@@ -1,0 +1,1 @@
+ALTER TABLE "provider_catalog" ADD COLUMN "category" text DEFAULT 'mcp' NOT NULL;

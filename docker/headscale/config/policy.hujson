@@ -1,0 +1,29 @@
+// Zakura 平台托管 Tailscale ACL
+// Headscale 要求 user 别名必须含 "@"（如 platform@）
+// - tag:platform：主实例，可访问全部设备
+// - 租户设备：归属各自 Headscale User（tenant-<id>@），仅能访问自己的设备 + 平台节点
+{
+  "tagOwners": {
+    "tag:platform": ["platform@"]
+  },
+  "acls": [
+    // 平台主节点 → 全网
+    {
+      "action": "accept",
+      "src": ["tag:platform"],
+      "dst": ["*:*"]
+    },
+    // 租户设备 → 平台（Runner 回连 Server、调 API）
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["tag:platform:*"]
+    },
+    // 同用户设备互通（跨租户无路径）
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self:*"]
+    }
+  ]
+}

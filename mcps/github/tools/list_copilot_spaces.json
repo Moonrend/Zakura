@@ -1,0 +1,8 @@
+{
+  "name": "list_copilot_spaces",
+  "description": "Retrieves the list of Copilot Spaces accessible to the user, including their names and owners.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  }
+}

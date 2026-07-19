@@ -1,0 +1,18 @@
+{
+  "name": "list_projects",
+  "description": "List all Vercel projects for a user (with a max of 50). Use this to help discover the Project ID of the project that the user is working on.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      }
+    },
+    "required": [
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

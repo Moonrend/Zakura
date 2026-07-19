@@ -1,0 +1,64 @@
+{
+  "name": "search_issues",
+  "description": "Search issues using combined lexical and semantic (hybrid) matching. Works with both exact terms and natural-language queries.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "order": {
+        "type": "string",
+        "description": "Sort order",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner. Required if `repo` is specified.",
+        "x-mcp-header": "owner"
+      },
+      "page": {
+        "type": "number",
+        "description": "Page number for pagination (min 1)",
+        "minimum": 1
+      },
+      "query": {
+        "type": "string",
+        "description": "Search query. Natural language is supported for semantic and hybrid variants."
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name. Required if `owner` is specified.",
+        "x-mcp-header": "repo"
+      },
+      "sort": {
+        "type": "string",
+        "description": "Sort field for search results. Defaults to best match.",
+        "enum": [
+          "comments",
+          "reactions",
+          "reactions-+1",
+          "reactions--1",
+          "reactions-smile",
+          "reactions-thinking_face",
+          "reactions-heart",
+          "reactions-tada",
+          "interactions",
+          "created",
+          "updated"
+        ]
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "dependentRequired": {
+      "owner": [
+        "repo"
+      ],
+      "repo": [
+        "owner"
+      ]
+    }
+  }
+}

@@ -1,0 +1,196 @@
+import { and, eq } from "drizzle-orm";
+import { hashApiKey } from "@zakura/core";
+import bcrypt from "bcryptjs";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import type { Db } from "../db/client.js";
+import {
+  apiKeys,
+  tenantMemberships,
+  tenants,
+  users,
+  type ApiKey,
+  type Tenant,
+  type TenantMembership,
+  type User,
+} from "../db/schema.js";
+
+export interface SessionPayload {
+  userId: string;
+  tenantId: string;
+  email: string;
+  /** Tenant membership role: owner | admin | member | api_key */
+  role: string;
+  isPlatformAdmin?: boolean;
+  exp: number;
+}
+
+export class LoginAmbiguousError extends Error {
+  constructor(public readonly tenants: Array<{ slug: string; name: string }>) {
+    super("Multiple tenants match this email; tenantSlug required");
+    this.name = "LoginAmbiguousError";
+  }
+}
+
+export function signSession(
+  secret: string,
+  payload: Omit<SessionPayload, "exp">,
+  ttlSec = 60 * 60 * 24 * 7,
+) {
+  const body: SessionPayload = { ...payload, exp: Math.floor(Date.now() / 1000) + ttlSec };
+  const data = Buffer.from(JSON.stringify(body)).toString("base64url");
+  const sig = createHmac("sha256", secret).update(data).digest("base64url");
+  return `${data}.${sig}`;
+}
+
+export function verifySession(secret: string, token: string): SessionPayload | null {
+  const [data, sig] = token.split(".");
+  if (!data || !sig) return null;
+  const expected = createHmac("sha256", secret).update(data).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf8")) as SessionPayload;
+    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+export type LoginResult = {
+  user: User;
+  tenant: Tenant;
+  membership: TenantMembership;
+};
+
+/**
+ * Authenticate by global email + password, then resolve a tenant membership.
+ * - With tenantSlug/tenantId: use that tenant
+ * - Without: if exactly one active membership → that tenant; else ambiguous
+ */
+export async function loginUser(
+  db: Db,
+  email: string,
+  password: string,
+  opts?: { tenantSlug?: string; tenantId?: string },
+): Promise<LoginResult | null> {
+  const normalized = email.toLowerCase();
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, normalized),
+  });
+  if (!user) return null;
+  if (!user.passwordHash) return null;
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) return null;
+
+  const memberships = await db
+    .select({
+      membership: tenantMemberships,
+      tenant: tenants,
+    })
+    .from(tenantMemberships)
+    .innerJoin(tenants, eq(tenants.id, tenantMemberships.tenantId))
+    .where(
+      and(eq(tenantMemberships.userId, user.id), eq(tenantMemberships.status, "active")),
+    );
+
+  if (memberships.length === 0) return null;
+
+  let picked = memberships[0];
+  if (opts?.tenantId) {
+    const match = memberships.find((m) => m.tenant.id === opts.tenantId);
+    if (!match) return null;
+    picked = match;
+  } else if (opts?.tenantSlug) {
+    const match = memberships.find((m) => m.tenant.slug === opts.tenantSlug);
+    if (!match) return null;
+    picked = match;
+  } else if (memberships.length > 1) {
+    throw new LoginAmbiguousError(
+      memberships.map((m) => ({ slug: m.tenant.slug, name: m.tenant.name })),
+    );
+  }
+
+  return {
+    user,
+    tenant: picked.tenant,
+    membership: picked.membership,
+  };
+}
+
+export function sessionFromLogin(
+  secret: string,
+  result: LoginResult,
+): string {
+  return signSession(secret, {
+    userId: result.user.id,
+    tenantId: result.tenant.id,
+    email: result.user.email,
+    role: result.membership.role,
+    isPlatformAdmin: result.user.isPlatformAdmin,
+  });
+}
+
+export async function switchTenantSession(
+  db: Db,
+  secret: string,
+  userId: string,
+  tenantId: string,
+): Promise<string | null> {
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user) return null;
+  const membership = await db.query.tenantMemberships.findFirst({
+    where: and(
+      eq(tenantMemberships.userId, userId),
+      eq(tenantMemberships.tenantId, tenantId),
+      eq(tenantMemberships.status, "active"),
+    ),
+  });
+  if (!membership) return null;
+  const tenant = await db.query.tenants.findFirst({
+    where: eq(tenants.id, tenantId),
+  });
+  if (!tenant) return null;
+  return signSession(secret, {
+    userId: user.id,
+    tenantId: tenant.id,
+    email: user.email,
+    role: membership.role,
+    isPlatformAdmin: user.isPlatformAdmin,
+  });
+}
+
+export async function authenticateApiKey(
+  db: Db,
+  rawKey: string,
+): Promise<{ apiKey: ApiKey; tenant: Tenant } | null> {
+  const keyHash = hashApiKey(rawKey);
+  const apiKey = await db.query.apiKeys.findFirst({
+    where: eq(apiKeys.keyHash, keyHash),
+  });
+  if (!apiKey) return null;
+  if (apiKey.expiresAt && apiKey.expiresAt < new Date()) return null;
+  await db
+    .update(apiKeys)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(apiKeys.id, apiKey.id));
+  const tenant = await db.query.tenants.findFirst({
+    where: eq(tenants.id, apiKey.tenantId),
+  });
+  if (!tenant) return null;
+  return { apiKey, tenant };
+}
+
+export function extractBearer(header: string | undefined): string | null {
+  if (!header) return null;
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  return m?.[1]?.trim() ?? null;
+}
+
+export function isSessionAdmin(session: { role: string; userId: string }): boolean {
+  return (
+    session.userId !== "api-key" &&
+    (session.role === "admin" || session.role === "owner")
+  );
+}

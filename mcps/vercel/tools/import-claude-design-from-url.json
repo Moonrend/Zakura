@@ -1,0 +1,27 @@
+{
+  "name": "import-claude-design-from-url",
+  "description": "Import a design into Vercel from a publicly fetchable URL. The file is a self-contained HTML bundle with all images, fonts, and styles inlined.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Public HTTPS URL to the design file. Valid for ~1 hour. Fetched server-side."
+      },
+      "title": {
+        "type": "string",
+        "description": "Suggested title for the imported design."
+      },
+      "claude_design_project_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Stable Claude Design project identifier. Reuse it to update the same imported Vercel project."
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

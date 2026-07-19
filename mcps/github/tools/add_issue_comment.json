@@ -1,0 +1,51 @@
+{
+  "name": "add_issue_comment",
+  "description": "Add a comment and/or reaction to a specific issue or issue comment in a GitHub repository. Use this tool with pull requests as well (in this case pass pull request number as issue_number), but only if user is not asking specifically to add or react to review comments. At least one of body or reaction is required.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "body": {
+        "type": "string",
+        "description": "Comment content. Required unless reaction is provided."
+      },
+      "comment_id": {
+        "type": "number",
+        "description": "The numeric ID of the issue or pull request comment to react to. Use this for reactions to comments; omit it to react to the issue or pull request itself. Cannot be combined with body.",
+        "minimum": 1
+      },
+      "issue_number": {
+        "type": "number",
+        "description": "Issue or pull request number to comment on or react to."
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "reaction": {
+        "type": "string",
+        "description": "Emoji reaction to add. Required unless body is provided.",
+        "enum": [
+          "+1",
+          "-1",
+          "laugh",
+          "confused",
+          "heart",
+          "hooray",
+          "rocket",
+          "eyes"
+        ]
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "issue_number"
+    ]
+  }
+}

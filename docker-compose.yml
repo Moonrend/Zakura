@@ -1,0 +1,91 @@
+# Zakura — AI 环境编排 & 统一 MCP 网关
+#
+# 默认自托管（内嵌 PGlite，无需外部数据库）：
+#   docker compose up -d --build
+#
+# 使用外部 Postgres（多租户 / 生产）：
+#   docker compose --profile postgres up -d
+#   并将 zakura 的 DATABASE_URL 指到 postgres 服务
+#
+# 可选组件：
+#   docker compose --profile components up -d
+
+services:
+  zakura:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: zakura
+    ports:
+      - "8787:8787"
+      - "3000:3000"
+    environment:
+      # 默认内嵌 PGlite；云端改为 postgresql://zakura:zakura@postgres:5432/zakura
+      DATABASE_URL: pglite:/data/pglite
+      ZAKURA_DATA_DIR: /data
+      ZAKURA_PUBLIC_URL: http://127.0.0.1:8787
+      HOST: 0.0.0.0
+      PORT: 8787
+    volumes:
+      - zakura-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks:
+      - zakura
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    container_name: zakura-postgres
+    environment:
+      POSTGRES_USER: zakura
+      POSTGRES_PASSWORD: zakura
+      POSTGRES_DB: zakura
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - zakura
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zakura -d zakura"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  searxng:
+    profiles: ["components"]
+    image: searxng/searxng:latest
+    container_name: zakura-searxng
+    ports:
+      - "8080:8080"
+    networks:
+      - zakura
+    restart: unless-stopped
+
+  openviking:
+    profiles: ["components"]
+    image: ghcr.io/volcengine/openviking:latest
+    container_name: zakura-openviking
+    ports:
+      - "1933:1933"
+    environment:
+      OPENVIKING_PUBLIC_BASE_URL: http://127.0.0.1:1933
+      OPENVIKING_WITH_BOT: "0"
+      OPENVIKING_CONFIG_FILE: /app/.openviking/ov.conf
+    volumes:
+      - openviking-data:/app/.openviking
+    networks:
+      - zakura
+    restart: unless-stopped
+
+volumes:
+  zakura-data:
+  openviking-data:
+  postgres-data:
+
+networks:
+  zakura:
+    name: zakura
+    driver: bridge

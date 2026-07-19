@@ -1,0 +1,26 @@
+{
+  "name": "@zakura/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.3",
+    "@zakura/core": "workspace:*",
+    "@zakura/shared": "workspace:*",
+    "dockerode": "^4.0.6",
+    "hono": "^4.7.11"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.38",
+    "@types/node": "^22.15.30",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

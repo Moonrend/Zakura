@@ -1,0 +1,35 @@
+{
+  "name": "get_runtime_errors",
+  "description": "Get grouped runtime error clusters for a project (error name, occurrence count, affected routes, sample messages, first/last seen). Use this first to answer \"why is production erroring\" — it reads a pre-aggregated table and does not time out. For recent windows, pass since like \"24h\" or \"7d\" and omit until; until is only needed for historical end times. Max 7-day range.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectId": {
+        "type": "string",
+        "description": "The project ID to get runtime errors for."
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      },
+      "since": {
+        "type": "string",
+        "description": "Start of the window as an ISO date or relative lookback from now (e.g. \"1h\", \"24h\", \"7d\"). Defaults to 24h ago; max lookback is 7d."
+      },
+      "until": {
+        "type": "string",
+        "description": "Optional end of the window as an ISO date, relative lookback, or \"now\". Omit this when the end should be the current time."
+      },
+      "routes": {
+        "type": "string",
+        "description": "Comma-separated route paths to filter by (e.g. \"/api/checkout\")."
+      }
+    },
+    "required": [
+      "projectId",
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

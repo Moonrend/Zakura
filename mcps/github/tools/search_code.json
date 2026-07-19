@@ -1,0 +1,39 @@
+{
+  "name": "search_code",
+  "description": "Fast and precise code search across ALL GitHub repositories using GitHub's native search engine. Best for finding exact symbols, functions, classes, or specific code patterns.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "order": {
+        "type": "string",
+        "description": "Sort order for results",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "page": {
+        "type": "number",
+        "description": "Page number for pagination (min 1)",
+        "minimum": 1
+      },
+      "perPage": {
+        "type": "number",
+        "description": "Results per page for pagination (min 1, max 100)",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "query": {
+        "type": "string",
+        "description": "Search query (GitHub code search REST). Implicit AND between terms; supports `OR`, `NOT`, and `\"quoted phrase\"` for exact match. Qualifiers: `repo:owner/repo`, `org:`, `user:`, `language:`, `path:dir` (prefix match), `filename:exact.ext`, `extension:`, `in:file`, `in:path`, `size:`, `is:archived`, `is:fork`. Max 256 chars. Examples: `WithContext language:go org:github`; `\"package main\" repo:o/r`; `func extension:go path:cmd repo:o/r`; `NOT TODO language:go repo:o/r`."
+      },
+      "sort": {
+        "type": "string",
+        "description": "Sort field ('indexed' only)"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "get_add_command_for_items",
+  "description": "Get the shadcn CLI add command for specific items in a registry. This is useful for adding one or more components to your project.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Array of items to get the add command for prefixed with the registry name (e.g., ['@shadcn/button', '@shadcn/card'])"
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

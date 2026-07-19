@@ -1,0 +1,85 @@
+# Zakura 平台托管 Tailscale 控制面（独立于主 docker-compose.yml）
+# 用法：
+#   cd docker/headscale
+#   cp .env.example .env   # 填写域名与密钥
+#   docker compose up -d headscale
+#   docker compose exec headscale headscale users create platform@
+#   docker compose exec headscale headscale apikeys create --expiration 999d
+#   # 将 API key 写入 .env 的 HEADSCALE_API_KEY 与 config/headplane.yaml
+#   docker compose up -d
+#
+# 对外必须经 HTTPS 反代（见 README）。
+
+name: zakura-headscale
+
+services:
+  headscale:
+    image: ${HEADSCALE_IMAGE:-headscale/headscale:0.29.2}
+    container_name: zakura-headscale
+    restart: unless-stopped
+    command: serve
+    labels:
+      me.tale.headplane.target: headscale
+    ports:
+      - "${HEADSCALE_HTTP_PORT:-8080}:8080"
+      - "${HEADSCALE_METRICS_PORT:-9090}:9090"
+      - "${HEADSCALE_GRPC_PORT:-50443}:50443"
+      - "${HEADSCALE_STUN_PORT:-3478}:3478/udp"
+    volumes:
+      - ./config/headscale.yaml:/etc/headscale/config.yaml:ro
+      - ./config/policy.hujson:/etc/headscale/policy.hujson:ro
+      - headscale-data:/var/lib/headscale
+      - headscale-run:/var/run/headscale
+    networks:
+      - headscale
+    healthcheck:
+      test: ["CMD", "headscale", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  headplane:
+    image: ${HEADPLANE_IMAGE:-ghcr.io/tale/headplane:latest}
+    container_name: zakura-headplane
+    restart: unless-stopped
+    depends_on:
+      headscale:
+        condition: service_healthy
+    ports:
+      - "${HEADPLANE_HTTP_PORT:-3000}:3000"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./config/headplane.yaml:/etc/headplane/config.yaml:ro
+      - ./config/headscale.yaml:/etc/headscale/config.yaml:ro
+      - headplane-data:/var/lib/headplane
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - headscale
+
+  # 可选 Postgres（默认 SQLite；仅 legacy / 特殊需求）
+  headscale-db:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    container_name: zakura-headscale-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-headscale}
+      POSTGRES_USER: ${POSTGRES_USER:-headscale}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - headscale-pg:/var/lib/postgresql/data
+    networks:
+      - headscale
+
+volumes:
+  headscale-data:
+  headscale-run:
+  headplane-data:
+  headscale-pg:
+
+networks:
+  headscale:
+    name: zakura-headscale
+    driver: bridge

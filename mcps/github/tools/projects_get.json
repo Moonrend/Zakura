@@ -1,0 +1,58 @@
+{
+  "name": "projects_get",
+  "description": "Get details about specific GitHub Projects resources.\nUse this tool to get details about individual projects, project fields, and project items by their unique IDs.\n",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "field_id": {
+        "type": "number",
+        "description": "The field's ID. Required for 'get_project_field' method."
+      },
+      "fields": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Specific list of field IDs to include in the response when getting a project item (e.g. [\"102589\", \"985201\", \"169875\"]). If not provided, only the title field is included. Only used for 'get_project_item' method."
+      },
+      "item_id": {
+        "type": "number",
+        "description": "The item's ID. Required for 'get_project_item' method."
+      },
+      "method": {
+        "type": "string",
+        "description": "The method to execute",
+        "enum": [
+          "get_project",
+          "get_project_field",
+          "get_project_item",
+          "get_project_status_update"
+        ]
+      },
+      "owner": {
+        "type": "string",
+        "description": "The owner (user or organization login). The name is not case sensitive.",
+        "x-mcp-header": "owner"
+      },
+      "owner_type": {
+        "type": "string",
+        "description": "Owner type (user or org). If not provided, will be automatically detected.",
+        "enum": [
+          "user",
+          "org"
+        ]
+      },
+      "project_number": {
+        "type": "number",
+        "description": "The project's number."
+      },
+      "status_update_id": {
+        "type": "string",
+        "description": "The node ID of the project status update. Required for 'get_project_status_update' method."
+      }
+    },
+    "required": [
+      "method"
+    ]
+  }
+}

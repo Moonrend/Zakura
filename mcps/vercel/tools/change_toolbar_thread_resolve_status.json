@@ -1,0 +1,28 @@
+{
+  "name": "change_toolbar_thread_resolve_status",
+  "description": "Change the resolve status of a toolbar thread. Can be used to mark a thread as resolved or unresolve a previously resolved thread.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "threadId": {
+        "type": "string",
+        "description": "The thread ID to update"
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      },
+      "resolved": {
+        "type": "boolean",
+        "description": "Set to true to resolve the thread, false to unresolve it"
+      }
+    },
+    "required": [
+      "threadId",
+      "teamId",
+      "resolved"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

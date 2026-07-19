@@ -1,0 +1,25 @@
+{
+  "name": "get_item_examples_from_registries",
+  "description": "Find usage examples and demos with their complete code. Search for patterns like 'accordion-demo', 'button example', 'card-demo', etc. Returns full implementation code with dependencies.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "registries": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Array of registry names to search (e.g., ['@shadcn', '@acme']). Omit to search every registry configured in components.json."
+      },
+      "query": {
+        "type": "string",
+        "description": "Search query for examples (e.g., 'accordion-demo', 'button demo', 'card example', 'tooltip-demo', 'example-booking-form', 'example-hero'). Common patterns: '{item-name}-demo', '{item-name} example', 'example {item-name}'"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

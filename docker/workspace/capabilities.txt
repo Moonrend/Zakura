@@ -1,0 +1,27 @@
+Zakura workspace capabilities
+==============================
+
+Shared filesystem
+  Host agent workspace ↔ container /workspace
+  fs_* tools and shell_exec see the same files.
+
+Languages / tools (preinstalled)
+  python3 / pip / venv
+  node / npm / npx  (Node.js LTS)
+  gcc / g++ / make  (build-essential)
+  git, curl, wget, jq, rg (ripgrep), fd, sqlite3, zip/unzip
+  fonts: Noto CJK (Chinese) + emoji
+
+Shell
+  shell_exec runs: bash -lc '<command>'
+  cwd defaults to /workspace
+  No command allowlist — any command the container user can run is allowed.
+  Prefer writing outputs under /workspace so the console file browser can see them.
+
+Caches (under /workspace so they persist with the volume)
+  npm:  /workspace/.cache/npm
+  pip:  /workspace/.cache/pip
+
+Display (when browser/desktop enabled)
+  Chromium CDP :9222
+  noVNC :6080

@@ -1,0 +1,28 @@
+{
+  "name": "get_release_by_tag",
+  "description": "Get a specific release by its tag name in a GitHub repository",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      },
+      "tag": {
+        "type": "string",
+        "description": "Tag name (e.g., 'v1.0.0')"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "tag"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "list_deployments",
+  "description": "List all deployments for a project",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectId": {
+        "type": "string",
+        "description": "The project ID to list deployments for."
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to list deployments for."
+      },
+      "since": {
+        "type": "number",
+        "description": "Get deployments created after this timestamp."
+      },
+      "until": {
+        "type": "number",
+        "description": "Get deployments created before this timestamp."
+      }
+    },
+    "required": [
+      "projectId",
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

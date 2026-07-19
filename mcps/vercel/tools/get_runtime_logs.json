@@ -1,0 +1,98 @@
+{
+  "name": "get_runtime_logs",
+  "description": "Get runtime logs for a project or deployment. Runtime logs show application output (console.log, errors, etc.) from serverless functions and edge functions during execution. Supports filtering by environment, log level, status code, source, time range, and full-text search. For recent windows, pass since like \"30m\" or \"24h\" and omit until; until is only needed for historical end times. For wide time ranges, scope to a deploymentId for speed, or use group_by to get counts instead of individual lines. To investigate production errors specifically, prefer get_runtime_errors.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectId": {
+        "type": "string",
+        "description": "The project ID to get runtime logs for."
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      },
+      "deploymentId": {
+        "type": "string",
+        "description": "Filter logs to a specific deployment ID or URL."
+      },
+      "environment": {
+        "type": "string",
+        "enum": [
+          "production",
+          "preview"
+        ],
+        "description": "Filter by environment: \"production\" or \"preview\"."
+      },
+      "level": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "info",
+            "fatal"
+          ]
+        },
+        "description": "Filter by log level(s). Can specify multiple levels."
+      },
+      "statusCode": {
+        "type": "string",
+        "description": "Filter by HTTP status code (e.g., \"500\", \"4xx\")."
+      },
+      "source": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "serverless",
+            "edge-function",
+            "edge-middleware",
+            "static"
+          ]
+        },
+        "description": "Filter by source type(s). Can specify multiple sources."
+      },
+      "since": {
+        "type": "string",
+        "description": "Start of the window as an ISO date or relative lookback from now (e.g., \"1h\", \"30m\", \"7d\"). Defaults to 24 hours ago."
+      },
+      "until": {
+        "type": "string",
+        "description": "Optional end of the window as an ISO date, relative lookback, or \"now\". Omit this when the end should be the current time."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Maximum number of log entries to return. Defaults to 50, max 100."
+      },
+      "query": {
+        "type": "string",
+        "description": "Full-text search query to filter logs."
+      },
+      "requestId": {
+        "type": "string",
+        "description": "Filter by specific request ID."
+      },
+      "group_by": {
+        "type": "string",
+        "enum": [
+          "statusCode",
+          "requestPath",
+          "route",
+          "level",
+          "source",
+          "deploymentId",
+          "branch"
+        ],
+        "description": "Return counts grouped by this attribute instead of individual log lines. Use for \"how many errors\", \"status code breakdown\", \"top paths\". Fast even over wide time ranges."
+      }
+    },
+    "required": [
+      "projectId",
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

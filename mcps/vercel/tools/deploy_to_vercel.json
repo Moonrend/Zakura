@@ -1,0 +1,99 @@
+{
+  "name": "deploy_to_vercel",
+  "description": "Deploy files directly to a new Vercel project — no git repo and no CLI needed. Provide the file tree and an explicit target; Vercel auto-detects the framework and builds. Best for shipping an app you just generated.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "target": {
+        "type": "string",
+        "enum": [
+          "preview",
+          "production"
+        ],
+        "description": "Required. \"preview\" for a shareable non-production URL, or \"production\" to go live."
+      },
+      "name": {
+        "type": "string",
+        "description": "Project name. Vercel creates the project if it does not already exist."
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Root-relative POSIX path, e.g. \"app/page.tsx\"."
+            },
+            "data": {
+              "type": "string",
+              "description": "File contents: plain text, or base64 when encoding is \"base64\"."
+            },
+            "encoding": {
+              "type": "string",
+              "enum": [
+                "utf-8",
+                "base64"
+              ],
+              "description": "Content encoding. Defaults to \"utf-8\"; use \"base64\" for binary files."
+            }
+          },
+          "required": [
+            "file",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        "description": "The file tree to deploy. Source files only — Vercel installs deps and builds."
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      },
+      "projectSettings": {
+        "type": "object",
+        "properties": {
+          "framework": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "buildCommand": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "installCommand": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outputDirectory": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rootDirectory": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "description": "Optional build settings. Omit to let Vercel auto-detect the framework."
+      }
+    },
+    "required": [
+      "target",
+      "name",
+      "files"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

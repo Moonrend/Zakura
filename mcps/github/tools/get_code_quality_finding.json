@@ -1,0 +1,28 @@
+{
+  "name": "get_code_quality_finding",
+  "description": "Get details of a specific code quality finding in a GitHub repository.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "findingNumber": {
+        "type": "number",
+        "description": "The number of the finding."
+      },
+      "owner": {
+        "type": "string",
+        "description": "The owner of the repository.",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "The name of the repository.",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "findingNumber"
+    ]
+  }
+}

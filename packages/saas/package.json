@@ -1,0 +1,37 @@
+{
+  "name": "@zakura/saas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zakura SaaS edition — multi-tenant, registration, members/invites. Strip with `pnpm strip:saas`.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
+    },
+    "./package.json": "./package.json",
+    "./strip-manifest.json": "./strip-manifest.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@zakura/shared": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "^0.44.2",
+    "hono": "^4.7.11"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3"
+  }
+}

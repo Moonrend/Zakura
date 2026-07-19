@@ -1,0 +1,28 @@
+{
+  "name": "get_discussion",
+  "description": "Get a specific discussion by ID",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "discussionNumber": {
+        "type": "number",
+        "description": "Discussion Number"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "discussionNumber"
+    ]
+  }
+}

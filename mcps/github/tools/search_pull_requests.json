@@ -1,0 +1,62 @@
+{
+  "name": "search_pull_requests",
+  "description": "Search for pull requests in GitHub repositories using issues search syntax already scoped to is:pr",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "order": {
+        "type": "string",
+        "description": "Sort order",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "owner": {
+        "type": "string",
+        "description": "Optional repository owner. If provided with repo, only pull requests for this repository are listed.",
+        "x-mcp-header": "owner"
+      },
+      "page": {
+        "type": "number",
+        "description": "Page number for pagination (min 1)",
+        "minimum": 1
+      },
+      "perPage": {
+        "type": "number",
+        "description": "Results per page for pagination (min 1, max 100)",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "query": {
+        "type": "string",
+        "description": "Search query using GitHub pull request search syntax"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Optional repository name. If provided with owner, only pull requests for this repository are listed.",
+        "x-mcp-header": "repo"
+      },
+      "sort": {
+        "type": "string",
+        "description": "Sort field by number of matches of categories, defaults to best match",
+        "enum": [
+          "comments",
+          "reactions",
+          "reactions-+1",
+          "reactions--1",
+          "reactions-smile",
+          "reactions-thinking_face",
+          "reactions-heart",
+          "reactions-tada",
+          "interactions",
+          "created",
+          "updated"
+        ]
+      }
+    },
+    "required": [
+      "query"
+    ]
+  }
+}

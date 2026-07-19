@@ -1,0 +1,65 @@
+{
+  "name": "triage_issue",
+  "description": "Triage an issue by capturing a focused triage rationale and optionally applying metadata (labels, issue type, and issue fields) in a single operation.\nUse this tool when:\n- You are triaging a newly opened or untriaged issue for maintainers\n- You need to categorize the issue (type) and suggest/apply relevant labels\n- You want to record a brief, structured triage report\n\nDo not use this tool when:\n- The user is asking a general product question unrelated to triaging a specific issue\n\ntriage_rationale should be concise markdown aimed at maintainers (not the issue author); it  should contain:\n- Summary of the issue\n- Analysis of the problem or request\n- Suggested next steps or actions.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "fields": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Field name"
+            },
+            "value": {
+              "description": "Field value (string, number, or other supported type)"
+            }
+          },
+          "required": [
+            "name",
+            "value"
+          ]
+        },
+        "description": "Custom fields to set on the issue (optional)"
+      },
+      "issue_number": {
+        "type": "number",
+        "description": "The issue number to triage",
+        "minimum": 1
+      },
+      "labels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Labels to apply to the issue (optional)"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner (username or organization)",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      },
+      "triage_rationale": {
+        "type": "string",
+        "description": "The triage comment body containing analysis and rationale. This will be posted as a comment on the issue."
+      },
+      "type": {
+        "type": "string",
+        "description": "The issue type to set (optional, e.g., 'bug', 'feature_request')"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "issue_number",
+      "triage_rationale"
+    ]
+  }
+}

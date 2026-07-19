@@ -1,0 +1,54 @@
+{
+  "name": "get_deployment_build_logs",
+  "description": "Get the build logs for a deployment by ID or URL, to investigate why a build failed. Returns the most recent lines by default (where build errors appear). Use errorsOnly to see just the failing lines. Omit since and until for latest logs; use since to narrow the window and omit until when the end should be the current time.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "idOrUrl": {
+        "type": "string",
+        "description": "The unique identifier or hostname of the deployment."
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "tail",
+          "head"
+        ],
+        "default": "tail",
+        "description": "Which end of the build log to return. \"tail\" (default) returns the most recent lines, where build errors appear. \"head\" returns the earliest lines."
+      },
+      "errorsOnly": {
+        "type": "boolean",
+        "default": false,
+        "description": "Return only error, stderr, exit, and fatal events."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Maximum number of log lines to return. Defaults is 100.",
+        "default": 100
+      },
+      "since": {
+        "type": "string",
+        "description": "Start of the window as an ISO date or relative lookback from now (e.g. \"1h\", \"30m\")."
+      },
+      "until": {
+        "type": "string",
+        "description": "Optional end of the window as an ISO date, relative lookback, or \"now\". Omit this when the end should be the current time."
+      },
+      "buildId": {
+        "type": "string",
+        "description": "Filter to a specific build ID (bld_...) for multi-build deployments."
+      },
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      }
+    },
+    "required": [
+      "idOrUrl",
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

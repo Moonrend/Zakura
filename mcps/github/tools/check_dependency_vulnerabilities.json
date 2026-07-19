@@ -1,0 +1,63 @@
+{
+  "name": "check_dependency_vulnerabilities",
+  "description": "Check a list of dependencies for known vulnerabilities using the GitHub Security Advisory Database.\nThis tool queries the GitHub Advisory Database to find known security vulnerabilities affecting the specified packages.\n\nUse this tool when:\n- You want to check if project dependencies have known vulnerabilities\n- You are adding a new dependency to a project and should check it is safe before adding to the project\n\nThe tool accepts owner, repo, and a list of dependencies with their ecosystems and versions, then returns any matching security advisories with upgrade recommendations where available.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "dependencies": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "ecosystem": {
+              "type": "string",
+              "description": "Package ecosystem",
+              "enum": [
+                "npm",
+                "pip",
+                "maven",
+                "nuget",
+                "composer",
+                "pub",
+                "actions",
+                "bundler",
+                "gomod",
+                "cargo",
+                "hex"
+              ]
+            },
+            "name": {
+              "type": "string",
+              "description": "Package name"
+            },
+            "version": {
+              "type": "string",
+              "description": "Package version"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "ecosystem"
+          ]
+        },
+        "description": "List of dependencies to check for vulnerabilities"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner (username or organization)",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "dependencies"
+    ]
+  }
+}

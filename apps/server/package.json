@@ -1,0 +1,38 @@
+{
+  "name": "@zakura/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.3",
+    "@hono/node-server": "^1.14.3",
+    "@paralleldrive/cuid2": "^2.2.2",
+    "@zakura/core": "workspace:*",
+    "@zakura/saas": "workspace:*",
+    "@zakura/shared": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "dockerode": "^4.0.6",
+    "drizzle-orm": "^0.44.2",
+    "hono": "^4.7.11",
+    "postgres": "^3.4.7",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/dockerode": "^3.3.38",
+    "@types/node": "^22.15.30",
+    "drizzle-kit": "^0.31.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

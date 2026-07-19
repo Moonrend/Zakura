@@ -1,0 +1,831 @@
+import { createId } from "@paralleldrive/cuid2";
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
+import { vectorColumn } from "./vector.js";
+
+/** Shared id helper — one place for all primary keys */
+export function newId(): string {
+  return createId();
+}
+
+const timestamps = {
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+};
+
+export const platformMeta = pgTable("platform_meta", {
+  id: text("id").primaryKey().default("platform"),
+  setupCompleted: boolean("setup_completed").notNull().default(false),
+  mode: text("mode").notNull().default("single-tenant"),
+  version: text("version").notNull().default("0.1.0"),
+  ...timestamps,
+});
+
+export const tenants = pgTable("tenants", {
+  id: text("id").primaryKey().$defaultFn(newId),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  isDefault: boolean("is_default").notNull().default(false),
+  /** Per-tenant first-run wizard (Agent / computer / memory / MCP). Independent of platform setup. */
+  onboardingCompleted: boolean("onboarding_completed").notNull().default(false),
+  /** JSON map of wizard steps, e.g. { agentCreated: true, mcpConnected: false } */
+  onboardingSteps: text("onboarding_steps").notNull().default("{}"),
+  ...timestamps,
+});
+
+/**
+ * Global login identity. Access to tenants is via tenant_memberships.
+ * Email is unique across the platform (one password, many tenants).
+ * passwordHash may be null for OAuth-only accounts.
+ */
+export const users = pgTable(
+  "users",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    email: text("email").notNull(),
+    name: text("name"),
+    passwordHash: text("password_hash"),
+    /** Platform super-admin (cross-tenant). Independent of tenant membership role. */
+    isPlatformAdmin: boolean("is_platform_admin").notNull().default(false),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("users_email").on(t.email)],
+);
+
+/**
+ * External IdP identities linked to a global user (SaaS login OAuth, e.g. ZeroCat).
+ */
+export const oauthIdentities = pgTable(
+  "oauth_identities",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    /** Provider id, e.g. "zerocat" */
+    provider: text("provider").notNull(),
+    /** Stable subject from IdP (openid / sub) */
+    providerUserId: text("provider_user_id").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** Last known profile JSON from userinfo */
+    profileJson: text("profile_json"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("oauth_identities_provider_user").on(t.provider, t.providerUserId),
+    index("oauth_identities_user").on(t.userId),
+  ],
+);
+
+/** Short-lived PKCE state for browser login OAuth (SaaS). */
+export const oauthLoginStates = pgTable(
+  "oauth_login_states",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("oauth_login_states_expires").on(t.expiresAt)],
+);
+
+/** Membership of a global user in a tenant */
+export const tenantMemberships = pgTable(
+  "tenant_memberships",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** owner | admin | member */
+    role: text("role").notNull().default("member"),
+    /** active | suspended */
+    status: text("status").notNull().default("active"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("tenant_memberships_unique").on(t.tenantId, t.userId),
+    index("tenant_memberships_user").on(t.userId),
+    index("tenant_memberships_tenant").on(t.tenantId),
+  ],
+);
+
+/** Email invite to join a tenant */
+export const tenantInvites = pgTable(
+  "tenant_invites",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    /** admin | member */
+    role: text("role").notNull().default("member"),
+    tokenHash: text("token_hash").notNull(),
+    invitedByUserId: text("invited_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_invites_token").on(t.tokenHash),
+    index("tenant_invites_tenant_email").on(t.tenantId, t.email),
+  ],
+);
+
+/**
+ * Tenant-scoped memory provider instances (Memoh-style).
+ * Global settings page manages these; each Agent picks one via memoryProviderId.
+ * kind: builtin | traditional | mem0 | openviking
+ */
+export const memoryProviders = pgTable(
+  "memory_providers",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    kind: text("kind").notNull(),
+    configJson: text("config_json").notNull().default("{}"),
+    isDefault: boolean("is_default").notNull().default(false),
+    status: text("status").notNull().default("ready"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("memory_providers_tenant_slug").on(t.tenantId, t.slug),
+    index("memory_providers_tenant").on(t.tenantId),
+  ],
+);
+
+/**
+ * Runtime nodes (local implicit Runner + remote Runner Agents).
+ * Declared before agents so FK columns can reference it.
+ */
+export const runtimeNodes = pgTable(
+  "runtime_nodes",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    /** local | runner */
+    kind: text("kind").notNull().default("runner"),
+    /** online | offline | draining */
+    status: text("status").notNull().default("offline"),
+    endpoint: text("endpoint"),
+    capabilitiesJson: text("capabilities_json").notNull().default("{}"),
+    hostInfoJson: text("host_info_json").notNull().default("{}"),
+    storageRoot: text("storage_root").notNull(),
+    agentVersion: text("agent_version"),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    /** sha256 of rnr_* token; null for local */
+    tokenHash: text("token_hash"),
+    labelsJson: text("labels_json").notNull().default("{}"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("runtime_nodes_tenant_slug").on(t.tenantId, t.slug),
+    index("runtime_nodes_tenant").on(t.tenantId),
+  ],
+);
+
+export const agents = pgTable(
+  "agents",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description").notNull().default(""),
+    /**
+     * Legacy column — Agent 本身无启动态；请看 managedContainers / lastError。
+     * 新行固定为 ready，不再写入 starting/running/stopped。
+     */
+    status: text("status").notNull().default("ready"),
+    /** files | shell | computer */
+    workspaceProfile: text("workspace_profile").notNull().default("files"),
+    enableFs: boolean("enable_fs").notNull().default(false),
+    enableShell: boolean("enable_shell").notNull().default(false),
+    enableComputer: boolean("enable_computer").notNull().default(false),
+    enableBrowser: boolean("enable_browser").notNull().default(false),
+    /** Per-agent long-term memory (data scoped to this agent); opt-in */
+    enableMemory: boolean("enable_memory").notNull().default(false),
+    /** Which memory provider this agent uses (null = tenant default) */
+    memoryProviderId: text("memory_provider_id").references(() => memoryProviders.id, {
+      onDelete: "set null",
+    }),
+    workspaceImage: text("workspace_image"),
+    /** Bound Runner node; null = implicit local */
+    runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
+      onDelete: "set null",
+    }),
+    /** ready | locked | migrating */
+    workspaceStatus: text("workspace_status").notNull().default("ready"),
+    workspaceRevision: text("workspace_revision"),
+    lastMigrationId: text("last_migration_id"),
+    /** JSON bag for future agent extensions (skills, model prefs, etc.) */
+    configJson: text("config_json").notNull().default("{}"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agents_tenant_slug").on(t.tenantId, t.slug),
+    index("agents_tenant").on(t.tenantId),
+  ],
+);
+
+export const workspaceMigrations = pgTable(
+  "workspace_migrations",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    sourceNodeId: text("source_node_id")
+      .notNull()
+      .references(() => runtimeNodes.id),
+    targetNodeId: text("target_node_id")
+      .notNull()
+      .references(() => runtimeNodes.id),
+    /** pending | exporting | transferring | importing | verifying | completed | failed | cancelled */
+    status: text("status").notNull().default("pending"),
+    phase: text("phase"),
+    progressPct: integer("progress_pct").notNull().default(0),
+    message: text("message"),
+    manifestJson: text("manifest_json"),
+    archivePath: text("archive_path"),
+    archiveSize: text("archive_size"),
+    archiveSha256: text("archive_sha256"),
+    excludePatternsJson: text("exclude_patterns_json").notNull().default("[]"),
+    sourceRetained: boolean("source_retained").notNull().default(false),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("workspace_migrations_agent").on(t.agentId),
+    index("workspace_migrations_status").on(t.status),
+  ],
+);
+
+export const apiKeys = pgTable("api_keys", {
+  id: text("id").primaryKey().$defaultFn(newId),
+  tenantId: text("tenant_id")
+    .notNull()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  /** When set, MCP is scoped to this agent's tools + bindings */
+  agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  keyPrefix: text("key_prefix").notNull(),
+  scopes: text("scopes").notNull().default('["*"]'),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const providerCatalog = pgTable("provider_catalog", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull().default(""),
+  version: text("version").notNull().default("1.0.0"),
+  category: text("category").notNull().default("mcp"),
+  capabilities: text("capabilities").notNull().default("[]"),
+  configSchema: text("config_schema").notNull().default("{}"),
+  ...timestamps,
+});
+
+export const componentInstances = pgTable(
+  "component_instances",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    providerId: text("provider_id")
+      .notNull()
+      .references(() => providerCatalog.id),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    status: text("status").notNull().default("stopped"),
+    configEnc: text("config_enc").notNull(),
+    endpointUrl: text("endpoint_url"),
+    healthStatus: text("health_status").notNull().default("unknown"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("instances_tenant_slug").on(t.tenantId, t.slug),
+    index("instances_tenant_provider").on(t.tenantId, t.providerId),
+  ],
+);
+
+export const managedContainers = pgTable(
+  "managed_containers",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: text("instance_id").references(() => componentInstances.id, {
+      onDelete: "set null",
+    }),
+    /** Agent workspace containers (purpose=workspace) */
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    dockerId: text("docker_id"),
+    name: text("name").notNull(),
+    image: text("image").notNull(),
+    purpose: text("purpose").notNull().default("component"),
+    status: text("status").notNull().default("created"),
+    labelsJson: text("labels_json").notNull().default("{}"),
+    portsJson: text("ports_json").notNull().default("[]"),
+    envEnc: text("env_enc"),
+    allocatedTo: text("allocated_to"),
+    runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
+      onDelete: "set null",
+    }),
+    ...timestamps,
+  },
+  (t) => [
+    index("containers_tenant_purpose").on(t.tenantId, t.purpose),
+    index("containers_docker_id").on(t.dockerId),
+    index("containers_agent").on(t.agentId),
+  ],
+);
+
+/** Bind shared component instances (search/memory/MCP) into an agent tool space */
+export const agentBindings = pgTable(
+  "agent_bindings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => componentInstances.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_bindings_unique").on(t.agentId, t.instanceId),
+    index("agent_bindings_agent").on(t.agentId),
+    index("agent_bindings_tenant").on(t.tenantId),
+  ],
+);
+
+export const settings = pgTable(
+  "settings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    ownerKey: text("owner_key").notNull(),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+  },
+  (t) => [uniqueIndex("settings_owner_key").on(t.ownerKey, t.key)],
+);
+
+export const mcpPolicies = pgTable("mcp_policies", {
+  id: text("id").primaryKey().$defaultFn(newId),
+  tenantId: text("tenant_id")
+    .notNull()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  apiKeyId: text("api_key_id").references(() => apiKeys.id, { onDelete: "cascade" }),
+  instanceIds: text("instance_ids").notNull().default("[]"),
+  toolAllowlist: text("tool_allowlist"),
+  toolDenylist: text("tool_denylist"),
+  includeBuiltin: boolean("include_builtin").notNull().default(true),
+  ...timestamps,
+});
+
+/**
+ * Agent-scoped long-term memory (Memoh-inspired layers / traditional notes).
+ * Rows are isolated by agentId; providerId links to the memory provider that wrote them.
+ */
+export const memories = pgTable(
+  "memories",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    instanceId: text("instance_id").references(() => componentInstances.id, {
+      onDelete: "cascade",
+    }),
+    providerId: text("provider_id").references(() => memoryProviders.id, {
+      onDelete: "set null",
+    }),
+    /** Owning agent — required for isolation */
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    userId: text("user_id"),
+    /** identity | preference | project | fact | episode | note (traditional) */
+    layer: text("layer").notNull().default("fact"),
+    content: text("content").notNull(),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    pinned: boolean("pinned").notNull().default(false),
+    importance: text("importance").notNull().default("3"),
+    /** tool | manual | import | system */
+    source: text("source").notNull().default("manual"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    /** pgvector embedding (PGlite / Postgres); optional semantic seed for builtin hybrid */
+    embedding: vectorColumn("embedding"),
+    embeddingModel: text("embedding_model"),
+    embeddingDim: integer("embedding_dim"),
+    /** sha256 of content used to skip re-embed when unchanged */
+    contentHash: text("content_hash"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("memories_tenant_user").on(t.tenantId, t.userId),
+    index("memories_tenant_agent").on(t.tenantId, t.agentId),
+    index("memories_agent_layer").on(t.agentId, t.layer),
+    index("memories_instance").on(t.instanceId),
+    index("memories_provider").on(t.providerId),
+  ],
+);
+
+/** Memory graph edges (builtin provider) — Memoh wiki-style relations */
+export const memoryEdges = pgTable(
+  "memory_edges",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    fromMemoryId: text("from_memory_id")
+      .notNull()
+      .references(() => memories.id, { onDelete: "cascade" }),
+    toMemoryId: text("to_memory_id")
+      .notNull()
+      .references(() => memories.id, { onDelete: "cascade" }),
+    relation: text("relation").notNull().default("related"),
+    weight: text("weight").notNull().default("1"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("memory_edges_agent").on(t.agentId),
+    index("memory_edges_from").on(t.fromMemoryId),
+    index("memory_edges_to").on(t.toMemoryId),
+    uniqueIndex("memory_edges_pair_rel").on(t.fromMemoryId, t.toMemoryId, t.relation),
+  ],
+);
+
+/**
+ * MCP tool-call audit log — every tools/call via the gateway.
+ * Scoped by tenant; filterable by agent and API key.
+ */
+export const toolCallLogs = pgTable(
+  "tool_call_logs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    apiKeyId: text("api_key_id").references(() => apiKeys.id, { onDelete: "set null" }),
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** Fully qualified MCP tool name, e.g. agent__fs_read */
+    qualifiedName: text("qualified_name").notNull(),
+    localName: text("local_name").notNull(),
+    providerId: text("provider_id").notNull().default(""),
+    instanceId: text("instance_id"),
+    /** Truncated JSON of call arguments */
+    argsJson: text("args_json").notNull().default("{}"),
+    /** Truncated JSON / text of tool result */
+    resultJson: text("result_json").notNull().default(""),
+    isError: boolean("is_error").notNull().default(false),
+    durationMs: integer("duration_ms").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tool_calls_tenant_created").on(t.tenantId, t.createdAt),
+    index("tool_calls_agent_created").on(t.agentId, t.createdAt),
+    index("tool_calls_api_key_created").on(t.apiKeyId, t.createdAt),
+    index("tool_calls_qualified").on(t.tenantId, t.qualifiedName),
+  ],
+);
+
+/** OAuth 2.1 clients — includes RFC 7591 dynamic registration (VS Code etc.) */
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    clientId: text("client_id").notNull().unique(),
+    /** Null for public clients (token_endpoint_auth_method=none) */
+    clientSecretHash: text("client_secret_hash"),
+    clientName: text("client_name").notNull().default(""),
+    redirectUrisJson: text("redirect_uris_json").notNull().default("[]"),
+    grantTypesJson: text("grant_types_json").notNull().default('["authorization_code","refresh_token"]'),
+    responseTypesJson: text("response_types_json").notNull().default('["code"]'),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+    scope: text("scope").notNull().default("mcp"),
+    /** manual | dynamic */
+    registrationType: text("registration_type").notNull().default("dynamic"),
+    /** Optional tenant binding for manually created clients */
+    tenantId: text("tenant_id").references(() => tenants.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("oauth_clients_tenant").on(t.tenantId)],
+);
+
+export const oauthAuthCodes = pgTable(
+  "oauth_auth_codes",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    codeHash: text("code_hash").notNull().unique(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    codeChallengeMethod: text("code_challenge_method").notNull().default("S256"),
+    scope: text("scope").notNull().default("mcp"),
+    resource: text("resource"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("oauth_codes_client").on(t.clientId)],
+);
+
+/** Refresh tokens (access tokens are signed JWTs, not stored) */
+export const oauthRefreshTokens = pgTable(
+  "oauth_refresh_tokens",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tokenHash: text("token_hash").notNull().unique(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull().default("mcp"),
+    resource: text("resource"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("oauth_refresh_client").on(t.clientId),
+    index("oauth_refresh_user").on(t.userId),
+  ],
+);
+
+/**
+ * Network integrations (Tailscale OAuth / auth keys, named tunnel credentials, etc.)
+ */
+export const networkIntegrations = pgTable(
+  "network_integrations",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** tailscale-oauth | tailscale-authkey | cloudflare-named | ngrok | frp */
+    kind: text("kind").notNull(),
+    /** disconnected | connected | error */
+    status: text("status").notNull().default("disconnected"),
+    displayName: text("display_name"),
+    credentialsEnc: text("credentials_enc").notNull().default("{}"),
+    metaJson: text("meta_json").notNull().default("{}"),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("network_integrations_tenant_kind").on(t.tenantId, t.kind),
+    index("network_integrations_tenant").on(t.tenantId),
+  ],
+);
+
+/**
+ * Per-tenant tunnel provider enablement / default / config.
+ * Seed: cloudflare-quick enabled + is_default.
+ */
+export const tunnelProviderSettings = pgTable(
+  "tunnel_provider_settings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** cloudflare-quick | cloudflare-named | tailscale-serve | ngrok | frp */
+    provider: text("provider").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    isDefault: boolean("is_default").notNull().default(false),
+    configEnc: text("config_enc").notNull().default("{}"),
+    lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+    lastTestOk: boolean("last_test_ok"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("tunnel_provider_settings_tenant_provider").on(t.tenantId, t.provider),
+    index("tunnel_provider_settings_tenant").on(t.tenantId),
+  ],
+);
+
+/**
+ * Tenant (or platform) security policy for mesh + port exposure.
+ */
+export const networkSecurityPolicies = pgTable(
+  "network_security_policies",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** platform | tenant */
+    scope: text("scope").notNull().default("tenant"),
+    enabled: boolean("enabled").notNull().default(true),
+    exposureEnabled: boolean("exposure_enabled").notNull().default(true),
+    defaultTtlMinutes: integer("default_ttl_minutes").notNull().default(60),
+    maxTtlMinutes: integer("max_ttl_minutes").notNull().default(1440),
+    maxActivePerAgent: integer("max_active_per_agent").notNull().default(3),
+    maxActivePerTenant: integer("max_active_per_tenant").notNull().default(50),
+    deniedPortsJson: text("denied_ports_json")
+      .notNull()
+      .default("[22,2375,2376,5432,6379,27017,5900,6080,9222,8787,7443]"),
+    allowDesktopExposure: boolean("allow_desktop_exposure").notNull().default(false),
+    allowPublicExposure: boolean("allow_public_exposure").notNull().default(true),
+    allowTcpExposure: boolean("allow_tcp_exposure").notNull().default(false),
+    agentsCanExpose: boolean("agents_can_expose").notNull().default(true),
+    requireUserApproval: boolean("require_user_approval").notNull().default(false),
+    requireTailscaleForRemoteRunners: boolean("require_tailscale_for_remote_runners")
+      .notNull()
+      .default(false),
+    auditRetentionDays: integer("audit_retention_days").notNull().default(90),
+    updatedBy: text("updated_by"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("network_security_policies_tenant_scope").on(t.tenantId, t.scope),
+    index("network_security_policies_tenant").on(t.tenantId),
+  ],
+);
+
+/**
+ * Active / historical port exposures (workspace port → public or tailnet URL).
+ */
+export const portExposures = pgTable(
+  "port_exposures",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
+      onDelete: "set null",
+    }),
+    name: text("name"),
+    port: integer("port").notNull(),
+    /** http | https | tcp */
+    protocol: text("protocol").notNull().default("http"),
+    provider: text("provider").notNull(),
+    /** starting | active | error | stopped | expired */
+    status: text("status").notNull().default("starting"),
+    publicUrl: text("public_url"),
+    relayHost: text("relay_host"),
+    relayPort: integer("relay_port"),
+    integrationId: text("integration_id").references(() => networkIntegrations.id, {
+      onDelete: "set null",
+    }),
+    ttlMinutes: integer("ttl_minutes"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    /** user | agent | system */
+    createdByType: text("created_by_type"),
+    createdById: text("created_by_id"),
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("port_exposures_tenant").on(t.tenantId),
+    index("port_exposures_agent").on(t.agentId),
+    index("port_exposures_status").on(t.tenantId, t.status),
+    index("port_exposures_expires").on(t.expiresAt),
+  ],
+);
+
+export const networkAuditLogs = pgTable(
+  "network_audit_logs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** user | agent | system */
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    action: text("action").notNull(),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    detailJson: text("detail_json").notNull().default("{}"),
+    ip: text("ip"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("network_audit_tenant_time").on(t.tenantId, t.createdAt)],
+);
+
+export const schema = {
+  platformMeta,
+  tenants,
+  users,
+  oauthIdentities,
+  oauthLoginStates,
+  tenantMemberships,
+  tenantInvites,
+  memoryProviders,
+  runtimeNodes,
+  agents,
+  workspaceMigrations,
+  apiKeys,
+  providerCatalog,
+  componentInstances,
+  managedContainers,
+  agentBindings,
+  settings,
+  mcpPolicies,
+  memories,
+  memoryEdges,
+  toolCallLogs,
+  oauthClients,
+  oauthAuthCodes,
+  oauthRefreshTokens,
+  networkIntegrations,
+  tunnelProviderSettings,
+  networkSecurityPolicies,
+  portExposures,
+  networkAuditLogs,
+};
+
+export type PlatformMeta = typeof platformMeta.$inferSelect;
+export type Tenant = typeof tenants.$inferSelect;
+export type User = typeof users.$inferSelect;
+export type OauthIdentity = typeof oauthIdentities.$inferSelect;
+export type OauthLoginState = typeof oauthLoginStates.$inferSelect;
+export type TenantMembership = typeof tenantMemberships.$inferSelect;
+export type TenantInvite = typeof tenantInvites.$inferSelect;
+export type MemoryProvider = typeof memoryProviders.$inferSelect;
+export type RuntimeNode = typeof runtimeNodes.$inferSelect;
+export type Agent = typeof agents.$inferSelect;
+export type WorkspaceMigration = typeof workspaceMigrations.$inferSelect;
+export type AgentBinding = typeof agentBindings.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type ProviderCatalog = typeof providerCatalog.$inferSelect;
+export type ComponentInstance = typeof componentInstances.$inferSelect;
+export type ManagedContainer = typeof managedContainers.$inferSelect;
+export type Setting = typeof settings.$inferSelect;
+export type McpPolicy = typeof mcpPolicies.$inferSelect;
+export type Memory = typeof memories.$inferSelect;
+export type MemoryEdge = typeof memoryEdges.$inferSelect;
+export type ToolCallLog = typeof toolCallLogs.$inferSelect;
+export type OauthClient = typeof oauthClients.$inferSelect;
+export type OauthAuthCode = typeof oauthAuthCodes.$inferSelect;
+export type OauthRefreshToken = typeof oauthRefreshTokens.$inferSelect;
+export type NetworkIntegration = typeof networkIntegrations.$inferSelect;
+export type TunnelProviderSetting = typeof tunnelProviderSettings.$inferSelect;
+export type NetworkSecurityPolicy = typeof networkSecurityPolicies.$inferSelect;
+export type PortExposure = typeof portExposures.$inferSelect;
+export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;

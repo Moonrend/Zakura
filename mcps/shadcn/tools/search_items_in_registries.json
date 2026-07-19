@@ -1,0 +1,40 @@
+{
+  "name": "search_items_in_registries",
+  "description": "Search for components in registries using fuzzy matching (requires components.json). After finding an item, use get_item_examples_from_registries to see usage examples.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "registries": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Array of registry names to search (e.g., ['@shadcn', '@acme']). Omit to search every registry configured in components.json."
+      },
+      "query": {
+        "type": "string",
+        "description": "Search query string for fuzzy matching against item names and descriptions"
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Filter by item type. One of: lib, block, component, ui, hook, page, file, theme, style, item, base, font."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Maximum number of items to return (defaults to 100; use 0 for no limit)"
+      },
+      "offset": {
+        "type": "number",
+        "description": "Number of items to skip for pagination"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

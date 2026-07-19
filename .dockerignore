@@ -1,0 +1,39 @@
+# Dependencies & build outputs
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/coverage
+**/*.tsbuildinfo
+
+# Local data & secrets
+data
+*.db
+*.db-journal
+.env
+.env.*
+!.env.example
+
+# VCS & IDE
+.git
+.github
+.gitignore
+.cursor
+.vscode
+.idea
+.DS_Store
+
+# Docs & misc (not needed in image)
+*.md
+!apps/**/README.md
+docs
+agent-transcripts
+*.log
+coverage
+
+# Docker / compose (avoid recursive context noise)
+docker-compose*.yml
+**/docker-compose*.yml

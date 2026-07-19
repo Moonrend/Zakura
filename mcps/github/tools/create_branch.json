@@ -1,0 +1,32 @@
+{
+  "name": "create_branch",
+  "description": "Create a new branch in a GitHub repository",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "branch": {
+        "type": "string",
+        "description": "Name for new branch"
+      },
+      "from_branch": {
+        "type": "string",
+        "description": "Source branch (defaults to repo default)"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "branch"
+    ]
+  }
+}

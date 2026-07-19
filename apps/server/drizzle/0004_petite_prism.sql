@@ -1,0 +1,1 @@
+ALTER TABLE "agents" ADD COLUMN "enable_browser" boolean DEFAULT false NOT NULL;

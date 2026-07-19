@@ -1,0 +1,24 @@
+# Strip Go from an already-built workspace image (avoids re-running apt when mirrors fail).
+# Source of truth for a full rebuild remains ./Dockerfile
+ARG BASE_IMAGE=zakura/workspace:debian
+FROM ${BASE_IMAGE}
+
+ENV PATH=/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV GOPATH= \
+    GOCACHE=
+
+RUN set -eux; \
+  rm -rf /usr/local/go; \
+  rm -f /usr/local/bin/go /usr/local/bin/gofmt; \
+  printf '%s\n' \
+    'export PATH="/usr/local/node/bin:$PATH"' \
+    'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-/workspace/.cache/npm}"' \
+    'export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"' \
+    'export PIP_BREAK_SYSTEM_PACKAGES=1' \
+    >/etc/profile.d/zakura-path.sh
+
+COPY entrypoint.sh /usr/local/bin/zakura-workspace
+COPY capabilities.txt /etc/zakura/capabilities.txt
+RUN chmod +x /usr/local/bin/zakura-workspace
+
+ENTRYPOINT ["/usr/local/bin/zakura-workspace"]

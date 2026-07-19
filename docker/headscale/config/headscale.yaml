@@ -1,0 +1,108 @@
+# Headscale — Zakura 平台托管 control plane
+# 本地开发默认 http://127.0.0.1:8080；生产请改为公网 HTTPS，并启用下方内置 DERP。
+# base_domain 必须与 server_url 的主机名不同。
+
+server_url: http://127.0.0.1:8080
+
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 0.0.0.0:9090
+grpc_listen_addr: 0.0.0.0:50443
+grpc_allow_insecure: true
+
+trusted_proxies:
+  - 127.0.0.1/32
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+# 内置 DERP 需要 HTTPS；本地 HTTP 时关闭，使用 Tailscale 公共 DERP
+derp:
+  server:
+    enabled: false
+    region_id: 999
+    region_code: "zakura"
+    region_name: "Zakura Embedded DERP"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 3h
+
+disable_check_updates: false
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+  routes:
+    ha:
+      probe_interval: 10s
+      probe_timeout: 5s
+
+database:
+  type: sqlite
+  debug: false
+  gorm:
+    prepare_stmt: true
+    parameterized_queries: true
+    skip_err_record_not_found: true
+    slow_threshold: 1000
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+    wal_autocheckpoint: 1000
+
+# TLS 由反代终止；如需 Headscale 自带证书再填写
+acme_url: https://acme-v02.api.letsencrypt.org/directory
+acme_email: ""
+tls_letsencrypt_hostname: ""
+tls_letsencrypt_cache_dir: /var/lib/headscale/cache
+tls_letsencrypt_challenge_type: HTTP-01
+tls_letsencrypt_listen: ":http"
+tls_cert_path: ""
+tls_key_path: ""
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+dns:
+  magic_dns: true
+  # 必须与 server_url 主机名不同
+  base_domain: mesh.local
+  override_local_dns: true
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
+  split: {}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false
+
+taildrop:
+  enabled: true
+
+auto_update:
+  enabled: false

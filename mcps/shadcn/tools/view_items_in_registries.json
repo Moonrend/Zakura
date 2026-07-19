@@ -1,0 +1,21 @@
+{
+  "name": "view_items_in_registries",
+  "description": "View detailed information about specific registry items including the name, description, type and files content. For usage examples, use get_item_examples_from_registries instead.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Array of item names with registry prefix (e.g., ['@shadcn/button', '@shadcn/card'])"
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

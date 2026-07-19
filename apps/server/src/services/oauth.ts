@@ -1,0 +1,611 @@
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
+import { and, asc, eq, isNull } from "drizzle-orm";
+import { hashApiKey } from "@zakura/core";
+import type { AppConfig } from "../config.js";
+import type { Db } from "../db/client.js";
+import {
+  agents,
+  newId,
+  oauthAuthCodes,
+  oauthClients,
+  oauthRefreshTokens,
+  tenants,
+  type OauthClient,
+  type Tenant,
+} from "../db/schema.js";
+import { LoginAmbiguousError, loginUser } from "./auth.js";
+
+const ACCESS_TTL_SEC = 60 * 60; // 1h
+const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
+const CODE_TTL_SEC = 60 * 10; // 10m
+
+export type McpAuthContext = {
+  tenant: Tenant;
+  /** Present for API-key auth */
+  apiKeyId?: string | null;
+  /** Present for OAuth user tokens */
+  userId?: string | null;
+  agentId?: string | null;
+  authMethod: "api_key" | "oauth";
+  clientId?: string | null;
+  scope?: string;
+};
+
+export type AccessTokenPayload = {
+  typ: "mcp_at";
+  sub: string; // userId
+  tid: string; // tenantId
+  cid: string; // clientId
+  aid?: string | null; // agentId
+  scope: string;
+  resource?: string | null;
+  exp: number;
+  iat: number;
+  jti: string;
+};
+
+function b64urlJson(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+
+function signAccessToken(secret: string, payload: AccessTokenPayload): string {
+  const data = b64urlJson(payload);
+  const sig = createHmac("sha256", secret).update(`mcp_at.${data}`).digest("base64url");
+  return `rca_${data}.${sig}`;
+}
+
+export function verifyAccessToken(
+  secret: string,
+  token: string,
+): AccessTokenPayload | null {
+  if (!token.startsWith("rca_")) return null;
+  const raw = token.slice(4);
+  const [data, sig] = raw.split(".");
+  if (!data || !sig) return null;
+  const expected = createHmac("sha256", secret).update(`mcp_at.${data}`).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf8")) as AccessTokenPayload;
+    if (payload.typ !== "mcp_at") return null;
+    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function hashToken(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+function pkceS256(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+export function isAllowedRedirectUri(uri: string): boolean {
+  try {
+    const u = new URL(uri);
+    if (u.protocol === "https:") return true;
+    if (u.protocol === "http:") {
+      return (
+        u.hostname === "127.0.0.1" ||
+        u.hostname === "localhost" ||
+        u.hostname === "[::1]"
+      );
+    }
+    // VS Code / Cursor custom schemes occasionally used
+    if (u.protocol === "vscode:" || u.protocol === "cursor:" || u.protocol === "vscode-insiders:") {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function authorizationServerMetadata(baseUrl: string) {
+  const issuer = baseUrl.replace(/\/$/, "");
+  return {
+    issuer,
+    authorization_endpoint: `${issuer}/authorize`,
+    token_endpoint: `${issuer}/token`,
+    registration_endpoint: `${issuer}/register`,
+    scopes_supported: ["mcp", "openid"],
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
+    revocation_endpoint: `${issuer}/token/revoke`,
+    // MCP / OAuth 2.1
+    client_id_metadata_document_supported: false,
+  };
+}
+
+export function protectedResourceMetadata(baseUrl: string, resourcePath = "/mcp") {
+  const issuer = baseUrl.replace(/\/$/, "");
+  const resource = `${issuer}${resourcePath.startsWith("/") ? resourcePath : `/${resourcePath}`}`;
+  return {
+    resource,
+    authorization_servers: [issuer],
+    scopes_supported: ["mcp"],
+    bearer_methods_supported: ["header"],
+    resource_documentation: `${issuer}/`,
+  };
+}
+
+export class OauthService {
+  constructor(
+    private readonly db: Db,
+    private readonly config: AppConfig,
+  ) {}
+
+  metadata() {
+    return authorizationServerMetadata(this.config.publicBaseUrl);
+  }
+
+  resourceMetadata(resourcePath = "/mcp") {
+    return protectedResourceMetadata(this.config.publicBaseUrl, resourcePath);
+  }
+
+  async registerClient(body: {
+    client_name?: string;
+    redirect_uris?: string[];
+    grant_types?: string[];
+    response_types?: string[];
+    token_endpoint_auth_method?: string;
+    scope?: string;
+  }): Promise<{
+    client_id: string;
+    client_secret?: string;
+    client_id_issued_at: number;
+    client_name: string;
+    redirect_uris: string[];
+    grant_types: string[];
+    response_types: string[];
+    token_endpoint_auth_method: string;
+    scope: string;
+  }> {
+    const redirectUris = (body.redirect_uris ?? []).filter(Boolean);
+    if (!redirectUris.length) {
+      throw new OauthError("invalid_client_metadata", "redirect_uris required", 400);
+    }
+    for (const uri of redirectUris) {
+      if (!isAllowedRedirectUri(uri)) {
+        throw new OauthError(
+          "invalid_redirect_uri",
+          `Redirect URI not allowed: ${uri}`,
+          400,
+        );
+      }
+    }
+
+    const authMethod = body.token_endpoint_auth_method ?? "none";
+    const grantTypes = body.grant_types?.length
+      ? body.grant_types
+      : ["authorization_code", "refresh_token"];
+    const responseTypes = body.response_types?.length ? body.response_types : ["code"];
+
+    const clientId = `ocl_${randomBytes(16).toString("base64url")}`;
+    let clientSecret: string | undefined;
+    let clientSecretHash: string | null = null;
+    if (authMethod !== "none") {
+      clientSecret = `ocs_${randomBytes(24).toString("base64url")}`;
+      clientSecretHash = hashApiKey(clientSecret);
+    }
+
+    await this.db.insert(oauthClients).values({
+      clientId,
+      clientSecretHash,
+      clientName: body.client_name?.trim() || "MCP Client",
+      redirectUrisJson: JSON.stringify(redirectUris),
+      grantTypesJson: JSON.stringify(grantTypes),
+      responseTypesJson: JSON.stringify(responseTypes),
+      tokenEndpointAuthMethod: authMethod,
+      scope: body.scope?.trim() || "mcp",
+      registrationType: "dynamic",
+    });
+
+    return {
+      client_id: clientId,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_name: body.client_name?.trim() || "MCP Client",
+      redirect_uris: redirectUris,
+      grant_types: grantTypes,
+      response_types: responseTypes,
+      token_endpoint_auth_method: authMethod,
+      scope: body.scope?.trim() || "mcp",
+    };
+  }
+
+  async getClient(clientId: string): Promise<OauthClient | null> {
+    return (
+      (await this.db.query.oauthClients.findFirst({
+        where: eq(oauthClients.clientId, clientId),
+      })) ?? null
+    );
+  }
+
+  parseRedirectUris(client: OauthClient): string[] {
+    try {
+      return JSON.parse(client.redirectUrisJson) as string[];
+    } catch {
+      return [];
+    }
+  }
+
+  async resolveAgentId(
+    tenantId: string,
+    opts: { agentSlug?: string | null; resource?: string | null },
+  ): Promise<string | null> {
+    let slug = opts.agentSlug?.trim() || null;
+    if (!slug && opts.resource) {
+      try {
+        const u = new URL(opts.resource);
+        const m = u.pathname.match(/^\/mcp\/agents\/([^/]+)/);
+        if (m?.[1]) slug = decodeURIComponent(m[1]);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!slug) return null;
+    const agent = await this.db.query.agents.findFirst({
+      where: and(eq(agents.tenantId, tenantId), eq(agents.slug, slug)),
+    });
+    return agent?.id ?? null;
+  }
+
+  async createAuthorizationCode(input: {
+    clientId: string;
+    userId: string;
+    tenantId: string;
+    agentId?: string | null;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod: string;
+    scope: string;
+    resource?: string | null;
+  }): Promise<string> {
+    const raw = `ac_${randomBytes(24).toString("base64url")}`;
+    await this.db.insert(oauthAuthCodes).values({
+      codeHash: hashToken(raw),
+      clientId: input.clientId,
+      userId: input.userId,
+      tenantId: input.tenantId,
+      agentId: input.agentId ?? null,
+      redirectUri: input.redirectUri,
+      codeChallenge: input.codeChallenge,
+      codeChallengeMethod: input.codeChallengeMethod || "S256",
+      scope: input.scope || "mcp",
+      resource: input.resource ?? null,
+      expiresAt: new Date(Date.now() + CODE_TTL_SEC * 1000),
+    });
+    return raw;
+  }
+
+  async consent(input: {
+    userId: string;
+    tenantId: string;
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod?: string;
+    scope?: string;
+    resource?: string | null;
+    agentSlug?: string | null;
+  }): Promise<{ code: string; redirectUri: string }> {
+    const client = await this.getClient(input.clientId);
+    if (!client) throw new OauthError("invalid_client", "Unknown client", 400);
+
+    // Bind DCR clients to the authorizing tenant; reject cross-tenant reuse
+    if (client.tenantId && client.tenantId !== input.tenantId) {
+      throw new OauthError("access_denied", "Client belongs to another tenant", 403);
+    }
+    if (!client.tenantId) {
+      await this.db
+        .update(oauthClients)
+        .set({ tenantId: input.tenantId })
+        .where(eq(oauthClients.clientId, input.clientId));
+    }
+
+    const uris = this.parseRedirectUris(client);
+    if (!uris.includes(input.redirectUri)) {
+      throw new OauthError("invalid_request", "redirect_uri mismatch", 400);
+    }
+    if (!input.codeChallenge) {
+      throw new OauthError("invalid_request", "code_challenge required (PKCE)", 400);
+    }
+    const method = input.codeChallengeMethod || "S256";
+    if (method !== "S256") {
+      throw new OauthError("invalid_request", "Only S256 PKCE is supported", 400);
+    }
+
+    const agentId = await this.resolveAgentId(input.tenantId, {
+      agentSlug: input.agentSlug,
+      resource: input.resource,
+    });
+
+    const code = await this.createAuthorizationCode({
+      clientId: input.clientId,
+      userId: input.userId,
+      tenantId: input.tenantId,
+      agentId,
+      redirectUri: input.redirectUri,
+      codeChallenge: input.codeChallenge,
+      codeChallengeMethod: method,
+      scope: input.scope || client.scope || "mcp",
+      resource: input.resource,
+    });
+
+    return { code, redirectUri: input.redirectUri };
+  }
+
+  async loginAndAuthorize(input: {
+    email: string;
+    password: string;
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    codeChallengeMethod?: string;
+    scope?: string;
+    resource?: string | null;
+    agentSlug?: string | null;
+    tenantSlug?: string;
+  }): Promise<{ code: string; redirectUri: string }> {
+    let logged: Awaited<ReturnType<typeof loginUser>>;
+    try {
+      logged = await loginUser(this.db, input.email, input.password, {
+        tenantSlug: input.tenantSlug,
+      });
+    } catch (err) {
+      if (err instanceof LoginAmbiguousError) {
+        throw new OauthError("invalid_request", "tenantSlug required for this account", 400);
+      }
+      throw err;
+    }
+    if (!logged) throw new OauthError("access_denied", "Invalid credentials", 401);
+
+    return this.consent({
+      userId: logged.user.id,
+      tenantId: logged.tenant.id,
+      clientId: input.clientId,
+      redirectUri: input.redirectUri,
+      codeChallenge: input.codeChallenge,
+      codeChallengeMethod: input.codeChallengeMethod,
+      scope: input.scope,
+      resource: input.resource,
+      agentSlug: input.agentSlug,
+    });
+  }
+
+  private async verifyClientSecret(
+    client: OauthClient,
+    secret: string | undefined,
+  ): Promise<boolean> {
+    if (client.tokenEndpointAuthMethod === "none") return true;
+    if (!secret || !client.clientSecretHash) return false;
+    return hashApiKey(secret) === client.clientSecretHash;
+  }
+
+  async exchangeToken(input: {
+    grantType: string;
+    code?: string;
+    redirectUri?: string;
+    codeVerifier?: string;
+    refreshToken?: string;
+    clientId?: string;
+    clientSecret?: string;
+    resource?: string | null;
+  }): Promise<{
+    access_token: string;
+    token_type: "Bearer";
+    expires_in: number;
+    refresh_token?: string;
+    scope: string;
+  }> {
+    if (input.grantType === "authorization_code") {
+      return this.exchangeAuthCode(input);
+    }
+    if (input.grantType === "refresh_token") {
+      return this.exchangeRefresh(input);
+    }
+    throw new OauthError("unsupported_grant_type", `Unsupported grant: ${input.grantType}`, 400);
+  }
+
+  private async exchangeAuthCode(input: {
+    code?: string;
+    redirectUri?: string;
+    codeVerifier?: string;
+    clientId?: string;
+    clientSecret?: string;
+    resource?: string | null;
+  }) {
+    if (!input.code || !input.redirectUri || !input.codeVerifier || !input.clientId) {
+      throw new OauthError(
+        "invalid_request",
+        "code, redirect_uri, code_verifier, client_id required",
+        400,
+      );
+    }
+    const client = await this.getClient(input.clientId);
+    if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
+    if (!(await this.verifyClientSecret(client, input.clientSecret))) {
+      throw new OauthError("invalid_client", "Invalid client authentication", 401);
+    }
+
+    const row = await this.db.query.oauthAuthCodes.findFirst({
+      where: eq(oauthAuthCodes.codeHash, hashToken(input.code)),
+    });
+    if (!row || row.usedAt || row.expiresAt < new Date()) {
+      throw new OauthError("invalid_grant", "Invalid or expired code", 400);
+    }
+    if (row.clientId !== input.clientId || row.redirectUri !== input.redirectUri) {
+      throw new OauthError("invalid_grant", "Code / client / redirect mismatch", 400);
+    }
+    if (pkceS256(input.codeVerifier) !== row.codeChallenge) {
+      throw new OauthError("invalid_grant", "PKCE verification failed", 400);
+    }
+
+    await this.db
+      .update(oauthAuthCodes)
+      .set({ usedAt: new Date() })
+      .where(eq(oauthAuthCodes.id, row.id));
+
+    return this.issueTokens({
+      clientId: row.clientId,
+      userId: row.userId,
+      tenantId: row.tenantId,
+      agentId: row.agentId,
+      scope: row.scope,
+      resource: input.resource ?? row.resource,
+    });
+  }
+
+  private async exchangeRefresh(input: {
+    refreshToken?: string;
+    clientId?: string;
+    clientSecret?: string;
+    resource?: string | null;
+  }) {
+    if (!input.refreshToken || !input.clientId) {
+      throw new OauthError("invalid_request", "refresh_token and client_id required", 400);
+    }
+    const client = await this.getClient(input.clientId);
+    if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
+    if (!(await this.verifyClientSecret(client, input.clientSecret))) {
+      throw new OauthError("invalid_client", "Invalid client authentication", 401);
+    }
+
+    const row = await this.db.query.oauthRefreshTokens.findFirst({
+      where: and(
+        eq(oauthRefreshTokens.tokenHash, hashToken(input.refreshToken)),
+        isNull(oauthRefreshTokens.revokedAt),
+      ),
+    });
+    if (!row || row.expiresAt < new Date() || row.clientId !== input.clientId) {
+      throw new OauthError("invalid_grant", "Invalid refresh token", 400);
+    }
+
+    // Rotate refresh token
+    await this.db
+      .update(oauthRefreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(eq(oauthRefreshTokens.id, row.id));
+
+    return this.issueTokens({
+      clientId: row.clientId,
+      userId: row.userId,
+      tenantId: row.tenantId,
+      agentId: row.agentId,
+      scope: row.scope,
+      resource: input.resource ?? row.resource,
+    });
+  }
+
+  private async issueTokens(input: {
+    clientId: string;
+    userId: string;
+    tenantId: string;
+    agentId?: string | null;
+    scope: string;
+    resource?: string | null;
+  }) {
+    const now = Math.floor(Date.now() / 1000);
+    const access = signAccessToken(this.config.secret, {
+      typ: "mcp_at",
+      sub: input.userId,
+      tid: input.tenantId,
+      cid: input.clientId,
+      aid: input.agentId ?? null,
+      scope: input.scope,
+      resource: input.resource ?? null,
+      iat: now,
+      exp: now + ACCESS_TTL_SEC,
+      jti: newId(),
+    });
+
+    const refreshRaw = `rcr_${randomBytes(32).toString("base64url")}`;
+    await this.db.insert(oauthRefreshTokens).values({
+      tokenHash: hashToken(refreshRaw),
+      clientId: input.clientId,
+      userId: input.userId,
+      tenantId: input.tenantId,
+      agentId: input.agentId ?? null,
+      scope: input.scope,
+      resource: input.resource ?? null,
+      expiresAt: new Date(Date.now() + REFRESH_TTL_SEC * 1000),
+    });
+
+    return {
+      access_token: access,
+      token_type: "Bearer" as const,
+      expires_in: ACCESS_TTL_SEC,
+      refresh_token: refreshRaw,
+      scope: input.scope,
+    };
+  }
+
+  async revokeRefreshToken(token: string): Promise<void> {
+    await this.db
+      .update(oauthRefreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(eq(oauthRefreshTokens.tokenHash, hashToken(token)));
+  }
+
+  async authenticateBearer(rawToken: string): Promise<McpAuthContext | null> {
+    // OAuth access token
+    const at = verifyAccessToken(this.config.secret, rawToken);
+    if (at) {
+      const tenant = await this.db.query.tenants.findFirst({
+        where: eq(tenants.id, at.tid),
+      });
+      if (!tenant) return null;
+      return {
+        tenant,
+        userId: at.sub,
+        agentId: at.aid ?? null,
+        authMethod: "oauth",
+        clientId: at.cid,
+        scope: at.scope,
+        apiKeyId: null,
+      };
+    }
+    return null;
+  }
+
+  async listClients(tenantId: string) {
+    const rows = await this.db
+      .select()
+      .from(oauthClients)
+      .where(eq(oauthClients.tenantId, tenantId))
+      .orderBy(asc(oauthClients.createdAt));
+    return rows.map((r) => ({
+      id: r.id,
+      clientId: r.clientId,
+      clientName: r.clientName,
+      tokenEndpointAuthMethod: r.tokenEndpointAuthMethod,
+      registrationType: r.registrationType,
+      redirectUris: this.parseRedirectUris(r),
+      scope: r.scope,
+      createdAt: r.createdAt,
+    }));
+  }
+}
+
+export class OauthError extends Error {
+  constructor(
+    public readonly error: string,
+    message: string,
+    public readonly status: number = 400,
+  ) {
+    super(message);
+    this.name = "OauthError";
+  }
+}

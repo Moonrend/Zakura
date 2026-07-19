@@ -1,0 +1,26 @@
+{
+  "name": "zakura",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI environment orchestration & unified MCP gateway",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @zakura/server --filter @zakura/web dev",
+    "dev:server": "pnpm --filter @zakura/server dev",
+    "dev:web": "pnpm --filter @zakura/web dev",
+    "build": "pnpm -r build",
+    "workspace:image": "docker build -t zakura/workspace:debian --build-arg APT_MIRROR=http://mirrors.cloud.tencent.com docker/workspace",
+    "workspace:image:cjk": "docker build -f docker/workspace/Dockerfile.cjk-fonts -t zakura/workspace:debian docker/workspace",
+    "db:generate": "pnpm --filter @zakura/server db:generate",
+    "db:migrate": "pnpm --filter @zakura/server db:migrate",
+    "db:up": "docker compose --profile postgres up -d postgres",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
+    "test:runner-agent": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
+    "setup": "pnpm install && pnpm db:generate && pnpm db:migrate",
+    "strip:saas": "node scripts/strip-saas.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

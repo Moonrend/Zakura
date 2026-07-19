@@ -1,0 +1,305 @@
+name: Release Containers
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver without v prefix (required when not triggered by tag), e.g. 0.1.0"
+        required: false
+        type: string
+      images:
+        description: "Which images to build"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - app
+          - runner
+          - workspace
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+
+jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      images: ${{ steps.resolve.outputs.images }}
+      owner: ${{ steps.resolve.outputs.owner }}
+      dockerhub_user: ${{ steps.resolve.outputs.dockerhub_user }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+    steps:
+      - name: Resolve version and inputs
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+
+          DOCKERHUB_USER="${DOCKERHUB_USERNAME:-}"
+          if [[ -z "${DOCKERHUB_USER}" ]]; then
+            echo "::error::DOCKERHUB_USERNAME is not set (configure Actions variable DOCKERHUB_USERNAME)"
+            exit 1
+          fi
+          DOCKERHUB_USER="${DOCKERHUB_USER,,}"
+          echo "dockerhub_user=${DOCKERHUB_USER}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            RAW="${GITHUB_REF_NAME}"
+            VERSION="${RAW#v}"
+            TAG_NAME="${RAW}"
+            IMAGES="all"
+          else
+            VERSION="${{ inputs.version }}"
+            if [[ -z "${VERSION}" ]]; then
+              echo "::error::workflow_dispatch requires inputs.version (e.g. 0.1.0)"
+              exit 1
+            fi
+            VERSION="${VERSION#v}"
+            TAG_NAME="v${VERSION}"
+            IMAGES="${{ inputs.images }}"
+          fi
+
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid semver: ${VERSION}"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "images=${IMAGES}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG_NAME} images=${IMAGES} dockerhub=${DOCKERHUB_USER}"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: app
+            image: zakura
+            dockerfile: docker/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: ""
+          - name: runner
+            image: zakura-runner
+            dockerfile: docker/runner/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: ""
+          - name: workspace
+            image: zakura-workspace
+            dockerfile: docker/workspace/Dockerfile
+            context: docker/workspace
+            timeout: 180
+            workspace_tags: "true"
+            build_args: "APT_MIRROR=http://deb.debian.org"
+    steps:
+      - name: Decide whether to build
+        id: gate
+        shell: bash
+        run: |
+          IMAGES="${{ needs.meta.outputs.images }}"
+          NAME="${{ matrix.name }}"
+          if [[ "${IMAGES}" == "all" || "${IMAGES}" == "${NAME}" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping ${NAME} (images=${IMAGES})"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        if: steps.gate.outputs.run == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ needs.meta.outputs.owner }}/${{ matrix.image }}
+            ${{ needs.meta.outputs.dockerhub_user }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ needs.meta.outputs.version }}
+            type=semver,pattern={{version}},value=v${{ needs.meta.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.meta.outputs.version }}
+            type=semver,pattern={{major}},value=v${{ needs.meta.outputs.version }},enable=${{ !startsWith(needs.meta.outputs.version, '0.') }}
+            type=raw,value=latest
+            type=raw,value=debian-${{ needs.meta.outputs.version }},enable=${{ matrix.workspace_tags == 'true' }}
+            type=raw,value=debian,enable=${{ matrix.workspace_tags == 'true' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push
+        if: steps.gate.outputs.run == 'true'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false
+
+      - name: Export digest
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          mkdir -p digests
+          DIGEST="${{ steps.build.outputs.digest }}"
+          echo "${DIGEST}" > "digests/${{ matrix.image }}.txt"
+          echo "Pushed ${{ env.REGISTRY }}/${{ needs.meta.outputs.owner }}/${{ matrix.image }}@${DIGEST}"
+
+      - name: Upload digest artifact
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests/${{ matrix.image }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Compose release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER="${{ needs.meta.outputs.owner }}"
+          DH_USER="${{ needs.meta.outputs.dockerhub_user }}"
+          VERSION="${{ needs.meta.outputs.version }}"
+          REGISTRY="${{ env.REGISTRY }}"
+          OUT=release-notes.md
+
+          {
+            echo "## Zakura ${VERSION}"
+            echo
+            echo "Container images (linux/amd64, linux/arm64) published to **GHCR** and **Docker Hub**."
+            echo
+            echo "### Pull (Docker Hub)"
+            echo
+            echo '```bash'
+            for img in zakura zakura-runner zakura-workspace; do
+              if [[ -f "digests/${img}.txt" ]]; then
+                echo "docker pull ${DH_USER}/${img}:${VERSION}"
+              fi
+            done
+            echo '```'
+            echo
+            echo "### Pull (GHCR)"
+            echo
+            echo '```bash'
+            for img in zakura zakura-runner zakura-workspace; do
+              if [[ -f "digests/${img}.txt" ]]; then
+                echo "docker pull ${REGISTRY}/${OWNER}/${img}:${VERSION}"
+              fi
+            done
+            echo '```'
+            echo
+            echo "### Digests"
+            echo
+            for img in zakura zakura-runner zakura-workspace; do
+              if [[ -f "digests/${img}.txt" ]]; then
+                digest="$(tr -d '[:space:]' < "digests/${img}.txt")"
+                echo "- \`${DH_USER}/${img}@${digest}\`"
+                echo "- \`${REGISTRY}/${OWNER}/${img}@${digest}\`"
+              fi
+            done
+            echo
+            echo "### Image tags"
+            echo
+            echo "| Image | Tags |"
+            echo "|-------|------|"
+            if [[ -f digests/zakura.txt ]]; then
+              echo "| \`${DH_USER}/zakura\` / \`${REGISTRY}/${OWNER}/zakura\` | \`${VERSION}\`, minor/major, \`latest\` |"
+            fi
+            if [[ -f digests/zakura-runner.txt ]]; then
+              echo "| \`${DH_USER}/zakura-runner\` / \`${REGISTRY}/${OWNER}/zakura-runner\` | \`${VERSION}\`, minor/major, \`latest\` |"
+            fi
+            if [[ -f digests/zakura-workspace.txt ]]; then
+              echo "| \`${DH_USER}/zakura-workspace\` / \`${REGISTRY}/${OWNER}/zakura-workspace\` | \`${VERSION}\`, \`debian-${VERSION}\`, \`debian\`, \`latest\` |"
+            fi
+            echo
+            echo "Dev / debug images are published separately as \`*-dev\` (see Dev Containers workflow)."
+            echo "First-time GHCR consumers: set each package visibility to **Public** if anonymous pulls are required."
+          } > "${OUT}"
+
+          echo "path=${OUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag_name }}
+          name: Zakura ${{ needs.meta.outputs.version }}
+          body_path: ${{ steps.notes.outputs.path }}
+          draft: false
+          prerelease: ${{ contains(needs.meta.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

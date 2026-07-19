@@ -1,0 +1,66 @@
+{
+  "name": "list_code_scanning_alerts",
+  "description": "List code scanning alerts in a GitHub repository.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "owner": {
+        "type": "string",
+        "description": "The owner of the repository.",
+        "x-mcp-header": "owner"
+      },
+      "page": {
+        "type": "number",
+        "description": "Page number for pagination (min 1)",
+        "minimum": 1
+      },
+      "perPage": {
+        "type": "number",
+        "description": "Results per page for pagination (min 1, max 100)",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "ref": {
+        "type": "string",
+        "description": "The Git reference for the results you want to list."
+      },
+      "repo": {
+        "type": "string",
+        "description": "The name of the repository.",
+        "x-mcp-header": "repo"
+      },
+      "severity": {
+        "type": "string",
+        "description": "Filter code scanning alerts by severity",
+        "enum": [
+          "critical",
+          "high",
+          "medium",
+          "low",
+          "warning",
+          "note",
+          "error"
+        ]
+      },
+      "state": {
+        "type": "string",
+        "description": "Filter code scanning alerts by state. Defaults to open",
+        "default": "open",
+        "enum": [
+          "open",
+          "closed",
+          "dismissed",
+          "fixed"
+        ]
+      },
+      "tool_name": {
+        "type": "string",
+        "description": "The name of the tool used for code scanning."
+      }
+    },
+    "required": [
+      "owner",
+      "repo"
+    ]
+  }
+}

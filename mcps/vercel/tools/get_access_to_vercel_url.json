@@ -1,0 +1,18 @@
+{
+  "name": "get_access_to_vercel_url",
+  "description": "Creates a temporary shareable link that bypasses authentication for protected Vercel deployments.\n\n  When you encounter a Vercel deployment URL (like https://myapp-abc123.vercel.app), \n  you might receive a 403 (Forbidden) error when trying to access it. \n\n  This tool generates a special URL with a '_vercel_share' parameter that allows temporary access \n  without requiring login credentials. The shareable URL will expire in 23 hours.\n  \n  When you use the returned URL, that URL will redirect and set an auth cookie.\n  If your fetch implementation does not support cookies, use the 'web_fetch_vercel_url' tool instead.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "The full URL of the Vercel deployment (e.g. \"https://myapp.vercel.app\")."
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

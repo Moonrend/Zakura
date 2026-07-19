@@ -1,0 +1,63 @@
+{
+  "name": "update_pull_request",
+  "description": "Update an existing pull request in a GitHub repository.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "base": {
+        "type": "string",
+        "description": "New base branch name"
+      },
+      "body": {
+        "type": "string",
+        "description": "New description"
+      },
+      "draft": {
+        "type": "boolean",
+        "description": "Mark pull request as draft (true) or ready for review (false)"
+      },
+      "maintainer_can_modify": {
+        "type": "boolean",
+        "description": "Allow maintainer edits"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "pullNumber": {
+        "type": "number",
+        "description": "Pull request number to update"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      },
+      "reviewers": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "GitHub usernames or ORG/team-slug team reviewers to request reviews from"
+      },
+      "state": {
+        "type": "string",
+        "description": "New state",
+        "enum": [
+          "open",
+          "closed"
+        ]
+      },
+      "title": {
+        "type": "string",
+        "description": "New title"
+      }
+    },
+    "required": [
+      "owner",
+      "repo",
+      "pullNumber"
+    ]
+  }
+}

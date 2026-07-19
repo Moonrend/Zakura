@@ -1,0 +1,90 @@
+{
+  "name": "list_issues",
+  "description": "List issues in a GitHub repository. For pagination, use the 'endCursor' from the previous response's 'pageInfo' in the 'after' parameter.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "after": {
+        "type": "string",
+        "description": "Cursor for pagination. Use the cursor from the previous response."
+      },
+      "direction": {
+        "type": "string",
+        "description": "Order direction. If provided, the 'orderBy' also needs to be provided.",
+        "enum": [
+          "ASC",
+          "DESC"
+        ]
+      },
+      "field_filters": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "field_name": {
+              "type": "string",
+              "description": "Name of the custom field (e.g. \"Priority\"). Case-insensitive."
+            },
+            "value": {
+              "type": "string",
+              "description": "Value to filter on. For single-select fields, the option name (e.g. \"P1\"). For dates, YYYY-MM-DD. For numbers, the numeric value as a string. For text, the text value."
+            }
+          },
+          "required": [
+            "field_name",
+            "value"
+          ]
+        },
+        "description": "Filter by custom issue field values. Each entry takes a field_name and a value; the server looks up the field and coerces the value to its type (single-select option name, text, number, or YYYY-MM-DD date)."
+      },
+      "labels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Filter by labels"
+      },
+      "orderBy": {
+        "type": "string",
+        "description": "Order issues by field. If provided, the 'direction' also needs to be provided.",
+        "enum": [
+          "CREATED_AT",
+          "UPDATED_AT",
+          "COMMENTS"
+        ]
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "perPage": {
+        "type": "number",
+        "description": "Results per page for pagination (min 1, max 100)",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      },
+      "since": {
+        "type": "string",
+        "description": "Filter by date (ISO 8601 timestamp)"
+      },
+      "state": {
+        "type": "string",
+        "description": "Filter by state, by default both open and closed issues are returned when not provided",
+        "enum": [
+          "OPEN",
+          "CLOSED"
+        ]
+      }
+    },
+    "required": [
+      "owner",
+      "repo"
+    ]
+  }
+}

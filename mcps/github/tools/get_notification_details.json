@@ -1,0 +1,16 @@
+{
+  "name": "get_notification_details",
+  "description": "Get detailed information for a specific GitHub notification, always call this tool when the user asks for details about a specific notification, if you don't know the ID list notifications first.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "notificationID": {
+        "type": "string",
+        "description": "The ID of the notification"
+      }
+    },
+    "required": [
+      "notificationID"
+    ]
+  }
+}

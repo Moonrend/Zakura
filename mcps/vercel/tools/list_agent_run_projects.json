@@ -1,0 +1,47 @@
+{
+  "name": "list_agent_run_projects",
+  "description": "List projects in a Vercel team that have Agent Runs observability data for agents built with the eve framework, with run counts and average duration rollups. Use this to discover which projects have eve agent activity before drilling into a project.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "teamId": {
+        "type": "string",
+        "description": "The team ID to get the deployment events for. Alternatively the team slug can be used.\nTeam IDs start with \"team_\".\nIf you do not know the team ID or slug, it can be found through these mechanism:\n- Read the file .vercel/project.json if it exists and extract the orgId\n- Use the `list_teams` tool"
+      },
+      "environment": {
+        "type": "string",
+        "description": "Agent run environment, usually \"production\" or \"preview\". Defaults to \"production\"."
+      },
+      "period": {
+        "type": "string",
+        "enum": [
+          "5m",
+          "15m",
+          "1h",
+          "6h",
+          "12h",
+          "1d",
+          "3d",
+          "7d",
+          "14d",
+          "30d",
+          "90d"
+        ],
+        "description": "Preset time range. Ignored when both from and to are provided. Defaults to the dashboard endpoint default."
+      },
+      "from": {
+        "type": "string",
+        "description": "Start time as ISO 8601, Unix seconds, Unix milliseconds, or a relative duration like \"12h\". Must be used with to."
+      },
+      "to": {
+        "type": "string",
+        "description": "End time as ISO 8601, Unix seconds, Unix milliseconds, a relative duration like \"1h\", or \"now\". Must be used with from."
+      }
+    },
+    "required": [
+      "teamId"
+    ],
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "fork_repository",
+  "description": "Fork a GitHub repository to your account or specified organization",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "organization": {
+        "type": "string",
+        "description": "Organization to fork to"
+      },
+      "owner": {
+        "type": "string",
+        "description": "Repository owner",
+        "x-mcp-header": "owner"
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name",
+        "x-mcp-header": "repo"
+      }
+    },
+    "required": [
+      "owner",
+      "repo"
+    ]
+  }
+}

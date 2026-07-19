@@ -1,0 +1,57 @@
+# Add CJK fonts onto an existing workspace image (full rebuild may fail when apt mirrors 403).
+ARG BASE_IMAGE=zakura/workspace:debian
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Prefer Noto CJK for sans/serif/monospace so Chromium stops tofu-boxing Chinese.
+COPY fonts-cjk.conf /etc/fonts/local.conf
+
+RUN set -eux; \
+  install_cjk() { \
+    apt-get install -y --no-install-recommends \
+      fonts-noto-cjk \
+      fonts-noto-color-emoji \
+      fontconfig; \
+  }; \
+  write_mirror() { \
+    local m="$1"; \
+    printf '%s\n' \
+      'Types: deb' \
+      "URIs: ${m}/debian" \
+      'Suites: bookworm bookworm-updates' \
+      'Components: main contrib non-free non-free-firmware' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      '' \
+      'Types: deb' \
+      "URIs: ${m}/debian-security" \
+      'Suites: bookworm-security' \
+      'Components: main contrib non-free non-free-firmware' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      >/etc/apt/sources.list.d/debian.sources; \
+  }; \
+  ok=0; \
+  for m in \
+    http://mirrors.cloud.tencent.com \
+    http://mirrors.tuna.tsinghua.edu.cn \
+    http://mirrors.ustc.edu.cn \
+    http://mirrors.huaweicloud.com \
+    http://deb.debian.org \
+    http://mirrors.aliyun.com; do \
+    echo "Trying apt mirror: $m"; \
+    write_mirror "$m"; \
+    rm -rf /var/lib/apt/lists/*; \
+    if apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 update \
+      && install_cjk; then \
+      ok=1; \
+      echo "CJK fonts installed via $m"; \
+      break; \
+    fi; \
+    echo "Mirror failed: $m"; \
+  done; \
+  [ "$ok" = 1 ]; \
+  fc-cache -f; \
+  fc-list :lang=zh | head -n 5; \
+  rm -rf /var/lib/apt/lists/*
