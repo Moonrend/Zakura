@@ -8,12 +8,14 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/shared/package.json packages/shared/
 COPY packages/core/package.json packages/core/
+COPY packages/saas/package.json packages/saas/
 RUN pnpm install --frozen-lockfile=false
 
 FROM deps AS build
 COPY . .
 RUN pnpm --filter @zakura/shared build \
  && pnpm --filter @zakura/core build \
+ && pnpm --filter @zakura/saas build \
  && pnpm --filter @zakura/server db:generate \
  && pnpm --filter @zakura/server build \
  && pnpm --filter @zakura/web build
