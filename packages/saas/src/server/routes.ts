@@ -446,7 +446,7 @@ export function registerSaasRoutes(
   app.patch("/api/admin/platform", async (c) => {
     return c.json(
       {
-        error: "Deployment mode is set by environment (ZAKURA_EDITION / ZAKURA_MULTI_TENANT)",
+        error: "Deployment mode is set by environment (ZAKURA_EDITION)",
       },
       400,
     );

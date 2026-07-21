@@ -1,16 +1,16 @@
 # Zakura
 
-AI 环境编排 + **多 Agent MCP 网关**。为每个 Agent 提供隔离的文件系统、Shell、电脑能力（Zakura 自实现），并把 SearXNG / mem0 / OpenViking 等组件聚合成统一 MCP，供 Cursor、Claude 等使用。
+AI 环境编排 + **多 Agent MCP 网关**。为每个 Agent 提供隔离的文件系统、Shell、电脑能力，并把网页搜索 / 抓取 / 记忆 / 上游 MCP 聚合成统一入口，供 Cursor、Claude 等使用。
 
 ## 能力
 
 - **多 Agent**：独立配置与 MCP 工具面
-- **按需功能**：文件系统 / Shell / 浏览器 / 桌面各自开关，容器内按需装包
+- **电脑环境**：文件系统 / Shell / 浏览器 / 桌面作为一套能力开关
 - **自研 MCP 工具**：`fs_*` · `shell_exec` · `browser_*` · `computer_*`
 - **全局设置 vs Agent 设置**
   - 全局：网页搜索 / 抓取 / **记忆提供商**、MCP 导入、Keys、策略
-  - 单 Agent：概览、工作区、**记忆数据**（按 Agent 隔离）、MCP
-- **记忆（Memoh 风格）**：层级 identity/preference/project/fact/episode；钉选、标签、重要性；MCP 工具 `search_memory` / `add_memory` / …
+  - 单 Agent：概览、电脑环境、**记忆数据**（按 Agent 隔离）、MCP
+- **记忆**：Built-in（关键词 + 可选向量 + 图谱）/ 传统笔记 / mem0 / OpenViking；MCP 工具 `search_memory` / `add_memory` / …
 - **统一 MCP**：仅按 Agent 接入 `/mcp/agents/{slug}`
 - **MCP 服务器**：商店 / 导入管理上游；HTTP / Stdio 容器；上游 OAuth 2.1 DCR；详情页工具试用
 - **对外 OAuth 2.1**：VS Code 等客户端动态注册（DCR + PKCE）
@@ -19,12 +19,14 @@ AI 环境编排 + **多 Agent MCP 网关**。为每个 Agent 提供隔离的文�
 |------|------|
 | Agent Key → `/mcp/agents/{slug}` | Agent 功能 + 已绑定的搜索/抓取/记忆/MCP 上游 |
 
-| 功能 | Docker | 按需安装 |
-|------|--------|----------|
-| 文件系统 | 否 | 主机 `data/agents/<id>/workspace` |
+| 功能 | Docker | 说明 |
+|------|--------|------|
+| 文件系统 | 否* | 主机或 Runner 工作区 |
 | Shell | 是 | 常驻容器 |
 | 浏览器 | 是 | Chromium + CDP + 显示 |
 | 桌面 | 是 | noVNC + 键鼠工具 |
+
+\*开启电脑环境后文件系统也走同一工作区/容器栈。
 
 ## 快速开始（本机）
 
@@ -48,7 +50,6 @@ SaaS 能力（多租户、注册、邀请、超管）在可剥离包 `@zakura/sa
 | `ZAKURA_SECRET` | 自动生成的 `data/secret.key` | 加密配置 / 签名 session |
 | `ZAKURA_DATA_DIR` | 仓库 `./data` | 数据与 Agent 工作区根目录 |
 | `ZAKURA_EDITION` | `oss` | `saas` 启用多租户 / 自助注册 / 成员邀请（需 `@zakura/saas`） |
-| `ZAKURA_MULTI_TENANT` | 关闭 | 兼容旧变量；`true` 等价于 `ZAKURA_EDITION=saas` |
 
 分发纯开源树：`pnpm strip:saas -- --out ../Zakura-oss`。
 

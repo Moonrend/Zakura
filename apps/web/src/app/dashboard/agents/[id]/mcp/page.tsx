@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 function providerLabel(id: string) {
   switch (id) {
@@ -174,48 +174,48 @@ export default function AgentMcpPage() {
         </div>
       ) : (
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>Slug</TH>
-              <TH>类型</TH>
-              <TH>状态</TH>
-              <TH className="text-right">绑定</TH>
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>Slug</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead className="text-right">绑定</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {instances.map((inst) => {
               const bound = mode === "all" ? true : selected.has(inst.id);
               return (
-                <TR key={inst.id}>
-                  <TD>
+                <TableRow key={inst.id}>
+                  <TableCell>
                     <Link
                       href={`/dashboard/mcp/${inst.id}`}
                       className="font-medium underline-offset-2 hover:underline"
                     >
                       {inst.name}
                     </Link>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <code className="text-[11px] text-muted-foreground">{inst.slug}</code>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="outline">{providerLabel(inst.providerId)}</Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant={statusVariant(inst.status)}>{inst.status}</Badge>
-                  </TD>
-                  <TD className="text-right">
+                  </TableCell>
+                  <TableCell className="text-right">
                     <Switch
                       checked={bound}
                       disabled={mode === "all"}
                       onCheckedChange={(v) => toggleInstance(inst.id, v)}
                     />
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </TBody>
+          </TableBody>
         </Table>
       )}
 

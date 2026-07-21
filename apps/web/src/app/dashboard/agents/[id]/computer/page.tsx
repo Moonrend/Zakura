@@ -18,7 +18,7 @@ import {
   fetchAgentProgress,
   getWorkspaceStatus,
   levelColor,
-  needsDocker,
+  needsContainer,
   workspaceStatusLabel,
   type ProgressSnapshot,
 } from "@/lib/agents";
@@ -314,7 +314,7 @@ export default function AgentComputerPage() {
     );
   }
 
-  const hasComputer = needsDocker(agent);
+  const hasComputer = needsContainer(agent);
   const showLog =
     progress &&
     (progress.running ||

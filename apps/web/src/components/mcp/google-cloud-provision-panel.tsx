@@ -1,50 +1,110 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Loader2 } from "lucide-react";
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  ExternalLink,
+  Loader2,
+} from "lucide-react";
 import { api } from "@/lib/api";
 import { SettingsSection } from "@/components/settings-shell";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
+
+type ProvisionCopyable = {
+  label: string;
+  value: string;
+  multiline?: boolean;
+};
+
+type ProvisionWizardStep = {
+  id: "project" | "enable-apis" | "chat-app" | "oauth-consent" | "oauth-client" | "save";
+  title: string;
+  description: string;
+  mode: "api" | "manual" | "hybrid";
+  consoleUrl?: string;
+  copyables: ProvisionCopyable[];
+};
 
 type ProvisionGuide = {
   projectId: string;
-  oauthClientAutomation: "unsupported";
-  limitation: string;
   redirectUri: string;
-  consoleLinks: {
-    enableApis: string;
-    oauthConsent: string;
-    createOauthClient: string;
-    credentials: string;
-  };
-  requiredScopes: Array<{ product: string; scopes: string[] }>;
-  gcloudScript: string;
-  checklist?: string[];
+  wizardSteps?: ProvisionWizardStep[];
   enabled?: string[];
   alreadyEnabled?: string[];
   failed?: Array<{ service: string; error: string }>;
+  projectInfo?: {
+    projectId: string;
+    name?: string;
+    state?: string;
+    error?: string;
+  };
 };
 
 type Props = {
-  /** 供应完成后把 Client 写入本租户 Google OAuth App */
   onClientReady?: (client: { clientId: string; clientSecret: string }) => void;
   defaultScope?: "tenant" | "platform";
 };
 
-/**
- * Google Cloud 供应向导：
- * 1) 可选：用 Service Account 自动启用 MCP API
- * 2) 引导用户在 Console 创建 Web OAuth 客户端（Google 无公开 API）
- * 3) 粘贴 Client ID/Secret → 写入租户配置
- */
+const STEP_IDS: ProvisionWizardStep["id"][] = [
+  "project",
+  "enable-apis",
+  "chat-app",
+  "oauth-consent",
+  "oauth-client",
+  "save",
+];
+
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text);
+}
+
+function CopyRow({ label, value, multiline }: ProvisionCopyable) {
+  const [copied, setCopied] = useState(false);
+  if (!value) return null;
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-border/80 bg-background px-2.5 py-2">
+      <div className="min-w-0 flex-1">
+        <p className="text-[11px] text-muted-foreground">{label}</p>
+        <code
+          className={cn(
+            "mt-0.5 block break-all font-mono text-[10px]",
+            multiline && "max-h-24 overflow-auto whitespace-pre-wrap",
+          )}
+        >
+          {value}
+        </code>
+      </div>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="h-7 shrink-0 px-2 text-[11px]"
+        onClick={() => {
+          void copyText(value).then(() => {
+            setCopied(true);
+            toast.success("已复制");
+            setTimeout(() => setCopied(false), 1200);
+          });
+        }}
+      >
+        {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+      </Button>
+    </div>
+  );
+}
+
 export function GoogleCloudProvisionPanel({
   onClientReady,
   defaultScope = "tenant",
 }: Props) {
+  const [stepIndex, setStepIndex] = useState(0);
   const [projectId, setProjectId] = useState("");
   const [saJson, setSaJson] = useState("");
   const [guide, setGuide] = useState<ProvisionGuide | null>(null);
@@ -52,18 +112,50 @@ export function GoogleCloudProvisionPanel({
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [saving, setSaving] = useState(false);
+  const [doneMap, setDoneMap] = useState<
+    Partial<Record<ProvisionWizardStep["id"], boolean>>
+  >({});
 
   const loadGuide = useCallback(async (pid: string) => {
     const q = encodeURIComponent(pid.trim() || "YOUR_PROJECT_ID");
     const res = await api<ProvisionGuide>(
-      `/api/mcp/google/provision-guide?projectId=${q}&products=gmail,drive,calendar`,
+      `/api/mcp/google/provision-guide?projectId=${q}&products=gmail,drive,calendar,people,chat`,
     );
     setGuide(res);
+    return res;
   }, []);
 
   useEffect(() => {
     void loadGuide("YOUR_PROJECT_ID").catch(() => undefined);
   }, [loadGuide]);
+
+  const steps = useMemo(() => {
+    if (guide?.wizardSteps?.length) return guide.wizardSteps;
+    return STEP_IDS.map((id) => ({
+      id,
+      title: id,
+      description: "",
+      mode: "manual" as const,
+      copyables: [],
+    }));
+  }, [guide]);
+
+  const step = steps[stepIndex] ?? steps[0];
+  const isLast = stepIndex >= steps.length - 1;
+
+  function markDone(id: ProvisionWizardStep["id"]) {
+    setDoneMap((prev) => ({ ...prev, [id]: true }));
+  }
+
+  async function refreshGuideWithProject() {
+    const pid = projectId.trim() || "YOUR_PROJECT_ID";
+    try {
+      await loadGuide(pid);
+      if (pid !== "YOUR_PROJECT_ID") markDone("project");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function runProvision() {
     if (!saJson.trim()) {
@@ -76,24 +168,26 @@ export function GoogleCloudProvisionPanel({
       try {
         parsed = JSON.parse(saJson);
       } catch {
-        /* 后端也会 parse string */
+        /* 后端也会 parse */
       }
       const res = await api<ProvisionGuide>("/api/mcp/google/provision", {
         method: "POST",
         json: {
           serviceAccountJson: parsed,
           projectId: projectId.trim() || undefined,
-          products: ["gmail", "drive", "calendar"],
+          products: ["gmail", "drive", "calendar", "people", "chat"],
         },
       });
       setGuide(res);
       if (res.projectId) setProjectId(res.projectId);
-      const okCount = (res.enabled?.length ?? 0) + (res.alreadyEnabled?.length ?? 0);
+      const ok = (res.enabled?.length ?? 0) + (res.alreadyEnabled?.length ?? 0);
       if (res.failed?.length) {
-        toast.error(`部分 API 启用失败（${res.failed.length}），请查看详情`);
+        toast.error(`${res.failed.length} 个 API 启用失败`);
       } else {
-        toast.success(`已处理 ${okCount} 个 Cloud API，请继续创建 OAuth 客户端`);
+        toast.success(`已启用 ${ok} 个 API`);
+        markDone("enable-apis");
       }
+      if (res.projectInfo && !res.projectInfo.error) markDone("project");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -103,7 +197,7 @@ export function GoogleCloudProvisionPanel({
 
   async function saveClient() {
     if (!clientId.trim() || !clientSecret.trim()) {
-      toast.error("请填写 Client ID 与 Client Secret");
+      toast.error("请填写 Client ID 与 Secret");
       return;
     }
     setSaving(true);
@@ -116,7 +210,8 @@ export function GoogleCloudProvisionPanel({
           clientSecret: clientSecret.trim(),
         },
       });
-      toast.success("已保存 Google OAuth 客户端");
+      toast.success("已保存");
+      markDone("save");
       onClientReady?.({
         clientId: clientId.trim(),
         clientSecret: clientSecret.trim(),
@@ -128,165 +223,168 @@ export function GoogleCloudProvisionPanel({
     }
   }
 
+  function goNext() {
+    if (step?.id === "project" && projectId.trim()) markDone("project");
+    if (step?.id === "chat-app") markDone("chat-app");
+    if (step?.id === "oauth-consent") markDone("oauth-consent");
+    if (step?.id === "oauth-client") markDone("oauth-client");
+    setStepIndex((i) => Math.min(i + 1, steps.length - 1));
+  }
+
   return (
-    <SettingsSection title="Google Cloud 自动供应（Workspace MCP）">
-      <div className="mb-3 flex flex-wrap gap-2">
-        <Badge variant="outline">API 可自动启用</Badge>
-        <Badge variant="secondary">OAuth 客户端须 Console</Badge>
-      </div>
-      <p className="mb-4 text-xs text-muted-foreground leading-relaxed">
-        {guide?.limitation ||
-          "Google 不允许通过公开 API 创建给 Gmail/Drive MCP 用的 Web OAuth 客户端。我们可用 Service Account 自动启用 Cloud API，再引导你完成客户端创建与权限勾选。"}
-      </p>
+    <SettingsSection title="Google Cloud 供应">
+      <nav className="mb-3 flex flex-wrap gap-1" aria-label="步骤">
+        {steps.map((s, i) => {
+          const done = !!doneMap[s.id];
+          const active = i === stepIndex;
+          return (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setStepIndex(i)}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                active
+                  ? "border-foreground bg-foreground text-background"
+                  : done
+                    ? "border-foreground/30"
+                    : "border-border text-muted-foreground",
+              )}
+            >
+              {done && !active ? <Check className="mr-1 inline size-3" /> : null}
+              {i + 1}. {s.title}
+            </button>
+          );
+        })}
+      </nav>
 
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <Label className="text-xs">GCP Project ID（可选，默认取自 SA JSON）</Label>
-          <Input
-            value={projectId}
-            placeholder="my-gcp-project"
-            onChange={(e) => setProjectId(e.target.value)}
-            autoComplete="off"
-          />
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-xs">Service Account JSON（不落库，仅本次调用）</Label>
-          <textarea
-            className="min-h-28 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-[11px]"
-            placeholder='{"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}'
-            value={saJson}
-            onChange={(e) => setSaJson(e.target.value)}
-            spellCheck={false}
-          />
-          <p className="text-[11px] text-muted-foreground">
-            需具备 Service Usage Admin（或 Editor）。密钥不会写入数据库。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={busy} onClick={() => void runProvision()}>
-            {busy ? <Loader2 className="animate-spin" /> : null}
-            用 SA 自动启用 MCP API
-          </Button>
-          <Button
-            variant="outline"
-            disabled={busy}
-            onClick={() =>
-              void loadGuide(projectId || "YOUR_PROJECT_ID").catch((err) =>
-                toast.error(err instanceof Error ? err.message : String(err)),
-              )
-            }
-          >
-            仅刷新引导链接
-          </Button>
-        </div>
-
-        {guide ? (
-          <div className="space-y-3 rounded-lg border border-border/80 bg-muted/20 p-3">
-            {(guide.enabled?.length || guide.alreadyEnabled?.length || guide.failed?.length) ? (
-              <div className="space-y-1 text-xs">
-                {guide.enabled?.length ? (
-                  <p>
-                    <span className="font-medium">新启用：</span>
-                    {guide.enabled.join(", ")}
-                  </p>
-                ) : null}
-                {guide.alreadyEnabled?.length ? (
-                  <p className="text-muted-foreground">
-                    已启用：{guide.alreadyEnabled.join(", ")}
-                  </p>
-                ) : null}
-                {guide.failed?.map((f) => (
-                  <p key={f.service} className="text-destructive">
-                    {f.service}: {f.error}
-                  </p>
-                ))}
-              </div>
+      {step ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            {step.description ? (
+              <p className="text-xs text-muted-foreground">{step.description}</p>
+            ) : (
+              <span />
+            )}
+            {step.consoleUrl ? (
+              <a
+                href={step.consoleUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+              >
+                打开 Console
+                <ExternalLink className="size-3" />
+              </a>
             ) : null}
+          </div>
 
-            <div className="space-y-1">
-              <p className="text-xs font-medium">回调 URI</p>
-              <code className="block break-all rounded-md bg-background px-2 py-1.5 text-[10px]">
-                {guide.redirectUri}
-              </code>
-            </div>
-
-            <ol className="list-decimal space-y-1 pl-4 text-xs text-muted-foreground">
-              {(guide.checklist ?? []).map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
-
+          {step.id === "project" ? (
             <div className="flex flex-wrap gap-2">
-              {(
-                [
-                  ["同意屏幕", guide.consoleLinks.oauthConsent],
-                  ["创建 OAuth 客户端", guide.consoleLinks.createOauthClient],
-                  ["凭证列表", guide.consoleLinks.credentials],
-                  ["API 库", guide.consoleLinks.enableApis],
-                ] as const
-              ).map(([label, href]) => (
-                <a
-                  key={label}
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-background px-2.5 py-1.5 text-[11px] hover:bg-muted/60"
-                >
-                  {label}
-                  <ExternalLink className="size-3 opacity-60" />
-                </a>
+              <Input
+                className="max-w-xs"
+                value={projectId}
+                placeholder="Project ID"
+                onChange={(e) => setProjectId(e.target.value)}
+                autoComplete="off"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshGuideWithProject()}
+              >
+                应用
+              </Button>
+            </div>
+          ) : null}
+
+          {step.id === "enable-apis" ? (
+            <div className="space-y-2">
+              <textarea
+                className="min-h-24 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-[11px]"
+                placeholder="Service Account JSON"
+                value={saJson}
+                onChange={(e) => setSaJson(e.target.value)}
+                spellCheck={false}
+              />
+              <Button disabled={busy} size="sm" onClick={() => void runProvision()}>
+                {busy ? <Loader2 className="animate-spin" /> : null}
+                自动启用 API
+              </Button>
+              {(guide?.enabled?.length ||
+                guide?.alreadyEnabled?.length ||
+                guide?.failed?.length) && (
+                <p className="text-[11px] text-muted-foreground">
+                  {guide.enabled?.length
+                    ? `新启用 ${guide.enabled.length}`
+                    : null}
+                  {guide.alreadyEnabled?.length
+                    ? ` · 已有 ${guide.alreadyEnabled.length}`
+                    : null}
+                  {guide.failed?.length
+                    ? ` · 失败 ${guide.failed.length}`
+                    : null}
+                </p>
+              )}
+            </div>
+          ) : null}
+
+          {step.id === "save" ? (
+            <div className="space-y-2">
+              <div className="space-y-1">
+                <Label className="text-xs">Client ID</Label>
+                <Input
+                  value={clientId}
+                  placeholder="*.apps.googleusercontent.com"
+                  onChange={(e) => setClientId(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Client Secret</Label>
+                <Input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <Button disabled={saving} size="sm" onClick={() => void saveClient()}>
+                {saving ? <Loader2 className="animate-spin" /> : null}
+                保存并启用
+              </Button>
+            </div>
+          ) : null}
+
+          {step.copyables.length ? (
+            <div className="space-y-1.5">
+              {step.copyables.map((c) => (
+                <CopyRow key={c.label} {...c} />
               ))}
             </div>
+          ) : null}
 
-            <div className="space-y-1">
-              <p className="text-xs font-medium">需在同意屏幕添加的 Scopes</p>
-              {guide.requiredScopes.map((g) => (
-                <div key={g.product} className="text-[11px]">
-                  <span className="font-medium">{g.product}：</span>
-                  <code className="break-all text-muted-foreground">
-                    {g.scopes.join(" ")}
-                  </code>
-                </div>
-              ))}
-            </div>
-
-            <details className="text-[11px]">
-              <summary className="cursor-pointer text-muted-foreground">gcloud 脚本</summary>
-              <pre className="mt-2 overflow-x-auto rounded-md bg-background p-2 whitespace-pre-wrap">
-                {guide.gcloudScript}
-              </pre>
-            </details>
+          <div className="flex items-center justify-between border-t border-border pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={stepIndex === 0}
+              onClick={() => setStepIndex((i) => Math.max(i - 1, 0))}
+            >
+              <ChevronLeft className="size-3.5" />
+              上一步
+            </Button>
+            {!isLast ? (
+              <Button type="button" size="sm" onClick={goNext}>
+                下一步
+                <ChevronRight className="size-3.5" />
+              </Button>
+            ) : null}
           </div>
-        ) : null}
-
-        <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs font-medium">粘贴 Console 创建的 OAuth 客户端</p>
-          <div className="space-y-1.5">
-            <Label className="text-xs">Client ID</Label>
-            <Input
-              value={clientId}
-              placeholder="*.apps.googleusercontent.com"
-              onChange={(e) => setClientId(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">Client Secret</Label>
-            <Input
-              type="password"
-              value={clientSecret}
-              onChange={(e) => setClientSecret(e.target.value)}
-              autoComplete="off"
-            />
-          </div>
-          <Button disabled={saving} onClick={() => void saveClient()}>
-            {saving ? <Loader2 className="animate-spin" /> : null}
-            保存到本租户并启用
-          </Button>
         </div>
-      </div>
+      ) : null}
     </SettingsSection>
   );
 }

@@ -597,7 +597,7 @@ export class NetworkSettingsService {
         } else if (tunnelToken) {
           result = {
             ok: true,
-            message: "Tunnel Token 已保存（运行时 cloudflared tunnel run 待 Phase 3）",
+            message: "Tunnel Token 已保存（运行时 cloudflared tunnel run 尚未接线）",
           };
         } else {
           throw new Error("请配置 API Token + Account ID，或直接粘贴 Tunnel Token");
@@ -606,11 +606,11 @@ export class NetworkSettingsService {
         const cfg = parseConfig(row.configEnc, this.config.secret);
         const token = String(cfg.authtoken ?? cfg.authToken ?? "");
         if (!token) throw new Error("请先配置 Authtoken");
-        result = { ok: true, message: "Authtoken 已配置（运行时测试待 Phase 3）" };
+        result = { ok: true, message: "Authtoken 已配置（连通性探测尚未接线）" };
       } else if (provider === "frp") {
         const cfg = parseConfig(row.configEnc, this.config.secret);
         if (!cfg.server) throw new Error("请先配置 frp Server");
-        result = { ok: true, message: "frp 配置已校验（运行时测试待 Phase 3）" };
+        result = { ok: true, message: "frp 配置已校验（连通性探测尚未接线）" };
       } else if (provider === "tailscale-serve") {
         const probe = await probeTailscaleBackend();
         if (!probe.ok) throw new Error(probe.message);
@@ -776,10 +776,6 @@ export class NetworkSettingsService {
     return {
       connected,
       meshProvider: platformMode ? ("headscale-platform" as const) : meshProvider,
-      /** @deprecated use meshProvider === "headscale-platform" */
-      platformHeadscaleAvailable: platformMode,
-      /** Runner must join mesh when platform-managed */
-      requireTailscale: platformMode,
       loginServer: platformMode ? hs.url : null,
       headscaleUser: platformMode
         ? typeof meta.headscaleUser === "string"
@@ -1980,7 +1976,6 @@ export class NetworkSettingsService {
       | null;
     meshConnected: boolean;
     hostJoinsTailscale: boolean;
-    requireTailscale: boolean;
     meshProvider: MeshProviderId | null;
     tailscaleError?: string;
   }> {
@@ -1994,10 +1989,10 @@ export class NetworkSettingsService {
     });
     const tPlain = performance.now();
 
-    const requireTailscale = await this.isPlatformHeadscaleAvailable();
+    const platformMode = await this.isPlatformHeadscaleAvailable();
     let withTailscale: typeof plain | null = null;
     let tailscaleError: string | undefined;
-    if (plain.meshConnected || requireTailscale) {
+    if (plain.meshConnected || platformMode) {
       try {
         withTailscale = await this.buildRunnerInstallPackage(tenantId, {
           token: opts.token,
@@ -2020,12 +2015,11 @@ export class NetworkSettingsService {
     return {
       plain,
       withTailscale,
-      meshConnected: plain.meshConnected || requireTailscale,
+      meshConnected: plain.meshConnected || platformMode,
       hostJoinsTailscale: await this.hostJoinsTailscaleForTenant(
-        requireTailscale ? "headscale-platform" : plain.meshProvider,
+        platformMode ? "headscale-platform" : plain.meshProvider,
       ),
-      requireTailscale,
-      meshProvider: requireTailscale ? "headscale-platform" : plain.meshProvider,
+      meshProvider: platformMode ? "headscale-platform" : plain.meshProvider,
       tailscaleError,
     };
   }

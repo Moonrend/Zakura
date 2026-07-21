@@ -1,7 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
-import { DEFAULT_NODE_IMAGE } from "../providers/stdio-mcp.js";
+import {
+  DEFAULT_NODE_IMAGE,
+  DEFAULT_PYTHON_IMAGE,
+} from "../providers/stdio-mcp.js";
 import {
   previewFromPackagesAndRemotes,
   type InstallPreviewOption,
@@ -926,11 +929,13 @@ export class McpStoreService {
       packageIndex?: number;
     },
   ): McpInstallPlan {
+    // 有可运行 package（npm/pypi/oci）时默认走 stdio，避免 Markitdown 等
+    // 同时声明空/不可用 HTTP remote 时误选 generic-mcp 触发 Empty SSE。
     const prefer =
       opts?.prefer ??
-      (server.installKinds.includes("http") && !server.packages?.length
-        ? "http"
-        : server.installKinds.includes("http")
+      (server.packages?.length
+        ? "stdio"
+        : server.remotes?.length
           ? "http"
           : "stdio");
     const displayName = server.title || server.name.split("/").pop() || server.name;
@@ -1027,7 +1032,7 @@ export class McpStoreService {
           command: pkg.runtimeHint && pkg.runtimeHint !== "uvx" ? pkg.runtimeHint : "uvx",
           args: JSON.stringify([pkg.identifier, ...packageArgs]),
           env: JSON.stringify(env),
-          image: DEFAULT_NODE_IMAGE,
+          image: DEFAULT_PYTHON_IMAGE,
           workingDir: "/data",
           packageManager: "pypi",
         },

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { hashApiKey } from "@zakura/core";
 import bcrypt from "bcryptjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -22,13 +22,6 @@ export interface SessionPayload {
   role: string;
   isPlatformAdmin?: boolean;
   exp: number;
-}
-
-export class LoginAmbiguousError extends Error {
-  constructor(public readonly tenants: Array<{ slug: string; name: string }>) {
-    super("Multiple tenants match this email; tenantSlug required");
-    this.name = "LoginAmbiguousError";
-  }
 }
 
 export function signSession(
@@ -67,7 +60,7 @@ export type LoginResult = {
 /**
  * Authenticate by global email + password, then resolve a tenant membership.
  * - With tenantSlug/tenantId: use that tenant
- * - Without: if exactly one active membership → that tenant; else ambiguous
+ * - Without: first active membership (earliest joined); prefer isDefault tenant if any
  */
 export async function loginUser(
   db: Db,
@@ -93,11 +86,12 @@ export async function loginUser(
     .innerJoin(tenants, eq(tenants.id, tenantMemberships.tenantId))
     .where(
       and(eq(tenantMemberships.userId, user.id), eq(tenantMemberships.status, "active")),
-    );
+    )
+    .orderBy(asc(tenantMemberships.createdAt));
 
   if (memberships.length === 0) return null;
 
-  let picked = memberships[0];
+  let picked = memberships.find((m) => m.tenant.isDefault) ?? memberships[0];
   if (opts?.tenantId) {
     const match = memberships.find((m) => m.tenant.id === opts.tenantId);
     if (!match) return null;
@@ -106,10 +100,6 @@ export async function loginUser(
     const match = memberships.find((m) => m.tenant.slug === opts.tenantSlug);
     if (!match) return null;
     picked = match;
-  } else if (memberships.length > 1) {
-    throw new LoginAmbiguousError(
-      memberships.map((m) => ({ slug: m.tenant.slug, name: m.tenant.name })),
-    );
   }
 
   return {

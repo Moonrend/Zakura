@@ -145,7 +145,7 @@ export function serializeEdge(row: MemoryEdge) {
 
 /**
  * Local memory rows (builtin / traditional).
- * Built-in optional pgvector embeddings (PGlite/Postgres) as Memoh-style semantic seeds,
+ * Built-in optional pgvector embeddings (PGlite/Postgres) as semantic seeds,
  * fused with keyword + graph expansion. No Qdrant required.
  */
 export class MemoryStore {
@@ -400,7 +400,7 @@ export class MemoryStore {
   }
 
   /**
-   * Memoh-style hybrid seed: max(semantic via pgvector, keyword) → graph 1-hop expand.
+   * Hybrid seed: max(semantic via pgvector, keyword) → graph 1-hop expand.
    * `queryEmbedding` optional; without it falls back to keyword+graph.
    */
   async hybridSearch(
@@ -531,16 +531,6 @@ export class MemoryStore {
       relations: edgeRows.map(serializeEdge),
       retrievalMode: queryEmb ? ("hybrid" as const) : ("keyword_graph" as const),
     };
-  }
-
-  /** @deprecated use hybridSearch — kept for call sites */
-  async searchWithGraph(
-    tenantId: string,
-    agentId: string,
-    query: string,
-    limit = 10,
-  ) {
-    return this.hybridSearch(tenantId, agentId, query, { limit });
   }
 
   async setEmbedding(

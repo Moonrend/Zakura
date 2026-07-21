@@ -132,10 +132,6 @@ export type MeshPayload = {
   connected: boolean;
   /** Active mesh control plane */
   meshProvider?: "tailscale-cloud" | "headscale-platform" | null;
-  /** Platform Headscale is configured on this deployment */
-  platformHeadscaleAvailable?: boolean;
-  /** When true, Runner registration always joins the mesh (no toggle) */
-  requireTailscale?: boolean;
   loginServer?: string | null;
   headscaleUser?: string | null;
   oauth: {
@@ -160,7 +156,6 @@ export type MeshPayload = {
   tailnetDevices?: TailnetDevice[];
   note?: string;
   joinCommand?: string;
-  hasStoredAuthKey?: boolean;
   generatedKey?: string;
   generatedKeyId?: string;
   generatedKeyExpires?: string | null;

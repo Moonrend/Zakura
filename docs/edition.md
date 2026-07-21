@@ -7,7 +7,7 @@ Zakura 以**同一套核心代码**交付两种部署形态；SaaS 能力集中�
 | 包 | 无 `@zakura/saas`（或未启用） | 需要 `@zakura/saas` |
 | 账户 | 单账户（`/setup` 安装管理员） | 自助注册 + 成员邀请 |
 | 租户 | 隐式唯一 Default | 创建 / 切换 / 超管后台 |
-| 启用 | 默认 | `ZAKURA_EDITION=saas` 或 `ZAKURA_MULTI_TENANT=true` |
+| 启用 | 默认 | `ZAKURA_EDITION=saas` |
 
 ## 登录 OAuth（SaaS）
 
@@ -24,8 +24,6 @@ Zakura 以**同一套核心代码**交付两种部署形态；SaaS 能力集中�
 
 ```bash
 ZAKURA_EDITION=saas
-# 或兼容旧变量：
-# ZAKURA_MULTI_TENANT=true
 ```
 
 重启 server 后：

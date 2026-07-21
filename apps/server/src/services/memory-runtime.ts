@@ -31,7 +31,7 @@ export async function resolveAgentMemory(
 /**
  * Pack memory into a context string when the agent calls `memory_context`.
  *
- * Built-in retrieval (Memoh-aligned):
+ * Built-in retrieval:
  * - keyword ILIKE (+ CJK bigrams)
  * - optional semantic seeds via OpenAI-compatible embeddings stored in pgvector
  * - 1-hop graph expansion

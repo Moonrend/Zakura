@@ -48,10 +48,7 @@ export interface AppConfig {
    * - `saas` — requires `@zakura/saas` (multi-tenant, register, invites, platform admin)
    */
   edition: ZakuraEdition;
-  /**
-   * True when edition === "saas". Kept for API back-compat with older clients.
-   * Enable with ZAKURA_EDITION=saas or ZAKURA_MULTI_TENANT=true.
-   */
+  /** True when edition === "saas". */
   multiTenant: boolean;
   /**
    * 上游 MCP 无 DCR 时使用的预注册 OAuth App（如 GitHub Remote MCP）。
@@ -61,6 +58,9 @@ export interface AppConfig {
     githubClientId: string;
     githubClientSecret: string;
     githubScopes: string;
+    slackClientId: string;
+    slackClientSecret: string;
+    slackScopes: string;
   };
 }
 
@@ -129,6 +129,9 @@ export function loadConfig(): AppConfig {
       githubClientSecret: process.env.ZAKURA_GITHUB_OAUTH_CLIENT_SECRET ?? "",
       // 空则使用上游 PRM scopes_supported
       githubScopes: process.env.ZAKURA_GITHUB_OAUTH_SCOPES ?? "",
+      slackClientId: process.env.ZAKURA_SLACK_OAUTH_CLIENT_ID ?? "",
+      slackClientSecret: process.env.ZAKURA_SLACK_OAUTH_CLIENT_SECRET ?? "",
+      slackScopes: process.env.ZAKURA_SLACK_OAUTH_SCOPES ?? "",
     },
   };
 }

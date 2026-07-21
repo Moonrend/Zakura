@@ -54,7 +54,7 @@ export function mcpErrorSummary(err: unknown): string {
   if (err instanceof McpHttpError) {
     if (err.kind === "auth") return `AUTH_REQUIRED: ${err.message.slice(0, 180)}`;
     if (err.kind === "network") return `UNREACHABLE: ${err.message.slice(0, 180)}`;
-    return err.message.slice(0, 240);
+    return annotateGoogleMcpPermission(err.message).slice(0, 320);
   }
   if (isMcpAuthError(err)) {
     return `AUTH_REQUIRED: ${err instanceof Error ? err.message : String(err)}`.slice(0, 240);
@@ -67,7 +67,26 @@ export function mcpErrorSummary(err: unknown): string {
     const host = cause?.hostname ? ` (${cause.hostname})` : "";
     return `UNREACHABLE${host}: ${err instanceof Error ? err.message : String(err)}`.slice(0, 240);
   }
-  return (err instanceof Error ? err.message : String(err)).slice(0, 240);
+  const raw = err instanceof Error ? err.message : String(err);
+  return annotateGoogleMcpPermission(raw).slice(0, 320);
+}
+
+/** Google Workspace MCP：OAuth 成功但 tools/call 仍报权限不足时的可操作提示 */
+function annotateGoogleMcpPermission(message: string): string {
+  if (/Chat app not found|configure the app in the Google Cloud console/i.test(message)) {
+    return (
+      "Google Chat 应用未配置：请在 GCP 打开 Chat API → Configuration，填写 App name 并保存。" +
+      " 链接：https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat" +
+      ` 原始错误：${message.slice(0, 120)}`
+    );
+  }
+  if (!/does not have permission|PERMISSION_DENIED|caller does not have permission/i.test(message)) {
+    return message;
+  }
+  return (
+    "Google API 权限不足。请确认 OAuth 同意屏幕已添加对应 scopes，且 GCP 项目已启用 gmail/drive/calendar/people/chat API。" +
+    ` 原始错误：${message}`
+  );
 }
 
 const PROTOCOL_CANDIDATES = ["2025-03-26", "2024-11-05"] as const;
@@ -179,7 +198,15 @@ export function unwrapRpc(payload: unknown): unknown {
 
 function parseRpcBody(raw: string, contentType: string | null): unknown {
   const ct = contentType ?? "";
-  if (ct.includes("text/event-stream") || raw.includes("data:")) {
+  const trimmed = raw.trim();
+  // 仅在明确 SSE 时走 event-stream 解析；避免 JSON 正文含 "data:" 被误判。
+  const isSseContentType = ct.includes("text/event-stream");
+  const looksLikeSsePayload =
+    !trimmed.startsWith("{") &&
+    !trimmed.startsWith("[") &&
+    /(?:^|\n)\s*data:\s*/.test(raw);
+
+  if (isSseContentType || looksLikeSsePayload) {
     const lines = raw
       .split("\n")
       .filter((l) => l.startsWith("data:"))
@@ -197,10 +224,19 @@ function parseRpcBody(raw: string, contentType: string | null): unknown {
       }
     }
     const last = lines.at(-1);
-    if (!last) throw new McpHttpError("Empty SSE MCP response", { kind: "parse" });
+    if (!last) {
+      // 空 SSE（仅 heartbeat/注释）时尝试按 JSON 回退
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        return unwrapRpc(JSON.parse(trimmed));
+      }
+      throw new McpHttpError(
+        "Empty SSE MCP response（上游无有效 JSON-RPC。若该服务同时提供 npm/PyPI/OCI 包，请改用 Stdio 安装）",
+        { kind: "parse" },
+      );
+    }
     return unwrapRpc(JSON.parse(last));
   }
-  if (!raw.trim()) return {};
+  if (!trimmed) return {};
   return unwrapRpc(JSON.parse(raw));
 }
 

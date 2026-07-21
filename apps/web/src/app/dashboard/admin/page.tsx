@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type Platform = {
   setupCompleted: boolean;
@@ -148,7 +148,7 @@ export default function AdminPage() {
 
       <SettingsSection title="部署模式">
         <p className="mb-3 text-sm text-muted-foreground">
-          模式由环境变量控制（ZAKURA_MULTI_TENANT），不可在此修改。
+          模式由环境变量控制（ZAKURA_EDITION=saas），不可在此修改。
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="secondary">{platform?.mode}</Badge>
@@ -269,29 +269,29 @@ export default function AdminPage() {
 
       <SettingsSection title="全部租户">
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>标识</TH>
-              <TH>成员</TH>
-              <TH>引导</TH>
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>标识</TableHead>
+              <TableHead>成员</TableHead>
+              <TableHead>引导</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {tenants.map((t) => (
-              <TR key={t.id}>
-                <TD>
+              <TableRow key={t.id}>
+                <TableCell>
                   <div className="font-medium">{t.name}</div>
                   {t.isDefault ? (
                     <span className="text-[11px] text-muted-foreground">默认</span>
                   ) : null}
-                </TD>
-                <TD className="font-mono text-xs">{t.slug}</TD>
-                <TD>{t.memberCount}</TD>
-                <TD>{t.onboardingCompleted ? "完成" : "未完成"}</TD>
-              </TR>
+                </TableCell>
+                <TableCell className="font-mono text-xs">{t.slug}</TableCell>
+                <TableCell>{t.memberCount}</TableCell>
+                <TableCell>{t.onboardingCompleted ? "完成" : "未完成"}</TableCell>
+              </TableRow>
             ))}
-          </TBody>
+          </TableBody>
         </Table>
       </SettingsSection>
     </div>

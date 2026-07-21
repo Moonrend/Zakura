@@ -10,6 +10,22 @@ export type McpOauthMessage = {
   error?: string;
 };
 
+const POPUP_FEATURES = "popup=yes,width=520,height=720,menubar=no,toolbar=no,location=yes,status=no,resizable=yes,scrollbars=yes";
+
+function popupFeatures(): string {
+  if (typeof window === "undefined") return POPUP_FEATURES;
+  const w = 520;
+  const h = 720;
+  const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - w) / 2));
+  const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - h) / 2));
+  return `${POPUP_FEATURES},left=${left},top=${top}`;
+}
+
+/** 每个安装流程使用独立窗口名，互不抢占 */
+function uniquePopupName(): string {
+  return `zakura-mcp-oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
 export function isMcpOauthMessage(data: unknown): data is McpOauthMessage {
   return (
     !!data &&
@@ -18,24 +34,29 @@ export function isMcpOauthMessage(data: unknown): data is McpOauthMessage {
   );
 }
 
-/** 在新标签页打开授权（保留 opener，便于回调页 postMessage） */
+/** 居中弹出窗口打开授权（保留 opener，便于回调页 postMessage） */
 export function openOauthAuthorizeTab(authorizeUrl: string): Window | null {
   // 不要用 noopener：回调页需要 window.opener 通知引导页
-  return window.open(authorizeUrl, "_blank");
+  return window.open(authorizeUrl, uniquePopupName(), popupFeatures());
 }
 
 /**
- * 在用户手势内先打开空白页，避免后续 async 后被弹窗拦截。
+ * 在用户手势内先打开空白弹出窗口，避免后续 async 后被拦截。
  * 拿到 authorizeUrl 后再导航。
  */
 export function prepareOauthTab(): Window | null {
-  return window.open("about:blank", "_blank");
+  return window.open("about:blank", uniquePopupName(), popupFeatures());
 }
 
 export function navigateOauthTab(tab: Window | null, authorizeUrl: string): Window | null {
   if (tab && !tab.closed) {
     try {
       tab.location.href = authorizeUrl;
+      try {
+        tab.focus();
+      } catch {
+        /* ignore */
+      }
       return tab;
     } catch {
       /* fall through */

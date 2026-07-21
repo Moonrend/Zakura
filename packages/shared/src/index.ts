@@ -146,7 +146,7 @@ export const MEMORY_PROVIDER_KIND_META: Record<
   builtin: {
     name: "Built-in",
     description:
-      "本地分层记忆 + 关键词/图谱；可选 OpenAI 兼容 embedding + pgvector 语义种子（Memoh 式 hybrid，PGlite/Postgres 均可）",
+      "本地分层记忆 + 关键词/图谱；可选 OpenAI 兼容 embedding + pgvector 混合召回（PGlite/Postgres 均可）",
     storesLocally: true,
   },
   traditional: {
@@ -166,18 +166,6 @@ export const MEMORY_PROVIDER_KIND_META: Record<
     storesLocally: false,
   },
 };
-
-/**
- * @deprecated Agent 本身无生命周期状态；仅工作区/组件等环境有状态。
- * 保留类型供旧调用方兼容，新代码请用 WorkspaceEnvStatus。
- */
-export type AgentStatus =
-  | "ready"
-  | "starting"
-  | "running"
-  | "stopping"
-  | "stopped"
-  | "error";
 
 /** 工作区容器等内置环境的运行状态（非 Agent 自身状态） */
 export type WorkspaceEnvStatus =
@@ -242,6 +230,7 @@ export const BUILTIN_PROVIDER_IDS = [
   "mem0",
   "openviking",
   "generic-mcp",
+  "google-workspace",
 ] as const;
 export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number];
 
@@ -259,7 +248,7 @@ export interface PublicPlatformInfo {
   setupCompleted: boolean;
   version: string;
   mode: "single-tenant" | "multi-tenant";
-  /** True when SaaS edition is active (ZAKURA_EDITION=saas / ZAKURA_MULTI_TENANT). */
+  /** True when SaaS edition is active. */
   multiTenant?: boolean;
   /** oss | saas — source of truth for feature gating */
   edition?: ZakuraEdition;
@@ -307,7 +296,6 @@ export {
   LOCAL_RUNTIME_NODE_ID,
   DEFAULT_MIGRATION_EXCLUDE_PATTERNS,
   buildRunnerComposeSnippet,
-  buildRunnerComposeSnippetPlain,
   buildRunnerInstallPackage,
 } from "./runner.js";
 export type {
@@ -352,3 +340,19 @@ export type {
   McpOauthAuthTier,
   McpOauthContract,
 } from "./mcp-oauth.js";
+
+export {
+  rankInstallPreview,
+  pickPreferredInstallPreview,
+} from "./mcp-config.js";
+export type {
+  McpAuthMode,
+  McpPackageManager,
+  McpInstallKind,
+  McpEnvHint,
+  McpToolPermissionRule,
+  McpToolPermissionState,
+  UnifiedMcpConfig,
+  StoreInstallPreview,
+  StoreServerLike,
+} from "./mcp-config.js";

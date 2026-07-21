@@ -9,7 +9,7 @@ import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type InstanceRow = {
   id: string;
@@ -21,7 +21,12 @@ type InstanceRow = {
   lastError?: string | null;
 };
 
-const MCP_PROVIDERS = new Set(["generic-mcp", "stdio-mcp", "openviking"]);
+const MCP_PROVIDERS = new Set([
+  "generic-mcp",
+  "stdio-mcp",
+  "openviking",
+  "google-workspace",
+]);
 
 function providerLabel(id: string) {
   switch (id) {
@@ -31,6 +36,8 @@ function providerLabel(id: string) {
       return "Stdio";
     case "openviking":
       return "OpenViking";
+    case "google-workspace":
+      return "Google Workspace";
     default:
       return id;
   }
@@ -112,21 +119,21 @@ export default function McpServersPage() {
         </div>
       ) : (
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>Slug</TH>
-              <TH>Provider</TH>
-              <TH>状态</TH>
-              <TH>错误</TH>
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>Slug</TableHead>
+              <TableHead>Provider</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>错误</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {instances.map((i) => {
               const authNeeded = needsUpstreamAuth(i);
               return (
-                <TR key={i.id}>
-                  <TD>
+                <TableRow key={i.id}>
+                  <TableCell>
                     <Link
                       href={`/dashboard/mcp/${i.id}`}
                       className="font-medium underline-offset-2 hover:underline"
@@ -138,26 +145,26 @@ export default function McpServersPage() {
                         需 OAuth
                       </Badge>
                     ) : null}
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <code className="text-[11px] text-muted-foreground">{i.slug}</code>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="outline">{providerLabel(i.providerId)}</Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant={statusVariant(i.status)}>{i.status}</Badge>
-                  </TD>
-                  <TD
+                  </TableCell>
+                  <TableCell
                     className="max-w-xs truncate text-xs text-muted-foreground"
                     title={i.lastError ?? undefined}
                   >
                     {formatError(i.lastError)}
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               );
             })}
-          </TBody>
+          </TableBody>
         </Table>
       )}
     </div>

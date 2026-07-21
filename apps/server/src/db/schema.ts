@@ -146,7 +146,7 @@ export const tenantInvites = pgTable(
 );
 
 /**
- * Tenant-scoped memory provider instances (Memoh-style).
+ * Tenant-scoped memory provider instances.
  * Global settings page manages these; each Agent picks one via memoryProviderId.
  * kind: builtin | traditional | mem0 | openviking
  */
@@ -216,13 +216,11 @@ export const agents = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull(),
     description: text("description").notNull().default(""),
-    /**
-     * Legacy column — Agent 本身无启动态；请看 managedContainers / lastError。
-     * 新行固定为 ready，不再写入 starting/running/stopped。
-     */
+    /** unused column; prefer workspaceStatus */
     status: text("status").notNull().default("ready"),
-    /** files | shell | computer */
+    /** files | computer — mirrored from enableComputer */
     workspaceProfile: text("workspace_profile").notNull().default("files"),
+    /** 与 enableComputer 同步；内部闸门用 */
     enableFs: boolean("enable_fs").notNull().default(false),
     enableShell: boolean("enable_shell").notNull().default(false),
     enableComputer: boolean("enable_computer").notNull().default(false),
@@ -424,7 +422,7 @@ export const mcpPolicies = pgTable("mcp_policies", {
 });
 
 /**
- * Agent-scoped long-term memory (Memoh-inspired layers / traditional notes).
+ * Agent-scoped long-term memory (layers / traditional notes).
  * Rows are isolated by agentId; providerId links to the memory provider that wrote them.
  */
 export const memories = pgTable(
@@ -470,7 +468,7 @@ export const memories = pgTable(
   ],
 );
 
-/** Memory graph edges (builtin provider) — Memoh wiki-style relations */
+/** Memory graph edges (builtin provider) */
 export const memoryEdges = pgTable(
   "memory_edges",
   {

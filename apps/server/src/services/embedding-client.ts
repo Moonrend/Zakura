@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 /**
  * OpenAI-compatible embeddings client for Built-in memory semantic seeds.
- * Mirrors Memoh's optional pgvector path: embedding is optional; keyword+graph
- * still works when disabled. Vectors use the `vector` extension (PGlite + Postgres).
+ * Embedding is optional; keyword+graph still works when disabled.
+ * Vectors use the `vector` extension (PGlite + Postgres).
  */
 
 export type EmbeddingConfig = {

@@ -178,33 +178,7 @@ export function previewFromPackagesAndRemotes(input: {
 }): InstallPreviewOption[] {
   const options: InstallPreviewOption[] = [];
 
-  for (const [i, remote] of (input.remotes ?? []).entries()) {
-    if (!remote.url) continue;
-    const authHeaders = (remote.headers ?? [])
-      .map((h) => h.name)
-      .filter(Boolean)
-      .join(", ");
-    options.push({
-      id: `http-${i}`,
-      kind: "http",
-      label: "HTTP 远程",
-      summary: remote.url,
-      detail: authHeaders
-        ? `传输: ${remote.type || "http"} · 鉴权头: ${authHeaders}`
-        : `传输: ${remote.type || "http"}`,
-      prefer: "http",
-      remoteUrl: remote.url,
-      envHints: (remote.headers ?? [])
-        .filter((h) => h.isSecret || /authorization|token|api.?key/i.test(h.name))
-        .map((h) => ({
-          name: h.name === "Authorization" ? "API_KEY" : h.name,
-          description: h.description ?? `HTTP header ${h.name}`,
-          isRequired: true,
-          isSecret: true,
-        })),
-    });
-  }
-
+  // 先列出 package（stdio），再列 HTTP remote —— 默认安装优先本地可运行包
   for (const [i, pkg] of (input.packages ?? []).entries()) {
     const runtimeArgs = (pkg.runtimeArguments ?? [])
       .map((a) => a.value)
@@ -233,7 +207,7 @@ export function previewFromPackagesAndRemotes(input: {
         kind: "stdio-pypi",
         label: "PyPI / uvx",
         summary: cmd,
-        detail: pkg.version ? `版本 ${pkg.version}` : "Python 包，容器内安装 uv 后运行",
+        detail: pkg.version ? `版本 ${pkg.version}` : "Python 包，容器内使用 uv 镜像运行",
         prefer: "stdio",
         packageIndex: i,
         envHints: pkg.environmentVariables,
@@ -287,6 +261,33 @@ export function previewFromPackagesAndRemotes(input: {
         envHints: pkg.environmentVariables,
       });
     }
+  }
+
+  for (const [i, remote] of (input.remotes ?? []).entries()) {
+    if (!remote.url) continue;
+    const authHeaders = (remote.headers ?? [])
+      .map((h) => h.name)
+      .filter(Boolean)
+      .join(", ");
+    options.push({
+      id: `http-${i}`,
+      kind: "http",
+      label: "HTTP 远程",
+      summary: remote.url,
+      detail: authHeaders
+        ? `传输: ${remote.type || "http"} · 鉴权头: ${authHeaders}`
+        : `传输: ${remote.type || "http"}`,
+      prefer: "http",
+      remoteUrl: remote.url,
+      envHints: (remote.headers ?? [])
+        .filter((h) => h.isSecret || /authorization|token|api.?key/i.test(h.name))
+        .map((h) => ({
+          name: h.name === "Authorization" ? "API_KEY" : h.name,
+          description: h.description ?? `HTTP header ${h.name}`,
+          isRequired: true,
+          isSecret: true,
+        })),
+    });
   }
 
   if (!options.length && input.installHint) {
@@ -355,7 +356,10 @@ export function entryToImportBody(entry: ParsedMcpEntry): {
       command: entry.command,
       args: JSON.stringify(entry.args ?? []),
       env: JSON.stringify(entry.env ?? {}),
-      image: "node:22-bookworm-slim",
+      image:
+        entry.packageManager === "pypi"
+          ? "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+          : "node:22-bookworm-slim",
       workingDir: "/data",
       packageManager: entry.packageManager ?? "npm",
     },

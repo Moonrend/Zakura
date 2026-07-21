@@ -25,7 +25,6 @@ import {
 import {
   extractBearer,
   isSessionAdmin,
-  LoginAmbiguousError,
   loginUser,
   sessionFromLogin,
   signSession,
@@ -88,6 +87,13 @@ import {
   provisionGoogleWorkspaceMcp,
 } from "../services/google-cloud-provision.js";
 import { applyOauthTokensToConfig } from "../providers/generic-mcp.js";
+import {
+  googleWorkspaceBuiltinUrl,
+  googleWorkspaceOauthDiscovery,
+  isGoogleWorkspaceTarget,
+  resolveGoogleWorkspaceProduct,
+  resolveToolPermissionStates,
+} from "../providers/google-workspace/index.js";
 import { randomBytes } from "node:crypto";
 
 /** Short-lived upstream OAuth PKCE state (in-memory) */
@@ -523,49 +529,35 @@ export async function createApiApp(deps: {
     if (!body.email || !body.password) {
       return c.json({ error: "email and password required" }, 400);
     }
-    try {
-      const result = await loginUser(db, body.email, body.password, {
-        tenantSlug: body.tenantSlug?.trim() || undefined,
-      });
-      if (!result) return c.json({ error: "Invalid credentials" }, 401);
-      const session = signSession(config.secret, {
-        userId: result.user.id,
-        tenantId: result.tenant.id,
+    const result = await loginUser(db, body.email, body.password, {
+      tenantSlug: body.tenantSlug?.trim() || undefined,
+    });
+    if (!result) return c.json({ error: "Invalid credentials" }, 401);
+    const session = signSession(config.secret, {
+      userId: result.user.id,
+      tenantId: result.tenant.id,
+      email: result.user.email,
+      role: result.membership.role,
+      isPlatformAdmin: config.multiTenant && result.user.isPlatformAdmin,
+    });
+    return c.json({
+      session,
+      user: {
+        id: result.user.id,
         email: result.user.email,
-        role: result.membership.role,
+        name: result.user.name,
         isPlatformAdmin: config.multiTenant && result.user.isPlatformAdmin,
-      });
-      return c.json({
-        session,
-        user: {
-          id: result.user.id,
-          email: result.user.email,
-          name: result.user.name,
-          isPlatformAdmin: config.multiTenant && result.user.isPlatformAdmin,
-        },
-        tenant: {
-          id: result.tenant.id,
-          slug: result.tenant.slug,
-          name: result.tenant.name,
-          onboardingCompleted: result.tenant.onboardingCompleted,
-        },
-        role: result.membership.role,
-        multiTenant: config.multiTenant,
-        edition: config.edition,
-      });
-    } catch (err) {
-      if (err instanceof LoginAmbiguousError) {
-        return c.json(
-          {
-            error: "tenant_required",
-            message: err.message,
-            tenants: err.tenants,
-          },
-          400,
-        );
-      }
-      throw err;
-    }
+      },
+      tenant: {
+        id: result.tenant.id,
+        slug: result.tenant.slug,
+        name: result.tenant.name,
+        onboardingCompleted: result.tenant.onboardingCompleted,
+      },
+      role: result.membership.role,
+      multiTenant: config.multiTenant,
+      edition: config.edition,
+    });
   });
 
   app.get("/api/me", async (c) => {
@@ -949,46 +941,6 @@ export async function createApiApp(deps: {
     }
   });
 
-  /** @deprecated Prefer /api/memory-providers */
-  app.get("/api/capabilities/memory", async (c) => {
-    const session = c.get("session")!;
-    const [list, usage] = await Promise.all([
-      memoryProviders.list(session.tenantId),
-      memoryProviders.usage(session.tenantId),
-    ]);
-    const def = list.find((p) => p.isDefault) ?? list[0];
-    return c.json({
-      providers: list,
-      config: def
-        ? {
-            enabled: true,
-            defaultUserId:
-              typeof def.config.defaultUserId === "string"
-                ? def.config.defaultUserId
-                : "default",
-            provider: def.kind,
-            defaultProviderId: def.id,
-          }
-        : { enabled: true, defaultUserId: "default", provider: "builtin" },
-      instance: def
-        ? { id: def.id, status: def.status, slug: def.slug }
-        : { id: "", status: "ready", slug: "" },
-      layers: MEMORY_LAYERS,
-      agents: usage,
-      note: "请改用 /api/memory-providers",
-    });
-  });
-
-  app.put("/api/capabilities/memory", async (c) => {
-    return c.json(
-      {
-        ok: false,
-        error: "已弃用：请在记忆页创建多个 Provider，并在 Agent 记忆页选择。",
-      },
-      410,
-    );
-  });
-
   app.get("/api/instances", async (c) => {
     const session = c.get("session")!;
     const rows = await db
@@ -1154,6 +1106,7 @@ export async function createApiApp(deps: {
       }
     }
     let tools: Awaited<ReturnType<typeof gateway.listToolsForTenant>> = [];
+    let toolPermissions: ReturnType<typeof resolveToolPermissionStates> | undefined;
     try {
       if (fresh.status === "running") {
         const plugin = globalRegistry.get(fresh.providerId);
@@ -1170,7 +1123,23 @@ export async function createApiApp(deps: {
     } catch {
       tools = [];
     }
-    return c.json({ ...fresh, config: safeConfig, tools });
+    if (fresh.providerId === "google-workspace") {
+      try {
+        const product = resolveGoogleWorkspaceProduct(
+          typeof handle.config.product === "string"
+            ? handle.config.product
+            : typeof handle.config.mcpUrl === "string"
+              ? handle.config.mcpUrl
+              : "",
+        );
+        if (product) {
+          toolPermissions = resolveToolPermissionStates(product, handle.config);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return c.json({ ...fresh, config: safeConfig, tools, toolPermissions });
   });
 
   app.patch("/api/instances/:id", async (c) => {
@@ -1437,10 +1406,7 @@ export async function createApiApp(deps: {
     const body = await c.req.json<{
       name?: string;
       description?: string;
-      enableFs?: boolean;
-      enableShell?: boolean;
       enableComputer?: boolean;
-      enableBrowser?: boolean;
       enableMemory?: boolean;
       memoryProviderId?: string | null;
       workspaceImage?: string | null;
@@ -1503,8 +1469,7 @@ export async function createApiApp(deps: {
     const { getAgentProgress } = await import("../services/agent-progress.js");
     const container = await agentService.workspace.getWorkspaceContainer(agent.id);
     const progress = getAgentProgress(agent.id);
-    const needsWs =
-      agent.enableShell || agent.enableComputer || agent.enableBrowser;
+    const needsWs = agent.enableComputer;
     const workspaceStatus = progress.running
       ? "starting"
       : progress.error
@@ -2386,7 +2351,7 @@ export async function createApiApp(deps: {
     }
   });
 
-  /** One-click import: probe + create generic-mcp instance */
+  /** One-click import: probe + create generic-mcp / google-workspace instance */
   app.post("/api/mcp/import", async (c) => {
     const session = c.get("session")!;
     const body = await c.req.json<{
@@ -2411,7 +2376,9 @@ export async function createApiApp(deps: {
     const authMode = body.authMode ?? (body.apiKey?.trim() ? "apiKey" : "none");
 
     try {
+      const googleProduct = resolveGoogleWorkspaceProduct(body.mcpUrl);
       const urlHost = (() => {
+        if (googleProduct) return googleProduct;
         try {
           return new URL(body.mcpUrl).hostname.replace(/\./g, "-");
         } catch {
@@ -2419,7 +2386,9 @@ export async function createApiApp(deps: {
         }
       })();
 
-      const name = body.name?.trim() || `MCP ${urlHost}`;
+      const name = body.name?.trim() || (googleProduct
+        ? `Google ${googleProduct[0]!.toUpperCase()}${googleProduct.slice(1)}`
+        : `MCP ${urlHost}`);
       const slug =
         body.slug?.trim() ||
         name
@@ -2428,6 +2397,99 @@ export async function createApiApp(deps: {
           .replace(/^-|-$/g, "")
           .slice(0, 32) ||
         `mcp-${Date.now().toString(36)}`;
+
+      // Google Workspace：本地 REST 工具，不走 *mcp.googleapis.com
+      if (googleProduct && authMode === "oauth") {
+        const mcpUrl = googleWorkspaceBuiltinUrl(googleProduct);
+        const instance = await orchestrator.createInstance({
+          tenantId: session.tenantId,
+          providerId: "google-workspace",
+          name,
+          slug,
+          config: {
+            product: googleProduct,
+            mcpUrl,
+            authRequired: true,
+            oauthTokenEndpoint: "https://oauth2.googleapis.com/token",
+          },
+        });
+
+        purgeUpstreamOauthPending();
+        const discovery = googleWorkspaceOauthDiscovery(googleProduct);
+        const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
+        const client = await resolveUpstreamOauthClient({
+          upstreamOauth,
+          config,
+          db,
+          tenantId: session.tenantId,
+          discovery,
+          mcpUrl,
+          redirectUri,
+          clientName: name,
+          byo: {
+            clientId: body.oauthClientId,
+            clientSecret: body.oauthClientSecret,
+            scopes: body.oauthScopes,
+          },
+        });
+        if (!client) {
+          return c.json(
+            {
+              instance: await loadInstanceWithContainers(db, session.tenantId, instance.id),
+              authRequired: true,
+              oauth: {
+                ok: false,
+                discovery,
+                error: await noDcrOauthError(mcpUrl, config, db, session.tenantId),
+                needsByoClient: true,
+                needsPatFallback: false,
+                redirectUri,
+              },
+            },
+            201,
+          );
+        }
+        const state = randomBytes(16).toString("hex");
+        const { url, codeVerifier } = upstreamOauth.buildAuthorizeUrl({
+          discovery,
+          clientId: client.clientId,
+          redirectUri,
+          state,
+          scope: upstreamOauth.resolveScope(discovery, client.scopeOverride),
+          // 本地 Google REST：不传 MCP resource
+          extraParams: { access_type: "offline", prompt: "consent" },
+        });
+        upstreamOauthPending.set(state, {
+          tenantId: session.tenantId,
+          instanceId: instance.id,
+          mcpUrl,
+          clientId: client.clientId,
+          clientSecret: client.clientSecret,
+          codeVerifier,
+          redirectUri,
+          tokenEndpoint: discovery.tokenEndpoint!,
+          createdAt: Date.now(),
+        });
+
+        return c.json(
+          {
+            instance: await loadInstanceWithContainers(db, session.tenantId, instance.id),
+            authRequired: true,
+            oauth: {
+              ok: true,
+              authorizeUrl: url,
+              state,
+              clientId: client.clientId,
+              clientSource: client.source,
+              discovery,
+            },
+            started: false,
+            tools: [],
+            qualifiedPreview: [],
+          },
+          201,
+        );
+      }
 
       const { normalizeMcpHttpUrl } = await import("../lib/mcp-http.js");
       const mcpUrl = normalizeMcpHttpUrl(body.mcpUrl);
@@ -2926,15 +2988,21 @@ export async function createApiApp(deps: {
 
     try {
       purgeUpstreamOauthPending();
-      const discovery = await upstreamOauth.discover(mcpUrl);
+      const googleProduct = resolveGoogleWorkspaceProduct(mcpUrl);
+      const discovery = googleProduct
+        ? googleWorkspaceOauthDiscovery(googleProduct)
+        : await upstreamOauth.discover(mcpUrl);
       const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
+      const resolvedUrl = googleProduct
+        ? googleWorkspaceBuiltinUrl(googleProduct)
+        : mcpUrl;
       const client = await resolveUpstreamOauthClient({
         upstreamOauth,
         config,
         db,
         tenantId: session.tenantId,
         discovery,
-        mcpUrl,
+        mcpUrl: resolvedUrl,
         redirectUri,
         clientName: body.clientName,
         byo: {
@@ -2949,7 +3017,7 @@ export async function createApiApp(deps: {
           {
             ok: false,
             discovery,
-            error: await noDcrOauthError(mcpUrl, config, db, session.tenantId),
+            error: await noDcrOauthError(resolvedUrl, config, db, session.tenantId),
             needsByoClient: true,
             needsPatFallback: /github/i.test(mcpUrl),
             redirectUri,
@@ -2969,14 +3037,16 @@ export async function createApiApp(deps: {
         redirectUri,
         state,
         scope: upstreamOauth.resolveScope(discovery, body.scope ?? client.scopeOverride),
-        resource: discovery.resource ?? mcpUrl,
-        extraParams: upstreamAuthorizeExtra(mcpUrl),
+        resource: googleProduct ? undefined : discovery.resource ?? mcpUrl,
+        extraParams: googleProduct
+          ? { access_type: "offline", prompt: "consent" }
+          : upstreamAuthorizeExtra(mcpUrl),
       });
 
       upstreamOauthPending.set(state, {
         tenantId: session.tenantId,
         instanceId: body.instanceId,
-        mcpUrl,
+        mcpUrl: resolvedUrl,
         clientId: client.clientId,
         clientSecret: client.clientSecret,
         codeVerifier,
@@ -3072,7 +3142,7 @@ export async function createApiApp(deps: {
         clientId: pending.clientId,
         clientSecret: pending.clientSecret,
         codeVerifier: pending.codeVerifier,
-        resource: pending.mcpUrl,
+        resource: isGoogleWorkspaceTarget(pending.mcpUrl) ? undefined : pending.mcpUrl,
       });
 
       let instanceId = pending.instanceId;
@@ -3094,7 +3164,9 @@ export async function createApiApp(deps: {
           applyOauthTokensToConfig(current, tokens),
         );
       } else {
+        const googleProduct = resolveGoogleWorkspaceProduct(pending.mcpUrl);
         const host = (() => {
+          if (googleProduct) return googleProduct;
           try {
             return new URL(pending.mcpUrl).hostname.replace(/\./g, "-");
           } catch {
@@ -3103,11 +3175,19 @@ export async function createApiApp(deps: {
         })();
         const created = await orchestrator.createInstance({
           tenantId: pending.tenantId,
-          providerId: "generic-mcp",
-          name: `MCP ${host}`,
+          providerId: googleProduct ? "google-workspace" : "generic-mcp",
+          name: googleProduct
+            ? `Google ${googleProduct[0]!.toUpperCase()}${googleProduct.slice(1)}`
+            : `MCP ${host}`,
           slug: `mcp-${host}`.slice(0, 32),
           config: applyOauthTokensToConfig(
-            { mcpUrl: pending.mcpUrl, apiKey: "", headerName: "Authorization" },
+            googleProduct
+              ? {
+                  product: googleProduct,
+                  mcpUrl: googleWorkspaceBuiltinUrl(googleProduct),
+                  oauthTokenEndpoint: "https://oauth2.googleapis.com/token",
+                }
+              : { mcpUrl: pending.mcpUrl, apiKey: "", headerName: "Authorization" },
             tokens,
           ),
         });
@@ -3192,7 +3272,7 @@ export async function createApiApp(deps: {
       scope,
       redirectUri: `${config.publicBaseUrl.replace(/\/$/, "")}/api/mcp/upstream-oauth/callback`,
       note:
-        "Google Workspace MCP 不支持 API Key，请填写 OAuth 2.0 Client ID/Secret；安装时可临时传入自备客户端，由本服务自动完成授权。",
+        "GitHub / Google / Slack 等无 DCR 的上游需预注册 OAuth Client；Google Workspace 不支持 API Key。安装时可临时传入自备客户端。",
     });
   });
 
@@ -3204,7 +3284,7 @@ export async function createApiApp(deps: {
       return c.json({ error: "需要管理员权限" }, 403);
     }
     const id = c.req.param("id") as McpOauthAppId;
-    if (id !== "github" && id !== "google") {
+    if (id !== "github" && id !== "google" && id !== "slack") {
       return c.json({ error: "未知应用" }, 404);
     }
     const body = await c.req.json<{
@@ -3238,12 +3318,16 @@ export async function createApiApp(deps: {
       return c.json({ error: "需要管理员权限" }, 403);
     }
     const projectId = c.req.query("projectId")?.trim() || "YOUR_PROJECT_ID";
-    const productsRaw = c.req.query("products") ?? "gmail,drive,calendar";
+    const productsRaw = c.req.query("products") ?? "gmail,drive,calendar,people,chat";
     const products = productsRaw
       .split(",")
       .map((s) => s.trim())
-      .filter((s): s is "gmail" | "drive" | "calendar" =>
-        s === "gmail" || s === "drive" || s === "calendar",
+      .filter((s): s is "gmail" | "drive" | "calendar" | "people" | "chat" =>
+        s === "gmail" ||
+        s === "drive" ||
+        s === "calendar" ||
+        s === "people" ||
+        s === "chat",
       );
     try {
       const guide = buildGoogleProvisionGuide(config, projectId, products);
@@ -3265,7 +3349,7 @@ export async function createApiApp(deps: {
     const body = await c.req.json<{
       serviceAccountJson: unknown;
       projectId?: string;
-      products?: Array<"gmail" | "drive" | "calendar">;
+      products?: Array<"gmail" | "drive" | "calendar" | "people" | "chat">;
     }>();
     if (body.serviceAccountJson == null) {
       return c.json({ error: "serviceAccountJson required" }, 400);
@@ -3310,22 +3394,6 @@ export async function createApiApp(deps: {
       })
       .returning();
     return c.json({ key: row.key, value: JSON.parse(row.value) });
-  });
-
-  /** @deprecated use GET /api/tenant/current */
-  app.get("/api/tenant/default", async (c) => {
-    const session = c.get("session")!;
-    const tenant = await db.query.tenants.findFirst({
-      where: eq(tenants.id, session.tenantId),
-    });
-    if (!tenant) return c.json({ error: "Not found" }, 404);
-    return c.json({
-      id: tenant.id,
-      slug: tenant.slug,
-      name: tenant.name,
-      isDefault: tenant.isDefault,
-      onboardingCompleted: tenant.onboardingCompleted,
-    });
   });
 
   return app;

@@ -104,12 +104,6 @@ function TableCaption({
   )
 }
 
-/** Backward-compatible aliases used across dashboard tables */
-const THead = TableHeader
-const TBody = TableBody
-const TR = TableRow
-const TH = TableHead
-const TD = TableCell
 
 export {
   Table,
@@ -119,10 +113,5 @@ export {
   TableHead,
   TableRow,
   TableCell,
-  TableCaption,
-  THead,
-  TBody,
-  TR,
-  TH,
-  TD,
+  TableCaption
 }

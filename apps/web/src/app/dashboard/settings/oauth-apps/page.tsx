@@ -16,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 
 type OauthApp = {
-  id: "github" | "google";
+  id: "github" | "google" | "slack";
   name: string;
   description: string;
   docsUrl: string;
@@ -145,7 +145,7 @@ export default function OauthAppsSettingsPage() {
     <div className="space-y-5">
       <SettingsHeader title="OAuth 应用" />
       <p className="text-sm text-muted-foreground leading-relaxed">
-        为无动态注册的上游 MCP（GitHub、Google Workspace）配置 OAuth 客户端。安装时也可临时填写自备
+        为无动态注册的上游 MCP（GitHub、Google Workspace、Slack）配置 OAuth 客户端。安装时也可临时填写自备
         Client ID/Secret，由本服务自动完成授权码流程。
         {note ? ` ${note}` : ""}
       </p>

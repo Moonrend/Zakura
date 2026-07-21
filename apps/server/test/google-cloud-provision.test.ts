@@ -30,6 +30,9 @@ function fakeConfig(publicBaseUrl = "https://zakura.example"): AppConfig {
       githubClientId: "",
       githubClientSecret: "",
       githubScopes: "",
+      slackClientId: "",
+      slackClientSecret: "",
+      slackScopes: "",
     },
   };
 }
@@ -47,17 +50,49 @@ describe("google-cloud-provision", () => {
     assert.throws(() => parseServiceAccount(null), /对象或字符串/);
   });
 
-  it("buildGoogleProvisionGuide returns console links and scopes", () => {
+  it("buildGoogleProvisionGuide returns console links, scopes and wizard steps", () => {
     const guide = buildGoogleProvisionGuide(fakeConfig(), "demo-proj", ["gmail", "drive"]);
     assert.equal(guide.projectId, "demo-proj");
     assert.equal(guide.oauthClientAutomation, "unsupported");
     assert.match(guide.redirectUri, /\/api\/mcp\/upstream-oauth\/callback$/);
     assert.match(guide.consoleLinks.createOauthClient, /demo-proj/);
+    assert.match(guide.consoleLinks.dataAccess, /demo-proj/);
+    assert.match(guide.consoleLinks.createProject, /projectcreate/);
     assert.equal(guide.requiredScopes.length, 2);
     assert.ok(guide.requiredScopes[0]!.scopes.some((s) => s.includes("gmail")));
+    assert.ok(guide.scopesPasteBlock.includes("gmail.readonly"));
+    assert.ok(guide.scopesPasteBlock.includes("gmail.modify"));
+    assert.ok(
+      guide.scopesPasteBlock
+        .split("\n")
+        .includes("https://www.googleapis.com/auth/calendar.events"),
+    );
+    assert.ok(guide.scopesPasteBlock.includes("drive.file"));
+    assert.ok(guide.scopesPasteBlock.includes("openid"));
+    assert.ok(guide.scopesPasteBlock.includes("userinfo.email"));
+    assert.ok(!guide.gcloudScript.includes("gmailmcp"));
     assert.ok(guide.checklist.length >= 4);
     assert.match(guide.gcloudScript, /gcloud services enable/);
     assert.ok(GOOGLE_WORKSPACE_MCP_SERVICES.every((s) => guide.gcloudScript.includes(s)));
+    assert.equal(guide.wizardSteps.length, 5);
+    assert.deepEqual(
+      guide.wizardSteps.map((s) => s.id),
+      ["project", "enable-apis", "oauth-consent", "oauth-client", "save"],
+    );
+    const clientStep = guide.wizardSteps.find((s) => s.id === "oauth-client")!;
+    assert.ok(clientStep.copyables.some((c) => c.value.includes("/api/mcp/upstream-oauth/callback")));
+    assert.ok(guide.wizardSteps.every((s) => s.title.length > 0));
+
+    const withChat = buildGoogleProvisionGuide(fakeConfig(), "demo-proj", [
+      "gmail",
+      "chat",
+    ]);
+    assert.deepEqual(
+      withChat.wizardSteps.map((s) => s.id),
+      ["project", "enable-apis", "chat-app", "oauth-consent", "oauth-client", "save"],
+    );
+    const chatStep = withChat.wizardSteps.find((s) => s.id === "chat-app")!;
+    assert.match(chatStep.consoleUrl ?? "", /chat\.googleapis\.com\/hangouts-chat/);
   });
 
   it("googleOauthSetupChecklist mentions redirect URI", () => {
@@ -91,6 +126,8 @@ describe("google-cloud-provision", () => {
       const sa = makeTestServiceAccount("auto-proj");
       let tokenCalls = 0;
       let enableCalls = 0;
+      let projectCalls = 0;
+      const enabledSet = new Set<string>();
 
       globalThis.fetch = mock.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -102,16 +139,45 @@ describe("google-cloud-provision", () => {
             headers: { "Content-Type": "application/json" },
           });
         }
+        if (url.includes("cloudresourcemanager.googleapis.com")) {
+          projectCalls += 1;
+          return new Response(
+            JSON.stringify({
+              projectId: "auto-proj",
+              name: "Auto Proj",
+              projectNumber: "123",
+              lifecycleState: "ACTIVE",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.includes("serviceusage.googleapis.com") && url.includes("/operations/")) {
+          return new Response(JSON.stringify({ done: true, name: url }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
         if (url.includes("serviceusage.googleapis.com") && url.includes(":enable")) {
           enableCalls += 1;
-          // alternate already / enabled
+          const svc =
+            GOOGLE_WORKSPACE_MCP_SERVICES.find((s) => url.includes(s)) ?? `svc-${enableCalls}`;
           if (enableCalls === 2) {
+            enabledSet.add(svc);
             return new Response(
               JSON.stringify({ error: { status: "ALREADY_EXISTS", message: "already enabled" } }),
               { status: 409, headers: { "Content-Type": "application/json" } },
             );
           }
+          enabledSet.add(svc);
           return new Response(JSON.stringify({ name: "operations/abc" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("serviceusage.googleapis.com") && url.includes("/services/")) {
+          const svc = GOOGLE_WORKSPACE_MCP_SERVICES.find((s) => url.includes(`/services/${s}`));
+          const state = svc && enabledSet.has(svc) ? "ENABLED" : "DISABLED";
+          return new Response(JSON.stringify({ state, name: url }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });
@@ -126,10 +192,14 @@ describe("google-cloud-provision", () => {
       });
 
       assert.equal(tokenCalls, 1);
+      assert.equal(projectCalls, 1);
       assert.equal(enableCalls, GOOGLE_WORKSPACE_MCP_SERVICES.length);
       assert.equal(result.projectId, "auto-proj");
       assert.equal(result.oauthClientAutomation, "unsupported");
-      assert.ok(result.enabled.length + result.alreadyEnabled.length === GOOGLE_WORKSPACE_MCP_SERVICES.length);
+      assert.ok(
+        result.enabled.length + result.alreadyEnabled.length ===
+          GOOGLE_WORKSPACE_MCP_SERVICES.length,
+      );
       assert.equal(result.alreadyEnabled.length, 1);
       assert.equal(result.failed.length, 0);
       assert.match(result.redirectUri, /^https:\/\/gw\.example\/api\/mcp\/upstream-oauth\/callback$/);
@@ -137,6 +207,9 @@ describe("google-cloud-provision", () => {
       assert.equal(result.requiredScopes[0]!.product, "Gmail");
       assert.ok(result.sessionId);
       assert.ok(result.checklist?.length);
+      assert.equal(result.wizardSteps.length, 5);
+      assert.equal(result.projectInfo?.name, "Auto Proj");
+      assert.equal(result.serviceStates?.length, GOOGLE_WORKSPACE_MCP_SERVICES.length);
     });
 
     it("surfaces enable failures without aborting whole run", async () => {
@@ -146,10 +219,28 @@ describe("google-cloud-provision", () => {
         if (url.includes("oauth2.googleapis.com/token")) {
           return new Response(JSON.stringify({ access_token: "t" }), { status: 200 });
         }
-        if (url.includes("gmail.googleapis.com")) {
+        if (url.includes("cloudresourcemanager.googleapis.com")) {
+          return new Response(JSON.stringify({ projectId: "fail-proj", lifecycleState: "ACTIVE" }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/operations/")) {
+          return new Response(JSON.stringify({ done: true }), { status: 200 });
+        }
+        if (url.includes(":enable") && url.includes("gmail.googleapis.com")) {
           return new Response(JSON.stringify({ error: { message: "PERMISSION_DENIED" } }), {
             status: 403,
           });
+        }
+        if (url.includes("serviceusage.googleapis.com") && url.includes(":enable")) {
+          return new Response(JSON.stringify({ name: "operations/ok" }), { status: 200 });
+        }
+        if (url.includes("serviceusage.googleapis.com") && url.includes("/services/")) {
+          // gmail 保持 DISABLED；其他启用后视为 ENABLED
+          if (url.includes("gmail.googleapis.com")) {
+            return new Response(JSON.stringify({ state: "DISABLED" }), { status: 200 });
+          }
+          return new Response(JSON.stringify({ state: "ENABLED" }), { status: 200 });
         }
         return new Response("{}", { status: 200 });
       }) as typeof fetch;

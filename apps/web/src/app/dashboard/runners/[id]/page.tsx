@@ -48,7 +48,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -93,7 +93,11 @@ export default function RunnerDetailPage() {
       setInstallBundle(res);
       setHostJoinsTailscale(res.hostJoinsTailscale !== false);
       setMeshAvailable(
-        Boolean(res.meshConnected || res.requireTailscale || res.installTailscale),
+        Boolean(
+          res.meshConnected ||
+            res.meshProvider === "headscale-platform" ||
+            res.installTailscale,
+        ),
       );
     } catch (err) {
       setInstallBundle(null);
@@ -126,7 +130,9 @@ export default function RunnerDetailPage() {
       setWantTailscale(preferTs);
       setContainers(res.containers);
       setHostJoinsTailscale(res.hostJoinsTailscale !== false);
-      setMeshAvailable(Boolean(res.meshConnected || res.requireTailscale));
+      setMeshAvailable(
+        Boolean(res.meshConnected || res.meshProvider === "headscale-platform"),
+      );
       if (res.tailscaleError) setInstallError(res.tailscaleError);
       // Install packages are heavy — load separately after detail paints
       if (res.node.kind !== "local") {
@@ -365,31 +371,31 @@ export default function RunnerDetailPage() {
           </p>
         ) : null}
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>镜像</TH>
-              <TH>用途</TH>
-              <TH>状态</TH>
-              <TH>Docker</TH>
-              <TH className="w-[1%]" />
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>镜像</TableHead>
+              <TableHead>用途</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>Docker</TableHead>
+              <TableHead className="w-[1%]" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {containers.map((r) => (
-              <TR key={r.id}>
-                <TD className="font-medium">{r.name}</TD>
-                <TD className="max-w-[160px] truncate text-xs">{r.image}</TD>
-                <TD>
+              <TableRow key={r.id}>
+                <TableCell className="font-medium">{r.name}</TableCell>
+                <TableCell className="max-w-[160px] truncate text-xs">{r.image}</TableCell>
+                <TableCell>
                   <Badge variant="outline">{r.purpose}</Badge>
-                </TD>
-                <TD className="text-xs">{r.status}</TD>
-                <TD>
+                </TableCell>
+                <TableCell className="text-xs">{r.status}</TableCell>
+                <TableCell>
                   <code className="text-[11px]">
                     {r.dockerId ? r.dockerId.slice(0, 12) : "—"}
                   </code>
-                </TD>
-                <TD>
+                </TableCell>
+                <TableCell>
                   <TableActions>
                     {r.dockerId && r.status !== "removed" ? (
                       <Button
@@ -412,17 +418,17 @@ export default function RunnerDetailPage() {
                       </Button>
                     ) : null}
                   </TableActions>
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             ))}
             {!containers.length && (
-              <TR>
-                <TD colSpan={6} className="py-6 text-center text-muted-foreground">
+              <TableRow>
+                <TableCell colSpan={6} className="py-6 text-center text-muted-foreground">
                   暂无容器
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             )}
-          </TBody>
+          </TableBody>
         </Table>
       </SettingsSection>
 
@@ -483,34 +489,34 @@ export default function RunnerDetailPage() {
                   内部）
                 </div>
                 <Table>
-                  <THead>
-                    <TR>
-                      <TH>接口</TH>
-                      <TH>IPv4</TH>
-                      <TH>MAC</TH>
-                      <TH>状态</TH>
-                      <TH>类型</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>接口</TableHead>
+                      <TableHead>IPv4</TableHead>
+                      <TableHead>MAC</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>类型</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {[...externalIfaces, ...internalIfaces].map((iface) => (
-                      <TR key={iface.name}>
-                        <TD className="font-mono text-xs">{iface.name}</TD>
-                        <TD className="font-mono text-[11px]">
+                      <TableRow key={iface.name}>
+                        <TableCell className="font-mono text-xs">{iface.name}</TableCell>
+                        <TableCell className="font-mono text-[11px]">
                           {iface.ipv4?.length ? iface.ipv4.join(", ") : "—"}
-                        </TD>
-                        <TD className="font-mono text-[11px] text-muted-foreground">
+                        </TableCell>
+                        <TableCell className="font-mono text-[11px] text-muted-foreground">
                           {iface.mac || "—"}
-                        </TD>
-                        <TD className="text-xs">{iface.operstate || "—"}</TD>
-                        <TD>
+                        </TableCell>
+                        <TableCell className="text-xs">{iface.operstate || "—"}</TableCell>
+                        <TableCell>
                           <Badge variant={iface.internal ? "secondary" : "outline"}>
                             {iface.internal ? "内部" : "外部"}
                           </Badge>
-                        </TD>
-                      </TR>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </TBody>
+                  </TableBody>
                 </Table>
               </div>
             ) : null}

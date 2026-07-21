@@ -2,30 +2,31 @@ import { createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { mcpOauthRedirectUri } from "./mcp-oauth-apps.js";
 
-/** Google Workspace MCP 所需启用的 Cloud API */
+/** Google Workspace 所需启用的 Cloud API（本地 REST，无需 *mcp.googleapis.com） */
 export const GOOGLE_WORKSPACE_MCP_SERVICES = [
   "gmail.googleapis.com",
   "drive.googleapis.com",
   "calendar-json.googleapis.com",
-  "gmailmcp.googleapis.com",
-  "drivemcp.googleapis.com",
-  "calendarmcp.googleapis.com",
+  "people.googleapis.com",
+  "chat.googleapis.com",
 ] as const;
 
 export const GOOGLE_MCP_PRODUCTS = [
   {
     id: "gmail",
     name: "Gmail",
-    mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+    mcpUrl: "zakura://google-workspace/gmail",
     scopes: [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.send",
     ],
   },
   {
     id: "drive",
     name: "Google Drive",
-    mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
+    mcpUrl: "zakura://google-workspace/drive",
     scopes: [
       "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/drive.file",
@@ -34,14 +35,47 @@ export const GOOGLE_MCP_PRODUCTS = [
   {
     id: "calendar",
     name: "Google Calendar",
-    mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1",
+    mcpUrl: "zakura://google-workspace/calendar",
     scopes: [
       "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
       "https://www.googleapis.com/auth/calendar.events.freebusy",
       "https://www.googleapis.com/auth/calendar.events.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+    ],
+  },
+  {
+    id: "people",
+    name: "Google People",
+    mcpUrl: "zakura://google-workspace/people",
+    scopes: [
+      "https://www.googleapis.com/auth/contacts.readonly",
+      "https://www.googleapis.com/auth/directory.readonly",
+    ],
+  },
+  {
+    id: "chat",
+    name: "Google Chat",
+    mcpUrl: "zakura://google-workspace/chat",
+    scopes: [
+      "https://www.googleapis.com/auth/chat.spaces.readonly",
+      "https://www.googleapis.com/auth/chat.memberships.readonly",
+      "https://www.googleapis.com/auth/chat.messages.readonly",
+      "https://www.googleapis.com/auth/chat.messages.create",
+      "https://www.googleapis.com/auth/chat.users.readstate.readonly",
     ],
   },
 ] as const;
+
+/** 同意屏幕需一次性配置的完整 scopes（含 openid/email） */
+export const GOOGLE_OAUTH_CONSENT_SCOPES = [
+  "openid",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+  ...new Set(GOOGLE_MCP_PRODUCTS.flatMap((p) => p.scopes)),
+] as const;
+
+export type GoogleMcpProductId = (typeof GOOGLE_MCP_PRODUCTS)[number]["id"];
+
 
 export type GoogleServiceAccountJson = {
   type?: string;
@@ -52,6 +86,31 @@ export type GoogleServiceAccountJson = {
   token_uri?: string;
 };
 
+export type ProvisionCopyable = {
+  label: string;
+  value: string;
+  /** 多行时用 monospace 展示 */
+  multiline?: boolean;
+};
+
+export type ProvisionWizardAction = {
+  kind: "open" | "click" | "fill" | "select" | "copy" | "paste";
+  label: string;
+  value?: string;
+  hint?: string;
+};
+
+export type ProvisionWizardStep = {
+  id: "project" | "enable-apis" | "chat-app" | "oauth-consent" | "oauth-client" | "save";
+  title: string;
+  description: string;
+  /** api=尽量自动；manual=仅 Console；hybrid=可 SA 自动也可手动 */
+  mode: "api" | "manual" | "hybrid";
+  consoleUrl?: string;
+  actions: ProvisionWizardAction[];
+  copyables: ProvisionCopyable[];
+};
+
 export type GoogleProvisionResult = {
   projectId: string;
   enabled: string[];
@@ -59,22 +118,42 @@ export type GoogleProvisionResult = {
   failed: Array<{ service: string; error: string }>;
   /**
    * Google 不提供公开 API 创建「普通 Web OAuth 客户端」（Gmail/Drive MCP 所需）。
-   * IAP / Workforce 的 oauthClients API 不能用于 Workspace MCP。
-   * 因此客户端创建仍须走 Console；我们返回一键链接与权限清单。
+   * IAP / Workforce 的 oauthClients API 不能用于 Workspace MCP，且已弃用。
+   * 因此客户端创建仍须走 Console；我们返回分步引导与模拟 UI。
    */
   oauthClientAutomation: "unsupported";
   limitation: string;
   redirectUri: string;
   consoleLinks: {
+    createProject: string;
     enableApis: string;
     oauthConsent: string;
+    dataAccess: string;
     createOauthClient: string;
     credentials: string;
+    serviceAccounts: string;
   };
   requiredScopes: Array<{ product: string; scopes: string[] }>;
+  /** 所有 scopes 合并，便于一键粘贴到 Console「Manually add scopes」 */
+  scopesPasteBlock: string;
+  oauthClientName: string;
   gcloudScript: string;
   checklist?: string[];
+  wizardSteps: ProvisionWizardStep[];
   sessionId?: string;
+  /** SA 供应时：Cloud Resource Manager 校验结果 */
+  projectInfo?: {
+    projectId: string;
+    name?: string;
+    projectNumber?: string;
+    state?: string;
+    error?: string;
+  };
+  /** SA 供应时：各服务启用状态快照 */
+  serviceStates?: Array<{
+    service: string;
+    state: "ENABLED" | "DISABLED" | "UNKNOWN" | string;
+  }>;
 };
 
 function b64url(input: Buffer | string): string {
@@ -98,14 +177,145 @@ export function parseServiceAccount(raw: unknown): GoogleServiceAccountJson {
   return raw as GoogleServiceAccountJson;
 }
 
+function consoleLinksFor(projectId: string) {
+  const q = encodeURIComponent(projectId);
+  return {
+    createProject: "https://console.cloud.google.com/projectcreate",
+    enableApis: `https://console.cloud.google.com/apis/library?project=${q}`,
+    chatApiConfig: `https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat?project=${q}`,
+    oauthConsent: `https://console.cloud.google.com/auth/branding?project=${q}`,
+    dataAccess: `https://console.cloud.google.com/auth/scopes?project=${q}`,
+    createOauthClient: `https://console.cloud.google.com/auth/clients/create?project=${q}`,
+    credentials: `https://console.cloud.google.com/auth/clients?project=${q}`,
+    serviceAccounts: `https://console.cloud.google.com/iam-admin/serviceaccounts?project=${q}`,
+  };
+}
+
+const OAUTH_CLIENT_DISPLAY_NAME = "Zakura Workspace MCP";
+
+function buildScopesPasteBlock(
+  products?: Array<(typeof GOOGLE_MCP_PRODUCTS)[number]>,
+): string {
+  // 同意屏幕一次配齐：openid/email + 所选产品（默认全部）scopes
+  const productScopes = (products?.length ? products : [...GOOGLE_MCP_PRODUCTS]).flatMap(
+    (p) => p.scopes,
+  );
+  return [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    ...new Set(productScopes),
+  ].join("\n");
+}
+
+/** 分步向导：短标题 + Console 链接 + 可复制字段 */
+export function buildProvisionWizardSteps(opts: {
+  projectId: string;
+  redirectUri: string;
+  products: Array<(typeof GOOGLE_MCP_PRODUCTS)[number]>;
+  links: ReturnType<typeof consoleLinksFor>;
+}): ProvisionWizardStep[] {
+  const { projectId, redirectUri, products, links } = opts;
+  const scopesPaste = buildScopesPasteBlock(products);
+  const includeChat = products.some((p) => p.id === "chat");
+
+  const steps: ProvisionWizardStep[] = [
+    {
+      id: "project",
+      title: "项目",
+      description: "",
+      mode: "manual",
+      consoleUrl: links.createProject,
+      actions: [],
+      copyables: [{ label: "项目名", value: "Zakura MCP" }],
+    },
+    {
+      id: "enable-apis",
+      title: "启用 API",
+      description: "启用 Gmail / Drive / Calendar / People / Chat API",
+      mode: "hybrid",
+      consoleUrl: links.serviceAccounts,
+      actions: [],
+      copyables: [
+        {
+          label: "gcloud",
+          value: [
+            `gcloud config set project ${projectId}`,
+            `gcloud services enable ${GOOGLE_WORKSPACE_MCP_SERVICES.join(" ")}`,
+          ].join("\n"),
+          multiline: true,
+        },
+      ],
+    },
+  ];
+
+  if (includeChat) {
+    steps.push({
+      id: "chat-app",
+      title: "Chat 应用",
+      description:
+        "仅启用 API 不够：须在 Chat API → Configuration 填写 App name 并保存（可关闭 Interactive features）。需 Workspace 账号。",
+      mode: "manual",
+      consoleUrl: links.chatApiConfig,
+      actions: [],
+      copyables: [
+        { label: "App name", value: "Zakura Workspace MCP" },
+        {
+          label: "Avatar URL",
+          value: "https://developers.google.com/static/chat/images/quickstart-app-avatar.png",
+        },
+        { label: "Description", value: "Local Google Chat tools for Zakura MCP" },
+      ],
+    });
+  }
+
+  steps.push(
+    {
+      id: "oauth-consent",
+      title: "同意屏幕",
+      description: "Branding → Audience → Data Access → 粘贴 Scopes",
+      mode: "manual",
+      consoleUrl: links.oauthConsent,
+      actions: [],
+      copyables: [
+        { label: "App name", value: "Workspace MCP Servers" },
+        { label: "Scopes", value: scopesPaste, multiline: true },
+      ],
+    },
+    {
+      id: "oauth-client",
+      title: "OAuth 客户端",
+      description: "类型选 Web application，粘贴回调 URI",
+      mode: "manual",
+      consoleUrl: links.createOauthClient,
+      actions: [],
+      copyables: [
+        { label: "Name", value: OAUTH_CLIENT_DISPLAY_NAME },
+        { label: "Redirect URI", value: redirectUri },
+      ],
+    },
+    {
+      id: "save",
+      title: "保存",
+      description: "",
+      mode: "api",
+      consoleUrl: links.credentials,
+      actions: [],
+      copyables: [],
+    },
+  );
+
+  return steps;
+}
+
 /** 仅生成引导信息（不调用 Google，不需要 Service Account） */
 export function buildGoogleProvisionGuide(
   config: AppConfig,
   projectId: string,
-  products?: Array<"gmail" | "drive" | "calendar">,
+  products?: GoogleMcpProductId[],
 ): Omit<
   GoogleProvisionResult,
-  "enabled" | "alreadyEnabled" | "failed"
+  "enabled" | "alreadyEnabled" | "failed" | "projectInfo" | "serviceStates"
 > & {
   checklist: string[];
 } {
@@ -115,24 +325,28 @@ export function buildGoogleProvisionGuide(
   const selected = products?.length
     ? GOOGLE_MCP_PRODUCTS.filter((p) => products.includes(p.id))
     : [...GOOGLE_MCP_PRODUCTS];
+  const links = consoleLinksFor(pid);
+  const scopesPasteBlock = buildScopesPasteBlock();
   return {
     projectId: pid,
     oauthClientAutomation: "unsupported",
-    limitation:
-      "Google 未开放公开 API 用于创建 Google Auth Platform 的 Web OAuth 客户端（clientauthconfig 仅供控制台/IAP）。后端可自动启用 MCP 相关 API；请按步骤在 Console 创建客户端并粘贴 Client ID/Secret。",
+    limitation: "OAuth Web 客户端需在 Console 创建；API 可自动启用 MCP 服务。",
     redirectUri,
-    consoleLinks: {
-      enableApis: `https://console.cloud.google.com/apis/library?project=${encodeURIComponent(pid)}`,
-      oauthConsent: `https://console.cloud.google.com/auth/branding?project=${encodeURIComponent(pid)}`,
-      createOauthClient: `https://console.cloud.google.com/auth/clients/create?project=${encodeURIComponent(pid)}`,
-      credentials: `https://console.cloud.google.com/auth/clients?project=${encodeURIComponent(pid)}`,
-    },
+    consoleLinks: links,
     requiredScopes: selected.map((p) => ({
       product: p.name,
       scopes: [...p.scopes],
     })),
+    scopesPasteBlock,
+    oauthClientName: OAUTH_CLIENT_DISPLAY_NAME,
     gcloudScript: buildGcloudScript(pid, redirectUri),
     checklist: googleOauthSetupChecklist(redirectUri),
+    wizardSteps: buildProvisionWizardSteps({
+      projectId: pid,
+      redirectUri,
+      products: selected,
+      links,
+    }),
   };
 }
 
@@ -195,11 +409,125 @@ async function serviceAccountAccessToken(
   return json.access_token;
 }
 
+/** Cloud Resource Manager：校验项目存在与状态 */
+async function fetchProjectInfo(
+  projectId: string,
+  token: string,
+): Promise<NonNullable<GoogleProvisionResult["projectInfo"]>> {
+  const url = `https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(projectId)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "x-goog-user-project": projectId,
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      const err =
+        (json.error as { message?: string } | undefined)?.message ||
+        `HTTP ${res.status}`;
+      return { projectId, error: err };
+    }
+    return {
+      projectId: String(json.projectId ?? projectId),
+      name: typeof json.name === "string" ? json.name : undefined,
+      projectNumber:
+        typeof json.projectNumber === "string" ? json.projectNumber : undefined,
+      state: typeof json.lifecycleState === "string" ? json.lifecycleState : undefined,
+    };
+  } catch (err) {
+    return {
+      projectId,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Service Usage：查询单个服务状态 */
+async function getServiceState(
+  projectId: string,
+  service: string,
+  token: string,
+): Promise<string> {
+  const url = `https://serviceusage.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/services/${encodeURIComponent(service)}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "x-goog-user-project": projectId,
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return "UNKNOWN";
+    const json = (await res.json().catch(() => ({}))) as { state?: string };
+    return json.state || "UNKNOWN";
+  } catch {
+    return "UNKNOWN";
+  }
+}
+
+function classifyEnableError(message: string): string {
+  if (
+    /allowlist|not been enabled|PERMISSION_DENIED|PRECONDITION_FAILED|developer preview|accessNotConfigured|SERVICE_DISABLED/i.test(
+      message,
+    )
+  ) {
+    return `${message}（若无法启用 *mcp.googleapis.com：需先将 GCP 项目加入 Google Workspace Developer Preview：https://developers.google.com/workspace/preview ）`;
+  }
+  return message;
+}
+
+/** 等待 Service Usage 异步 Operation 完成 */
+async function waitServiceOperation(
+  operationName: string,
+  token: string,
+  projectId: string,
+  timeoutMs = 90_000,
+): Promise<void> {
+  const name = operationName.replace(/^\//, "");
+  const url = `https://serviceusage.googleapis.com/v1/${name}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "x-goog-user-project": projectId,
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    const json = (await res.json().catch(() => ({}))) as {
+      done?: boolean;
+      error?: { message?: string; status?: string };
+    };
+    if (!res.ok) {
+      throw new Error(
+        classifyEnableError(
+          json.error?.message || `轮询启用状态失败 HTTP ${res.status}`,
+        ),
+      );
+    }
+    if (json.done) {
+      if (json.error?.message) {
+        throw new Error(classifyEnableError(json.error.message));
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error(`启用操作超时：${operationName}`);
+}
+
 async function enableService(
   projectId: string,
   service: string,
   token: string,
 ): Promise<"enabled" | "already" | string> {
+  // 已启用则跳过
+  const before = await getServiceState(projectId, service, token);
+  if (before === "ENABLED") return "already";
+
   const url = `https://serviceusage.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/services/${encodeURIComponent(service)}:enable`;
   const res = await fetch(url, {
     method: "POST",
@@ -211,29 +539,58 @@ async function enableService(
     body: "{}",
     signal: AbortSignal.timeout(60000),
   });
-  if (res.ok || res.status === 200 || res.status === 201) return "enabled";
   const text = await res.text();
+
   if (res.status === 409 || /already enabled|ALREADY_EXISTS/i.test(text)) {
     return "already";
   }
-  // 异步 operation 也算接受
-  if (res.status === 200 || text.includes("\"name\": \"operations/")) {
-    return "enabled";
-  }
+
+  let operationName = "";
   try {
-    const j = JSON.parse(text) as { error?: { message?: string; status?: string } };
+    const j = JSON.parse(text) as {
+      name?: string;
+      error?: { message?: string; status?: string };
+    };
     if (j.error?.status === "ALREADY_EXISTS" || /already/i.test(j.error?.message ?? "")) {
       return "already";
     }
-    return j.error?.message || text.slice(0, 200);
+    if (!res.ok && j.error?.message) {
+      return classifyEnableError(j.error.message);
+    }
+    if (typeof j.name === "string" && j.name.includes("operations/")) {
+      operationName = j.name;
+    }
   } catch {
-    return text.slice(0, 200) || `HTTP ${res.status}`;
+    if (!res.ok) return classifyEnableError(text.slice(0, 200) || `HTTP ${res.status}`);
+  }
+
+  if (!res.ok && !operationName) {
+    return classifyEnableError(text.slice(0, 200) || `HTTP ${res.status}`);
+  }
+
+  try {
+    if (operationName) {
+      await waitServiceOperation(operationName, token, projectId);
+    }
+    // 再确认最终状态（LRO 成功后偶发短暂延迟）
+    for (let i = 0; i < 5; i++) {
+      const state = await getServiceState(projectId, service, token);
+      if (state === "ENABLED") return "enabled";
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const finalState = await getServiceState(projectId, service, token);
+    if (finalState === "ENABLED") return "enabled";
+    return classifyEnableError(
+      `启用后状态仍为 ${finalState}（MCP 工具调用会报 The caller does not have permission）`,
+    );
+  } catch (err) {
+    return classifyEnableError(err instanceof Error ? err.message : String(err));
   }
 }
 
 function buildGcloudScript(projectId: string, redirectUri: string): string {
   const services = GOOGLE_WORKSPACE_MCP_SERVICES.join(" \\\n  ");
-  return `# 在本机已登录 gcloud 的前提下执行（可选，与「一键启用 API」等价）
+  return `# 在本机已登录 gcloud 的前提下执行（可选，与「API 自动启用」等价）
 gcloud config set project ${projectId}
 gcloud services enable \\
   ${services}
@@ -253,7 +610,7 @@ export async function provisionGoogleWorkspaceMcp(opts: {
   config: AppConfig;
   serviceAccountJson: unknown;
   projectId?: string;
-  products?: Array<"gmail" | "drive" | "calendar">;
+  products?: GoogleMcpProductId[];
 }): Promise<GoogleProvisionResult> {
   const sa = parseServiceAccount(opts.serviceAccountJson);
   const projectId = (opts.projectId || sa.project_id || "").trim();
@@ -271,6 +628,8 @@ export async function provisionGoogleWorkspaceMcp(opts: {
     ? GOOGLE_MCP_PRODUCTS.filter((p) => opts.products!.includes(p.id))
     : [...GOOGLE_MCP_PRODUCTS];
 
+  const projectInfo = await fetchProjectInfo(projectId, token);
+
   const enabled: string[] = [];
   const alreadyEnabled: string[] = [];
   const failed: Array<{ service: string; error: string }> = [];
@@ -282,38 +641,51 @@ export async function provisionGoogleWorkspaceMcp(opts: {
     else failed.push({ service, error: result });
   }
 
+  const serviceStates: NonNullable<GoogleProvisionResult["serviceStates"]> = [];
+  for (const service of GOOGLE_WORKSPACE_MCP_SERVICES) {
+    const state = await getServiceState(projectId, service, token);
+    serviceStates.push({ service, state });
+  }
+
+  const links = consoleLinksFor(projectId);
+  const scopesPasteBlock = buildScopesPasteBlock();
+
   return {
     projectId,
     enabled,
     alreadyEnabled,
     failed,
     oauthClientAutomation: "unsupported",
-    limitation:
-      "Google 未开放公开 API 用于创建 Google Auth Platform 的 Web OAuth 客户端（clientauthconfig 仅供控制台/IAP）。后端已尽量自动启用 MCP 相关 API；请按下方步骤在 Console 创建客户端并粘贴 Client ID/Secret。",
+    limitation: "OAuth Web 客户端需在 Console 创建；API 可自动启用 MCP 服务。",
     redirectUri,
-    consoleLinks: {
-      enableApis: `https://console.cloud.google.com/apis/library?project=${encodeURIComponent(projectId)}`,
-      oauthConsent: `https://console.cloud.google.com/auth/branding?project=${encodeURIComponent(projectId)}`,
-      createOauthClient: `https://console.cloud.google.com/auth/clients/create?project=${encodeURIComponent(projectId)}`,
-      credentials: `https://console.cloud.google.com/auth/clients?project=${encodeURIComponent(projectId)}`,
-    },
+    consoleLinks: links,
     requiredScopes: products.map((p) => ({
       product: p.name,
       scopes: [...p.scopes],
     })),
+    scopesPasteBlock,
+    oauthClientName: OAUTH_CLIENT_DISPLAY_NAME,
     gcloudScript: buildGcloudScript(projectId, redirectUri),
     checklist: googleOauthSetupChecklist(redirectUri),
+    wizardSteps: buildProvisionWizardSteps({
+      projectId,
+      redirectUri,
+      products,
+      links,
+    }),
     sessionId: newProvisionSessionId(),
+    projectInfo,
+    serviceStates,
   };
 }
 
 export function googleOauthSetupChecklist(redirectUri: string): string[] {
   return [
-    "在 Google Cloud 创建/选择项目，并启用 Gmail / Drive / Calendar 与对应 MCP API（可用上方「用 Service Account 自动启用」）。",
-    "配置 OAuth 同意屏幕（Branding / Audience），Data Access 中添加下方所需 scopes。",
-    "创建 OAuth 客户端：应用类型选「Web 应用」，Authorized redirect URIs 填入回调 URI。",
+    "在 Google Cloud 创建/选择项目，并启用 Gmail / Drive / Calendar 与对应 MCP API（可用向导「用 API 自动启用」）。",
+    "配置 OAuth 同意屏幕（Branding / Audience），Data Access 中粘贴所需 scopes。",
+    "创建 OAuth 客户端：应用类型选「Web application」，Authorized redirect URIs 填入回调 URI。",
     `回调 URI：${redirectUri}`,
-    "将 Client ID 与 Client Secret 粘贴回 Zakura（本页或安装流），由本服务自动完成用户授权码流程。",
+    "将 Client ID 与 Client Secret 粘贴回本向导最后一步保存。",
   ];
 }
 

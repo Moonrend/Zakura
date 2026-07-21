@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
-import { api, ApiError, setSession, type PlatformInfo } from "@/lib/api";
+import { api, setSession, type PlatformInfo } from "@/lib/api";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,21 +17,13 @@ export default function LoginPage() {
   const [oauthLoading, setOauthLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [tenantSlug, setTenantSlug] = useState("");
-  const [showTenant, setShowTenant] = useState(false);
-  const [multiTenant, setMultiTenant] = useState(false);
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [zerocatEnabled, setZerocatEnabled] = useState(false);
-  const [tenantOptions, setTenantOptions] = useState<Array<{ slug: string; name: string }>>(
-    [],
-  );
 
   useEffect(() => {
     void api<PlatformInfo>("/api/platform")
       .then((p) => {
-        setMultiTenant(!!p.multiTenant);
         setRegistrationEnabled(!!(p.registrationEnabled || p.edition === "saas"));
-        if (p.multiTenant) setShowTenant(true);
         setZerocatEnabled(!!p.oauthProviders?.some((x) => x.id === "zerocat" && x.enabled));
       })
       .catch(() => undefined);
@@ -87,11 +79,7 @@ export default function LoginPage() {
             try {
               const res = await api<{ session: string }>("/api/auth/login", {
                 method: "POST",
-                json: {
-                  email,
-                  password,
-                  ...(tenantSlug.trim() ? { tenantSlug: tenantSlug.trim() } : {}),
-                },
+                json: { email, password },
               });
               setSession(res.session);
               toast.success("登录成功");
@@ -100,18 +88,7 @@ export default function LoginPage() {
                 current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
               );
             } catch (err) {
-              if (
-                err instanceof ApiError &&
-                err.body.error === "tenant_required" &&
-                Array.isArray(err.body.tenants)
-              ) {
-                setShowTenant(true);
-                setMultiTenant(true);
-                setTenantOptions(err.body.tenants as Array<{ slug: string; name: string }>);
-                toast.error("该邮箱属于多个租户，请选择或填写租户标识");
-              } else {
-                toast.error(err instanceof Error ? err.message : String(err));
-              }
+              toast.error(err instanceof Error ? err.message : String(err));
             } finally {
               setLoading(false);
             }
@@ -139,28 +116,6 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          {(multiTenant || showTenant) && (
-            <div className="space-y-1.5">
-              <Label htmlFor="tenantSlug">租户标识</Label>
-              <Input
-                id="tenantSlug"
-                autoComplete="organization"
-                placeholder="例如 default"
-                list={tenantOptions.length ? "tenant-options" : undefined}
-                value={tenantSlug}
-                onChange={(e) => setTenantSlug(e.target.value)}
-              />
-              {tenantOptions.length > 0 ? (
-                <datalist id="tenant-options">
-                  {tenantOptions.map((t) => (
-                    <option key={t.slug} value={t.slug}>
-                      {t.name}
-                    </option>
-                  ))}
-                </datalist>
-              ) : null}
-            </div>
-          )}
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? <Loader2 className="animate-spin" /> : null}
             {loading ? "登录中…" : "继续"}

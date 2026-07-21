@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkSecurityPage() {
   const [policy, setPolicy] = useState<NetworkSecurityPolicyDto | null>(null);
@@ -207,31 +207,31 @@ export default function NetworkSecurityPage() {
           <p className="text-sm text-muted-foreground">暂无事件</p>
         ) : (
           <Table>
-            <THead>
-              <TR>
-                <TH>时间</TH>
-                <TH>动作</TH>
-                <TH>主体</TH>
-                <TH>目标</TH>
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>时间</TableHead>
+                <TableHead>动作</TableHead>
+                <TableHead>主体</TableHead>
+                <TableHead>目标</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {audit.map((row) => (
-                <TR key={row.id}>
-                  <TD className="whitespace-nowrap text-xs text-muted-foreground">
+                <TableRow key={row.id}>
+                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                     {new Date(row.createdAt).toLocaleString()}
-                  </TD>
-                  <TD className="font-mono text-xs">{row.action}</TD>
-                  <TD className="text-xs">
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{row.action}</TableCell>
+                  <TableCell className="text-xs">
                     {row.actorType}
                     {row.actorId ? `:${row.actorId.slice(0, 8)}` : ""}
-                  </TD>
-                  <TD className="text-xs text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
                     {row.targetType ?? "—"}
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               ))}
-            </TBody>
+            </TableBody>
           </Table>
         )}
       </SettingsSection>

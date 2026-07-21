@@ -9,7 +9,7 @@ import { api } from "@/lib/api";
 import {
   fetchAgents,
   getWorkspaceStatus,
-  needsDocker,
+  needsContainer,
   statusVariant,
   workspaceStatusLabel,
   type AgentListItem,
@@ -26,7 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function AgentsListPage() {
@@ -119,58 +119,58 @@ export default function AgentsListPage() {
         <Skeleton className="h-40 w-full rounded-lg" />
       ) : (
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>Slug</TH>
-              <TH>环境</TH>
-              <TH>能力</TH>
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>Slug</TableHead>
+              <TableHead>环境</TableHead>
+              <TableHead>能力</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {list.map((a) => {
               const ws = getWorkspaceStatus(a);
               return (
-                <TR key={a.id}>
-                  <TD>
+                <TableRow key={a.id}>
+                  <TableCell>
                     <Link
                       href={`/dashboard/agents/${a.id}/general`}
                       className="font-medium underline-offset-2 hover:underline"
                     >
                       {a.name}
                     </Link>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <code className="text-[11px] text-muted-foreground">{a.slug}</code>
-                  </TD>
-                  <TD>
-                    {needsDocker(a) ? (
+                  </TableCell>
+                  <TableCell>
+                    {needsContainer(a) ? (
                       <Badge variant={statusVariant(ws)}>
                         {workspaceStatusLabel(ws)}
                       </Badge>
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
-                  </TD>
-                  <TD className="text-xs text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
                     {[
-                      needsDocker(a) ? "电脑" : null,
+                      needsContainer(a) ? "电脑" : null,
                       a.enableMemory ? "记忆" : null,
                     ]
                       .filter(Boolean)
                       .join(" · ") || "—"}
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               );
             })}
             {!list.length ? (
-              <TR>
-                <TD colSpan={4} className="py-8 text-center text-muted-foreground">
+              <TableRow>
+                <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
                   暂无 Agent
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             ) : null}
-          </TBody>
+          </TableBody>
         </Table>
       )}
 

@@ -112,9 +112,7 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
       status: "ready",
       workspaceProfile: "computer",
       enableFs: true,
-      enableShell: true,
       enableComputer: true,
-      enableBrowser: true,
       enableMemory: false,
       runtimeNodeId: nodeId,
       workspaceStatus: "ready",
@@ -235,7 +233,7 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
     assert.equal(existsSync(localWouldBe), false, `local path must stay empty: ${localWouldBe}`);
   });
 
-  it("null runtime_node_id still uses local dataDir (today path)", async () => {
+  it("null runtime_node_id still uses local dataDir", async () => {
     const { agents, newId } = await import("../src/db/schema.js");
     const localAgentId = newId();
     const now = new Date();
@@ -247,9 +245,7 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
       description: "",
       status: "ready",
       enableFs: true,
-      enableShell: false,
       enableComputer: false,
-      enableBrowser: false,
       enableMemory: false,
       runtimeNodeId: null,
       workspaceStatus: "ready",

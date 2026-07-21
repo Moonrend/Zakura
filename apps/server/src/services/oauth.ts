@@ -18,7 +18,7 @@ import {
   type OauthClient,
   type Tenant,
 } from "../db/schema.js";
-import { LoginAmbiguousError, loginUser } from "./auth.js";
+import { loginUser } from "./auth.js";
 
 const ACCESS_TTL_SEC = 60 * 60; // 1h
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
@@ -359,17 +359,9 @@ export class OauthService {
     agentSlug?: string | null;
     tenantSlug?: string;
   }): Promise<{ code: string; redirectUri: string }> {
-    let logged: Awaited<ReturnType<typeof loginUser>>;
-    try {
-      logged = await loginUser(this.db, input.email, input.password, {
-        tenantSlug: input.tenantSlug,
-      });
-    } catch (err) {
-      if (err instanceof LoginAmbiguousError) {
-        throw new OauthError("invalid_request", "tenantSlug required for this account", 400);
-      }
-      throw err;
-    }
+    const logged = await loginUser(this.db, input.email, input.password, {
+      tenantSlug: input.tenantSlug,
+    });
     if (!logged) throw new OauthError("access_denied", "Invalid credentials", 401);
 
     return this.consent({

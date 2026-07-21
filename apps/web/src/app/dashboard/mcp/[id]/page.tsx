@@ -14,18 +14,21 @@ import {
 import { api } from "@/lib/api";
 import {
   listenMcpOauthCallback,
-  openOauthAuthorizeTab,
+  navigateOauthTab,
+  prepareOauthTab,
   startUpstreamOauth as startUpstreamOauthApi,
 } from "@/lib/mcp-oauth";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import {
   SchemaToolForm,
   defaultsFromSchema,
 } from "@/components/mcp/schema-tool-form";
+import { McpToolPermissionsPanel } from "@/components/mcp/tool-permissions-panel";
+import type { McpToolPermissionState } from "@/lib/mcp-config";
 import { cn } from "@/lib/utils";
 
 type InstanceDetail = {
@@ -39,6 +42,7 @@ type InstanceDetail = {
   lastError?: string | null;
   config?: Record<string, unknown>;
   tools?: ToolRow[];
+  toolPermissions?: McpToolPermissionState[];
 };
 
 type ToolRow = {
@@ -222,13 +226,41 @@ function McpServerDetailInner() {
     }
   }
 
+  async function setToolPermission(ruleId: string, enabled: boolean) {
+    if (!instance) return;
+    setActionBusy(true);
+    try {
+      const prev =
+        instance.config?.toolPermissions &&
+        typeof instance.config.toolPermissions === "object" &&
+        !Array.isArray(instance.config.toolPermissions)
+          ? { ...(instance.config.toolPermissions as Record<string, boolean>) }
+          : {};
+      await api(`/api/instances/${id}`, {
+        method: "PATCH",
+        json: {
+          config: {
+            toolPermissions: { ...prev, [ruleId]: enabled },
+          },
+        },
+      });
+      toast.success(enabled ? `已开启 ${ruleId}` : `已关闭 ${ruleId}`);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function startUpstreamOauth() {
     setOauthBusy(true);
+    const preparedTab = prepareOauthTab();
     try {
       const { authorizeUrl } = await startUpstreamOauthApi(id);
-      openOauthAuthorizeTab(authorizeUrl);
-      toast.message("已打开授权页", {
-        description: "在新标签页完成授权后返回本页并刷新",
+      navigateOauthTab(preparedTab, authorizeUrl);
+      toast.message("已打开授权窗口", {
+        description: "在弹出窗口完成授权后将自动刷新",
       });
       oauthUnsubRef.current?.();
       oauthUnsubRef.current = listenMcpOauthCallback((msg) => {
@@ -241,6 +273,7 @@ function McpServerDetailInner() {
         setOauthBusy(false);
       });
     } catch (err) {
+      if (preparedTab && !preparedTab.closed) preparedTab.close();
       toast.error(err instanceof Error ? err.message : String(err));
       setOauthBusy(false);
     }
@@ -333,7 +366,8 @@ function McpServerDetailInner() {
               <HeartPulse className="size-3.5" />
               健康检查
             </Button>
-            {instance.providerId === "generic-mcp" ? (
+            {instance.providerId === "generic-mcp" ||
+            instance.providerId === "google-workspace" ? (
               <Button
                 size="sm"
                 variant={authNeeded ? "default" : "outline"}
@@ -375,6 +409,14 @@ function McpServerDetailInner() {
         </div>
       ) : null}
 
+      {instance.toolPermissions && instance.toolPermissions.length > 0 ? (
+        <McpToolPermissionsPanel
+          rules={instance.toolPermissions}
+          disabled={actionBusy}
+          onChange={(ruleId, enabled) => void setToolPermission(ruleId, enabled)}
+        />
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="space-y-2">
           <div className="flex items-center justify-between">
@@ -382,14 +424,14 @@ function McpServerDetailInner() {
           </div>
           <div className="max-h-[520px] overflow-auto rounded-lg border border-border bg-card">
             <Table>
-              <THead>
-                <TR>
-                  <TH>Tool</TH>
-                </TR>
-              </THead>
-              <TBody>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Tool</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {tools.map((t) => (
-                  <TR
+                  <TableRow
                     key={t.qualifiedName}
                     className={cn(
                       "cursor-pointer",
@@ -399,24 +441,24 @@ function McpServerDetailInner() {
                     )}
                     onClick={() => selectTool(t)}
                   >
-                    <TD>
+                    <TableCell>
                       <code className="text-[11px]">{t.localName ?? t.qualifiedName}</code>
                       <div className="mt-0.5 max-w-[280px] truncate text-[10px] text-muted-foreground">
                         {t.description}
                       </div>
-                    </TD>
-                  </TR>
+                    </TableCell>
+                  </TableRow>
                 ))}
                 {!loading && !tools.length ? (
-                  <TR>
-                    <TD className="py-10 text-center text-muted-foreground">
+                  <TableRow>
+                    <TableCell className="py-10 text-center text-muted-foreground">
                       {instance.status !== "running"
                         ? "启动服务器后可加载工具"
                         : "暂无 tools"}
-                    </TD>
-                  </TR>
+                    </TableCell>
+                  </TableRow>
                 ) : null}
-              </TBody>
+              </TableBody>
             </Table>
           </div>
         </section>

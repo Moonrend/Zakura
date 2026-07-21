@@ -307,16 +307,6 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
 `;
 }
 
-/** @deprecated Prefer buildRunnerComposeSnippet({ enableTailscale: false }) */
-export function buildRunnerComposeSnippetPlain(
-  opts: Omit<
-    RunnerComposeOpts,
-    "tsAuthKey" | "tsHostname" | "tsTags" | "tailscaleImage" | "enableTailscale"
-  >,
-): string {
-  return buildRunnerComposeSnippet({ ...opts, enableTailscale: false });
-}
-
 /** Plain `docker run` — no compose file. Data under /var/zakura/{slug}/. */
 function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): string {
   const port = opts.port ?? 7443;

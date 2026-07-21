@@ -57,29 +57,12 @@ export function isSaasPackagePresent(): boolean {
 }
 
 /**
- * Resolve deployment edition.
- * - Explicit `ZAKURA_EDITION=oss|saas`
- * - Back-compat: `ZAKURA_MULTI_TENANT=true` / `ZAKURA_TENANT_MODE=multi-tenant` ⇒ saas
- * - Falls back to oss when the saas package was stripped
+ * Resolve deployment edition from `ZAKURA_EDITION=oss|saas`.
+ * Falls back to oss when the saas package was stripped.
  */
 export function resolveEdition(): ZakuraEdition {
   const explicit = (process.env.ZAKURA_EDITION ?? "").trim().toLowerCase();
-  if (explicit === "oss" || explicit === "open-source" || explicit === "opensource") {
-    return "oss";
-  }
-
-  const flag = (process.env.ZAKURA_MULTI_TENANT ?? "").trim().toLowerCase();
-  const mode = (process.env.ZAKURA_TENANT_MODE ?? "").trim().toLowerCase();
-  const wantSaas =
-    explicit === "saas" ||
-    flag === "1" ||
-    flag === "true" ||
-    flag === "yes" ||
-    flag === "on" ||
-    mode === "multi-tenant" ||
-    mode === "multi";
-
-  if (!wantSaas) return "oss";
+  if (explicit !== "saas") return "oss";
 
   if (!isSaasPackagePresent()) {
     console.warn(

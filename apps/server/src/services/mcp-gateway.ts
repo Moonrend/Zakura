@@ -26,7 +26,7 @@ import type { Orchestrator } from "./orchestrator.js";
 import type { ToolCallStore } from "./tool-call-store.js";
 
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
-const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch", "mem0"]);
+const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
 
 export interface ResolvedTool {
   qualifiedName: string;
@@ -209,7 +209,7 @@ export class McpGateway {
 
   /**
    * Agent tool universe:
-   * 1) native tools gated by enableFs/Shell/Browser/Computer/Memory
+   * 1) native tools gated by enableComputer / enableMemory
    * 2) web-search / web-fetch when agent providers.*.enabled === true
    * 3) other component instances: all running (mcp.mode=all) or agent_bindings (selected)
    */
@@ -271,9 +271,6 @@ export class McpGateway {
       );
 
     for (const instance of instances) {
-      // Native agent memory tools only — skip tenant mem0 surface
-      if (instance.providerId === "mem0") continue;
-
       if (instance.providerId === "web-search" && !isWebSearchEnabledForAgent(agent)) continue;
       if (instance.providerId === "web-fetch" && !isWebFetchEnabledForAgent(agent)) continue;
 
@@ -657,11 +654,9 @@ export class McpGateway {
             id: agents.id,
             name: agents.name,
             slug: agents.slug,
-            status: agents.status,
-            enableFs: agents.enableFs,
-            enableShell: agents.enableShell,
+            workspaceStatus: agents.workspaceStatus,
             enableComputer: agents.enableComputer,
-            enableBrowser: agents.enableBrowser,
+            enableMemory: agents.enableMemory,
           })
           .from(agents)
           .where(eq(agents.tenantId, tenantId));

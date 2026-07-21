@@ -29,7 +29,7 @@ export function toWorkspacePath(root: string, absPath: string): string {
   return rel === "" ? "." : rel;
 }
 
-/** Memoh-style workspace path: leading slash, never empty. */
+/** Workspace path: leading slash, never empty. */
 export function toApiPath(root: string, absPath: string): string {
   const rel = toWorkspacePath(root, absPath);
   if (rel === "." || rel === "") return "/";

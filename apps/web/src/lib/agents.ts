@@ -11,14 +11,7 @@ export type AgentListItem = {
   id: string;
   name: string;
   slug: string;
-  /** @deprecated Agent 无启动态；请用 workspace */
-  status: string;
-  /** 电脑环境（含文件/Shell/浏览器/桌面） */
-  computerEnv?: boolean;
-  enableFs: boolean;
-  enableShell: boolean;
   enableComputer: boolean;
-  enableBrowser: boolean;
   enableMemory: boolean;
   memoryProviderId?: string | null;
   /** Bound runtime node; null = implicit local */
@@ -122,18 +115,12 @@ export function levelColor(level: string) {
   return "text-muted-foreground";
 }
 
-export function needsDocker(a: {
-  enableShell?: boolean;
-  enableBrowser?: boolean;
-  enableComputer?: boolean;
-  computerEnv?: boolean;
-}) {
-  if (typeof a.computerEnv === "boolean") return a.computerEnv;
-  return Boolean(a.enableShell || a.enableBrowser || a.enableComputer);
+export function needsContainer(a: { enableComputer?: boolean; needsContainer?: boolean }) {
+  return a.needsContainer ?? Boolean(a.enableComputer);
 }
 
 export function getWorkspaceStatus(a: AgentListItem): string {
-  return a.workspace?.status ?? (needsDocker(a) ? "idle" : "none");
+  return a.workspace?.status ?? (needsContainer(a) ? "idle" : "none");
 }
 
 export async function fetchAgents() {

@@ -1,59 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ExternalLink, RefreshCw, Store } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  fromStorePreview,
+  pickPreferredInstallPreview,
+  type StoreInstallPreview,
+  type StoreServerLike,
+  type UnifiedMcpConfig,
+} from "@/lib/mcp-config";
 import { McpServerCard } from "@/components/mcp/server-card";
+import { McpInstallDialog } from "@/components/mcp/install-dialog";
+import type { McpInstallPhase } from "@/components/mcp/install-flow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 
 type StoreId = "github-mcp" | "official-registry" | "mcpservers-org" | "awesome-mcp";
 
-type InstallPreview = {
-  id: string;
-  kind: "http" | "stdio-npm" | "stdio-pypi" | "stdio-oci" | "stdio-other";
-  label: string;
-  summary: string;
-  detail?: string;
-  prefer: "http" | "stdio";
-  packageIndex?: number;
-  remoteUrl?: string;
-  envHints?: Array<{
-    name: string;
-    description?: string;
-    isRequired?: boolean;
-    isSecret?: boolean;
-    default?: string;
-  }>;
-};
-
-type StoreServer = {
-  name: string;
-  title?: string;
-  description: string;
+type StoreServer = StoreServerLike & {
   version: string;
-  repository?: { url?: string };
   remotes?: Array<{ type: string; url: string }>;
   packages?: Array<{
     registryType: string;
     identifier: string;
     runtimeHint?: string;
     version?: string;
-    environmentVariables?: InstallPreview["envHints"];
+    environmentVariables?: StoreInstallPreview["envHints"];
   }>;
   installKinds: string[];
   storeId: StoreId;
@@ -61,7 +39,7 @@ type StoreServer = {
   topics?: string[];
   category?: string;
   installHint?: string;
-  preview?: InstallPreview[];
+  preview?: StoreInstallPreview[];
 };
 
 type Source = {
@@ -87,6 +65,127 @@ const KIND_BADGE: Record<string, string> = {
   "stdio-other": "Stdio",
 };
 
+/** 单卡安装：状态内聚，互不阻塞其他卡片 */
+function StoreServerInstallCard({
+  item,
+  onInstalled,
+}: {
+  item: StoreServer;
+  onInstalled: (
+    instanceId: string,
+    meta: { authRequired?: boolean; dialogWasOpen: boolean },
+  ) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [server, setServer] = useState<StoreServerLike | null>(null);
+  const [options, setOptions] = useState<StoreInstallPreview[]>([]);
+  const [config, setConfig] = useState<UnifiedMcpConfig | null>(null);
+  const [installPhase, setInstallPhase] = useState<McpInstallPhase>("idle");
+  const [installedLocal, setInstalledLocal] = useState(false);
+
+  async function openInstall() {
+    setOpen(true);
+    setLoading(true);
+    setConfig(null);
+    try {
+      const enriched = await api<StoreServer>(
+        `/api/mcp/store/servers/${encodeURIComponent(item.name)}?store=${item.storeId}`,
+      );
+      const opts = enriched.preview?.length ? enriched.preview : [];
+      const preferred = pickPreferredInstallPreview(opts) ?? opts[0];
+      const like: StoreServerLike = {
+        name: enriched.name,
+        title: enriched.title,
+        description: enriched.description,
+        storeId: enriched.storeId,
+        repository: enriched.repository,
+        preview: opts,
+      };
+      setServer(like);
+      setOptions(opts);
+      if (preferred) {
+        setConfig(fromStorePreview(like, preferred));
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+      const like: StoreServerLike = {
+        name: item.name,
+        title: item.title,
+        description: item.description,
+        storeId: item.storeId,
+        repository: item.repository,
+        preview: item.preview,
+      };
+      setServer(like);
+      setOptions(item.preview ?? []);
+      const preferred = pickPreferredInstallPreview(item.preview ?? []);
+      if (preferred) setConfig(fromStorePreview(like, preferred));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function selectPreview(opt: StoreInstallPreview) {
+    if (!server) return;
+    setConfig(fromStorePreview(server, opt));
+  }
+
+  return (
+    <>
+      <McpServerCard
+        server={{
+          id: `${item.storeId}:${item.name}`,
+          title: item.title || item.name.split("/").pop() || item.name,
+          subtitle: item.name,
+          description: item.description,
+          version: item.version,
+          stars: item.stars,
+          repositoryUrl: item.repository?.url,
+          installed: installedLocal,
+          badges: [
+            {
+              label: STORE_LABEL[item.storeId] ?? item.storeId,
+              variant: "default",
+            },
+            ...item.installKinds.slice(0, 3).map((k) => ({
+              label: KIND_BADGE[k] ?? k,
+              variant: "secondary" as const,
+            })),
+          ],
+        }}
+        installPhase={installPhase}
+        installMessage={
+          installPhase === "creating"
+            ? "正在安装并启动…"
+            : installPhase === "awaiting_oauth"
+              ? "等待授权窗口…"
+              : undefined
+        }
+        onInstall={() => void openInstall()}
+      />
+      <McpInstallDialog
+        open={open}
+        onOpenChange={setOpen}
+        config={config}
+        previewOptions={options}
+        storeServer={server}
+        onSelectPreview={selectPreview}
+        loading={loading}
+        onPhaseChange={setInstallPhase}
+        onComplete={(result, meta) => {
+          setInstalledLocal(true);
+          setInstallPhase("done");
+          onInstalled(result.instanceId, {
+            authRequired: result.authRequired,
+            dialogWasOpen: meta.dialogWasOpen,
+          });
+        }}
+      />
+    </>
+  );
+}
+
 export function McpStorePanel() {
   const router = useRouter();
   const [q, setQ] = useState("");
@@ -99,10 +198,6 @@ export function McpStorePanel() {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
   const [storeCounts, setStoreCounts] = useState<Record<string, number>>({});
-  const [installTarget, setInstallTarget] = useState<StoreServer | null>(null);
-  const [selectedPreviewId, setSelectedPreviewId] = useState<string | null>(null);
-  const [envValues, setEnvValues] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,16 +227,6 @@ export function McpStorePanel() {
     const t = setTimeout(() => void load(), 200);
     return () => clearTimeout(t);
   }, [load]);
-
-  const previewOptions = useMemo(
-    () => installTarget?.preview ?? [],
-    [installTarget],
-  );
-
-  const selectedOption = useMemo(
-    () => previewOptions.find((p) => p.id === selectedPreviewId) ?? previewOptions[0],
-    [previewOptions, selectedPreviewId],
-  );
 
   async function sync(force = false) {
     setSyncing(true);
@@ -177,84 +262,6 @@ export function McpStorePanel() {
     }
   }
 
-  async function openInstall(server: StoreServer) {
-    try {
-      const enriched = await api<StoreServer & { preview?: InstallPreview[] }>(
-        `/api/mcp/store/servers/${encodeURIComponent(server.name)}?store=${server.storeId}`,
-      );
-      const options = enriched.preview?.length
-        ? enriched.preview
-        : [];
-      const preferred =
-        options.find((o) => o.kind === "http") ??
-        options.find((o) => o.kind === "stdio-npm") ??
-        options.find((o) => o.kind === "stdio-pypi") ??
-        options.find((o) => o.kind === "stdio-oci") ??
-        options[0];
-      setSelectedPreviewId(preferred?.id ?? null);
-      const env: Record<string, string> = {};
-      for (const hint of preferred?.envHints ?? []) {
-        env[hint.name] = hint.default ?? "";
-      }
-      setEnvValues(env);
-      setInstallTarget({ ...enriched, preview: options });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-      setInstallTarget(server);
-    }
-  }
-
-  function selectOption(opt: InstallPreview) {
-    setSelectedPreviewId(opt.id);
-    const env: Record<string, string> = {};
-    for (const hint of opt.envHints ?? []) {
-      env[hint.name] = envValues[hint.name] ?? hint.default ?? "";
-    }
-    setEnvValues(env);
-  }
-
-  async function confirmInstall() {
-    if (!installTarget || !selectedOption) return;
-    setBusy(true);
-    try {
-      const res = await api<{
-        instance: { id: string; slug: string };
-        started: boolean;
-        startError?: string;
-        authRequired?: boolean;
-      }>("/api/mcp/store/install", {
-        method: "POST",
-        json: {
-          name: installTarget.name,
-          store: installTarget.storeId,
-          prefer: selectedOption.prefer,
-          remoteUrl: selectedOption.remoteUrl,
-          packageIndex: selectedOption.packageIndex,
-          env: envValues,
-          start: true,
-        },
-      });
-      if (res.authRequired) {
-        toast.message("已安装，上游需要 OAuth 授权");
-        setInstallTarget(null);
-        router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
-        return;
-      }
-      toast.success(
-        res.started
-          ? `已安装 ${res.instance.slug}`
-          : `已创建（启动失败：${res.startError ?? "unknown"}）`,
-      );
-      setInstallTarget(null);
-      router.push(`/dashboard/mcp/${res.instance.id}`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const envHints = selectedOption?.envHints ?? [];
   const activeSource = sources.find((s) => s.id === store);
 
   return (
@@ -348,6 +355,7 @@ export function McpStorePanel() {
       <p className="text-xs text-muted-foreground">
         {loading ? "加载中…" : `${total} 条结果`}
         {fetchedAt ? ` · 缓存于 ${new Date(fetchedAt).toLocaleString()}` : null}
+        <span className="ml-1">· 默认优先 npm / uvx / OCI，可并行安装</span>
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -356,28 +364,18 @@ export function McpStorePanel() {
               <Skeleton key={i} className="h-40 rounded-lg" />
             ))
           : items.map((item) => (
-              <McpServerCard
+              <StoreServerInstallCard
                 key={`${item.storeId}:${item.name}`}
-                server={{
-                  id: `${item.storeId}:${item.name}`,
-                  title: item.title || item.name.split("/").pop() || item.name,
-                  subtitle: item.name,
-                  description: item.description,
-                  version: item.version,
-                  stars: item.stars,
-                  repositoryUrl: item.repository?.url,
-                  badges: [
-                    {
-                      label: STORE_LABEL[item.storeId] ?? item.storeId,
-                      variant: "default",
-                    },
-                    ...item.installKinds.slice(0, 3).map((k) => ({
-                      label: KIND_BADGE[k] ?? k,
-                      variant: "secondary" as const,
-                    })),
-                  ],
+                item={item}
+                onInstalled={(id, meta) => {
+                  // 弹窗已关：留在商店页；仍开着才进入详情
+                  if (!meta.dialogWasOpen && !meta.authRequired) return;
+                  router.push(
+                    meta.authRequired
+                      ? `/dashboard/mcp/${id}?oauth=1`
+                      : `/dashboard/mcp/${id}`,
+                  );
                 }}
-                onInstall={() => void openInstall(item)}
               />
             ))}
       </div>
@@ -391,114 +389,6 @@ export function McpStorePanel() {
           。
         </div>
       ) : null}
-
-      <Dialog open={!!installTarget} onOpenChange={(o) => !o && setInstallTarget(null)}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>安装预览</DialogTitle>
-            <DialogDescription>
-              {installTarget?.title || installTarget?.name}
-              {installTarget ? (
-                <span className="mt-1 block text-[11px]">
-                  来源：{STORE_LABEL[installTarget.storeId]} · {installTarget.name}
-                </span>
-              ) : null}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3">
-            {previewOptions.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                暂无安装元数据。可到{" "}
-                <Link href="/dashboard/mcp/import" className="underline">
-                  手动导入
-                </Link>{" "}
-                粘贴 VS Code JSON 或填写 URL。
-              </p>
-            ) : (
-              <div className="space-y-1.5">
-                <Label>安装方案</Label>
-                <div className="space-y-1.5">
-                  {previewOptions.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => selectOption(opt)}
-                      className={`w-full rounded-lg px-3 py-2 text-left ring-1 transition-colors ${
-                        selectedOption?.id === opt.id
-                          ? "bg-primary/10 ring-primary/40"
-                          : "bg-card ring-foreground/10 hover:bg-muted/50"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary" className="text-[10px]">
-                          {opt.label}
-                        </Badge>
-                        {opt.kind === "stdio-oci" ? (
-                          <span className="text-[10px] text-muted-foreground">Docker 运行</span>
-                        ) : null}
-                      </div>
-                      <code className="mt-1 block break-all text-[11px] text-foreground">
-                        {opt.summary}
-                      </code>
-                      {opt.detail ? (
-                        <p className="mt-0.5 text-[10px] text-muted-foreground">{opt.detail}</p>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {installTarget?.packages?.length ? (
-              <div className="rounded-lg bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
-                包信息：
-                {installTarget.packages.map((p, i) => (
-                  <span key={`${p.identifier}-${i}`} className="mr-2">
-                    [{p.registryType}
-                    {p.runtimeHint ? `/${p.runtimeHint}` : ""}] {p.identifier}
-                    {p.version ? `@${p.version}` : ""}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-
-            {envHints.length > 0 ? (
-              <div className="space-y-2">
-                <Label>环境变量 / 鉴权</Label>
-                {envHints.map((h) => (
-                  <div key={h.name} className="space-y-1">
-                    <div className="text-[11px] text-muted-foreground">
-                      {h.name}
-                      {h.isRequired ? " *" : ""}
-                      {h.description ? ` — ${h.description}` : ""}
-                    </div>
-                    <Input
-                      type={h.isSecret ? "password" : "text"}
-                      value={envValues[h.name] ?? ""}
-                      onChange={(e) =>
-                        setEnvValues((prev) => ({ ...prev, [h.name]: e.target.value }))
-                      }
-                    />
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setInstallTarget(null)}>
-              取消
-            </Button>
-            <Button
-              disabled={busy || !selectedOption}
-              onClick={() => void confirmInstall()}
-            >
-              {busy ? "安装中…" : "确认安装"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

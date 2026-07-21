@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { fromStdioPackage } from "@/lib/mcp-config";
 import {
   listenMcpOauthCallback,
   navigateOauthTab,
@@ -116,7 +117,7 @@ export function McpImportPanel() {
 
       if (authMode === "oauth") {
         if (res.oauth?.ok && res.oauth.authorizeUrl) {
-          toast.message("已创建实例，请在新标签页完成授权");
+          toast.message("已创建实例，请在弹出窗口完成授权");
           navigateOauthTab(preparedTab, res.oauth.authorizeUrl);
           const unsub = listenMcpOauthCallback((msg) => {
             unsub();
@@ -216,13 +217,12 @@ export function McpImportPanel() {
         .trim()
         .split(/\s+/)
         .filter(Boolean);
-      const command = stdioManager === "pypi" ? "uvx" : "npx";
-      const args =
-        stdioManager === "pypi" ? [pkg, ...extra] : ["-y", pkg, ...extra];
-      const name =
-        stdioName.trim() ||
-        pkg.split("/").pop()?.replace(/^@/, "") ||
-        "stdio-mcp";
+      const config = fromStdioPackage({
+        name: stdioName.trim() || undefined,
+        packageName: pkg,
+        packageManager: stdioManager,
+        extraArgs: extra,
+      });
       const res = await api<{
         instance: { id: string; slug: string };
         started: boolean;
@@ -230,10 +230,10 @@ export function McpImportPanel() {
       }>("/api/mcp/import-stdio", {
         method: "POST",
         json: {
-          name,
-          command,
-          args,
-          packageManager: stdioManager,
+          name: config.name,
+          command: config.command,
+          args: config.args,
+          packageManager: config.packageManager,
           start: startAfter,
         },
       });

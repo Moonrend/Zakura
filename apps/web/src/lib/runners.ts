@@ -72,7 +72,6 @@ export type RunnerInstallBundle = {
   installTailscale: RunnerInstallPackage | null;
   meshConnected?: boolean;
   hostJoinsTailscale?: boolean;
-  requireTailscale?: boolean;
   meshProvider?: string | null;
   tailscaleError?: string;
   tokenHint?: string;
@@ -100,7 +99,6 @@ export type RunnerDetailPayload = {
   installTailscale: RunnerInstallPackage | null;
   meshConnected?: boolean;
   hostJoinsTailscale?: boolean;
-  requireTailscale?: boolean;
   meshProvider?: string | null;
   tailscaleError?: string | null;
   tokenHint?: string | null;
@@ -188,9 +186,6 @@ export async function fetchRunnerMeshStatus(): Promise<{
   /** False in SaaS cloud mode: host never joins tenant tailnets */
   hostJoinsTailscale?: boolean;
   meshProvider?: string | null;
-  platformHeadscaleAvailable?: boolean;
-  /** Platform mode: Tailscale is mandatory for runners */
-  requireTailscale?: boolean;
 }> {
   return api("/api/runtime-nodes/mesh-status");
 }

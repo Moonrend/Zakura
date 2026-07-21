@@ -20,7 +20,6 @@ export type TailscaleMeshReady = {
   /** 可用 Tailscale 安装 Runner */
   ready: boolean;
   /** 平台 Headscale：强制组网 */
-  requireTailscale: boolean;
   platformMode: boolean;
   mesh: MeshPayload | null;
 };
@@ -112,13 +111,11 @@ type PanelProps = {
 };
 
 function deriveReady(mesh: MeshPayload): TailscaleMeshReady {
-  const platformMode =
-    mesh.meshProvider === "headscale-platform" || Boolean(mesh.requireTailscale);
+  const platformMode = mesh.meshProvider === "headscale-platform";
   const oauthConnected = mesh.oauth?.status === "connected";
   const ready = platformMode || Boolean(mesh.connected) || oauthConnected;
   return {
     ready,
-    requireTailscale: Boolean(mesh.requireTailscale) || platformMode,
     platformMode,
     mesh,
   };
@@ -150,7 +147,6 @@ export function TailscaleMeshPanel({
     if (!next) {
       onStatusChangeRef.current?.({
         ready: false,
-        requireTailscale: false,
         platformMode: false,
         mesh: null,
       });

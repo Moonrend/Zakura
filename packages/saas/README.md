@@ -17,4 +17,4 @@ pnpm strip:saas -- --out ../Zakura-oss
 | `@zakura/saas` | edition 常量 / SaaS web 路由列表 |
 | `@zakura/saas/server` | `registerSaasRoutes(app, deps)` |
 
-Server 在 `ZAKURA_EDITION=saas`（或 `ZAKURA_MULTI_TENANT=true`）且本包可解析时动态挂载。
+Server 在 `ZAKURA_EDITION=saas` 且本包可解析时动态挂载。

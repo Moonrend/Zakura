@@ -29,7 +29,6 @@ import { ServerWorkspaceFsProvider } from "./services/workspace-fs-provider.js";
 import { NetworkAuditService } from "./services/network-audit.js";
 import { SecurityPolicyService } from "./services/network-security.js";
 import { NetworkSettingsService } from "./services/network-settings.js";
-import { migratePlatformHeadscaleFromEnv } from "./services/platform-headscale.js";
 import {
   ExposureService,
   reconcileOrphanExposures,
@@ -72,9 +71,6 @@ async function main() {
     networkAudit,
   );
   if (config.multiTenant) {
-    await migratePlatformHeadscaleFromEnv(db, config.secret).catch((err) => {
-      console.warn("[headscale] env migrate failed:", err);
-    });
     await networkSettings.refreshPlatformHeadscale().catch((err) => {
       console.warn("[headscale] load config failed:", err);
     });

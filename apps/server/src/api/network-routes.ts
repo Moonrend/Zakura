@@ -27,17 +27,15 @@ function canManagePlatformHeadscale(
   return session.isPlatformAdmin === true;
 }
 
-/** UI-compat fields without rebuilding install packages on every mesh response. */
+/** 补全 hostJoinsTailscale，避免每次 mesh 响应重建安装包。 */
 async function withMeshExtras(
   mesh: Awaited<ReturnType<NetworkSettingsService["getMesh"]>>,
   network: NetworkSettingsService,
 ) {
+  if (mesh.hostJoinsTailscale != null) return mesh;
   return {
     ...mesh,
-    hasStoredAuthKey: mesh.hasAuthKey,
-    hostJoinsTailscale:
-      mesh.hostJoinsTailscale ??
-      (await network.hostJoinsTailscaleForTenant(mesh.meshProvider ?? null)),
+    hostJoinsTailscale: await network.hostJoinsTailscaleForTenant(mesh.meshProvider ?? null),
   };
 }
 
@@ -93,7 +91,6 @@ export function registerNetworkRoutes(
     const meshProvider = await network.resolveMeshProvider(session.tenantId);
     return c.json({
       ...overview,
-      platformHeadscaleAvailable: await network.isPlatformHeadscaleAvailable(),
       meshProvider,
       hostJoinsTailscale: await network.hostJoinsTailscaleForTenant(meshProvider),
     });
@@ -222,10 +219,7 @@ export function registerNetworkRoutes(
         actorId: session.userId,
       });
       network.invalidateMeshCache(session.tenantId);
-      return c.json({
-        ...result,
-        hasStoredAuthKey: Boolean(result.hasAuthKey),
-      });
+      return c.json(result);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

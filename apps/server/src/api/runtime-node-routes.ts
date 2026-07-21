@@ -202,22 +202,18 @@ export function registerRuntimeNodeRoutes(
         tags: [] as string[],
         hostJoinsTailscale: !config.multiTenant,
         meshProvider: null as string | null,
-        platformHeadscaleAvailable: false,
-        requireTailscale: false,
       });
     }
     try {
       // 仅读 mesh 摘要，不再调用 runnerJoinHint（会拼装安装包，极慢）
       const mesh = await network.getMesh(session.tenantId);
-      const requireTailscale = Boolean(mesh.requireTailscale);
+      const platformMode = mesh.meshProvider === "headscale-platform";
       return c.json({
-        meshConnected: Boolean(mesh.connected) || requireTailscale,
+        meshConnected: Boolean(mesh.connected) || platformMode,
         hasAuthKey: Boolean(mesh.hasAuthKey),
         tags: mesh.oauth?.tags ?? [],
         hostJoinsTailscale: mesh.hostJoinsTailscale ?? !config.multiTenant,
         meshProvider: mesh.meshProvider ?? null,
-        platformHeadscaleAvailable: mesh.platformHeadscaleAvailable ?? false,
-        requireTailscale,
       });
     } catch {
       const platform = await network.isPlatformHeadscaleAvailable();
@@ -227,8 +223,6 @@ export function registerRuntimeNodeRoutes(
         tags: [] as string[],
         hostJoinsTailscale: platform || !config.multiTenant,
         meshProvider: platform ? "headscale-platform" : null,
-        platformHeadscaleAvailable: platform,
-        requireTailscale: platform,
       });
     }
   });
@@ -409,7 +403,6 @@ export function registerRuntimeNodeRoutes(
         installTailscale: variants.withTailscale ? attach(variants.withTailscale) : null,
         meshConnected: variants.meshConnected,
         hostJoinsTailscale: variants.hostJoinsTailscale,
-        requireTailscale: variants.requireTailscale,
         meshProvider: variants.meshProvider,
         tailscaleError: variants.tailscaleError,
         tokenHint: `${token.slice(0, 8)}…`,
@@ -444,7 +437,6 @@ export function registerRuntimeNodeRoutes(
         installTailscale: null,
         meshConnected: false,
         hostJoinsTailscale: true,
-        requireTailscale: false,
         meshProvider: null,
         tailscaleError: null,
         tokenHint: null,
@@ -454,14 +446,13 @@ export function registerRuntimeNodeRoutes(
     const token = nodes.resolveToken(node);
     let meshConnected = false;
     let hostJoinsTailscale = !config.multiTenant;
-    let requireTailscale = false;
     let meshProvider: string | null = null;
     let tailscaleError: string | null = null;
 
     try {
       const mesh = await network.getMesh(session.tenantId);
-      requireTailscale = Boolean(mesh.requireTailscale);
-      meshConnected = Boolean(mesh.connected) || requireTailscale;
+      const platformMode = mesh.meshProvider === "headscale-platform";
+      meshConnected = Boolean(mesh.connected) || platformMode;
       hostJoinsTailscale =
         mesh.hostJoinsTailscale ??
         (await network.hostJoinsTailscaleForTenant(mesh.meshProvider));
@@ -489,7 +480,6 @@ export function registerRuntimeNodeRoutes(
       installTailscale: null,
       meshConnected,
       hostJoinsTailscale,
-      requireTailscale,
       meshProvider,
       tailscaleError,
       tokenHint: token ? `${token.slice(0, 8)}…` : null,
@@ -600,7 +590,7 @@ export function registerRuntimeNodeRoutes(
     return c.json(
       {
         error:
-          "Remote residual cleanup requires runner API (use runner DELETE residual in Phase 3 UI)",
+          "Remote residual cleanup requires runner API",
         hint: join(node.storageRoot, "agents", agentId, "workspace"),
       },
       501,

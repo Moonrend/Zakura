@@ -17,14 +17,6 @@ export type PreRegisteredOauthClient = {
   source: "byo" | "tenant" | "platform" | "env";
 };
 
-type ProviderDef = {
-  id: string;
-  oauthAppId: McpOauthAppId;
-  hosts: string[];
-  /** 产品默认 scopes（Google Workspace MCP） */
-  defaultScopes?: string;
-};
-
 const PROVIDERS: ProviderDef[] = [
   {
     id: "github",
@@ -35,16 +27,26 @@ const PROVIDERS: ProviderDef[] = [
     id: "google-gmail",
     oauthAppId: "google",
     hosts: ["gmailmcp.googleapis.com"],
+    pathHints: ["zakura://google-workspace/gmail"],
     defaultScopes: [
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/gmail.send",
     ].join(" "),
   },
   {
     id: "google-drive",
     oauthAppId: "google",
     hosts: ["drivemcp.googleapis.com"],
+    pathHints: ["zakura://google-workspace/drive"],
     defaultScopes: [
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
       "https://www.googleapis.com/auth/drive.readonly",
       "https://www.googleapis.com/auth/drive.file",
     ].join(" "),
@@ -53,14 +55,88 @@ const PROVIDERS: ProviderDef[] = [
     id: "google-calendar",
     oauthAppId: "google",
     hosts: ["calendarmcp.googleapis.com"],
+    pathHints: ["zakura://google-workspace/calendar"],
     defaultScopes: [
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
       "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
       "https://www.googleapis.com/auth/calendar.events.freebusy",
       "https://www.googleapis.com/auth/calendar.events.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
+    ].join(" "),
+  },
+  {
+    id: "google-people",
+    oauthAppId: "google",
+    hosts: ["people.googleapis.com"],
+    pathHints: ["zakura://google-workspace/people"],
+    defaultScopes: [
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+      "https://www.googleapis.com/auth/contacts.readonly",
+      "https://www.googleapis.com/auth/directory.readonly",
+    ].join(" "),
+  },
+  {
+    id: "google-chat",
+    oauthAppId: "google",
+    hosts: ["chatmcp.googleapis.com", "chat.googleapis.com"],
+    pathHints: ["zakura://google-workspace/chat"],
+    defaultScopes: [
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+      "https://www.googleapis.com/auth/chat.spaces.readonly",
+      "https://www.googleapis.com/auth/chat.memberships.readonly",
+      "https://www.googleapis.com/auth/chat.messages.readonly",
+      "https://www.googleapis.com/auth/chat.messages.create",
+      "https://www.googleapis.com/auth/chat.users.readstate.readonly",
+    ].join(" "),
+  },
+  {
+    id: "slack",
+    oauthAppId: "slack",
+    hosts: ["mcp.slack.com"],
+    pathHints: ["https://mcp.slack.com/mcp"],
+    defaultScopes: [
+      "search:read.public",
+      "search:read.private",
+      "search:read.mpim",
+      "search:read.im",
+      "search:read.files",
+      "search:read.users",
+      "files:read",
+      "emoji:read",
+      "chat:write",
+      "channels:history",
+      "groups:history",
+      "mpim:history",
+      "im:history",
+      "channels:read",
+      "groups:read",
+      "mpim:read",
+      "users:read",
+      "users:read.email",
+      "reactions:write",
+      "canvases:read",
+      "canvases:write",
+      "channels:write",
+      "groups:write",
+      "im:write",
+      "mpim:write",
     ].join(" "),
   },
 ];
 
+type ProviderDef = {
+  id: string;
+  oauthAppId: McpOauthAppId;
+  hosts: string[];
+  pathHints?: string[];
+  defaultScopes?: string;
+};
 function hostnameOf(mcpUrl: string): string | null {
   try {
     return new URL(mcpUrl).hostname.toLowerCase();
@@ -70,6 +146,12 @@ function hostnameOf(mcpUrl: string): string | null {
 }
 
 function matchProvider(mcpUrl: string): ProviderDef | null {
+  const normalized = mcpUrl.trim().toLowerCase();
+  const byHint = PROVIDERS.find((p) =>
+    p.pathHints?.some((h) => normalized === h.toLowerCase() || normalized.startsWith(h.toLowerCase())),
+  );
+  if (byHint) return byHint;
+
   const host = hostnameOf(mcpUrl);
   if (!host) return null;
   return (

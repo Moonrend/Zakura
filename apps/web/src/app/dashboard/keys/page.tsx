@@ -16,7 +16,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 
 type KeyRow = {
@@ -72,35 +72,35 @@ export default function KeysPage() {
         <Skeleton className="h-40 w-full rounded-lg" />
       ) : (
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>前缀</TH>
-              <TH>最近使用</TH>
-              <TH>创建</TH>
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>前缀</TableHead>
+              <TableHead>最近使用</TableHead>
+              <TableHead>创建</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {rows.map((r) => (
-              <TR key={r.id}>
-                <TD className="font-medium">{r.name}</TD>
-                <TD>
+              <TableRow key={r.id}>
+                <TableCell className="font-medium">{r.name}</TableCell>
+                <TableCell>
                   <code className="text-[11px]">{r.keyPrefix}…</code>
-                </TD>
-                <TD className="text-xs text-muted-foreground">{r.lastUsedAt || "—"}</TD>
-                <TD className="text-xs text-muted-foreground">
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">{r.lastUsedAt || "—"}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
                   {new Date(r.createdAt).toLocaleString()}
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             ))}
             {!rows.length ? (
-              <TR>
-                <TD colSpan={4} className="py-8 text-center text-muted-foreground">
+              <TableRow>
+                <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
                   暂无 Key
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             ) : null}
-          </TBody>
+          </TableBody>
         </Table>
       )}
 

@@ -42,7 +42,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -56,7 +56,7 @@ export default function RunnersPage() {
   const [name, setName] = useState("");
   const [accessMode, setAccessMode] = useState<AccessMode>(null);
   const [meshReady, setMeshReady] = useState(false);
-  const [requireTailscale, setRequireTailscale] = useState(false);
+  const [platformMode, setPlatformMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{
     node: RuntimeNode;
@@ -88,14 +88,13 @@ export default function RunnersPage() {
     setName("");
     setAccessMode(null);
     setMeshReady(false);
-    setRequireTailscale(false);
+    setPlatformMode(false);
   }
 
   function onMeshStatus(status: TailscaleMeshReady) {
     setMeshReady(status.ready);
-    setRequireTailscale(status.requireTailscale);
-    // 平台强制组网时自动锁定到 tailscale
-    if (status.requireTailscale) {
+    setPlatformMode(status.platformMode);
+    if (status.platformMode) {
       setAccessMode("tailscale");
     }
   }
@@ -104,7 +103,7 @@ export default function RunnersPage() {
   const canSubmit =
     Boolean(name.trim()) &&
     accessMode != null &&
-    (accessMode === "public" ? !requireTailscale : meshReady);
+    (accessMode === "public" ? !platformMode : meshReady);
 
   return (
     <div className="space-y-5">
@@ -158,18 +157,18 @@ export default function RunnersPage() {
         <Skeleton className="h-48 w-full rounded-lg" />
       ) : (
         <Table>
-          <THead>
-            <TR>
-              <TH>名称</TH>
-              <TH>类型</TH>
-              <TH>状态</TH>
-              <TH>主机 / IP</TH>
-              <TH>Endpoint</TH>
-              <TH>最近心跳</TH>
-              <TH className="w-[1%]" />
-            </TR>
-          </THead>
-          <TBody>
+          <TableHeader>
+            <TableRow>
+              <TableHead>名称</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>主机 / IP</TableHead>
+              <TableHead>Endpoint</TableHead>
+              <TableHead>最近心跳</TableHead>
+              <TableHead className="w-[1%]" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {rows.map((r) => {
               const host = isRunnerHostInfo(r.hostInfo) ? r.hostInfo : {};
               const hostLine =
@@ -181,8 +180,8 @@ export default function RunnersPage() {
                   ? `可用 ${formatBytes(host.disk.freeBytes)}`
                   : null;
               return (
-                <TR key={r.id}>
-                  <TD>
+                <TableRow key={r.id}>
+                  <TableCell>
                     <Link
                       href={`/dashboard/runners/${r.id}`}
                       className="font-medium hover:underline"
@@ -192,30 +191,30 @@ export default function RunnersPage() {
                     <div className="text-[11px] text-muted-foreground font-mono">
                       {r.id}
                     </div>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="outline">{kindLabel(r.kind)}</Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant={statusVariant(r.status)}>
                       {statusLabel(r.status)}
                     </Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <div className="text-xs">{hostLine}</div>
                     {disk ? (
                       <div className="text-[11px] text-muted-foreground">{disk}</div>
                     ) : null}
-                  </TD>
-                  <TD className="max-w-[160px] truncate text-xs font-mono text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="max-w-[160px] truncate text-xs font-mono text-muted-foreground">
                     {r.endpoint || "—"}
-                  </TD>
-                  <TD className="text-xs text-muted-foreground whitespace-nowrap">
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                     {r.lastSeenAt
                       ? new Date(r.lastSeenAt).toLocaleString()
                       : "—"}
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <TableActions>
                       <Button
                         size="icon"
@@ -254,21 +253,21 @@ export default function RunnersPage() {
                         </Button>
                       ) : null}
                     </TableActions>
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               );
             })}
             {!rows.length ? (
-              <TR>
-                <TD colSpan={7} className="py-10 text-center text-muted-foreground">
+              <TableRow>
+                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
                   <div className="flex flex-col items-center gap-2">
                     <Cpu className="size-8 opacity-40" />
                     <div>暂无 Runner</div>
                   </div>
-                </TD>
-              </TR>
+                </TableCell>
+              </TableRow>
             ) : null}
-          </TBody>
+          </TableBody>
         </Table>
       )}
 
@@ -319,7 +318,7 @@ export default function RunnersPage() {
                   toast.error("请先完成 Tailscale 连接");
                   return;
                 }
-                if (accessMode === "public" && requireTailscale) {
+                if (accessMode === "public" && platformMode) {
                   toast.error("当前部署要求 Runner 必须加入组网");
                   return;
                 }
@@ -354,7 +353,7 @@ export default function RunnersPage() {
                 <div className="grid gap-2 sm:grid-cols-2">
                   <button
                     type="button"
-                    disabled={requireTailscale}
+                    disabled={platformMode}
                     onClick={() => {
                       setAccessMode("public");
                       setMeshReady(false);
@@ -398,7 +397,7 @@ export default function RunnersPage() {
               {/* 仅在选定「无公网」后才加载组网状态与配置，避免打开弹窗就打慢接口 */}
               {accessMode === "public" ? (
                 <div className="rounded-lg border border-border/60 px-3 py-2.5 text-[11px] text-muted-foreground leading-relaxed">
-                  {requireTailscale ? (
+                  {platformMode ? (
                     <>当前部署为平台托管组网，远程 Runner 必须加入 Tailscale，请改选「无公网 / NAT」。</>
                   ) : (
                     <>

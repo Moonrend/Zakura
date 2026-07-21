@@ -615,7 +615,7 @@ export async function callAgentNativeTool(
 ): Promise<McpToolResult> {
   try {
     // Resolve FS via provider when available (local or remote runner).
-    // Fall back to ensureLocal only when provider is not wired (tests/legacy).
+    // Fall back to ensureLocal only when provider is not wired (tests without provider).
     const fs: WorkspaceFs = workspaceFsProvider
       ? await workspaceFsProvider.forAgent(agent.id, agent.tenantId)
       : (() => {
@@ -641,13 +641,8 @@ export async function callAgentNativeTool(
         id: agent.id,
         name: agent.name,
         slug: agent.slug,
-        capabilities: {
-          computer: isComputerEnvEnabled(agent),
-          filesystem: isComputerEnvEnabled(agent),
-          shell: isComputerEnvEnabled(agent),
-          browser: isComputerEnvEnabled(agent),
-          memory: agent.enableMemory,
-        },
+        enableComputer: isComputerEnvEnabled(agent),
+        enableMemory: agent.enableMemory,
         memoryProvider,
         runtimeNodeId: agent.runtimeNodeId ?? null,
         workspaceStatus: agent.workspaceStatus ?? "ready",
@@ -655,15 +650,6 @@ export async function callAgentNativeTool(
         hostDataNote: "Host path is managed by Zakura; tools only see the sandbox.",
         desktop,
         workspace: container
-          ? {
-              id: container.id,
-              dockerId: container.dockerId,
-              status: container.status,
-              image: container.image,
-            }
-          : null,
-        /** @deprecated 使用 workspace.status */
-        container: container
           ? {
               id: container.id,
               dockerId: container.dockerId,

@@ -1,8 +1,6 @@
 /**
- * Workspace migration export/import: walk + exclude + tar + gzip + manifest.
- * Compression uses gzip (portable zlib) with compression field in manifest.
- * Archive filename convention remains *.tar.zst for pipeline compatibility;
- * body is gzip when zstd CLI is unavailable (Windows/dev hosts).
+ * Workspace migration export/import: walk + exclude + tar.gz + manifest.
+ * Archives are gzip-compressed; manifest records compression: "gzip".
  */
 import { createHash } from "node:crypto";
 import {

@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 
 type Member = {
@@ -133,24 +133,24 @@ export default function TenantMembersPage() {
           <Skeleton className="h-24 w-full" />
         ) : (
           <Table>
-            <THead>
-              <TR>
-                <TH>用户</TH>
-                <TH>角色</TH>
-                <TH className="w-24" />
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>用户</TableHead>
+                <TableHead>角色</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {members.map((m) => (
-                <TR key={m.id}>
-                  <TD>
+                <TableRow key={m.id}>
+                  <TableCell>
                     <div className="font-medium">{m.user.name || m.user.email}</div>
                     <div className="text-xs text-muted-foreground">{m.user.email}</div>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant="secondary">{m.role}</Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     {m.role !== "owner" ? (
                       <Button
                         size="sm"
@@ -160,10 +160,10 @@ export default function TenantMembersPage() {
                         <Trash2 className="size-3.5" />
                       </Button>
                     ) : null}
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               ))}
-            </TBody>
+            </TableBody>
           </Table>
         )}
       </SettingsSection>
@@ -173,28 +173,28 @@ export default function TenantMembersPage() {
           <p className="text-sm text-muted-foreground">暂无待处理邀请</p>
         ) : (
           <Table>
-            <THead>
-              <TR>
-                <TH>邮箱</TH>
-                <TH>角色</TH>
-                <TH className="w-24" />
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>邮箱</TableHead>
+                <TableHead>角色</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {invites.map((i) => (
-                <TR key={i.id}>
-                  <TD>{i.email}</TD>
-                  <TD>
+                <TableRow key={i.id}>
+                  <TableCell>{i.email}</TableCell>
+                  <TableCell>
                     <Badge variant="outline">{i.role}</Badge>
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Button size="sm" variant="ghost" onClick={() => void revoke(i.id)}>
                       撤销
                     </Button>
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               ))}
-            </TBody>
+            </TableBody>
           </Table>
         )}
       </SettingsSection>

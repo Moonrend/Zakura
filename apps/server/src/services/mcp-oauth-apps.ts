@@ -6,7 +6,7 @@ import type { AppConfig } from "../config.js";
 
 export const MCP_OAUTH_APPS_KEY = "mcp.oauth.apps";
 
-export type McpOauthAppId = "github" | "google";
+export type McpOauthAppId = "github" | "google" | "slack";
 export type McpOauthAppScope = "platform" | "tenant";
 
 export type McpOauthAppStored = {
@@ -57,9 +57,15 @@ export const MCP_OAUTH_APP_META: Record<
       "用于 Gmail / Drive / Calendar 等 Google Workspace MCP。须在 Google Cloud 创建「OAuth 客户端」（Web 应用），不是 API 密钥（API Key 无法访问用户邮箱/云盘数据）。",
     docsUrl: "https://developers.google.com/workspace/guides/configure-mcp-servers",
   },
+  slack: {
+    name: "Slack",
+    description:
+      "用于官方 Slack MCP（mcp.slack.com）。须在 api.slack.com 创建 App，开启 Agents & AI / MCP，并配置 Redirect URL；Slack 不支持 DCR。",
+    docsUrl: "https://docs.slack.dev/ai/slack-mcp-server",
+  },
 };
 
-const APP_IDS: McpOauthAppId[] = ["github", "google"];
+const APP_IDS: McpOauthAppId[] = ["github", "google", "slack"];
 
 function emptyStored(): McpOauthAppStored {
   return { enabled: false, clientId: "", clientSecretEnc: "", scopes: "" };
@@ -167,6 +173,17 @@ export function resolveAppCredentials(
       clientId,
       clientSecret: process.env.ZAKURA_GOOGLE_OAUTH_CLIENT_SECRET?.trim() || undefined,
       scopes: process.env.ZAKURA_GOOGLE_OAUTH_SCOPES?.trim() || undefined,
+      enabled: true,
+      fromEnv: true,
+    };
+  }
+  if (appId === "slack") {
+    const clientId = config.mcpOauthClients.slackClientId?.trim();
+    if (!clientId) return null;
+    return {
+      clientId,
+      clientSecret: config.mcpOauthClients.slackClientSecret?.trim() || undefined,
+      scopes: config.mcpOauthClients.slackScopes?.trim() || undefined,
       enabled: true,
       fromEnv: true,
     };

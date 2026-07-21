@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { KeyRound } from "lucide-react";
-import { api, ApiError, setSession } from "@/lib/api";
+import { api, setSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,8 +36,6 @@ export default function OauthAuthorizePage() {
   const [me, setMe] = useState<Me | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [tenantSlug, setTenantSlug] = useState("");
-  const [showTenant, setShowTenant] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const query = useMemo(
@@ -81,22 +79,13 @@ export default function OauthAuthorizePage() {
     try {
       const res = await api<{ session: string }>("/api/auth/login", {
         method: "POST",
-        json: {
-          email,
-          password,
-          ...(tenantSlug.trim() ? { tenantSlug: tenantSlug.trim() } : {}),
-        },
+        json: { email, password },
       });
       setSession(res.session);
       setMe(await api<Me>("/api/me"));
       toast.success("已登录");
     } catch (err) {
-      if (err instanceof ApiError && err.body.error === "tenant_required") {
-        setShowTenant(true);
-        toast.error("该邮箱属于多个租户，请填写租户标识");
-      } else {
-        toast.error(err instanceof Error ? err.message : String(err));
-      }
+      toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -227,27 +216,6 @@ export default function OauthAuthorizePage() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
-            {(showTenant || tenantSlug) && (
-              <div className="space-y-1.5">
-                <Label htmlFor="tenantSlug">租户标识</Label>
-                <Input
-                  id="tenantSlug"
-                  autoComplete="organization"
-                  placeholder="例如 default"
-                  value={tenantSlug}
-                  onChange={(e) => setTenantSlug(e.target.value)}
-                />
-              </div>
-            )}
-            {!showTenant ? (
-              <button
-                type="button"
-                className="text-xs text-muted-foreground underline-offset-2 hover:underline"
-                onClick={() => setShowTenant(true)}
-              >
-                多租户？填写租户标识
-              </button>
-            ) : null}
             <div className="flex gap-2">
               <Button type="submit" className="flex-1" disabled={busy || !info}>
                 {busy ? "…" : "登录"}

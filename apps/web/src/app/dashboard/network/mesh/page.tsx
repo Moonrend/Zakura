@@ -22,7 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkMeshPage() {
   const [data, setData] = useState<MeshPayload | null>(null);
@@ -217,8 +217,7 @@ export default function NetworkMeshPage() {
     );
   }
 
-  const platformMode =
-    data.meshProvider === "headscale-platform" || Boolean(data.requireTailscale);
+  const platformMode = data.meshProvider === "headscale-platform";
   const oauthConnected = data.oauth?.status === "connected";
 
   // ── Platform-managed (SaaS Headscale): devices only ────────────────────
@@ -259,46 +258,46 @@ export default function NetworkMeshPage() {
             <p className="text-sm text-muted-foreground">暂无设备。创建 Runner 并启用安装脚本后将出现在此。</p>
           ) : (
             <Table>
-              <THead>
-                <TR>
-                  <TH>名称</TH>
-                  <TH>地址</TH>
-                  <TH>状态</TH>
-                  <TH>标签 / 用户</TH>
-                </TR>
-              </THead>
-              <TBody>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>地址</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>标签 / 用户</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {tailnet.map((d) => (
-                  <TR key={d.id}>
-                    <TD className="font-medium">{d.hostname || d.name}</TD>
-                    <TD className="font-mono text-xs">
+                  <TableRow key={d.id}>
+                    <TableCell className="font-medium">{d.hostname || d.name}</TableCell>
+                    <TableCell className="font-mono text-xs">
                       {d.addresses?.join(", ") || "—"}
-                    </TD>
-                    <TD>
+                    </TableCell>
+                    <TableCell>
                       <Badge variant={d.online ? "default" : "secondary"}>
                         {d.online ? "在线" : "离线"}
                       </Badge>
-                    </TD>
-                    <TD className="font-mono text-xs text-muted-foreground">
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
                       {d.tags?.length ? d.tags.join(", ") : d.user || "—"}
-                    </TD>
-                  </TR>
+                    </TableCell>
+                  </TableRow>
                 ))}
                 {data.devices.map((d) => (
-                  <TR key={`rn-${d.id}`}>
-                    <TD className="font-medium">{d.name}</TD>
-                    <TD className="font-mono text-xs">
+                  <TableRow key={`rn-${d.id}`}>
+                    <TableCell className="font-medium">{d.name}</TableCell>
+                    <TableCell className="font-mono text-xs">
                       {d.tailscale?.ip || d.endpoint || "—"}
-                    </TD>
-                    <TD>
+                    </TableCell>
+                    <TableCell>
                       <Badge variant={d.status === "online" ? "default" : "secondary"}>
                         {d.status}
                       </Badge>
-                    </TD>
-                    <TD className="text-xs text-muted-foreground">Runner · {d.slug}</TD>
-                  </TR>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">Runner · {d.slug}</TableCell>
+                  </TableRow>
                 ))}
-              </TBody>
+              </TableBody>
             </Table>
           )}
         </SettingsSection>
@@ -425,22 +424,22 @@ export default function NetworkMeshPage() {
       {(data.tailnetDevices?.length ?? 0) > 0 ? (
         <SettingsSection title="Tailnet 设备">
           <Table>
-            <THead>
-              <TR>
-                <TH>名称</TH>
-                <TH>地址</TH>
-                <TH>状态</TH>
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>地址</TableHead>
+                <TableHead>状态</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {data.tailnetDevices!.map((d) => (
-                <TR key={d.id}>
-                  <TD>{d.hostname || d.name}</TD>
-                  <TD className="font-mono text-xs">{d.addresses?.join(", ")}</TD>
-                  <TD>{d.online ? "在线" : "离线"}</TD>
-                </TR>
+                <TableRow key={d.id}>
+                  <TableCell>{d.hostname || d.name}</TableCell>
+                  <TableCell className="font-mono text-xs">{d.addresses?.join(", ")}</TableCell>
+                  <TableCell>{d.online ? "在线" : "离线"}</TableCell>
+                </TableRow>
               ))}
-            </TBody>
+            </TableBody>
           </Table>
         </SettingsSection>
       ) : null}

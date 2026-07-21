@@ -1,26 +1,17 @@
 /**
- * 电脑环境能力归一化：文件系统 / Shell / 浏览器 / 桌面是一套，不可拆开限制。
+ * 电脑环境能力：文件系统 / Shell / 浏览器 / 桌面是一套，不可拆开限制。
  */
 
-export function isComputerEnvEnabled(caps: {
-  enableShell?: boolean;
-  enableComputer?: boolean;
-  enableBrowser?: boolean;
-}): boolean {
-  return Boolean(caps.enableComputer || caps.enableBrowser || caps.enableShell);
+export function isComputerEnvEnabled(caps: { enableComputer?: boolean }): boolean {
+  return Boolean(caps.enableComputer);
 }
 
 /** 将「电脑环境」归一成整套标志；记忆仍为独立 opt-in。 */
 export function normalizeCaps(input: {
-  /** 电脑环境总开关；也兼容旧的 shell/browser 字段 */
   enableComputer?: boolean;
-  enableShell?: boolean;
-  enableBrowser?: boolean;
-  enableFs?: boolean;
   enableMemory?: boolean;
 }) {
-  const computerOn =
-    input.enableComputer ?? Boolean(input.enableShell || input.enableBrowser);
+  const computerOn = Boolean(input.enableComputer);
   const enableMemory = input.enableMemory ?? false;
 
   return {
@@ -33,10 +24,6 @@ export function normalizeCaps(input: {
   };
 }
 
-export function needsContainer(caps: {
-  enableShell: boolean;
-  enableComputer: boolean;
-  enableBrowser: boolean;
-}): boolean {
+export function needsContainer(caps: { enableComputer: boolean }): boolean {
   return isComputerEnvEnabled(caps);
 }

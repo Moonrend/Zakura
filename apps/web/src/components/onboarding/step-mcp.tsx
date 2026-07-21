@@ -5,14 +5,8 @@ import { toast } from "sonner";
 import { CURATED_OAUTH_MCPS, oauthTierBadge, type UnifiedMcpConfig } from "@/lib/mcp-config";
 import { api } from "@/lib/api";
 import { McpServerCard } from "@/components/mcp/server-card";
-import { McpInstallFlow } from "@/components/mcp/install-flow";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { McpInstallDialog } from "@/components/mcp/install-dialog";
+import type { McpInstallPhase } from "@/components/mcp/install-flow";
 
 type InstalledRow = {
   id: string;
@@ -35,8 +29,59 @@ function isInstalled(mcp: UnifiedMcpConfig, list: InstalledRow[]) {
   });
 }
 
+function OnboardingInstallCard({
+  mcp,
+  installed,
+  onInstalled,
+}: {
+  mcp: UnifiedMcpConfig;
+  installed: boolean;
+  onInstalled: (meta: { dialogWasOpen: boolean }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [installPhase, setInstallPhase] = useState<McpInstallPhase>("idle");
+  const [installedLocal, setInstalledLocal] = useState(installed);
+  const tier = oauthTierBadge(mcp);
+
+  useEffect(() => {
+    setInstalledLocal(installed);
+  }, [installed]);
+
+  return (
+    <>
+      <McpServerCard
+        server={{
+          id: mcp.id,
+          title: mcp.name,
+          subtitle: mcp.mcpUrl,
+          description: mcp.description,
+          badges: [
+            { label: tier.label, variant: tier.variant },
+            { label: "HTTP", variant: "secondary" },
+          ],
+          repositoryUrl: mcp.repositoryUrl ?? mcp.docsUrl,
+          installed: installedLocal,
+        }}
+        installPhase={installPhase}
+        onInstall={() => setOpen(true)}
+      />
+      <McpInstallDialog
+        open={open}
+        onOpenChange={setOpen}
+        config={mcp}
+        onPhaseChange={setInstallPhase}
+        onComplete={(_result, meta) => {
+          setInstalledLocal(true);
+          setInstallPhase("done");
+          toast.success(`${mcp.name} 已接入`);
+          onInstalled(meta);
+        }}
+      />
+    </>
+  );
+}
+
 export function StepMcpConnect({ onDone }: Props) {
-  const [selected, setSelected] = useState<UnifiedMcpConfig | null>(null);
   const [installed, setInstalled] = useState<InstalledRow[]>([]);
 
   const refresh = useCallback(async () => {
@@ -47,7 +92,8 @@ export function StepMcpConnect({ onDone }: Props) {
           (i) =>
             i.providerId === "generic-mcp" ||
             i.providerId === "stdio-mcp" ||
-            i.providerId === "openviking",
+            i.providerId === "openviking" ||
+            i.providerId === "google-workspace",
         ),
       );
     } catch {
@@ -62,53 +108,18 @@ export function StepMcpConnect({ onDone }: Props) {
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
-        {CURATED_OAUTH_MCPS.map((mcp) => {
-          const tier = oauthTierBadge(mcp);
-          return (
-            <McpServerCard
-              key={mcp.id}
-              server={{
-                id: mcp.id,
-                title: mcp.name,
-                subtitle: mcp.mcpUrl,
-                description: mcp.description,
-                badges: [
-                  { label: tier.label, variant: tier.variant },
-                  { label: "HTTP", variant: "secondary" },
-                ],
-                repositoryUrl: mcp.repositoryUrl ?? mcp.docsUrl,
-                installed: isInstalled(mcp, installed),
-              }}
-              onInstall={() => setSelected(mcp)}
-            />
-          );
-        })}
+        {CURATED_OAUTH_MCPS.map((mcp) => (
+          <OnboardingInstallCard
+            key={mcp.id}
+            mcp={mcp}
+            installed={isInstalled(mcp, installed)}
+            onInstalled={() => {
+              void refresh();
+              onDone();
+            }}
+          />
+        ))}
       </div>
-
-      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>安装 {selected?.name}</DialogTitle>
-            <DialogDescription>
-              {selected?.oauth?.tier === "B"
-                ? "使用预注册 OAuth App 或访问令牌完成授权。"
-                : "OAuth 2.1 授权后即可使用。"}
-            </DialogDescription>
-          </DialogHeader>
-          {selected ? (
-            <McpInstallFlow
-              key={selected.id}
-              config={selected}
-              onComplete={() => {
-                void refresh();
-                toast.success(`${selected.name} 已接入`);
-                setSelected(null);
-                onDone();
-              }}
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

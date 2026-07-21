@@ -6,12 +6,11 @@ import { componentInstances } from "../db/schema.js";
 import type { Orchestrator } from "./orchestrator.js";
 
 /** First-class product capabilities (each has its own settings panel). */
-export type CapabilityKind = "web-search" | "web-fetch" | "mem0";
+export type CapabilityKind = "web-search" | "web-fetch";
 
 const META: Record<CapabilityKind, { name: string; slug: string }> = {
   "web-search": { name: "网页搜索", slug: "web-search" },
   "web-fetch": { name: "网页抓取", slug: "web-fetch" },
-  mem0: { name: "记忆", slug: "memory" },
 };
 
 function defaultConfig(kind: CapabilityKind): Record<string, unknown> {
@@ -21,15 +20,9 @@ function defaultConfig(kind: CapabilityKind): Record<string, unknown> {
       engines: { duckduckgo: { enabled: true } },
     };
   }
-  if (kind === "web-fetch") {
-    return {
-      defaultBackend: "native",
-      backends: { native: { enabled: true } },
-    };
-  }
   return {
-    enabled: true,
-    defaultUserId: "default",
+    defaultBackend: "native",
+    backends: { native: { enabled: true } },
   };
 }
 

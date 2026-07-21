@@ -245,10 +245,7 @@ export class AgentService {
     input: {
       name?: string;
       description?: string;
-      enableFs?: boolean;
-      enableShell?: boolean;
       enableComputer?: boolean;
-      enableBrowser?: boolean;
       enableMemory?: boolean;
       memoryProviderId?: string | null;
       workspaceImage?: string | null;
@@ -272,19 +269,11 @@ export class AgentService {
       if (!mp) throw new Error("Memory provider not found");
     }
 
-    const computerTouched =
-      input.enableComputer !== undefined ||
-      input.enableShell !== undefined ||
-      input.enableBrowser !== undefined ||
-      input.enableFs !== undefined;
+    const computerTouched = input.enableComputer !== undefined;
 
     const caps = computerTouched
       ? normalizeCaps({
-          enableComputer:
-            input.enableComputer ??
-            input.enableShell ??
-            input.enableBrowser ??
-            false,
+          enableComputer: Boolean(input.enableComputer),
           enableMemory: input.enableMemory ?? agent.enableMemory,
         })
       : {
@@ -453,8 +442,8 @@ export class AgentService {
           ),
         );
       if (rows.length !== unique.length) throw new Error("部分实例不存在或不属于当前租户");
-      const blocked = rows.filter((r) =>
-        r.providerId === "web-search" || r.providerId === "web-fetch" || r.providerId === "mem0",
+      const blocked = rows.filter(
+        (r) => r.providerId === "web-search" || r.providerId === "web-fetch",
       );
       if (blocked.length) {
         throw new Error("网页搜索/抓取/记忆请在对应 Agent 设置页开关，不要作为 MCP 绑定");
@@ -528,10 +517,7 @@ export class AgentService {
     const bound = new Set(await this.boundInstanceIds(agent.id));
     const mcpInstances = allInstances
       .filter(
-        (i) =>
-          i.providerId !== "web-search" &&
-          i.providerId !== "web-fetch" &&
-          i.providerId !== "mem0",
+        (i) => i.providerId !== "web-search" && i.providerId !== "web-fetch",
       )
       .map((i) => ({
         id: i.id,
@@ -641,22 +627,7 @@ export class AgentService {
       name: agent.name,
       slug: agent.slug,
       description: agent.description,
-      /** @deprecated Agent 无启动态；请用 workspace.status */
-      status: "ready",
-      capabilities: {
-        /** 电脑环境（含文件系统、Shell、浏览器、桌面） */
-        computer: isComputerEnvEnabled(agent),
-        filesystem: isComputerEnvEnabled(agent),
-        shell: isComputerEnvEnabled(agent),
-        browser: isComputerEnvEnabled(agent),
-        memory: agent.enableMemory,
-      },
-      /** 电脑环境总开关 */
-      computerEnv: isComputerEnvEnabled(agent),
-      enableFs: isComputerEnvEnabled(agent),
-      enableShell: isComputerEnvEnabled(agent),
       enableComputer: isComputerEnvEnabled(agent),
-      enableBrowser: isComputerEnvEnabled(agent),
       enableMemory: agent.enableMemory,
       memoryProviderId: agent.memoryProviderId,
       workspaceImage: agent.workspaceImage,

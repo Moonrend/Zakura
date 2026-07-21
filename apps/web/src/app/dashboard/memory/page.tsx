@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type KindMeta = {
   kind: string;
@@ -257,23 +257,23 @@ export default function GlobalMemoryPage() {
       />
 
       <Table>
-            <THead>
-              <TR>
-                <TH>名称</TH>
-                <TH>类型</TH>
-                <TH>默认</TH>
-                <TH>状态</TH>
-                <TH>引用 Agent</TH>
-                <TH />
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>类型</TableHead>
+                <TableHead>默认</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>引用 Agent</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {data.providers.length === 0 ? (
-                <TR>
-                  <TD colSpan={6} className="text-muted-foreground">
+                <TableRow>
+                  <TableCell colSpan={6} className="text-muted-foreground">
                     暂无 Provider
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               ) : (
                 data.providers.map((p) => {
                   const refs = data.agents.filter(
@@ -281,8 +281,8 @@ export default function GlobalMemoryPage() {
                   );
                   const meta = kindMeta.get(p.kind);
                   return (
-                    <TR key={p.id}>
-                      <TD>
+                    <TableRow key={p.id}>
+                      <TableCell>
                         <button
                           type="button"
                           className="text-left font-medium underline-offset-2 hover:underline"
@@ -291,18 +291,18 @@ export default function GlobalMemoryPage() {
                           {p.name}
                         </button>
                         <div className="text-[11px] text-muted-foreground">{p.slug}</div>
-                      </TD>
-                      <TD>
+                      </TableCell>
+                      <TableCell>
                         <Badge variant="outline">{meta?.name ?? p.kind}</Badge>
-                      </TD>
-                      <TD>{p.isDefault ? <Badge>默认</Badge> : "—"}</TD>
-                      <TD className="text-xs text-muted-foreground">{p.status}</TD>
-                      <TD className="text-xs text-muted-foreground">
+                      </TableCell>
+                      <TableCell>{p.isDefault ? <Badge>默认</Badge> : "—"}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{p.status}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
                         {refs.length === 0
                           ? "—"
                           : refs.map((a) => a.name).join("、")}
-                      </TD>
-                      <TD>
+                      </TableCell>
+                      <TableCell>
                         <TableActions>
                           {!p.isDefault && (
                             <Button
@@ -331,12 +331,12 @@ export default function GlobalMemoryPage() {
                             <Trash2 className="size-3.5" />
                           </Button>
                         </TableActions>
-                      </TD>
-                    </TR>
+                      </TableCell>
+                    </TableRow>
                   );
                 })
               )}
-            </TBody>
+            </TableBody>
           </Table>
 
       <Dialog open={open} onOpenChange={setOpen}>
@@ -388,7 +388,7 @@ export default function GlobalMemoryPage() {
                   <div>
                     <Label>启用向量语义种子</Label>
                     <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      Memoh 式 hybrid：embedding 写入 pgvector（PGlite / Postgres 均支持），与关键词融合后再扩图谱。
+                      Hybrid 检索：embedding 写入 pgvector（PGlite / Postgres 均支持），与关键词融合后再扩图谱。
                     </p>
                   </div>
                   <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} />

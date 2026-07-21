@@ -1,9 +1,11 @@
 "use client";
 
-import { ExternalLink, Star } from "lucide-react";
+import { ExternalLink, Loader2, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ProgressLinear } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
+import type { McpInstallPhase } from "@/components/mcp/install-flow";
 
 export type McpServerCardData = {
   id: string;
@@ -23,9 +25,20 @@ type McpServerCardProps = {
   onInstall?: () => void;
   installLabel?: string;
   className?: string;
-  /** 安装中禁用 */
+  /** 安装中禁用按钮 */
   busy?: boolean;
+  /** 卡片内安装进度（顶栏无限滚动 + 毛玻璃遮罩） */
+  installPhase?: McpInstallPhase;
+  installMessage?: string;
 };
+
+function isInstallingPhase(phase?: McpInstallPhase) {
+  return (
+    phase === "creating" ||
+    phase === "awaiting_oauth" ||
+    phase === "verifying"
+  );
+}
 
 /** 商店 / 引导共用的 MCP 服务器卡片 */
 export function McpServerCard({
@@ -34,14 +47,59 @@ export function McpServerCard({
   installLabel = "安装",
   className,
   busy,
+  installPhase = "idle",
+  installMessage,
 }: McpServerCardProps) {
+  const installing = isInstallingPhase(installPhase);
+  const showProgress =
+    installing || installPhase === "done" || installPhase === "error";
+
   return (
     <div
       className={cn(
-        "flex flex-col gap-2 rounded-lg border border-border bg-card p-4",
+        "relative flex flex-col gap-2 overflow-hidden rounded-lg border border-border bg-card p-4",
         className,
       )}
     >
+      {showProgress ? (
+        <div className="absolute inset-x-0 top-0 z-30">
+          <ProgressLinear
+            flush
+            indeterminate={installing}
+            value={
+              installPhase === "done"
+                ? 100
+                : installPhase === "error"
+                  ? 100
+                  : null
+            }
+            barClassName={cn(
+              installPhase === "error" && "bg-destructive",
+              installPhase === "done" && "bg-foreground",
+            )}
+          />
+        </div>
+      ) : null}
+
+      {installing ? (
+        <div
+          className={cn(
+            "absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-[inherit]",
+            "bg-card/55 backdrop-blur-md supports-backdrop-filter:bg-card/40",
+          )}
+        >
+          <Loader2 className="size-5 animate-spin text-foreground" />
+          <p className="px-3 text-center text-xs font-medium">
+            {installMessage ||
+              (installPhase === "awaiting_oauth"
+                ? "等待授权…"
+                : installPhase === "verifying"
+                  ? "正在校验…"
+                  : "正在安装并启动…")}
+          </p>
+        </div>
+      ) : null}
+
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{server.title}</div>
@@ -82,10 +140,14 @@ export function McpServerCard({
         {onInstall ? (
           <Button
             size="sm"
-            disabled={busy || server.installed}
+            disabled={busy || installing || server.installed}
             onClick={onInstall}
           >
-            {server.installed ? "已安装" : installLabel}
+            {server.installed
+              ? "已安装"
+              : installing
+                ? "安装中…"
+                : installLabel}
           </Button>
         ) : null}
         {server.repositoryUrl ? (

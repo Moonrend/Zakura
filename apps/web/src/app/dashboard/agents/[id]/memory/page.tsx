@@ -26,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 const LAYERS = ["identity", "preference", "project", "fact", "episode", "note"] as const;
 
@@ -412,29 +412,29 @@ export default function AgentMemoryPage() {
 
           <div className="rounded-lg border border-border bg-card">
             <Table>
-              <THead>
-                <TR>
-                  <TH>内容</TH>
-                  {!isTraditional && <TH>层级</TH>}
-                  {!isTraditional && <TH>重要</TH>}
-                  <TH>来源</TH>
-                  <TH />
-                </TR>
-              </THead>
-              <TBody>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>内容</TableHead>
+                  {!isTraditional && <TableHead>层级</TableHead>}
+                  {!isTraditional && <TableHead>重要</TableHead>}
+                  <TableHead>来源</TableHead>
+                  <TableHead />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {items.length === 0 ? (
-                  <TR>
-                    <TD
+                  <TableRow>
+                    <TableCell
                       colSpan={isTraditional ? 3 : 5}
                       className="text-center text-xs text-muted-foreground"
                     >
                       —
-                    </TD>
-                  </TR>
+                    </TableCell>
+                  </TableRow>
                 ) : (
                   items.map((m) => (
-                    <TR key={m.id}>
-                      <TD className="max-w-md">
+                    <TableRow key={m.id}>
+                      <TableCell className="max-w-md">
                         <button
                           type="button"
                           className="line-clamp-2 text-left text-sm hover:underline"
@@ -445,20 +445,20 @@ export default function AgentMemoryPage() {
                           ) : null}
                           {m.content}
                         </button>
-                      </TD>
+                      </TableCell>
                       {!isTraditional && (
-                        <TD>
+                        <TableCell>
                           <Badge variant="secondary">{m.layer}</Badge>
-                        </TD>
+                        </TableCell>
                       )}
                       {!isTraditional && (
-                        <TD className="tabular-nums text-xs">{m.importance}</TD>
+                        <TableCell className="tabular-nums text-xs">{m.importance}</TableCell>
                       )}
-                      <TD className="text-xs text-muted-foreground">
+                      <TableCell className="text-xs text-muted-foreground">
                         {m.source}
                         {m.score != null ? ` · ${m.score.toFixed(1)}` : ""}
-                      </TD>
-                      <TD>
+                      </TableCell>
+                      <TableCell>
                         <TableActions>
                           <Button size="sm" variant="ghost" onClick={() => void togglePin(m)}>
                             <Pin className={m.pinned ? "text-warning-foreground" : ""} />
@@ -471,11 +471,11 @@ export default function AgentMemoryPage() {
                             <Trash2 />
                           </Button>
                         </TableActions>
-                      </TD>
-                    </TR>
+                      </TableCell>
+                    </TableRow>
                   ))
                 )}
-              </TBody>
+              </TableBody>
             </Table>
           </div>
         </>

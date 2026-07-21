@@ -42,27 +42,15 @@ function workspaceContainerName(tenantSlug: string, agentSlug: string): string {
 export type StackMode = "none" | "shell" | "display";
 
 export function resolveStackMode(agent: Agent): StackMode {
-  // 电脑环境是整套 display 栈（含文件系统挂载、Shell、浏览器、桌面）
-  if (agent.enableComputer || agent.enableBrowser || agent.enableShell) return "display";
+  if (agent.enableComputer) return "display";
   return "none";
 }
 
-/**
- * Prefer the local prebaked workspace image (Memoh-style: packages at build time).
- * Legacy ubuntu / bare debian:bookworm-slim → zakura/workspace:debian.
- */
+/** Prefer the local prebaked workspace image (packages at build time). */
 export function resolveWorkspaceImage(configured: string | null | undefined): string {
   const preferred = WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE;
   const raw = (configured?.trim() || preferred).trim();
-  if (!raw) return preferred;
-  if (/^ubuntu(?::|@|$)/i.test(raw) || /\/ubuntu(?::|@|$)/i.test(raw)) {
-    return preferred;
-  }
-  // Migrate bare slim default to prebaked image
-  if (/^debian:bookworm-slim(?:$|@)/i.test(raw)) {
-    return preferred;
-  }
-  return raw;
+  return raw || preferred;
 }
 
 export function isPrebakedWorkspaceImage(image: string): boolean {
@@ -402,9 +390,7 @@ export class AgentWorkspaceService {
    * 远程 Runner：从 Runner endpoints API 读取 noVNC/CDP。
    */
   async getDesktopInfo(agent: Agent) {
-    const computerOn = Boolean(
-      agent.enableComputer || agent.enableBrowser || agent.enableShell,
-    );
+    const computerOn = Boolean(agent.enableComputer);
     const row = await this.getWorkspaceContainer(agent.id);
 
     if (this.isRemoteAgent(agent)) {
@@ -578,19 +564,13 @@ export class AgentWorkspaceService {
 
       const image = resolveWorkspaceImage(agent.workspaceImage);
       const name = workspaceContainerName(tenant.slug, agent.slug);
-      const previousImage = agent.workspaceImage?.trim() || "(default)";
 
-      // Persist migrated image so subsequent starts / UI don't keep showing ubuntu
       if (agent.workspaceImage !== image) {
         await this.db
           .update(agents)
           .set({ workspaceImage: image, updatedAt: new Date() })
           .where(eq(agents.id, agent.id));
-        log(
-          "image",
-          `镜像已切换 ${previousImage} → ${image}`,
-          20,
-        );
+        log("image", `使用镜像 ${image}`, 20);
       } else {
         log("image", `使用镜像 ${image}`, 20);
       }

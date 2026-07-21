@@ -13,7 +13,7 @@ import { SettingsHeader, SettingsSection, TableActions } from "@/components/sett
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkActiveExposuresPage() {
   const [rows, setRows] = useState<PortExposureDto[]>([]);
@@ -86,27 +86,27 @@ export default function NetworkActiveExposuresPage() {
           <p className="text-sm text-muted-foreground">当前没有活跃隧道</p>
         ) : (
           <Table>
-            <THead>
-              <TR>
-                <TH>Agent</TH>
-                <TH>端口</TH>
-                <TH>Provider</TH>
-                <TH>URL</TH>
-                <TH>状态</TH>
-                <TH>过期</TH>
-                <TH />
-              </TR>
-            </THead>
-            <TBody>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Agent</TableHead>
+                <TableHead>端口</TableHead>
+                <TableHead>Provider</TableHead>
+                <TableHead>URL</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>过期</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {rows.map((r) => (
-                <TR key={r.id}>
-                  <TD>
+                <TableRow key={r.id}>
+                  <TableCell>
                     <div className="font-medium">{r.agentName ?? r.agentId}</div>
                     <div className="text-xs text-muted-foreground">{r.name}</div>
-                  </TD>
-                  <TD className="font-mono text-xs">{r.port}</TD>
-                  <TD className="text-xs">{r.provider}</TD>
-                  <TD className="max-w-[220px] truncate font-mono text-xs">
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{r.port}</TableCell>
+                  <TableCell className="text-xs">{r.provider}</TableCell>
+                  <TableCell className="max-w-[220px] truncate font-mono text-xs">
                     {r.publicUrl ? (
                       <a
                         href={r.publicUrl}
@@ -119,16 +119,16 @@ export default function NetworkActiveExposuresPage() {
                     ) : (
                       "—"
                     )}
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <Badge variant={r.status === "active" ? "default" : "secondary"}>
                       {r.status}
                     </Badge>
-                  </TD>
-                  <TD className="text-xs text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
                     {r.expiresAt ? new Date(r.expiresAt).toLocaleString() : "—"}
-                  </TD>
-                  <TD>
+                  </TableCell>
+                  <TableCell>
                     <TableActions>
                       <Button
                         size="icon"
@@ -141,10 +141,10 @@ export default function NetworkActiveExposuresPage() {
                         <Square className="size-3.5" />
                       </Button>
                     </TableActions>
-                  </TD>
-                </TR>
+                  </TableCell>
+                </TableRow>
               ))}
-            </TBody>
+            </TableBody>
           </Table>
         )}
       </SettingsSection>

@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type Policy = {
   id: string;
@@ -105,20 +105,20 @@ export default function PoliciesPage() {
       />
 
       <Table>
-        <THead>
-          <TR>
-            <TH>Key</TH>
-            <TH>能力</TH>
-            <TH>Allow</TH>
-            <TH>Deny</TH>
-            <TH>内置</TH>
-            <TH />
-          </TR>
-        </THead>
-        <TBody>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Key</TableHead>
+            <TableHead>能力</TableHead>
+            <TableHead>Allow</TableHead>
+            <TableHead>Deny</TableHead>
+            <TableHead>内置</TableHead>
+            <TableHead />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {rows.map((row) => (
-            <TR key={row.id}>
-              <TD className="text-xs">
+            <TableRow key={row.id}>
+              <TableCell className="text-xs">
                 {row.apiKey ? (
                   <>
                     {row.apiKey.name}{" "}
@@ -127,26 +127,26 @@ export default function PoliciesPage() {
                 ) : (
                   <Badge variant="secondary">默认</Badge>
                 )}
-              </TD>
-              <TD className="text-xs">
+              </TableCell>
+              <TableCell className="text-xs">
                 {!row.instanceIds.length
                   ? "全部"
                   : row.instanceIds
                       .map((id) => instances.find((i) => i.id === id)?.slug ?? id.slice(0, 6))
                       .join(", ")}
-              </TD>
-              <TD className="max-w-[120px] truncate text-xs">
+              </TableCell>
+              <TableCell className="max-w-[120px] truncate text-xs">
                 {(row.toolAllowlist ?? []).join(", ") || "—"}
-              </TD>
-              <TD className="max-w-[120px] truncate text-xs">
+              </TableCell>
+              <TableCell className="max-w-[120px] truncate text-xs">
                 {(row.toolDenylist ?? []).join(", ") || "—"}
-              </TD>
-              <TD>
+              </TableCell>
+              <TableCell>
                 <Badge variant={row.includeBuiltin ? "success" : "secondary"}>
                   {row.includeBuiltin ? "开" : "关"}
                 </Badge>
-              </TD>
-              <TD>
+              </TableCell>
+              <TableCell>
                 <TableActions>
                   <Button size="sm" variant="ghost" onClick={() => openEdit(row)}>
                     编辑
@@ -163,17 +163,17 @@ export default function PoliciesPage() {
                     <Trash2 />
                   </Button>
                 </TableActions>
-              </TD>
-            </TR>
+              </TableCell>
+            </TableRow>
           ))}
           {!rows.length ? (
-            <TR>
-              <TD colSpan={6} className="py-8 text-center text-muted-foreground">
+            <TableRow>
+              <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
                 暂无策略
-              </TD>
-            </TR>
+              </TableCell>
+            </TableRow>
           ) : null}
-        </TBody>
+        </TableBody>
       </Table>
 
       <Dialog open={open} onOpenChange={setOpen}>

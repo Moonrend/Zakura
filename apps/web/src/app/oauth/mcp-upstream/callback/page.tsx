@@ -25,12 +25,39 @@ function CallbackInner() {
       if (ok === "1") {
         if (instanceId) {
           try {
-            await api("/api/mcp/upstream-oauth/verify", {
-              method: "POST",
-              json: { instanceId },
+            const res = await api<{ ok?: boolean; error?: string; health?: { status?: string; lastError?: string } }>(
+              "/api/mcp/upstream-oauth/verify",
+              {
+                method: "POST",
+                json: { instanceId },
+              },
+            );
+            if (res.ok === false || res.health?.status === "unhealthy") {
+              const detail =
+                res.error ||
+                res.health?.lastError ||
+                "健康检查未通过";
+              setMsg(detail);
+              setStatus("error");
+              broadcastMcpOauthResult({
+                type: MCP_OAUTH_MESSAGE,
+                ok: false,
+                error: detail,
+                instanceId,
+              });
+              return;
+            }
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            setMsg(detail);
+            setStatus("error");
+            broadcastMcpOauthResult({
+              type: MCP_OAUTH_MESSAGE,
+              ok: false,
+              error: detail,
+              instanceId,
             });
-          } catch {
-            /* non-fatal */
+            return;
           }
         }
         setMsg("上游 OAuth 授权成功，令牌已写入实例配置。");

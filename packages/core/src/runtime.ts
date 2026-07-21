@@ -18,7 +18,7 @@ export interface CreateContainerOptions {
 }
 
 /**
- * Runtime adapter — Local Docker today; K8s / remote later.
+ * Runtime adapter — Local Docker；远程 Runner 走独立节点 API。
  * Keep orchestration behind this interface for extensibility.
  */
 export interface ContainerRuntime {

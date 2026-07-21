@@ -346,11 +346,7 @@ export function AppSidebar({
       icon: AGENT_ICONS[item.href] ?? Settings2,
       isActive: (path: string) =>
         path === `/dashboard/agents/${agentId}/${item.href}` ||
-        path.endsWith(`/${item.href}`) ||
-        (item.href === "web" &&
-          (path.endsWith("/web-search") ||
-            path.endsWith("/web-fetch") ||
-            path.endsWith("/web"))),
+        path.endsWith(`/${item.href}`),
     }));
   }, [agentId]);
 
@@ -371,10 +367,7 @@ export function AppSidebar({
       label: "网页",
       icon: Globe,
       isActive: (path) =>
-        path === "/dashboard/web" ||
-        path.startsWith("/dashboard/web/") ||
-        path.startsWith("/dashboard/web-search") ||
-        path.startsWith("/dashboard/web-fetch"),
+        path === "/dashboard/web" || path.startsWith("/dashboard/web/"),
     },
     {
       id: "memory",

@@ -53,7 +53,7 @@ async function resolveAgentFs(
   if (requireFs && !agent.enableFs) {
     return { agent, denied: true as const };
   }
-  // Local agents still ensure host workspace dir exists (today path).
+  // 本地 Agent 仍确保主机工作区目录存在
   if (!agent.runtimeNodeId) {
     agentService.workspace.ensureLocal(agent);
   }
@@ -63,7 +63,7 @@ async function resolveAgentFs(
 }
 
 /**
- * Memoh-aligned filesystem HTTP API for agent workspaces.
+ * Agent workspace filesystem HTTP API.
  * Routes through WorkspaceFsProvider so remote-bound agents hit Runner FS.
  */
 export function registerAgentFsRoutes(
@@ -182,7 +182,7 @@ export function registerAgentFsRoutes(
     if (!resolved) return c.json({ error: "Not found" }, 404);
     if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
     if (!resolved.localRoot) {
-      return c.json({ error: "Archive is only supported on local runner workspaces in MVP" }, 501);
+      return c.json({ error: "Archive is only supported on local runner workspaces" }, 501);
     }
     const body = await c.req.json<{ paths?: string[] }>().catch(() => ({} as { paths?: string[] }));
     const paths = body.paths ?? [];
@@ -332,7 +332,7 @@ export function registerAgentFsRoutes(
     if (!resolved) return c.json({ error: "Not found" }, 404);
     if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
     if (!resolved.localRoot) {
-      return c.json({ error: "Extract is only supported on local runner workspaces in MVP" }, 501);
+      return c.json({ error: "Extract is only supported on local runner workspaces" }, 501);
     }
     const body = await c.req.json<{ path?: string; destination?: string }>();
     if (!body.path?.trim()) return c.json({ error: "path is required" }, 400);

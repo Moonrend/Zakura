@@ -8,7 +8,7 @@ import {
   fetchAgent,
   fetchAgentProgress,
   getWorkspaceStatus,
-  needsDocker,
+  needsContainer,
   type AgentDetail,
 } from "@/lib/agents";
 import {
@@ -237,7 +237,7 @@ export function StepComputerEnv({ agentId, onDone }: Props) {
   }
 
   const ws = getWorkspaceStatus(agent);
-  const hasComputer = needsDocker(agent);
+  const hasComputer = needsContainer(agent);
 
   return (
     <div className="mx-auto max-w-md space-y-4">

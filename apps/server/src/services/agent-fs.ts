@@ -274,7 +274,7 @@ export const agentFs = {
     };
   },
 
-  /** Memoh-compatible directory listing for HTTP API. */
+  /** Directory listing for HTTP API. */
   listDetailed(root: string, path: string): { path: string; entries: FsEntry[] } {
     const abs = resolveInRoot(root, path || ".");
     const st = statSync(abs);

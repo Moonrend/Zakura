@@ -126,15 +126,5 @@ for (const [pkgRel, deps] of Object.entries(manifest.packageJsonDeps ?? {})) {
   }
 }
 
-// Soften README SaaS env docs if present
-const readmePath = join(root, "README.md");
-if (existsSync(readmePath) && !dryRun) {
-  let readme = readFileSync(readmePath, "utf8");
-  if (readme.includes("ZAKURA_EDITION") || readme.includes("ZAKURA_MULTI_TENANT")) {
-    // Leave README; docs/edition.md may be removed with saas. No rewrite required.
-  }
-  void readme;
-}
-
 console.log(dryRun ? "Dry run complete." : `Done. OSS tree at: ${root}`);
 console.log("Next: pnpm install && pnpm setup  (edition defaults to oss)");
