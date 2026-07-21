@@ -16,7 +16,6 @@ COPY . .
 RUN pnpm --filter @zakura/shared build \
  && pnpm --filter @zakura/core build \
  && pnpm --filter @zakura/saas build \
- && pnpm --filter @zakura/server db:generate \
  && pnpm --filter @zakura/server build \
  && pnpm --filter @zakura/web build
 

@@ -76,8 +76,12 @@ function CallbackInner() {
       </div>
       <p className="text-sm text-muted-foreground">{msg}</p>
       {status === "error" ? (
-        <Button asChild variant="outline">
-          <Link href="/login">返回登录</Link>
+        <Button
+          variant="outline"
+          nativeButton={false}
+          render={<Link href="/login" />}
+        >
+          返回登录
         </Button>
       ) : null}
     </div>

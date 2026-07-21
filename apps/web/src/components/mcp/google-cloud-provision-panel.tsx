@@ -129,14 +129,14 @@ export function GoogleCloudProvisionPanel({
     void loadGuide("YOUR_PROJECT_ID").catch(() => undefined);
   }, [loadGuide]);
 
-  const steps = useMemo(() => {
+  const steps = useMemo((): ProvisionWizardStep[] => {
     if (guide?.wizardSteps?.length) return guide.wizardSteps;
     return STEP_IDS.map((id) => ({
       id,
       title: id,
       description: "",
       mode: "manual" as const,
-      copyables: [],
+      copyables: [] as ProvisionCopyable[],
     }));
   }, [guide]);
 

@@ -42,8 +42,13 @@ export default function RegisterPage() {
           <p className="mt-2 text-sm text-muted-foreground">
             当前部署为开源单账户版，不支持自助注册。请使用管理员安装流程。
           </p>
-          <Button asChild className="mt-6" variant="outline">
-            <Link href="/login">去登录</Link>
+          <Button
+            className="mt-6"
+            variant="outline"
+            nativeButton={false}
+            render={<Link href="/login" />}
+          >
+            去登录
           </Button>
         </div>
       </div>

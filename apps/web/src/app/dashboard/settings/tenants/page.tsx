@@ -152,8 +152,13 @@ export default function TenantsSettingsPage() {
               </div>
               <div className="flex gap-2">
                 {!item.tenant.onboardingCompleted ? (
-                  <Button asChild size="sm" variant="outline">
-                    <Link href="/onboarding">继续引导</Link>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    nativeButton={false}
+                    render={<Link href="/onboarding" />}
+                  >
+                    继续引导
                   </Button>
                 ) : null}
                 {item.tenant.id !== currentId ? (

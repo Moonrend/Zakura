@@ -65,8 +65,13 @@ export default function TenantSettingsPage() {
         title="租户设置"
         actions={
           isAdmin ? (
-            <Button asChild size="sm" variant="outline">
-              <Link href="/dashboard/settings/members">成员管理</Link>
+            <Button
+              size="sm"
+              variant="outline"
+              nativeButton={false}
+              render={<Link href="/dashboard/settings/members" />}
+            >
+              成员管理
             </Button>
           ) : null
         }
