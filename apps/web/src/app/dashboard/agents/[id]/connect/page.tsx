@@ -312,6 +312,7 @@ export default function AgentConnectPage() {
                     ],
                     ["Authorization", meta.authorizationServer.authorization_endpoint],
                     ["Token", meta.authorizationServer.token_endpoint],
+                    ["UserInfo (OIDC)", `${meta.publicBaseUrl}/userinfo`],
                     ["Registration (DCR)", meta.authorizationServer.registration_endpoint],
                   ] as const
                 ).map(([label, url]) => (

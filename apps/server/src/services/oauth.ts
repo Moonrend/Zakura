@@ -15,6 +15,7 @@ import {
   oauthClients,
   oauthRefreshTokens,
   tenants,
+  users,
   type OauthClient,
   type Tenant,
 } from "../db/schema.js";
@@ -191,12 +192,16 @@ export function authorizationServerMetadata(baseUrl: string) {
      * （nginx 对 POST /register 的 418 分流在部分环境会表现为客户端看到的 403）
      */
     registration_endpoint: `${issuer}/oauth/register`,
+    /** OIDC UserInfo：ChatGPT 用邮箱做声明授权域；缺省时 UI 会显示 https://example.com */
+    userinfo_endpoint: `${issuer}/userinfo`,
     scopes_supported: ["mcp"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: [...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED],
     revocation_endpoint: `${issuer}/token/revoke`,
+    subject_types_supported: ["public"],
+    claims_supported: ["sub", "email", "email_verified", "name"],
     /**
      * CIMD：ChatGPT / MCP 规范优先路径。
      * client_id 为 https 元数据 URL 时，AS 拉取并校验文档，无需 DCR。
@@ -698,6 +703,34 @@ export class OauthService {
       .update(oauthRefreshTokens)
       .set({ revokedAt: new Date() })
       .where(eq(oauthRefreshTokens.tokenHash, hashToken(token)));
+  }
+
+  /**
+   * OIDC UserInfo（RFC 7662 / OIDC Core §5.3）。
+   * ChatGPT 在发现 openid-configuration 后会拉取用户邮箱用于声明授权域。
+   */
+  async userInfo(rawToken: string): Promise<{
+    sub: string;
+    email: string;
+    email_verified: boolean;
+    name?: string;
+  }> {
+    const at = verifyAccessToken(this.config.secret, rawToken);
+    if (!at) {
+      throw new OauthError("invalid_token", "Invalid or expired access token", 401);
+    }
+    const user = await this.db.query.users.findFirst({
+      where: eq(users.id, at.sub),
+    });
+    if (!user) {
+      throw new OauthError("invalid_token", "User not found", 401);
+    }
+    return {
+      sub: user.id,
+      email: user.email,
+      email_verified: true,
+      ...(user.name ? { name: user.name } : {}),
+    };
   }
 
   async authenticateBearer(rawToken: string): Promise<McpAuthContext | null> {

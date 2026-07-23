@@ -70,6 +70,7 @@ describe("oauth CIMD", () => {
     const meta = authorizationServerMetadata("https://zakura.example");
     assert.equal(meta.client_id_metadata_document_supported, true);
     assert.equal(meta.registration_endpoint, "https://zakura.example/oauth/register");
+    assert.equal(meta.userinfo_endpoint, "https://zakura.example/userinfo");
     assert.ok(meta.token_endpoint_auth_methods_supported.includes("none"));
     assert.deepEqual(meta.scopes_supported, ["mcp"]);
   });

@@ -172,6 +172,48 @@ export function createOauthApp(deps: {
     return c.json({ revoked: true });
   });
 
+  /** OIDC UserInfo — ChatGPT 声明授权域需要邮箱 */
+  const userInfoHandler = async (c: Context) => {
+    const auth = c.req.header("authorization") ?? "";
+    const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+    if (!bearer) {
+      c.header(
+        "WWW-Authenticate",
+        `Bearer realm="oauth", error="invalid_request", error_description="missing access token"`,
+      );
+      return c.json(
+        { error: "invalid_request", error_description: "Authorization Bearer required" },
+        401,
+      );
+    }
+    try {
+      return c.json(await oauth.userInfo(bearer));
+    } catch (err) {
+      if (err instanceof OauthError) {
+        c.header(
+          "WWW-Authenticate",
+          `Bearer realm="oauth", error="${err.error}", error_description="${err.message}"`,
+        );
+        return c.json(
+          { error: err.error, error_description: err.message },
+          err.status as 401,
+        );
+      }
+      return c.json(
+        {
+          error: "server_error",
+          error_description: err instanceof Error ? err.message : String(err),
+        },
+        500,
+      );
+    }
+  };
+
+  app.get("/userinfo", userInfoHandler);
+  app.post("/userinfo", userInfoHandler);
+  app.get("/oauth/userinfo", userInfoHandler);
+  app.post("/oauth/userinfo", userInfoHandler);
+
   app.get("/oauth/discovery", (c) => {
     return c.json({
       publicBaseUrl: config.publicBaseUrl,
