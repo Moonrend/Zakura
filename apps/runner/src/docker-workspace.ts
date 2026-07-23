@@ -116,6 +116,28 @@ export class RunnerDockerWorkspace {
     }
   }
 
+  /** 指定 bridge 网络不存在时自动创建（与 Server DockerRuntime 对齐） */
+  async ensureNetwork(name: string): Promise<void> {
+    const network = name.trim();
+    if (!network) return;
+    try {
+      const networks = await this.docker.listNetworks({
+        filters: { name: [network] },
+      });
+      if (networks.some((n) => n.Name === network)) return;
+      await this.docker.createNetwork({
+        Name: network,
+        CheckDuplicate: true,
+        Driver: "bridge",
+        Labels: { "zakura.managed": "true" },
+      });
+    } catch (err) {
+      const msg = dockerErr(err).message;
+      if (/already exists/i.test(msg)) return;
+      throw dockerErr(err);
+    }
+  }
+
   async findByAgent(agentId: string): Promise<WorkspaceInfo | null> {
     const list = await this.docker.listContainers({
       all: true,
@@ -254,6 +276,7 @@ export class RunnerDockerWorkspace {
     };
 
     if (spec.network) {
+      await this.ensureNetwork(spec.network);
       createOpts.NetworkingConfig = {
         EndpointsConfig: { [spec.network]: {} },
       };
