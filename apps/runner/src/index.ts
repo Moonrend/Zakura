@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { createAuthConfig } from "./auth.js";
 import { createRunnerApp } from "./app.js";
 import { collectHostInfo } from "./host-info.js";
+import { startServerSync } from "./server-sync.js";
 
 const VERSION = "0.1.0";
 
@@ -73,12 +74,30 @@ export async function startRunner(opts?: RunnerLaunchOptions): Promise<{
   return new Promise((resolvePromise, reject) => {
     const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (info) => {
       console.log(`[runner] listening on http://${info.address}:${info.port}`);
+
+      let stopSync: (() => void) | undefined;
+      const serverUrl = env.serverUrl?.trim();
+      if (serverUrl) {
+        stopSync = startServerSync({
+          serverUrl,
+          token: env.token,
+          storageRoot: env.storageRoot,
+          version: VERSION,
+          publicUrl: env.publicUrl,
+        }).stop;
+      } else {
+        console.warn(
+          "[runner] ZAKURA_RUNNER_SERVER_URL unset — skip register/heartbeat (cloud will see offline)",
+        );
+      }
+
       resolvePromise({
         port: info.port,
         host: info.address,
         storageRoot: env.storageRoot,
         close: () =>
           new Promise<void>((res, rej) => {
+            stopSync?.();
             server.close((err) => (err ? rej(err) : res()));
           }),
       });

@@ -231,7 +231,7 @@ function runnerDataDirs(slug: string) {
 export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
   const port = opts.port ?? 7443;
   const slug = sanitizeSlug(opts.slug);
-  const runnerImage = opts.runnerImage ?? "zakura/runner:latest";
+  const runnerImage = opts.runnerImage ?? "sunwuyuan/zakura-runner-dev:latest";
   const dirs = runnerDataDirs(slug);
   const enableTs = Boolean(opts.enableTailscale && opts.tsAuthKey?.trim());
 
@@ -277,6 +277,12 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
       TS_EXTRA_ARGS: ${yamlQuote(extraArgs)}
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - ${dirs.ts}:/var/lib/tailscale
     devices:
@@ -300,6 +306,13 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
       DOCKER_HOST: unix:///var/run/docker.sock
+      # 避免继承宿主机 HTTP 代理；控制面走 Tailscale / 直连
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${dirs.data}:/var/lib/zakura
@@ -311,7 +324,7 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
 function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): string {
   const port = opts.port ?? 7443;
   const slug = opts.slug;
-  const runnerImage = opts.runnerImage ?? "zakura/runner:latest";
+  const runnerImage = opts.runnerImage ?? "sunwuyuan/zakura-runner-dev:latest";
   const dirs = runnerDataDirs(slug);
   const enableTs = Boolean(opts.enableTailscale && opts.tsAuthKey?.trim());
 
@@ -328,6 +341,8 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
       `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
       `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
       "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
+      "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
+      '  -e NO_PROXY=* -e no_proxy=* \\',
       "  -v /var/run/docker.sock:/var/run/docker.sock \\",
       `  -v ${dirs.data}:/var/lib/zakura \\`,
       "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",
@@ -357,6 +372,7 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
     "  -e TS_STATE_DIR=/var/lib/tailscale \\",
     '  -e TS_USERSPACE=false \\',
     `  -e TS_EXTRA_ARGS=${shQuote(extraArgs)} \\`,
+    "  -e HTTP_PROXY= -e HTTPS_PROXY= -e NO_PROXY=* \\",
     `  -v ${dirs.ts}:/var/lib/tailscale \\`,
     "  --device /dev/net/tun:/dev/net/tun \\",
     "  --cap-add NET_ADMIN --cap-add NET_RAW \\",
@@ -372,6 +388,8 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
     `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
     `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
     "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
+    "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
+    '  -e NO_PROXY=* -e no_proxy=* \\',
     "  -v /var/run/docker.sock:/var/run/docker.sock \\",
     `  -v ${dirs.data}:/var/lib/zakura \\`,
     "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",

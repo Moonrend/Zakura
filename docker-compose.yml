@@ -1,7 +1,10 @@
 # Zakura — AI 环境编排 & 统一 MCP 网关
 #
-# 默认自托管（内嵌 PGlite，无需外部数据库）：
-#   docker compose up -d --build
+# 默认拉取 Docker Hub 开发镜像（自托管，内嵌 PGlite）：
+#   docker compose up -d
+#
+# 本地构建：
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
 # 使用外部 Postgres（多租户 / 生产）：
 #   docker compose --profile postgres up -d
@@ -12,26 +15,57 @@
 
 services:
   zakura:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: ${ZAKURA_IMAGE:-sunwuyuan/zakura-dev:latest}
     container_name: zakura
-    ports:
-      - "8787:8787"
-      - "3000:3000"
+    # 经 nginx 对外；直连调试可取消注释
+    # ports:
+    #   - "8787:8787"
+    #   - "3000:3001"
+    expose:
+      - "8787"
+      - "3001"
     environment:
       # 默认内嵌 PGlite；云端改为 postgresql://zakura:zakura@postgres:5432/zakura
-      DATABASE_URL: pglite:/data/pglite
+      DATABASE_URL: ${DATABASE_URL:-pglite:/data/pglite}
       ZAKURA_DATA_DIR: /data
-      ZAKURA_PUBLIC_URL: http://127.0.0.1:8787
+      ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://preview.moonrend.com}
+      ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://preview.moonrend.com}
       HOST: 0.0.0.0
       PORT: 8787
+      # SaaS：多租户 / 自助注册 / 成员邀请（镜像内需含 @zakura/saas）
+      ZAKURA_EDITION: ${ZAKURA_EDITION:-saas}
+      # 工作区 / Runner 默认镜像（可由环境覆盖）
+      ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:debian}
+      ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
+      # 平台自托管 Headscale：数据面由 zakura-host-ts（host 网 + kernel TUN）加入本机网。
+      # 控制面主机勿再跑个人 Tailscale 内核客户端，否则会与 host-ts 抢 TUN/100.x。
     volumes:
       - zakura-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    # 经 docker0 访问宿主机 tailscale0 上的 Runner（100.64/10）需要主机 ip_forward=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - zakura
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: zakura-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/preview.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/zakura-network.conf:/etc/nginx/conf.d/zakura-network.conf:ro
+      - ./docker/nginx/proxy_locations.conf:/etc/nginx/proxy_locations.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - zakura
+    restart: unless-stopped
+    networks:
+      - zakura
+      - headscale
 
   postgres:
     profiles: ["postgres"]
@@ -89,3 +123,6 @@ networks:
   zakura:
     name: zakura
     driver: bridge
+  headscale:
+    name: zakura-headscale
+    external: true
