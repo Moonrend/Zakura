@@ -1,8 +1,7 @@
 # Headscale — Zakura 平台托管 control plane
-# 本地开发默认 http://127.0.0.1:8080；生产请改为公网 HTTPS，并启用下方内置 DERP。
-# base_domain 必须与 server_url 的主机名不同。
+# server_url 须为公网 HTTPS；base_domain 必须与 server_url 主机名不同。
 
-server_url: http://127.0.0.1:8080
+server_url: https://zakura-network.moonrend.com
 
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 0.0.0.0:9090
@@ -23,10 +22,10 @@ prefixes:
   v6: fd7a:115c:a1e0::/48
   allocation: sequential
 
-# 内置 DERP 需要 HTTPS；本地 HTTP 时关闭，使用 Tailscale 公共 DERP
+# HTTPS 反代下启用内置 DERP；STUN 仍走宿主机 3478/udp
 derp:
   server:
-    enabled: false
+    enabled: true
     region_id: 999
     region_code: "zakura"
     region_name: "Zakura Embedded DERP"
@@ -64,7 +63,6 @@ database:
     write_ahead_log: true
     wal_autocheckpoint: 1000
 
-# TLS 由反代终止；如需 Headscale 自带证书再填写
 acme_url: https://acme-v02.api.letsencrypt.org/directory
 acme_email: ""
 tls_letsencrypt_hostname: ""
@@ -85,7 +83,7 @@ policy:
 dns:
   magic_dns: true
   # 必须与 server_url 主机名不同
-  base_domain: mesh.local
+  base_domain: mesh.moonrend.com
   override_local_dns: true
   nameservers:
     global:

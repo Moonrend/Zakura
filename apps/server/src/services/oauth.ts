@@ -19,6 +19,11 @@ import {
   type Tenant,
 } from "../db/schema.js";
 import { loginUser } from "./auth.js";
+import {
+  fetchCimdDocument,
+  isCimdClientId,
+  pickCimdTokenAuthMethod,
+} from "./oauth-cimd.js";
 
 const ACCESS_TTL_SEC = 60 * 60; // 1h
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
@@ -110,21 +115,36 @@ export function isAllowedRedirectUri(uri: string): boolean {
   }
 }
 
+/** AS 声明的 token 端点鉴权方式（CIMD 与 ChatGPT 取交集；优先 none 公开客户端） */
+export const TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED = [
+  "none",
+  "client_secret_post",
+  "client_secret_basic",
+] as const;
+
 export function authorizationServerMetadata(baseUrl: string) {
   const issuer = baseUrl.replace(/\/$/, "");
   return {
     issuer,
     authorization_endpoint: `${issuer}/authorize`,
     token_endpoint: `${issuer}/token`,
-    registration_endpoint: `${issuer}/register`,
+    /**
+     * DCR：使用 /oauth/register，避免与 Web SaaS 注册页 GET /register 冲突。
+     * （nginx 对 POST /register 的 418 分流在部分环境会表现为客户端看到的 403）
+     */
+    registration_endpoint: `${issuer}/oauth/register`,
     scopes_supported: ["mcp", "openid"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
+    token_endpoint_auth_methods_supported: [...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED],
     revocation_endpoint: `${issuer}/token/revoke`,
-    // MCP / OAuth 2.1
-    client_id_metadata_document_supported: false,
+    /**
+     * CIMD：ChatGPT / MCP 规范优先路径。
+     * client_id 为 https 元数据 URL 时，AS 拉取并校验文档，无需 DCR。
+     * @see https://developers.openai.com/apps-sdk/build/auth
+     */
+    client_id_metadata_document_supported: true,
   };
 }
 
@@ -233,6 +253,76 @@ export class OauthService {
     );
   }
 
+  /**
+   * 解析 OAuth client：本地库优先；若 client_id 为 CIMD URL 则拉取元数据并 upsert。
+   * CIMD 客户端跨租户共享，不绑定 tenantId。
+   */
+  async resolveClient(clientId: string): Promise<OauthClient | null> {
+    const existing = await this.getClient(clientId);
+    if (existing && existing.registrationType !== "cimd") {
+      return existing;
+    }
+    if (!isCimdClientId(clientId)) {
+      return existing;
+    }
+
+    let doc;
+    try {
+      doc = await fetchCimdDocument(clientId);
+    } catch (err) {
+      if (existing) return existing; // 拉取失败时沿用缓存行
+      throw new OauthError(
+        "invalid_client",
+        err instanceof Error ? err.message : String(err),
+        400,
+      );
+    }
+
+    const authMethod = pickCimdTokenAuthMethod(doc, [
+      ...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED,
+    ]);
+    // 尚未实现 private_key_jwt 验签：若文档只支持它，降级提示
+    if (authMethod === "private_key_jwt") {
+      throw new OauthError(
+        "invalid_client",
+        "当前授权服务器尚未支持 private_key_jwt；请使用 token_endpoint_auth_method=none 的 CIMD 客户端",
+        400,
+      );
+    }
+
+    const values = {
+      clientSecretHash: null as string | null,
+      clientName: doc.client_name?.trim() || "MCP Client (CIMD)",
+      redirectUrisJson: JSON.stringify(doc.redirect_uris),
+      grantTypesJson: JSON.stringify(
+        doc.grant_types?.length
+          ? doc.grant_types
+          : ["authorization_code", "refresh_token"],
+      ),
+      responseTypesJson: JSON.stringify(
+        doc.response_types?.length ? doc.response_types : ["code"],
+      ),
+      tokenEndpointAuthMethod: authMethod,
+      scope: doc.scope?.trim() || "mcp",
+      registrationType: "cimd" as const,
+      tenantId: null as string | null,
+    };
+
+    if (existing) {
+      await this.db
+        .update(oauthClients)
+        .set(values)
+        .where(eq(oauthClients.clientId, clientId));
+    } else {
+      await this.db.insert(oauthClients).values({
+        clientId,
+        ...values,
+      });
+    }
+
+    return (await this.getClient(clientId))!;
+  }
+
   parseRedirectUris(client: OauthClient): string[] {
     try {
       return JSON.parse(client.redirectUrisJson) as string[];
@@ -301,18 +391,20 @@ export class OauthService {
     resource?: string | null;
     agentSlug?: string | null;
   }): Promise<{ code: string; redirectUri: string }> {
-    const client = await this.getClient(input.clientId);
+    const client = await this.resolveClient(input.clientId);
     if (!client) throw new OauthError("invalid_client", "Unknown client", 400);
 
-    // Bind DCR clients to the authorizing tenant; reject cross-tenant reuse
-    if (client.tenantId && client.tenantId !== input.tenantId) {
-      throw new OauthError("access_denied", "Client belongs to another tenant", 403);
-    }
-    if (!client.tenantId) {
-      await this.db
-        .update(oauthClients)
-        .set({ tenantId: input.tenantId })
-        .where(eq(oauthClients.clientId, input.clientId));
+    // DCR/手动客户端绑定授权租户；CIMD 为全局身份，不绑定 tenant
+    if (client.registrationType !== "cimd") {
+      if (client.tenantId && client.tenantId !== input.tenantId) {
+        throw new OauthError("access_denied", "Client belongs to another tenant", 403);
+      }
+      if (!client.tenantId) {
+        await this.db
+          .update(oauthClients)
+          .set({ tenantId: input.tenantId })
+          .where(eq(oauthClients.clientId, input.clientId));
+      }
     }
 
     const uris = this.parseRedirectUris(client);
@@ -426,7 +518,7 @@ export class OauthService {
         400,
       );
     }
-    const client = await this.getClient(input.clientId);
+    const client = await this.resolveClient(input.clientId);
     if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
     if (!(await this.verifyClientSecret(client, input.clientSecret))) {
       throw new OauthError("invalid_client", "Invalid client authentication", 401);
@@ -469,7 +561,7 @@ export class OauthService {
     if (!input.refreshToken || !input.clientId) {
       throw new OauthError("invalid_request", "refresh_token and client_id required", 400);
     }
-    const client = await this.getClient(input.clientId);
+    const client = await this.resolveClient(input.clientId);
     if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
     if (!(await this.verifyClientSecret(client, input.clientSecret))) {
       throw new OauthError("invalid_client", "Invalid client authentication", 401);

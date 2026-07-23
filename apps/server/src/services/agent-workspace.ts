@@ -46,15 +46,27 @@ export function resolveStackMode(agent: Agent): StackMode {
   return "none";
 }
 
-/** Prefer the local prebaked workspace image (packages at build time). */
+/** Prefer env override, then published / local prebaked workspace image. */
 export function resolveWorkspaceImage(configured: string | null | undefined): string {
-  const preferred = WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE;
-  const raw = (configured?.trim() || preferred).trim();
-  return raw || preferred;
+  const fromEnv = process.env.ZAKURA_WORKSPACE_IMAGE?.trim();
+  const preferred = fromEnv || WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE;
+  const raw = (configured?.trim() || preferred).trim() || preferred;
+  // 历史本地标签 → 发布镜像（避免 DB / 旧默认值继续拉取 zakura/workspace:*）
+  if (isLegacyWorkspaceImage(raw)) return preferred;
+  return raw;
+}
+
+/** 旧版本地构建标签（docker build -t zakura/workspace:debian） */
+export function isLegacyWorkspaceImage(image: string): boolean {
+  return /^zakura\/workspace(?::|$)/i.test(image.trim());
 }
 
 export function isPrebakedWorkspaceImage(image: string): boolean {
-  return /^zakura\/workspace(?::|$)/i.test(image.trim());
+  const t = image.trim();
+  return (
+    isLegacyWorkspaceImage(t) ||
+    /(?:^|\/)zakura-workspace(?:-dev)?(?::|$)/i.test(t)
+  );
 }
 
 function resolveWorkspaceDockerContext(): string | null {

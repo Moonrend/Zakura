@@ -74,6 +74,7 @@ export function createWebFetchProvider(): ProviderPlugin {
       return [
         {
           name: "web_fetch",
+          title: "Web Fetch",
           description: `读取网页正文。可用后端: ${meta.map((b) => b.id).join(", ") || "（未配置）"}`,
           inputSchema: {
             type: "object",
@@ -87,6 +88,12 @@ export function createWebFetchProvider(): ProviderPlugin {
               },
               timeout_ms: { type: "number", default: 25000 },
             },
+          },
+          annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            openWorldHint: true,
+            idempotentHint: true,
           },
         },
       ];

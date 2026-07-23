@@ -35,6 +35,11 @@ export interface ResolvedTool {
   localName: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  title?: string;
+  outputSchema?: Record<string, unknown>;
+  annotations?: McpToolDef["annotations"];
+  securitySchemes?: McpToolDef["securitySchemes"];
+  _meta?: Record<string, unknown>;
   builtin?: boolean;
   /** Native Zakura agent tool (fs/shell/computer) */
   agentScoped?: boolean;
@@ -322,6 +327,11 @@ export class McpGateway {
           localName: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
+          title: t.title,
+          outputSchema: t.outputSchema,
+          annotations: t.annotations,
+          securitySchemes: t.securitySchemes,
+          _meta: t._meta,
           agentId: agent.id,
         });
       }
@@ -451,6 +461,11 @@ export class McpGateway {
           localName: t.name,
           description: `[${instance.name}] ${t.description}`,
           inputSchema: t.inputSchema,
+          title: t.title,
+          outputSchema: t.outputSchema,
+          annotations: t.annotations,
+          securitySchemes: t.securitySchemes,
+          _meta: t._meta,
         });
       }
     }

@@ -9,6 +9,8 @@
 | **Headscale** | `8080` HTTP、`50443` gRPC、`3478/udp` STUN、`9090` metrics | 协调服务器（镜像建议 `0.29.2+`，需支持 `autogroup:self`） |
 | **Headplane** | 默认映射 `3045→3000`（见 `.env`） | Web UI（agent + Docker 集成） |
 
+生产域名示例：`https://zakura-network.moonrend.com`（经主应用 nginx 反代，MagicDNS `base_domain` 用 `mesh.moonrend.com`）。
+
 ACL（[`config/policy.hujson`](config/policy.hujson)）：
 
 - tagOwners 中的用户别名**必须含 `@`**（如 `platform@`），否则 Headscale 拒绝启动

@@ -4,7 +4,7 @@ import {
   type WorkspaceFs,
   type WorkspaceFsProvider,
 } from "@zakura/core";
-import type { McpToolResult, MemoryProviderKind } from "@zakura/shared";
+import type { McpToolResult, MemoryProviderKind, McpToolAnnotations } from "@zakura/shared";
 import { AGENT_WORKSPACE_ROOT } from "@zakura/shared";
 import type { Agent } from "../db/schema.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
@@ -25,6 +25,8 @@ export interface AgentNativeToolDef {
   localName: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  title?: string;
+  annotations?: McpToolAnnotations;
   builtin: true;
   agentScoped: true;
 }
@@ -33,6 +35,10 @@ function tool(
   name: string,
   description: string,
   inputSchema: Record<string, unknown>,
+  opts?: {
+    title?: string;
+    annotations?: McpToolAnnotations;
+  },
 ): AgentNativeToolDef {
   return {
     qualifiedName: name.startsWith("re_") ? name : `re_${name}`,
@@ -41,6 +47,8 @@ function tool(
     localName: name,
     description,
     inputSchema,
+    title: opts?.title,
+    annotations: opts?.annotations,
     builtin: true,
     agentScoped: true,
   };

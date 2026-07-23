@@ -46,7 +46,7 @@ function authorizeFrontendUrl(config: AppConfig, reqUrl: string): string {
 
 /**
  * OAuth 2.1 Authorization Server for MCP:
- * metadata, DCR (/register), /authorize → frontend, /token
+ * metadata、CIMD、DCR (/oauth/register)、/authorize → frontend、/token
  */
 export function createOauthApp(deps: {
   db: Db;
@@ -168,7 +168,8 @@ export function createOauthApp(deps: {
         {
           id: "oauth21",
           name: "OAuth 2.1 + PKCE",
-          description: "VS Code / 支持动态客户端注册的 MCP 客户端（推荐）；请使用 Agent MCP URL",
+          description:
+            "ChatGPT / VS Code 等：优先 CIMD（client_id 为元数据 URL），兼容 DCR + PKCE；请使用 Agent MCP URL",
         },
         {
           id: "api_key",

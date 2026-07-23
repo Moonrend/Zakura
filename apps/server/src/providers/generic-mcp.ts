@@ -7,6 +7,10 @@ import type {
   ProviderConfigSchema,
   RuntimeSpec,
 } from "@zakura/shared";
+import {
+  normalizeToolResult,
+  pickUpstreamToolFields,
+} from "@zakura/shared";
 import { eq } from "drizzle-orm";
 import {
   hasMcpCredentials,
@@ -351,17 +355,21 @@ export function createGenericMcpProvider(): ProviderPlugin {
         undefined,
         runtimeCtx(handle),
       )) as {
-        tools?: Array<{
-          name: string;
-          description?: string;
-          inputSchema?: Record<string, unknown>;
-        }>;
+        tools?: Array<Record<string, unknown>>;
       };
-      return (result.tools ?? []).map((t) => ({
-        name: t.name,
-        description: t.description ?? t.name,
-        inputSchema: t.inputSchema ?? { type: "object", properties: {} },
-      }));
+      return (result.tools ?? []).map((t) => {
+        const name = typeof t.name === "string" ? t.name : "unknown";
+        return {
+          name,
+          description:
+            typeof t.description === "string" ? t.description : name,
+          inputSchema:
+            t.inputSchema && typeof t.inputSchema === "object"
+              ? (t.inputSchema as Record<string, unknown>)
+              : { type: "object", properties: {} },
+          ...pickUpstreamToolFields(t),
+        };
+      });
     },
 
     async callTool(handle, toolName, args): Promise<McpToolResult> {
@@ -372,10 +380,7 @@ export function createGenericMcpProvider(): ProviderPlugin {
           { name: toolName, arguments: args },
           runtimeCtx(handle),
         );
-        if (result && typeof result === "object" && "content" in result) {
-          return result as McpToolResult;
-        }
-        return textResult(JSON.stringify(result, null, 2));
+        return normalizeToolResult(result);
       } catch (err) {
         return textResult(mcpErrorSummary(err), true);
       }

@@ -111,7 +111,7 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
         agentId: body.agentId,
         agentSlug: body.agentSlug,
         tenantSlug: body.tenantSlug,
-        image: body.image || "zakura/workspace:debian",
+        image: body.image || "sunwuyuan/zakura-workspace-dev:debian",
         network: body.network,
         env: body.env,
         labels: body.labels,

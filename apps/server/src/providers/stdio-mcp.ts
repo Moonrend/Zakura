@@ -9,6 +9,10 @@ import type {
   ProviderConfigSchema,
   RuntimeSpec,
 } from "@zakura/shared";
+import {
+  normalizeToolResult,
+  pickUpstreamToolFields,
+} from "@zakura/shared";
 import { mcpHttpRpc } from "../lib/mcp-http.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -314,17 +318,21 @@ export function createStdioMcpProvider(): ProviderPlugin {
 
     async listTools(handle): Promise<McpToolDef[]> {
       const result = (await mcpHttpRpc(mcpEndpoint(handle), {}, "tools/list")) as {
-        tools?: Array<{
-          name: string;
-          description?: string;
-          inputSchema?: Record<string, unknown>;
-        }>;
+        tools?: Array<Record<string, unknown>>;
       };
-      return (result.tools ?? []).map((t) => ({
-        name: t.name,
-        description: t.description ?? t.name,
-        inputSchema: t.inputSchema ?? { type: "object", properties: {} },
-      }));
+      return (result.tools ?? []).map((t) => {
+        const name = typeof t.name === "string" ? t.name : "unknown";
+        return {
+          name,
+          description:
+            typeof t.description === "string" ? t.description : name,
+          inputSchema:
+            t.inputSchema && typeof t.inputSchema === "object"
+              ? (t.inputSchema as Record<string, unknown>)
+              : { type: "object", properties: {} },
+          ...pickUpstreamToolFields(t),
+        };
+      });
     },
 
     async callTool(handle, toolName, args): Promise<McpToolResult> {
@@ -333,10 +341,7 @@ export function createStdioMcpProvider(): ProviderPlugin {
           name: toolName,
           arguments: args,
         });
-        if (result && typeof result === "object" && "content" in result) {
-          return result as McpToolResult;
-        }
-        return textResult(JSON.stringify(result, null, 2));
+        return normalizeToolResult(result);
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }

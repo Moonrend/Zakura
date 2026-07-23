@@ -1,0 +1,7 @@
+# 本地从源码构建主应用（覆盖 docker-compose.yml 的 image）
+services:
+  zakura:
+    image: sunwuyuan/zakura-dev:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile

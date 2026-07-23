@@ -120,9 +120,10 @@ async function main() {
         "X-Api-Key",
         "X-Zakura-Session",
         "MCP-Protocol-Version",
+        "Mcp-Session-Id",
       ],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      exposeHeaders: ["WWW-Authenticate"],
+      exposeHeaders: ["WWW-Authenticate", "MCP-Protocol-Version", "Mcp-Session-Id"],
     }),
   );
 
@@ -165,10 +166,11 @@ async function main() {
         agentMcp: "/mcp/agents/:slug",
         authorize: "/authorize",
         token: "/token",
-        register: "/register",
+        register: "/oauth/register",
         oauthMetadata: "/.well-known/oauth-authorization-server",
         resourceMetadata: "/.well-known/oauth-protected-resource",
         health: "/api/health",
+        cimd: "client_id_metadata_document_supported",
       },
     }),
   );

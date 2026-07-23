@@ -50,6 +50,7 @@ import {
 import { resolveAgentMemory } from "../services/memory-runtime.js";
 import type { ToolCallStore } from "../services/tool-call-store.js";
 import { OauthError, type OauthService } from "../services/oauth.js";
+import { isCimdClientId } from "../services/oauth-cimd.js";
 import { PROVIDER_CATEGORY_META } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
@@ -598,10 +599,11 @@ export async function createApiApp(deps: {
         agentMcpPattern: `${config.publicBaseUrl}/mcp/agents/{slug}`,
         authorizeUrl: `${config.webPublicUrl}/oauth/authorize`,
         tokenUrl: `${config.publicBaseUrl}/token`,
-        registerUrl: `${config.publicBaseUrl}/register`,
+        registerUrl: `${config.publicBaseUrl}/oauth/register`,
         oauthMetadataUrl: `${config.publicBaseUrl}/.well-known/oauth-authorization-server`,
         resourceMetadataUrl: `${config.publicBaseUrl}/.well-known/oauth-protected-resource`,
         webPublicUrl: config.webPublicUrl,
+        clientIdMetadataDocumentSupported: true,
       },
     });
   });
@@ -656,8 +658,28 @@ export async function createApiApp(deps: {
       return c.json({ error: "缺少 client_id / redirect_uri / code_challenge" }, 400);
     }
 
-    const client = await oauth.getClient(clientId);
-    if (!client) return c.json({ error: "未知客户端，请先完成动态注册" }, 400);
+    let client;
+    try {
+      client = await oauth.resolveClient(clientId);
+    } catch (err) {
+      if (err instanceof OauthError) {
+        return c.json({ error: err.message }, err.status as 400);
+      }
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
+    }
+    if (!client) {
+      return c.json(
+        {
+          error: isCimdClientId(clientId)
+            ? "无法加载 CIMD 客户端元数据，请检查 client_id URL 是否可访问"
+            : "未知客户端，请先完成动态注册或使用支持 CIMD 的客户端",
+        },
+        400,
+      );
+    }
     const uris = oauth.parseRedirectUris(client);
     if (!uris.includes(redirectUri)) {
       return c.json({ error: "redirect_uri 未登记" }, 400);

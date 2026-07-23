@@ -1,21 +1,20 @@
-# Headplane — Headscale Web UI（全功能）
-# 本地开发：cookie_secure=false；生产 HTTPS 请改回 true 并更新 base_url。
+# Headplane — Headscale Web UI
+# api_key / cookie_secret 由部署时写入，勿提交真实密钥
 
 server:
   host: "0.0.0.0"
   port: 3000
-  base_url: "http://127.0.0.1:3045"
-  cookie_secret: "2816c64b2c8b57093c5cdb3f696abca5"
-  cookie_secure: false
+  base_url: "https://zakura-network.moonrend.com"
+  cookie_secret: "CHANGE_ME_32_CHARS_COOKIE_SECRET!!"
+  cookie_secure: true
   cookie_max_age: 86400
   data_path: "/var/lib/headplane"
 
 headscale:
   url: "http://headscale:8080"
-  public_url: "http://127.0.0.1:8080"
+  public_url: "https://zakura-network.moonrend.com"
   config_path: "/etc/headscale/config.yaml"
-  # 由启动脚本写入 apikeys create 输出；勿提交真实密钥到公开仓库
-  api_key: "hskey-api-oVEtypbZ89VQ-2UsHVHgPGsXOisy_7kTuPAEci4Trkp5tQgUy1CENtoT0T308WXL32mmLKj4AvNUk"
+  api_key: "REPLACE_WITH_HEADSCALE_API_KEY"
 
 integration:
   agent:
@@ -29,7 +28,6 @@ integration:
     socket: "unix:///var/run/docker.sock"
   kubernetes:
     enabled: false
-    # 即便 disabled，新版 Headplane schema 仍要求该字段存在
     validate_manifest: true
     pod_name: "headscale"
   proc:

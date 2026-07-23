@@ -13,7 +13,8 @@ AI 环境编排 + **多 Agent MCP 网关**。为每个 Agent 提供隔离的文�
 - **记忆**：Built-in（关键词 + 可选向量 + 图谱）/ 传统笔记 / mem0 / OpenViking；MCP 工具 `search_memory` / `add_memory` / …
 - **统一 MCP**：仅按 Agent 接入 `/mcp/agents/{slug}`
 - **MCP 服务器**：商店 / 导入管理上游；HTTP / Stdio 容器；上游 OAuth 2.1 DCR；详情页工具试用
-- **对外 OAuth 2.1**：VS Code 等客户端动态注册（DCR + PKCE）
+- **对外 OAuth 2.1**：CIMD（ChatGPT 等）+ DCR/PKCE（VS Code 等）
+- **ChatGPT Apps SDK**：tools/list 含 title / annotations / securitySchemes / `_meta`；WWW-Authenticate 使用 `resource_metadata`
 
 | 入口 | 工具 |
 |------|------|
@@ -89,8 +90,8 @@ docker compose --profile postgres up -d     # 外部 Postgres，再改 DATABASE_
 | `zakura-workspace-dev` | `latest`、`sha-<7位>`、`debian` |
 
 ```bash
-docker pull <user>/zakura-dev:latest
-docker pull <user>/zakura-dev:sha-abc1234
+docker pull sunwuyuan/zakura-dev:latest
+docker pull sunwuyuan/zakura-dev:sha-abc1234
 docker pull ghcr.io/moonrend/zakura-dev:latest
 ```
 
@@ -104,20 +105,20 @@ git push origin v0.1.0
 ```
 
 ```bash
-docker pull <user>/zakura:0.1.0
-docker pull <user>/zakura:latest
-docker pull <user>/zakura-runner:latest
-docker pull <user>/zakura-workspace:debian
+docker pull sunwuyuan/zakura:0.1.0
+docker pull sunwuyuan/zakura:latest
+docker pull sunwuyuan/zakura-runner:latest
+docker pull sunwuyuan/zakura-workspace:debian
 ```
 
 | 镜像 | 说明 |
 |------|------|
-| `<user>/zakura` · `ghcr.io/<owner>/zakura` | 主应用正式版 |
-| `<user>/zakura-runner` · `ghcr.io/<owner>/zakura-runner` | Runner 正式版 |
-| `<user>/zakura-workspace` · `ghcr.io/<owner>/zakura-workspace` | Workspace 正式版 |
-| `<user>/zakura-*-dev` · `ghcr.io/<owner>/zakura-*-dev` | 开发调试版（main 最新） |
+| `sunwuyuan/zakura` · `ghcr.io/moonrend/zakura` | 主应用正式版 |
+| `sunwuyuan/zakura-runner` · `ghcr.io/moonrend/zakura-runner` | Runner 正式版 |
+| `sunwuyuan/zakura-workspace` · `ghcr.io/moonrend/zakura-workspace` | Workspace 正式版 |
+| `sunwuyuan/zakura-*-dev` · `ghcr.io/moonrend/zakura-*-dev` | 开发调试版（main 最新） |
 
-本地开发仍可用 `docker compose` / `pnpm workspace:image` 构建本地标签（`zakura`、`zakura/runner:latest`、`zakura/workspace:debian`）。GHCR 首次公开发布后，若需匿名拉取，请在 GitHub Packages 将对应包可见性设为 **Public**。
+本地开发仍可用 `docker compose` / `pnpm workspace:image`（默认标签已对齐 Docker Hub：`sunwuyuan/zakura-dev`、`sunwuyuan/zakura-runner-dev`、`sunwuyuan/zakura-workspace-dev`）。GHCR 首次公开发布后，若需匿名拉取，请在 GitHub Packages 将对应包可见性设为 **Public**。
 
 ## 连接 MCP（Cursor 等）
 

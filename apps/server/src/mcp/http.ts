@@ -1,5 +1,9 @@
 import type { Context } from "hono";
 import { and, eq } from "drizzle-orm";
+import {
+  buildWwwAuthenticateChallenge,
+  toPublicToolDescriptor,
+} from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { agents } from "../db/schema.js";
@@ -14,6 +18,10 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
+/** ChatGPT / 新版 MCP 客户端优先；保留 2024-11-05 兼容 */
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
+const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
+
 function rpcResult(id: string | number | null | undefined, result: unknown) {
   return { jsonrpc: "2.0", id: id ?? null, result };
 }
@@ -27,18 +35,36 @@ function agentSlugFromPath(path: string): string | null {
   return m?.[1] ? decodeURIComponent(m[1]) : null;
 }
 
-function wwwAuthenticate(config: AppConfig, resourcePath: string): string {
+function resourceMetadataUrl(config: AppConfig, resourcePath: string): string {
   const base = config.publicBaseUrl.replace(/\/$/, "");
-  const resourceMeta =
-    resourcePath === "/mcp"
-      ? `${base}/.well-known/oauth-protected-resource`
-      : `${base}/.well-known/oauth-protected-resource${resourcePath}`;
-  return `Bearer FAKESECRET_g3h4i5j6k7l8m9n0o1p2="${resourceMeta}", scope="mcp"`;
+  return resourcePath === "/mcp"
+    ? `${base}/.well-known/oauth-protected-resource`
+    : `${base}/.well-known/oauth-protected-resource${resourcePath}`;
+}
+
+function wwwAuthenticate(config: AppConfig, resourcePath: string): string {
+  return buildWwwAuthenticateChallenge({
+    resourceMetadataUrl: resourceMetadataUrl(config, resourcePath),
+    scope: "mcp",
+  });
 }
 
 function unauthorized(c: Context, config: AppConfig, resourcePath: string, message: string) {
   c.header("WWW-Authenticate", wwwAuthenticate(config, resourcePath));
   return c.json(rpcError(null, -32001, message), 401);
+}
+
+function negotiateProtocolVersion(
+  requested: unknown,
+  headerVersion: string | undefined,
+): string {
+  const candidates = [requested, headerVersion].filter(
+    (v): v is string => typeof v === "string" && !!v.trim(),
+  );
+  for (const v of candidates) {
+    if ((SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(v)) return v;
+  }
+  return DEFAULT_PROTOCOL_VERSION;
 }
 
 /**
@@ -50,7 +76,11 @@ function unauthorized(c: Context, config: AppConfig, resourcePath: string, messa
  * 2. API Key — Authorization: Bearer zak_... or X-Api-Key
  *
  * Unauthenticated requests get 401 + WWW-Authenticate (RFC 9728 resource_metadata)
- * so VS Code / MCP clients can start OAuth + dynamic client registration.
+ * so ChatGPT / VS Code 可走 CIMD 或 DCR。
+ *
+ * tools/list 输出对齐 ChatGPT Apps SDK tool descriptor：
+ * title / annotations / securitySchemes / _meta
+ * @see https://developers.openai.com/apps-sdk/reference#tool-descriptor-parameters
  */
 export function createMcpHandler(deps: {
   db: Db;
@@ -84,12 +114,13 @@ export function createMcpHandler(deps: {
       return c.json({
         name: `Zakura Agent MCP (${pathSlug})`,
         transport: "streamable-http",
+        protocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth: {
           methods: ["oauth2.1", "api_key"],
           authorizationServers: [config.publicBaseUrl.replace(/\/$/, "")],
-          resourceMetadata: `${config.publicBaseUrl.replace(/\/$/, "")}/.well-known/oauth-protected-resource${resourcePath}`,
+          resourceMetadata: resourceMetadataUrl(config, resourcePath),
         },
-        hint: "Use OAuth 2.1 (VS Code) or Authorization: Bearer <agent-api-key>",
+        hint: "Use OAuth 2.1 (ChatGPT CIMD / VS Code DCR) or Authorization: Bearer <agent-api-key>",
         agentSlug: pathSlug,
       });
     }
@@ -149,16 +180,28 @@ export function createMcpHandler(deps: {
       agentId,
     };
 
+    const headerProto = c.req.header("mcp-protocol-version") ?? undefined;
+
     try {
       if (method === "initialize") {
+        const protocolVersion = negotiateProtocolVersion(
+          params?.protocolVersion,
+          headerProto,
+        );
+        c.header("MCP-Protocol-Version", protocolVersion);
         return c.json(
           rpcResult(id, {
-            protocolVersion: "2024-11-05",
-            capabilities: { tools: {} },
+            protocolVersion,
+            capabilities: {
+              tools: { listChanged: false },
+            },
             serverInfo: {
               name: "zakura-agent",
               version: "0.2.0",
+              title: `Zakura Agent (${pathSlug})`,
             },
+            instructions:
+              "Zakura Agent MCP gateway. Tools require OAuth 2.1 (scope=mcp) or an agent API key. Prefer Agent-scoped URL /mcp/agents/{slug}.",
           }),
         );
       }
@@ -171,11 +214,22 @@ export function createMcpHandler(deps: {
         const tools = await gateway.listToolsForTenant(auth.tenant.id, scope);
         return c.json(
           rpcResult(id, {
-            tools: tools.map((t) => ({
-              name: t.qualifiedName,
-              description: t.description,
-              inputSchema: t.inputSchema,
-            })),
+            tools: tools.map((t) =>
+              toPublicToolDescriptor(
+                {
+                  name: t.localName,
+                  title: t.title,
+                  description: t.description,
+                  inputSchema: t.inputSchema,
+                  outputSchema: t.outputSchema,
+                  annotations: t.annotations,
+                  // 对外始终声明 Zakura OAuth；上游 scheme 不覆盖网关鉴权语义
+                  securitySchemes: undefined,
+                  _meta: t._meta,
+                },
+                { publicName: t.qualifiedName },
+              ),
+            ),
           }),
         );
       }

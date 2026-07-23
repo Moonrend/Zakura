@@ -543,9 +543,9 @@ export const oauthClients = pgTable(
     responseTypesJson: text("response_types_json").notNull().default('["code"]'),
     tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
     scope: text("scope").notNull().default("mcp"),
-    /** manual | dynamic */
+    /** manual | dynamic | cimd */
     registrationType: text("registration_type").notNull().default("dynamic"),
-    /** Optional tenant binding for manually created clients */
+    /** Optional tenant binding for manually created / DCR clients；CIMD 保持 null（跨租户共享） */
     tenantId: text("tenant_id").references(() => tenants.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

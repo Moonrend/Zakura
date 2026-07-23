@@ -81,16 +81,12 @@ export interface HealthResult {
   details?: Record<string, unknown>;
 }
 
-export interface McpToolDef {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
-export interface McpToolResult {
-  content: Array<{ type: "text"; text: string } | { type: "resource"; uri: string; text?: string }>;
-  isError?: boolean;
-}
+export type {
+  McpToolAnnotations,
+  McpSecurityScheme,
+  McpToolDef,
+  McpToolResult,
+} from "./mcp-tool-descriptor.js";
 
 export type ProviderCapability =
   | "mcp-proxy"
@@ -189,10 +185,10 @@ export interface AgentCapabilities {
 }
 
 /** Default Docker image for any container-backed capability (prebaked xvfb+chromium). */
-export const DEFAULT_WORKSPACE_IMAGE = "zakura/workspace:debian";
+export const DEFAULT_WORKSPACE_IMAGE = "sunwuyuan/zakura-workspace-dev:debian";
 
-/** Local prebaked workspace image context (docker/workspace). */
-export const WORKSPACE_IMAGE_LOCAL = "zakura/workspace:debian";
+/** Local / published workspace image (docker/workspace → Docker Hub *-dev). */
+export const WORKSPACE_IMAGE_LOCAL = "sunwuyuan/zakura-workspace-dev:debian";
 
 export const AGENT_WORKSPACE_ROOT = "/workspace";
 
@@ -356,3 +352,15 @@ export type {
   StoreInstallPreview,
   StoreServerLike,
 } from "./mcp-config.js";
+
+export {
+  DEFAULT_MCP_OAUTH_SCHEMES,
+  inferToolAnnotations,
+  humanizeToolTitle,
+  toPublicToolDescriptor,
+  pickUpstreamToolFields,
+  buildWwwAuthenticateChallenge,
+  authRequiredToolResult,
+  normalizeToolResult,
+} from "./mcp-tool-descriptor.js";
+export type { PublicMcpToolDescriptor } from "./mcp-tool-descriptor.js";

@@ -1,6 +1,6 @@
 # Strip Go from an already-built workspace image (avoids re-running apt when mirrors fail).
 # Source of truth for a full rebuild remains ./Dockerfile
-ARG BASE_IMAGE=zakura/workspace:debian
+ARG BASE_IMAGE=sunwuyuan/zakura-workspace-dev:debian
 FROM ${BASE_IMAGE}
 
 ENV PATH=/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

@@ -74,6 +74,7 @@ export function createWebSearchProvider(): ProviderPlugin {
       return [
         {
           name: "web_search",
+          title: "Web Search",
           description: `网页搜索。可用引擎: ${meta.map((e) => e.id).join(", ") || "（未配置）"}`,
           inputSchema: {
             type: "object",
@@ -88,6 +89,12 @@ export function createWebSearchProvider(): ProviderPlugin {
               limit: { type: "number", default: 8 },
               language: { type: "string", description: "如 zh-CN / en" },
             },
+          },
+          annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            openWorldHint: true,
+            idempotentHint: true,
           },
         },
       ];
