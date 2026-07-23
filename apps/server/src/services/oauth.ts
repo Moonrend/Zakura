@@ -115,6 +115,64 @@ export function isAllowedRedirectUri(uri: string): boolean {
   }
 }
 
+/**
+ * 校验 redirect_uri 是否属于该 client。
+ * CIMD（ChatGPT/Claude）：文档可能未及时列出新 callback_id，
+ * 对受信主机允许官方回调路径前缀匹配；redirect_uris 中以 `/` 结尾的视为前缀。
+ */
+export function isRedirectUriRegistered(
+  client: { registrationType: string; redirectUrisJson: string },
+  redirectUri: string,
+  clientId?: string,
+): boolean {
+  let uris: string[] = [];
+  try {
+    uris = JSON.parse(client.redirectUrisJson) as string[];
+  } catch {
+    uris = [];
+  }
+  if (
+    uris.some(
+      (u) =>
+        u === redirectUri ||
+        (u.endsWith("/") && redirectUri.startsWith(u)) ||
+        // 精确路径条目（无尾斜杠）的「父路径」允许：connector_platform_oauth_redirect
+        redirectUri === u,
+    )
+  ) {
+    return true;
+  }
+
+  if (client.registrationType !== "cimd") return false;
+  try {
+    const redirect = new URL(redirectUri);
+    const idHost = clientId ? new URL(clientId).hostname.toLowerCase() : "";
+    const host = redirect.hostname.toLowerCase();
+
+    // ChatGPT Apps / Connectors
+    if (
+      (host === "chatgpt.com" || host === "chat.openai.com" || idHost === "chatgpt.com") &&
+      (redirect.pathname.startsWith("/connector/oauth/") ||
+        redirect.pathname === "/connector_platform_oauth_redirect")
+    ) {
+      return redirect.protocol === "https:";
+    }
+
+    // Claude
+    if (
+      (host === "claude.ai" || idHost === "claude.ai") &&
+      (redirect.pathname.startsWith("/api/mcp/auth_callback") ||
+        redirect.pathname.startsWith("/oauth/") ||
+        redirect.pathname.includes("callback"))
+    ) {
+      return redirect.protocol === "https:";
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 /** AS 声明的 token 端点鉴权方式（CIMD 与 ChatGPT 取交集；优先 none 公开客户端） */
 export const TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED = [
   "none",
@@ -133,7 +191,7 @@ export function authorizationServerMetadata(baseUrl: string) {
      * （nginx 对 POST /register 的 418 分流在部分环境会表现为客户端看到的 403）
      */
     registration_endpoint: `${issuer}/oauth/register`,
-    scopes_supported: ["mcp", "openid"],
+    scopes_supported: ["mcp"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
@@ -407,8 +465,7 @@ export class OauthService {
       }
     }
 
-    const uris = this.parseRedirectUris(client);
-    if (!uris.includes(input.redirectUri)) {
+    if (!isRedirectUriRegistered(client, input.redirectUri, input.clientId)) {
       throw new OauthError("invalid_request", "redirect_uri mismatch", 400);
     }
     if (!input.codeChallenge) {

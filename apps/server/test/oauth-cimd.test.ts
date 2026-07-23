@@ -71,6 +71,7 @@ describe("oauth CIMD", () => {
     assert.equal(meta.client_id_metadata_document_supported, true);
     assert.equal(meta.registration_endpoint, "https://zakura.example/oauth/register");
     assert.ok(meta.token_endpoint_auth_methods_supported.includes("none"));
+    assert.deepEqual(meta.scopes_supported, ["mcp"]);
   });
 
   it("fetchCimdDocument 使用 mock fetch 并缓存", async () => {

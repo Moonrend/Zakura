@@ -109,7 +109,31 @@ export function createMcpHandler(deps: {
 
     const resourcePath = `/mcp/agents/${pathSlug}`;
 
+    /**
+     * Streamable HTTP：GET 只能返回 text/event-stream，或不支持时 405。
+     * 先前对 MCP 客户端 GET 返回 JSON discovery，会导致 ChatGPT 握手后断开
+     * （「连接到 Zakura 时出现问题」）。
+     * 浏览器（Accept 含 text/html）仍返回可读 discovery。
+     * @see https://modelcontextprotocol.io/specification/2025-03-26/basic/transports
+     */
     if (c.req.method === "GET") {
+      const accept = (c.req.header("accept") ?? "").toLowerCase();
+      const isBrowser =
+        accept.includes("text/html") || accept.includes("application/xhtml");
+      if (!isBrowser) {
+        c.header("Allow", "POST, OPTIONS");
+        c.header("WWW-Authenticate", wwwAuthenticate(config, resourcePath));
+        return c.json(
+          {
+            error: "method_not_allowed",
+            message:
+              "This MCP endpoint is Streamable HTTP (POST JSON-RPC only). GET SSE is not supported.",
+            agentSlug: pathSlug,
+            resourceMetadata: resourceMetadataUrl(config, resourcePath),
+          },
+          405,
+        );
+      }
       c.header("WWW-Authenticate", wwwAuthenticate(config, resourcePath));
       return c.json({
         name: `Zakura Agent MCP (${pathSlug})`,
@@ -127,6 +151,11 @@ export function createMcpHandler(deps: {
 
     if (c.req.method === "OPTIONS") {
       return c.body(null, 204);
+    }
+
+    // Streamable HTTP 会话终止：无状态实现直接确认
+    if (c.req.method === "DELETE") {
+      return c.body(null, 200);
     }
 
     const rawToken =
@@ -206,7 +235,12 @@ export function createMcpHandler(deps: {
         );
       }
 
-      if (method === "notifications/initialized" || method === "ping") {
+      if (method === "notifications/initialized") {
+        // JSON-RPC notification：无 id，应答 202
+        return c.body(null, 202);
+      }
+
+      if (method === "ping") {
         return c.json(rpcResult(id, {}));
       }
 

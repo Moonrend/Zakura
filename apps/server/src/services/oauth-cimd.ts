@@ -197,9 +197,58 @@ export function parseCimdDocument(raw: unknown, expectedClientId: string): CimdD
   };
 }
 
+const TRUSTED_CIMD_HOSTS: Record<
+  string,
+  { client_name: string; redirect_uri_prefixes: string[] }
+> = {
+  "chatgpt.com": {
+    client_name: "ChatGPT",
+    redirect_uri_prefixes: [
+      "https://chatgpt.com/connector/oauth/",
+      "https://chatgpt.com/connector_platform_oauth_redirect",
+      "https://chat.openai.com/connector/oauth/",
+    ],
+  },
+  "chat.openai.com": {
+    client_name: "ChatGPT",
+    redirect_uri_prefixes: [
+      "https://chatgpt.com/connector/oauth/",
+      "https://chatgpt.com/connector_platform_oauth_redirect",
+      "https://chat.openai.com/connector/oauth/",
+    ],
+  },
+  "claude.ai": {
+    client_name: "Claude",
+    redirect_uri_prefixes: [
+      "https://claude.ai/api/mcp/auth_callback",
+      "https://claude.ai/oauth/",
+    ],
+  },
+};
+
+/** Cloudflare WAF 等导致 CIMD 拉取失败时，对受信主机回退为前缀 allowlist */
+export function trustedCimdFallback(clientId: string): CimdDocument | null {
+  if (!isCimdClientId(clientId)) return null;
+  try {
+    const host = new URL(clientId).hostname.toLowerCase();
+    const trusted = TRUSTED_CIMD_HOSTS[host];
+    if (!trusted) return null;
+    return {
+      client_id: clientId,
+      client_name: trusted.client_name,
+      redirect_uris: trusted.redirect_uri_prefixes,
+      token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 从 ChatGPT / Claude 等托管的 CIMD URL 拉取元数据。
- * 不跟随重定向（防 SSRF）。
+ * 不跟随重定向（防 SSRF）。受信主机拉取失败时回退 allowlist。
  */
 export async function fetchCimdDocument(
   clientId: string,
@@ -238,27 +287,45 @@ export async function fetchCimdDocument(
         "User-Agent": "Zakura-MCP-OAuth/1.0 (CIMD)",
       },
     });
+  } catch (err) {
+    clearTimeout(timer);
+    const fallback = trustedCimdFallback(clientId);
+    if (fallback) {
+      cache.set(clientId, { doc: fallback, expiresAt: Date.now() + DEFAULT_TTL_MS });
+      return fallback;
+    }
+    throw err instanceof Error ? err : new Error(String(err));
   } finally {
     clearTimeout(timer);
   }
 
   // 3xx：规范实现通常不跟随；拒绝以防跳到内网
   if (res.status >= 300 && res.status < 400) {
+    const fallback = trustedCimdFallback(clientId);
+    if (fallback) {
+      cache.set(clientId, { doc: fallback, expiresAt: Date.now() + DEFAULT_TTL_MS });
+      return fallback;
+    }
     throw new Error(`CIMD 拉取被重定向（HTTP ${res.status}），已拒绝`);
   }
   if (!res.ok) {
+    const fallback = trustedCimdFallback(clientId);
+    if (fallback) {
+      cache.set(clientId, { doc: fallback, expiresAt: Date.now() + DEFAULT_TTL_MS });
+      return fallback;
+    }
     throw new Error(`CIMD 拉取失败: HTTP ${res.status}`);
-  }
-
-  const ct = res.headers.get("content-type") ?? "";
-  if (ct && !/json/i.test(ct) && !/text\/plain/i.test(ct)) {
-    // 宽松：部分 CDN 可能漏 Content-Type，仍尝试 JSON.parse
   }
 
   let raw: unknown;
   try {
     raw = await res.json();
   } catch {
+    const fallback = trustedCimdFallback(clientId);
+    if (fallback) {
+      cache.set(clientId, { doc: fallback, expiresAt: Date.now() + DEFAULT_TTL_MS });
+      return fallback;
+    }
     throw new Error("CIMD 响应不是合法 JSON");
   }
 

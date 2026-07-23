@@ -49,7 +49,7 @@ import {
 } from "../services/memory-providers.js";
 import { resolveAgentMemory } from "../services/memory-runtime.js";
 import type { ToolCallStore } from "../services/tool-call-store.js";
-import { OauthError, type OauthService } from "../services/oauth.js";
+import { OauthError, isRedirectUriRegistered, type OauthService } from "../services/oauth.js";
 import { isCimdClientId } from "../services/oauth-cimd.js";
 import { PROVIDER_CATEGORY_META } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
@@ -681,7 +681,7 @@ export async function createApiApp(deps: {
       );
     }
     const uris = oauth.parseRedirectUris(client);
-    if (!uris.includes(redirectUri)) {
+    if (!isRedirectUriRegistered(client, redirectUri, clientId)) {
       return c.json({ error: "redirect_uri 未登记" }, 400);
     }
 
@@ -696,6 +696,7 @@ export async function createApiApp(deps: {
       resource: resource || null,
       agent: agent || null,
       codeChallengeMethod: c.req.query("code_challenge_method") || "S256",
+      registeredRedirectUris: uris,
     });
   });
 
