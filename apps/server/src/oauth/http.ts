@@ -57,13 +57,27 @@ export function createOauthApp(deps: {
   void deps.db;
   const app = new Hono();
 
-  app.get("/.well-known/oauth-authorization-server", (c) => c.json(oauth.metadata()));
-  app.get("/.well-known/oauth-authorization-server/*", (c) => c.json(oauth.metadata()));
+  const asMetadata = (c: Context) => {
+    // 避免 ChatGPT / CDN 缓存旧的 client_id_metadata_document_supported:false
+    c.header("Cache-Control", "no-store, max-age=0");
+    c.header("Content-Type", "application/json");
+    return c.json(oauth.metadata());
+  };
+
+  // RFC 8414 — ChatGPT 读 CIMD 标志主要看这个端点
+  app.get("/.well-known/oauth-authorization-server", asMetadata);
+  app.get("/.well-known/oauth-authorization-server/*", asMetadata);
+
+  // OIDC Discovery — 与 RFC 8414 同文；部分客户端只查此路径
+  app.get("/.well-known/openid-configuration", asMetadata);
+  app.get("/.well-known/openid-configuration/*", asMetadata);
 
   app.get("/.well-known/oauth-protected-resource", (c) => {
+    c.header("Cache-Control", "no-store, max-age=0");
     return c.json(oauth.resourceMetadata("/mcp"));
   });
   app.get("/.well-known/oauth-protected-resource/*", (c) => {
+    c.header("Cache-Control", "no-store, max-age=0");
     const suffix = c.req.path.replace(/^\/\.well-known\/oauth-protected-resource/, "") || "/mcp";
     const path = suffix.startsWith("/mcp") ? suffix : `/mcp${suffix}`;
     return c.json(oauth.resourceMetadata(path));

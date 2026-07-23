@@ -19,6 +19,7 @@ type ConnectMeta = {
     authorization_endpoint: string;
     token_endpoint: string;
     registration_endpoint: string;
+    client_id_metadata_document_supported?: boolean;
   };
 };
 
@@ -298,17 +299,20 @@ export default function AgentConnectPage() {
                 {(
                   [
                     [
-                      "Metadata",
-                      meta.authorizationServer.issuer +
-                        "/.well-known/oauth-authorization-server",
+                      "Metadata (RFC 8414)",
+                      `${meta.publicBaseUrl}/.well-known/oauth-authorization-server`,
+                    ],
+                    [
+                      "OIDC Discovery",
+                      `${meta.publicBaseUrl}/.well-known/openid-configuration`,
                     ],
                     [
                       "Protected Resource",
-                      `${meta.publicBaseUrl}/.well-known/oauth-protected-resource`,
+                      `${meta.publicBaseUrl}/.well-known/oauth-protected-resource/mcp/agents/${agent?.slug ?? "{slug}"}`,
                     ],
                     ["Authorization", meta.authorizationServer.authorization_endpoint],
                     ["Token", meta.authorizationServer.token_endpoint],
-                    ["Registration", meta.authorizationServer.registration_endpoint],
+                    ["Registration (DCR)", meta.authorizationServer.registration_endpoint],
                   ] as const
                 ).map(([label, url]) => (
                   <div
@@ -332,12 +336,21 @@ export default function AgentConnectPage() {
                   </div>
                 ))}
               </div>
+              <div className="rounded-md border px-3 py-2 text-[12px]">
+                <span className="text-muted-foreground">CIMD：</span>
+                {meta.authorizationServer.client_id_metadata_document_supported ? (
+                  <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                    已公布（client_id_metadata_document_supported=true）
+                  </span>
+                ) : (
+                  <span className="font-medium text-destructive">
+                    未公布 — 请重新部署服务端后再在 ChatGPT 中选择 CIMD
+                  </span>
+                )}
+              </div>
               <a
                 className="inline-flex items-center gap-1 text-[12px] text-primary hover:underline"
-                href={
-                  meta.authorizationServer.issuer +
-                  "/.well-known/oauth-authorization-server"
-                }
+                href={`${meta.publicBaseUrl}/.well-known/oauth-authorization-server`}
                 target="_blank"
                 rel="noreferrer"
               >
