@@ -1,7 +1,6 @@
 import type { Context } from "hono";
-import { and, asc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
-  authRequiredToolResult,
   buildWwwAuthenticateChallenge,
   toPublicToolDescriptor,
 } from "@zakura/shared";
@@ -22,14 +21,6 @@ interface JsonRpcRequest {
 /** ChatGPT / 新版 MCP 客户端优先；保留 2024-11-05 兼容 */
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2024-11-05"] as const;
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-
-/** 免鉴权：连接器扫描 / 工具枚举。tools/call 仍需 OAuth（调用时挑战）。 */
-const ANON_METHODS = new Set([
-  "initialize",
-  "notifications/initialized",
-  "ping",
-  "tools/list",
-]);
 
 function rpcResult(id: string | number | null | undefined, result: unknown) {
   return { jsonrpc: "2.0", id: id ?? null, result };
@@ -79,13 +70,18 @@ function negotiateProtocolVersion(
 /**
  * Streamable HTTP MCP endpoint at /mcp/agents/:slug only.
  *
- * Auth 模型（对齐 ChatGPT Apps SDK「匿名发现、调用时鉴权」）：
- * - initialize / ping / tools/list：可无凭证（便于连接器扫描，避开卡死的授权弹窗）
- * - tools/call：需 OAuth access token 或 API Key；否则返回带
- *   `_meta["mcp/www_authenticate"]` 的工具级挑战
+ * 鉴权（受保护资源 / MCP Authorization + ChatGPT Apps SDK）：
+ * 1. OAuth 2.1 access token — Authorization: Bearer rca_...
+ * 2. API Key — Authorization: Bearer zak_... 或 X-Api-Key
  *
+ * 未鉴权 → HTTP 401 + WWW-Authenticate: Bearer resource_metadata="…"
+ * （RFC 9728 §5.1 / MCP Authorization），客户端据此发现 AS 并走 OAuth。
+ *
+ * tools/list 声明 securitySchemes: oauth2（scope=mcp），对齐 Apps SDK tool descriptor。
+ *
+ * @see https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
  * @see https://developers.openai.com/apps-sdk/build/auth
- * @see https://community.openai.com/t/apps-sdk-submission-blocked-mcp-oauth-code-issued-but-chatgpt-never-calls-token-authorize-mcp-modal-hangs/1385089
+ * @see https://developers.openai.com/apps-sdk/reference#tool-descriptor-parameters
  */
 export function createMcpHandler(deps: {
   db: Db;
@@ -94,38 +90,6 @@ export function createMcpHandler(deps: {
   config: AppConfig;
 }) {
   const { db, gateway, oauth, config } = deps;
-
-  async function resolveAgentBySlug(pathSlug: string, tenantId?: string) {
-    if (tenantId) {
-      return (
-        (await db.query.agents.findFirst({
-          where: and(eq(agents.tenantId, tenantId), eq(agents.slug, pathSlug)),
-        })) ?? null
-      );
-    }
-    // 匿名：按 slug 取最早创建的 Agent（公开 MCP URL 建议全局唯一 slug）
-    return (
-      (await db.query.agents.findFirst({
-        where: eq(agents.slug, pathSlug),
-        orderBy: [asc(agents.createdAt)],
-      })) ?? null
-    );
-  }
-
-  async function resolveAuth(rawToken: string | null): Promise<McpAuthContext | null> {
-    if (!rawToken) return null;
-    const oauthAuth = await oauth.authenticateBearer(rawToken);
-    if (oauthAuth) return oauthAuth;
-    const keyed = await authenticateApiKey(db, rawToken);
-    if (!keyed) return null;
-    return {
-      tenant: keyed.tenant,
-      apiKeyId: keyed.apiKey.id,
-      agentId: keyed.apiKey.agentId ?? null,
-      authMethod: "api_key",
-      userId: null,
-    };
-  }
 
   return async (c: Context) => {
     const pathSlug = agentSlugFromPath(c.req.path);
@@ -174,11 +138,10 @@ export function createMcpHandler(deps: {
         protocolVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth: {
           methods: ["oauth2.1", "api_key"],
-          discovery: "anonymous",
           authorizationServers: [config.publicBaseUrl.replace(/\/$/, "")],
           resourceMetadata: resourceMetadataUrl(config, resourcePath),
         },
-        hint: "initialize/tools/list 可匿名；tools/call 需 OAuth 2.1 (scope=mcp) 或 Agent API Key",
+        hint: "Use OAuth 2.1 (ChatGPT CIMD / VS Code DCR) or Authorization: Bearer <agent-api-key>",
         agentSlug: pathSlug,
       });
     }
@@ -191,6 +154,44 @@ export function createMcpHandler(deps: {
       return c.body(null, 200);
     }
 
+    const rawToken =
+      extractBearer(c.req.header("authorization")) ??
+      c.req.header("x-api-key") ??
+      null;
+
+    if (!rawToken) {
+      return unauthorized(c, config, resourcePath, "Unauthorized: missing credentials");
+    }
+
+    let auth: McpAuthContext | null = await oauth.authenticateBearer(rawToken);
+    if (!auth) {
+      const keyed = await authenticateApiKey(db, rawToken);
+      if (keyed) {
+        auth = {
+          tenant: keyed.tenant,
+          apiKeyId: keyed.apiKey.id,
+          agentId: keyed.apiKey.agentId ?? null,
+          authMethod: "api_key",
+          userId: null,
+        };
+      }
+    }
+
+    if (!auth) {
+      return unauthorized(c, config, resourcePath, "Unauthorized: invalid token");
+    }
+
+    const agent = await db.query.agents.findFirst({
+      where: and(eq(agents.tenantId, auth.tenant.id), eq(agents.slug, pathSlug)),
+    });
+    if (!agent) {
+      return c.json(rpcError(null, -32004, `Unknown agent: ${pathSlug}`), 404);
+    }
+    if (auth.agentId && auth.agentId !== agent.id) {
+      return c.json(rpcError(null, -32001, "Token is bound to a different agent"), 403);
+    }
+    const agentId = agent.id;
+
     let body: JsonRpcRequest;
     try {
       body = await c.req.json<JsonRpcRequest>();
@@ -199,48 +200,12 @@ export function createMcpHandler(deps: {
     }
 
     const { id, method, params } = body;
-    const headerProto = c.req.header("mcp-protocol-version") ?? undefined;
-    const rawToken =
-      extractBearer(c.req.header("authorization")) ??
-      c.req.header("x-api-key") ??
-      null;
-    const auth = await resolveAuth(rawToken);
-    const allowAnon = !!method && ANON_METHODS.has(method);
-
-    if (!auth && !allowAnon) {
-      if (method === "tools/call") {
-        c.header("WWW-Authenticate", wwwAuthenticate(config, resourcePath));
-        return c.json(
-          rpcResult(
-            id,
-            authRequiredToolResult({
-              resourceMetadataUrl: resourceMetadataUrl(config, resourcePath),
-              message: "调用工具需要先完成 OAuth 授权（scope=mcp）或提供 Agent API Key。",
-            }),
-          ),
-        );
-      }
-      return unauthorized(
-        c,
-        config,
-        resourcePath,
-        rawToken ? "Unauthorized: invalid token" : "Unauthorized: missing credentials",
-      );
-    }
-
-    const agent = await resolveAgentBySlug(pathSlug, auth?.tenant.id);
-    if (!agent) {
-      return c.json(rpcError(id, -32004, `Unknown agent: ${pathSlug}`), 404);
-    }
-    if (auth?.agentId && auth.agentId !== agent.id) {
-      return c.json(rpcError(id, -32001, "Token is bound to a different agent"), 403);
-    }
-
-    const tenantId = auth?.tenant.id ?? agent.tenantId;
     const scope = {
-      apiKeyId: auth?.apiKeyId ?? undefined,
-      agentId: agent.id,
+      apiKeyId: auth.apiKeyId ?? undefined,
+      agentId,
     };
+
+    const headerProto = c.req.header("mcp-protocol-version") ?? undefined;
 
     try {
       if (method === "initialize") {
@@ -261,7 +226,7 @@ export function createMcpHandler(deps: {
               title: `Zakura Agent (${pathSlug})`,
             },
             instructions:
-              "Zakura Agent MCP：可匿名 initialize/tools/list；tools/call 需 OAuth 2.1 (scope=mcp) 或 Agent API Key。",
+              "Zakura Agent MCP gateway. Tools require OAuth 2.1 (scope=mcp) or an agent API key.",
           }),
         );
       }
@@ -275,7 +240,7 @@ export function createMcpHandler(deps: {
       }
 
       if (method === "tools/list") {
-        const tools = await gateway.listToolsForTenant(tenantId, scope);
+        const tools = await gateway.listToolsForTenant(auth.tenant.id, scope);
         return c.json(
           rpcResult(id, {
             tools: tools.map((t) =>
@@ -287,7 +252,7 @@ export function createMcpHandler(deps: {
                   inputSchema: t.inputSchema,
                   outputSchema: t.outputSchema,
                   annotations: t.annotations,
-                  // 对外始终声明 Zakura OAuth；上游 scheme 不覆盖网关鉴权语义
+                  // 对外声明 oauth2；上游 scheme 不覆盖网关鉴权语义
                   securitySchemes: undefined,
                   _meta: t._meta,
                 },
@@ -299,10 +264,9 @@ export function createMcpHandler(deps: {
       }
 
       if (method === "tools/call") {
-        // 此处必有 auth（未授权已在上方返回挑战）
         const name = String(params?.name ?? "");
         const args = (params?.arguments as Record<string, unknown>) ?? {};
-        const result = await gateway.callTool(tenantId, name, args, scope);
+        const result = await gateway.callTool(auth.tenant.id, name, args, scope);
         return c.json(rpcResult(id, result));
       }
 
