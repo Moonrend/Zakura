@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 export type WizardStepMeta = {
   id: string;
   title: string;
-  description: string;
+  description?: string;
   optional?: boolean;
 };
 
@@ -64,9 +64,9 @@ export function OnboardingWizardShell({
           <h1 className="mt-1 text-xl font-semibold tracking-tight">
             {step?.title}
           </h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            {step?.description}
-          </p>
+          {step?.description ? (
+            <p className="mt-1.5 text-sm text-muted-foreground">{step.description}</p>
+          ) : null}
           <nav className="mt-5 flex flex-wrap gap-1.5" aria-label="步骤">
             {steps.map((s, i) => {
               const done = !!doneMap[s.id];

@@ -109,7 +109,7 @@ export default function KeysPage() {
           <DialogHeader>
             <DialogTitle>{created ? "Key 已创建" : "新建 Key"}</DialogTitle>
             {created ? (
-              <DialogDescription>请立即复制，只显示一次。</DialogDescription>
+              <DialogDescription>仅显示一次</DialogDescription>
             ) : null}
           </DialogHeader>
           {created ? (

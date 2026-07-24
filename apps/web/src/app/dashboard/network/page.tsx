@@ -85,10 +85,7 @@ export default function NetworkOverviewPage() {
       </div>
 
       {data.hostJoinsTailscale === false ? (
-        <p className="text-xs text-muted-foreground">
-          多租户部署下控制面主机不加入各租户 Tailnet；Runner 仍可通过 Tailscale
-          互通，安装时使用站点外部地址回连。
-        </p>
+        <p className="text-xs text-muted-foreground">控制面不入租户 Tailnet</p>
       ) : null}
 
       <div className="grid gap-3 sm:grid-cols-3">
@@ -127,9 +124,6 @@ export default function NetworkOverviewPage() {
             查看活跃暴露
           </Button>
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          Tailscale 负责机器互通；Cloudflare Quick Tunnel 等负责把 workspace 端口分享给外人。二者正交。
-        </p>
       </SettingsSection>
     </div>
   );

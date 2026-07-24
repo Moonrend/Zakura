@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { KeyRound } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -130,9 +129,6 @@ export default function OauthAuthorizePage() {
       <div className="w-full max-w-[400px] space-y-5">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">授权接入 MCP</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            使用 Zakura 控制台账号批准客户端访问工具
-          </p>
         </div>
 
         {infoError ? (
@@ -190,10 +186,6 @@ export default function OauthAuthorizePage() {
               void login();
             }}
           >
-            <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
-              <KeyRound className="h-3.5 w-3.5" />
-              先登录控制台账号，再批准授权
-            </div>
             <div className="space-y-1.5">
               <Label htmlFor="email">邮箱</Label>
               <Input

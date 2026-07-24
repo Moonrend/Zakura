@@ -187,7 +187,7 @@ export default function AgentsListPage() {
           </DialogHeader>
           {createdKey && createdId ? (
             <div className="space-y-3">
-              <p className="text-xs text-muted-foreground">密钥只显示一次，请立即复制。</p>
+              <p className="text-xs text-muted-foreground">仅显示一次</p>
               <pre className="max-h-56 overflow-auto rounded-lg bg-muted/50 p-3 font-mono text-[11px] leading-relaxed border border-border">
                 {JSON.stringify(
                   {

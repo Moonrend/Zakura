@@ -112,7 +112,7 @@ export function McpServerCard({
         {server.version ? <Badge variant="outline">{server.version}</Badge> : null}
       </div>
 
-      <p className="line-clamp-3 flex-1 text-xs text-muted-foreground">
+      <p className="line-clamp-1 flex-1 text-xs text-muted-foreground">
         {server.description || "无描述"}
       </p>
 

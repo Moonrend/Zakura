@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { ChevronDown, ExternalLink, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useMe } from "@/components/me-context";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { GoogleCloudProvisionPanel } from "@/components/mcp/google-cloud-provision-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -144,10 +145,9 @@ export default function OauthAppsSettingsPage() {
   return (
     <div className="space-y-5">
       <SettingsHeader title="OAuth 应用" />
-      <p className="text-sm text-muted-foreground leading-relaxed">
-        为无动态注册的上游 MCP（GitHub、Google Workspace、Slack）配置 OAuth 客户端。安装时也可临时填写自备
-        Client ID/Secret，由本服务自动完成授权码流程。
-        {note ? ` ${note}` : ""}
+      <p className="text-sm text-muted-foreground">
+        上游 MCP 的 OAuth 客户端
+        {note ? ` · ${note}` : ""}
       </p>
 
       <div className="flex gap-1">
@@ -169,17 +169,19 @@ export default function OauthAppsSettingsPage() {
         ) : null}
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        {tab === "tenant"
-          ? "优先使用本租户凭证；适合每位用户/组织自建 Google Cloud / GitHub OAuth App。"
-          : "整站回退凭证；本租户未配置时使用。SaaS 仅超管可改。"}
-      </p>
-
       {tab === "tenant" && !forbidden ? (
-        <GoogleCloudProvisionPanel
-          defaultScope="tenant"
-          onClientReady={() => void load("tenant")}
-        />
+        <Collapsible className="rounded-lg border border-border">
+          <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium hover:bg-muted/40">
+            Google 一键配置
+            <ChevronDown className="size-4 text-muted-foreground" />
+          </CollapsibleTrigger>
+          <CollapsibleContent className="border-t border-border px-4 pb-4 pt-3">
+            <GoogleCloudProvisionPanel
+              defaultScope="tenant"
+              onClientReady={() => void load("tenant")}
+            />
+          </CollapsibleContent>
+        </Collapsible>
       ) : null}
 
       {loading ? (
@@ -217,9 +219,9 @@ export default function OauthAppsSettingsPage() {
                   <ExternalLink className="size-3" />
                 </a>
               </div>
-              <p className="mb-4 text-xs text-muted-foreground leading-relaxed">
-                {app.description}
-              </p>
+              {!app.ready && app.description ? (
+                <p className="mb-4 text-xs text-muted-foreground">{app.description}</p>
+              ) : null}
 
               <div className="space-y-4">
                 <SettingsField label="启用">
@@ -233,9 +235,6 @@ export default function OauthAppsSettingsPage() {
                   <code className="block max-w-md break-all rounded-md bg-muted/50 px-2 py-1.5 text-[11px]">
                     {redirectUri || app.redirectUri}
                   </code>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    在 {app.name} 开发者控制台将此 URI 加入 Authorized redirect URIs。
-                  </p>
                 </SettingsField>
 
                 <div className="space-y-1.5">

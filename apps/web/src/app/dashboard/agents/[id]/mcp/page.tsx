@@ -236,11 +236,7 @@ export default function AgentMcpPage() {
           <div className="flex items-start justify-between gap-4 rounded-lg border border-border p-4">
             <div className="space-y-1">
               <p className="text-sm font-medium">暴露云端文件系统</p>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                默认开启。MCP Resources 列出工作区顶层文件；Resource Templates 提供{" "}
-                <code className="text-[11px]">zakura://agent/fs/{"{+path}"}</code>{" "}
-                按需读取任意路径。与「资源 / 资源模板」是两种能力：前者可枚举，后者需填参。
-              </p>
+              <p className="text-xs text-muted-foreground">向 MCP 暴露工作区文件</p>
             </div>
             <Switch checked={exposeFs} onCheckedChange={setExposeFs} />
           </div>
@@ -313,7 +309,7 @@ export default function AgentMcpPage() {
 
           {mode === "all" && instances.length > 0 ? (
             <p className="text-xs text-muted-foreground">
-              当前为「全部 running」模式：自动挂载所有运行中的实例，无需逐个勾选。
+              已挂载全部运行中实例
             </p>
           ) : null}
         </TabsContent>

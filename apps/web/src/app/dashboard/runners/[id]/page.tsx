@@ -73,7 +73,6 @@ export default function RunnerDetailPage() {
   const [installError, setInstallError] = useState<string | null>(null);
   const [installBusy, setInstallBusy] = useState(false);
   const [wantTailscale, setWantTailscale] = useState(false);
-  const [hostJoinsTailscale, setHostJoinsTailscale] = useState(true);
   const [meshAvailable, setMeshAvailable] = useState(false);
   const [containers, setContainers] = useState<ManagedContainerRow[]>([]);
   const [containersBusy, setContainersBusy] = useState(false);
@@ -91,7 +90,6 @@ export default function RunnerDetailPage() {
     try {
       const res = await fetchRunnerInstall(id);
       setInstallBundle(res);
-      setHostJoinsTailscale(res.hostJoinsTailscale !== false);
       setMeshAvailable(
         Boolean(
           res.meshConnected ||
@@ -129,7 +127,6 @@ export default function RunnerDetailPage() {
       const preferTs = Boolean(res.node.labels?.enableTailscale);
       setWantTailscale(preferTs);
       setContainers(res.containers);
-      setHostJoinsTailscale(res.hostJoinsTailscale !== false);
       setMeshAvailable(
         Boolean(res.meshConnected || res.meshProvider === "headscale-platform"),
       );
@@ -210,20 +207,10 @@ export default function RunnerDetailPage() {
               <p className="text-[11px] text-muted-foreground">
                 {installBundle.tailscaleError ??
                   (!installBundle.meshConnected
-                    ? "组网未就绪时仅可使用公网安装包"
+                    ? "组网未就绪"
                     : "暂无 Tailscale 安装包")}
               </p>
-            ) : wantTailscale ? (
-              <p className="text-[11px] text-muted-foreground">
-                {hostJoinsTailscale
-                  ? "安装包将自动入网，Server 经私有地址访问"
-                  : "主机不入网时，Runner 入网后仍需配置可达的回连地址"}
-              </p>
-            ) : (
-              <p className="text-[11px] text-muted-foreground">
-                Runner 需有公网 IP/域名，并在节点配置中填写 endpoint
-              </p>
-            )}
+            ) : null}
           </div>
           <Button
             size="sm"
@@ -367,7 +354,7 @@ export default function RunnerDetailPage() {
       >
         {!isLocal ? (
           <p className="mb-3 text-[11px] text-muted-foreground">
-            远程节点仅展示已绑定的工作区容器；分配请在本机节点操作，或通过 Agent 工作区启动。
+            远程节点仅展示已绑定容器
           </p>
         ) : null}
         <Table>

@@ -217,7 +217,6 @@ export default function AgentConnectPage() {
         >
           {tab === "vscode" ? (
             <>
-              <div className="text-sm font-medium">VS Code</div>
               <CopyBlock title="MCP URL" value={mcpUrl} language="text" />
               <CopyBlock title="mcp.json" value={vscodeMcpJson} />
             </>
@@ -226,7 +225,6 @@ export default function AgentConnectPage() {
           {tab === "cursor" ? (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium">Cursor</span>
                 <Button size="sm" onClick={() => void mintKey()} disabled={busy}>
                   <KeyRound className="h-3.5 w-3.5" />
                   生成 Key
@@ -244,7 +242,6 @@ export default function AgentConnectPage() {
           {tab === "claude" ? (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium">Claude Desktop</span>
                 <Button size="sm" onClick={() => void mintKey()} disabled={busy}>
                   <KeyRound className="h-3.5 w-3.5" />
                   生成 Key
@@ -262,7 +259,6 @@ export default function AgentConnectPage() {
           {tab === "apikey" ? (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm font-medium">API Key</span>
                 <Button size="sm" onClick={() => void mintKey()} disabled={busy}>
                   <KeyRound className="h-3.5 w-3.5" />
                   生成 Key
@@ -294,7 +290,6 @@ export default function AgentConnectPage() {
 
           {tab === "oauth" ? (
             <>
-              <div className="text-sm font-medium">OAuth 端点</div>
               <div className="grid gap-2">
                 {(
                   [

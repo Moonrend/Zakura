@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ExternalLink, RefreshCw, Store } from "lucide-react";
@@ -303,7 +302,6 @@ export function McpStorePanel() {
 
       {activeSource ? (
         <p className="text-xs text-muted-foreground">
-          {activeSource.description}{" "}
           <a
             href={activeSource.url}
             target="_blank"
@@ -333,7 +331,7 @@ export function McpStorePanel() {
 
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
-          placeholder="搜索名称 / 描述 / 标签…"
+          placeholder="搜索…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           className="sm:max-w-sm"
@@ -355,7 +353,6 @@ export function McpStorePanel() {
       <p className="text-xs text-muted-foreground">
         {loading ? "加载中…" : `${total} 条结果`}
         {fetchedAt ? ` · 缓存于 ${new Date(fetchedAt).toLocaleString()}` : null}
-        <span className="ml-1">· 默认优先 npm / uvx / OCI，可并行安装</span>
       </p>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -382,11 +379,7 @@ export function McpStorePanel() {
 
       {!loading && !items.length ? (
         <div className="rounded-lg border border-border bg-card p-8 text-center text-sm text-muted-foreground">
-          暂无结果。点击「同步当前商店」拉取目录，或{" "}
-          <Link href="/dashboard/mcp/import" className="underline">
-            手动导入
-          </Link>
-          。
+          暂无结果
         </div>
       ) : null}
     </div>

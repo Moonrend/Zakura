@@ -68,9 +68,6 @@ export default function AgentGeneralPage() {
             <Label htmlFor="slug">Slug</Label>
             <Input id="slug" className="font-mono text-xs" value={agent.slug} readOnly />
           </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            电脑环境所在的 Runner 在「电脑」页创建时选择；跨设备迁移也在该页操作。
-          </p>
         </div>
       </SettingsSection>
     </div>

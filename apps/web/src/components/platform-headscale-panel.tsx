@@ -107,11 +107,7 @@ export function PlatformHeadscalePanel({ onSaved }: { onSaved?: () => void }) {
 
   return (
     <SettingsSection title="平台 Headscale">
-      <p className="text-sm text-muted-foreground">
-        仅 SaaS 多租户部署可用。配置后各租户自动使用托管组网（无需连接 Tailscale
-        云）。API Key 加密存入数据库；独立部署见{" "}
-        <code className="text-xs">docker/headscale</code>。
-      </p>
+      <p className="text-sm text-muted-foreground">SaaS 租户托管组网</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Badge variant={cfg?.ready ? "default" : "secondary"}>
           {cfg?.ready ? "已就绪" : draft.enabled ? "未就绪" : "关闭"}

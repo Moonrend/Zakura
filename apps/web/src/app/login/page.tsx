@@ -50,7 +50,6 @@ export default function LoginPage() {
       <div className="w-full max-w-[360px] animate-in-page">
         <div className="mb-8 text-center">
           <div className="text-xl font-semibold tracking-tight">Zakura</div>
-          <p className="mt-1.5 text-sm text-muted-foreground">登录以继续</p>
         </div>
         {zerocatEnabled ? (
           <div className="mb-6 space-y-3">

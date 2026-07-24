@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  packageManagerLabel,
   type StoreInstallPreview,
   type StoreServerLike,
   type UnifiedMcpConfig,
@@ -91,13 +90,7 @@ export function McpInstallDialog({
   const showChrome = open;
 
   const headerTitle = title ?? (config ? `安装 ${config.name}` : "安装 MCP");
-  const headerDesc =
-    description ??
-    (config?.kind === "stdio"
-      ? `通过 ${packageManagerLabel(config.packageManager)} 在隔离容器中运行并自动启动。`
-      : config?.oauth?.tier === "B"
-        ? "使用预注册 OAuth App 或访问令牌完成授权。"
-        : "确认安装方案后接入并自动启动。");
+  const headerDesc = description?.trim() || null;
 
   const firstStdioId = previewOptions.find((o) => o.prefer === "stdio")?.id;
 
@@ -140,7 +133,9 @@ export function McpInstallDialog({
         {showChrome ? (
           <DialogHeader>
             <DialogTitle>{headerTitle}</DialogTitle>
-            <DialogDescription>{headerDesc}</DialogDescription>
+            {headerDesc ? (
+              <DialogDescription>{headerDesc}</DialogDescription>
+            ) : null}
           </DialogHeader>
         ) : null}
 

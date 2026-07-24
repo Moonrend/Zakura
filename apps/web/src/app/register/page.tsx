@@ -67,7 +67,6 @@ export default function RegisterPage() {
       <div className="w-full max-w-[360px] animate-in-page">
         <div className="mb-8 text-center">
           <div className="text-xl font-semibold tracking-tight">Zakura</div>
-          <p className="mt-1.5 text-sm text-muted-foreground">创建账号并创建工作区</p>
         </div>
         <form
           className="space-y-4"

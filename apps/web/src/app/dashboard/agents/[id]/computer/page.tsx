@@ -335,9 +335,6 @@ export default function AgentComputerPage() {
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-16">
           <Monitor className="size-8 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">尚未创建电脑</p>
-          <p className="max-w-sm text-center text-[11px] text-muted-foreground">
-            创建时选择运行位置（本机或远程 Runner）。文件系统与 Shell 会落在同一节点。
-          </p>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Monitor />
             创建电脑
@@ -438,9 +435,6 @@ export default function AgentComputerPage() {
             </Button>
           </div>
         </div>
-        <p className="mt-2 text-[11px] text-muted-foreground leading-relaxed">
-          电脑环境（文件 / Shell / 浏览器 / 桌面）始终在同一 Runner 上。迁移会打包工作区到目标节点，源端副本默认保留。
-        </p>
       </SettingsSection>
 
       {agent.lastError ? (
@@ -530,9 +524,7 @@ export default function AgentComputerPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>迁移电脑工作区</DialogTitle>
-            <DialogDescription>
-              将工作区文件迁移到目标 Runner（排除 node_modules 等缓存）。完成后在目标节点启动环境。源端数据默认保留。
-            </DialogDescription>
+            <DialogDescription>迁移工作区到目标 Runner</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1.5">
@@ -603,9 +595,7 @@ function CreateComputerDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>创建电脑</DialogTitle>
-          <DialogDescription>
-            选择电脑环境运行位置。远程节点需已在「Runners」注册并在线。
-          </DialogDescription>
+          <DialogDescription>选择运行节点</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">

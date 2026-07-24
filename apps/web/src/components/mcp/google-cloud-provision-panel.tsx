@@ -11,7 +11,6 @@ import {
   Loader2,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import { SettingsSection } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -232,8 +231,8 @@ export function GoogleCloudProvisionPanel({
   }
 
   return (
-    <SettingsSection title="Google Cloud 供应">
-      <nav className="mb-3 flex flex-wrap gap-1" aria-label="步骤">
+    <div className="space-y-3">
+      <nav className="flex flex-wrap gap-1" aria-label="步骤">
         {steps.map((s, i) => {
           const done = !!doneMap[s.id];
           const active = i === stepIndex;
@@ -258,14 +257,9 @@ export function GoogleCloudProvisionPanel({
         })}
       </nav>
 
-      {step ? (
+          {step ? (
         <div className="space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            {step.description ? (
-              <p className="text-xs text-muted-foreground">{step.description}</p>
-            ) : (
-              <span />
-            )}
+          <div className="flex items-center justify-end gap-2">
             {step.consoleUrl ? (
               <a
                 href={step.consoleUrl}
@@ -385,6 +379,6 @@ export function GoogleCloudProvisionPanel({
           </div>
         </div>
       ) : null}
-    </SettingsSection>
+    </div>
   );
 }

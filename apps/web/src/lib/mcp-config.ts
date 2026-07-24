@@ -43,7 +43,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "notion",
     name: "Notion",
-    description: "读写 Notion 页面、数据库与评论。纯 OAuth，无需 API Key。",
+    description: "读写页面、数据库与评论",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.notion.com/mcp",
@@ -57,7 +57,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "linear",
     name: "Linear",
-    description: "Issues、Projects、Cycles。支持 OAuth（也可改用 API Key）。",
+    description: "Issues、Projects、Cycles",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.linear.app/mcp",
@@ -71,8 +71,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "atlassian",
     name: "Atlassian",
-    description:
-      "官方 Rovo MCP：Jira / Confluence / Compass 等。OAuth 2.1（也可 API Token）。",
+    description: "Jira / Confluence / Compass",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.atlassian.com/v1/mcp",
@@ -87,8 +86,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "asana",
     name: "Asana",
-    description:
-      "官方 Asana MCP v2。需在 Asana 开发者控制台预注册 OAuth 客户端（无 DCR）。",
+    description: "任务与项目管理（需预注册 App）",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.asana.com/v2/mcp",
@@ -102,7 +100,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "miro",
     name: "Miro",
-    description: "官方 Miro MCP：读写白板。OAuth 2.1 + 动态客户端注册。",
+    description: "读写白板",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.miro.com/",
@@ -116,8 +114,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "slack",
     name: "Slack",
-    description:
-      "官方 Slack MCP：搜索、读写消息、频道与 Canvas。须预注册 Slack App（不支持 DCR）。",
+    description: "消息、频道与 Canvas（需预注册 App）",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.slack.com/mcp",
@@ -134,8 +131,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "figma",
     name: "Figma",
-    description:
-      "官方 Figma 远程 MCP（mcp.figma.com）。注意：目前仅允许目录内客户端（Cursor/Claude 等）；自建网关可能需申请 waitlist。",
+    description: "设计文件与评论",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.figma.com/mcp",
@@ -149,7 +145,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "cloudflare",
     name: "Cloudflare",
-    description: "Workers、KV、R2、DNS 等 Cloudflare 能力。OAuth 授权后可用。",
+    description: "Workers、KV、R2、DNS",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.cloudflare.com/mcp",
@@ -163,7 +159,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "vercel",
     name: "Vercel",
-    description: "部署、项目与日志。通过 Vercel 远程 MCP + OAuth 接入。",
+    description: "部署、项目与日志",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.vercel.com",
@@ -177,7 +173,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "sentry",
     name: "Sentry",
-    description: "官方 Sentry MCP：Issues、项目与排查。OAuth；也可用上游 Token。",
+    description: "Issues 与项目排查",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.sentry.dev/mcp",
@@ -192,7 +188,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "stripe",
     name: "Stripe",
-    description: "官方 Stripe MCP：账单与知识库。OAuth；也可用受限 API Key。",
+    description: "账单与知识库",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.stripe.com",
@@ -206,8 +202,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "hubspot",
     name: "HubSpot",
-    description:
-      "官方 HubSpot MCP。需在 HubSpot 创建 MCP Auth App（Client ID/Secret，无 DCR）。",
+    description: "CRM（需预注册 App）",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://mcp.hubspot.com",
@@ -222,8 +217,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "github",
     name: "GitHub",
-    description:
-      "官方 GitHub MCP（Copilot 托管）。需在「OAuth 应用」配置 GitHub App，或改用 PAT。",
+    description: "仓库、Issues 与 PR",
     kind: "http",
     auth: "oauth",
     mcpUrl: "https://api.githubcopilot.com/mcp/",
@@ -242,8 +236,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "google-gmail",
     name: "Gmail",
-    description:
-      "本地 Gmail 工具（搜索线程、读邮件、草稿与标签；发件需在实例「工具权限」中开启）。直接调用 Gmail API。",
+    description: "邮件搜索、草稿与标签",
     kind: "http",
     auth: "oauth",
     mcpUrl: "zakura://google-workspace/gmail",
@@ -260,8 +253,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "google-drive",
     name: "Google Drive",
-    description:
-      "本地 Drive 工具（对齐官方 MCP：搜索、读写文件）。直接调用 Drive API。",
+    description: "搜索与读写文件",
     kind: "http",
     auth: "oauth",
     mcpUrl: "zakura://google-workspace/drive",
@@ -278,8 +270,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "google-calendar",
     name: "Google Calendar",
-    description:
-      "本地 Calendar 工具（对齐官方 MCP：列表、创建/更新日程）。直接调用 Calendar API。",
+    description: "日程列表与创建",
     kind: "http",
     auth: "oauth",
     mcpUrl: "zakura://google-workspace/calendar",
@@ -296,8 +287,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "google-people",
     name: "Google People",
-    description:
-      "本地 People 工具：个人资料、联系人与 Workspace 通讯录搜索。直接调用 People API。",
+    description: "联系人与通讯录",
     kind: "http",
     auth: "oauth",
     mcpUrl: "zakura://google-workspace/people",
@@ -314,8 +304,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
   {
     id: "google-chat",
     name: "Google Chat",
-    description:
-      "本地 Chat 工具：搜索会话、列表/搜索消息、发送消息。须在 GCP 配置 Chat 应用（Configuration）。",
+    description: "会话与消息",
     kind: "http",
     auth: "oauth",
     mcpUrl: "zakura://google-workspace/chat",
@@ -334,28 +323,22 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
 export const CURATED_MCP_GROUPS: Array<{
   id: NonNullable<UnifiedMcpConfig["group"]>;
   title: string;
-  description: string;
 }> = [
   {
     id: "google",
     title: "Google Workspace",
-    description: "本地 Google API 工具。先在「设置 → OAuth 应用」配置客户端。",
   },
   {
     id: "dev",
     title: "开发协作",
-    description: "GitHub 等需预注册 OAuth App 的服务。",
   },
   {
     id: "productivity",
     title: "效率工具",
-    description:
-      "Notion / Linear / Slack / Figma 等。支持 DCR 的可一键授权；Slack / Asana / HubSpot 需预注册 App。",
   },
   {
     id: "infra",
     title: "基础设施",
-    description: "Cloudflare、Vercel、Sentry、Stripe 等平台能力。",
   },
 ];
 

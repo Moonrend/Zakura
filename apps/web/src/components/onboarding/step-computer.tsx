@@ -316,7 +316,7 @@ export function StepComputerEnv({ agentId, onDone }: Props) {
             />
           </div>
           <div className="space-y-2">
-            <Label>是否有公网？</Label>
+            <Label>访问方式</Label>
             <div className="grid gap-2 grid-cols-2">
               <button
                 type="button"

@@ -291,9 +291,6 @@ export function McpImportPanel() {
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
             />
-            <p className="text-[11px] text-muted-foreground">
-              实例 slug 将自动生成，无需手动填写。
-            </p>
           </div>
 
           <div className="space-y-1.5">
@@ -316,13 +313,6 @@ export function McpImportPanel() {
                 </Button>
               ))}
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              {authMode === "oauth"
-                ? "将动态注册客户端（DCR）并跳转上游授权页（OAuth 2.1 + PKCE）。"
-                : authMode === "apiKey"
-                  ? "使用 Bearer / 自定义 Header 携带密钥。"
-                  : "公开或内网 MCP，导入后直接探测 tools。"}
-            </p>
           </div>
 
           {authMode === "apiKey" ? (
@@ -386,8 +376,7 @@ export function McpImportPanel() {
               }}
             />
             <p className="text-[11px] text-muted-foreground">
-              支持 Cursor <code>mcpServers</code>、VS Code <code>servers</code>，以及含{" "}
-              <code>url</code> / <code>command</code> 的条目。
+              支持 Cursor / VS Code 格式
             </p>
           </div>
 

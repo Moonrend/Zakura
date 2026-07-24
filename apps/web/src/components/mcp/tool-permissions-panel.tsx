@@ -25,9 +25,6 @@ export function McpToolPermissionsPanel({
   return (
     <section className={className ?? "space-y-2"}>
       <h2 className="text-sm font-medium">工具权限</h2>
-      <p className="text-xs text-muted-foreground">
-        关闭后对应工具不会出现在 Agent 的 tools/list 中，也无法调用。
-      </p>
       <div className="space-y-2 rounded-lg border border-border bg-card p-3">
         {rules.map((rule) => (
           <div

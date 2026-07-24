@@ -121,8 +121,7 @@ function ProviderCard({
       {provider.provider === "cloudflare-named" ? (
         <div className="mt-3 space-y-3">
           <p className="text-xs text-muted-foreground">
-            Cloudflare Tunnel 管理接口不支持 Dashboard OAuth（无 Tunnel 权限 scope）。请使用 API
-            Token（Account → Cloudflare Tunnel → Edit）。也可直接粘贴已有 Tunnel Token。
+            需 Cloudflare API Token（Tunnel Edit）或已有 Tunnel Token
           </p>
           <div className="flex flex-wrap items-end gap-2">
             <div className="space-y-1">
@@ -335,10 +334,7 @@ export default function NetworkExposureProvidersPage() {
   return (
     <div className="space-y-5">
       <SettingsHeader title="端口暴露 Provider" />
-      <p className="text-sm text-muted-foreground">
-        Agent / 用户一键暴露 workspace 端口时使用。默认启用 Cloudflare Quick Tunnel（无需账号）。
-        Quick Tunnel URL 知道即可访问。
-      </p>
+      <p className="text-sm text-muted-foreground">一键暴露 workspace 端口</p>
       <div className="space-y-3">
         {providers.map((p) => (
           <ProviderCard key={p.id} provider={p} onChange={load} />

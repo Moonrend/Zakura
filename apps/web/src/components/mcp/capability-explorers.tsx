@@ -210,9 +210,6 @@ export function McpResourcesExplorer({
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="space-y-2">
           <h2 className="text-sm font-medium">Resources · {resources.length}</h2>
-          <p className="text-[11px] text-muted-foreground">
-            具体可枚举 URI，直接 resources/read。
-          </p>
           <div className="max-h-[420px] overflow-auto rounded-lg border border-border bg-card">
             <Table>
               <TableHeader>
@@ -274,13 +271,13 @@ export function McpResourcesExplorer({
                   </pre>
                 ) : (
                   <p className="py-6 text-center text-sm text-muted-foreground">
-                    {reading ? "读取中…" : "点击左侧资源读取内容"}
+                    {reading ? "读取中…" : "选择资源"}
                   </p>
                 )}
               </>
             ) : (
               <p className="py-10 text-center text-sm text-muted-foreground">
-                选择左侧资源查看内容。
+                选择资源
               </p>
             )}
           </div>
@@ -290,9 +287,6 @@ export function McpResourcesExplorer({
       {templates.length > 0 ? (
         <section className="space-y-2">
           <h2 className="text-sm font-medium">Resource Templates · {templates.length}</h2>
-          <p className="text-[11px] text-muted-foreground">
-            URI 模板（RFC 6570）：填入参数后再 resources/read，不一定出现在 Resources 列表里。
-          </p>
           <div className="overflow-auto rounded-lg border border-border bg-card">
             <Table>
               <TableHeader>

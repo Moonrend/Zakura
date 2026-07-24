@@ -58,9 +58,9 @@ type Payload = {
 };
 
 const KIND_ITEMS = [
-  { value: "builtin", label: "Built-in（关键词+可选向量）" },
-  { value: "traditional", label: "传统记忆（全文注入）" },
-  { value: "mem0", label: "mem0（远程语义检索）" },
+  { value: "builtin", label: "Built-in" },
+  { value: "traditional", label: "传统记忆" },
+  { value: "mem0", label: "mem0" },
   { value: "openviking", label: "OpenViking" },
 ];
 
@@ -387,9 +387,6 @@ export default function GlobalMemoryPage() {
                 <div className="flex items-center justify-between">
                   <div>
                     <Label>启用向量语义种子</Label>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      Hybrid 检索：embedding 写入 pgvector（PGlite / Postgres 均支持），与关键词融合后再扩图谱。
-                    </p>
                   </div>
                   <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} />
                 </div>
@@ -449,11 +446,6 @@ export default function GlobalMemoryPage() {
             )}
             {kind === "mem0" && (
               <>
-                <p className="text-[11px] text-muted-foreground">
-                  mem0 必须指向已部署实例（Platform 或自托管 OSS）。语义检索依赖 mem0
-                  侧的 embedding + 向量库；Zakura 只做 HTTP 代理，不提供「无向量的本地
-                  mem0」。无向量需求请选 Built-in 或传统记忆。
-                </p>
                 <div>
                   <Label>Base URL</Label>
                   <Input

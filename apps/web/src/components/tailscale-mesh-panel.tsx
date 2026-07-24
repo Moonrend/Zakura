@@ -87,7 +87,7 @@ export function TailscaleOauthConnectForm({
           placeholder="tag:zakura"
         />
         <p className="text-[11px] text-muted-foreground">
-          须与 OAuth Client 勾选的 tag、ACL tagOwners 一致
+          与 OAuth Client Tags 一致
         </p>
       </div>
       <Button
@@ -249,14 +249,11 @@ export function TailscaleMeshPanel({
   if (status.platformMode) {
     return (
       <div className={className}>
-        <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 space-y-1">
+        <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5">
           <div className="flex items-center gap-2">
             <Badge>平台组网</Badge>
             <span className="text-xs text-muted-foreground">Headscale 已托管</span>
           </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            安装脚本会自动加入平台私有网络，无需额外配置 Tailscale 账号。
-          </p>
         </div>
       </div>
     );
@@ -265,16 +262,13 @@ export function TailscaleMeshPanel({
   if (status.ready || oauthConnected) {
     return (
       <div className={className}>
-        <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 space-y-1">
+        <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5">
           <div className="flex items-center gap-2">
             <Badge>已连接</Badge>
             {mesh.oauth?.displayName ? (
               <span className="text-xs text-muted-foreground">{mesh.oauth.displayName}</span>
             ) : null}
           </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Runner 安装时将自动入网；Server 经 Tailscale 私有地址访问。
-          </p>
         </div>
       </div>
     );
@@ -282,14 +276,11 @@ export function TailscaleMeshPanel({
 
   return (
     <div className={className}>
-      <div className="mb-2.5 space-y-1">
+      <div className="mb-2.5">
         <div className="flex items-center gap-2">
           <Badge variant="secondary">未连接</Badge>
-          <span className="text-xs text-muted-foreground">需先开启 Tailscale 集成</span>
+          <span className="text-xs text-muted-foreground">连接 Tailscale 账号</span>
         </div>
-        <p className="text-[11px] text-muted-foreground leading-relaxed">
-          自托管模式下请连接自有 Tailscale 账号。完成后即可用组网方式注册无公网 Runner。
-        </p>
       </div>
       <TailscaleOauthConnectForm
         compact={compact}

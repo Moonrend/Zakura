@@ -236,13 +236,11 @@ export default function NetworkMeshPage() {
         />
 
         <p className="text-sm text-muted-foreground">
-          平台托管网络已启用：主节点入网，本租户设备仅能互访。注册 Runner
-          时自动加入，无需额外配置。
+          平台组网已启用，Runner 自动加入
           {data.headscaleUser ? (
             <>
               {" "}
-              租户身份{" "}
-              <code className="font-mono text-xs">{data.headscaleUser}</code>
+              · <code className="font-mono text-xs">{data.headscaleUser}</code>
             </>
           ) : null}
         </p>
@@ -320,21 +318,12 @@ export default function NetworkMeshPage() {
 
       {data.hostJoinsTailscale === false ? (
         <p className="text-xs text-muted-foreground rounded-lg border border-border/60 px-3 py-2">
-          多租户部署且未配置平台 Headscale：控制面主机不加入 Tailnet。Runner
-          仍可入网；安装包使用站点外部 URL。
-        </p>
-      ) : data.hostJoinsTailscale ? (
-        <p className="text-xs text-muted-foreground rounded-lg border border-border/60 px-3 py-2">
-          连接 Tailscale 后，本机（控制面）可选择加入同一 Tailnet，便于 Runner
-          通过内网地址访问服务端。
+          控制面不入网；安装包用外部 URL
         </p>
       ) : null}
 
       <SettingsSection title="Tailscale 云（自有账号）">
-        <p className="text-sm text-muted-foreground">
-          使用 OAuth Client Credentials。Auth Key 的 tags 须与 ACL{" "}
-          <code className="font-mono">tagOwners</code>、OAuth Client 勾选一致。
-        </p>
+        <p className="text-sm text-muted-foreground">OAuth Client + 一致的 Tags</p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Badge variant={oauthConnected ? "default" : "secondary"}>
             {oauthConnected ? "OAuth 已连接" : "OAuth 未连接"}

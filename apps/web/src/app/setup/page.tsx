@@ -28,7 +28,6 @@ export default function SetupPage() {
       <div className="w-full max-w-[360px] animate-in-page">
         <div className="mb-8 text-center">
           <div className="text-xl font-semibold tracking-tight">Zakura</div>
-          <p className="mt-1.5 text-sm text-muted-foreground">创建管理员账号以开始使用</p>
         </div>
 
         <form

@@ -33,9 +33,6 @@ export function StepConnect({ agentId }: Props) {
 
   return (
     <div className="mx-auto max-w-md space-y-3">
-      <p className="text-sm text-muted-foreground">
-        在客户端添加此 MCP URL，用 OAuth 登录即可。
-      </p>
       <div className="flex items-center gap-2">
         <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted/30 px-2.5 py-1.5 font-mono text-[11px]">
           {mcpUrl}

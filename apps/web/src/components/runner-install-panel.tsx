@@ -98,9 +98,6 @@ export function RunnerInstallPanel({
         </TabsList>
 
         <TabsContent value="curl" className="mt-3 space-y-2">
-          <p className="text-[11px] text-muted-foreground">
-            在目标主机执行，将自动拉取并启动对应配置（含 Tailscale 开关状态）。
-          </p>
           <CopyBlock value={installCurl} compact={compact} label="复制" />
         </TabsContent>
 

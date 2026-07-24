@@ -118,30 +118,18 @@ export function McpInstallFlow({
     config.oauth?.providerId === "slack" || /mcp\.slack\.com/i.test(config.mcpUrl ?? "");
   const isFigma = /mcp\.figma\.com/i.test(config.mcpUrl ?? "");
 
+  /** 仅错误态或特殊前置条件时显示；常态不重复卡片 description */
   const installHint = useMemo(() => {
-    if (isStdio) {
-      const pm = packageManagerLabel(config.packageManager);
-      if (config.packageManager === "oci") {
-        return `将通过 Docker socket 拉取 OCI 镜像并在隔离容器中运行（${pm}）。`;
-      }
-      return `将拉取 ${pm} 包并在容器中以 stdio 方式启动，过程可能需要数十秒。`;
-    }
-    if (isGoogle) {
-      return "本地 Google Workspace 工具（直接调用 Gmail/Drive/Calendar API）。请填写 OAuth Client ID/Secret，或先在「设置 → OAuth 应用」保存。";
-    }
-    if (isSlack) {
-      return "Slack 官方 MCP 不支持 DCR。请在 api.slack.com 创建 App（开启 MCP），填写 Client ID/Secret，或先在「设置 → OAuth 应用」保存 Slack。";
-    }
-    if (isFigma) {
-      return "Figma 远程 MCP 目前主要开放给目录内客户端；若授权失败，需向 Figma 申请将本网关加入 waitlist。";
-    }
+    if (phase !== "error") return null;
+    if (isSlack) return "Slack 需预注册 App（不支持 DCR）";
+    if (isFigma) return "若授权失败，可能需向 Figma 申请 waitlist";
+    if (isGoogle) return "需 OAuth 客户端，可先在「设置 → OAuth 应用」配置";
     if (config.oauth?.tier === "B" || config.oauth?.providerId === "github") {
-      return "可填写自备 OAuth App Client ID/Secret，由本服务自动完成授权；也可使用整站/本租户已保存的客户端，或改用 PAT。";
+      return "需预注册 OAuth App，或改用 PAT";
     }
     return null;
   }, [
-    isStdio,
-    config.packageManager,
+    phase,
     config.oauth?.tier,
     config.oauth?.providerId,
     isGoogle,
@@ -494,11 +482,8 @@ export function McpInstallFlow({
               </Badge>
             ) : null}
           </div>
-          <p className="text-sm text-muted-foreground">{config.description}</p>
           {installHint ? (
-            <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
-              {installHint}
-            </p>
+            <p className="text-xs text-muted-foreground">{installHint}</p>
           ) : null}
           {config.mcpUrl ? (
             <code className="mt-2 block truncate text-[11px] text-muted-foreground">
@@ -552,12 +537,6 @@ export function McpInstallFlow({
             </button>
             {showByo ? (
               <div className="space-y-2">
-                {isGoogle ? (
-                  <p className="text-[11px] text-muted-foreground leading-relaxed">
-                    请使用 Google Cloud →「OAuth 客户端」的 ID/Secret，不要填写「API
-                    密钥」。类型选 Web 应用，并添加下方回调 URI。
-                  </p>
-                ) : null}
                 {redirectUri ? (
                   <div className="space-y-1">
                     <Label className="text-xs">回调 URI（填入你的 OAuth App）</Label>

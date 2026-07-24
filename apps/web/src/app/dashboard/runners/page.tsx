@@ -349,7 +349,7 @@ export default function RunnersPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>此节点是否有公网？</Label>
+                <Label>访问方式</Label>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <button
                     type="button"
@@ -369,9 +369,6 @@ export default function RunnersPage() {
                       <Globe className="size-3.5 opacity-70" />
                       有公网
                     </div>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground leading-snug">
-                      Runner 暴露公网 IP / 域名，Server 直连 HTTP，不加入私有网络。
-                    </p>
                   </button>
                   <button
                     type="button"
@@ -387,24 +384,14 @@ export default function RunnersPage() {
                       <Network className="size-3.5 opacity-70" />
                       无公网 / NAT
                     </div>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground leading-snug">
-                      经 Tailscale 组网，安装脚本自动入网，适合家庭宽带 / 内网主机。
-                    </p>
                   </button>
                 </div>
               </div>
 
               {/* 仅在选定「无公网」后才加载组网状态与配置，避免打开弹窗就打慢接口 */}
-              {accessMode === "public" ? (
-                <div className="rounded-lg border border-border/60 px-3 py-2.5 text-[11px] text-muted-foreground leading-relaxed">
-                  {platformMode ? (
-                    <>当前部署为平台托管组网，远程 Runner 必须加入 Tailscale，请改选「无公网 / NAT」。</>
-                  ) : (
-                    <>
-                      请确保目标机器对 Server 可达（防火墙放行 Runner 端口）。若机器在 NAT
-                      后，请改用「无公网 / NAT」。
-                    </>
-                  )}
+              {accessMode === "public" && platformMode ? (
+                <div className="rounded-lg border border-border/60 px-3 py-2.5 text-[11px] text-muted-foreground">
+                  平台托管组网下请改选「无公网 / NAT」
                 </div>
               ) : null}
 
@@ -416,13 +403,6 @@ export default function RunnersPage() {
                     compact
                     onStatusChange={onMeshStatus}
                   />
-                  <p className="text-[11px] text-muted-foreground">
-                    也可在{" "}
-                    <Link href="/dashboard/network/mesh" className="underline">
-                      网络 → Runner 组网
-                    </Link>{" "}
-                    管理完整设置。
-                  </p>
                 </div>
               ) : null}
 

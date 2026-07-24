@@ -33,29 +33,24 @@ const WIZARD_STEPS: WizardStepMeta[] = [
   {
     id: "agentCreated",
     title: "创建 Agent",
-    description: "后续能力都挂在这个工作单元上。",
   },
   {
     id: "computerEnabled",
     title: "启用电脑环境",
-    description: "可选。SaaS 下请注册远程 Runner。",
     optional: true,
   },
   {
     id: "memoryConfigured",
     title: "配置记忆",
-    description: "可选。默认 Built-in 即可。",
     optional: true,
   },
   {
     id: "mcpConnected",
     title: "接入 MCP",
-    description: "一键授权 Notion、GitHub 等远程工具。",
   },
   {
     id: "connectReady",
     title: "完成接入",
-    description: "在客户端用 OAuth 连接 Zakura MCP。",
   },
 ];
 

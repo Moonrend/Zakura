@@ -114,11 +114,7 @@ export function McpOfficialStorePanel() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          精选远程 MCP，按统一配置格式与 OAuth 契约分流安装。GitHub / Google
-          需先在整站「OAuth 应用」配置客户端（自托管也可在此填写）。
-        </p>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <Link
           href="/dashboard/settings/oauth-apps"
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium hover:bg-muted/60"
@@ -133,10 +129,7 @@ export function McpOfficialStorePanel() {
         if (!items.length) return null;
         return (
           <section key={group.id} className="space-y-3">
-            <div>
-              <h2 className="text-sm font-medium">{group.title}</h2>
-              <p className="text-xs text-muted-foreground">{group.description}</p>
-            </div>
+            <h2 className="text-sm font-medium">{group.title}</h2>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {items.map((mcp) => (
                 <OfficialInstallCard
