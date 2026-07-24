@@ -18,7 +18,8 @@
     "test": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
     "test:runner-agent": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
     "setup": "pnpm install && pnpm db:generate && pnpm db:migrate",
-    "strip:saas": "node scripts/strip-saas.mjs"
+    "strip:saas": "node scripts/strip-saas.mjs",
+    "mcp:conformance": "pnpm --filter @zakura/server mcp:conformance"
   },
   "engines": {
     "node": ">=20"

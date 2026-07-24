@@ -42,7 +42,36 @@ export type ProgressSnapshot = {
 };
 
 export type AgentDetail = AgentListItem & {
-  tools: Array<{ name: string; agentScoped: boolean; providerId?: string }>;
+  tools: Array<{
+    name: string;
+    description?: string;
+    agentScoped: boolean;
+    providerId?: string;
+    inputSchema?: Record<string, unknown>;
+  }>;
+  resources?: Array<{
+    uri: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+    title?: string;
+    providerId?: string;
+  }>;
+  prompts?: Array<{
+    name: string;
+    description?: string;
+    title?: string;
+    arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+    providerId?: string;
+  }>;
+  resourceTemplates?: Array<{
+    uriTemplate: string;
+    name: string;
+    description?: string;
+    mimeType?: string;
+    title?: string;
+    providerId?: string;
+  }>;
   desktop?: {
     enabled: boolean;
     novncUrl: string | null;
@@ -71,6 +100,8 @@ export type AgentProviderOptions = {
   };
   mcp: {
     mode: "all" | "selected";
+    /** 通过 MCP Resources 暴露云端工作区 */
+    exposeWorkspaceFs?: boolean;
     instances: Array<{
       id: string;
       name: string;
@@ -140,7 +171,11 @@ export async function saveAgentProviders(
   body: {
     webSearch?: { enabled?: boolean; defaultEngine?: string | null };
     webFetch?: { enabled?: boolean; defaultBackend?: string | null };
-    mcp?: { mode?: "all" | "selected"; instanceIds?: string[] };
+    mcp?: {
+      mode?: "all" | "selected";
+      instanceIds?: string[];
+      exposeWorkspaceFs?: boolean;
+    };
     enableMemory?: boolean;
   },
 ) {

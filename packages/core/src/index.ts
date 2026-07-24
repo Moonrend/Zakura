@@ -4,6 +4,7 @@ export type { ContainerRuntime, CreateContainerOptions, RunningContainer } from 
 export {
   encryptJson,
   decryptJson,
+  DecryptError,
   hashApiKey,
   generateApiKey,
   generateSecret,

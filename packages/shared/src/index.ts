@@ -88,9 +88,36 @@ export type {
   McpToolResult,
 } from "./mcp-tool-descriptor.js";
 
+export type {
+  McpResourceDef,
+  McpResourceTemplateDef,
+  McpResourceContents,
+  McpReadResourceResult,
+  McpPromptArgumentDef,
+  McpPromptDef,
+  McpPromptMessageContent,
+  McpPromptMessage,
+  McpGetPromptResult,
+  McpCompleteRef,
+  McpCompleteArgument,
+  McpCompleteParams,
+  McpCompleteResult,
+} from "./mcp-resource-prompt.js";
+export {
+  normalizeResourceDef,
+  normalizeResourceTemplateDef,
+  normalizePromptDef,
+  normalizeReadResourceResult,
+  normalizeGetPromptResult,
+  normalizeCompleteResult,
+} from "./mcp-resource-prompt.js";
+
 export type ProviderCapability =
   | "mcp-proxy"
   | "tools"
+  | "resources"
+  | "prompts"
+  | "completions"
   | "memory"
   | "search"
   | "fetch"
@@ -362,5 +389,9 @@ export {
   buildWwwAuthenticateChallenge,
   authRequiredToolResult,
   normalizeToolResult,
+  isCreateTaskResult,
+  rewriteToolUiMeta,
+  DEFAULT_TASK_OPTIONAL_TOOLS,
 } from "./mcp-tool-descriptor.js";
+export type { McpCreateTaskResult } from "./mcp-tool-descriptor.js";
 export type { PublicMcpToolDescriptor } from "./mcp-tool-descriptor.js";

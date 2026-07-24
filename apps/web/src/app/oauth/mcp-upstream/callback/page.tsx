@@ -4,7 +4,6 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Check, Loader2, X } from "lucide-react";
-import { api } from "@/lib/api";
 import { MCP_OAUTH_MESSAGE, broadcastMcpOauthResult } from "@/lib/mcp-oauth";
 import { Button } from "@/components/ui/button";
 
@@ -23,43 +22,8 @@ function CallbackInner() {
 
     void (async () => {
       if (ok === "1") {
-        if (instanceId) {
-          try {
-            const res = await api<{ ok?: boolean; error?: string; health?: { status?: string; lastError?: string } }>(
-              "/api/mcp/upstream-oauth/verify",
-              {
-                method: "POST",
-                json: { instanceId },
-              },
-            );
-            if (res.ok === false || res.health?.status === "unhealthy") {
-              const detail =
-                res.error ||
-                res.health?.lastError ||
-                "健康检查未通过";
-              setMsg(detail);
-              setStatus("error");
-              broadcastMcpOauthResult({
-                type: MCP_OAUTH_MESSAGE,
-                ok: false,
-                error: detail,
-                instanceId,
-              });
-              return;
-            }
-          } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            setMsg(detail);
-            setStatus("error");
-            broadcastMcpOauthResult({
-              type: MCP_OAUTH_MESSAGE,
-              ok: false,
-              error: detail,
-              instanceId,
-            });
-            return;
-          }
-        }
+        // 弹窗常无 zakura_session（跨源 / 分区存储）；令牌已在服务端 callback 写入。
+        // 健康检查由 opener（install-flow）带 session 调用 verify，此处不再请求以免 Unauthorized。
         setMsg("上游 OAuth 授权成功，令牌已写入实例配置。");
         setStatus("ok");
         broadcastMcpOauthResult({
@@ -67,7 +31,6 @@ function CallbackInner() {
           ok: true,
           instanceId: instanceId ?? undefined,
         });
-        // 新标签授权场景：提示可关闭
         setFromPopup(true);
         return;
       }

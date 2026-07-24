@@ -556,6 +556,7 @@ export class AgentService {
       },
       mcp: {
         mode: prefs.mcp?.mode === "all" ? ("all" as const) : ("selected" as const),
+        exposeWorkspaceFs: prefs.mcp?.exposeWorkspaceFs !== false,
         instances: mcpInstances,
       },
       memory: {

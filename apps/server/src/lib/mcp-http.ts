@@ -1,4 +1,15 @@
-/** Shared MCP HTTP JSON-RPC helpers — Streamable HTTP + session + legacy SSE fallback */
+/**
+ * 上游 MCP HTTP 客户端 — 基于 @modelcontextprotocol/sdk
+ * Streamable HTTP 优先，失败时回退 legacy SSE。
+ */
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import {
+  CallToolResultSchema,
+  ResultSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 
 export class McpHttpError extends Error {
   readonly status: number;
@@ -30,6 +41,7 @@ export class McpHttpError extends Error {
 
 export function isMcpAuthError(err: unknown): boolean {
   if (err instanceof McpHttpError) return err.kind === "auth";
+  if (err instanceof UnauthorizedError) return true;
   const msg = err instanceof Error ? err.message : String(err);
   return /\b401\b|\b403\b|unauthorized|authorization header|authentication required|auth_required/i.test(
     msg,
@@ -71,7 +83,6 @@ export function mcpErrorSummary(err: unknown): string {
   return annotateGoogleMcpPermission(raw).slice(0, 320);
 }
 
-/** Google Workspace MCP：OAuth 成功但 tools/call 仍报权限不足时的可操作提示 */
 function annotateGoogleMcpPermission(message: string): string {
   if (/Chat app not found|configure the app in the Google Cloud console/i.test(message)) {
     return (
@@ -89,22 +100,17 @@ function annotateGoogleMcpPermission(message: string): string {
   );
 }
 
-const PROTOCOL_CANDIDATES = ["2025-03-26", "2024-11-05"] as const;
-const CLIENT_INFO = { name: "zakura", version: "0.4.0" };
+const CLIENT_INFO = { name: "zakura", version: "0.4.0" } as const;
 
 type TransportMode = "streamable-http" | "sse-legacy";
 
-type SessionState = {
-  /** POST endpoint for JSON-RPC (may differ from user URL for legacy SSE) */
-  postUrl: string;
-  sessionId?: string;
-  protocolVersion: string;
+type SessionEntry = {
+  client: Client;
   mode: TransportMode;
-  ready: boolean;
+  mcpUrl: string;
 };
 
-/** In-memory sessions keyed by normalized URL + auth fingerprint */
-const sessions = new Map<string, SessionState>();
+const sessions = new Map<string, SessionEntry>();
 
 function authFingerprint(headers: Record<string, string>): string {
   const auth =
@@ -141,7 +147,6 @@ export function normalizeMcpHttpUrl(raw: string): string {
     else if (path === "/sse") path = "/mcp";
   }
 
-  // Supabase hosted MCP commonly lives under /mcp
   if (host === "mcp.supabase.com" && (path === "/" || path === "")) {
     path = "/mcp";
   }
@@ -167,25 +172,111 @@ function deriveLegacySseUrl(streamableUrl: string): string {
   }
 }
 
-function headerGet(res: Response, name: string): string | null {
-  return res.headers.get(name) ?? res.headers.get(name.toLowerCase());
-}
-
-function isSessionRequiredError(err: unknown): boolean {
-  if (!(err instanceof McpHttpError)) return false;
-  if (err.status === 400 && /mcp-session-id|session.?id.*required|non-initialization/i.test(err.message)) {
-    return true;
+function rethrowAsMcpHttpError(err: unknown): never {
+  if (err instanceof McpHttpError) throw err;
+  if (err instanceof UnauthorizedError) {
+    throw new McpHttpError(err.message || "Unauthorized", {
+      status: 401,
+      kind: "auth",
+      cause: err,
+    });
   }
-  return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  const statusMatch = /\b(401|403|404|405|500)\b/.exec(msg);
+  const status = statusMatch ? Number(statusMatch[1]) : 0;
+  if (status === 401 || status === 403 || /unauthorized/i.test(msg)) {
+    throw new McpHttpError(msg, { status: status || 401, kind: "auth", cause: err });
+  }
+  if (isMcpNetworkError(err)) {
+    throw new McpHttpError(msg, { kind: "network", cause: err });
+  }
+  throw new McpHttpError(msg, {
+    status,
+    kind: status ? "http" : "parse",
+    cause: err,
+  });
 }
 
-function isSessionLostError(err: unknown, hadSession: boolean): boolean {
-  if (!(err instanceof McpHttpError)) return false;
-  if (hadSession && err.status === 404) return true;
-  if (isSessionRequiredError(err)) return true;
-  return false;
+async function connectStreamable(
+  url: string,
+  headers: Record<string, string>,
+): Promise<SessionEntry> {
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: { headers: { ...headers } },
+  });
+  const client = new Client(CLIENT_INFO, { capabilities: {} });
+  await client.connect(transport);
+  return { client, mode: "streamable-http", mcpUrl: url };
 }
 
+async function connectLegacySse(
+  streamableUrl: string,
+  headers: Record<string, string>,
+): Promise<SessionEntry> {
+  const sseUrl = deriveLegacySseUrl(streamableUrl);
+  const transport = new SSEClientTransport(new URL(sseUrl), {
+    requestInit: { headers: { ...headers } },
+  });
+  const client = new Client(CLIENT_INFO, { capabilities: {} });
+  await client.connect(transport);
+  return { client, mode: "sse-legacy", mcpUrl: streamableUrl };
+}
+
+function isFallbackWorthy(err: unknown): boolean {
+  if (err instanceof McpHttpError) {
+    return err.status === 404 || err.status === 405;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b404\b|\b405\b|Method Not Allowed|not found/i.test(msg);
+}
+
+async function ensureClient(
+  mcpUrl: string,
+  headers: Record<string, string>,
+): Promise<SessionEntry> {
+  const normalized = normalizeMcpHttpUrl(mcpUrl);
+  const key = sessionCacheKey(normalized, headers);
+  const cached = sessions.get(key);
+  if (cached) return cached;
+
+  try {
+    const entry = await connectStreamable(normalized, headers);
+    sessions.set(key, entry);
+    return entry;
+  } catch (streamableErr) {
+    if (isMcpAuthError(streamableErr)) rethrowAsMcpHttpError(streamableErr);
+    if (!isFallbackWorthy(streamableErr)) rethrowAsMcpHttpError(streamableErr);
+    try {
+      const entry = await connectLegacySse(normalized, headers);
+      sessions.set(key, entry);
+      return entry;
+    } catch (sseErr) {
+      if (isMcpAuthError(sseErr)) rethrowAsMcpHttpError(sseErr);
+      rethrowAsMcpHttpError(streamableErr);
+    }
+  }
+}
+
+async function invalidateAndReconnect(
+  mcpUrl: string,
+  headers: Record<string, string>,
+): Promise<SessionEntry> {
+  const normalized = normalizeMcpHttpUrl(mcpUrl);
+  const key = sessionCacheKey(normalized, headers);
+  const old = sessions.get(key);
+  sessions.delete(key);
+  if (old) {
+    await old.client.close().catch(() => undefined);
+  }
+  return ensureClient(normalized, headers);
+}
+
+function isSessionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /session|mcp-session-id|404/i.test(msg);
+}
+
+/** @deprecated 保留兼容；SDK Client 已自动 unwrap JSON-RPC */
 export function unwrapRpc(payload: unknown): unknown {
   if (payload && typeof payload === "object" && "result" in payload) {
     return (payload as { result: unknown }).result;
@@ -196,320 +287,6 @@ export function unwrapRpc(payload: unknown): unknown {
   return payload;
 }
 
-function parseRpcBody(raw: string, contentType: string | null): unknown {
-  const ct = contentType ?? "";
-  const trimmed = raw.trim();
-  // 仅在明确 SSE 时走 event-stream 解析；避免 JSON 正文含 "data:" 被误判。
-  const isSseContentType = ct.includes("text/event-stream");
-  const looksLikeSsePayload =
-    !trimmed.startsWith("{") &&
-    !trimmed.startsWith("[") &&
-    /(?:^|\n)\s*data:\s*/.test(raw);
-
-  if (isSseContentType || looksLikeSsePayload) {
-    const lines = raw
-      .split("\n")
-      .filter((l) => l.startsWith("data:"))
-      .map((l) => l.slice(5).trim())
-      .filter(Boolean);
-    // Prefer last JSON-RPC response that has result/error
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const parsed = JSON.parse(lines[i]!);
-        if (parsed && typeof parsed === "object" && ("result" in parsed || "error" in parsed)) {
-          return unwrapRpc(parsed);
-        }
-      } catch {
-        /* continue */
-      }
-    }
-    const last = lines.at(-1);
-    if (!last) {
-      // 空 SSE（仅 heartbeat/注释）时尝试按 JSON 回退
-      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        return unwrapRpc(JSON.parse(trimmed));
-      }
-      throw new McpHttpError(
-        "Empty SSE MCP response（上游无有效 JSON-RPC。若该服务同时提供 npm/PyPI/OCI 包，请改用 Stdio 安装）",
-        { kind: "parse" },
-      );
-    }
-    return unwrapRpc(JSON.parse(last));
-  }
-  if (!trimmed) return {};
-  return unwrapRpc(JSON.parse(raw));
-}
-
-type PostResult = {
-  result: unknown;
-  sessionId: string | null;
-  protocolVersion: string | null;
-  status: number;
-  wwwAuthenticate: string;
-};
-
-async function postJsonRpc(opts: {
-  url: string;
-  headers: Record<string, string>;
-  body: Record<string, unknown>;
-  sessionId?: string;
-  protocolVersion?: string;
-  timeoutMs: number;
-  /** Accept 202 with empty body (notifications) */
-  allowEmptyAccepted?: boolean;
-}): Promise<PostResult> {
-  const reqHeaders: Record<string, string> = {
-    Accept: "application/json, text/event-stream",
-    "Content-Type": "application/json",
-    ...opts.headers,
-  };
-  if (opts.sessionId) {
-    reqHeaders["Mcp-Session-Id"] = opts.sessionId;
-  }
-  if (opts.protocolVersion) {
-    reqHeaders["MCP-Protocol-Version"] = opts.protocolVersion;
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(opts.url, {
-      method: "POST",
-      headers: reqHeaders,
-      body: JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(opts.timeoutMs),
-    });
-  } catch (err) {
-    throw new McpHttpError(
-      err instanceof Error ? err.message : `fetch failed: ${String(err)}`,
-      { kind: "network", cause: err },
-    );
-  }
-
-  const raw = await res.text();
-  const sessionId = headerGet(res, "mcp-session-id");
-  const protocolVersion = headerGet(res, "mcp-protocol-version");
-  const wwwAuthenticate = headerGet(res, "www-authenticate") ?? "";
-
-  if (res.status === 202 && opts.allowEmptyAccepted) {
-    return {
-      result: {},
-      sessionId,
-      protocolVersion,
-      status: res.status,
-      wwwAuthenticate,
-    };
-  }
-
-  if (!res.ok) {
-    const hint =
-      res.status === 404
-        ? "（若为 Notion，请使用 https://mcp.notion.com/mcp；会话过期时客户端会自动重连）"
-        : "";
-    throw new McpHttpError(`MCP HTTP ${res.status}: ${raw.slice(0, 400)}${hint}`, {
-      status: res.status,
-      wwwAuthenticate,
-      kind: res.status === 401 || res.status === 403 ? "auth" : "http",
-    });
-  }
-
-  try {
-    if (!raw.trim() && opts.allowEmptyAccepted) {
-      return { result: {}, sessionId, protocolVersion, status: res.status, wwwAuthenticate };
-    }
-    const result = parseRpcBody(raw, res.headers.get("content-type"));
-    return { result, sessionId, protocolVersion, status: res.status, wwwAuthenticate };
-  } catch (err) {
-    if (err instanceof McpHttpError) throw err;
-    throw new McpHttpError(
-      err instanceof Error ? err.message : `Invalid MCP response: ${raw.slice(0, 200)}`,
-      { kind: "parse", cause: err },
-    );
-  }
-}
-
-/** Legacy HTTP+SSE: GET /sse → endpoint event → POST messages there */
-async function discoverLegacySseEndpoint(
-  sseUrl: string,
-  headers: Record<string, string>,
-  timeoutMs: number,
-): Promise<string> {
-  let res: Response;
-  try {
-    res = await fetch(sseUrl, {
-      method: "GET",
-      headers: {
-        Accept: "text/event-stream",
-        ...headers,
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    throw new McpHttpError(
-      err instanceof Error ? err.message : `SSE GET failed: ${String(err)}`,
-      { kind: "network", cause: err },
-    );
-  }
-
-  if (!res.ok) {
-    throw new McpHttpError(`Legacy SSE HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`, {
-      status: res.status,
-      wwwAuthenticate: headerGet(res, "www-authenticate") ?? "",
-      kind: res.status === 401 || res.status === 403 ? "auth" : "http",
-    });
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) throw new McpHttpError("Legacy SSE: empty body", { kind: "parse" });
-
-  const decoder = new TextDecoder();
-  let buf = "";
-  const deadline = Date.now() + Math.min(timeoutMs, 12000);
-
-  while (Date.now() < deadline) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const blocks = buf.split("\n\n");
-    buf = blocks.pop() ?? "";
-    for (const block of blocks) {
-      const event = /(?:^|\n)event:\s*(\S+)/.exec(block)?.[1];
-      const data = block
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trim())
-        .join("\n");
-      if (event === "endpoint" && data) {
-        void reader.cancel().catch(() => undefined);
-        try {
-          return new URL(data, sseUrl).toString();
-        } catch {
-          return data;
-        }
-      }
-      // Some servers only send data without event name
-      if (!event && data.startsWith("/") ) {
-        void reader.cancel().catch(() => undefined);
-        return new URL(data, sseUrl).toString();
-      }
-    }
-  }
-
-  void reader.cancel().catch(() => undefined);
-  throw new McpHttpError("Legacy SSE: timed out waiting for endpoint event", { kind: "parse" });
-}
-
-async function initializeStreamable(
-  postUrl: string,
-  headers: Record<string, string>,
-  timeoutMs: number,
-): Promise<SessionState> {
-  let lastErr: unknown;
-  for (const protocolVersion of PROTOCOL_CANDIDATES) {
-    try {
-      const init = await postJsonRpc({
-        url: postUrl,
-        headers,
-        timeoutMs,
-        body: {
-          jsonrpc: "2.0",
-          id: crypto.randomUUID(),
-          method: "initialize",
-          params: {
-            protocolVersion,
-            capabilities: {},
-            clientInfo: CLIENT_INFO,
-          },
-        },
-      });
-
-      const negotiated =
-        (init.result &&
-        typeof init.result === "object" &&
-        "protocolVersion" in init.result &&
-        typeof (init.result as { protocolVersion?: unknown }).protocolVersion === "string"
-          ? (init.result as { protocolVersion: string }).protocolVersion
-          : null) ||
-        init.protocolVersion ||
-        protocolVersion;
-
-      const sessionId = init.sessionId ?? undefined;
-      const state: SessionState = {
-        postUrl,
-        sessionId,
-        protocolVersion: negotiated,
-        mode: "streamable-http",
-        ready: true,
-      };
-
-      // notifications/initialized (no id)
-      try {
-        await postJsonRpc({
-          url: postUrl,
-          headers,
-          timeoutMs: Math.min(timeoutMs, 10000),
-          sessionId,
-          protocolVersion: negotiated,
-          allowEmptyAccepted: true,
-          body: {
-            jsonrpc: "2.0",
-            method: "notifications/initialized",
-          },
-        });
-      } catch {
-        // Some servers ignore/reject the notification; session may still be usable
-      }
-
-      return state;
-    } catch (err) {
-      lastErr = err;
-      // Auth errors shouldn't try other protocol versions
-      if (isMcpAuthError(err)) throw err;
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-}
-
-async function ensureSession(
-  mcpUrl: string,
-  headers: Record<string, string>,
-  timeoutMs: number,
-): Promise<SessionState> {
-  const normalized = normalizeMcpHttpUrl(mcpUrl);
-  const key = sessionCacheKey(normalized, headers);
-  const cached = sessions.get(key);
-  if (cached?.ready) return cached;
-
-  try {
-    const state = await initializeStreamable(normalized, headers, timeoutMs);
-    sessions.set(key, state);
-    return state;
-  } catch (streamableErr) {
-    // Fall back to legacy HTTP+SSE when streamable initialize fails with 404/405
-    if (
-      streamableErr instanceof McpHttpError &&
-      (streamableErr.status === 404 || streamableErr.status === 405)
-    ) {
-      try {
-        const sseUrl = deriveLegacySseUrl(normalized);
-        const messageUrl = await discoverLegacySseEndpoint(sseUrl, headers, timeoutMs);
-        const state = await initializeStreamable(messageUrl, headers, timeoutMs);
-        state.mode = "sse-legacy";
-        sessions.set(key, state);
-        return state;
-      } catch (sseErr) {
-        // Prefer original streamable error (often more actionable)
-        if (isMcpAuthError(sseErr)) throw sseErr;
-        throw streamableErr;
-      }
-    }
-    throw streamableErr;
-  }
-}
-
-function invalidateSession(mcpUrl: string, headers: Record<string, string>) {
-  sessions.delete(sessionCacheKey(normalizeMcpHttpUrl(mcpUrl), headers));
-}
-
 export async function mcpHttpRpc(
   mcpUrl: string,
   headers: Record<string, string>,
@@ -518,73 +295,115 @@ export async function mcpHttpRpc(
   timeoutMs = 20000,
 ): Promise<unknown> {
   const normalized = normalizeMcpHttpUrl(mcpUrl);
+  const requestOpts = { timeout: timeoutMs };
 
-  // Allow direct initialize for OAuth discovery probes
+  // OAuth / 探测：一次性连接，返回 initialize 结果后关闭
   if (method === "initialize") {
-    const init = await postJsonRpc({
-      url: normalized,
-      headers,
-      timeoutMs,
-      body: {
-        jsonrpc: "2.0",
-        id: crypto.randomUUID(),
-        method: "initialize",
-        params: params ?? {
-          protocolVersion: PROTOCOL_CANDIDATES[0],
-          capabilities: {},
-          clientInfo: CLIENT_INFO,
-        },
-      },
-    });
-    return init.result;
+    try {
+      const entry = await connectStreamable(normalized, headers).catch(async (err) => {
+        if (isMcpAuthError(err)) rethrowAsMcpHttpError(err);
+        if (isFallbackWorthy(err)) return connectLegacySse(normalized, headers);
+        rethrowAsMcpHttpError(err);
+      });
+      const result = {
+        protocolVersion: "2025-11-25",
+        capabilities: entry.client.getServerCapabilities() ?? {},
+        serverInfo: entry.client.getServerVersion() ?? CLIENT_INFO,
+        instructions: undefined as string | undefined,
+      };
+      await entry.client.close().catch(() => undefined);
+      return result;
+    } catch (err) {
+      rethrowAsMcpHttpError(err);
+    }
   }
 
-  const run = async (session: SessionState) => {
-    const body: Record<string, unknown> = {
-      jsonrpc: "2.0",
-      id: crypto.randomUUID(),
-      method,
-    };
-    if (params) body.params = params;
-
-    const res = await postJsonRpc({
-      url: session.postUrl,
-      headers,
-      timeoutMs,
-      sessionId: session.sessionId,
-      protocolVersion: session.protocolVersion,
-      body,
-    });
-
-    // Server may rotate session id
-    if (res.sessionId && res.sessionId !== session.sessionId) {
-      session.sessionId = res.sessionId;
-      sessions.set(sessionCacheKey(normalized, headers), session);
+  const run = async (entry: SessionEntry) => {
+    if (method === "tools/list") {
+      return entry.client.listTools(
+        params as { cursor?: string } | undefined,
+        requestOpts,
+      );
     }
-    return res.result;
+    if (method === "tools/call") {
+      return entry.client.callTool(
+        {
+          name: String(params?.name ?? ""),
+          arguments: (params?.arguments as Record<string, unknown>) ?? {},
+        },
+        CallToolResultSchema,
+        requestOpts,
+      );
+    }
+    // resources / prompts 列表用宽松 ResultSchema：
+    // 上游常缺 name、带 nextCursor:null 等，严格 List*ResultSchema 会导致整表失败，
+    // Inspector / 聚合网关表现为「拿不到 resources/prompts」（tools 仍有原生工具可显示）。
+    if (method === "resources/list") {
+      return entry.client.request(
+        { method: "resources/list", params },
+        ResultSchema,
+        requestOpts,
+      );
+    }
+    if (method === "resources/read") {
+      return entry.client.readResource(
+        { uri: String(params?.uri ?? "") },
+        requestOpts,
+      );
+    }
+    if (method === "resources/templates/list") {
+      return entry.client.request(
+        { method: "resources/templates/list", params },
+        ResultSchema,
+        requestOpts,
+      );
+    }
+    if (method === "prompts/list") {
+      return entry.client.request(
+        { method: "prompts/list", params },
+        ResultSchema,
+        requestOpts,
+      );
+    }
+    if (method === "prompts/get") {
+      return entry.client.getPrompt(
+        {
+          name: String(params?.name ?? ""),
+          arguments: params?.arguments as Record<string, string> | undefined,
+        },
+        requestOpts,
+      );
+    }
+    if (method === "completion/complete") {
+      return entry.client.complete(
+        params as Parameters<Client["complete"]>[0],
+        requestOpts,
+      );
+    }
+    if (method === "ping") {
+      await entry.client.ping(requestOpts);
+      return {};
+    }
+    return entry.client.request(
+      { method, params } as Parameters<Client["request"]>[0],
+      ResultSchema,
+      requestOpts,
+    );
   };
 
-  let session = await ensureSession(normalized, headers, timeoutMs);
   try {
-    return await run(session);
-  } catch (err) {
-    if (isSessionLostError(err, !!session.sessionId) || isSessionRequiredError(err)) {
-      invalidateSession(normalized, headers);
-      session = await ensureSession(normalized, headers, timeoutMs);
-      return await run(session);
-    }
-    // First request got 404 without us ever having a session — might be wrong path;
-    // try once more after invalidating (ensureSession may take SSE fallback)
-    if (err instanceof McpHttpError && err.status === 404 && !session.sessionId) {
-      invalidateSession(normalized, headers);
-      try {
-        session = await ensureSession(normalized, headers, timeoutMs);
-        return await run(session);
-      } catch {
-        throw err;
+    const entry = await ensureClient(normalized, headers);
+    try {
+      return await run(entry);
+    } catch (err) {
+      if (isSessionError(err) || isMcpAuthError(err) === false && /404|session/i.test(String(err))) {
+        const fresh = await invalidateAndReconnect(normalized, headers);
+        return await run(fresh);
       }
+      rethrowAsMcpHttpError(err);
     }
-    throw err;
+  } catch (err) {
+    rethrowAsMcpHttpError(err);
   }
 }
 
@@ -600,7 +419,6 @@ export function mcpAuthHeaders(opts: {
   return h;
 }
 
-/** True when config has usable static key or OAuth access token */
 export function hasMcpCredentials(config: Record<string, unknown>): boolean {
   const oauth =
     typeof config.oauthAccessToken === "string" ? config.oauthAccessToken.trim() : "";
@@ -643,7 +461,9 @@ export async function probeMcpTools(opts: {
   }));
 }
 
-/** Clear cached MCP sessions (tests / logout) */
 export function clearMcpHttpSessions(): void {
+  for (const entry of sessions.values()) {
+    void entry.client.close().catch(() => undefined);
+  }
   sessions.clear();
 }

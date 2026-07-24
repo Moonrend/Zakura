@@ -2,13 +2,27 @@ import type { ProviderPlugin, InstanceHandle, ProviderContext } from "@zakura/co
 import { textResult } from "@zakura/core";
 import type {
   HealthResult,
+  McpCompleteParams,
+  McpCompleteResult,
+  McpGetPromptResult,
+  McpPromptDef,
+  McpReadResourceResult,
+  McpResourceDef,
+  McpResourceTemplateDef,
   McpToolDef,
   McpToolResult,
   ProviderConfigSchema,
   RuntimeSpec,
 } from "@zakura/shared";
 import {
+  normalizeCompleteResult,
+  normalizeGetPromptResult,
+  normalizePromptDef,
+  normalizeReadResourceResult,
+  normalizeResourceDef,
+  normalizeResourceTemplateDef,
   normalizeToolResult,
+  isCreateTaskResult,
   pickUpstreamToolFields,
 } from "@zakura/shared";
 import { eq } from "drizzle-orm";
@@ -297,7 +311,7 @@ export function createGenericMcpProvider(): ProviderPlugin {
     description: "透传任意上游 MCP（HTTP / OAuth 2.1），用于快速接入未内置的组件",
     version: "0.5.0",
     category: "mcp",
-    capabilities: ["mcp-proxy", "tools"],
+    capabilities: ["mcp-proxy", "tools", "resources", "prompts", "completions"],
     configSchema,
 
     validateConfig(config) {
@@ -380,10 +394,106 @@ export function createGenericMcpProvider(): ProviderPlugin {
           { name: toolName, arguments: args },
           runtimeCtx(handle),
         );
+        if (isCreateTaskResult(result)) return result as never;
         return normalizeToolResult(result);
       } catch (err) {
         return textResult(mcpErrorSummary(err), true);
       }
+    },
+
+    async invokeRaw(handle, method, params) {
+      return rpcWithAuth(handle, method, params, runtimeCtx(handle));
+    },
+
+    async listResources(handle): Promise<McpResourceDef[]> {
+      try {
+        const result = (await rpcWithAuth(
+          handle,
+          "resources/list",
+          undefined,
+          runtimeCtx(handle),
+        )) as { resources?: Array<Record<string, unknown>> };
+        return (result.resources ?? [])
+          .map((r) => normalizeResourceDef(r))
+          .filter((r): r is McpResourceDef => !!r);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) {
+          return [];
+        }
+        throw err;
+      }
+    },
+
+    async readResource(handle, uri): Promise<McpReadResourceResult> {
+      const result = await rpcWithAuth(
+        handle,
+        "resources/read",
+        { uri },
+        runtimeCtx(handle),
+      );
+      return normalizeReadResourceResult(result);
+    },
+
+    async listPrompts(handle): Promise<McpPromptDef[]> {
+      try {
+        const result = (await rpcWithAuth(
+          handle,
+          "prompts/list",
+          undefined,
+          runtimeCtx(handle),
+        )) as { prompts?: Array<Record<string, unknown>> };
+        return (result.prompts ?? [])
+          .map((p) => normalizePromptDef(p))
+          .filter((p): p is McpPromptDef => !!p);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) {
+          return [];
+        }
+        throw err;
+      }
+    },
+
+    async getPrompt(handle, name, args): Promise<McpGetPromptResult> {
+      const result = await rpcWithAuth(
+        handle,
+        "prompts/get",
+        { name, ...(args ? { arguments: args } : {}) },
+        runtimeCtx(handle),
+      );
+      return normalizeGetPromptResult(result);
+    },
+
+    async listResourceTemplates(handle): Promise<McpResourceTemplateDef[]> {
+      try {
+        const result = (await rpcWithAuth(
+          handle,
+          "resources/templates/list",
+          undefined,
+          runtimeCtx(handle),
+        )) as { resourceTemplates?: Array<Record<string, unknown>> };
+        return (result.resourceTemplates ?? [])
+          .map((r) => normalizeResourceTemplateDef(r))
+          .filter((r): r is McpResourceTemplateDef => !!r);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) return [];
+        throw err;
+      }
+    },
+
+    async complete(handle, params: McpCompleteParams): Promise<McpCompleteResult> {
+      const result = await rpcWithAuth(
+        handle,
+        "completion/complete",
+        {
+          ref: params.ref,
+          argument: params.argument,
+        },
+        runtimeCtx(handle),
+      );
+      return normalizeCompleteResult(result);
     },
   };
 }

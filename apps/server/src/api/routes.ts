@@ -32,7 +32,7 @@ import {
   verifySession,
 } from "../services/auth.js";
 import { InstanceNotFoundError, type Orchestrator } from "../services/orchestrator.js";
-import type { McpGateway } from "../services/mcp-gateway.js";
+import { qualifyResourceUri, type McpGateway } from "../services/mcp-gateway.js";
 import type { AgentService } from "../services/agents.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import {
@@ -1117,8 +1117,16 @@ export async function createApiApp(deps: {
     if (!fresh) {
       return c.json({ error: "Not found" }, 404);
     }
-    const handle = await orchestrator.toHandle(session.tenantId, id);
-    const safeConfig = { ...handle.config };
+
+    let handle: Awaited<ReturnType<typeof orchestrator.toHandle>> | null = null;
+    let decryptError: string | null = null;
+    try {
+      handle = await orchestrator.toHandle(session.tenantId, id);
+    } catch (err) {
+      decryptError = err instanceof Error ? err.message : String(err);
+    }
+
+    const safeConfig: Record<string, unknown> = handle ? { ...handle.config } : {};
     for (const key of Object.keys(safeConfig)) {
       if (
         /secret|token|password|apikey|api_key|refresh/i.test(key) &&
@@ -1129,10 +1137,30 @@ export async function createApiApp(deps: {
       }
     }
     let tools: Awaited<ReturnType<typeof gateway.listToolsForTenant>> = [];
+    let resources: Array<{
+      uri: string;
+      name: string;
+      description?: string;
+      mimeType?: string;
+      title?: string;
+    }> = [];
+    let prompts: Array<{
+      name: string;
+      description?: string;
+      title?: string;
+      arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+    }> = [];
+    let resourceTemplates: Array<{
+      uriTemplate: string;
+      name: string;
+      description?: string;
+      mimeType?: string;
+      title?: string;
+    }> = [];
     let toolPermissions: ReturnType<typeof resolveToolPermissionStates> | undefined;
-    try {
-      if (fresh.status === "running") {
-        const plugin = globalRegistry.get(fresh.providerId);
+    if (fresh.status === "running" && handle) {
+      const plugin = globalRegistry.get(fresh.providerId);
+      try {
         const defs = await plugin.listTools(handle);
         tools = defs.map((t) => ({
           qualifiedName: `re_${fresh.slug}__${t.name}`,
@@ -1142,11 +1170,52 @@ export async function createApiApp(deps: {
           description: t.description,
           inputSchema: t.inputSchema,
         }));
+      } catch {
+        tools = [];
       }
-    } catch {
-      tools = [];
+      if (typeof plugin.listResources === "function") {
+        try {
+          const listed = await plugin.listResources(handle);
+          resources = listed.map((r) => ({
+            uri: qualifyResourceUri(fresh.slug, r.uri),
+            name: r.name,
+            description: r.description,
+            mimeType: r.mimeType,
+            title: r.title,
+          }));
+        } catch {
+          resources = [];
+        }
+      }
+      if (typeof plugin.listPrompts === "function") {
+        try {
+          const listed = await plugin.listPrompts(handle);
+          prompts = listed.map((p) => ({
+            name: `re_${fresh.slug}__${p.name}`,
+            description: p.description,
+            title: p.title,
+            arguments: p.arguments,
+          }));
+        } catch {
+          prompts = [];
+        }
+      }
+      if (typeof plugin.listResourceTemplates === "function") {
+        try {
+          const listed = await plugin.listResourceTemplates(handle);
+          resourceTemplates = listed.map((t) => ({
+            uriTemplate: qualifyResourceUri(fresh.slug, t.uriTemplate),
+            name: t.name,
+            description: t.description,
+            mimeType: t.mimeType,
+            title: t.title,
+          }));
+        } catch {
+          resourceTemplates = [];
+        }
+      }
     }
-    if (fresh.providerId === "google-workspace") {
+    if (fresh.providerId === "google-workspace" && handle) {
       try {
         const product = resolveGoogleWorkspaceProduct(
           typeof handle.config.product === "string"
@@ -1162,7 +1231,16 @@ export async function createApiApp(deps: {
         /* ignore */
       }
     }
-    return c.json({ ...fresh, config: safeConfig, tools, toolPermissions });
+    return c.json({
+      ...fresh,
+      config: safeConfig,
+      tools,
+      resources,
+      prompts,
+      resourceTemplates,
+      toolPermissions,
+      lastError: decryptError ?? fresh.lastError,
+    });
   });
 
   app.patch("/api/instances/:id", async (c) => {
@@ -1362,6 +1440,30 @@ export async function createApiApp(deps: {
         description: string;
         agentScoped: boolean;
         providerId?: string;
+        inputSchema?: Record<string, unknown>;
+      }> = [];
+      let resources: Array<{
+        uri: string;
+        name: string;
+        description?: string;
+        mimeType?: string;
+        title?: string;
+        providerId?: string;
+      }> = [];
+      let prompts: Array<{
+        name: string;
+        description?: string;
+        title?: string;
+        arguments?: Array<{ name: string; description?: string; required?: boolean }>;
+        providerId?: string;
+      }> = [];
+      let resourceTemplates: Array<{
+        uriTemplate: string;
+        name: string;
+        description?: string;
+        mimeType?: string;
+        title?: string;
+        providerId?: string;
       }> = [];
       try {
         const listed = await gateway.listToolsForAgent(agent);
@@ -1370,9 +1472,48 @@ export async function createApiApp(deps: {
           description: t.description,
           agentScoped: Boolean(t.agentScoped),
           providerId: t.providerId,
+          inputSchema: t.inputSchema,
         }));
       } catch (err) {
         console.warn(`[api] listToolsForAgent ${agent.slug}:`, err);
+      }
+      try {
+        const listed = await gateway.listResourcesForAgent(agent);
+        resources = listed.map((r) => ({
+          uri: r.qualifiedUri,
+          name: r.name,
+          description: r.description,
+          mimeType: r.mimeType,
+          title: r.title,
+          providerId: r.providerId,
+        }));
+      } catch (err) {
+        console.warn(`[api] listResourcesForAgent ${agent.slug}:`, err);
+      }
+      try {
+        const listed = await gateway.listPromptsForAgent(agent);
+        prompts = listed.map((p) => ({
+          name: p.qualifiedName,
+          description: p.description,
+          title: p.title,
+          arguments: p.arguments,
+          providerId: p.providerId,
+        }));
+      } catch (err) {
+        console.warn(`[api] listPromptsForAgent ${agent.slug}:`, err);
+      }
+      try {
+        const listed = await gateway.listResourceTemplatesForAgent(agent);
+        resourceTemplates = listed.map((t) => ({
+          uriTemplate: t.qualifiedUriTemplate,
+          name: t.name,
+          description: t.description,
+          mimeType: t.mimeType,
+          title: t.title,
+          providerId: t.providerId,
+        }));
+      } catch (err) {
+        console.warn(`[api] listResourceTemplatesForAgent ${agent.slug}:`, err);
       }
 
       const container = await agentService.workspace.getWorkspaceContainer(agent.id);
@@ -1408,6 +1549,9 @@ export async function createApiApp(deps: {
             : null,
         }),
         tools,
+        resources,
+        prompts,
+        resourceTemplates,
         workspaceContainer: container,
         desktop,
       });
@@ -1588,7 +1732,7 @@ export async function createApiApp(deps: {
     const body = await c.req.json<{
       webSearch?: { enabled?: boolean; defaultEngine?: string | null };
       webFetch?: { enabled?: boolean; defaultBackend?: string | null };
-      mcp?: { mode?: "all" | "selected"; instanceIds?: string[] };
+      mcp?: { mode?: "all" | "selected"; instanceIds?: string[]; exposeWorkspaceFs?: boolean };
       enableMemory?: boolean;
       memoryProviderId?: string | null;
     }>();
@@ -1596,7 +1740,7 @@ export async function createApiApp(deps: {
       const patch: {
         webSearch?: { enabled?: boolean; defaultEngine?: string };
         webFetch?: { enabled?: boolean; defaultBackend?: string };
-        mcp?: { mode?: "all" | "selected"; instanceIds?: string[] };
+        mcp?: { mode?: "all" | "selected"; instanceIds?: string[]; exposeWorkspaceFs?: boolean };
       } = {};
 
       if (body.webSearch) {
@@ -2759,6 +2903,7 @@ export async function createApiApp(deps: {
       qualifiedName: string;
       arguments?: Record<string, unknown>;
       agentId?: string;
+      task?: { ttl?: number | null; pollInterval?: number };
     }>();
     if (!body.qualifiedName) return c.json({ error: "qualifiedName required" }, 400);
     const result = await gateway.callTool(
@@ -2769,7 +2914,86 @@ export async function createApiApp(deps: {
       body.arguments ?? {},
       { agentId: body.agentId },
     );
-    return c.json({ ok: !result.isError, result });
+    if (result && typeof result === "object" && "task" in result && result.task) {
+      return c.json({ ok: true, task: true, result });
+    }
+    return c.json({
+      ok: !(result as { isError?: boolean }).isError,
+      result,
+    });
+  });
+
+  /** 读取聚合后的 MCP resource */
+  app.post("/api/mcp/resources/read", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{ uri?: string; agentId?: string }>();
+    if (!body.uri?.trim()) return c.json({ error: "uri required" }, 400);
+    try {
+      const result = await gateway.readResource(session.tenantId, body.uri.trim(), {
+        agentId: body.agentId,
+      });
+      return c.json({ ok: true, result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /** 获取聚合后的 MCP prompt */
+  app.post("/api/mcp/prompts/get", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{
+      name?: string;
+      arguments?: Record<string, string>;
+      agentId?: string;
+    }>();
+    if (!body.name?.trim()) return c.json({ error: "name required" }, 400);
+    try {
+      const result = await gateway.getPrompt(
+        session.tenantId,
+        body.name.trim(),
+        body.arguments,
+        { agentId: body.agentId },
+      );
+      return c.json({ ok: true, result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /** MCP completion/complete */
+  app.post("/api/mcp/complete", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{
+      ref?: { type?: string; name?: string; uri?: string };
+      argument?: { name?: string; value?: string };
+      agentId?: string;
+    }>();
+    const refType = body.ref?.type;
+    const argName = body.argument?.name;
+    const argValue = body.argument?.value;
+    if (
+      (refType !== "ref/prompt" && refType !== "ref/resource") ||
+      typeof argName !== "string" ||
+      typeof argValue !== "string"
+    ) {
+      return c.json({ error: "ref + argument required" }, 400);
+    }
+    try {
+      const result = await gateway.complete(
+        session.tenantId,
+        {
+          ref:
+            refType === "ref/prompt"
+              ? { type: "ref/prompt", name: String(body.ref?.name ?? "") }
+              : { type: "ref/resource", uri: String(body.ref?.uri ?? "") },
+          argument: { name: argName, value: argValue },
+        },
+        { agentId: body.agentId },
+      );
+      return c.json({ ok: true, result });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   /** MCP Store — official registry + curated source links */
@@ -3001,11 +3225,23 @@ export async function createApiApp(deps: {
         ),
       });
       if (!existing) return c.json({ error: "instance not found" }, 404);
-      const cfg = decryptJson<Record<string, unknown>>(config.secret, existing.configEnc);
-      mcpUrl =
-        (typeof cfg.mcpUrl === "string" && cfg.mcpUrl) ||
-        existing.endpointUrl ||
-        "";
+      try {
+        const cfg = decryptJson<Record<string, unknown>>(config.secret, existing.configEnc);
+        mcpUrl =
+          (typeof cfg.mcpUrl === "string" && cfg.mcpUrl) ||
+          existing.endpointUrl ||
+          "";
+      } catch (err) {
+        return c.json(
+          {
+            error:
+              err instanceof Error
+                ? err.message
+                : "实例配置无法解密，请检查 ZAKURA_SECRET / data/secret.key",
+          },
+          400,
+        );
+      }
     }
     if (!mcpUrl) return c.json({ error: "mcpUrl required" }, 400);
 

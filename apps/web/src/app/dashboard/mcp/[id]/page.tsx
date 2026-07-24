@@ -8,7 +8,6 @@ import {
   ArrowLeft,
   HeartPulse,
   KeyRound,
-  Play,
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -18,18 +17,22 @@ import {
   prepareOauthTab,
   startUpstreamOauth as startUpstreamOauthApi,
 } from "@/lib/mcp-oauth";
+import {
+  McpPromptsExplorer,
+  McpResourcesExplorer,
+  McpToolsExplorer,
+  type McpPromptRow,
+  type McpResourceRow,
+  type McpResourceTemplateRow,
+  type McpToolRow,
+} from "@/components/mcp/capability-explorers";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import {
-  SchemaToolForm,
-  defaultsFromSchema,
-} from "@/components/mcp/schema-tool-form";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { McpToolPermissionsPanel } from "@/components/mcp/tool-permissions-panel";
 import type { McpToolPermissionState } from "@/lib/mcp-config";
-import { cn } from "@/lib/utils";
 
 type InstanceDetail = {
   id: string;
@@ -41,17 +44,11 @@ type InstanceDetail = {
   endpointUrl?: string | null;
   lastError?: string | null;
   config?: Record<string, unknown>;
-  tools?: ToolRow[];
+  tools?: McpToolRow[];
+  resources?: McpResourceRow[];
+  prompts?: McpPromptRow[];
+  resourceTemplates?: McpResourceTemplateRow[];
   toolPermissions?: McpToolPermissionState[];
-};
-
-type ToolRow = {
-  qualifiedName: string;
-  description: string;
-  providerId: string;
-  inputSchema?: Record<string, unknown>;
-  instanceId?: string | null;
-  localName?: string;
 };
 
 function providerLabel(id: string) {
@@ -107,13 +104,10 @@ function McpServerDetailInner() {
 
   const [instance, setInstance] = useState<InstanceDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedTool, setSelectedTool] = useState<ToolRow | null>(null);
-  const [args, setArgs] = useState<Record<string, unknown>>({});
-  const [resultText, setResultText] = useState("");
-  const [calling, setCalling] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthAutoTried, setOauthAutoTried] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [tab, setTab] = useState("tools");
   const oauthUnsubRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -127,10 +121,6 @@ function McpServerDetailInner() {
     try {
       const data = await api<InstanceDetail>(`/api/instances/${id}`);
       setInstance(data);
-      setSelectedTool((prev) => {
-        if (!prev || !data.tools?.length) return prev;
-        return data.tools.find((t) => t.qualifiedName === prev.qualifiedName) ?? prev;
-      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
       setInstance(null);
@@ -150,42 +140,6 @@ function McpServerDetailInner() {
     void startUpstreamOauth();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only auto-trigger once on oauth=1
   }, [autoOauth, oauthAutoTried, loading, instance]);
-
-  function selectTool(tool: ToolRow) {
-    setSelectedTool(tool);
-    setArgs(defaultsFromSchema(tool.inputSchema ?? {}));
-    setResultText("");
-  }
-
-  async function runTool() {
-    if (!selectedTool) return;
-    setCalling(true);
-    setResultText("");
-    try {
-      const res = await api<{
-        ok: boolean;
-        result: { content?: Array<{ type: string; text?: string }>; isError?: boolean };
-      }>("/api/mcp/call", {
-        method: "POST",
-        json: {
-          qualifiedName: selectedTool.qualifiedName,
-          arguments: args,
-        },
-      });
-      const text =
-        res.result.content
-          ?.map((c) => ("text" in c ? c.text : JSON.stringify(c)))
-          .join("\n") ?? JSON.stringify(res.result, null, 2);
-      setResultText(text);
-      if (res.result.isError) toast.error("调用返回错误");
-      else toast.success("调用成功");
-    } catch (err) {
-      setResultText(err instanceof Error ? err.message : String(err));
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCalling(false);
-    }
-  }
 
   async function startStop(action: "start" | "stop") {
     setActionBusy(true);
@@ -305,11 +259,16 @@ function McpServerDetailInner() {
   }
 
   const tools = instance.tools ?? [];
+  const resources = instance.resources ?? [];
+  const prompts = instance.prompts ?? [];
+  const templates = instance.resourceTemplates ?? [];
   const authNeeded = needsUpstreamAuth(instance);
   const remoteUrl =
     typeof instance.config?.mcpUrl === "string"
       ? instance.config.mcpUrl
       : instance.endpointUrl;
+  const emptyHint =
+    instance.status !== "running" ? "启动服务器后可加载" : undefined;
 
   return (
     <div className="space-y-5">
@@ -417,86 +376,40 @@ function McpServerDetailInner() {
         />
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium">工具 · {tools.length}</h2>
-          </div>
-          <div className="max-h-[520px] overflow-auto rounded-lg border border-border bg-card">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Tool</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {tools.map((t) => (
-                  <TableRow
-                    key={t.qualifiedName}
-                    className={cn(
-                      "cursor-pointer",
-                      selectedTool?.qualifiedName === t.qualifiedName
-                        ? "bg-muted/50"
-                        : "hover:bg-muted/30",
-                    )}
-                    onClick={() => selectTool(t)}
-                  >
-                    <TableCell>
-                      <code className="text-[11px]">{t.localName ?? t.qualifiedName}</code>
-                      <div className="mt-0.5 max-w-[280px] truncate text-[10px] text-muted-foreground">
-                        {t.description}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {!loading && !tools.length ? (
-                  <TableRow>
-                    <TableCell className="py-10 text-center text-muted-foreground">
-                      {instance.status !== "running"
-                        ? "启动服务器后可加载工具"
-                        : "暂无 tools"}
-                    </TableCell>
-                  </TableRow>
-                ) : null}
-              </TableBody>
-            </Table>
-          </div>
-        </section>
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          if (v) setTab(v);
+        }}
+      >
+        <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+          <TabsTrigger value="tools">工具 · {tools.length}</TabsTrigger>
+          <TabsTrigger value="resources">资源 · {resources.length}</TabsTrigger>
+          <TabsTrigger value="prompts">Prompts · {prompts.length}</TabsTrigger>
+        </TabsList>
 
-        <section className="space-y-2">
-          <h2 className="text-sm font-medium">工具试用</h2>
-          <div className="space-y-3 rounded-lg border border-border bg-card p-4">
-            {selectedTool ? (
-              <>
-                <div>
-                  <code className="text-xs">{selectedTool.qualifiedName}</code>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedTool.description}
-                  </p>
-                </div>
-                <SchemaToolForm
-                  schema={selectedTool.inputSchema ?? { type: "object", properties: {} }}
-                  value={args}
-                  onChange={setArgs}
-                />
-                <Button disabled={calling} onClick={() => void runTool()}>
-                  <Play />
-                  {calling ? "调用中…" : "运行"}
-                </Button>
-                {resultText ? (
-                  <pre className="max-h-64 overflow-auto rounded-lg bg-muted/50 p-3 font-mono text-[11px] whitespace-pre-wrap">
-                    {resultText}
-                  </pre>
-                ) : null}
-              </>
-            ) : (
-              <p className="py-10 text-center text-sm text-muted-foreground">
-                选择左侧工具，按 schema 生成表单后试用。
-              </p>
-            )}
-          </div>
-        </section>
-      </div>
+        <TabsContent value="tools" className="mt-4">
+          <McpToolsExplorer
+            tools={tools}
+            emptyHint={emptyHint ?? "暂无 tools"}
+          />
+        </TabsContent>
+
+        <TabsContent value="resources" className="mt-4">
+          <McpResourcesExplorer
+            resources={resources}
+            templates={templates}
+            emptyHint={emptyHint ?? "暂无 resources"}
+          />
+        </TabsContent>
+
+        <TabsContent value="prompts" className="mt-4">
+          <McpPromptsExplorer
+            prompts={prompts}
+            emptyHint={emptyHint ?? "暂无 prompts"}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

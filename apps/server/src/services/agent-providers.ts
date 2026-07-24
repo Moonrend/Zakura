@@ -20,6 +20,12 @@ export type AgentProvidersConfig = {
   mcp?: {
     mode?: "all" | "selected";
     instanceIds?: string[];
+    /**
+     * 通过 MCP Resources / Resource Templates 暴露 Agent 云端工作区文件系统。
+     * 默认开启；显式设为 false 可关闭。
+     * Resources = 可枚举的具体 URI；Templates = `zakura://agent/fs/{+path}` 按需读任意路径。
+     */
+    exposeWorkspaceFs?: boolean;
   };
 };
 
@@ -54,6 +60,11 @@ export function isWebFetchEnabledForAgent(agent: Agent): boolean {
 export function getAgentMcpMode(agent: Agent): "all" | "selected" {
   const mode = getAgentProviders(agent).mcp?.mode;
   return mode === "all" ? "all" : "selected";
+}
+
+/** 是否通过 MCP Resources 暴露云端工作区 FS（默认开启） */
+export function isWorkspaceFsExposedViaMcp(agent: Agent): boolean {
+  return getAgentProviders(agent).mcp?.exposeWorkspaceFs !== false;
 }
 
 export function mergeAgentProviders(

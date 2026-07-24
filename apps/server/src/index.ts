@@ -15,6 +15,7 @@ import { ToolCallStore } from "./services/tool-call-store.js";
 import { OauthService } from "./services/oauth.js";
 import { createApiApp } from "./api/routes.js";
 import { createMcpHandler } from "./mcp/http.js";
+import { createAgentTaskInfrastructure } from "./services/mcp-task-store.js";
 import { createOauthApp } from "./oauth/http.js";
 import {
   ensurePlatformMeta,
@@ -106,6 +107,8 @@ async function main() {
   gateway.setMemoryStore(memoryStore);
   gateway.setMemoryProviders(memoryProviders);
   gateway.setToolCallStore(toolCallStore);
+  const { taskStore, taskMessageQueue } = createAgentTaskInfrastructure(orchestrator);
+  gateway.setTaskStore(taskStore);
   gateway.setWorkspaceFsProvider(workspaceFsProvider);
   gateway.setExposureService(exposures);
 
@@ -121,6 +124,8 @@ async function main() {
         "X-Zakura-Session",
         "MCP-Protocol-Version",
         "Mcp-Session-Id",
+        "Last-Event-ID",
+        "Accept",
       ],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       exposeHeaders: ["WWW-Authenticate", "MCP-Protocol-Version", "Mcp-Session-Id"],
@@ -152,7 +157,14 @@ async function main() {
     }),
   );
 
-  const mcpHandler = createMcpHandler({ db, gateway, oauth, config });
+  const mcpHandler = createMcpHandler({
+    db,
+    gateway,
+    oauth,
+    config,
+    taskStore,
+    taskMessageQueue,
+  });
   app.all("/mcp", mcpHandler);
   app.all("/mcp/*", mcpHandler);
 

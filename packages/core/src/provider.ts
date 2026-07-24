@@ -1,5 +1,12 @@
 import type {
   HealthResult,
+  McpCompleteParams,
+  McpCompleteResult,
+  McpGetPromptResult,
+  McpPromptDef,
+  McpReadResourceResult,
+  McpResourceDef,
+  McpResourceTemplateDef,
   McpToolDef,
   McpToolResult,
   ProviderCapability,
@@ -69,6 +76,44 @@ export interface ProviderPlugin {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<McpToolResult>;
+
+  /** 可选：上游 MCP resources/list */
+  listResources?(handle: InstanceHandle): Promise<McpResourceDef[]>;
+
+  /** 可选：上游 MCP resources/read */
+  readResource?(
+    handle: InstanceHandle,
+    uri: string,
+  ): Promise<McpReadResourceResult>;
+
+  /** 可选：上游 MCP prompts/list */
+  listPrompts?(handle: InstanceHandle): Promise<McpPromptDef[]>;
+
+  /** 可选：上游 MCP prompts/get */
+  getPrompt?(
+    handle: InstanceHandle,
+    name: string,
+    args?: Record<string, string>,
+  ): Promise<McpGetPromptResult>;
+
+  /** 可选：上游 MCP resources/templates/list */
+  listResourceTemplates?(handle: InstanceHandle): Promise<McpResourceTemplateDef[]>;
+
+  /** 可选：上游 MCP completion/complete */
+  complete?(
+    handle: InstanceHandle,
+    params: McpCompleteParams,
+  ): Promise<McpCompleteResult>;
+
+  /**
+   * 可选：任意上游 JSON-RPC（用于 tasks/get 等透传）。
+   * 未实现时网关无法代理该实例的异步任务。
+   */
+  invokeRaw?(
+    handle: InstanceHandle,
+    method: string,
+    params?: Record<string, unknown>,
+  ): Promise<unknown>;
 }
 
 export type ProviderFactory = () => ProviderPlugin;

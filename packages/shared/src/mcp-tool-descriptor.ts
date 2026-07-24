@@ -38,6 +38,10 @@ export interface McpToolDef {
    * 以及 `_meta.securitySchemes` 兼容镜像等
    */
   _meta?: Record<string, unknown>;
+  /** 2025-11-25 Tasks：声明该工具是否支持 task-augmented 调用 */
+  execution?: {
+    taskSupport?: "required" | "optional" | "forbidden";
+  };
 }
 
 export interface McpToolResult {
@@ -67,6 +71,9 @@ export type PublicMcpToolDescriptor = {
   annotations: McpToolAnnotations;
   securitySchemes: McpSecurityScheme[];
   _meta: Record<string, unknown>;
+  execution?: {
+    taskSupport?: "required" | "optional" | "forbidden";
+  };
 };
 
 const READ_ONLY_NAMES = new Set([
@@ -192,6 +199,7 @@ export function toPublicToolDescriptor(
     | "annotations"
     | "securitySchemes"
     | "_meta"
+    | "execution"
   > & { name: string },
   opts?: {
     /** 对外公开名（如带 re_ 前缀的 qualifiedName） */
@@ -234,6 +242,9 @@ export function toPublicToolDescriptor(
   if (tool.outputSchema && typeof tool.outputSchema === "object") {
     descriptor.outputSchema = tool.outputSchema;
   }
+  if (tool.execution?.taskSupport) {
+    descriptor.execution = { taskSupport: tool.execution.taskSupport };
+  }
   return descriptor;
 }
 
@@ -252,6 +263,12 @@ export function pickUpstreamToolFields(raw: Record<string, unknown>): Partial<Mc
   }
   if (raw._meta && typeof raw._meta === "object") {
     out._meta = raw._meta as Record<string, unknown>;
+  }
+  if (raw.execution && typeof raw.execution === "object") {
+    const ts = (raw.execution as { taskSupport?: unknown }).taskSupport;
+    if (ts === "required" || ts === "optional" || ts === "forbidden") {
+      out.execution = { taskSupport: ts };
+    }
   }
   return out;
 }
@@ -326,3 +343,60 @@ export function normalizeToolResult(raw: unknown): McpToolResult {
   }
   return result;
 }
+
+/** 2025-11-25 CreateTaskResult 形态检测 */
+export type McpCreateTaskResult = {
+  task: {
+    taskId: string;
+    status: string;
+    ttl: number | null;
+    createdAt: string;
+    lastUpdatedAt: string;
+    pollInterval?: number;
+    statusMessage?: string;
+  };
+  _meta?: Record<string, unknown>;
+};
+
+export function isCreateTaskResult(raw: unknown): raw is McpCreateTaskResult {
+  if (!raw || typeof raw !== "object") return false;
+  const task = (raw as { task?: unknown }).task;
+  if (!task || typeof task !== "object") return false;
+  return typeof (task as { taskId?: unknown }).taskId === "string";
+}
+
+/**
+ * 重写工具 _meta 中的 MCP Apps UI 资源 URI（聚合限定）。
+ * qualifyUri(localUri) → 对外 URI。
+ */
+export function rewriteToolUiMeta(
+  meta: Record<string, unknown> | undefined,
+  qualifyUri: (localUri: string) => string,
+): Record<string, unknown> | undefined {
+  if (!meta) return undefined;
+  const next: Record<string, unknown> = { ...meta };
+  const ui = next.ui;
+  if (ui && typeof ui === "object" && !Array.isArray(ui)) {
+    const uiObj = { ...(ui as Record<string, unknown>) };
+    if (typeof uiObj.resourceUri === "string" && uiObj.resourceUri) {
+      uiObj.resourceUri = qualifyUri(uiObj.resourceUri);
+    }
+    next.ui = uiObj;
+  }
+  if (typeof next["openai/outputTemplate"] === "string" && next["openai/outputTemplate"]) {
+    next["openai/outputTemplate"] = qualifyUri(String(next["openai/outputTemplate"]));
+  }
+  return next;
+}
+
+/** 适合声明 taskSupport=optional 的长耗时工具名（本地名） */
+export const DEFAULT_TASK_OPTIONAL_TOOLS = new Set([
+  "shell_exec",
+  "shell_run",
+  "containers_create",
+  "containers_exec",
+  "computer_click",
+  "computer_type",
+  "computer_key",
+  "browser_act",
+]);

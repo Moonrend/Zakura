@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import {
   decryptJson,
+  DecryptError,
   encryptJson,
   globalRegistry,
   type InstanceHandle,
@@ -108,7 +109,19 @@ export class Orchestrator {
       ),
     });
 
-    const config = decryptJson<Record<string, unknown>>(this.config.secret, instance.configEnc);
+    const config = (() => {
+      try {
+        return decryptJson<Record<string, unknown>>(this.config.secret, instance.configEnc);
+      } catch (err) {
+        if (err instanceof DecryptError) {
+          throw new DecryptError(
+            `实例「${instance.name}」(${instance.slug}) 配置无法解密：当前密钥与写入时不一致。请恢复原来的 ZAKURA_SECRET / data/secret.key，或删除后重新导入该实例。`,
+            err,
+          );
+        }
+        throw err;
+      }
+    })();
     const containers: Record<string, string> = {};
     for (const c of containersRows) {
       if (c.dockerId) {

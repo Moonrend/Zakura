@@ -129,9 +129,9 @@ export class McpUpstreamOauthService {
           id: 1,
           method: "initialize",
           params: {
-            protocolVersion: "2024-11-05",
+            protocolVersion: "2025-11-25",
             capabilities: {},
-            clientInfo: { name: "zakura", version: "0.2.0" },
+            clientInfo: { name: "zakura", version: "0.4.0" },
           },
         }),
         signal: AbortSignal.timeout(12000),

@@ -1,6 +1,22 @@
 import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { globalRegistry, textResult, type InstanceHandle } from "@zakura/core";
-import type { McpToolDef, McpToolResult, MemoryProviderKind } from "@zakura/shared";
+import type {
+  McpCompleteParams,
+  McpCompleteResult,
+  McpCreateTaskResult,
+  McpGetPromptResult,
+  McpPromptDef,
+  McpReadResourceResult,
+  McpToolDef,
+  McpToolResult,
+  MemoryProviderKind,
+} from "@zakura/shared";
+import {
+  DEFAULT_TASK_OPTIONAL_TOOLS,
+  isCreateTaskResult,
+  rewriteToolUiMeta,
+} from "@zakura/shared";
+import type { ZakuraTaskStore } from "./mcp-task-store.js";
 import type { Db } from "../db/client.js";
 import {
   agents,
@@ -12,12 +28,26 @@ import {
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
 import { callAgentNativeTool, listAgentNativeTools } from "./agent-tools.js";
+import {
+  AGENT_NATIVE_PROVIDER_ID,
+  getAgentNativePrompt,
+  isAgentNativePromptName,
+  isAgentNativeResourceUri,
+  isWorkspaceFsResourceUri,
+  listAgentNativePrompts,
+  listAgentNativeResources,
+  listAgentNativeResourceTemplates,
+  listWorkspaceFsResources,
+  readAgentNativeResource,
+  readWorkspaceFsResource,
+} from "./agent-mcp-primitives.js";
 import type { AgentService } from "./agents.js";
 import {
   getAgentMcpMode,
   getAgentProviders,
   isWebFetchEnabledForAgent,
   isWebSearchEnabledForAgent,
+  isWorkspaceFsExposedViaMcp,
 } from "./agent-providers.js";
 import { ensureCapabilityInstance } from "./capabilities.js";
 import type { MemoryStore } from "./memory-store.js";
@@ -40,9 +70,53 @@ export interface ResolvedTool {
   annotations?: McpToolDef["annotations"];
   securitySchemes?: McpToolDef["securitySchemes"];
   _meta?: Record<string, unknown>;
+  execution?: McpToolDef["execution"];
   builtin?: boolean;
   /** Native Zakura agent tool (fs/shell/computer) */
   agentScoped?: boolean;
+  agentId?: string;
+}
+
+export interface ResolvedResource {
+  /** 对外 URI（含实例限定，避免冲突） */
+  qualifiedUri: string;
+  /** 原生平台资源为 null */
+  instanceId: string | null;
+  providerId: string;
+  /** 上游原始 URI */
+  localUri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  title?: string;
+  _meta?: Record<string, unknown>;
+  agentId?: string;
+}
+
+export interface ResolvedPrompt {
+  qualifiedName: string;
+  /** 原生平台 prompt 为 null */
+  instanceId: string | null;
+  providerId: string;
+  localName: string;
+  description?: string;
+  title?: string;
+  arguments?: McpPromptDef["arguments"];
+  _meta?: Record<string, unknown>;
+  agentId?: string;
+}
+
+export interface ResolvedResourceTemplate {
+  qualifiedUriTemplate: string;
+  /** 原生平台模板为 null */
+  instanceId: string | null;
+  providerId: string;
+  localUriTemplate: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+  title?: string;
+  _meta?: Record<string, unknown>;
   agentId?: string;
 }
 
@@ -55,12 +129,33 @@ export function withRePrefix(name: string): string {
   return name.startsWith("re_") ? name : `re_${name}`;
 }
 
+/** 对外资源 URI：zakura://mcp/{slug}/{urlencoded localUri} */
+export function qualifyResourceUri(instanceSlug: string, localUri: string): string {
+  return `zakura://mcp/${encodeURIComponent(instanceSlug)}/${encodeURIComponent(localUri)}`;
+}
+
+export function parseQualifiedResourceUri(
+  uri: string,
+): { slug: string; localUri: string } | null {
+  const m = /^zakura:\/\/mcp\/([^/]+)\/(.+)$/.exec(uri);
+  if (!m?.[1] || !m[2]) return null;
+  try {
+    return {
+      slug: decodeURIComponent(m[1]),
+      localUri: decodeURIComponent(m[2]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export class McpGateway {
   private agentService: AgentService | null = null;
   private browserService: AgentBrowserService | null = null;
   private memoryStore: MemoryStore | null = null;
   private memoryProviders: MemoryProvidersService | null = null;
   private toolCallStore: ToolCallStore | null = null;
+  private taskStore: ZakuraTaskStore | null = null;
   private workspaceFsProvider: import("./workspace-fs-provider.js").ServerWorkspaceFsProvider | null =
     null;
   private exposureService: import("./port-exposures.js").ExposureService | null = null;
@@ -98,8 +193,28 @@ export class McpGateway {
     this.toolCallStore = store;
   }
 
+  setTaskStore(store: ZakuraTaskStore): void {
+    this.taskStore = store;
+  }
+
   setExposureService(service: import("./port-exposures.js").ExposureService): void {
     this.exposureService = service;
+  }
+
+  private enrichResolvedTool(
+    tool: ResolvedTool,
+    instanceSlug?: string | null,
+  ): ResolvedTool {
+    const execution =
+      tool.execution ??
+      (DEFAULT_TASK_OPTIONAL_TOOLS.has(tool.localName)
+        ? { taskSupport: "optional" as const }
+        : undefined);
+    const _meta =
+      instanceSlug && tool._meta
+        ? rewriteToolUiMeta(tool._meta, (uri) => qualifyResourceUri(instanceSlug, uri))
+        : tool._meta;
+    return { ...tool, execution, _meta };
   }
 
   private builtinTools(tenantId: string): ResolvedTool[] {
@@ -255,10 +370,12 @@ export class McpGateway {
       }
     }
 
-    const tools: ResolvedTool[] = listAgentNativeTools(agent, memoryKind).map((t) => ({
-      ...t,
-      agentId: agent.id,
-    }));
+    const tools: ResolvedTool[] = listAgentNativeTools(agent, memoryKind).map((t) =>
+      this.enrichResolvedTool({
+        ...t,
+        agentId: agent.id,
+      }),
+    );
     const usedNames = new Set(tools.map((t) => t.qualifiedName));
 
     const mcpMode = getAgentMcpMode(agent);
@@ -320,20 +437,26 @@ export class McpGateway {
         }
         if (usedNames.has(name)) continue;
         usedNames.add(name);
-        tools.push({
-          qualifiedName: name,
-          instanceId: instance.id,
-          providerId: instance.providerId,
-          localName: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-          title: t.title,
-          outputSchema: t.outputSchema,
-          annotations: t.annotations,
-          securitySchemes: t.securitySchemes,
-          _meta: t._meta,
-          agentId: agent.id,
-        });
+        tools.push(
+          this.enrichResolvedTool(
+            {
+              qualifiedName: name,
+              instanceId: instance.id,
+              providerId: instance.providerId,
+              localName: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              title: t.title,
+              outputSchema: t.outputSchema,
+              annotations: t.annotations,
+              securitySchemes: t.securitySchemes,
+              _meta: t._meta,
+              execution: t.execution,
+              agentId: agent.id,
+            },
+            instance.slug,
+          ),
+        );
       }
     }
 
@@ -391,7 +514,7 @@ export class McpGateway {
 
     const tools: ResolvedTool[] = [];
     if (includeBuiltin) {
-      tools.push(...this.builtinTools(tenantId));
+      tools.push(...this.builtinTools(tenantId).map((t) => this.enrichResolvedTool(t)));
     }
 
     for (const instance of instances) {
@@ -454,19 +577,25 @@ export class McpGateway {
         ) {
           continue;
         }
-        tools.push({
-          qualifiedName,
-          instanceId: instance.id,
-          providerId: instance.providerId,
-          localName: t.name,
-          description: `[${instance.name}] ${t.description}`,
-          inputSchema: t.inputSchema,
-          title: t.title,
-          outputSchema: t.outputSchema,
-          annotations: t.annotations,
-          securitySchemes: t.securitySchemes,
-          _meta: t._meta,
-        });
+        tools.push(
+          this.enrichResolvedTool(
+            {
+              qualifiedName,
+              instanceId: instance.id,
+              providerId: instance.providerId,
+              localName: t.name,
+              description: `[${instance.name}] ${t.description}`,
+              inputSchema: t.inputSchema,
+              title: t.title,
+              outputSchema: t.outputSchema,
+              annotations: t.annotations,
+              securitySchemes: t.securitySchemes,
+              _meta: t._meta,
+              execution: t.execution,
+            },
+            instance.slug,
+          ),
+        );
       }
     }
 
@@ -478,7 +607,7 @@ export class McpGateway {
     qualifiedName: string,
     args: Record<string, unknown>,
     opts?: { apiKeyId?: string; agentId?: string | null },
-  ): Promise<McpToolResult> {
+  ): Promise<McpToolResult | McpCreateTaskResult> {
     const tools = await this.listToolsForTenant(tenantId, opts);
     const tool = tools.find((t) => t.qualifiedName === qualifiedName);
     if (!tool) {
@@ -498,25 +627,46 @@ export class McpGateway {
     }
 
     const started = Date.now();
-    let result: McpToolResult;
+    let result: McpToolResult | McpCreateTaskResult;
     try {
       result = await this.dispatchTool(tenantId, tool, args, opts);
     } catch (err) {
       result = textResult(err instanceof Error ? err.message : String(err), true);
     }
 
-    void this.toolCallStore?.record({
-      tenantId,
-      apiKeyId: opts?.apiKeyId,
-      agentId: opts?.agentId ?? tool.agentId ?? null,
-      qualifiedName: tool.qualifiedName,
-      localName: tool.localName,
-      providerId: tool.providerId,
-      instanceId: tool.instanceId,
-      args,
-      result,
-      durationMs: Date.now() - started,
-    });
+    if (isCreateTaskResult(result) && tool.instanceId && this.taskStore) {
+      const instance = await this.db.query.componentInstances.findFirst({
+        where: and(
+          eq(componentInstances.id, tool.instanceId),
+          eq(componentInstances.tenantId, tenantId),
+        ),
+      });
+      if (instance) {
+        const publicTask = this.taskStore.registerProxyTask({
+          tenantId,
+          instanceId: instance.id,
+          providerId: instance.providerId,
+          slug: instance.slug,
+          upstream: result.task,
+        });
+        result = { ...result, task: publicTask };
+      }
+    }
+
+    if (!isCreateTaskResult(result)) {
+      void this.toolCallStore?.record({
+        tenantId,
+        apiKeyId: opts?.apiKeyId,
+        agentId: opts?.agentId ?? tool.agentId ?? null,
+        qualifiedName: tool.qualifiedName,
+        localName: tool.localName,
+        providerId: tool.providerId,
+        instanceId: tool.instanceId,
+        args,
+        result,
+        durationMs: Date.now() - started,
+      });
+    }
 
     return result;
   }
@@ -526,7 +676,7 @@ export class McpGateway {
     tool: ResolvedTool,
     args: Record<string, unknown>,
     opts?: { apiKeyId?: string; agentId?: string | null },
-  ): Promise<McpToolResult> {
+  ): Promise<McpToolResult | McpCreateTaskResult> {
     void opts;
     if (tool.agentScoped && tool.agentId && this.agentService) {
       const agent = await this.db.query.agents.findFirst({
@@ -574,7 +724,9 @@ export class McpGateway {
       }
     }
 
-    return plugin.callTool(handle, tool.localName, callArgs);
+    return plugin.callTool(handle, tool.localName, callArgs) as Promise<
+      McpToolResult | McpCreateTaskResult
+    >;
   }
 
   private async callBuiltin(
@@ -707,5 +859,796 @@ export class McpGateway {
     const row = await this.findContainer(tenantId, idOrDocker);
     if (!row.dockerId) throw new Error(`Container has no docker id: ${row.id}`);
     return row.dockerId;
+  }
+
+  // ─── Resources ───────────────────────────────────────────────
+
+  async listResourcesForAgent(agent: Agent): Promise<ResolvedResource[]> {
+    if (!this.agentService) throw new Error("AgentService not bound");
+    const resources: ResolvedResource[] = [];
+    const usedUris = new Set<string>();
+
+    for (const r of listAgentNativeResources(agent)) {
+      usedUris.add(r.uri);
+      resources.push({
+        qualifiedUri: r.uri,
+        instanceId: null,
+        providerId: AGENT_NATIVE_PROVIDER_ID,
+        localUri: r.uri,
+        name: r.name,
+        description: r.description,
+        mimeType: r.mimeType,
+        title: r.title,
+        _meta: r._meta,
+        agentId: agent.id,
+      });
+    }
+
+    if (isWorkspaceFsExposedViaMcp(agent) && this.workspaceFsProvider) {
+      try {
+        if (!agent.runtimeNodeId) {
+          this.agentService.workspace.ensureLocal(agent);
+        }
+        const fs = await this.workspaceFsProvider.forAgent(agent.id, agent.tenantId);
+        for (const r of await listWorkspaceFsResources(fs)) {
+          if (usedUris.has(r.uri)) continue;
+          usedUris.add(r.uri);
+          resources.push({
+            qualifiedUri: r.uri,
+            instanceId: null,
+            providerId: AGENT_NATIVE_PROVIDER_ID,
+            localUri: r.uri,
+            name: r.name,
+            description: r.description,
+            mimeType: r.mimeType,
+            title: r.title,
+            _meta: r._meta,
+            agentId: agent.id,
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[mcp] agent workspace fs resources ${agent.slug}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    const mcpMode = getAgentMcpMode(agent);
+    const boundIds =
+      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
+
+    const instances = await this.db
+      .select()
+      .from(componentInstances)
+      .where(
+        and(
+          eq(componentInstances.tenantId, agent.tenantId),
+          eq(componentInstances.status, "running"),
+        ),
+      );
+
+    for (const instance of instances) {
+      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
+      if (boundIds && !boundIds.has(instance.id)) continue;
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listResources !== "function") continue;
+
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
+      } catch {
+        continue;
+      }
+
+      try {
+        if (
+          handle.config.authRequired === true &&
+          !(
+            (typeof handle.config.oauthAccessToken === "string" &&
+              handle.config.oauthAccessToken.trim()) ||
+            (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
+          )
+        ) {
+          continue;
+        }
+        const listed = await plugin.listResources(handle);
+        for (const r of listed) {
+          const qualifiedUri = qualifyResourceUri(instance.slug, r.uri);
+          if (usedUris.has(qualifiedUri)) continue;
+          usedUris.add(qualifiedUri);
+          resources.push({
+            qualifiedUri,
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localUri: r.uri,
+            name: r.name,
+            description: r.description,
+            mimeType: r.mimeType,
+            title: r.title,
+            _meta: r._meta,
+            agentId: agent.id,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[mcp] agent listResources ${instance.slug}: ${msg.slice(0, 200)}`);
+      }
+    }
+
+    return resources;
+  }
+
+  async listResourcesForTenant(
+    tenantId: string,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<ResolvedResource[]> {
+    if (opts?.agentId && this.agentService) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (!agent) return [];
+      return this.listResourcesForAgent(agent);
+    }
+
+    const policyResolved = opts?.apiKeyId
+      ? await this.db.query.mcpPolicies.findFirst({
+          where: and(
+            eq(mcpPolicies.tenantId, tenantId),
+            eq(mcpPolicies.apiKeyId, opts.apiKeyId),
+          ),
+        })
+      : await this.db.query.mcpPolicies.findFirst({
+          where: and(eq(mcpPolicies.tenantId, tenantId), isNull(mcpPolicies.apiKeyId)),
+        });
+
+    const allowedInstances: string[] | null = policyResolved
+      ? (JSON.parse(policyResolved.instanceIds) as string[])
+      : null;
+
+    const whereClause =
+      allowedInstances && allowedInstances.length > 0
+        ? and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+            inArray(componentInstances.id, allowedInstances),
+          )
+        : and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+          );
+
+    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const resources: ResolvedResource[] = [];
+
+    for (const instance of instances) {
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listResources !== "function") continue;
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(tenantId, instance.id);
+      } catch {
+        continue;
+      }
+      try {
+        const listed = await plugin.listResources(handle);
+        for (const r of listed) {
+          resources.push({
+            qualifiedUri: qualifyResourceUri(instance.slug, r.uri),
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localUri: r.uri,
+            name: r.name,
+            description: r.description
+              ? `[${instance.name}] ${r.description}`
+              : undefined,
+            mimeType: r.mimeType,
+            title: r.title,
+            _meta: r._meta,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[mcp] listResources ${instance.slug}: ${msg.slice(0, 200)}`);
+      }
+    }
+
+    return resources;
+  }
+
+  async readResource(
+    tenantId: string,
+    uri: string,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<McpReadResourceResult> {
+    if (opts?.agentId && isWorkspaceFsResourceUri(uri) && this.workspaceFsProvider) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (agent && isWorkspaceFsExposedViaMcp(agent)) {
+        if (!agent.runtimeNodeId && this.agentService) {
+          this.agentService.workspace.ensureLocal(agent);
+        }
+        const fs = await this.workspaceFsProvider.forAgent(agent.id, tenantId);
+        const native = await readWorkspaceFsResource(fs, uri);
+        if (native) return native;
+      }
+    }
+
+    if (opts?.agentId && isAgentNativeResourceUri(uri) && !isWorkspaceFsResourceUri(uri)) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (agent) {
+        const native = readAgentNativeResource(agent, uri);
+        if (native) return native;
+      }
+    }
+
+    const resources = await this.listResourcesForTenant(tenantId, opts);
+    const match =
+      resources.find((r) => r.qualifiedUri === uri) ??
+      resources.find((r) => r.localUri === uri);
+
+    if (!match) {
+      throw Object.assign(new Error(`Resource not found: ${uri}`), {
+        code: -32602,
+        data: { uri },
+      });
+    }
+
+    if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
+      const agent = match.agentId
+        ? await this.db.query.agents.findFirst({
+            where: and(eq(agents.id, match.agentId), eq(agents.tenantId, tenantId)),
+          })
+        : null;
+      if (!agent) {
+        throw Object.assign(new Error(`Resource not found: ${uri}`), {
+          code: -32602,
+          data: { uri },
+        });
+      }
+      if (isWorkspaceFsResourceUri(match.localUri)) {
+        if (!isWorkspaceFsExposedViaMcp(agent) || !this.workspaceFsProvider) {
+          throw Object.assign(new Error(`Resource not found: ${uri}`), {
+            code: -32602,
+            data: { uri },
+          });
+        }
+        if (!agent.runtimeNodeId && this.agentService) {
+          this.agentService.workspace.ensureLocal(agent);
+        }
+        const fs = await this.workspaceFsProvider.forAgent(agent.id, tenantId);
+        const ws = await readWorkspaceFsResource(fs, match.localUri);
+        if (!ws) {
+          throw Object.assign(new Error(`Resource not found: ${uri}`), {
+            code: -32602,
+            data: { uri },
+          });
+        }
+        return ws;
+      }
+      const native = readAgentNativeResource(agent, match.localUri);
+      if (!native) {
+        throw Object.assign(new Error(`Resource not found: ${uri}`), {
+          code: -32602,
+          data: { uri },
+        });
+      }
+      return native;
+    }
+
+    const handle = await this.orchestrator.toHandle(tenantId, match.instanceId);
+    const plugin = globalRegistry.get(match.providerId);
+    if (typeof plugin.readResource !== "function") {
+      throw new Error(`Provider ${match.providerId} does not support resources/read`);
+    }
+
+    const result = await plugin.readResource(handle, match.localUri);
+    return {
+      ...result,
+      contents: result.contents.map((c) => ({
+        ...c,
+        // 对外回写限定 URI，便于客户端对照 list
+        uri: c.uri === match.localUri ? match.qualifiedUri : c.uri,
+      })),
+    };
+  }
+
+  // ─── Prompts ─────────────────────────────────────────────────
+
+  async listPromptsForAgent(agent: Agent): Promise<ResolvedPrompt[]> {
+    if (!this.agentService) throw new Error("AgentService not bound");
+    const prompts: ResolvedPrompt[] = [];
+    const usedNames = new Set<string>();
+
+    for (const p of listAgentNativePrompts(agent)) {
+      usedNames.add(p.name);
+      prompts.push({
+        qualifiedName: p.name,
+        instanceId: null,
+        providerId: AGENT_NATIVE_PROVIDER_ID,
+        localName: p.name,
+        description: p.description,
+        title: p.title,
+        arguments: p.arguments,
+        _meta: p._meta,
+        agentId: agent.id,
+      });
+    }
+
+    const mcpMode = getAgentMcpMode(agent);
+    const boundIds =
+      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
+
+    const instances = await this.db
+      .select()
+      .from(componentInstances)
+      .where(
+        and(
+          eq(componentInstances.tenantId, agent.tenantId),
+          eq(componentInstances.status, "running"),
+        ),
+      );
+
+    for (const instance of instances) {
+      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
+      if (boundIds && !boundIds.has(instance.id)) continue;
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listPrompts !== "function") continue;
+
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
+      } catch {
+        continue;
+      }
+
+      try {
+        if (
+          handle.config.authRequired === true &&
+          !(
+            (typeof handle.config.oauthAccessToken === "string" &&
+              handle.config.oauthAccessToken.trim()) ||
+            (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
+          )
+        ) {
+          continue;
+        }
+        const listed = await plugin.listPrompts(handle);
+        for (const p of listed) {
+          let name = withRePrefix(p.name);
+          if (usedNames.has(name)) {
+            name = withRePrefix(qualify(instance.slug, p.name));
+          }
+          if (usedNames.has(name)) continue;
+          usedNames.add(name);
+          prompts.push({
+            qualifiedName: name,
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localName: p.name,
+            description: p.description,
+            title: p.title,
+            arguments: p.arguments,
+            _meta: p._meta,
+            agentId: agent.id,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[mcp] agent listPrompts ${instance.slug}: ${msg.slice(0, 200)}`);
+      }
+    }
+
+    return prompts;
+  }
+
+  async listPromptsForTenant(
+    tenantId: string,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<ResolvedPrompt[]> {
+    if (opts?.agentId && this.agentService) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (!agent) return [];
+      return this.listPromptsForAgent(agent);
+    }
+
+    const policyResolved = opts?.apiKeyId
+      ? await this.db.query.mcpPolicies.findFirst({
+          where: and(
+            eq(mcpPolicies.tenantId, tenantId),
+            eq(mcpPolicies.apiKeyId, opts.apiKeyId),
+          ),
+        })
+      : await this.db.query.mcpPolicies.findFirst({
+          where: and(eq(mcpPolicies.tenantId, tenantId), isNull(mcpPolicies.apiKeyId)),
+        });
+
+    const allowedInstances: string[] | null = policyResolved
+      ? (JSON.parse(policyResolved.instanceIds) as string[])
+      : null;
+
+    const whereClause =
+      allowedInstances && allowedInstances.length > 0
+        ? and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+            inArray(componentInstances.id, allowedInstances),
+          )
+        : and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+          );
+
+    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const prompts: ResolvedPrompt[] = [];
+
+    for (const instance of instances) {
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listPrompts !== "function") continue;
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(tenantId, instance.id);
+      } catch {
+        continue;
+      }
+      try {
+        const listed = await plugin.listPrompts(handle);
+        for (const p of listed) {
+          prompts.push({
+            qualifiedName: withRePrefix(qualify(instance.slug, p.name)),
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localName: p.name,
+            description: p.description
+              ? `[${instance.name}] ${p.description}`
+              : undefined,
+            title: p.title,
+            arguments: p.arguments,
+            _meta: p._meta,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[mcp] listPrompts ${instance.slug}: ${msg.slice(0, 200)}`);
+      }
+    }
+
+    return prompts;
+  }
+
+  async getPrompt(
+    tenantId: string,
+    name: string,
+    args?: Record<string, string>,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<McpGetPromptResult> {
+    if (opts?.agentId && isAgentNativePromptName(name)) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (agent) {
+        const native = getAgentNativePrompt(agent, name, args);
+        if (native) return native;
+      }
+    }
+
+    const prompts = await this.listPromptsForTenant(tenantId, opts);
+    const match =
+      prompts.find((p) => p.qualifiedName === name) ??
+      prompts.find((p) => p.localName === name) ??
+      prompts.find((p) => withRePrefix(p.localName) === name);
+
+    if (!match) {
+      throw Object.assign(new Error(`Unknown prompt: ${name}`), {
+        code: -32602,
+        data: { name },
+      });
+    }
+
+    if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
+      const agent = match.agentId
+        ? await this.db.query.agents.findFirst({
+            where: and(eq(agents.id, match.agentId), eq(agents.tenantId, tenantId)),
+          })
+        : null;
+      if (!agent) {
+        throw Object.assign(new Error(`Unknown prompt: ${name}`), {
+          code: -32602,
+          data: { name },
+        });
+      }
+      const native = getAgentNativePrompt(agent, match.localName, args);
+      if (!native) {
+        throw Object.assign(new Error(`Unknown prompt: ${name}`), {
+          code: -32602,
+          data: { name },
+        });
+      }
+      return native;
+    }
+
+    const handle = await this.orchestrator.toHandle(tenantId, match.instanceId);
+    const plugin = globalRegistry.get(match.providerId);
+    if (typeof plugin.getPrompt !== "function") {
+      throw new Error(`Provider ${match.providerId} does not support prompts/get`);
+    }
+
+    return plugin.getPrompt(handle, match.localName, args);
+  }
+
+  // ─── Resource templates ──────────────────────────────────────
+
+  async listResourceTemplatesForAgent(agent: Agent): Promise<ResolvedResourceTemplate[]> {
+    if (!this.agentService) throw new Error("AgentService not bound");
+    const templates: ResolvedResourceTemplate[] = [];
+    const used = new Set<string>();
+
+    for (const t of listAgentNativeResourceTemplates(agent)) {
+      used.add(t.uriTemplate);
+      templates.push({
+        qualifiedUriTemplate: t.uriTemplate,
+        instanceId: null,
+        providerId: AGENT_NATIVE_PROVIDER_ID,
+        localUriTemplate: t.uriTemplate,
+        name: t.name,
+        description: t.description,
+        mimeType: t.mimeType,
+        title: t.title,
+        _meta: t._meta,
+        agentId: agent.id,
+      });
+    }
+
+    const mcpMode = getAgentMcpMode(agent);
+    const boundIds =
+      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
+
+    const instances = await this.db
+      .select()
+      .from(componentInstances)
+      .where(
+        and(
+          eq(componentInstances.tenantId, agent.tenantId),
+          eq(componentInstances.status, "running"),
+        ),
+      );
+
+    for (const instance of instances) {
+      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
+      if (boundIds && !boundIds.has(instance.id)) continue;
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listResourceTemplates !== "function") continue;
+
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
+      } catch {
+        continue;
+      }
+
+      try {
+        if (
+          handle.config.authRequired === true &&
+          !(
+            (typeof handle.config.oauthAccessToken === "string" &&
+              handle.config.oauthAccessToken.trim()) ||
+            (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
+          )
+        ) {
+          continue;
+        }
+        const listed = await plugin.listResourceTemplates(handle);
+        for (const t of listed) {
+          const qualifiedUriTemplate = qualifyResourceUri(instance.slug, t.uriTemplate);
+          if (used.has(qualifiedUriTemplate)) continue;
+          used.add(qualifiedUriTemplate);
+          templates.push({
+            qualifiedUriTemplate,
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localUriTemplate: t.uriTemplate,
+            name: t.name,
+            description: t.description,
+            mimeType: t.mimeType,
+            title: t.title,
+            _meta: t._meta,
+            agentId: agent.id,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[mcp] agent listResourceTemplates ${instance.slug}: ${msg.slice(0, 200)}`,
+        );
+      }
+    }
+
+    return templates;
+  }
+
+  async listResourceTemplatesForTenant(
+    tenantId: string,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<ResolvedResourceTemplate[]> {
+    if (opts?.agentId && this.agentService) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (!agent) return [];
+      return this.listResourceTemplatesForAgent(agent);
+    }
+
+    const policyResolved = opts?.apiKeyId
+      ? await this.db.query.mcpPolicies.findFirst({
+          where: and(
+            eq(mcpPolicies.tenantId, tenantId),
+            eq(mcpPolicies.apiKeyId, opts.apiKeyId),
+          ),
+        })
+      : await this.db.query.mcpPolicies.findFirst({
+          where: and(eq(mcpPolicies.tenantId, tenantId), isNull(mcpPolicies.apiKeyId)),
+        });
+
+    const allowedInstances: string[] | null = policyResolved
+      ? (JSON.parse(policyResolved.instanceIds) as string[])
+      : null;
+
+    const whereClause =
+      allowedInstances && allowedInstances.length > 0
+        ? and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+            inArray(componentInstances.id, allowedInstances),
+          )
+        : and(
+            eq(componentInstances.tenantId, tenantId),
+            eq(componentInstances.status, "running"),
+          );
+
+    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const templates: ResolvedResourceTemplate[] = [];
+
+    for (const instance of instances) {
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      if (typeof plugin.listResourceTemplates !== "function") continue;
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(tenantId, instance.id);
+      } catch {
+        continue;
+      }
+      try {
+        const listed = await plugin.listResourceTemplates(handle);
+        for (const t of listed) {
+          templates.push({
+            qualifiedUriTemplate: qualifyResourceUri(instance.slug, t.uriTemplate),
+            instanceId: instance.id,
+            providerId: instance.providerId,
+            localUriTemplate: t.uriTemplate,
+            name: t.name,
+            description: t.description
+              ? `[${instance.name}] ${t.description}`
+              : undefined,
+            mimeType: t.mimeType,
+            title: t.title,
+            _meta: t._meta,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[mcp] listResourceTemplates ${instance.slug}: ${msg.slice(0, 200)}`,
+        );
+      }
+    }
+
+    return templates;
+  }
+
+  // ─── Completions ─────────────────────────────────────────────
+
+  async complete(
+    tenantId: string,
+    params: McpCompleteParams,
+    opts?: { apiKeyId?: string; agentId?: string | null },
+  ): Promise<McpCompleteResult> {
+    const ref = params.ref;
+    if (ref.type === "ref/prompt") {
+      const prompts = await this.listPromptsForTenant(tenantId, opts);
+      const match =
+        prompts.find((p) => p.qualifiedName === ref.name) ??
+        prompts.find((p) => p.localName === ref.name) ??
+        prompts.find((p) => withRePrefix(p.localName) === ref.name);
+
+      if (!match) {
+        throw Object.assign(new Error(`Unknown prompt for complete: ${ref.name}`), {
+          code: -32602,
+          data: { name: ref.name },
+        });
+      }
+
+      if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
+        // 平台 prompts 暂无参数补全词表
+        return { completion: { values: [], hasMore: false } };
+      }
+
+      const handle = await this.orchestrator.toHandle(tenantId, match.instanceId);
+      const plugin = globalRegistry.get(match.providerId);
+      if (typeof plugin.complete !== "function") {
+        throw new Error(`Provider ${match.providerId} does not support completion/complete`);
+      }
+
+      return plugin.complete(handle, {
+        ref: { type: "ref/prompt", name: match.localName },
+        argument: params.argument,
+      });
+    }
+
+    const templates = await this.listResourceTemplatesForTenant(tenantId, opts);
+    const match =
+      templates.find((t) => t.qualifiedUriTemplate === ref.uri) ??
+      templates.find((t) => t.localUriTemplate === ref.uri);
+
+    let instanceId: string | undefined;
+    let providerId: string | undefined;
+    let localUri: string | undefined;
+
+    if (match) {
+      if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
+        return { completion: { values: [], hasMore: false } };
+      }
+      instanceId = match.instanceId;
+      providerId = match.providerId;
+      localUri = match.localUriTemplate;
+    } else {
+      const parsed = parseQualifiedResourceUri(ref.uri);
+      if (parsed) {
+        const instances = await this.db
+          .select()
+          .from(componentInstances)
+          .where(
+            and(
+              eq(componentInstances.tenantId, tenantId),
+              eq(componentInstances.slug, parsed.slug),
+              eq(componentInstances.status, "running"),
+            ),
+          );
+        const instance = instances[0];
+        if (instance) {
+          instanceId = instance.id;
+          providerId = instance.providerId;
+          localUri = parsed.localUri;
+        }
+      }
+    }
+
+    if (!instanceId || !providerId || !localUri) {
+      throw Object.assign(
+        new Error(`Unknown resource template for complete: ${ref.uri}`),
+        { code: -32602, data: { uri: ref.uri } },
+      );
+    }
+
+    const handle = await this.orchestrator.toHandle(tenantId, instanceId);
+    const plugin = globalRegistry.get(providerId);
+    if (typeof plugin.complete !== "function") {
+      throw new Error(`Provider ${providerId} does not support completion/complete`);
+    }
+
+    return plugin.complete(handle, {
+      ref: { type: "ref/resource", uri: localUri },
+      argument: params.argument,
+    });
   }
 }

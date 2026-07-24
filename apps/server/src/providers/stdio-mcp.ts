@@ -4,20 +4,34 @@ import type { ProviderPlugin } from "@zakura/core";
 import { textResult } from "@zakura/core";
 import type {
   HealthResult,
+  McpCompleteParams,
+  McpCompleteResult,
+  McpGetPromptResult,
+  McpPromptDef,
+  McpReadResourceResult,
+  McpResourceDef,
+  McpResourceTemplateDef,
   McpToolDef,
   McpToolResult,
   ProviderConfigSchema,
   RuntimeSpec,
 } from "@zakura/shared";
 import {
+  normalizeCompleteResult,
+  normalizeGetPromptResult,
+  normalizePromptDef,
+  normalizeReadResourceResult,
+  normalizeResourceDef,
+  normalizeResourceTemplateDef,
   normalizeToolResult,
+  isCreateTaskResult,
   pickUpstreamToolFields,
 } from "@zakura/shared";
 import { mcpHttpRpc } from "../lib/mcp-http.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-/** Lives next to providers/ under src/mcp/ (tsx) or dist/mcp/ after build. */
-const BRIDGE_HOST_PATH = join(HERE, "..", "mcp", "stdio-bridge.mjs");
+/** 打包后的 SDK 桥接（esbuild）；开发时回退到源码旁的 bundle */
+const BRIDGE_HOST_PATH = join(HERE, "..", "mcp", "stdio-bridge.bundle.mjs");
 
 const DEFAULT_NODE_IMAGE = "node:22-bookworm-slim";
 /** Includes `uv` / `uvx` for PyPI MCP packages */
@@ -182,7 +196,7 @@ export function createStdioMcpProvider(): ProviderPlugin {
       "在 Node 容器中运行本地命令行 MCP（npx / uvx / docker run OCI …），经 HTTP 桥接接入网关",
     version: "0.2.0",
     category: "mcp",
-    capabilities: ["mcp-proxy", "tools", "containers"],
+    capabilities: ["mcp-proxy", "tools", "resources", "prompts", "completions", "containers"],
     configSchema,
 
     validateConfig(config) {
@@ -341,10 +355,89 @@ export function createStdioMcpProvider(): ProviderPlugin {
           name: toolName,
           arguments: args,
         });
+        if (isCreateTaskResult(result)) return result as never;
         return normalizeToolResult(result);
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }
+    },
+
+    async invokeRaw(handle, method, params) {
+      return mcpHttpRpc(mcpEndpoint(handle), {}, method, params);
+    },
+
+    async listResources(handle): Promise<McpResourceDef[]> {
+      try {
+        const result = (await mcpHttpRpc(
+          mcpEndpoint(handle),
+          {},
+          "resources/list",
+        )) as { resources?: Array<Record<string, unknown>> };
+        return (result.resources ?? [])
+          .map((r) => normalizeResourceDef(r))
+          .filter((r): r is McpResourceDef => !!r);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) return [];
+        throw err;
+      }
+    },
+
+    async readResource(handle, uri): Promise<McpReadResourceResult> {
+      const result = await mcpHttpRpc(mcpEndpoint(handle), {}, "resources/read", {
+        uri,
+      });
+      return normalizeReadResourceResult(result);
+    },
+
+    async listPrompts(handle): Promise<McpPromptDef[]> {
+      try {
+        const result = (await mcpHttpRpc(
+          mcpEndpoint(handle),
+          {},
+          "prompts/list",
+        )) as { prompts?: Array<Record<string, unknown>> };
+        return (result.prompts ?? [])
+          .map((p) => normalizePromptDef(p))
+          .filter((p): p is McpPromptDef => !!p);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) return [];
+        throw err;
+      }
+    },
+
+    async getPrompt(handle, name, args): Promise<McpGetPromptResult> {
+      const result = await mcpHttpRpc(mcpEndpoint(handle), {}, "prompts/get", {
+        name,
+        ...(args ? { arguments: args } : {}),
+      });
+      return normalizeGetPromptResult(result);
+    },
+
+    async listResourceTemplates(handle): Promise<McpResourceTemplateDef[]> {
+      try {
+        const result = (await mcpHttpRpc(
+          mcpEndpoint(handle),
+          {},
+          "resources/templates/list",
+        )) as { resourceTemplates?: Array<Record<string, unknown>> };
+        return (result.resourceTemplates ?? [])
+          .map((r) => normalizeResourceTemplateDef(r))
+          .filter((r): r is McpResourceTemplateDef => !!r);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/Method not found|-32601|not support|Zod|Invalid|parse/i.test(msg)) return [];
+        throw err;
+      }
+    },
+
+    async complete(handle, params: McpCompleteParams): Promise<McpCompleteResult> {
+      const result = await mcpHttpRpc(mcpEndpoint(handle), {}, "completion/complete", {
+        ref: params.ref,
+        argument: params.argument,
+      });
+      return normalizeCompleteResult(result);
     },
   };
 }
