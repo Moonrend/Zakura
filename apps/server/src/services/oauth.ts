@@ -29,6 +29,19 @@ import {
 const ACCESS_TTL_SEC = 60 * 60; // 1h
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
 const CODE_TTL_SEC = 60 * 10; // 10m
+const ID_TOKEN_TTL_SEC = 60 * 60; // 1h
+
+/** OIDC + MCP 对外声明的 scope */
+export const OAUTH_SCOPES_SUPPORTED = [
+  "mcp",
+  "openid",
+  "email",
+  "profile",
+  "offline_access",
+] as const;
+
+/** ChatGPT 声明授权域（siwc）需要的 OIDC scope；即便请求里只有 mcp 也一并授予 */
+const CHATGPT_OIDC_SCOPES = ["openid", "email", "profile"] as const;
 
 export type McpAuthContext = {
   tenant: Tenant;
@@ -93,6 +106,73 @@ function hashToken(raw: string): string {
 
 function pkceS256(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
+}
+
+/** 合并去重 scope 字符串 */
+export function mergeScopes(...parts: Array<string | null | undefined>): string {
+  const set = new Set<string>();
+  for (const part of parts) {
+    if (!part) continue;
+    for (const s of part.split(/[\s+]+/)) {
+      const t = s.trim();
+      if (t) set.add(t);
+    }
+  }
+  return [...set].join(" ");
+}
+
+function scopeSet(scope: string | null | undefined): Set<string> {
+  return new Set(
+    (scope ?? "")
+      .split(/[\s+]+/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+function isChatgptCimdClient(clientId: string): boolean {
+  try {
+    const host = new URL(clientId).hostname.toLowerCase();
+    return host === "chatgpt.com" || host === "chat.openai.com";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 规范化授权 scope：ChatGPT CIMD 即使只传 mcp，也附带 openid/email/profile，
+ * 以便签发 id_token / userinfo 供声明授权域使用。
+ */
+export function normalizeGrantedScopes(
+  requested: string | null | undefined,
+  opts?: { clientId?: string | null },
+): string {
+  let scope = mergeScopes(requested || "mcp");
+  if (opts?.clientId && isCimdClientId(opts.clientId) && isChatgptCimdClient(opts.clientId)) {
+    scope = mergeScopes(scope, ...CHATGPT_OIDC_SCOPES);
+  }
+  return scope;
+}
+
+type IdTokenClaims = {
+  iss: string;
+  sub: string;
+  aud: string;
+  exp: number;
+  iat: number;
+  auth_time: number;
+  email?: string;
+  email_verified?: boolean;
+  name?: string;
+  preferred_username?: string;
+};
+
+/** OIDC ID Token（JWT HS256）；供 ChatGPT siwc / id_token_hint 使用 */
+function signIdToken(secret: string, claims: IdTokenClaims): string {
+  const header = b64urlJson({ alg: "HS256", typ: "JWT" });
+  const payload = b64urlJson(claims);
+  const sig = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
+  return `${header}.${payload}.${sig}`;
 }
 
 export function isAllowedRedirectUri(uri: string): boolean {
@@ -195,17 +275,32 @@ export function authorizationServerMetadata(baseUrl: string) {
     /** OIDC UserInfo：ChatGPT 用邮箱做声明授权域；缺省时 UI 会显示 https://example.com */
     userinfo_endpoint: `${issuer}/userinfo`,
     /**
-     * mcp：MCP 工具授权；openid/email/profile：ChatGPT 声明授权域（siwc）拉邮箱。
+     * mcp：MCP 工具授权；openid/email/profile：ChatGPT 声明授权域（siwc）；
+     * offline_access：声明可发 refresh_token（实际始终可发，与 scope 对齐）。
      * @see https://developers.openai.com/apps-sdk/build/auth
      */
-    scopes_supported: ["mcp", "openid", "email", "profile"],
+    scopes_supported: [...OAUTH_SCOPES_SUPPORTED],
     response_types_supported: ["code"],
+    response_modes_supported: ["query"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: [...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED],
     revocation_endpoint: `${issuer}/token/revoke`,
     subject_types_supported: ["public"],
-    claims_supported: ["sub", "email", "email_verified", "name"],
+    id_token_signing_alg_values_supported: ["HS256"],
+    claim_types_supported: ["normal"],
+    claims_supported: [
+      "sub",
+      "iss",
+      "aud",
+      "exp",
+      "iat",
+      "auth_time",
+      "email",
+      "email_verified",
+      "name",
+      "preferred_username",
+    ],
     /**
      * RFC 9207：授权响应必须带 iss；ChatGPT 等严格客户端缺 iss 会拒绝对话并不换 token。
      * @see https://modelcontextprotocol.io/specification/draft/basic/authorization
@@ -503,7 +598,9 @@ export class OauthService {
       redirectUri: input.redirectUri,
       codeChallenge: input.codeChallenge,
       codeChallengeMethod: method,
-      scope: input.scope || client.scope || "mcp",
+      scope: normalizeGrantedScopes(input.scope || client.scope || "mcp", {
+        clientId: input.clientId,
+      }),
       resource: input.resource,
     });
 
@@ -564,6 +661,7 @@ export class OauthService {
     expires_in: number;
     refresh_token?: string;
     scope: string;
+    id_token?: string;
   }> {
     if (input.grantType === "authorization_code") {
       return this.exchangeAuthCode(input);
@@ -671,15 +769,24 @@ export class OauthService {
     agentId?: string | null;
     scope: string;
     resource?: string | null;
-  }) {
+  }): Promise<{
+    access_token: string;
+    token_type: "Bearer";
+    expires_in: number;
+    refresh_token?: string;
+    scope: string;
+    id_token?: string;
+  }> {
     const now = Math.floor(Date.now() / 1000);
+    const scope = normalizeGrantedScopes(input.scope, { clientId: input.clientId });
+    const scopes = scopeSet(scope);
     const access = signAccessToken(this.config.secret, {
       typ: "mcp_at",
       sub: input.userId,
       tid: input.tenantId,
       cid: input.clientId,
       aid: input.agentId ?? null,
-      scope: input.scope,
+      scope,
       resource: input.resource ?? null,
       iat: now,
       exp: now + ACCESS_TTL_SEC,
@@ -693,18 +800,53 @@ export class OauthService {
       userId: input.userId,
       tenantId: input.tenantId,
       agentId: input.agentId ?? null,
-      scope: input.scope,
+      scope,
       resource: input.resource ?? null,
       expiresAt: new Date(Date.now() + REFRESH_TTL_SEC * 1000),
     });
 
-    return {
+    const out: {
+      access_token: string;
+      token_type: "Bearer";
+      expires_in: number;
+      refresh_token?: string;
+      scope: string;
+      id_token?: string;
+    } = {
       access_token: access,
-      token_type: "Bearer" as const,
+      token_type: "Bearer",
       expires_in: ACCESS_TTL_SEC,
       refresh_token: refreshRaw,
-      scope: input.scope,
+      scope,
     };
+
+    // OIDC：scope 含 openid 时签发 id_token（ChatGPT siwc / id_token_hint）
+    if (scopes.has("openid")) {
+      const user = await this.db.query.users.findFirst({
+        where: eq(users.id, input.userId),
+      });
+      if (user) {
+        const claims: IdTokenClaims = {
+          iss: this.config.publicBaseUrl.replace(/\/$/, ""),
+          sub: user.id,
+          aud: input.clientId,
+          iat: now,
+          exp: now + ID_TOKEN_TTL_SEC,
+          auth_time: now,
+        };
+        if (scopes.has("email")) {
+          claims.email = user.email;
+          claims.email_verified = true;
+        }
+        if (scopes.has("profile")) {
+          if (user.name) claims.name = user.name;
+          claims.preferred_username = user.email;
+        }
+        out.id_token = signIdToken(this.config.secret, claims);
+      }
+    }
+
+    return out;
   }
 
   async revokeRefreshToken(token: string): Promise<void> {
@@ -715,14 +857,16 @@ export class OauthService {
   }
 
   /**
-   * OIDC UserInfo（RFC 7662 / OIDC Core §5.3）。
-   * ChatGPT 在发现 openid-configuration 后会拉取用户邮箱用于声明授权域。
+   * OIDC UserInfo（OIDC Core §5.3）。
+   * ChatGPT 在换票后拉取邮箱用于声明授权域（siwc）。
+   * 按 access token 的 scope 过滤返回字段。
    */
   async userInfo(rawToken: string): Promise<{
     sub: string;
-    email: string;
-    email_verified: boolean;
+    email?: string;
+    email_verified?: boolean;
     name?: string;
+    preferred_username?: string;
   }> {
     const at = verifyAccessToken(this.config.secret, rawToken);
     if (!at) {
@@ -734,12 +878,24 @@ export class OauthService {
     if (!user) {
       throw new OauthError("invalid_token", "User not found", 401);
     }
-    return {
-      sub: user.id,
-      email: user.email,
-      email_verified: true,
-      ...(user.name ? { name: user.name } : {}),
-    };
+    const scopes = scopeSet(at.scope);
+    const out: {
+      sub: string;
+      email?: string;
+      email_verified?: boolean;
+      name?: string;
+      preferred_username?: string;
+    } = { sub: user.id };
+    // 未声明 OIDC scope 时仍返回邮箱：兼容仅请求 mcp 的旧客户端 / ChatGPT
+    if (scopes.has("email") || scopes.has("openid") || scopes.has("mcp")) {
+      out.email = user.email;
+      out.email_verified = true;
+    }
+    if (scopes.has("profile") || scopes.has("openid")) {
+      if (user.name) out.name = user.name;
+      out.preferred_username = user.email;
+    }
+    return out;
   }
 
   async authenticateBearer(rawToken: string): Promise<McpAuthContext | null> {
