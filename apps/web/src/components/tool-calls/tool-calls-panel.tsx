@@ -92,19 +92,19 @@ function prettyJson(raw: string): string {
 function prettyResultJson(raw: string): string {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed) &&
-      "isError" in parsed &&
-      typeof (parsed as { text?: unknown }).text === "string" &&
-      Object.keys(parsed as object).every((k) => k === "isError" || k === "text")
-    ) {
-      const text = (parsed as { text: string }).text;
-      try {
-        return JSON.stringify(JSON.parse(text), null, 2);
-      } catch {
-        return text;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if (
+        "isError" in record &&
+        typeof record.text === "string" &&
+        Object.keys(record).every((k) => k === "isError" || k === "text")
+      ) {
+        const text = record.text;
+        try {
+          return JSON.stringify(JSON.parse(text), null, 2);
+        } catch {
+          return text;
+        }
       }
     }
     if (typeof parsed === "string") return parsed;
