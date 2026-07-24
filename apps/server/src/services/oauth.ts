@@ -25,6 +25,12 @@ import {
   isCimdClientId,
   pickCimdTokenAuthMethod,
 } from "./oauth-cimd.js";
+import {
+  jwksDocument,
+  loadOrCreateOauthSigningKey,
+  signJwtRs256,
+  type OauthSigningKey,
+} from "./oauth-signing.js";
 
 const ACCESS_TTL_SEC = 60 * 60; // 1h
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
@@ -40,8 +46,8 @@ export const OAUTH_SCOPES_SUPPORTED = [
   "offline_access",
 ] as const;
 
-/** ChatGPT 声明授权域（siwc）需要的 OIDC scope；即便请求里只有 mcp 也一并授予 */
-const CHATGPT_OIDC_SCOPES = ["openid", "email", "profile"] as const;
+/** ChatGPT 声明授权域（siwc）+ 刷新令牌所需 scope；即便请求里只有 mcp 也一并授予 */
+const CHATGPT_OIDC_SCOPES = ["openid", "email", "profile", "offline_access"] as const;
 
 export type McpAuthContext = {
   tenant: Tenant;
@@ -167,14 +173,6 @@ type IdTokenClaims = {
   preferred_username?: string;
 };
 
-/** OIDC ID Token（JWT HS256）；供 ChatGPT siwc / id_token_hint 使用 */
-function signIdToken(secret: string, claims: IdTokenClaims): string {
-  const header = b64urlJson({ alg: "HS256", typ: "JWT" });
-  const payload = b64urlJson(claims);
-  const sig = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
-  return `${header}.${payload}.${sig}`;
-}
-
 export function isAllowedRedirectUri(uri: string): boolean {
   try {
     const u = new URL(uri);
@@ -287,7 +285,9 @@ export function authorizationServerMetadata(baseUrl: string) {
     token_endpoint_auth_methods_supported: [...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED],
     revocation_endpoint: `${issuer}/token/revoke`,
     subject_types_supported: ["public"],
-    id_token_signing_alg_values_supported: ["HS256"],
+    /** 公开客户端（CIMD none）须用 RS256 + jwks_uri 验 id_token；HS256 无法共享 secret */
+    id_token_signing_alg_values_supported: ["RS256"],
+    jwks_uri: `${issuer}/.well-known/jwks.json`,
     claim_types_supported: ["normal"],
     claims_supported: [
       "sub",
@@ -321,20 +321,29 @@ export function protectedResourceMetadata(baseUrl: string, resourcePath = "/mcp"
   return {
     resource,
     authorization_servers: [issuer],
-    scopes_supported: ["mcp"],
+    /** 与 AS scopes 对齐，避免 ChatGPT 只从 PRM 读到 mcp */
+    scopes_supported: [...OAUTH_SCOPES_SUPPORTED],
     bearer_methods_supported: ["header"],
     resource_documentation: `${issuer}/`,
   };
 }
 
 export class OauthService {
+  private readonly signingKey: OauthSigningKey;
+
   constructor(
     private readonly db: Db,
     private readonly config: AppConfig,
-  ) {}
+  ) {
+    this.signingKey = loadOrCreateOauthSigningKey(this.config.dataDir);
+  }
 
   metadata() {
     return authorizationServerMetadata(this.config.publicBaseUrl);
+  }
+
+  jwks() {
+    return jwksDocument(this.signingKey);
   }
 
   resourceMetadata(resourcePath = "/mcp") {
@@ -842,7 +851,7 @@ export class OauthService {
           if (user.name) claims.name = user.name;
           claims.preferred_username = user.email;
         }
-        out.id_token = signIdToken(this.config.secret, claims);
+        out.id_token = signJwtRs256(this.signingKey, claims);
       }
     }
 

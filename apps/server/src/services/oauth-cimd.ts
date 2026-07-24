@@ -338,7 +338,11 @@ export async function fetchCimdDocument(
   return doc;
 }
 
-/** 在 AS 支持的方法与 CIMD 声明之间选择鉴权方式（偏好 private_key_jwt，否则 none） */
+/**
+ * 在 AS 支持的方法与 CIMD 声明之间选择鉴权方式。
+ * 优先 `none`（PKCE 公开客户端）：ChatGPT CIMD 同时声明 none + private_key_jwt，
+ * 而本 AS 尚未实现 private_key_jwt 验签，若误选会在 resolveClient 时直接失败。
+ */
 export function pickCimdTokenAuthMethod(
   doc: CimdDocument,
   asSupported: string[],
@@ -348,8 +352,8 @@ export function pickCimdTokenAuthMethod(
     (doc.token_endpoint_auth_method ? [doc.token_endpoint_auth_method] : ["none"]);
   const asSet = new Set(asSupported);
   const intersection = clientMethods.filter((m) => asSet.has(m));
-  if (intersection.includes("private_key_jwt")) return "private_key_jwt";
   if (intersection.includes("none")) return "none";
+  if (intersection.includes("private_key_jwt")) return "private_key_jwt";
   if (intersection.length) return intersection[0]!;
   // 文档未声明时，按公开客户端处理
   if (asSet.has("none")) return "none";

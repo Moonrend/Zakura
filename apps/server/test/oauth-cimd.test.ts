@@ -54,6 +54,18 @@ describe("oauth CIMD", () => {
     );
   });
 
+  it("pickCimdTokenAuthMethod 优先 none（即使 CIMD 也声明 private_key_jwt）", () => {
+    const method = pickCimdTokenAuthMethod(
+      {
+        client_id: "https://chatgpt.com/oauth/client.json",
+        redirect_uris: ["https://chatgpt.com/cb"],
+        token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
+      },
+      ["none", "client_secret_post", "private_key_jwt"],
+    );
+    assert.equal(method, "none");
+  });
+
   it("pickCimdTokenAuthMethod 在 AS 仅支持 none 时选用 none", () => {
     const method = pickCimdTokenAuthMethod(
       {
@@ -72,7 +84,16 @@ describe("oauth CIMD", () => {
     assert.equal(meta.registration_endpoint, "https://zakura.example/oauth/register");
     assert.equal(meta.userinfo_endpoint, "https://zakura.example/userinfo");
     assert.ok(meta.token_endpoint_auth_methods_supported.includes("none"));
-    assert.deepEqual(meta.scopes_supported, ["mcp"]);
+    assert.deepEqual(meta.scopes_supported, [
+      "mcp",
+      "openid",
+      "email",
+      "profile",
+      "offline_access",
+    ]);
+    assert.deepEqual(meta.code_challenge_methods_supported, ["S256"]);
+    assert.deepEqual(meta.id_token_signing_alg_values_supported, ["RS256"]);
+    assert.equal(meta.jwks_uri, "https://zakura.example/.well-known/jwks.json");
   });
 
   it("fetchCimdDocument 使用 mock fetch 并缓存", async () => {

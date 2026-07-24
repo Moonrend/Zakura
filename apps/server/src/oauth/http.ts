@@ -72,6 +72,16 @@ export function createOauthApp(deps: {
   app.get("/.well-known/openid-configuration", asMetadata);
   app.get("/.well-known/openid-configuration/*", asMetadata);
 
+  /** OIDC JWKS：校验 RS256 id_token */
+  app.get("/.well-known/jwks.json", (c) => {
+    c.header("Cache-Control", "public, max-age=3600");
+    return c.json(oauth.jwks());
+  });
+  app.get("/oauth/jwks", (c) => {
+    c.header("Cache-Control", "public, max-age=3600");
+    return c.json(oauth.jwks());
+  });
+
   app.get("/.well-known/oauth-protected-resource", (c) => {
     c.header("Cache-Control", "no-store, max-age=0");
     return c.json(oauth.resourceMetadata("/mcp"));

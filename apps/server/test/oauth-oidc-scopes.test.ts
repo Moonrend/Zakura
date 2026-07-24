@@ -11,7 +11,7 @@ describe("oauth OIDC scopes", () => {
     assert.equal(mergeScopes(null, undefined, ""), "");
   });
 
-  it("ChatGPT CIMD 自动附带 openid/email/profile", () => {
+  it("ChatGPT CIMD 自动附带 openid/email/profile/offline_access", () => {
     const scope = normalizeGrantedScopes("mcp", {
       clientId: "https://chatgpt.com/oauth/pRRt3ecBwyHH/client.json",
     });
@@ -19,6 +19,7 @@ describe("oauth OIDC scopes", () => {
     assert.ok(scope.includes("openid"));
     assert.ok(scope.includes("email"));
     assert.ok(scope.includes("profile"));
+    assert.ok(scope.includes("offline_access"));
   });
 
   it("非 ChatGPT 客户端不强制 OIDC scope", () => {
