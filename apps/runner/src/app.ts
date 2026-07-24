@@ -9,7 +9,7 @@ import {
 } from "@zakura/core";
 import type { RunnerAuthConfig } from "./auth.js";
 import { requireRunnerAuth, tokenMatches, extractBearer } from "./auth.js";
-import { collectHostInfo } from "./host-info.js";
+import { collectHostInfo, resolveEndpointPublicHost } from "./host-info.js";
 import { RunnerDockerWorkspace } from "./docker-workspace.js";
 
 export type RunnerConfig = {
@@ -59,16 +59,17 @@ function getFs(storageRoot: string, agentId: string): LocalWorkspaceFs {
 
 export function createRunnerApp(cfg: RunnerConfig): Hono {
   const app = new Hono();
-  const publicHost =
-    cfg.publicHost ||
-    process.env.ZAKURA_RUNNER_PUBLIC_HOST ||
-    (() => {
-      try {
-        return cfg.publicUrl ? new URL(cfg.publicUrl).hostname : "127.0.0.1";
-      } catch {
-        return "127.0.0.1";
-      }
-    })();
+  const hostInfo = collectHostInfo(cfg.storageRoot, cfg.publicUrl);
+  // noVNC/CDP must advertise a host reachable from Server/browser — not loopback
+  const publicHost = resolveEndpointPublicHost(hostInfo, {
+    publicHost: cfg.publicHost,
+    publicUrl: cfg.publicUrl,
+  });
+  if (publicHost === "127.0.0.1") {
+    console.warn(
+      "[runner] desktop endpoints will use 127.0.0.1 — set ZAKURA_RUNNER_PUBLIC_HOST (or PUBLIC_URL) for remote access",
+    );
+  }
   const dockerWs = new RunnerDockerWorkspace(cfg.storageRoot, publicHost);
 
   app.get("/health", (c) => c.json({ ok: true, service: "zakura-runner" }));

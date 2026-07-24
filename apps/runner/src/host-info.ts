@@ -171,6 +171,41 @@ function collectTailscaleInfo(ifaces: RunnerNetworkInterface[]): RunnerTailscale
   return undefined;
 }
 
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "0.0.0.0";
+}
+
+/**
+ * Host used in noVNC/CDP URLs returned to Server/browser.
+ * Prefer explicit PUBLIC_HOST → PUBLIC_URL hostname → LAN/Tailscale primaryIp.
+ * Never prefer loopback when a reachable address is known.
+ */
+export function resolveEndpointPublicHost(
+  hostInfo: RunnerHostInfo,
+  opts?: { publicHost?: string; publicUrl?: string },
+): string {
+  const explicit =
+    opts?.publicHost?.trim() || process.env.ZAKURA_RUNNER_PUBLIC_HOST?.trim();
+  if (explicit && !isLoopbackHost(explicit)) return explicit;
+
+  const urlCandidates = [opts?.publicUrl, hostInfo.publicUrl, process.env.ZAKURA_RUNNER_PUBLIC_URL];
+  for (const raw of urlCandidates) {
+    if (!raw?.trim()) continue;
+    try {
+      const h = new URL(raw).hostname;
+      if (h && !isLoopbackHost(h)) return h;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (hostInfo.primaryIp && !isLoopbackHost(hostInfo.primaryIp)) {
+    return hostInfo.primaryIp;
+  }
+  return "127.0.0.1";
+}
+
 export function collectHostInfo(storageRoot: string, publicUrl?: string): RunnerHostInfo {
   let interfaces = collectOsInterfaces();
   interfaces = mergeHostSysNet(interfaces);

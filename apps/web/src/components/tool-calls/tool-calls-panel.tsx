@@ -88,6 +88,32 @@ function prettyJson(raw: string): string {
   }
 }
 
+/** 展开历史 { isError, text } 包装，并美化内层 JSON */
+function prettyResultJson(raw: string): string {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      "isError" in parsed &&
+      typeof (parsed as { text?: unknown }).text === "string" &&
+      Object.keys(parsed as object).every((k) => k === "isError" || k === "text")
+    ) {
+      const text = (parsed as { text: string }).text;
+      try {
+        return JSON.stringify(JSON.parse(text), null, 2);
+      } catch {
+        return text;
+      }
+    }
+    if (typeof parsed === "string") return parsed;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return raw;
+  }
+}
+
 function StatCard({
   label,
   value,
@@ -207,7 +233,7 @@ function CallRow({
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-muted-foreground">结果</div>
             <pre className="max-h-64 overflow-auto rounded-md border bg-card p-2 text-[11px] leading-relaxed">
-              {prettyJson(item.resultJson)}
+              {prettyResultJson(item.resultJson)}
             </pre>
           </div>
         </div>

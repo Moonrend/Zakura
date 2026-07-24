@@ -47,6 +47,7 @@ const WIZARD_STEPS: WizardStepMeta[] = [
   {
     id: "mcpConnected",
     title: "接入 MCP",
+    optional: true,
   },
   {
     id: "connectReady",
@@ -127,9 +128,8 @@ export default function TenantOnboardingPage() {
   const stepId = WIZARD_STEPS[currentIndex]?.id as StepId | undefined;
   const firstAgentId = agents[0]?.id ?? null;
 
-  // MCP：装完一个后显示「下一步」；已有 MCP 也可前进
-  const showNext =
-    stepId === "mcpConnected" && !!state?.steps.mcpConnected;
+  // MCP 可选：未接入也可跳过/下一步；接入后同样可前进
+  const showNext = stepId === "mcpConnected";
 
   if (loading || !state) {
     return (

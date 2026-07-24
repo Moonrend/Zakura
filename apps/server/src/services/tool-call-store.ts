@@ -66,6 +66,7 @@ function truncateJson(value: unknown): string {
   }
 }
 
+/** 取出工具返回文本；若本身是 JSON 则解析，避免 resultJson 双重 stringify */
 function resultPayload(result: McpToolResult): unknown {
   const texts = (result.content ?? [])
     .map((c) => {
@@ -74,10 +75,21 @@ function resultPayload(result: McpToolResult): unknown {
       return "";
     })
     .filter(Boolean);
-  return {
-    isError: Boolean(result.isError),
-    text: texts.join("\n"),
-  };
+  const text = texts.join("\n");
+  if (!text) return null;
+  const trimmed = text.trim();
+  if (
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith('"')
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      /* 非合法 JSON，按纯文本存 */
+    }
+  }
+  return text;
 }
 
 export class ToolCallStore {

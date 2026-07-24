@@ -11,10 +11,18 @@ import {
   DEFAULT_WORKSPACE_IMAGE,
   LOCAL_RUNTIME_NODE_ID,
   WORKSPACE_IMAGE_LOCAL,
+  type RunnerHostInfo,
 } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
-import { agents, managedContainers, newId, tenants, type Agent } from "../db/schema.js";
+import {
+  agents,
+  managedContainers,
+  newId,
+  tenants,
+  type Agent,
+  type RuntimeNode,
+} from "../db/schema.js";
 import type { DockerRuntime, TcpTunnel } from "../runtime/docker.js";
 import {
   beginAgentProgress,
@@ -23,6 +31,58 @@ import {
 } from "./agent-progress.js";
 import { ensureWorkspaceDir } from "./agent-fs.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "0.0.0.0";
+}
+
+/** Runner 若未配置 PUBLIC_HOST，endpoints 可能仍是 127.0.0.1 — 用节点 hostInfo 改写 */
+function advertiseHostFromNode(node: RuntimeNode): string | null {
+  let hi: RunnerHostInfo | Record<string, unknown> = {};
+  try {
+    hi = JSON.parse(node.hostInfoJson || "{}") as RunnerHostInfo;
+  } catch {
+    hi = {};
+  }
+  const primaryIp = typeof hi.primaryIp === "string" ? hi.primaryIp : null;
+  if (primaryIp && !isLoopbackHost(primaryIp)) return primaryIp;
+
+  const publicUrl = typeof hi.publicUrl === "string" ? hi.publicUrl : null;
+  if (publicUrl) {
+    try {
+      const h = new URL(publicUrl).hostname;
+      if (h && !isLoopbackHost(h)) return h;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (node.endpoint) {
+    try {
+      const h = new URL(node.endpoint).hostname;
+      if (h && !isLoopbackHost(h)) return h;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
+function rewriteLoopbackUrl(
+  url: string | null | undefined,
+  advertiseHost: string | null,
+): string | null {
+  if (!url) return null;
+  if (!advertiseHost || isLoopbackHost(advertiseHost)) return url;
+  try {
+    const u = new URL(url);
+    if (!isLoopbackHost(u.hostname)) return url;
+    u.hostname = advertiseHost;
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 export function agentDataDir(config: AppConfig, agentId: string): string {
   return join(config.dataDir, "agents", agentId);
@@ -125,18 +185,16 @@ export class AgentWorkspaceService {
     return Boolean(id && id !== LOCAL_RUNTIME_NODE_ID);
   }
 
-  private async requireRunnerClient(agent: Agent): Promise<RunnerClient> {
+  private async requireRunnerClient(
+    agent: Agent,
+  ): Promise<{ client: RunnerClient; node: RuntimeNode }> {
     if (!this.isRemoteAgent(agent)) {
       throw new Error("当前电脑未绑定远程运行节点");
     }
     if (!this.nodes) {
       throw new Error("运行节点服务不可用，请稍后重试");
     }
-    const { client } = await this.nodes.requireRunnerClient(
-      agent.tenantId,
-      agent.runtimeNodeId!,
-    );
-    return client;
+    return this.nodes.requireRunnerClient(agent.tenantId, agent.runtimeNodeId!);
   }
 
   async getWorkspaceContainer(agentId: string) {
@@ -248,9 +306,10 @@ export class AgentWorkspaceService {
       });
       if (agentRow && this.isRemoteAgent(agentRow)) {
         try {
-          const client = await this.requireRunnerClient(agentRow);
+          const { client, node } = await this.requireRunnerClient(agentRow);
           const ws = await client.getWorkspace(agentId).catch(() => null);
-          const cdp = ws?.endpoints?.cdpUrl ?? null;
+          const advertise = advertiseHostFromNode(node);
+          const cdp = rewriteLoopbackUrl(ws?.endpoints?.cdpUrl ?? null, advertise);
           if (cdp && (await this.probeHttp(`${cdp}/json/version`))) {
             return {
               url: cdp,
@@ -408,7 +467,7 @@ export class AgentWorkspaceService {
     if (this.isRemoteAgent(agent)) {
       // Remote: never fall through to local Docker inspect
       try {
-        const client = await this.requireRunnerClient(agent);
+        const { client, node } = await this.requireRunnerClient(agent);
         const ws = await client.getWorkspace(agent.id);
         if (ws?.endpoints) {
           if (row && ws.status && ws.status !== row.status) {
@@ -417,15 +476,16 @@ export class AgentWorkspaceService {
               .set({ status: ws.status, updatedAt: new Date() })
               .where(eq(managedContainers.id, row.id));
           }
+          const advertise = advertiseHostFromNode(node);
           return {
             enabled: computerOn,
             computer: computerOn,
             browser: computerOn,
             containerStatus: ws.status ?? row?.status ?? null,
             dockerId: row?.dockerId ?? null,
-            novncUrl: ws.endpoints.novncUrl,
+            novncUrl: rewriteLoopbackUrl(ws.endpoints.novncUrl, advertise),
             novncPort: ws.endpoints.novncPort,
-            cdpUrl: ws.endpoints.cdpUrl,
+            cdpUrl: rewriteLoopbackUrl(ws.endpoints.cdpUrl, advertise),
             cdpPort: ws.endpoints.cdpPort,
             vncPort: null as number | null,
             width: AGENT_DESKTOP_WIDTH,
@@ -552,7 +612,7 @@ export class AgentWorkspaceService {
 
     if (this.isRemoteAgent(agent)) {
       log("runner", "正在连接远程运行节点…", 6, "docker");
-      const remoteClient = await this.requireRunnerClient(agent);
+      const { client: remoteClient } = await this.requireRunnerClient(agent);
       return this.startOnRunner(agent, remoteClient, log);
     }
 
@@ -982,7 +1042,7 @@ export class AgentWorkspaceService {
       throw new Error("Workspace container not running. Start the agent first.");
     }
     if (this.isRemoteAgent(agent)) {
-      const client = await this.requireRunnerClient(agent);
+      const { client } = await this.requireRunnerClient(agent);
       const ws = await client.getWorkspace(agent.id);
       if (!ws || ws.status !== "running") {
         throw new Error("Remote workspace container is not running");
@@ -1016,7 +1076,7 @@ export class AgentWorkspaceService {
     };
 
     if (this.isRemoteAgent(agent)) {
-      const client = await this.requireRunnerClient(agent);
+      const { client } = await this.requireRunnerClient(agent);
       return client.execWorkspace(agent.id, command, { workingDir, env });
     }
 
