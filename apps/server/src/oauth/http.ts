@@ -152,6 +152,8 @@ export function createOauthApp(deps: {
         refreshToken: params.refresh_token,
         clientId,
         clientSecret,
+        clientAssertion: params.client_assertion,
+        clientAssertionType: params.client_assertion_type,
         resource: params.resource || null,
       });
       return c.json(result);

@@ -232,7 +232,7 @@ function createAgentMcpServer(opts: {
             inputSchema: t.inputSchema,
             outputSchema: t.outputSchema,
             annotations: t.annotations,
-            securitySchemes: undefined,
+            securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
             _meta: t._meta,
             execution: t.execution,
           },
@@ -583,6 +583,19 @@ export function createMcpHandler(deps: {
 
     if (!auth) {
       return unauthorized(c, config, resourcePath, "Unauthorized: invalid token");
+    }
+
+    // Apps SDK：校验 access token 的 resource/aud 与当前 MCP 资源一致
+    if (auth.authMethod === "oauth" && auth.resource) {
+      const expectedResource = `${config.publicBaseUrl.replace(/\/$/, "")}${resourcePath}`;
+      if (auth.resource !== expectedResource) {
+        return unauthorized(
+          c,
+          config,
+          resourcePath,
+          `Unauthorized: token audience mismatch (got ${auth.resource})`,
+        );
+      }
     }
 
     const agent = await db.query.agents.findFirst({

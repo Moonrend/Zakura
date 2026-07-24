@@ -54,7 +54,7 @@ describe("oauth CIMD", () => {
     );
   });
 
-  it("pickCimdTokenAuthMethod 优先 none（即使 CIMD 也声明 private_key_jwt）", () => {
+  it("pickCimdTokenAuthMethod 优先 private_key_jwt（与 ChatGPT 一致）", () => {
     const method = pickCimdTokenAuthMethod(
       {
         client_id: "https://chatgpt.com/oauth/client.json",
@@ -63,7 +63,7 @@ describe("oauth CIMD", () => {
       },
       ["none", "client_secret_post", "private_key_jwt"],
     );
-    assert.equal(method, "none");
+    assert.equal(method, "private_key_jwt");
   });
 
   it("pickCimdTokenAuthMethod 在 AS 仅支持 none 时选用 none", () => {
@@ -84,6 +84,7 @@ describe("oauth CIMD", () => {
     assert.equal(meta.registration_endpoint, "https://zakura.example/oauth/register");
     assert.equal(meta.userinfo_endpoint, "https://zakura.example/userinfo");
     assert.ok(meta.token_endpoint_auth_methods_supported.includes("none"));
+    assert.ok(meta.token_endpoint_auth_methods_supported.includes("private_key_jwt"));
     assert.deepEqual(meta.scopes_supported, [
       "mcp",
       "openid",

@@ -31,6 +31,13 @@ import {
   signJwtRs256,
   type OauthSigningKey,
 } from "./oauth-signing.js";
+import {
+  CLIENT_ASSERTION_TYPE,
+  decodeJwtHeader,
+  fetchJwks,
+  pickJwk,
+  verifyClientAssertion,
+} from "./oauth-private-key-jwt.js";
 
 const ACCESS_TTL_SEC = 60 * 60; // 1h
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
@@ -59,6 +66,8 @@ export type McpAuthContext = {
   authMethod: "api_key" | "oauth";
   clientId?: string | null;
   scope?: string;
+  /** OAuth access token 绑定的 MCP resource（RFC 8709 / aud） */
+  resource?: string | null;
 };
 
 export type AccessTokenPayload = {
@@ -68,7 +77,9 @@ export type AccessTokenPayload = {
   cid: string; // clientId
   aid?: string | null; // agentId
   scope: string;
+  /** RFC 8709：绑定 MCP resource；同时作为 aud 供资源服务器校验 */
   resource?: string | null;
+  aud?: string | null;
   exp: number;
   iat: number;
   jti: string;
@@ -252,9 +263,10 @@ export function isRedirectUriRegistered(
   return false;
 }
 
-/** AS 声明的 token 端点鉴权方式（CIMD 与 ChatGPT 取交集；优先 none 公开客户端） */
+/** AS 声明的 token 端点鉴权方式（与 ChatGPT CIMD 取交集；优先 private_key_jwt） */
 export const TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED = [
   "none",
+  "private_key_jwt",
   "client_secret_post",
   "client_secret_basic",
 ] as const;
@@ -457,11 +469,13 @@ export class OauthService {
     const authMethod = pickCimdTokenAuthMethod(doc, [
       ...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED,
     ]);
-    // 尚未实现 private_key_jwt 验签：若文档只支持它，降级提示
-    if (authMethod === "private_key_jwt") {
+    if (
+      authMethod !== "none" &&
+      authMethod !== "private_key_jwt"
+    ) {
       throw new OauthError(
         "invalid_client",
-        "当前授权服务器尚未支持 private_key_jwt；请使用 token_endpoint_auth_method=none 的 CIMD 客户端",
+        `CIMD 不支持 token_endpoint_auth_method=${authMethod}`,
         400,
       );
     }
@@ -646,13 +660,83 @@ export class OauthService {
     });
   }
 
-  private async verifyClientSecret(
-    client: OauthClient,
-    secret: string | undefined,
-  ): Promise<boolean> {
-    if (client.tokenEndpointAuthMethod === "none") return true;
-    if (!secret || !client.clientSecretHash) return false;
-    return hashApiKey(secret) === client.clientSecretHash;
+  private async verifyClientAuthentication(input: {
+    client: OauthClient;
+    clientSecret?: string;
+    clientAssertion?: string;
+    clientAssertionType?: string;
+  }): Promise<void> {
+    const method = input.client.tokenEndpointAuthMethod || "none";
+
+    if (method === "none") {
+      // 公开客户端：仅靠 PKCE。若客户端仍带了 assertion（元数据升级过渡期），一并校验。
+      if (!input.clientAssertion) return;
+    }
+
+    if (method === "private_key_jwt" || input.clientAssertion) {
+      if (!input.clientAssertion) {
+        throw new OauthError(
+          "invalid_client",
+          "private_key_jwt 需要 client_assertion",
+          401,
+        );
+      }
+      let jwksUri: string | undefined;
+      if (isCimdClientId(input.client.clientId)) {
+        const doc = await fetchCimdDocument(input.client.clientId);
+        jwksUri = doc.jwks_uri;
+      }
+      if (!jwksUri) {
+        throw new OauthError(
+          "invalid_client",
+          "客户端未提供 jwks_uri，无法校验 private_key_jwt",
+          401,
+        );
+      }
+      try {
+        const jwks = await fetchJwks(jwksUri);
+        const header = decodeJwtHeader(input.clientAssertion);
+        const jwk = pickJwk(jwks, header.kid);
+        const base = this.config.publicBaseUrl.replace(/\/$/, "");
+        // 兼容 /token 与 /oauth/token；aud 可能是字符串或数组
+        const tokenEndpoints = [`${base}/token`, `${base}/oauth/token`];
+        let lastErr: Error | undefined;
+        let ok = false;
+        for (const tokenEndpoint of tokenEndpoints) {
+          try {
+            verifyClientAssertion({
+              assertion: input.clientAssertion,
+              assertionType: input.clientAssertionType ?? CLIENT_ASSERTION_TYPE,
+              clientId: input.client.clientId,
+              tokenEndpoint,
+              jwk,
+            });
+            ok = true;
+            break;
+          } catch (err) {
+            lastErr = err instanceof Error ? err : new Error(String(err));
+          }
+        }
+        if (!ok) throw lastErr ?? new Error("client_assertion 校验失败");
+      } catch (err) {
+        if (err instanceof OauthError) throw err;
+        throw new OauthError(
+          "invalid_client",
+          err instanceof Error ? err.message : String(err),
+          401,
+        );
+      }
+      return;
+    }
+
+    if (method === "none") return;
+
+    if (!input.clientSecret || !input.client.clientSecretHash) {
+      throw new OauthError("invalid_client", "Invalid client authentication", 401);
+    }
+    if (hashApiKey(input.clientSecret) !== input.client.clientSecretHash) {
+      throw new OauthError("invalid_client", "Invalid client authentication", 401);
+    }
   }
 
   async exchangeToken(input: {
@@ -663,6 +747,8 @@ export class OauthService {
     refreshToken?: string;
     clientId?: string;
     clientSecret?: string;
+    clientAssertion?: string;
+    clientAssertionType?: string;
     resource?: string | null;
   }): Promise<{
     access_token: string;
@@ -687,6 +773,8 @@ export class OauthService {
     codeVerifier?: string;
     clientId?: string;
     clientSecret?: string;
+    clientAssertion?: string;
+    clientAssertionType?: string;
     resource?: string | null;
   }) {
     if (!input.code || !input.redirectUri || !input.codeVerifier || !input.clientId) {
@@ -698,9 +786,12 @@ export class OauthService {
     }
     const client = await this.resolveClient(input.clientId);
     if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
-    if (!(await this.verifyClientSecret(client, input.clientSecret))) {
-      throw new OauthError("invalid_client", "Invalid client authentication", 401);
-    }
+    await this.verifyClientAuthentication({
+      client,
+      clientSecret: input.clientSecret,
+      clientAssertion: input.clientAssertion,
+      clientAssertionType: input.clientAssertionType,
+    });
 
     const row = await this.db.query.oauthAuthCodes.findFirst({
       where: eq(oauthAuthCodes.codeHash, hashToken(input.code)),
@@ -734,6 +825,8 @@ export class OauthService {
     refreshToken?: string;
     clientId?: string;
     clientSecret?: string;
+    clientAssertion?: string;
+    clientAssertionType?: string;
     resource?: string | null;
   }) {
     if (!input.refreshToken || !input.clientId) {
@@ -741,9 +834,12 @@ export class OauthService {
     }
     const client = await this.resolveClient(input.clientId);
     if (!client) throw new OauthError("invalid_client", "Unknown client", 401);
-    if (!(await this.verifyClientSecret(client, input.clientSecret))) {
-      throw new OauthError("invalid_client", "Invalid client authentication", 401);
-    }
+    await this.verifyClientAuthentication({
+      client,
+      clientSecret: input.clientSecret,
+      clientAssertion: input.clientAssertion,
+      clientAssertionType: input.clientAssertionType,
+    });
 
     const row = await this.db.query.oauthRefreshTokens.findFirst({
       where: and(
@@ -797,6 +893,8 @@ export class OauthService {
       aid: input.agentId ?? null,
       scope,
       resource: input.resource ?? null,
+      // Apps SDK：resource 写入 aud，MCP 资源服务器按 audience 校验
+      aud: input.resource ?? null,
       iat: now,
       exp: now + ACCESS_TTL_SEC,
       jti: newId(),
@@ -922,6 +1020,7 @@ export class OauthService {
         authMethod: "oauth",
         clientId: at.cid,
         scope: at.scope,
+        resource: at.resource ?? at.aud ?? null,
         apiKeyId: null,
       };
     }
