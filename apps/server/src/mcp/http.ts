@@ -672,8 +672,12 @@ export function createMcpHandler(deps: {
             taskMessageQueue,
           });
 
+          // enableJsonResponse：tools/call 用 application/json 回包。
+          // 默认 SSE 模式下客户端提前取消 POST 流时，工具已执行成功但结果会被静默丢弃
+          //（ChatGPT 表现为「Zakura 有成功记录，对话里却没返回」）。
           const transport = new WebStandardStreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
+            enableJsonResponse: true,
             onsessioninitialized: (sid) => {
               sessions.set(sid, {
                 transport,
@@ -721,6 +725,7 @@ export function createMcpHandler(deps: {
           });
           const transport = new WebStandardStreamableHTTPServerTransport({
             sessionIdGenerator: undefined,
+            enableJsonResponse: true,
           });
           await server.connect(transport);
           try {
