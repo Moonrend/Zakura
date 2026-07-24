@@ -194,7 +194,11 @@ export function authorizationServerMetadata(baseUrl: string) {
     registration_endpoint: `${issuer}/oauth/register`,
     /** OIDC UserInfo：ChatGPT 用邮箱做声明授权域；缺省时 UI 会显示 https://example.com */
     userinfo_endpoint: `${issuer}/userinfo`,
-    scopes_supported: ["mcp"],
+    /**
+     * mcp：MCP 工具授权；openid/email/profile：ChatGPT 声明授权域（siwc）拉邮箱。
+     * @see https://developers.openai.com/apps-sdk/build/auth
+     */
+    scopes_supported: ["mcp", "openid", "email", "profile"],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
@@ -202,6 +206,11 @@ export function authorizationServerMetadata(baseUrl: string) {
     revocation_endpoint: `${issuer}/token/revoke`,
     subject_types_supported: ["public"],
     claims_supported: ["sub", "email", "email_verified", "name"],
+    /**
+     * RFC 9207：授权响应必须带 iss；ChatGPT 等严格客户端缺 iss 会拒绝对话并不换 token。
+     * @see https://modelcontextprotocol.io/specification/draft/basic/authorization
+     */
+    authorization_response_iss_parameter_supported: true,
     /**
      * CIMD：ChatGPT / MCP 规范优先路径。
      * client_id 为 https 元数据 URL 时，AS 拉取并校验文档，无需 DCR。

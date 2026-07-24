@@ -118,6 +118,10 @@ export default function OauthAuthorizePage() {
       const url = new URL(query.redirect_uri);
       url.searchParams.set("error", "access_denied");
       if (query.state) url.searchParams.set("state", query.state);
+      // RFC 9207：错误响应也应带 iss
+      if (typeof window !== "undefined") {
+        url.searchParams.set("iss", window.location.origin);
+      }
       window.location.href = url.toString();
     } catch {
       router.push("/dashboard/agents");

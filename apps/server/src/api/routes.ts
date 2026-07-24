@@ -732,6 +732,8 @@ export async function createApiApp(deps: {
       const url = new URL(redirectUri);
       url.searchParams.set("code", code);
       if (body.state) url.searchParams.set("state", body.state);
+      // RFC 9207 / MCP：ChatGPT 校验 iss；缺失会 403 且不调用 /token
+      url.searchParams.set("iss", config.publicBaseUrl.replace(/\/$/, ""));
       return c.json({ redirect: url.toString() });
     } catch (err) {
       if (err instanceof OauthError) {
