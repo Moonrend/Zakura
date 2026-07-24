@@ -85,6 +85,7 @@ async function main() {
     securityPolicy,
     networkAudit,
   );
+  exposures.setRuntimeNodes(runtimeNodes);
   // Seed implicit local runner when a tenant already exists
   const defaultTenant = await getDefaultTenant(db);
   if (defaultTenant) {

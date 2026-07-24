@@ -109,6 +109,7 @@ export async function registerSaasUser(
         name: input.name?.trim() || email.split("@")[0],
         passwordHash,
         isPlatformAdmin: false,
+        canUseLocalRunner: false,
         createdAt: now,
         updatedAt: now,
       })

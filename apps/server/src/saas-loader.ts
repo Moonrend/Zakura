@@ -14,7 +14,7 @@ const SAAS_SERVER_SPEC = "@zakura/saas/server";
 export type SaasServerModule = {
   registerSaasRoutes: (app: unknown, deps: unknown) => void;
   loadZerocatConfig?: (deps: unknown) => Promise<{
-    public: { enabled: boolean };
+    public: { enabled: boolean; disablePasswordLogin?: boolean };
   }>;
   SAAS_SERVER_MODULE?: string;
 };

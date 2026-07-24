@@ -16,9 +16,21 @@ import type { Db } from "../db/client.js";
 import { agents, managedContainers, runtimeNodes } from "../db/schema.js";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { agentWorkspaceHostPath } from "../services/agent-workspace.js";
+import {
+  assertSharedRunnerOperationAllowed,
+  isForeignSharedAccess,
+  userCanUseLocalRunner,
+  RunnerAccessError,
+} from "../services/runner-access.js";
 
 type SessionVars = {
-  session?: { userId: string; tenantId: string; email: string; role: string };
+  session?: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    role: string;
+    isPlatformAdmin?: boolean;
+  };
 };
 
 function attachRunnerInstallCommands(
@@ -189,8 +201,16 @@ export function registerRuntimeNodeRoutes(
   app.get("/api/runtime-nodes", async (c) => {
     const session = c.get("session")!;
     await nodes.refreshOfflineStatuses(config.runnerHeartbeatTimeoutSec, session.tenantId);
-    const list = await nodes.list(session.tenantId);
-    return c.json({ nodes: list.map(mapRuntimeNode) });
+    const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+    const list = await nodes.listAccessible(session.tenantId);
+    const filtered = list.filter((n) => {
+      if (n.kind === "local" || n.slug === "local") return canLocal;
+      return true;
+    });
+    return c.json({
+      nodes: filtered.map((n) => mapRuntimeNode(n, { access: n.access })),
+      canUseLocalRunner: canLocal,
+    });
   });
 
   app.get("/api/runtime-nodes/mesh-status", async (c) => {
@@ -250,6 +270,7 @@ export function registerRuntimeNodeRoutes(
     const { node, token } = await nodes.create(session.tenantId, {
       name: body.name,
       labels,
+      createdByUserId: session.userId === "api-key" ? null : session.userId,
     });
 
     let install: ReturnType<typeof attachRunnerInstallCommands> | null = null;
@@ -375,8 +396,16 @@ export function registerRuntimeNodeRoutes(
   app.get("/api/runtime-nodes/:id/install", async (c) => {
     const session = c.get("session")!;
     if (!network) return c.json({ error: "Network service unavailable" }, 503);
-    const node = await nodes.get(session.tenantId, c.req.param("id"));
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
     if (node.kind === "local") return c.json({ error: "Local node has no install package" }, 400);
 
     const token = nodes.resolveToken(node);
@@ -416,8 +445,13 @@ export function registerRuntimeNodeRoutes(
   app.get("/api/runtime-nodes/:id/detail", async (c) => {
     const session = c.get("session")!;
     const t0 = performance.now();
-    const node = await nodes.get(session.tenantId, c.req.param("id"));
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
+    if (node.kind === "local" || node.slug === "local") {
+      const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+      if (!canLocal) return c.json({ error: "未授权使用本机 Local Runner" }, 403);
+    }
+    const access = isForeignSharedAccess(node, session.tenantId) ? "shared" : "owned";
 
     const syncLive = c.req.query("sync") === "1";
     const containers = await listContainersForNode(
@@ -427,7 +461,7 @@ export function registerRuntimeNodeRoutes(
       node,
       { syncLive },
     );
-    const mapped = mapRuntimeNode(node);
+    const mapped = mapRuntimeNode(node, { access });
 
     if (node.kind === "local" || !network) {
       return c.json({
@@ -488,14 +522,19 @@ export function registerRuntimeNodeRoutes(
 
   app.get("/api/runtime-nodes/:id", async (c) => {
     const session = c.get("session")!;
-    const node = await nodes.get(session.tenantId, c.req.param("id"));
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    return c.json({ node: mapRuntimeNode(node) });
+    if (node.kind === "local" || node.slug === "local") {
+      const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+      if (!canLocal) return c.json({ error: "未授权使用本机 Local Runner" }, 403);
+    }
+    const access = isForeignSharedAccess(node, session.tenantId) ? "shared" : "owned";
+    return c.json({ node: mapRuntimeNode(node, { access }) });
   });
 
   app.get("/api/runtime-nodes/:id/containers", async (c) => {
     const session = c.get("session")!;
-    const node = await nodes.get(session.tenantId, c.req.param("id"));
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
     const syncLive = c.req.query("sync") === "1";
     const containers = await listContainersForNode(
@@ -511,14 +550,24 @@ export function registerRuntimeNodeRoutes(
   app.post("/api/runtime-nodes/:id/containers/allocate", async (c) => {
     const session = c.get("session")!;
     if (!orchestrator) return c.json({ error: "Orchestrator unavailable" }, 503);
-    const node = await nodes.get(session.tenantId, c.req.param("id"));
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "containerAllocate");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
     if (node.kind !== "local") {
       return c.json(
         { error: "仅本机节点可分配容器；远程请通过 Agent 工作区启动" },
         400,
       );
     }
+    const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+    if (!canLocal) return c.json({ error: "未授权使用本机 Local Runner" }, 403);
     const body = await c.req.json<{
       image: string;
       name?: string;
@@ -547,6 +596,16 @@ export function registerRuntimeNodeRoutes(
 
   app.patch("/api/runtime-nodes/:id", async (c) => {
     const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
     const body = await c.req
       .json<{ name?: string; labels?: Record<string, unknown> }>()
       .catch(() => ({}));
@@ -557,6 +616,16 @@ export function registerRuntimeNodeRoutes(
 
   app.delete("/api/runtime-nodes/:id", async (c) => {
     const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
     const result = await nodes.delete(session.tenantId, c.req.param("id"));
     if ("error" in result) {
       const status = result.error === "Not found" ? 404 : 400;

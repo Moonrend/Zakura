@@ -289,6 +289,42 @@ export class RunnerClient {
     return (await res.json()) as { ok: true; fileCount: number; workspaceRoot: string };
   }
 
+  /** 在远程 Runner 上启动 Cloudflare Quick Tunnel */
+  async startExposure(input: {
+    exposureId: string;
+    agentId: string;
+    port: number;
+    provider?: string;
+    protocol?: "http" | "https" | "tcp";
+    ttlMinutes?: number;
+  }): Promise<{ publicUrl: string; relayHost: string; relayPort: number }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/v1/exposures`, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `startExposure failed (${res.status})`);
+    }
+    return (await res.json()) as {
+      publicUrl: string;
+      relayHost: string;
+      relayPort: number;
+    };
+  }
+
+  async stopExposure(exposureId: string): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/exposures/${encodeURIComponent(exposureId)}`,
+      { method: "DELETE", headers: this.headers() },
+    );
+    if (!res.ok && res.status !== 404) {
+      const text = await res.text();
+      throw new Error(text || `stopExposure failed (${res.status})`);
+    }
+  }
+
   /** Build a WorkspaceFs that proxies all ops to this Runner for one agent. */
   workspaceFs(agentId: string): WorkspaceFs {
     const client = this;

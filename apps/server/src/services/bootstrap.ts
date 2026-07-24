@@ -116,7 +116,7 @@ export async function ensureSaasPlatformAdmin(db: Db) {
 
   const [updated] = await db
     .update(users)
-    .set({ isPlatformAdmin: true, updatedAt: new Date() })
+    .set({ isPlatformAdmin: true, canUseLocalRunner: true, updatedAt: new Date() })
     .where(eq(users.id, ownerMembership.userId))
     .returning();
 
@@ -176,6 +176,8 @@ export async function runSetup(db: Db, payload: SetupPayload) {
         passwordHash,
         // Platform admin flag only meaningful when multi-tenant is enabled
         isPlatformAdmin: !isSingle,
+        // 自托管始终可用 Local；SaaS 管理员默认授权
+        canUseLocalRunner: true,
         createdAt: now,
         updatedAt: now,
       })

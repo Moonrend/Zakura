@@ -12,6 +12,8 @@ export type PlatformInfo = {
   edition?: "oss" | "saas";
   /** Public self-registration (SaaS only) */
   registrationEnabled?: boolean;
+  /** 邮箱密码登录；ZeroCat 启用后可由超管关闭 */
+  passwordLoginEnabled?: boolean;
   /** Login OAuth providers (SaaS); secrets never included */
   oauthProviders?: Array<{ id: string; name: string; enabled: boolean }>;
 };

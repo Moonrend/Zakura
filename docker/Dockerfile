@@ -27,7 +27,10 @@ ENV HOST=0.0.0.0
 ENV PORT=8787
 RUN corepack enable \
  && apt-get update \
- && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && apt-get install -y --no-install-recommends openssl ca-certificates curl \
+ && curl -fsSL -o /usr/local/bin/cloudflared \
+      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+ && chmod +x /usr/local/bin/cloudflared \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data
 

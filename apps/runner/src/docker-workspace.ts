@@ -4,7 +4,8 @@
 import Docker from "dockerode";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { createServer } from "node:net";
+import { createServer, type AddressInfo, type Socket } from "node:net";
+import { PassThrough } from "node:stream";
 import {
   AGENT_PORT_CDP,
   AGENT_PORT_NOVNC,
@@ -348,6 +349,96 @@ export class RunnerDockerWorkspace {
       exitCode: inspect.ExitCode ?? 0,
       stdout: demuxed.stdout,
       stderr: demuxed.stderr,
+    };
+  }
+
+  /**
+   * Proxy a container localhost TCP port to the host via docker exec + socat/nc.
+   * Used by Cloudflare Quick Tunnel (cloudflared binds to host loopback).
+   */
+  async openTcpTunnel(
+    agentId: string,
+    containerPort: number,
+  ): Promise<{ host: string; port: number; url: string; close: () => void }> {
+    const existing = await this.findByAgent(agentId);
+    if (!existing || existing.status !== "running") {
+      throw new Error("Workspace container not running on this runner");
+    }
+    const container = this.docker.getContainer(existing.dockerId);
+    const server = createServer((socket: Socket) => {
+      void (async () => {
+        let stream: (NodeJS.ReadableStream & NodeJS.WritableStream & { destroy?: () => void }) | null =
+          null;
+        const cleanup = () => {
+          try {
+            socket.destroy();
+          } catch {
+            /* ignore */
+          }
+          try {
+            stream?.destroy?.();
+          } catch {
+            /* ignore */
+          }
+        };
+        try {
+          const exec = await container.exec({
+            Cmd: [
+              "bash",
+              "-lc",
+              `if command -v socat >/dev/null 2>&1; then exec socat STDIO TCP:127.0.0.1:${containerPort},forever; elif command -v nc >/dev/null 2>&1; then exec nc 127.0.0.1 ${containerPort}; else echo 'socat/nc missing' >&2; exit 127; fi`,
+            ],
+            AttachStdin: true,
+            AttachStdout: true,
+            AttachStderr: true,
+            Tty: false,
+          });
+          stream = (await exec.start({
+            hijack: true,
+            stdin: true,
+          })) as NodeJS.ReadableStream & NodeJS.WritableStream & { destroy?: () => void };
+
+          socket.pipe(stream);
+          const stdout = new PassThrough();
+          const stderr = new PassThrough();
+          this.docker.modem.demuxStream(stream, stdout, stderr);
+          stdout.pipe(socket);
+          stderr.resume();
+
+          socket.on("close", cleanup);
+          socket.on("error", cleanup);
+          stream.on("end", cleanup);
+          stream.on("error", cleanup);
+          stdout.on("error", cleanup);
+        } catch {
+          cleanup();
+        }
+      })();
+    });
+
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as AddressInfo | null;
+        if (!addr) {
+          reject(new Error("failed to bind TCP tunnel"));
+          return;
+        }
+        resolve(addr.port);
+      });
+    });
+
+    return {
+      host: "127.0.0.1",
+      port,
+      url: `http://127.0.0.1:${port}`,
+      close: () => {
+        try {
+          server.close();
+        } catch {
+          /* ignore */
+        }
+      },
     };
   }
 }

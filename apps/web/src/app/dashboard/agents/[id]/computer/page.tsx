@@ -149,27 +149,35 @@ export default function AgentComputerPage() {
     [nodes],
   );
 
+  const hasLocal = useMemo(() => nodes.some((n) => n.kind === "local"), [nodes]);
+
+  useEffect(() => {
+    if (hasLocal) return;
+    const firstRemote = nodes.find((n) => n.kind !== "local");
+    if (firstRemote) setCreateNodeId(firstRemote.id);
+  }, [hasLocal, nodes]);
+
   const createItems = useMemo(
     () => [
-      { value: LOCAL_VALUE, label: "本机" },
+      ...(hasLocal ? [{ value: LOCAL_VALUE, label: "本机" }] : []),
       ...remoteNodes.map((n) => ({
         value: n.id,
-        label: `${n.name} · ${statusLabel(n.status)}`,
+        label: `${n.name}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
       })),
     ],
-    [remoteNodes],
+    [hasLocal, remoteNodes],
   );
 
   const migrateItems = useMemo(() => {
     const current = agent?.runtimeNodeId || LOCAL_VALUE;
     return [
-      { value: LOCAL_VALUE, label: "本机 (local)" },
+      ...(hasLocal ? [{ value: LOCAL_VALUE, label: "本机 (local)" }] : []),
       ...remoteNodes.map((n) => ({
         value: n.id,
-        label: `${n.name} · ${statusLabel(n.status)}`,
+        label: `${n.name}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
       })),
     ].filter((i) => i.value !== current);
-  }, [agent?.runtimeNodeId, remoteNodes]);
+  }, [agent?.runtimeNodeId, hasLocal, remoteNodes]);
 
   async function createComputer() {
     setCreating(true);
@@ -611,23 +619,26 @@ function CreateComputerDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={LOCAL_VALUE}>本机</SelectItem>
-                {remoteNodes.map((n) => (
-                  <SelectItem key={n.id} value={n.id}>
-                    {n.name} · {statusLabel(n.status)}
-                    {n.status !== "online" ? "（离线）" : ""}
+                {createItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
-          {remoteNodes.length === 0 ? (
+          {remoteNodes.length === 0 && createItems.some((i) => i.value === LOCAL_VALUE) ? (
             <p className="text-[11px] text-muted-foreground">
               尚未注册远程 Runner。可先在本机创建，或前往{" "}
               <Link href="/dashboard/runners" className="underline">
                 Runners
               </Link>{" "}
               注册设备。
+            </p>
+          ) : null}
+          {!createItems.length ? (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400">
+              当前没有可用运行节点。请联系管理员授权本机 Runner，或等待共享 Runner 上线。
             </p>
           ) : null}
         </div>
@@ -638,6 +649,7 @@ function CreateComputerDialog({
           <Button
             disabled={
               creating ||
+              !createItems.length ||
               (createNodeId !== LOCAL_VALUE &&
                 remoteNodes.find((n) => n.id === createNodeId)?.status !== "online")
             }

@@ -2,6 +2,9 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends tar zstd curl ca-certificates \
+  && curl -fsSL -o /usr/local/bin/cloudflared \
+       https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+  && chmod +x /usr/local/bin/cloudflared \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

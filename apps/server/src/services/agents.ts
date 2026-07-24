@@ -11,7 +11,6 @@ import {
   mcpPolicies,
   memoryProviders,
   newId,
-  runtimeNodes,
   type Agent,
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
@@ -36,6 +35,10 @@ import { enabledEngines, listSearchEngineMeta } from "../capabilities/web-search
 import { enabledBackends, listFetchBackendMeta } from "../capabilities/web-fetch/index.js";
 import type { WebSearchConfig } from "../capabilities/web-search/types.js";
 import type { WebFetchConfig } from "../capabilities/web-fetch/types.js";
+import {
+  assertNodeBindAllowed,
+  resolveAccessibleNode,
+} from "./runner-access.js";
 
 function slugify(input: string): string {
   return (
@@ -191,17 +194,23 @@ export class AgentService {
   async startAsync(
     tenantId: string,
     id: string,
-    opts?: { runtimeNodeId?: string | null },
+    opts?: { runtimeNodeId?: string | null; userId?: string },
   ): Promise<Agent> {
     let agent = await this.get(tenantId, id);
     if (!agent) throw new Error("Agent not found");
 
     if (opts && "runtimeNodeId" in opts) {
       const nodeId = opts.runtimeNodeId;
-      if (nodeId) {
-        const node = await this.db.query.runtimeNodes.findFirst({
-          where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.id, nodeId)),
+      if (opts.userId) {
+        await assertNodeBindAllowed(this.db, this.config, {
+          userId: opts.userId,
+          tenantId,
+          nodeId: nodeId ?? null,
+          excludeAgentId: agent.id,
         });
+      }
+      if (nodeId) {
+        const node = await resolveAccessibleNode(this.db, tenantId, nodeId);
         if (!node) throw new Error("Runner 节点不存在");
         if (node.kind === "runner") {
           if (node.status === "offline") {
@@ -228,6 +237,13 @@ export class AgentService {
         .where(eq(agents.id, agent.id))
         .returning();
       agent = updated ?? agent;
+    } else if (opts?.userId) {
+      await assertNodeBindAllowed(this.db, this.config, {
+        userId: opts.userId,
+        tenantId,
+        nodeId: agent.runtimeNodeId,
+        excludeAgentId: agent.id,
+      });
     }
 
     if (!needsContainer(agent)) {
@@ -254,10 +270,24 @@ export class AgentService {
       config?: Record<string, unknown>;
       /** Restart workspace after feature change when container-backed */
       restart?: boolean;
+      userId?: string;
     },
   ): Promise<Agent> {
     const agent = await this.get(tenantId, id);
     if (!agent) throw new Error("Agent not found");
+
+    if (input.runtimeNodeId !== undefined && input.userId) {
+      await assertNodeBindAllowed(this.db, this.config, {
+        userId: input.userId,
+        tenantId,
+        nodeId: input.runtimeNodeId,
+        excludeAgentId: agent.id,
+      });
+      if (input.runtimeNodeId) {
+        const node = await resolveAccessibleNode(this.db, tenantId, input.runtimeNodeId);
+        if (!node) throw new Error("Runner 节点不存在");
+      }
+    }
 
     if (input.memoryProviderId) {
       const mp = await this.db.query.memoryProviders.findFirst({

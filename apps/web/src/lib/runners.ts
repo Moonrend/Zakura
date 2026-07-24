@@ -42,6 +42,9 @@ export type RuntimeNode = {
   agentVersion: string | null;
   lastSeenAt: string | null;
   labels: Record<string, unknown>;
+  isShared?: boolean;
+  createdByUserId?: string | null;
+  access?: "owned" | "shared";
   createdAt: string;
   updatedAt: string;
 };
@@ -82,7 +85,9 @@ export function isRunnerHostInfo(v: unknown): v is RunnerHostInfo {
 }
 
 export async function listRuntimeNodes(): Promise<RuntimeNode[]> {
-  const res = await api<{ nodes: RuntimeNode[] }>("/api/runtime-nodes");
+  const res = await api<{ nodes: RuntimeNode[]; canUseLocalRunner?: boolean }>(
+    "/api/runtime-nodes",
+  );
   return res.nodes ?? [];
 }
 

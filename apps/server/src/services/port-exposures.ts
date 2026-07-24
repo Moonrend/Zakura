@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import {
   TUNNEL_PROVIDER_META,
   type PortExposureDto,
@@ -85,6 +85,8 @@ export type CreateExposureInput = {
 };
 
 export class ExposureService {
+  private nodes: import("./runtime-nodes.js").RuntimeNodeService | null = null;
+
   constructor(
     private readonly db: Db,
     _config: AppConfig,
@@ -95,6 +97,10 @@ export class ExposureService {
     private readonly audit: NetworkAuditService,
   ) {
     void _config;
+  }
+
+  setRuntimeNodes(nodes: import("./runtime-nodes.js").RuntimeNodeService) {
+    this.nodes = nodes;
   }
 
   async listForAgent(tenantId: string, agentId: string): Promise<PortExposureDto[]> {
@@ -307,21 +313,34 @@ export class ExposureService {
     });
     if (!agent) throw new Error("Agent not found");
 
-    // Phase 1: local Docker only; remote Runner TunnelManager comes in later phases
-    if (agent.runtimeNodeId) {
-      const rn = await this.db.query.runtimeNodes.findFirst({
-        where: eq(runtimeNodes.id, agent.runtimeNodeId),
-      });
-      if (rn && rn.kind !== "local") {
-        throw new Error(
-          "远程 Runner 上的端口暴露将在 Runner TunnelManager 就绪后支持；请先使用本地 Runner",
-        );
-      }
-    }
+    const node =
+      agent.runtimeNodeId && this.nodes
+        ? await this.nodes.getAccessible(tenantId, agent.runtimeNodeId)
+        : agent.runtimeNodeId
+          ? await this.db.query.runtimeNodes.findFirst({
+              where: eq(runtimeNodes.id, agent.runtimeNodeId),
+            })
+          : null;
 
-    const container = await this.workspace.getWorkspaceContainer(agentId);
-    if (!container?.dockerId || container.status !== "running") {
-      throw new Error("Workspace 容器未运行，无法暴露端口");
+    const isRemote = Boolean(node && node.kind === "runner");
+
+    // 本机：需 workspace 容器在 Server Docker；远程：由 Runner 侧校验容器状态
+    if (!isRemote) {
+      const container = await this.workspace.getWorkspaceContainer(agentId);
+      if (!container?.dockerId || container.status !== "running") {
+        throw new Error("Workspace 容器未运行，无法暴露端口");
+      }
+    } else {
+      const container = await this.workspace.getWorkspaceContainer(agentId);
+      if (!container || (container.status !== "running" && container.status !== "starting")) {
+        throw new Error("远程工作区未运行，无法暴露端口");
+      }
+      if (providerId !== "cloudflare-quick") {
+        throw new Error("远程 Runner 目前仅支持 Cloudflare Quick Tunnel");
+      }
+      if (!this.nodes) {
+        throw new Error("Runtime nodes 服务不可用");
+      }
     }
 
     const now = new Date();
@@ -354,35 +373,60 @@ export class ExposureService {
         );
       }
 
-      const relay = await this.runtime.openTcpTunnel(container.dockerId, port);
-      const targetUrl = `http://127.0.0.1:${relay.port}`;
-
       let publicUrl: string;
+      let relayHost: string | null = null;
+      let relayPort: number | null = null;
       let tunnelStop: () => Promise<void>;
+      let relayClose: () => void = () => undefined;
 
-      try {
-        if (providerId === "cloudflare-quick") {
-          const tunnel = await startCloudflareQuickTunnel(targetUrl);
-          publicUrl = tunnel.publicUrl;
-          tunnelStop = tunnel.stop;
-        } else if (providerId === "tailscale-serve") {
-          const mountPath = `/zakura/${row.id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12) || row.id.slice(0, 8)}`;
-          const tunnel = await startTailscaleServe({
-            targetUrl,
-            mountPath,
-          });
-          publicUrl = tunnel.publicUrl;
-          tunnelStop = tunnel.stop;
-        } else {
-          throw new Error(`Provider ${providerId} 未接线`);
-        }
-      } catch (startErr) {
+      if (isRemote) {
+        const { client } = await this.nodes!.requireRunnerClient(tenantId, node!.id);
+        const remote = await client.startExposure({
+          exposureId: row!.id,
+          agentId,
+          port,
+          provider: providerId,
+          protocol,
+          ttlMinutes: ttl,
+        });
+        publicUrl = remote.publicUrl;
+        relayHost = remote.relayHost;
+        relayPort = remote.relayPort;
+        tunnelStop = async () => {
+          await client.stopExposure(row!.id).catch(() => undefined);
+        };
+      } else {
+        const container = await this.workspace.getWorkspaceContainer(agentId);
+        const relay = await this.runtime.openTcpTunnel(container!.dockerId!, port);
+        relayClose = relay.close;
+        relayHost = relay.host;
+        relayPort = relay.port;
+        const targetUrl = `http://127.0.0.1:${relay.port}`;
+
         try {
-          relay.close();
-        } catch {
-          /* ignore */
+          if (providerId === "cloudflare-quick") {
+            const tunnel = await startCloudflareQuickTunnel(targetUrl);
+            publicUrl = tunnel.publicUrl;
+            tunnelStop = tunnel.stop;
+          } else if (providerId === "tailscale-serve") {
+            const mountPath = `/zakura/${row!.id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 12) || row!.id.slice(0, 8)}`;
+            const tunnel = await startTailscaleServe({
+              targetUrl,
+              mountPath,
+            });
+            publicUrl = tunnel.publicUrl;
+            tunnelStop = tunnel.stop;
+          } else {
+            throw new Error(`Provider ${providerId} 未接线`);
+          }
+        } catch (startErr) {
+          try {
+            relay.close();
+          } catch {
+            /* ignore */
+          }
+          throw startErr;
         }
-        throw startErr;
       }
 
       const [updated] = await this.db
@@ -390,23 +434,23 @@ export class ExposureService {
         .set({
           status: "active",
           publicUrl,
-          relayHost: relay.host,
-          relayPort: relay.port,
+          relayHost,
+          relayPort,
           lastError: null,
           updatedAt: new Date(),
         })
-        .where(eq(portExposures.id, row.id))
+        .where(eq(portExposures.id, row!.id))
         .returning();
 
       const timer = setTimeout(
         () => {
-          void this.stop(tenantId, row.id, { type: "system", id: "ttl" }).catch(() => undefined);
+          void this.stop(tenantId, row!.id, { type: "system", id: "ttl" }).catch(() => undefined);
         },
         ttl * 60_000,
       );
 
-      liveTunnels.set(row.id, {
-        relayClose: relay.close,
+      liveTunnels.set(row!.id, {
+        relayClose,
         tunnelStop,
         timer,
       });
@@ -414,12 +458,13 @@ export class ExposureService {
       await this.audit.append(tenantId, "exposure.create", {
         actor,
         targetType: "port_exposure",
-        targetId: row.id,
+        targetId: row!.id,
         detail: {
           port,
           provider: providerId,
           publicUrl,
           agentId,
+          remote: isRemote,
         },
       });
 
@@ -434,12 +479,12 @@ export class ExposureService {
           updatedAt: new Date(),
           stoppedAt: new Date(),
         })
-        .where(eq(portExposures.id, row.id))
+        .where(eq(portExposures.id, row!.id))
         .returning();
       await this.audit.append(tenantId, "exposure.create", {
         actor,
         targetType: "port_exposure",
-        targetId: row.id,
+        targetId: row!.id,
         detail: { port, provider: providerId, error: message },
       });
       throw Object.assign(new Error(message), { exposure: serializeExposure(failed, agent) });
@@ -470,6 +515,16 @@ export class ExposureService {
         /* ignore */
       }
       liveTunnels.delete(exposureId);
+    } else if (row.runtimeNodeId && this.nodes) {
+      // Server 重启后内存隧道丢失：尽量通知远程 Runner 停掉 cloudflared
+      try {
+        const { client } = await this.nodes.requireRunnerClient(tenantId, row.runtimeNodeId, {
+          allowOffline: true,
+        });
+        await client.stopExposure(exposureId);
+      } catch {
+        /* ignore */
+      }
     }
 
     const now = new Date();
@@ -539,18 +594,15 @@ export class ExposureService {
 
   async expireDue(tenantId?: string): Promise<number> {
     const now = new Date();
-    const where = tenantId
-      ? and(
-          eq(portExposures.tenantId, tenantId),
-          inArray(portExposures.status, ["active", "starting"]),
-          sql`${portExposures.expiresAt} is not null and ${portExposures.expiresAt} <= ${now}`,
-        )
-      : and(
-          inArray(portExposures.status, ["active", "starting"]),
-          sql`${portExposures.expiresAt} is not null and ${portExposures.expiresAt} <= ${now}`,
-        );
+    // 勿用 sql`... ${Date}`：postgres.js 会拒收 Date，导致 active-exposures 500
+    const conds = [
+      inArray(portExposures.status, ["active", "starting"]),
+      isNotNull(portExposures.expiresAt),
+      lte(portExposures.expiresAt, now),
+    ];
+    if (tenantId) conds.push(eq(portExposures.tenantId, tenantId));
 
-    const due = await this.db.select().from(portExposures).where(where);
+    const due = await this.db.select().from(portExposures).where(and(...conds));
     for (const row of due) {
       await this.stop(row.tenantId, row.id, { type: "system", id: "ttl" });
     }

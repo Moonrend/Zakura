@@ -445,6 +445,7 @@ export async function createApiApp(deps: {
   app.get("/api/platform", async (c) => {
     const meta = await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
     const oauthProviders: Array<{ id: string; name: string; enabled: boolean }> = [];
+    let passwordLoginEnabled = true;
     if (config.edition === "saas") {
       try {
         const saas = await loadSaasServer();
@@ -469,6 +470,9 @@ export async function createApiApp(deps: {
             name: "ZeroCat",
             enabled: pub.enabled,
           });
+          if (pub.disablePasswordLogin) {
+            passwordLoginEnabled = false;
+          }
         }
       } catch {
         /* ignore — login still works with password */
@@ -480,7 +484,8 @@ export async function createApiApp(deps: {
       mode: meta.mode,
       multiTenant: config.multiTenant,
       edition: config.edition,
-      registrationEnabled: config.edition === "saas",
+      registrationEnabled: config.edition === "saas" && passwordLoginEnabled,
+      passwordLoginEnabled,
       oauthProviders,
     });
   });
@@ -524,6 +529,33 @@ export async function createApiApp(deps: {
   });
 
   app.post("/api/auth/login", async (c) => {
+    if (config.edition === "saas") {
+      try {
+        const saas = await loadSaasServer();
+        if (saas?.loadZerocatConfig) {
+          const { public: pub } = await saas.loadZerocatConfig({
+            db,
+            schema: {
+              users,
+              tenants,
+              tenantMemberships,
+              oauthIdentities,
+              oauthLoginStates,
+              settings,
+              newId,
+            },
+            secret: config.secret,
+            webPublicUrl: config.webPublicUrl,
+            decryptJson,
+          });
+          if (pub.disablePasswordLogin) {
+            return c.json({ error: "邮箱密码登录已关闭，请使用 ZeroCat 登录" }, 403);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     const body = await c.req
       .json<{ email?: string; password?: string; tenantSlug?: string }>()
       .catch(() => ({} as { email?: string; password?: string; tenantSlug?: string }));
@@ -571,6 +603,8 @@ export async function createApiApp(deps: {
       where: eq(tenants.id, session.tenantId),
     });
     if (!tenant) throw new Error(`Tenant not found: ${session.tenantId}`);
+    const { userCanUseLocalRunner } = await import("../services/runner-access.js");
+    const canUseLocalRunner = await userCanUseLocalRunner(db, config, session.userId);
     return c.json({
       user: user
         ? {
@@ -578,8 +612,9 @@ export async function createApiApp(deps: {
             email: user.email,
             name: user.name,
             isPlatformAdmin: user.isPlatformAdmin,
+            canUseLocalRunner: user.canUseLocalRunner || user.isPlatformAdmin || !config.multiTenant,
           }
-        : { id: "api-key", email: session.email, isPlatformAdmin: false },
+        : { id: "api-key", email: session.email, isPlatformAdmin: false, canUseLocalRunner: false },
       tenant: {
         id: tenant.id,
         slug: tenant.slug,
@@ -592,6 +627,7 @@ export async function createApiApp(deps: {
       isPlatformAdmin:
         config.multiTenant &&
         (session.isPlatformAdmin === true || user?.isPlatformAdmin === true),
+      canUseLocalRunner,
       multiTenant: config.multiTenant,
       edition: config.edition,
       registrationEnabled: config.edition === "saas",
@@ -1584,10 +1620,16 @@ export async function createApiApp(deps: {
       restart?: boolean;
     }>();
     try {
-      const agent = await agentService.update(session.tenantId, c.req.param("id"), body);
+      const agent = await agentService.update(session.tenantId, c.req.param("id"), {
+        ...body,
+        userId: session.userId,
+      });
       return c.json(agentService.serialize(agent));
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      const status = err && typeof err === "object" && "status" in err
+        ? Number((err as { status: number }).status) || 400
+        : 400;
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, status as 400);
     }
   });
 
@@ -1612,6 +1654,7 @@ export async function createApiApp(deps: {
         ...(Object.prototype.hasOwnProperty.call(body, "runtimeNodeId")
           ? { runtimeNodeId: body.runtimeNodeId ?? null }
           : {}),
+        userId: session.userId,
       });
       const container = await agentService.workspace.getWorkspaceContainer(agent.id);
       return c.json({
@@ -1627,7 +1670,11 @@ export async function createApiApp(deps: {
         starting: true,
       });
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      const status =
+        err && typeof err === "object" && "status" in err
+          ? Number((err as { status: number }).status) || 500
+          : 500;
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, status as 500);
     }
   });
 
@@ -2137,6 +2184,16 @@ export async function createApiApp(deps: {
           await runtimeNodes?.ensureLocalNode(tenantId).catch(() => undefined);
           await networkSettings?.ensureTenantDefaults(tenantId).catch(() => undefined);
         },
+        runtimeNodes: runtimeNodes
+          ? {
+              listAllRemote: () => runtimeNodes.listAllRemote(),
+              setShared: (
+                nodeId: string,
+                isShared: boolean,
+                actor: { userId: string; isPlatformAdmin: boolean },
+              ) => runtimeNodes.setShared(nodeId, isShared, actor),
+            }
+          : undefined,
       });
     }
   }

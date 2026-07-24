@@ -159,7 +159,7 @@ export function StepComputerEnv({ agentId, onDone }: Props) {
     const local = nodes.find((n) => n.kind === "local");
     const items = remotes.map((n) => ({
       value: n.id,
-      label: `${n.name} · ${statusLabel(n.status)}`,
+      label: `${n.name}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
     }));
     if (local) {
       items.push({ value: local.id, label: `本机 · ${statusLabel(local.status)}` });

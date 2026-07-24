@@ -74,6 +74,14 @@ export function registerSaasRoutes(
 
   // ── Public self-registration ──────────────────────────────────────────
   app.post("/api/auth/register", async (c) => {
+    try {
+      const { public: pub } = await loadZerocatConfig(oauthDeps());
+      if (pub.disablePasswordLogin) {
+        return c.json({ error: "邮箱注册已关闭，请使用 ZeroCat 登录" }, 403);
+      }
+    } catch {
+      /* ignore */
+    }
     const body = await c.req
       .json<{
         email?: string;
@@ -459,6 +467,7 @@ export function registerSaasRoutes(
       // Admin sees configured toggle even if secret missing (enabled flag as stored)
       enabled: stored.enabled,
       ready: pub.enabled,
+      disablePasswordLogin: stored.disablePasswordLogin,
     });
   });
 
@@ -471,6 +480,7 @@ export function registerSaasRoutes(
         ...pub,
         enabled: stored.enabled,
         ready: pub.enabled,
+        disablePasswordLogin: stored.disablePasswordLogin,
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -504,5 +514,195 @@ export function registerSaasRoutes(
     if (!tenant) return c.json({ error: "Not found" }, 404);
     const members = await tenantService.listMembers(tenant.id);
     return c.json({ tenant, members });
+  });
+
+  // ── Platform users ────────────────────────────────────────────────────
+  app.get("/api/admin/users", async (c) => {
+    const dbAny = dbUnknown as {
+      query: {
+        users: {
+          findMany: (args?: unknown) => Promise<
+            Array<{
+              id: string;
+              email: string;
+              name: string | null;
+              isPlatformAdmin: boolean;
+              canUseLocalRunner: boolean;
+              passwordHash: string | null;
+              createdAt: Date;
+            }>
+          >;
+        };
+        tenantMemberships: {
+          findMany: (args?: unknown) => Promise<
+            Array<{ tenantId: string; userId: string; role: string; status: string }>
+          >;
+        };
+        tenants: {
+          findMany: (args?: unknown) => Promise<
+            Array<{ id: string; slug: string; name: string }>
+          >;
+        };
+      };
+    };
+    const allUsers = await dbAny.query.users.findMany();
+    const memberships = await dbAny.query.tenantMemberships.findMany();
+    const allTenants = await dbAny.query.tenants.findMany();
+    const tenantById = new Map(allTenants.map((t) => [t.id, t]));
+    const byUser = new Map<string, Array<{ tenantId: string; slug: string; name: string; role: string }>>();
+    for (const m of memberships) {
+      if (m.status !== "active") continue;
+      const t = tenantById.get(m.tenantId);
+      if (!t) continue;
+      const list = byUser.get(m.userId) ?? [];
+      list.push({ tenantId: t.id, slug: t.slug, name: t.name, role: m.role });
+      byUser.set(m.userId, list);
+    }
+    return c.json({
+      users: allUsers
+        .map((u) => ({
+          id: u.id,
+          email: u.email,
+          name: u.name,
+          isPlatformAdmin: u.isPlatformAdmin,
+          canUseLocalRunner: u.canUseLocalRunner || u.isPlatformAdmin,
+          hasPassword: !!u.passwordHash,
+          tenants: byUser.get(u.id) ?? [],
+          createdAt: u.createdAt.toISOString(),
+        }))
+        .sort((a, b) => a.email.localeCompare(b.email)),
+    });
+  });
+
+  app.patch("/api/admin/users/:id", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req
+      .json<{
+        canUseLocalRunner?: boolean;
+        isPlatformAdmin?: boolean;
+      }>()
+      .catch(() => ({} as { canUseLocalRunner?: boolean; isPlatformAdmin?: boolean }));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dbAny = dbUnknown as any;
+    const usersTable = schema.users as { id: unknown };
+    const target = await dbAny.query.users.findFirst({
+      where: eq(usersTable.id as never, c.req.param("id")),
+    });
+    if (!target) return c.json({ error: "Not found" }, 404);
+
+    if (body.isPlatformAdmin === false && target.id === session.userId) {
+      return c.json({ error: "不能取消自己的平台管理员身份" }, 400);
+    }
+
+    const nextAdmin =
+      body.isPlatformAdmin !== undefined ? body.isPlatformAdmin : target.isPlatformAdmin;
+    let nextLocal =
+      body.canUseLocalRunner !== undefined
+        ? body.canUseLocalRunner
+        : target.canUseLocalRunner;
+    // 平台管理员始终视为已授权 Local Runner
+    if (nextAdmin) nextLocal = true;
+
+    const [updated] = await dbAny
+      .update(usersTable)
+      .set({
+        isPlatformAdmin: nextAdmin,
+        canUseLocalRunner: nextLocal,
+        updatedAt: new Date(),
+      })
+      .where(eq(usersTable.id as never, target.id))
+      .returning();
+
+    if (!updated) return c.json({ error: "Update failed" }, 500);
+    return c.json({
+      user: {
+        id: updated.id,
+        email: updated.email,
+        name: updated.name,
+        isPlatformAdmin: updated.isPlatformAdmin,
+        canUseLocalRunner: updated.canUseLocalRunner || updated.isPlatformAdmin,
+      },
+    });
+  });
+
+  // ── Shared runners ────────────────────────────────────────────────────
+  app.get("/api/admin/runners", async (c) => {
+    if (!deps.runtimeNodes) {
+      return c.json({ error: "Runtime nodes unavailable" }, 503);
+    }
+    const rows = await deps.runtimeNodes.listAllRemote();
+    const dbAny = dbUnknown as {
+      query: {
+        users: {
+          findMany: () => Promise<Array<{ id: string; email: string; isPlatformAdmin: boolean }>>;
+        };
+        tenants: {
+          findMany: () => Promise<Array<{ id: string; slug: string; name: string }>>;
+        };
+      };
+    };
+    const allUsers = await dbAny.query.users.findMany();
+    const allTenants = await dbAny.query.tenants.findMany();
+    const userById = new Map(allUsers.map((u) => [u.id, u]));
+    const tenantById = new Map(allTenants.map((t) => [t.id, t]));
+    return c.json({
+      runners: rows.map((n) => {
+        const owner = n.createdByUserId ? userById.get(n.createdByUserId) : null;
+        const tenant = tenantById.get(n.tenantId);
+        return {
+          id: n.id,
+          name: n.name,
+          slug: n.slug,
+          status: n.status,
+          isShared: n.isShared,
+          tenantId: n.tenantId,
+          tenantSlug: tenant?.slug ?? null,
+          tenantName: tenant?.name ?? null,
+          createdByUserId: n.createdByUserId,
+          createdByEmail: owner?.email ?? null,
+          ownerIsPlatformAdmin: owner?.isPlatformAdmin ?? false,
+          lastSeenAt: n.lastSeenAt?.toISOString() ?? null,
+          createdAt: n.createdAt.toISOString(),
+        };
+      }),
+      limits: {
+        maxActiveWorkspacesPerTenant: 1,
+        maxActiveWorkspacesTotal: 40,
+        allowPortExposure: true,
+        allowContainerAllocate: false,
+        allowArchive: false,
+      },
+    });
+  });
+
+  app.patch("/api/admin/runners/:id", async (c) => {
+    const session = c.get("session")!;
+    if (!deps.runtimeNodes) {
+      return c.json({ error: "Runtime nodes unavailable" }, 503);
+    }
+    const body = await c.req
+      .json<{ isShared?: boolean }>()
+      .catch(() => ({} as { isShared?: boolean }));
+    if (typeof body.isShared !== "boolean") {
+      return c.json({ error: "isShared boolean required" }, 400);
+    }
+    try {
+      const updated = await deps.runtimeNodes.setShared(c.req.param("id"), body.isShared, {
+        userId: session.userId,
+        isPlatformAdmin: true,
+      });
+      return c.json({
+        runner: {
+          id: updated.id,
+          name: updated.name,
+          tenantId: updated.tenantId,
+          isShared: updated.isShared,
+          createdByUserId: updated.createdByUserId,
+        },
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 }

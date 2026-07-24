@@ -11,6 +11,7 @@ import type { RunnerAuthConfig } from "./auth.js";
 import { requireRunnerAuth, tokenMatches, extractBearer } from "./auth.js";
 import { collectHostInfo, resolveEndpointPublicHost } from "./host-info.js";
 import { RunnerDockerWorkspace } from "./docker-workspace.js";
+import { TunnelManager } from "./tunnel/manager.js";
 
 export type RunnerConfig = {
   storageRoot: string;
@@ -71,6 +72,7 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     );
   }
   const dockerWs = new RunnerDockerWorkspace(cfg.storageRoot, publicHost);
+  const tunnels = new TunnelManager();
 
   app.get("/health", (c) => c.json({ ok: true, service: "zakura-runner" }));
 
@@ -360,6 +362,49 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       return c.json({ bytesUsed: bytes, fileCount: files, path: root });
     } catch {
       return c.json({ bytesUsed: 0, fileCount: 0, path: root });
+    }
+  });
+
+  /** Cloudflare Quick Tunnel（在 Runner 主机启动 cloudflared） */
+  app.post("/v1/exposures", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      exposureId?: string;
+      agentId?: string;
+      port?: number;
+      provider?: string;
+      protocol?: "http" | "https" | "tcp";
+      ttlMinutes?: number;
+    };
+    if (!body.exposureId?.trim() || !body.agentId?.trim()) {
+      return c.json({ error: "exposureId and agentId required" }, 400);
+    }
+    if (body.port == null || !Number.isInteger(body.port)) {
+      return c.json({ error: "port is required" }, 400);
+    }
+    try {
+      const result = await tunnels.start(
+        {
+          exposureId: body.exposureId.trim(),
+          agentId: body.agentId.trim(),
+          port: body.port,
+          provider: body.provider ?? "cloudflare-quick",
+          protocol: body.protocol,
+          ttlMinutes: body.ttlMinutes,
+        },
+        dockerWs,
+      );
+      return c.json(result, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/v1/exposures/:exposureId", async (c) => {
+    try {
+      await tunnels.stop(c.req.param("exposureId"));
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });
 

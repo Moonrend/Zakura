@@ -47,6 +47,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           multiTenant: !!res.multiTenant,
           role: res.role,
           edition: res.edition,
+          canUseLocalRunner: res.canUseLocalRunner !== false,
         };
         setMe(info);
         const completed = res.tenant.onboardingCompleted !== false;

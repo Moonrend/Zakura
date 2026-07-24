@@ -12,6 +12,8 @@ export type MeInfo = {
   multiTenant?: boolean;
   role?: string;
   edition?: "oss" | "saas" | string;
+  /** SaaS：是否授权使用本机 Local Runner；自托管恒为 true */
+  canUseLocalRunner?: boolean;
 };
 
 const MeContext = createContext<MeInfo | null>(null);

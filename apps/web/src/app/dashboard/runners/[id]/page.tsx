@@ -132,7 +132,7 @@ export default function RunnerDetailPage() {
       );
       if (res.tailscaleError) setInstallError(res.tailscaleError);
       // Install packages are heavy — load separately after detail paints
-      if (res.node.kind !== "local") {
+      if (res.node.kind !== "local" && res.node.access !== "shared") {
         void loadInstall();
       } else {
         setInstallBundle(null);
@@ -186,9 +186,10 @@ export default function RunnerDetailPage() {
   const needsInstall =
     node.kind !== "local" && (node.status === "offline" || !node.lastSeenAt);
   const isLocal = node.kind === "local";
+  const isSharedAccess = node.access === "shared";
 
   const installSection =
-    node.kind !== "local" ? (
+    node.kind !== "local" && !isSharedAccess ? (
       <SettingsSection title="安装">
         <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
           <div className="mr-auto flex flex-col gap-1 text-xs">
@@ -257,10 +258,12 @@ export default function RunnerDetailPage() {
               <RefreshCw />
               刷新
             </Button>
-            <Button size="sm" disabled={busy} onClick={() => void save()}>
-              {busy ? <Loader2 className="animate-spin" /> : <Save />}
-              保存
-            </Button>
+            {!isSharedAccess ? (
+              <Button size="sm" disabled={busy} onClick={() => void save()}>
+                {busy ? <Loader2 className="animate-spin" /> : <Save />}
+                保存
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -268,6 +271,9 @@ export default function RunnerDetailPage() {
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={statusVariant(node.status)}>{statusLabel(node.status)}</Badge>
         <Badge variant="outline">{kindLabel(node.kind)}</Badge>
+        {isSharedAccess || node.isShared ? (
+          <Badge variant="secondary">共享</Badge>
+        ) : null}
         {node.agentVersion ? (
           <Badge variant="secondary">v{node.agentVersion}</Badge>
         ) : null}
@@ -285,7 +291,7 @@ export default function RunnerDetailPage() {
               id="rn-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={node.kind === "local"}
+              disabled={node.kind === "local" || isSharedAccess}
             />
           </div>
           <div className="space-y-1.5">
@@ -514,7 +520,7 @@ export default function RunnerDetailPage() {
       {/* Online: install section after host info */}
       {!needsInstall ? installSection : null}
 
-      {node.kind !== "local" ? (
+      {node.kind !== "local" && !isSharedAccess ? (
         <div className="flex justify-end pt-2">
           <Button
             variant="destructive"

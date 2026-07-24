@@ -63,6 +63,11 @@ export interface RuntimeNodeDto {
   agentVersion: string | null;
   lastSeenAt: string | null;
   labels: Record<string, unknown>;
+  /** 平台共享 Runner，可被任意租户绑定 */
+  isShared?: boolean;
+  createdByUserId?: string | null;
+  /** owned = 本租户；shared = 跨租户共享池 */
+  access?: "owned" | "shared";
   createdAt: string;
   updatedAt: string;
 }

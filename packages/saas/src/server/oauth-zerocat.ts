@@ -22,6 +22,8 @@ export type ZerocatOauthStoredConfig = {
   userinfoUrl: string;
   scope: string;
   allowRegistration: boolean;
+  /** 启用 ZeroCat 后可关闭邮箱密码登录，仅保留 ZeroCat */
+  disablePasswordLogin: boolean;
 };
 
 export type ZerocatOauthPublicConfig = {
@@ -33,6 +35,7 @@ export type ZerocatOauthPublicConfig = {
   userinfoUrl: string;
   scope: string;
   allowRegistration: boolean;
+  disablePasswordLogin: boolean;
   redirectUri: string;
 };
 
@@ -45,6 +48,7 @@ export type ZerocatOauthPatch = {
   userinfoUrl?: string;
   scope?: string;
   allowRegistration?: boolean;
+  disablePasswordLogin?: boolean;
 };
 
 export type ZerocatUserinfo = {
@@ -99,6 +103,7 @@ function defaultStored(): ZerocatOauthStoredConfig {
     userinfoUrl: ZEROCAT_DEFAULTS.userinfoUrl,
     scope: ZEROCAT_DEFAULTS.scope,
     allowRegistration: true,
+    disablePasswordLogin: false,
   };
 }
 
@@ -174,6 +179,13 @@ export async function loadZerocatConfig(
       userinfoUrl: stored.userinfoUrl || ZEROCAT_DEFAULTS.userinfoUrl,
       scope: stored.scope || ZEROCAT_DEFAULTS.scope,
       allowRegistration: stored.allowRegistration !== false,
+      // 仅当 ZeroCat 实际可用时，禁止邮箱登录才生效
+      disablePasswordLogin: !!(
+        stored.disablePasswordLogin &&
+        stored.enabled &&
+        stored.clientId &&
+        clientSecret
+      ),
       redirectUri: redirectUriFor(deps.webPublicUrl),
     },
   };
@@ -205,10 +217,24 @@ export async function saveZerocatConfig(
         : stored.userinfoUrl,
     scope: patch.scope !== undefined ? patch.scope.trim() || ZEROCAT_DEFAULTS.scope : stored.scope,
     allowRegistration: patch.allowRegistration ?? stored.allowRegistration,
+    disablePasswordLogin: patch.disablePasswordLogin ?? stored.disablePasswordLogin,
   };
 
   if (patch.clientSecret !== undefined && patch.clientSecret.trim()) {
     next.clientSecretEnc = deps.encryptJson(deps.secret, patch.clientSecret.trim());
+  }
+
+  // 关闭 ZeroCat 时强制恢复邮箱登录；开启「禁止邮箱」时要求 ZeroCat 可用
+  if (!next.enabled) {
+    next.disablePasswordLogin = false;
+  } else if (next.disablePasswordLogin) {
+    const secretReady = !!(
+      next.clientSecretEnc ||
+      (patch.clientSecret !== undefined && patch.clientSecret.trim())
+    );
+    if (!next.clientId.trim() || !secretReady) {
+      throw new Error("禁止邮箱登录前请先配置并启用可用的 ZeroCat OAuth（Client ID / Secret）");
+    }
   }
 
   await db

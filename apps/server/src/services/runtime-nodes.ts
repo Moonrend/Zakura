@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or } from "drizzle-orm";
+import { and, eq, isNull, lt, or, ne } from "drizzle-orm";
 import {
   decryptJson,
   encryptJson,
@@ -13,17 +13,27 @@ import {
   agents,
   newId,
   runtimeNodes,
+  users,
   type RuntimeNode,
 } from "../db/schema.js";
 import { getDefaultTenant } from "./bootstrap.js";
+import {
+  listSharedRunnerNodes,
+  resolveAccessibleNode,
+} from "./runner-access.js";
 
 const TOKEN_ENC_LABEL = "_tokenEnc";
 
-export function mapRuntimeNode(row: RuntimeNode) {
+export function mapRuntimeNode(
+  row: RuntimeNode,
+  opts?: { access?: "owned" | "shared" },
+) {
   const labels = JSON.parse(row.labelsJson || "{}") as Record<string, unknown>;
   // Never expose encrypted token material to API clients
   const { [TOKEN_ENC_LABEL]: _hidden, ...publicLabels } = labels;
   void _hidden;
+  const access =
+    opts?.access ?? "owned";
   return {
     id: row.id,
     tenantId: row.tenantId,
@@ -38,6 +48,10 @@ export function mapRuntimeNode(row: RuntimeNode) {
     agentVersion: row.agentVersion,
     lastSeenAt: row.lastSeenAt?.toISOString() ?? null,
     labels: publicLabels,
+    isShared: Boolean(row.isShared),
+    createdByUserId: row.createdByUserId ?? null,
+    /** owned = 本租户节点；shared = 跨租户共享池（只读使用） */
+    access,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -112,6 +126,19 @@ export class RuntimeNodeService {
     });
   }
 
+  /**
+   * 本租户节点 + 跨租户共享远程 Runner。
+   * Local 是否返回由调用方按 canUseLocalRunner 过滤。
+   */
+  async listAccessible(tenantId: string): Promise<Array<RuntimeNode & { access: "owned" | "shared" }>> {
+    const owned = await this.list(tenantId);
+    const shared = await listSharedRunnerNodes(this.db, tenantId);
+    return [
+      ...owned.map((n) => ({ ...n, access: "owned" as const })),
+      ...shared.map((n) => ({ ...n, access: "shared" as const })),
+    ];
+  }
+
   async get(tenantId: string, id: string): Promise<RuntimeNode | null> {
     return (
       (await this.db.query.runtimeNodes.findFirst({
@@ -120,10 +147,19 @@ export class RuntimeNodeService {
     );
   }
 
+  /** 本租户或共享节点 */
+  async getAccessible(tenantId: string, id: string): Promise<RuntimeNode | null> {
+    return resolveAccessibleNode(this.db, tenantId, id);
+  }
+
   /** Create a remote runner node; returns one-time token. */
   async create(
     tenantId: string,
-    input: { name: string; labels?: Record<string, unknown> },
+    input: {
+      name: string;
+      labels?: Record<string, unknown>;
+      createdByUserId?: string | null;
+    },
   ): Promise<{ node: RuntimeNode; token: string }> {
     // Internal unique handle (not shown as "slug" in UI) — also used for Tailscale hostname
     let slug = "";
@@ -159,6 +195,8 @@ export class RuntimeNodeService {
         storageRoot: "/var/lib/zakura",
         tokenHash: hash,
         labelsJson: JSON.stringify(labels),
+        isShared: false,
+        createdByUserId: input.createdByUserId ?? null,
         createdAt: now,
         updatedAt: now,
       })
@@ -166,6 +204,61 @@ export class RuntimeNodeService {
 
     cacheRunnerToken(row!.id, raw);
     return { node: row!, token: raw };
+  }
+
+  /**
+   * 平台管理员将远程 runner 设为共享。共享 runner 必须由平台管理员持有/创建。
+   */
+  async setShared(
+    nodeId: string,
+    isShared: boolean,
+    actor: { userId: string; isPlatformAdmin: boolean },
+  ): Promise<RuntimeNode> {
+    if (!actor.isPlatformAdmin) {
+      throw new Error("仅平台管理员可配置共享 Runner");
+    }
+    const node = await this.db.query.runtimeNodes.findFirst({
+      where: eq(runtimeNodes.id, nodeId),
+    });
+    if (!node) throw new Error("Runner 不存在");
+    if (node.kind === "local" || node.slug === "local") {
+      throw new Error("本机 Local Runner 不可设为共享");
+    }
+
+    if (isShared) {
+      const ownerId = node.createdByUserId ?? actor.userId;
+      const owner = await this.db.query.users.findFirst({
+        where: eq(users.id, ownerId),
+      });
+      if (!owner?.isPlatformAdmin) {
+        throw new Error("共享 Runner 必须属于平台管理员");
+      }
+      // 若尚无创建者，归属到当前管理员
+      const [updated] = await this.db
+        .update(runtimeNodes)
+        .set({
+          isShared: true,
+          createdByUserId: ownerId,
+          updatedAt: new Date(),
+        })
+        .where(eq(runtimeNodes.id, nodeId))
+        .returning();
+      return updated!;
+    }
+
+    const [updated] = await this.db
+      .update(runtimeNodes)
+      .set({ isShared: false, updatedAt: new Date() })
+      .where(eq(runtimeNodes.id, nodeId))
+      .returning();
+    return updated!;
+  }
+
+  /** 平台管理：列出全部远程 runner（含共享状态） */
+  async listAllRemote(): Promise<RuntimeNode[]> {
+    return this.db.query.runtimeNodes.findMany({
+      where: and(eq(runtimeNodes.kind, "runner"), ne(runtimeNodes.slug, "local")),
+    });
   }
 
   async register(input: {
@@ -259,7 +352,7 @@ export class RuntimeNodeService {
       return { error: "Cannot delete local runtime node" };
     }
     const bound = await this.db.query.agents.findFirst({
-      where: and(eq(agents.tenantId, tenantId), eq(agents.runtimeNodeId, id)),
+      where: eq(agents.runtimeNodeId, id),
     });
     if (bound) return { error: "Node still has bound agents" };
 
@@ -326,7 +419,7 @@ export class RuntimeNodeService {
     opts?: { allowOffline?: boolean },
   ): Promise<{ node: RuntimeNode; client: RunnerClient }> {
     await this.refreshOfflineStatuses(this.config.runnerHeartbeatTimeoutSec);
-    const node = await this.get(tenantId, nodeId);
+    const node = await this.getAccessible(tenantId, nodeId);
     if (!node) {
       throw new Error("所选运行节点不存在，请重新选择。");
     }
@@ -363,7 +456,7 @@ export class RuntimeNodeService {
     if (!agentRuntimeNodeId || agentRuntimeNodeId === LOCAL_RUNTIME_NODE_ID) {
       return this.ensureLocalNode(tenantId);
     }
-    const node = await this.get(tenantId, agentRuntimeNodeId);
+    const node = await this.getAccessible(tenantId, agentRuntimeNodeId);
     if (!node) {
       throw new Error("当前绑定的运行节点已不存在，请重新选择运行位置。");
     }

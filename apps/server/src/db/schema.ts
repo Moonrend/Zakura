@@ -54,6 +54,12 @@ export const users = pgTable(
     passwordHash: text("password_hash"),
     /** Platform super-admin (cross-tenant). Independent of tenant membership role. */
     isPlatformAdmin: boolean("is_platform_admin").notNull().default(false),
+    /**
+     * SaaS：是否允许使用本机（Server 内嵌）Local Runner。
+     * 自托管单租户下服务端始终放行，不依赖此字段。
+     * 平台管理员默认视为已授权。
+     */
+    canUseLocalRunner: boolean("can_use_local_runner").notNull().default(false),
     ...timestamps,
   },
   (t) => [uniqueIndex("users_email").on(t.email)],
@@ -198,11 +204,21 @@ export const runtimeNodes = pgTable(
     /** sha256 of rnr_* token; null for local */
     tokenHash: text("token_hash"),
     labelsJson: text("labels_json").notNull().default("{}"),
+    /**
+     * 平台共享 Runner：标记后可被任意租户绑定使用。
+     * 仅允许管理员创建的远程 runner；使用方受共享策略严格限制。
+     */
+    isShared: boolean("is_shared").notNull().default(false),
+    /** 创建者；共享 runner 必须由平台管理员创建/持有 */
+    createdByUserId: text("created_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
     ...timestamps,
   },
   (t) => [
     uniqueIndex("runtime_nodes_tenant_slug").on(t.tenantId, t.slug),
     index("runtime_nodes_tenant").on(t.tenantId),
+    index("runtime_nodes_shared").on(t.isShared),
   ],
 );
 

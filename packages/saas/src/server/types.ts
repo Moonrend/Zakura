@@ -140,6 +140,38 @@ export type SaasHostDeps = {
   ) => Promise<{ setupCompleted: boolean; mode: string; version: string }>;
   /** Optional: seed local runner / network defaults for newly created tenants */
   onTenantCreated?: (tenantId: string) => Promise<void>;
+  /**
+   * Optional: platform admin runner management (shared runners).
+   * Injected by host to avoid circular package deps.
+   */
+  runtimeNodes?: {
+    listAllRemote: () => Promise<
+      Array<{
+        id: string;
+        tenantId: string;
+        name: string;
+        slug: string;
+        kind: string;
+        status: string;
+        isShared: boolean;
+        createdByUserId: string | null;
+        lastSeenAt: Date | null;
+        createdAt: Date;
+      }>
+    >;
+    setShared: (
+      nodeId: string,
+      isShared: boolean,
+      actor: { userId: string; isPlatformAdmin: boolean },
+    ) => Promise<{
+      id: string;
+      tenantId: string;
+      name: string;
+      isShared: boolean;
+      createdByUserId: string | null;
+    }>;
+    mapPublic?: (node: unknown) => unknown;
+  };
 };
 
 export type SaasApp = Hono<{ Variables: { session?: SaasSession } }>;

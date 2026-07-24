@@ -191,6 +191,11 @@ export default function RunnersPage() {
                     <div className="text-[11px] text-muted-foreground font-mono">
                       {r.id}
                     </div>
+                    {r.access === "shared" || r.isShared ? (
+                      <Badge variant="secondary" className="mt-1">
+                        共享
+                      </Badge>
+                    ) : null}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{kindLabel(r.kind)}</Badge>
@@ -225,7 +230,7 @@ export default function RunnersPage() {
                       >
                         <Server />
                       </Button>
-                      {r.kind !== "local" ? (
+                      {r.kind !== "local" && r.access !== "shared" ? (
                         <Button
                           size="icon"
                           variant="ghost"

@@ -332,8 +332,16 @@ export function registerNetworkRoutes(
 
   app.get("/api/settings/network/active-exposures", async (c) => {
     const session = c.get("session")!;
-    const items = await exposures.listActive(session.tenantId);
-    return c.json({ exposures: items });
+    try {
+      const items = await exposures.listActive(session.tenantId);
+      return c.json({ exposures: items });
+    } catch (err) {
+      console.error("[active-exposures]", err);
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err), exposures: [] },
+        500,
+      );
+    }
   });
 
   app.post("/api/settings/network/active-exposures/stop-all", async (c) => {
