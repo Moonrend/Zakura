@@ -46,9 +46,12 @@ services:
     # 经 docker0 访问宿主机 tailscale0 上的 Runner（100.64/10）需要主机 ip_forward=1
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
     networks:
       - zakura
-
   caddy:
     image: caddy:2.9-alpine
     container_name: zakura-caddy
@@ -71,14 +74,16 @@ services:
 
   postgres:
     profiles: ["postgres"]
-    image: postgres:16-alpine
+    # 需带 pgvector（memory embedding / migrate 0010）
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     container_name: zakura-postgres
     environment:
       POSTGRES_USER: zakura
       POSTGRES_PASSWORD: zakura
       POSTGRES_DB: zakura
+    # 仅本机调试用；容器间走 zakura 网络，勿对公网暴露
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -89,7 +94,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
   searxng:
     profiles: ["components"]
     image: searxng/searxng:latest

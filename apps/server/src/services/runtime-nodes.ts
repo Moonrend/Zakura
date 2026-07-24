@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, or } from "drizzle-orm";
 import {
   decryptJson,
   encryptJson,
@@ -384,8 +384,8 @@ export class RuntimeNodeService {
       .where(
         and(
           ...conds,
-          // lastSeenAt missing or older than cutoff
-          sql`(${runtimeNodes.lastSeenAt} is null or ${runtimeNodes.lastSeenAt} < ${cutoff})`,
+          // lastSeenAt 缺失或早于 cutoff（勿用 sql`... ${Date}`：postgres.js 会拒收 Date）
+          or(isNull(runtimeNodes.lastSeenAt), lt(runtimeNodes.lastSeenAt, cutoff)),
         ),
       );
   }
