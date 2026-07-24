@@ -597,7 +597,7 @@ export async function createApiApp(deps: {
       registrationEnabled: config.edition === "saas",
       connect: {
         agentMcpPattern: `${config.publicBaseUrl}/mcp/agents/{slug}`,
-        authorizeUrl: `${config.webPublicUrl}/oauth/authorize`,
+        authorizeUrl: `${config.webPublicUrl}/console/oauth/authorize`,
         tokenUrl: `${config.publicBaseUrl}/token`,
         registerUrl: `${config.publicBaseUrl}/oauth/register`,
         oauthMetadataUrl: `${config.publicBaseUrl}/.well-known/oauth-authorization-server`,
@@ -3380,19 +3380,19 @@ export async function createApiApp(deps: {
     const err = c.req.query("error");
     if (err) {
       return c.redirect(
-        `${config.webPublicUrl}/oauth/mcp-upstream/callback?error=${encodeURIComponent(err)}`,
+        `${config.webPublicUrl}/console/oauth/mcp-upstream/callback?error=${encodeURIComponent(err)}`,
       );
     }
     if (!code || !state) {
       return c.redirect(
-        `${config.webPublicUrl}/oauth/mcp-upstream/callback?error=missing_code`,
+        `${config.webPublicUrl}/console/oauth/mcp-upstream/callback?error=missing_code`,
       );
     }
     const pending = upstreamOauthPending.get(state);
     upstreamOauthPending.delete(state);
     if (!pending) {
       return c.redirect(
-        `${config.webPublicUrl}/oauth/mcp-upstream/callback?error=invalid_state`,
+        `${config.webPublicUrl}/console/oauth/mcp-upstream/callback?error=invalid_state`,
       );
     }
     try {
@@ -3457,12 +3457,12 @@ export async function createApiApp(deps: {
       }
 
       return c.redirect(
-        `${config.webPublicUrl}/oauth/mcp-upstream/callback?ok=1&instanceId=${encodeURIComponent(instanceId)}`,
+        `${config.webPublicUrl}/console/oauth/mcp-upstream/callback?ok=1&instanceId=${encodeURIComponent(instanceId)}`,
       );
     } catch (exchangeErr) {
       const msg = exchangeErr instanceof Error ? exchangeErr.message : String(exchangeErr);
       return c.redirect(
-        `${config.webPublicUrl}/oauth/mcp-upstream/callback?error=${encodeURIComponent(msg)}`,
+        `${config.webPublicUrl}/console/oauth/mcp-upstream/callback?error=${encodeURIComponent(msg)}`,
       );
     }
   });

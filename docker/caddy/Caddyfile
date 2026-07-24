@@ -1,0 +1,96 @@
+# Zakura reverse proxy — Caddy + Let's Encrypt
+# 约定：后端前缀 → 8787；其余一律前端 → 3001
+#   后端：/api /mcp /.well-known /authorize /token /userinfo /oauth /register(POST)
+#   前端：含 /console/*（OAuth 授权 UI、回调页等）
+
+{
+	email {$CADDY_ACME_EMAIL:admin@moonrend.com}
+	servers {
+		protocols h1 h2
+	}
+}
+
+preview.moonrend.com {
+	request_body {
+		max_size 100MB
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	# —— 后端 API ——
+	handle /api/* {
+		reverse_proxy zakura:8787
+	}
+
+	handle /mcp* {
+		reverse_proxy zakura:8787 {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	# OAuth/OIDC discovery；勿代理 ACME（Let's Encrypt HTTP-01）
+	@oauth_wk {
+		path /.well-known/*
+		not path /.well-known/acme-challenge*
+	}
+	handle @oauth_wk {
+		reverse_proxy zakura:8787
+	}
+
+	# OAuth AS 协议端点（授权 UI 在 /console/oauth/*，不冲突）
+	handle /authorize {
+		reverse_proxy zakura:8787
+	}
+	handle /token* {
+		reverse_proxy zakura:8787
+	}
+	handle /userinfo {
+		reverse_proxy zakura:8787
+	}
+	handle /oauth/* {
+		reverse_proxy zakura:8787
+	}
+
+	# DCR 兼容：POST /register → API；GET /register → 前端注册页
+	@dcr_post {
+		method POST
+		path /register
+	}
+	handle @dcr_post {
+		rewrite * /oauth/register
+		reverse_proxy zakura:8787
+	}
+
+	# —— 前端控制台 ——
+	handle {
+		reverse_proxy zakura:3001
+	}
+}
+
+# Headscale 控制面 + Headplane UI
+zakura-network.moonrend.com {
+	request_body {
+		max_size 32MB
+	}
+
+	handle /admin* {
+		reverse_proxy headplane:3000
+	}
+
+	handle {
+		reverse_proxy headscale:8080 {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+}

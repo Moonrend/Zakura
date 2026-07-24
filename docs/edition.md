@@ -13,7 +13,7 @@ Zakura 以**同一套核心代码**交付两种部署形态；SaaS 能力集中�
 
 平台超管可在 `/dashboard/admin` 配置 **ZeroCat OAuth**（授权码 + PKCE）：
 
-- 回调地址：`{ZAKURA_WEB_URL}/oauth/zerocat/callback`
+- 回调地址：`{ZAKURA_WEB_URL}/console/oauth/zerocat/callback`
 - Client Secret 加密存入平台 settings，不回传前端
 - 启用且配置完整后，登录页出现「使用 ZeroCat 登录」
 - 首次登录可按配置自动创建用户与租户（或仅允许已有邮箱关联）

@@ -1,11 +1,13 @@
 /**
- * OIDC id_token 签名密钥（RS256 + JWKS）。
+ * OIDC / OAuth JWT 签名密钥（RS256 + JWKS）。
  * ChatGPT 等公开客户端无法验证 HS256（无共享 secret），须用非对称算法。
+ * access_token 与 id_token 共用同一密钥，经 jwks_uri 校验。
  */
 import {
   createPrivateKey,
   createPublicKey,
   createSign,
+  createVerify,
   generateKeyPairSync,
   randomBytes,
   type KeyObject,
@@ -68,12 +70,17 @@ export function loadOrCreateOauthSigningKey(dataDir: string): OauthSigningKey {
   };
 }
 
-/** 签发 RS256 JWT（OIDC id_token） */
+/** 签发 RS256 JWT（id_token / access token） */
 export function signJwtRs256(
   key: OauthSigningKey,
   claims: Record<string, unknown>,
+  opts?: { typ?: string },
 ): string {
-  const header = b64urlJson({ alg: "RS256", typ: "JWT", kid: key.kid });
+  const header = b64urlJson({
+    alg: "RS256",
+    typ: opts?.typ ?? "JWT",
+    kid: key.kid,
+  });
   const payload = b64urlJson(claims);
   const data = `${header}.${payload}`;
   const signer = createSign("RSA-SHA256");
@@ -81,6 +88,39 @@ export function signJwtRs256(
   signer.end();
   const sig = signer.sign(key.privateKey).toString("base64url");
   return `${data}.${sig}`;
+}
+
+/** 校验本 AS 签发的 RS256 JWT；成功返回 claims，失败返回 null */
+export function verifyJwtRs256(
+  key: OauthSigningKey,
+  token: string,
+): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts;
+  if (!headerB64 || !payloadB64 || !sigB64) return null;
+
+  try {
+    const header = JSON.parse(
+      Buffer.from(headerB64, "base64url").toString("utf8"),
+    ) as { alg?: string; kid?: string };
+    if (header.alg !== "RS256") return null;
+    if (header.kid && header.kid !== key.kid) return null;
+
+    const data = `${headerB64}.${payloadB64}`;
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(data);
+    verifier.end();
+    if (!verifier.verify(key.privateKey, Buffer.from(sigB64, "base64url"))) {
+      return null;
+    }
+
+    return JSON.parse(
+      Buffer.from(payloadB64, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
 }
 
 export function jwksDocument(key: OauthSigningKey): { keys: Record<string, unknown>[] } {

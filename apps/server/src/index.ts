@@ -193,7 +193,7 @@ async function main() {
   console.log(`  database : ${config.databaseUrl} (${kind})`);
   console.log(`  Agent MCP: ${config.publicBaseUrl}/mcp/agents/{slug}`);
   console.log(`  Web UI   : ${config.webPublicUrl}`);
-  console.log(`  Authorize: ${config.publicBaseUrl}/authorize → ${config.webPublicUrl}/oauth/authorize`);
+  console.log(`  Authorize: ${config.publicBaseUrl}/authorize → ${config.webPublicUrl}/console/oauth/authorize`);
   if (config.aptMirror) {
     console.log(`  APT mirror: ${config.aptMirror}`);
   }

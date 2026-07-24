@@ -7,7 +7,7 @@
     "apps/web/src/app/dashboard/admin/page.tsx",
     "apps/web/src/app/dashboard/settings/members/page.tsx",
     "apps/web/src/app/dashboard/settings/tenants/page.tsx",
-    "apps/web/src/app/oauth/zerocat/callback/page.tsx"
+    "apps/web/src/app/console/oauth/zerocat/callback/page.tsx"
   ],
   "packageJsonDeps": {
     "apps/server/package.json": ["@zakura/saas"]

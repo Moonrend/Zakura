@@ -34,10 +34,10 @@ async function readTokenParams(c: Context): Promise<Record<string, string>> {
   return out;
 }
 
-/** Forward OAuth authorize query to the web console UI */
+/** Forward OAuth authorize query to the web console UI（/console/* 属前端，勿与协议 /oauth/* 混用） */
 function authorizeFrontendUrl(config: AppConfig, reqUrl: string): string {
   const incoming = new URL(reqUrl);
-  const target = new URL("/oauth/authorize", config.webPublicUrl);
+  const target = new URL("/console/oauth/authorize", config.webPublicUrl);
   incoming.searchParams.forEach((value, key) => {
     target.searchParams.set(key, value);
   });

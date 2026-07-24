@@ -29,6 +29,7 @@ import {
   jwksDocument,
   loadOrCreateOauthSigningKey,
   signJwtRs256,
+  verifyJwtRs256,
   type OauthSigningKey,
 } from "./oauth-signing.js";
 import {
@@ -71,31 +72,100 @@ export type McpAuthContext = {
 };
 
 export type AccessTokenPayload = {
-  typ: "mcp_at";
+  /** 旧版 rca_ HMAC token；JWT 形态不再写入 typ */
+  typ?: "mcp_at";
   sub: string; // userId
   tid: string; // tenantId
-  cid: string; // clientId
+  cid: string; // clientId（JWT 内为 client_id）
   aid?: string | null; // agentId
   scope: string;
   /** RFC 8709：绑定 MCP resource；同时作为 aud 供资源服务器校验 */
   resource?: string | null;
   aud?: string | null;
+  iss?: string;
   exp: number;
   iat: number;
   jti: string;
 };
 
-function b64urlJson(obj: unknown): string {
-  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+/**
+ * 签发 RS256 JWT access token（RFC 9068 风格，header typ=at+jwt）。
+ * Apps SDK 要求资源服务器用 JWKS 校验 signature / iss / aud / exp。
+ */
+function signAccessTokenJwt(
+  key: OauthSigningKey,
+  issuer: string,
+  payload: AccessTokenPayload,
+): string {
+  const aud = payload.aud ?? payload.resource ?? issuer;
+  return signJwtRs256(
+    key,
+    {
+      iss: issuer,
+      sub: payload.sub,
+      aud,
+      client_id: payload.cid,
+      tid: payload.tid,
+      ...(payload.aid ? { aid: payload.aid } : {}),
+      scope: payload.scope,
+      ...(payload.resource ? { resource: payload.resource } : {}),
+      iat: payload.iat,
+      exp: payload.exp,
+      jti: payload.jti,
+    },
+    { typ: "at+jwt" },
+  );
 }
 
-function signAccessToken(secret: string, payload: AccessTokenPayload): string {
-  const data = b64urlJson(payload);
-  const sig = createHmac("sha256", secret).update(`mcp_at.${data}`).digest("base64url");
-  return `rca_${data}.${sig}`;
+function parseAccessTokenClaims(
+  claims: Record<string, unknown>,
+  expectedIss?: string,
+): AccessTokenPayload | null {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = typeof claims.exp === "number" ? claims.exp : null;
+  const iat = typeof claims.iat === "number" ? claims.iat : null;
+  const sub = typeof claims.sub === "string" ? claims.sub : null;
+  const tid = typeof claims.tid === "string" ? claims.tid : null;
+  const cid =
+    typeof claims.client_id === "string"
+      ? claims.client_id
+      : typeof claims.cid === "string"
+        ? claims.cid
+        : null;
+  const scope = typeof claims.scope === "string" ? claims.scope : null;
+  const jti = typeof claims.jti === "string" ? claims.jti : null;
+  if (!exp || !iat || !sub || !tid || !cid || !scope || !jti) return null;
+  if (exp < now) return null;
+  if (expectedIss) {
+    const iss = typeof claims.iss === "string" ? claims.iss : null;
+    if (iss !== expectedIss) return null;
+  }
+  const audRaw = claims.aud;
+  const aud =
+    typeof audRaw === "string"
+      ? audRaw
+      : Array.isArray(audRaw) && typeof audRaw[0] === "string"
+        ? audRaw[0]
+        : null;
+  const resource =
+    typeof claims.resource === "string" ? claims.resource : aud;
+  return {
+    sub,
+    tid,
+    cid,
+    aid: typeof claims.aid === "string" ? claims.aid : null,
+    scope,
+    resource,
+    aud,
+    iss: typeof claims.iss === "string" ? claims.iss : undefined,
+    exp,
+    iat,
+    jti,
+  };
 }
 
-export function verifyAccessToken(
+/** 校验旧版 rca_ HMAC access token（部署过渡期兼容） */
+function verifyLegacyAccessToken(
   secret: string,
   token: string,
 ): AccessTokenPayload | null {
@@ -108,13 +178,29 @@ export function verifyAccessToken(
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
-    const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf8")) as AccessTokenPayload;
+    const payload = JSON.parse(
+      Buffer.from(data, "base64url").toString("utf8"),
+    ) as AccessTokenPayload;
     if (payload.typ !== "mcp_at") return null;
     if (payload.exp < Math.floor(Date.now() / 1000)) return null;
     return payload;
   } catch {
     return null;
   }
+}
+
+export function verifyAccessToken(
+  key: OauthSigningKey,
+  secret: string,
+  token: string,
+  issuer: string,
+): AccessTokenPayload | null {
+  if (token.startsWith("rca_")) {
+    return verifyLegacyAccessToken(secret, token);
+  }
+  const claims = verifyJwtRs256(key, token);
+  if (!claims) return null;
+  return parseAccessTokenClaims(claims, issuer.replace(/\/$/, ""));
 }
 
 function hashToken(raw: string): string {
@@ -297,8 +383,10 @@ export function authorizationServerMetadata(baseUrl: string) {
     token_endpoint_auth_methods_supported: [...TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED],
     revocation_endpoint: `${issuer}/token/revoke`,
     subject_types_supported: ["public"],
-    /** 公开客户端（CIMD none）须用 RS256 + jwks_uri 验 id_token；HS256 无法共享 secret */
+    /** 公开客户端（CIMD none）须用 RS256 + jwks_uri 验 id_token / access_token；HS256 无法共享 secret */
     id_token_signing_alg_values_supported: ["RS256"],
+    /** RFC 9068：access token 为 RS256 JWT，与 id_token 共用 jwks_uri */
+    access_token_signing_alg_values_supported: ["RS256"],
     jwks_uri: `${issuer}/.well-known/jwks.json`,
     claim_types_supported: ["normal"],
     claims_supported: [
@@ -885,8 +973,8 @@ export class OauthService {
     const now = Math.floor(Date.now() / 1000);
     const scope = normalizeGrantedScopes(input.scope, { clientId: input.clientId });
     const scopes = scopeSet(scope);
-    const access = signAccessToken(this.config.secret, {
-      typ: "mcp_at",
+    const issuer = this.config.publicBaseUrl.replace(/\/$/, "");
+    const access = signAccessTokenJwt(this.signingKey, issuer, {
       sub: input.userId,
       tid: input.tenantId,
       cid: input.clientId,
@@ -975,7 +1063,12 @@ export class OauthService {
     name?: string;
     preferred_username?: string;
   }> {
-    const at = verifyAccessToken(this.config.secret, rawToken);
+    const at = verifyAccessToken(
+      this.signingKey,
+      this.config.secret,
+      rawToken,
+      this.config.publicBaseUrl,
+    );
     if (!at) {
       throw new OauthError("invalid_token", "Invalid or expired access token", 401);
     }
@@ -1007,7 +1100,12 @@ export class OauthService {
 
   async authenticateBearer(rawToken: string): Promise<McpAuthContext | null> {
     // OAuth access token
-    const at = verifyAccessToken(this.config.secret, rawToken);
+    const at = verifyAccessToken(
+      this.signingKey,
+      this.config.secret,
+      rawToken,
+      this.config.publicBaseUrl,
+    );
     if (at) {
       const tenant = await this.db.query.tenants.findFirst({
         where: eq(tenants.id, at.tid),

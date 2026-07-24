@@ -49,17 +49,19 @@ services:
     networks:
       - zakura
 
-  nginx:
-    image: nginx:1.27-alpine
-    container_name: zakura-nginx
+  caddy:
+    image: caddy:2.9-alpine
+    container_name: zakura-caddy
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"
+    environment:
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@moonrend.com}
     volumes:
-      - ./docker/nginx/preview.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./docker/nginx/zakura-network.conf:/etc/nginx/conf.d/zakura-network.conf:ro
-      - ./docker/nginx/proxy_locations.conf:/etc/nginx/proxy_locations.conf:ro
-      - ./certs:/etc/nginx/certs:ro
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
     depends_on:
       - zakura
     restart: unless-stopped
@@ -118,6 +120,8 @@ volumes:
   zakura-data:
   openviking-data:
   postgres-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   zakura:

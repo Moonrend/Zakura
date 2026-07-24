@@ -126,7 +126,7 @@ function resolveDisplayName(profile: ZerocatUserinfo): string {
 }
 
 export function redirectUriFor(webPublicUrl: string): string {
-  return `${webPublicUrl.replace(/\/$/, "")}/oauth/zerocat/callback`;
+  return `${webPublicUrl.replace(/\/$/, "")}/console/oauth/zerocat/callback`;
 }
 
 export async function loadZerocatConfig(

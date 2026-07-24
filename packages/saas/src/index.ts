@@ -11,5 +11,5 @@ export const SAAS_WEB_ROUTES = [
   "/dashboard/admin",
   "/dashboard/settings/members",
   "/dashboard/settings/tenants",
-  "/oauth/zerocat/callback",
+  "/console/oauth/zerocat/callback",
 ] as const;
