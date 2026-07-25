@@ -1081,6 +1081,21 @@ export class AgentWorkspaceService {
     }
 
     const dockerId = await this.resolveDockerId(agent);
+    const root = this.hostRoot(agent);
+    if (!existsSync(root)) {
+      this.ensureLocal(agent);
+      throw new Error(
+        `工作区主机目录丢失并已重建为空目录。请重启电脑环境以重新挂载 ${AGENT_WORKSPACE_ROOT}。`,
+      );
+    }
+    const probe = await this.runtime.exec(dockerId, ["test", "-d", AGENT_WORKSPACE_ROOT], {
+      workingDir: "/",
+    });
+    if (probe.exitCode !== 0) {
+      throw new Error(
+        `工作区挂载已失效（无法访问 ${AGENT_WORKSPACE_ROOT}）。主机目录可能被删除，请在控制台重启电脑环境。`,
+      );
+    }
     return this.runtime.exec(dockerId, command, {
       workingDir,
       env,

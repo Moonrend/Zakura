@@ -416,9 +416,11 @@ export class RuntimeNodeService {
   async requireRunnerClient(
     tenantId: string,
     nodeId: string,
-    opts?: { allowOffline?: boolean },
+    opts?: { allowOffline?: boolean; skipHeartbeatRefresh?: boolean },
   ): Promise<{ node: RuntimeNode; client: RunnerClient }> {
-    await this.refreshOfflineStatuses(this.config.runnerHeartbeatTimeoutSec);
+    if (!opts?.skipHeartbeatRefresh) {
+      await this.refreshOfflineStatuses(this.config.runnerHeartbeatTimeoutSec);
+    }
     const node = await this.getAccessible(tenantId, nodeId);
     if (!node) {
       throw new Error("所选运行节点不存在，请重新选择。");

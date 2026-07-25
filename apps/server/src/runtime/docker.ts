@@ -1,8 +1,15 @@
 import Docker from "dockerode";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
-import type { ContainerRuntime, CreateContainerOptions, RunningContainer } from "@zakura/core";
+import {
+  toDockerHostPath,
+  type ContainerRuntime,
+  type CreateContainerOptions,
+  type RunningContainer,
+} from "@zakura/core";
 import type { ContainerSpec } from "@zakura/shared";
+
+export { toDockerHostPath };
 
 function dockerErr(err: unknown): Error {
   if (!err || typeof err !== "object") return new Error(String(err));
@@ -40,15 +47,6 @@ export interface TcpTunnel {
   port: number;
   url: string;
   close: () => void;
-}
-
-/** Docker Desktop on Windows prefers forward-slash host paths */
-export function toDockerHostPath(hostPath: string): string {
-  const normalized = hostPath.replace(/\\/g, "/");
-  if (process.platform !== "win32") return normalized;
-  const m = normalized.match(/^([A-Za-z]):\/(.*)$/);
-  if (m) return `${m[1].toUpperCase()}:/${m[2]}`;
-  return normalized;
 }
 
 function toRunning(info: Docker.ContainerInspectInfo): RunningContainer {

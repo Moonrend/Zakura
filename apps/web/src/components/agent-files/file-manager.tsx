@@ -16,6 +16,7 @@ import {
   Archive,
   Pencil,
   ArrowUp,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,21 +83,41 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
     return items;
   }, [cwd]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     try {
       const res = await fsList(agentId, cwd);
       setEntries(res.entries);
-      setSelected(new Set());
+      if (!opts?.silent) setSelected(new Set());
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      if (!opts?.silent) toast.error(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
   }, [agentId, cwd]);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // Agent 可能通过 shell/MCP 写入文件；切回页面或定时刷新以跟上变更
+  useEffect(() => {
+    const onFocus = () => {
+      void load({ silent: true });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void load({ silent: true });
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void load({ silent: true });
+    }, 8000);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      clearInterval(timer);
+    };
   }, [load]);
 
   useEffect(() => {
@@ -272,6 +293,15 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
             onClick={() => setCwd(parentFsPath(cwd))}
           >
             <ArrowUp />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title="刷新"
+            disabled={loading}
+            onClick={() => void load()}
+          >
+            <RefreshCw className={loading ? "animate-spin" : undefined} />
           </Button>
           {canWrite ? (
             <>

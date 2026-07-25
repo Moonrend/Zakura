@@ -1,6 +1,7 @@
 import {
   LocalWorkspaceFs,
   textResult,
+  unwrapShellCommand,
   type WorkspaceFs,
   type WorkspaceFsProvider,
 } from "@zakura/core";
@@ -223,7 +224,8 @@ export function listAgentNativeTools(
           properties: {
             command: {
               type: "string",
-              description: "Arbitrary shell command (no allowlist). Example: python3 main.py",
+              description:
+                "Arbitrary shell command (no allowlist). Do not wrap the whole command in quotes. Example: python3 main.py",
             },
             working_dir: {
               type: "string",
@@ -622,14 +624,19 @@ export async function callAgentNativeTool(
   exposures?: import("./port-exposures.js").ExposureService | null,
 ): Promise<McpToolResult> {
   try {
-    // Resolve FS via provider when available (local or remote runner).
-    // Fall back to ensureLocal only when provider is not wired (tests without provider).
-    const fs: WorkspaceFs = workspaceFsProvider
-      ? await workspaceFsProvider.forAgent(agent.id, agent.tenantId)
-      : (() => {
-          const root = workspace.ensureLocal(agent);
-          return new LocalWorkspaceFs(root);
-        })();
+    // 仅 fs_* 时打开磁盘/Runner；避免 shell/browser 等工具每次都查节点、建 FS
+    let fsOnce: WorkspaceFs | null = null;
+    const getFs = async (): Promise<WorkspaceFs> => {
+      if (fsOnce) return fsOnce;
+      fsOnce = workspaceFsProvider
+        ? await workspaceFsProvider.forAgentBinding({
+            id: agent.id,
+            tenantId: agent.tenantId,
+            runtimeNodeId: agent.runtimeNodeId,
+          })
+        : new LocalWorkspaceFs(workspace.ensureLocal(agent));
+      return fsOnce;
+    };
 
     if (name === "agent_info") {
       const container = await workspace.getWorkspaceContainer(agent.id);
@@ -813,16 +820,20 @@ export async function callAgentNativeTool(
     switch (name) {
       case "fs_read":
         return okJson(
-          await fs.read(String(args.path), {
+          await (await getFs()).read(String(args.path), {
             lineOffset: typeof args.line_offset === "number" ? args.line_offset : undefined,
             nLines: typeof args.n_lines === "number" ? args.n_lines : undefined,
           }),
         );
       case "fs_write":
-        return okJson(await fs.write(String(args.path), String(args.content ?? "")));
+        return okJson(
+          await (await getFs()).write(String(args.path), String(args.content ?? "")),
+        );
       case "fs_edit":
         return okJson(
-          await fs.edit(
+          await (
+            await getFs()
+          ).edit(
             String(args.path),
             String(args.old_text ?? ""),
             String(args.new_text ?? ""),
@@ -830,22 +841,26 @@ export async function callAgentNativeTool(
         );
       case "fs_list":
         return okJson(
-          await fs.list(typeof args.path === "string" ? args.path : ".", {
+          await (await getFs()).list(typeof args.path === "string" ? args.path : ".", {
             recursive: Boolean(args.recursive),
             offset: typeof args.offset === "number" ? args.offset : undefined,
             limit: typeof args.limit === "number" ? args.limit : undefined,
           }),
         );
       case "fs_mkdir":
-        return okJson(await fs.mkdir(String(args.path)));
+        return okJson(await (await getFs()).mkdir(String(args.path)));
       case "fs_delete":
-        return okJson(await fs.delete(String(args.path), Boolean(args.recursive)));
+        return okJson(
+          await (await getFs()).delete(String(args.path), Boolean(args.recursive)),
+        );
       case "fs_stat":
-        return okJson(await fs.stat(String(args.path)));
+        return okJson(await (await getFs()).stat(String(args.path)));
       case "fs_move":
-        return okJson(await fs.move(String(args.from), String(args.to)));
+        return okJson(
+          await (await getFs()).move(String(args.from), String(args.to)),
+        );
       case "shell_exec": {
-        const command = String(args.command ?? "");
+        const command = unwrapShellCommand(String(args.command ?? ""));
         if (!command.trim()) return textResult("command is required", true);
         const result = await workspace.execInWorkspace(agent, ["bash", "-lc", command], {
           workingDir: typeof args.working_dir === "string" ? args.working_dir : undefined,

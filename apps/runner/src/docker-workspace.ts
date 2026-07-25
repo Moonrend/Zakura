@@ -2,10 +2,11 @@
  * Local Docker ops for agent workspace containers on the Runner host.
  */
 import Docker from "dockerode";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
+import { toDockerHostPath } from "@zakura/core";
 import {
   AGENT_PORT_CDP,
   AGENT_PORT_NOVNC,
@@ -254,7 +255,7 @@ export class RunnerDockerWorkspace {
       ...(spec.env ?? {}),
     };
 
-    const hostPath = root.replace(/\\/g, "/");
+    const hostPath = toDockerHostPath(root);
     const createOpts: Docker.ContainerCreateOptions = {
       name,
       Image: spec.image,
@@ -319,16 +320,33 @@ export class RunnerDockerWorkspace {
     return { ok: true };
   }
 
-  async exec(
-    agentId: string,
+  /** Probe that /workspace is a readable bind mount (host dir not deleted). */
+  async probeWorkspaceMount(dockerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const result = await this.execRaw(dockerId, ["test", "-d", AGENT_WORKSPACE_ROOT], {
+        workingDir: "/",
+      });
+      if (result.exitCode !== 0) {
+        return {
+          ok: false,
+          error: `工作区挂载已失效（无法访问 ${AGENT_WORKSPACE_ROOT}）。主机目录可能被删除，请重启电脑环境。`,
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  private async execRaw(
+    dockerId: string,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const existing = await this.findByAgent(agentId);
-    if (!existing || existing.status !== "running") {
-      throw new Error("Workspace container not running on this runner");
-    }
-    const container = this.docker.getContainer(existing.dockerId);
+    const container = this.docker.getContainer(dockerId);
     const exec = await container.exec({
       Cmd: command,
       AttachStdout: true,
@@ -350,6 +368,28 @@ export class RunnerDockerWorkspace {
       stdout: demuxed.stdout,
       stderr: demuxed.stderr,
     };
+  }
+
+  async exec(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const existing = await this.findByAgent(agentId);
+    if (!existing || existing.status !== "running") {
+      throw new Error("Workspace container not running on this runner");
+    }
+    // Host dir must exist; recreating after delete without container restart leaves a broken mount
+    const root = this.workspacePath(agentId);
+    if (!existsSync(root)) {
+      mkdirSync(root, { recursive: true });
+      throw new Error(
+        `工作区主机目录丢失并已重建为空目录：${root}。请重启电脑环境以重新挂载 /workspace。`,
+      );
+    }
+    const probe = await this.probeWorkspaceMount(existing.dockerId);
+    if (!probe.ok) throw new Error(probe.error);
+    return this.execRaw(existing.dockerId, command, opts);
   }
 
   /**

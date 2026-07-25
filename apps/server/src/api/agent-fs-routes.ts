@@ -53,11 +53,12 @@ async function resolveAgentFs(
   if (requireFs && !agent.enableFs) {
     return { agent, denied: true as const };
   }
-  // 本地 Agent 仍确保主机工作区目录存在
-  if (!agent.runtimeNodeId) {
-    agentService.workspace.ensureLocal(agent);
-  }
-  const fs = await fsProvider.forAgent(agent.id, tenantId);
+  // 直接按 binding 打开本机/Runner 文件，不再二次查 agents、不在热路径写 README
+  const fs = await fsProvider.forAgentBinding({
+    id: agent.id,
+    tenantId: agent.tenantId,
+    runtimeNodeId: agent.runtimeNodeId,
+  });
   const localRoot = fs instanceof LocalWorkspaceFs ? fs.getRoot() : null;
   return { agent, fs, localRoot, denied: false as const };
 }

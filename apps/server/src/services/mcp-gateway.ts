@@ -886,10 +886,11 @@ export class McpGateway {
 
     if (isWorkspaceFsExposedViaMcp(agent) && this.workspaceFsProvider) {
       try {
-        if (!agent.runtimeNodeId) {
-          this.agentService.workspace.ensureLocal(agent);
-        }
-        const fs = await this.workspaceFsProvider.forAgent(agent.id, agent.tenantId);
+        const fs = await this.workspaceFsProvider.forAgentBinding({
+          id: agent.id,
+          tenantId: agent.tenantId,
+          runtimeNodeId: agent.runtimeNodeId,
+        });
         for (const r of await listWorkspaceFsResources(fs)) {
           if (usedUris.has(r.uri)) continue;
           usedUris.add(r.uri);
@@ -1068,10 +1069,11 @@ export class McpGateway {
         where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
       });
       if (agent && isWorkspaceFsExposedViaMcp(agent)) {
-        if (!agent.runtimeNodeId && this.agentService) {
-          this.agentService.workspace.ensureLocal(agent);
-        }
-        const fs = await this.workspaceFsProvider.forAgent(agent.id, tenantId);
+        const fs = await this.workspaceFsProvider.forAgentBinding({
+          id: agent.id,
+          tenantId: agent.tenantId,
+          runtimeNodeId: agent.runtimeNodeId,
+        });
         const native = await readWorkspaceFsResource(fs, uri);
         if (native) return native;
       }
@@ -1118,10 +1120,11 @@ export class McpGateway {
             data: { uri },
           });
         }
-        if (!agent.runtimeNodeId && this.agentService) {
-          this.agentService.workspace.ensureLocal(agent);
-        }
-        const fs = await this.workspaceFsProvider.forAgent(agent.id, tenantId);
+        const fs = await this.workspaceFsProvider.forAgentBinding({
+          id: agent.id,
+          tenantId: agent.tenantId,
+          runtimeNodeId: agent.runtimeNodeId,
+        });
         const ws = await readWorkspaceFsResource(fs, match.localUri);
         if (!ws) {
           throw Object.assign(new Error(`Resource not found: ${uri}`), {

@@ -55,10 +55,12 @@ function guessWidget(name: string, schema: JsonSchema): string {
   }
   if (
     format === "textarea" ||
+    lower === "command" ||
     lower.includes("content") ||
     lower.includes("body") ||
     lower.includes("prompt") ||
     lower.includes("query") ||
+    lower.includes("script") ||
     (typeof schema.description === "string" && schema.description.length > 80)
   ) {
     return "textarea";
