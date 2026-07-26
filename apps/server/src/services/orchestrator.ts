@@ -19,6 +19,7 @@ import {
   type ComponentInstance,
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
+import { platformEvents } from "./platform-events.js";
 
 export class InstanceNotFoundError extends Error {
   constructor(instanceId: string) {
@@ -168,7 +169,41 @@ export class Orchestrator {
         updatedAt: now,
       })
       .returning();
+    if (row) this.emitInstance(row, "stopped", "实例已创建");
     return row;
+  }
+
+  /** 推送实例状态变化（SSE 平台事件，前端据此免轮询刷新） */
+  private emitInstance(
+    instance: { id: string; tenantId: string; slug: string; providerId: string },
+    status: string,
+    message?: string,
+  ): void {
+    platformEvents.publish(instance.tenantId, {
+      type: "mcp_instance",
+      instanceId: instance.id,
+      slug: instance.slug,
+      providerId: instance.providerId,
+      status,
+      ...(message ? { message } : {}),
+    });
+  }
+
+  /** 推送启动/安装过程中的阶段性进度 */
+  private emitProgress(
+    instance: { id: string; tenantId: string; slug: string },
+    step: string,
+    message: string,
+    level: "info" | "warn" | "error" | "ok" = "info",
+  ): void {
+    platformEvents.publish(instance.tenantId, {
+      type: "mcp_progress",
+      instanceId: instance.id,
+      slug: instance.slug,
+      step,
+      message,
+      level,
+    });
   }
 
   async startInstance(tenantId: string, instanceId: string): Promise<InstanceHandle> {
@@ -185,6 +220,7 @@ export class Orchestrator {
       .where(
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
+    this.emitInstance(instance, "starting");
 
     try {
       const plugin = globalRegistry.get(instance.providerId);
@@ -217,6 +253,7 @@ export class Orchestrator {
           .where(
             and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
           );
+        this.emitInstance(instance, "running");
         const handle = await this.toHandle(tenantId, instanceId);
         await plugin.afterStart?.(handle, ctx);
         return handle;
@@ -257,7 +294,13 @@ export class Orchestrator {
           }
         }
 
+        this.emitProgress(
+          instance,
+          "pull_image",
+          `拉取镜像 ${containerSpec.image}（首次可能需要几分钟）`,
+        );
         await this.runtime.ensureImage(containerSpec.image);
+        this.emitProgress(instance, "image_ready", `镜像就绪：${containerSpec.image}`, "ok");
 
         const running = await this.runtime.createAndStart({
           tenantId: instance.tenantId,
@@ -309,6 +352,7 @@ export class Orchestrator {
         .where(
           and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
         );
+      this.emitInstance(instance, "running");
 
       const handle = await this.toHandle(tenantId, instanceId);
       await plugin.afterStart?.(handle, ctx);
@@ -321,12 +365,13 @@ export class Orchestrator {
         .where(
           and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
         );
+      this.emitInstance(instance, "error", message);
       throw err;
     }
   }
 
   async stopInstance(tenantId: string, instanceId: string): Promise<void> {
-    await this.requireInstance(tenantId, instanceId);
+    const instance = await this.requireInstance(tenantId, instanceId);
     const containers = await this.db.query.managedContainers.findMany({
       where: and(
         eq(managedContainers.instanceId, instanceId),
@@ -360,9 +405,11 @@ export class Orchestrator {
       .where(
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
+    this.emitInstance(instance, "stopped");
   }
 
   async refreshHealth(tenantId: string, instanceId: string) {
+    const instance = await this.requireInstance(tenantId, instanceId);
     const handle = await this.toHandle(tenantId, instanceId);
     const plugin = globalRegistry.get(handle.providerId);
     const result = await plugin.healthCheck(handle);
@@ -376,6 +423,10 @@ export class Orchestrator {
       .where(
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
+    // 健康状态变化才推送，避免噪声
+    if (instance.healthStatus !== result.status) {
+      this.emitInstance(instance, instance.status, `健康检查：${result.status}`);
+    }
     return result;
   }
 

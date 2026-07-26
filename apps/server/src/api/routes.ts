@@ -57,6 +57,7 @@ import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
+import { platformEvents } from "../services/platform-events.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
@@ -2169,6 +2170,59 @@ export async function createApiApp(deps: {
       upstreamModels,
     });
   }
+
+  /**
+   * 平台事件（SSE）：MCP 实例状态与安装进度、Agent 工作区进度、
+   * Runner 心跳、工作区文件变更。瞬态信号不落库；断线重连后
+   * 前端应重新拉一次对应快照接口对齐状态。
+   */
+  app.get("/api/events", async (c) => {
+    const session = c.get("session")!;
+    const tenantId = session.tenantId;
+    const encoder = new TextEncoder();
+    let unsubscribe: (() => void) | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let closed = false;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (event: string, data: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+            );
+          } catch {
+            /* stream closed */
+          }
+        };
+        send("ready", { ts: Date.now() });
+        unsubscribe = platformEvents.subscribe(tenantId, (ev) => send("platform", ev));
+        heartbeat = setInterval(() => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(`: ping\n\n`));
+          } catch {
+            /* ignore */
+          }
+        }, 15_000);
+      },
+      cancel() {
+        closed = true;
+        if (heartbeat) clearInterval(heartbeat);
+        unsubscribe?.();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  });
 
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {

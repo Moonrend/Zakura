@@ -1,3 +1,5 @@
+import { platformEvents } from "./platform-events.js";
+
 export type ProgressLevel = "info" | "warn" | "error" | "ok";
 
 export interface ProgressEvent {
@@ -20,7 +22,17 @@ export interface AgentProgressSnapshot {
 }
 
 const store = new Map<string, AgentProgressSnapshot>();
+/** agentId → tenantId（begin 时登记，用于事件推送） */
+const tenantByAgent = new Map<string, string>();
 const MAX_EVENTS = 200;
+
+function publishSnapshot(agentId: string): void {
+  const tenantId = tenantByAgent.get(agentId);
+  if (!tenantId) return;
+  const snapshot = store.get(agentId);
+  if (!snapshot) return;
+  platformEvents.publish(tenantId, { type: "agent_progress", agentId, snapshot });
+}
 
 function empty(agentId: string): AgentProgressSnapshot {
   return {
@@ -39,7 +51,12 @@ export function getAgentProgress(agentId: string): AgentProgressSnapshot {
   return store.get(agentId) ?? empty(agentId);
 }
 
-export function beginAgentProgress(agentId: string, phase = "starting"): void {
+export function beginAgentProgress(
+  agentId: string,
+  phase = "starting",
+  tenantId?: string,
+): void {
+  if (tenantId) tenantByAgent.set(agentId, tenantId);
   store.set(agentId, {
     ...empty(agentId),
     phase,
@@ -47,6 +64,7 @@ export function beginAgentProgress(agentId: string, phase = "starting"): void {
     percent: 0,
     updatedAt: Date.now(),
   });
+  publishSnapshot(agentId);
 }
 
 export function logAgentProgress(
@@ -76,6 +94,7 @@ export function logAgentProgress(
     events,
     updatedAt: Date.now(),
   });
+  publishSnapshot(agentId);
 }
 
 export function finishAgentProgress(
@@ -100,8 +119,10 @@ export function finishAgentProgress(
     events: [...cur.events, event].slice(-MAX_EVENTS),
     updatedAt: Date.now(),
   });
+  publishSnapshot(agentId);
 }
 
 export function clearAgentProgress(agentId: string): void {
   store.delete(agentId);
+  tenantByAgent.delete(agentId);
 }

@@ -18,6 +18,7 @@ import { buildMemoryContext, resolveAgentMemory } from "./memory-runtime.js";
 import { Mem0Client } from "./mem0-client.js";
 import { withEmbedding } from "./memory-embed.js";
 import { embedText, parseEmbeddingConfig } from "./embedding-client.js";
+import { platformEvents } from "./platform-events.js";
 
 export interface AgentNativeToolDef {
   qualifiedName: string;
@@ -637,6 +638,14 @@ export async function callAgentNativeTool(
         : new LocalWorkspaceFs(workspace.ensureLocal(agent));
       return fsOnce;
     };
+    /** 工作区文件变更事件：前端文件面板据此免轮询刷新 */
+    const notifyFsChanged = (path: string) => {
+      platformEvents.publish(agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: agent.id,
+        path,
+      });
+    };
 
     if (name === "agent_info") {
       const container = await workspace.getWorkspaceContainer(agent.id);
@@ -825,20 +834,22 @@ export async function callAgentNativeTool(
             nLines: typeof args.n_lines === "number" ? args.n_lines : undefined,
           }),
         );
-      case "fs_write":
-        return okJson(
-          await (await getFs()).write(String(args.path), String(args.content ?? "")),
+      case "fs_write": {
+        const res = await (await getFs()).write(String(args.path), String(args.content ?? ""));
+        notifyFsChanged(String(args.path));
+        return okJson(res);
+      }
+      case "fs_edit": {
+        const res = await (
+          await getFs()
+        ).edit(
+          String(args.path),
+          String(args.old_text ?? ""),
+          String(args.new_text ?? ""),
         );
-      case "fs_edit":
-        return okJson(
-          await (
-            await getFs()
-          ).edit(
-            String(args.path),
-            String(args.old_text ?? ""),
-            String(args.new_text ?? ""),
-          ),
-        );
+        notifyFsChanged(String(args.path));
+        return okJson(res);
+      }
       case "fs_list":
         return okJson(
           await (await getFs()).list(typeof args.path === "string" ? args.path : ".", {
@@ -847,18 +858,24 @@ export async function callAgentNativeTool(
             limit: typeof args.limit === "number" ? args.limit : undefined,
           }),
         );
-      case "fs_mkdir":
-        return okJson(await (await getFs()).mkdir(String(args.path)));
-      case "fs_delete":
-        return okJson(
-          await (await getFs()).delete(String(args.path), Boolean(args.recursive)),
-        );
+      case "fs_mkdir": {
+        const res = await (await getFs()).mkdir(String(args.path));
+        notifyFsChanged(String(args.path));
+        return okJson(res);
+      }
+      case "fs_delete": {
+        const res = await (await getFs()).delete(String(args.path), Boolean(args.recursive));
+        notifyFsChanged(String(args.path));
+        return okJson(res);
+      }
       case "fs_stat":
         return okJson(await (await getFs()).stat(String(args.path)));
-      case "fs_move":
-        return okJson(
-          await (await getFs()).move(String(args.from), String(args.to)),
-        );
+      case "fs_move": {
+        const res = await (await getFs()).move(String(args.from), String(args.to));
+        notifyFsChanged(String(args.from));
+        notifyFsChanged(String(args.to));
+        return okJson(res);
+      }
       case "shell_exec": {
         const command = unwrapShellCommand(String(args.command ?? ""));
         if (!command.trim()) return textResult("command is required", true);

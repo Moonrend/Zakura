@@ -29,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   fsArchive,
   fsDelete,
@@ -100,7 +101,7 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
     void load();
   }, [load]);
 
-  // Agent 可能通过 shell/MCP 写入文件；切回页面或定时刷新以跟上变更
+  // Agent 写文件经平台事件推送（fs_* 工具）；切回页面时再刷新一次兜底
   useEffect(() => {
     const onFocus = () => {
       void load({ silent: true });
@@ -110,15 +111,19 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void load({ silent: true });
-    }, 8000);
+    const unsubscribe = subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "agent_fs_changed" || ev.agentId !== agentId) return;
+        void load({ silent: true });
+      },
+      () => void load({ silent: true }),
+    );
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
-      clearInterval(timer);
+      unsubscribe();
     };
-  }, [load]);
+  }, [load, agentId]);
 
   useEffect(() => {
     return () => {

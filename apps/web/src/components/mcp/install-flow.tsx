@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 
 export type McpInstallPhase =
   | "idle"
@@ -106,6 +107,27 @@ export function McpInstallFlow({
   }, [config.kind, config.auth]);
 
   const busy = phase !== "idle" && phase !== "done" && phase !== "error";
+  /** 安装期间的服务端实时进度（拉镜像/启动容器等，经平台事件推送） */
+  const [progressLines, setProgressLines] = useState<
+    Array<{ message: string; level: string }>
+  >([]);
+
+  useEffect(() => {
+    if (phase === "creating") setProgressLines([]);
+  }, [phase]);
+
+  useEffect(() => {
+    if (!busy) return;
+    return subscribePlatformEvents((ev) => {
+      if (ev.type !== "mcp_progress") return;
+      // 安装请求返回前还拿不到 instanceId：先展示本租户全部安装进度
+      if (instanceId && ev.instanceId !== instanceId) return;
+      setProgressLines((prev) => [
+        ...prev.slice(-6),
+        { message: ev.message, level: ev.level },
+      ]);
+    });
+  }, [busy, instanceId]);
   const isStdio = config.kind === "stdio";
   const allowPatFallback =
     config.oauth?.allowPatFallback === true ||
@@ -466,6 +488,15 @@ export function McpInstallFlow({
       ) : null}
 
       <div className="space-y-4 pt-1">
+        {(busy || phase === "error") && progressLines.length > 0 ? (
+          <div className="space-y-0.5 rounded-md bg-muted/40 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+            {progressLines.map((l, i) => (
+              <div key={i} className={cn(l.level === "error" && "text-destructive")}>
+                {l.message}
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div>
           <div className="mb-2 flex flex-wrap gap-1.5">
             <Badge variant="secondary" className="text-[10px]">

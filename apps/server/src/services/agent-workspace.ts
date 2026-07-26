@@ -588,7 +588,7 @@ export class AgentWorkspaceService {
       logAgentProgress(agent.id, step, message, { percent, phase });
 
     this.closeTunnelsForAgent(agent.id);
-    beginAgentProgress(agent.id, "starting");
+    beginAgentProgress(agent.id, "starting", agent.tenantId);
     log("init", "准备工作区环境", 2, "init");
 
     if (mode === "none") {

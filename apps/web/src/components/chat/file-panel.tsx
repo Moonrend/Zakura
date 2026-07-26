@@ -33,6 +33,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   fileExt,
   formatSize,
@@ -183,6 +184,21 @@ export function FilePanel({
     },
     [],
   );
+
+  // Agent 写文件时经平台事件刷新对应目录（订阅经 ref 保持稳定，避免连接抖动）
+  const dirCacheRef = useRef(dirCache);
+  dirCacheRef.current = dirCache;
+  const loadDirRef = useRef(loadDir);
+  loadDirRef.current = loadDir;
+  useEffect(() => {
+    if (!fsEnabled) return;
+    return subscribePlatformEvents((ev) => {
+      if (ev.type !== "agent_fs_changed" || ev.agentId !== agentId) return;
+      const p = normPath(ev.path);
+      const dir = p.slice(0, p.lastIndexOf("/")) || "/";
+      if (dirCacheRef.current.has(dir)) void loadDirRef.current(dir, true);
+    });
+  }, [agentId, fsEnabled]);
 
   const openFile = useCallback(
     async (path: string) => {

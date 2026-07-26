@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   listenMcpOauthCallback,
   navigateOauthTab,
@@ -116,22 +117,46 @@ function McpServerDetailInner() {
     };
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api<InstanceDetail>(`/api/instances/${id}`);
-      setInstance(data);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-      setInstance(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
+  const load = useCallback(
+    async (silent = false) => {
+      if (!silent) setLoading(true);
+      try {
+        const data = await api<InstanceDetail>(`/api/instances/${id}`, {
+          cacheTtlMs: false,
+        });
+        setInstance(data);
+      } catch (err) {
+        if (!silent) {
+          toast.error(err instanceof Error ? err.message : String(err));
+          setInstance(null);
+        }
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [id],
+  );
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 本实例的状态/安装进度经平台事件推送，变化时静默重拉详情
+  useEffect(() => {
+    let last = 0;
+    return subscribePlatformEvents((ev) => {
+      if (
+        (ev.type !== "mcp_instance" && ev.type !== "mcp_progress") ||
+        ev.instanceId !== id
+      ) {
+        return;
+      }
+      const now = Date.now();
+      if (ev.type === "mcp_progress" && now - last < 2000) return;
+      last = now;
+      void load(true);
+    });
+  }, [id, load]);
 
   useEffect(() => {
     if (!autoOauth || oauthAutoTried || loading || !instance) return;

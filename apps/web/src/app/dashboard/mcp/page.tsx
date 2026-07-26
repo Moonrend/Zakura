@@ -5,6 +5,7 @@ import Link from "next/link";
 import { toast } from "sonner";
 import { CloudDownload, Store } from "lucide-react";
 import { api } from "@/lib/api";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -68,20 +69,39 @@ export default function McpServersPage() {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
-      const inst = await api<InstanceRow[]>("/api/instances");
+      const inst = await api<InstanceRow[]>("/api/instances", { cacheTtlMs: false });
       setInstances(inst.filter((i) => MCP_PROVIDERS.has(i.providerId)));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      if (!silent) toast.error(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // 实例状态变化经平台事件推送：已知实例就地更新，新实例静默重拉
+  useEffect(() => {
+    return subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "mcp_instance") return;
+        setInstances((prev) => {
+          if (!prev.some((i) => i.id === ev.instanceId)) {
+            void load(true);
+            return prev;
+          }
+          return prev.map((i) =>
+            i.id === ev.instanceId ? { ...i, status: ev.status } : i,
+          );
+        });
+      },
+      () => void load(true),
+    );
   }, [load]);
 
   return (

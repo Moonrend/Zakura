@@ -53,13 +53,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 
 const LOCAL_VALUE = "__local__";
-
-function shouldPollProgress(wsStatus: string, progress: ProgressSnapshot | null) {
-  if (progress?.running) return true;
-  return wsStatus === "starting" || wsStatus === "stopping";
-}
 
 export default function AgentComputerPage() {
   const { id, agent, refresh, patchAgent } = useAgentDetail();
@@ -97,16 +93,11 @@ export default function AgentComputerPage() {
       .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
   }, [id]);
 
+  // 进度经平台事件推送（SSE），只在挂载/重连/收尾时拉快照对齐
   useEffect(() => {
     let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    const schedule = (ms: number) => {
-      if (!alive) return;
-      timer = setTimeout(() => void tick(), ms);
-    };
-
-    const tick = async () => {
+    const syncSnapshot = async () => {
       try {
         const res = await fetchAgentProgress(id);
         if (!alive) return;
@@ -116,20 +107,27 @@ export default function AgentComputerPage() {
           lastError: res.agent.lastError,
           workspace: res.workspace,
         });
-        const active = shouldPollProgress(res.workspace.status, res.progress);
-        if (res.progress.done && res.workspace.status === "running") {
-          void refresh({ list: false });
-        }
-        schedule(active ? 1500 : 8000);
       } catch {
-        schedule(5000);
+        /* ignore */
       }
     };
 
-    void tick();
+    void syncSnapshot();
+    const unsubscribe = subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "agent_progress" || ev.agentId !== id) return;
+        setProgress(ev.snapshot);
+        if (ev.snapshot.done) {
+          // 收尾：拉一次权威状态（workspace status / lastError）
+          void syncSnapshot();
+          void refresh({ list: false });
+        }
+      },
+      () => void syncSnapshot(),
+    );
     return () => {
       alive = false;
-      if (timer) clearTimeout(timer);
+      unsubscribe();
     };
   }, [id, patchAgent, refresh]);
 

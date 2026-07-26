@@ -8,6 +8,7 @@ import type { NetworkSettingsService } from "../services/network-settings.js";
 import type { Orchestrator } from "../services/orchestrator.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import { hashRunnerToken } from "@zakura/core";
+import { platformEvents } from "../services/platform-events.js";
 import type { RunnerHostInfo, RunnerInstallPackage } from "@zakura/shared";
 import { rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -195,6 +196,8 @@ export function registerRuntimeNodeRoutes(
       .catch(() => ({} as { hostInfo?: RunnerHostInfo }));
     const updated = await nodes.heartbeat(nodeId, { ...body, token });
     if (!updated) return c.json({ error: "Not found" }, 404);
+    // 心跳即状态信号：推送给租户，前端 Runner 列表免轮询
+    platformEvents.publish(updated.tenantId, { type: "runner_node", nodeId: updated.id });
     return c.json({ node: mapRuntimeNode(updated) });
   });
 

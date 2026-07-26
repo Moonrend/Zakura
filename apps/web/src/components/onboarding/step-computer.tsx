@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, Plus } from "lucide-react";
 import { api } from "@/lib/api";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   fetchAgent,
   fetchAgentProgress,
@@ -97,10 +98,11 @@ export function StepComputerEnv({ agentId, onDone }: Props) {
     void load();
   }, [load]);
 
+  // 进度经平台事件推送，只在挂载/重连/收尾时拉快照对齐
   useEffect(() => {
     if (!agentId) return;
     let alive = true;
-    const tick = async () => {
+    const syncSnapshot = async () => {
       try {
         const res = await fetchAgentProgress(agentId);
         if (!alive) return;
@@ -115,11 +117,19 @@ export function StepComputerEnv({ agentId, onDone }: Props) {
         /* ignore */
       }
     };
-    void tick();
-    const t = setInterval(() => void tick(), 1500);
+    void syncSnapshot();
+    const unsubscribe = subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "agent_progress" || ev.agentId !== agentId) return;
+        setPercent(ev.snapshot.percent);
+        setRunning(ev.snapshot.running);
+        if (ev.snapshot.done) void syncSnapshot();
+      },
+      () => void syncSnapshot(),
+    );
     return () => {
       alive = false;
-      clearInterval(t);
+      unsubscribe();
     };
   }, [agentId]);
 

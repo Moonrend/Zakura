@@ -29,6 +29,7 @@ import {
   TailscaleMeshPanel,
   type TailscaleMeshReady,
 } from "@/components/tailscale-mesh-panel";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import { RunnerInstallPanel } from "@/components/runner-install-panel";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
@@ -77,10 +78,27 @@ export default function RunnersPage() {
     }
   }, []);
 
+  // Runner 心跳经平台事件推送；回到前台时刷新一次，不再定时轮询
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(true), 30_000);
-    return () => clearInterval(t);
+    let last = 0;
+    const throttledReload = () => {
+      const now = Date.now();
+      if (now - last < 4000) return;
+      last = now;
+      void load(true);
+    };
+    const unsubscribe = subscribePlatformEvents((ev) => {
+      if (ev.type === "runner_node") throttledReload();
+    }, throttledReload);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") throttledReload();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      unsubscribe();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load]);
 
   function resetDialog() {
