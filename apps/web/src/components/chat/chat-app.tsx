@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import {
@@ -110,7 +111,7 @@ export function ChatApp() {
   const [events, setEvents] = useState<CloudAgentEvent[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -140,6 +141,7 @@ export function ChatApp() {
   /** 跨 Agent 打开搜索结果：切换后应加载的目标会话 */
   const pendingSessionRef = useRef<{ agentId: string; sessionId: string } | null>(null);
 
+  const isMobile = useIsMobile();
   const agent = agents.find((a) => a.id === agentId) ?? null;
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
   const runActive = Boolean(activeSession?.activeRunId);
@@ -150,6 +152,19 @@ export function ChatApp() {
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
   const grouped = useMemo(() => groupSessions(sessions), [sessions]);
   const searching = searchQ.trim().length > 0;
+
+  // 初始按视口决定：桌面展开，移动端收起（覆盖式抽屉，避免首帧闪现）
+  useEffect(() => {
+    setSidebarOpen(window.matchMedia("(min-width: 768px)").matches);
+  }, []);
+  useEffect(() => {
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
+
+  /** 移动端在做出选择后自动收起抽屉 */
+  const closeNavOnMobile = useCallback(() => {
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
 
   // —— 鉴权 + Agent 列表 ——
   useEffect(() => {
@@ -567,11 +582,22 @@ export function ChatApp() {
 
   return (
     <div className="flex h-svh bg-background">
-      {/* ===== 侧边栏 ===== */}
+      {/* ===== 侧边栏（桌面内联收展；移动端覆盖式抽屉） ===== */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+          aria-hidden
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
       <aside
         className={cn(
-          "flex h-full shrink-0 flex-col border-r border-border/60 bg-muted/20 transition-[width] duration-200",
-          sidebarOpen ? "w-[264px]" : "w-0 overflow-hidden border-r-0",
+          "flex h-full shrink-0 flex-col border-r border-border/60 bg-muted/20",
+          "md:transition-[width] md:duration-200",
+          "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[290px] max-md:bg-background max-md:shadow-xl max-md:transition-transform max-md:duration-200",
+          sidebarOpen
+            ? "w-[264px] max-md:translate-x-0"
+            : "w-0 overflow-hidden border-r-0 max-md:-translate-x-full",
         )}
       >
         {/* Agent 切换 */}
@@ -595,7 +621,13 @@ export function ChatApp() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-56">
               {agents.map((a) => (
-                <DropdownMenuItem key={a.id} onClick={() => setAgentId(a.id)}>
+                <DropdownMenuItem
+                  key={a.id}
+                  onClick={() => {
+                    setAgentId(a.id);
+                    closeNavOnMobile();
+                  }}
+                >
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
                     {a.name.slice(0, 1)}
                   </span>
@@ -611,7 +643,10 @@ export function ChatApp() {
         <div className="flex flex-col gap-1 p-2">
           <button
             type="button"
-            onClick={() => void handleNewSession()}
+            onClick={() => {
+              void handleNewSession();
+              closeNavOnMobile();
+            }}
             className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground hover:bg-muted/60"
           >
             <SquarePen className="h-4 w-4" />
@@ -651,7 +686,10 @@ export function ChatApp() {
                   <button
                     key={hit.id}
                     type="button"
-                    onClick={() => void openSearchHit(hit)}
+                    onClick={() => {
+                      void openSearchHit(hit);
+                      closeNavOnMobile();
+                    }}
                     className="flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left hover:bg-muted/60"
                   >
                     <span className="flex items-center gap-1.5">
@@ -706,7 +744,10 @@ export function ChatApp() {
                             <button
                               type="button"
                               className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
-                              onClick={() => agentId && void loadSession(agentId, s.id)}
+                              onClick={() => {
+                                if (agentId) void loadSession(agentId, s.id);
+                                closeNavOnMobile();
+                              }}
                             >
                               <span className="truncate">{s.title}</span>
                               {s.activeRunId ? (
@@ -719,7 +760,7 @@ export function ChatApp() {
                                   <button
                                     type="button"
                                     aria-label="会话操作"
-                                    className="mr-1 rounded p-1 text-muted-foreground opacity-0 hover:bg-muted group-hover:opacity-100 data-[popup-open]:opacity-100"
+                                    className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:data-[popup-open]:opacity-100"
                                   />
                                 }
                               >
@@ -843,7 +884,7 @@ export function ChatApp() {
         </div>
 
         {/* 组合器 */}
-        <div className="shrink-0 px-4 pb-4 pt-1">
+        <div className="shrink-0 px-2.5 pb-[max(env(safe-area-inset-bottom),0.625rem)] pt-1 md:px-4 md:pb-4">
           <div className="mx-auto max-w-3xl">
             <div className="rounded-3xl border border-border/70 bg-background shadow-sm transition-shadow focus-within:border-ring/40 focus-within:shadow-md">
               {/* 待发送附件 */}
@@ -882,7 +923,7 @@ export function ChatApp() {
                 placeholder={hasChatRoute ? "发送消息…" : "请先配置 chat 模型路由"}
                 disabled={!hasChatRoute || sending}
                 rows={1}
-                className="max-h-48 min-h-11 w-full resize-none border-0 bg-transparent px-4 pt-3 text-[15px] shadow-none focus-visible:ring-0"
+                className="max-h-48 min-h-11 w-full resize-none border-0 bg-transparent px-4 pt-3 text-base shadow-none focus-visible:ring-0 md:text-[15px]"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -962,12 +1003,13 @@ export function ChatApp() {
         </div>
       </div>
 
-      {/* ===== 文件面板 ===== */}
+      {/* ===== 文件面板（移动端全屏覆盖） ===== */}
       {filePanelOpen && agentId && (
         <FilePanel
           agentId={agentId}
           fsEnabled={Boolean(agent?.enableComputer)}
           openRequest={fileRequest}
+          overlay={isMobile}
           onClose={() => setFilePanelOpen(false)}
         />
       )}

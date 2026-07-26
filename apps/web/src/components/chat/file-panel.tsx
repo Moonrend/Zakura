@@ -117,12 +117,15 @@ export function FilePanel({
   agentId,
   fsEnabled,
   openRequest,
+  overlay = false,
   onClose,
 }: {
   agentId: string;
   fsEnabled: boolean;
   /** 外部请求打开的文件：{path, nonce}；nonce 变化触发 */
   openRequest?: { path: string; nonce: number } | null;
+  /** 移动端全屏覆盖模式 */
+  overlay?: boolean;
   onClose: () => void;
 }) {
   const { resolvedTheme } = useTheme();
@@ -439,7 +442,13 @@ export function FilePanel({
   }
 
   return (
-    <aside className="flex h-full w-[400px] shrink-0 flex-col border-l border-border/60 bg-muted/10">
+    <aside
+      className={
+        overlay
+          ? "fixed inset-0 z-50 flex flex-col bg-background"
+          : "flex h-full w-[400px] shrink-0 flex-col border-l border-border/60 bg-muted/10"
+      }
+    >
       {/* 头部 */}
       <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border/50 px-2">
         {file ? (

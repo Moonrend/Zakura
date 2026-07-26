@@ -67,7 +67,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const MD_CLASS =
-  "max-w-full min-w-0 text-[15px] leading-7 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted/50 [&_pre]:p-3 [&_pre]:text-[13px] [&_code]:font-mono [&_code]:text-[0.88em] [&_p]:my-2.5 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-0.5 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-[15px] [&_a]:underline [&_a]:underline-offset-2 [&_table]:my-2 [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground";
+  "max-w-full min-w-0 break-words text-[15px] leading-7 [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted/50 [&_pre]:p-3 [&_pre]:text-[13px] [&_code]:font-mono [&_code]:text-[0.88em] [&_p]:my-2.5 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-0.5 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-[15px] [&_a]:underline [&_a]:underline-offset-2 [&_table]:my-2 [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -173,7 +173,7 @@ function renderRunItems(
             <MarkdownRender content={it.content} final={it.final} fade={false} />
           </div>
           {it.final && it.content && (
-            <div className="opacity-0 transition-opacity group-hover/msg:opacity-100">
+            <div className="max-md:opacity-70 md:opacity-0 md:transition-opacity md:group-hover/msg:opacity-100">
               <CopyButton text={it.content} />
             </div>
           )}
@@ -273,7 +273,7 @@ export function ChatMessages({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-3 py-4 md:px-4 md:py-6">
       {turns.map((turn, ti) => {
         const isLast = ti === turns.length - 1;
         const runItems = turn.items.filter((it) => it.kind !== "user");
@@ -323,7 +323,7 @@ export function ChatMessages({
               <div className="group flex flex-col items-end gap-1">
                 <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
                 <div className="flex items-end justify-end gap-1">
-                  <div className="mb-0.5 flex opacity-0 transition-opacity group-hover:opacity-100">
+                  <div className="mb-0.5 flex max-md:opacity-70 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
                     <CopyButton text={turn.message.content} />
                     <Button
                       size="icon-sm"
