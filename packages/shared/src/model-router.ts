@@ -449,9 +449,19 @@ export type ModelToolChoice =
   | "required"
   | { type: "function"; function: { name: string } };
 
+/** 多模态内容部件（图片以 data: URI 或 http(s) URL 传入） */
+export type ModelChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; imageUrl: { url: string } };
+
 export interface ModelChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  /**
+   * 可选多模态部件；存在时适配器优先使用 parts（content 作为纯文本回退，
+   * 便于不支持多模态的路径与历史代码继续工作）。仅 user 消息支持。
+   */
+  parts?: ModelChatContentPart[];
   name?: string;
   /** assistant 发起的 tool 调用 */
   toolCalls?: ModelToolCall[];

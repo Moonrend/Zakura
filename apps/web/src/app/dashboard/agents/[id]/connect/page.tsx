@@ -63,7 +63,7 @@ function CopyBlock({
       ) : null}
       <pre
         className={cn(
-          "overflow-auto rounded-lg bg-muted p-3 font-mono text-[11px] leading-relaxed text-foreground border border-border dark:bg-background",
+          "overflow-auto rounded-lg bg-muted p-3 font-mono text-[11px] leading-relaxed text-foreground dark:bg-muted/40",
           !title && "relative",
         )}
       >

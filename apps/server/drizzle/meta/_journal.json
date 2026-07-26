@@ -148,6 +148,13 @@
       "when": 1785200000000,
       "tag": "0020_upstream_models",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785300000000,
+      "tag": "0021_cloud_agent",
+      "breakpoints": true
     }
   ]
 }

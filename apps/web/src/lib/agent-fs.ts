@@ -127,6 +127,18 @@ export async function fsDownload(agentId: string, path: string) {
   await downloadBlob(`/api/agents/${agentId}/fs/download?${qs(path)}`, undefined, name);
 }
 
+/** 读取文件内容为 Blob（预览用，不触发浏览器下载） */
+export async function fsFetchBlob(agentId: string, path: string): Promise<Blob> {
+  const res = await fetch(`/api/agents/${agentId}/fs/download?${qs(path)}`, {
+    headers: sessionHeader(),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
+  }
+  return res.blob();
+}
+
 export async function fsArchive(agentId: string, paths: string[]) {
   await downloadBlob(
     `/api/agents/${agentId}/fs/archive`,

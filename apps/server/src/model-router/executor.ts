@@ -7,7 +7,8 @@ import type {
   ModelImageResult,
   ModelRerankResult,
 } from "@zakura/shared";
-import type { ModelProtocolAdapter } from "./adapter.js";
+import type { ChatStreamCallbacks, ModelProtocolAdapter } from "./adapter.js";
+import { isRetryableModelError, withModelRetries } from "./http.js";
 import { resolveAdapterForCapability } from "./registry.js";
 import type { ResolvedRoute } from "./types.js";
 
@@ -35,6 +36,27 @@ export async function executeChat(
   return invokeWithAdapter(route, "chat", async (adapter) => {
     if (!adapter.chat) throw new Error(`协议 ${adapter.protocol} 未实现 chat`);
     return adapter.chat(route, messages, options);
+  });
+}
+
+/**
+ * 流式 chat：协议支持 chatStream 时边生成边回调；
+ * 否则回退非流式并在完成时整块回调一次。
+ */
+export async function executeChatStream(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options: ModelChatInvokeOptions | undefined,
+  callbacks: ChatStreamCallbacks,
+): Promise<ModelChatResult> {
+  return invokeWithAdapter(route, "chat", async (adapter) => {
+    if (adapter.chatStream) {
+      return adapter.chatStream(route, messages, options, callbacks);
+    }
+    if (!adapter.chat) throw new Error(`协议 ${adapter.protocol} 未实现 chat`);
+    const result = await adapter.chat(route, messages, options);
+    if (result.content) callbacks.onDelta?.(result.content);
+    return result;
   });
 }
 
@@ -71,7 +93,11 @@ export async function executeImage(
   });
 }
 
-/** 按已排序的候选链依次尝试，首个成功即返回 */
+/**
+ * 按已排序的候选链依次尝试，首个成功即返回。
+ * 瞬时错误（网络中断/超时/429/5xx）在切换路由前会先在原路由上重试一次。
+ * 全部失败时抛出的聚合错误带 retryable 标记（任一路由错误为瞬时即视为可重试）。
+ */
 export async function executeWithFallback<T>(
   routes: ResolvedRoute[],
   capability: ModelCapability,
@@ -81,16 +107,20 @@ export async function executeWithFallback<T>(
     throw new Error(`未配置 ${capability} 模型路由`);
   }
   const errors: string[] = [];
+  let anyRetryable = false;
   for (const route of routes) {
     try {
       const adapter = resolveAdapterForCapability(route.upstream.protocol, capability);
-      const result = await fn(adapter, route);
+      const result = await withModelRetries(() => fn(adapter, route), { attempts: 2 });
       return { result, route };
     } catch (err) {
+      if (isRetryableModelError(err)) anyRetryable = true;
       errors.push(
         `${route.routeSlug}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
-  throw new Error(`所有 ${capability} 路由均失败:\n${errors.join("\n")}`);
+  const aggregate = new Error(`所有 ${capability} 路由均失败:\n${errors.join("\n")}`);
+  (aggregate as { retryable?: boolean }).retryable = anyRetryable;
+  throw aggregate;
 }

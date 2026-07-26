@@ -4,9 +4,14 @@ import type {
   ModelChatResult,
   ModelEmbeddingResult,
   ModelImageResult,
+  ModelToolCall,
 } from "@zakura/shared";
-import type { ModelProtocolAdapter } from "../adapter.js";
-import { apiError, httpJson, mapConcurrent } from "../http.js";
+import {
+  parseDataUri,
+  type ChatStreamCallbacks,
+  type ModelProtocolAdapter,
+} from "../adapter.js";
+import { apiError, httpJson, httpSse, mapConcurrent } from "../http.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
 import type { ResolvedRoute } from "../types.js";
 
@@ -72,6 +77,29 @@ function toGeminiContents(messages: ModelChatMessage[]) {
       continue;
     }
 
+    // 多模态：user 消息带 parts 时转 inline_data / file_data
+    if (m.role === "user" && m.parts?.length) {
+      const parts: Array<Record<string, unknown>> = [];
+      for (const p of m.parts) {
+        if (p.type === "text") {
+          if (p.text) parts.push({ text: p.text });
+          continue;
+        }
+        const dataUri = parseDataUri(p.imageUrl.url);
+        if (dataUri) {
+          parts.push({
+            inline_data: { mime_type: dataUri.mimeType, data: dataUri.base64 },
+          });
+        } else {
+          parts.push({ file_data: { file_uri: p.imageUrl.url } });
+        }
+      }
+      if (parts.length) {
+        contents.push({ role: "user", parts });
+        continue;
+      }
+    }
+
     contents.push({
       role: geminiRole(m.role),
       parts: [{ text: m.content ?? "" }],
@@ -94,14 +122,18 @@ function mapTools(options?: ModelChatInvokeOptions) {
   ];
 }
 
-async function chat(
+const FINISH_MAP: Record<string, string> = {
+  STOP: "stop",
+  MAX_TOKENS: "length",
+  SAFETY: "content_filter",
+};
+
+function buildChatBody(
   route: ResolvedRoute,
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
-): Promise<ModelChatResult> {
-  const url = `${route.upstream.config.baseUrl}/models/${encodeURIComponent(route.model)}:generateContent?key=${encodeURIComponent(apiKey(route))}`;
+): Record<string, unknown> {
   const { systemParts, contents } = toGeminiContents(messages);
-
   const body: Record<string, unknown> = { contents };
   const genConfig: Record<string, unknown> = {};
   if (route.options.temperature != null) genConfig.temperature = route.options.temperature;
@@ -113,6 +145,16 @@ async function chat(
   const tools = mapTools(options);
   if (tools) body.tools = tools;
   if (options?.extensions) Object.assign(body, options.extensions);
+  return body;
+}
+
+async function chat(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options?: ModelChatInvokeOptions,
+): Promise<ModelChatResult> {
+  const url = `${route.upstream.config.baseUrl}/models/${encodeURIComponent(route.model)}:generateContent?key=${encodeURIComponent(apiKey(route))}`;
+  const body = buildChatBody(route, messages, options);
 
   const res = await httpJson<{
     candidates?: Array<{
@@ -157,13 +199,8 @@ async function chat(
     }
   }
 
-  const finishMap: Record<string, string> = {
-    STOP: "stop",
-    MAX_TOKENS: "length",
-    SAFETY: "content_filter",
-  };
   const finishReason = candidate?.finishReason
-    ? (finishMap[candidate.finishReason] ?? candidate.finishReason.toLowerCase())
+    ? (FINISH_MAP[candidate.finishReason] ?? candidate.finishReason.toLowerCase())
     : toolCalls.length
       ? "tool_calls"
       : "stop";
@@ -183,6 +220,117 @@ async function chat(
       : undefined,
   });
   return toModelChatResult(openai, res.data);
+}
+
+/** Gemini streamGenerateContent 分片的累积状态 */
+export type GeminiStreamState = {
+  text: string;
+  toolCalls: ModelToolCall[];
+  finishReason: string | null;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+};
+
+export function createGeminiStreamState(): GeminiStreamState {
+  return { text: "", toolCalls: [], finishReason: null };
+}
+
+/** 吸收一个流式 GenerateContentResponse 分片，返回新增文本 */
+export function absorbGeminiStreamChunk(state: GeminiStreamState, chunk: unknown): string {
+  if (!chunk || typeof chunk !== "object") return "";
+  const o = chunk as {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }>;
+      };
+      finishReason?: string;
+    }>;
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      totalTokenCount?: number;
+    };
+    error?: { message?: string };
+  };
+  if (o.error?.message) throw new Error(`gemini stream error: ${o.error.message}`);
+  if (o.usageMetadata) {
+    state.usage = {
+      promptTokens: o.usageMetadata.promptTokenCount,
+      completionTokens: o.usageMetadata.candidatesTokenCount,
+      totalTokens: o.usageMetadata.totalTokenCount,
+    };
+  }
+  const candidate = o.candidates?.[0];
+  if (!candidate) return "";
+  if (candidate.finishReason) state.finishReason = candidate.finishReason;
+  let added = "";
+  for (const p of candidate.content?.parts ?? []) {
+    if (p.text) {
+      state.text += p.text;
+      added += p.text;
+    }
+    if (p.functionCall?.name) {
+      state.toolCalls.push({
+        id: `call_gemini_${state.toolCalls.length}`,
+        type: "function",
+        function: {
+          name: p.functionCall.name,
+          arguments: JSON.stringify(p.functionCall.args ?? {}),
+        },
+      });
+    }
+  }
+  return added;
+}
+
+export function geminiStreamStateToResult(
+  state: GeminiStreamState,
+  model: string,
+): ModelChatResult {
+  const finishReason = state.finishReason
+    ? (FINISH_MAP[state.finishReason] ?? state.finishReason.toLowerCase())
+    : state.toolCalls.length
+      ? "tool_calls"
+      : "stop";
+  const openai = buildOpenAIChatCompletion({
+    model,
+    content: state.text || null,
+    toolCalls: state.toolCalls.length ? state.toolCalls : undefined,
+    finishReason,
+    usage: state.usage,
+  });
+  return toModelChatResult(openai);
+}
+
+async function chatStream(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options: ModelChatInvokeOptions | undefined,
+  callbacks: ChatStreamCallbacks,
+): Promise<ModelChatResult> {
+  const url = `${route.upstream.config.baseUrl}/models/${encodeURIComponent(route.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey(route))}`;
+  const body = buildChatBody(route, messages, options);
+  const state = createGeminiStreamState();
+  await httpSse(
+    "gemini chat(stream)",
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+      timeoutMs: timeout(route),
+    },
+    (payload) => {
+      let chunk: unknown;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      const delta = absorbGeminiStreamChunk(state, chunk);
+      if (delta) callbacks.onDelta?.(delta);
+    },
+  );
+  return geminiStreamStateToResult(state, route.model);
 }
 
 async function embedOne(route: ResolvedRoute, text: string): Promise<number[]> {
@@ -254,6 +402,7 @@ export const geminiAdapter: ModelProtocolAdapter = {
   protocol: "gemini",
   supportedCapabilities: ["chat", "embedding", "image"],
   chat,
+  chatStream,
   embed,
   generateImage,
 };

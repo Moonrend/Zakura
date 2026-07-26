@@ -453,7 +453,7 @@ export default function AgentComputerPage() {
 
       {showLog ? (
         <SettingsSection title="日志">
-          <div className="max-h-56 overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-[11px] leading-relaxed">
+          <div className="max-h-56 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
             {(progress?.events ?? []).map((e, i) => (
               <div
                 key={`${e.ts}-${i}`}

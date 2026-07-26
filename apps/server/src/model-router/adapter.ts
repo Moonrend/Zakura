@@ -11,11 +11,23 @@ import type {
 } from "@zakura/shared";
 import type { ResolvedRoute } from "./types.js";
 
+/** 流式回调：onDelta 收到增量文本；结束后仍返回完整 ModelChatResult */
+export type ChatStreamCallbacks = {
+  onDelta?: (text: string) => void;
+};
+
 export type ModelInvokeHandlers = {
   chat?(
     route: ResolvedRoute,
     messages: ModelChatMessage[],
     options?: ModelChatInvokeOptions,
+  ): Promise<ModelChatResult>;
+  /** 可选流式 chat；未实现的协议由 executor 回退到非流式 */
+  chatStream?(
+    route: ResolvedRoute,
+    messages: ModelChatMessage[],
+    options: ModelChatInvokeOptions | undefined,
+    callbacks: ChatStreamCallbacks,
   ): Promise<ModelChatResult>;
   embed?(route: ResolvedRoute, texts: string[]): Promise<ModelEmbeddingResult>;
   rerank?(
@@ -37,6 +49,13 @@ export function adapterSupports(
   capability: ModelCapability,
 ): boolean {
   return adapter.supportedCapabilities.includes(capability);
+}
+
+/** 解析 data: URI（多模态图片）；非 data URI 返回 null */
+export function parseDataUri(url: string): { mimeType: string; base64: string } | null {
+  const m = /^data:([^;,]+);base64,(.+)$/s.exec(url);
+  if (!m) return null;
+  return { mimeType: m[1]!, base64: m[2]! };
 }
 
 /** 从 OpenAI 兼容 choice.message 提取 tool_calls */

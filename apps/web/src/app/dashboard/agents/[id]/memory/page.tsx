@@ -455,7 +455,13 @@ export default function AgentMemoryPage() {
                         <TableCell className="tabular-nums text-xs">{m.importance}</TableCell>
                       )}
                       <TableCell className="text-xs text-muted-foreground">
-                        {m.source}
+                        {m.source === "auto" ? (
+                          <Badge variant="success" className="px-1.5 py-0 text-[10px]">
+                            自动
+                          </Badge>
+                        ) : (
+                          m.source
+                        )}
                         {m.score != null ? ` · ${m.score.toFixed(1)}` : ""}
                       </TableCell>
                       <TableCell>

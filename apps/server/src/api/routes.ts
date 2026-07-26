@@ -54,7 +54,10 @@ import { isCimdClientId } from "../services/oauth-cimd.js";
 import { PROVIDER_CATEGORY_META } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
+import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
+import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
+import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
@@ -2165,6 +2168,45 @@ export async function createApiApp(deps: {
       catalog: modelCatalog,
       upstreamModels,
     });
+  }
+
+  // Cloud Agent：持久会话 + MCP 工具注入推理循环
+  {
+    const cloudStore = new CloudAgentSessionStore(db);
+    if (modelRouter) {
+      const cloudRuntime = new CloudAgentRuntime({
+        store: cloudStore,
+        gateway,
+        modelRouter,
+        agentService,
+        memoryStore,
+        memoryProviders,
+        workspaceFsProvider,
+      });
+      // MCP 客户端可经 re_spawn_subagent 在云端运行子代理
+      gateway.setSubagentRunner({
+        run: (tenantId, agent, args, opts) =>
+          cloudRuntime.runSubagent(tenantId, agent, args, opts),
+      });
+      registerCloudAgentRoutes(app, {
+        agentService,
+        store: cloudStore,
+        runtime: cloudRuntime,
+        modelRouter,
+      });
+    } else {
+      // 无模型路由：注册只读会话 API，发消息时返回明确错误
+      registerCloudAgentRoutes(app, {
+        agentService,
+        store: cloudStore,
+        runtime: {
+          startTurn: async () => {
+            throw new Error("模型路由未启用，请先配置 chat 上游");
+          },
+        },
+        modelRouter,
+      });
+    }
   }
 
   registerTenantRoutes(app, {

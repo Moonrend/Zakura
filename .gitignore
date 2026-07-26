@@ -14,3 +14,4 @@ certs/
 *.pem
 *.key
 apps/server/src/mcp/stdio-bridge.bundle.mjs
+.claude/

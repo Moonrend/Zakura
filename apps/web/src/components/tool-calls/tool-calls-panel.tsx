@@ -226,13 +226,13 @@ function CallRow({
         <div className="grid gap-2 border-t bg-muted/30 px-3 py-3 md:grid-cols-2">
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-muted-foreground">参数</div>
-            <pre className="max-h-64 overflow-auto rounded-md border bg-card p-2 text-[11px] leading-relaxed">
+            <pre className="max-h-64 overflow-auto rounded-md bg-background/70 p-2 text-[11px] leading-relaxed">
               {prettyJson(item.argsJson)}
             </pre>
           </div>
           <div className="space-y-1">
             <div className="text-[11px] font-medium text-muted-foreground">结果</div>
-            <pre className="max-h-64 overflow-auto rounded-md border bg-card p-2 text-[11px] leading-relaxed">
+            <pre className="max-h-64 overflow-auto rounded-md bg-background/70 p-2 text-[11px] leading-relaxed">
               {prettyResultJson(item.resultJson)}
             </pre>
           </div>

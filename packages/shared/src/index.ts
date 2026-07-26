@@ -187,6 +187,7 @@ export {
   type ModelToolCall,
   type ModelToolChoice,
   type ModelChatMessage,
+  type ModelChatContentPart,
   type ModelChatInvokeOptions,
   type OpenAIChatCompletion,
   type OpenAIChatCompletionChoice,
@@ -434,3 +435,31 @@ export {
 } from "./mcp-tool-descriptor.js";
 export type { McpCreateTaskResult } from "./mcp-tool-descriptor.js";
 export type { PublicMcpToolDescriptor } from "./mcp-tool-descriptor.js";
+
+export {
+  CLOUD_AGENT_EVENT_TYPES,
+  parseCloudAgentConfig,
+} from "./cloud-agent.js";
+export type {
+  CloudAgentEventType,
+  CloudAgentRunStatus,
+  CloudAgentSessionStatus,
+  CloudAgentUserMessagePayload,
+  CloudAgentRunStartPayload,
+  CloudAgentAssistantDeltaPayload,
+  CloudAgentAssistantMessagePayload,
+  CloudAgentAssistantRollbackPayload,
+  CloudAgentAttachment,
+  CloudAgentToolCallStartPayload,
+  CloudAgentToolCallArgsPayload,
+  CloudAgentToolCallResultPayload,
+  CloudAgentRunStatusPayload,
+  CloudAgentRunEndPayload,
+  CloudAgentRunErrorPayload,
+  CloudAgentRunLogPayload,
+  CloudAgentMemoryUpdatedPayload,
+  CloudAgentSessionUpdatePayload,
+  CloudAgentEventPayload,
+  CloudAgentEvent,
+  CloudAgentConfig,
+} from "./cloud-agent.js";

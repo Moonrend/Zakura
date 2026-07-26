@@ -14,6 +14,7 @@ import {
   Globe,
   KeyRound,
   LogOut,
+  MessageSquare,
   Monitor,
   Network,
   Plug,
@@ -363,6 +364,13 @@ export function AppSidebar({
   };
 
   const platformNav: NavEntry[] = [
+    {
+      id: "chat",
+      href: "/chat",
+      label: "聊天",
+      icon: MessageSquare,
+      isActive: (path) => path === "/chat" || path.startsWith("/chat/"),
+    },
     {
       id: "web",
       href: "/dashboard/web",

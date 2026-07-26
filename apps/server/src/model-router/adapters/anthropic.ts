@@ -2,9 +2,14 @@ import type {
   ModelChatInvokeOptions,
   ModelChatMessage,
   ModelChatResult,
+  ModelToolCall,
 } from "@zakura/shared";
-import type { ModelProtocolAdapter } from "../adapter.js";
-import { apiError, httpJson } from "../http.js";
+import {
+  parseDataUri,
+  type ChatStreamCallbacks,
+  type ModelProtocolAdapter,
+} from "../adapter.js";
+import { apiError, httpJson, httpSse } from "../http.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
 import type { ResolvedRoute } from "../types.js";
 
@@ -25,7 +30,13 @@ function version(route: ResolvedRoute): string {
 type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+  | { type: "tool_result"; tool_use_id: string; content: string }
+  | {
+      type: "image";
+      source:
+        | { type: "base64"; media_type: string; data: string }
+        | { type: "url"; url: string };
+    };
 
 function toAnthropicMessages(messages: ModelChatMessage[]): {
   system?: string;
@@ -72,6 +83,28 @@ function toAnthropicMessages(messages: ModelChatMessage[]): {
       out.push({ role: "assistant", content: blocks });
       continue;
     }
+    // 多模态：user 消息带 parts 时转 content blocks
+    if (m.role === "user" && m.parts?.length) {
+      const blocks: AnthropicContentBlock[] = [];
+      for (const p of m.parts) {
+        if (p.type === "text") {
+          if (p.text) blocks.push({ type: "text", text: p.text });
+          continue;
+        }
+        const dataUri = parseDataUri(p.imageUrl.url);
+        blocks.push({
+          type: "image",
+          source: dataUri
+            ? { type: "base64", media_type: dataUri.mimeType, data: dataUri.base64 }
+            : { type: "url", url: p.imageUrl.url },
+        });
+      }
+      if (blocks.length) {
+        out.push({ role: "user", content: blocks });
+        continue;
+      }
+    }
+
     out.push({
       role: m.role === "assistant" ? "assistant" : "user",
       content: m.content ?? "",
@@ -104,11 +137,18 @@ function mapToolChoice(options?: ModelChatInvokeOptions) {
   return undefined;
 }
 
-async function chat(
+const FINISH_MAP: Record<string, string> = {
+  end_turn: "stop",
+  max_tokens: "length",
+  stop_sequence: "stop",
+  tool_use: "tool_calls",
+};
+
+function buildBody(
   route: ResolvedRoute,
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
-): Promise<ModelChatResult> {
+): Record<string, unknown> {
   const mapped = toAnthropicMessages(messages);
   const body: Record<string, unknown> = {
     model: route.model,
@@ -123,7 +163,24 @@ async function chat(
   const toolChoice = mapToolChoice(options);
   if (toolChoice) body.tool_choice = toolChoice;
   if (options?.extensions) Object.assign(body, options.extensions);
+  return body;
+}
 
+function buildRequestHeaders(route: ResolvedRoute): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey(route),
+    "anthropic-version": version(route),
+    ...(route.upstream.config.extraHeaders ?? {}),
+  };
+}
+
+async function chat(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options?: ModelChatInvokeOptions,
+): Promise<ModelChatResult> {
+  const body = buildBody(route, messages, options);
   const url = `${route.upstream.config.baseUrl}/messages`;
   const res = await httpJson<{
     id?: string;
@@ -140,13 +197,7 @@ async function chat(
     error?: { message?: string };
   }>(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "x-api-key": apiKey(route),
-      "anthropic-version": version(route),
-      ...(route.upstream.config.extraHeaders ?? {}),
-    },
+    headers: { ...buildRequestHeaders(route), Accept: "application/json" },
     body: JSON.stringify(body),
     timeoutMs: timeout(route),
   });
@@ -169,14 +220,8 @@ async function chat(
     }
   }
 
-  const finishMap: Record<string, string> = {
-    end_turn: "stop",
-    max_tokens: "length",
-    stop_sequence: "stop",
-    tool_use: "tool_calls",
-  };
   const finishReason = res.data?.stop_reason
-    ? (finishMap[res.data.stop_reason] ?? res.data.stop_reason)
+    ? (FINISH_MAP[res.data.stop_reason] ?? res.data.stop_reason)
     : toolCalls!.length
       ? "tool_calls"
       : "stop";
@@ -200,8 +245,150 @@ async function chat(
   return toModelChatResult(openai, res.data);
 }
 
+/** Anthropic Messages 流式事件的累积状态 */
+export type AnthropicStreamState = {
+  model: string | null;
+  text: string;
+  /** content block index → 工具调用累积 */
+  tools: Map<number, { id: string; name: string; args: string }>;
+  stopReason: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
+export function createAnthropicStreamState(): AnthropicStreamState {
+  return { model: null, text: "", tools: new Map(), stopReason: null };
+}
+
+/**
+ * 吸收一条流式事件（message_start / content_block_* / message_delta …）。
+ * 返回本事件新增的文本增量；error 事件抛出异常。
+ */
+export function absorbAnthropicStreamEvent(
+  state: AnthropicStreamState,
+  event: unknown,
+): string {
+  if (!event || typeof event !== "object") return "";
+  const ev = event as {
+    type?: string;
+    message?: { model?: string; usage?: { input_tokens?: number } };
+    index?: number;
+    content_block?: { type?: string; id?: string; name?: string };
+    delta?: {
+      type?: string;
+      text?: string;
+      partial_json?: string;
+      stop_reason?: string;
+    };
+    usage?: { output_tokens?: number };
+    error?: { message?: string };
+  };
+  switch (ev.type) {
+    case "message_start":
+      if (ev.message?.model) state.model = ev.message.model;
+      if (ev.message?.usage?.input_tokens != null) {
+        state.inputTokens = ev.message.usage.input_tokens;
+      }
+      return "";
+    case "content_block_start":
+      if (ev.content_block?.type === "tool_use" && ev.index != null) {
+        state.tools.set(ev.index, {
+          id: ev.content_block.id ?? `call_${ev.index}`,
+          name: ev.content_block.name ?? "tool",
+          args: "",
+        });
+      }
+      return "";
+    case "content_block_delta": {
+      const d = ev.delta;
+      if (d?.type === "text_delta" && typeof d.text === "string") {
+        state.text += d.text;
+        return d.text;
+      }
+      if (d?.type === "input_json_delta" && typeof d.partial_json === "string") {
+        const slot = ev.index != null ? state.tools.get(ev.index) : undefined;
+        if (slot) slot.args += d.partial_json;
+      }
+      return "";
+    }
+    case "message_delta":
+      if (ev.delta?.stop_reason) state.stopReason = ev.delta.stop_reason;
+      if (ev.usage?.output_tokens != null) state.outputTokens = ev.usage.output_tokens;
+      return "";
+    case "error":
+      throw new Error(`anthropic stream error: ${ev.error?.message ?? "unknown"}`);
+    default:
+      return "";
+  }
+}
+
+export function anthropicStreamStateToResult(
+  state: AnthropicStreamState,
+  fallbackModel: string,
+): ModelChatResult {
+  const toolCalls: ModelToolCall[] = [...state.tools.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, t]) => ({
+      id: t.id,
+      type: "function" as const,
+      function: { name: t.name, arguments: t.args || "{}" },
+    }));
+  const finishReason = state.stopReason
+    ? (FINISH_MAP[state.stopReason] ?? state.stopReason)
+    : toolCalls.length
+      ? "tool_calls"
+      : "stop";
+  const openai = buildOpenAIChatCompletion({
+    model: state.model ?? fallbackModel,
+    content: state.text || null,
+    toolCalls: toolCalls.length ? toolCalls : undefined,
+    finishReason,
+    usage:
+      state.inputTokens != null || state.outputTokens != null
+        ? {
+            promptTokens: state.inputTokens,
+            completionTokens: state.outputTokens,
+            totalTokens: (state.inputTokens ?? 0) + (state.outputTokens ?? 0),
+          }
+        : undefined,
+  });
+  return toModelChatResult(openai);
+}
+
+async function chatStream(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options: ModelChatInvokeOptions | undefined,
+  callbacks: ChatStreamCallbacks,
+): Promise<ModelChatResult> {
+  const body = { ...buildBody(route, messages, options), stream: true };
+  const state = createAnthropicStreamState();
+  await httpSse(
+    "anthropic chat(stream)",
+    `${route.upstream.config.baseUrl}/messages`,
+    {
+      method: "POST",
+      headers: { ...buildRequestHeaders(route), Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+      timeoutMs: timeout(route),
+    },
+    (payload) => {
+      let event: unknown;
+      try {
+        event = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      const delta = absorbAnthropicStreamEvent(state, event);
+      if (delta) callbacks.onDelta?.(delta);
+    },
+  );
+  return anthropicStreamStateToResult(state, route.model);
+}
+
 export const anthropicAdapter: ModelProtocolAdapter = {
   protocol: "anthropic",
   supportedCapabilities: ["chat"],
   chat,
+  chatStream,
 };

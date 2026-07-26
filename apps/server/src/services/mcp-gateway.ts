@@ -124,6 +124,64 @@ function qualify(instanceSlug: string, toolName: string): string {
   return `${instanceSlug}__${toolName}`;
 }
 
+/** 云端子代理工具：provider 标识 + 对外名 */
+export const SUBAGENT_PROVIDER_ID = "zakura-subagent";
+export const SUBAGENT_TOOL_NAME = "spawn_subagent";
+export const SUBAGENT_TOOL_QUALIFIED = `re_${SUBAGENT_TOOL_NAME}`;
+
+/**
+ * 云端子代理执行器接口：由 CloudAgentRuntime 注入。
+ * MCP 客户端与 agent loop 都经此在云端运行隔离上下文的子代理。
+ */
+export interface CloudSubagentRunner {
+  run(
+    tenantId: string,
+    agent: Agent,
+    args: Record<string, unknown>,
+    opts: {
+      /** 父任务取消检查（MCP 外部调用可缺省） */
+      isCancelled?: () => Promise<boolean>;
+      /** 进度回调（agent loop 用于 run_log） */
+      onProgress?: (message: string, data?: Record<string, unknown>) => void;
+    },
+  ): Promise<string>;
+}
+
+function subagentToolDef(agentId: string): ResolvedTool {
+  return {
+    qualifiedName: SUBAGENT_TOOL_QUALIFIED,
+    instanceId: null,
+    providerId: SUBAGENT_PROVIDER_ID,
+    localName: SUBAGENT_TOOL_NAME,
+    title: "云端子代理",
+    description:
+      "在云端启动一个子代理（subagent）独立完成一个子任务。子代理与你共享同一工作区和全部工具，" +
+      "但拥有全新的隔离上下文（看不到当前对话），运行结束后只返回最终结果。" +
+      "适用于：可并行的独立子任务（同一轮发起多个调用即并行执行）、需要大量中间探索但只需要结论的调研、" +
+      "避免冗长中间产物占用主对话上下文。task 必须自包含——子代理没有你的记忆与对话背景。",
+    inputSchema: {
+      type: "object",
+      required: ["task"],
+      properties: {
+        task: {
+          type: "string",
+          description: "子任务描述：目标、范围与验收标准需自包含、可独立执行",
+        },
+        context: {
+          type: "string",
+          description: "可选背景信息（子代理看不到当前对话，历史结论需在此显式给出）",
+        },
+        expected_output: {
+          type: "string",
+          description: "可选期望输出格式（如：JSON 数组 / 要点列表 / 产物文件路径）",
+        },
+      },
+    },
+    builtin: true,
+    agentId,
+  };
+}
+
 /** All MCP-exposed tool names use a stable re_ prefix */
 export function withRePrefix(name: string): string {
   return name.startsWith("re_") ? name : `re_${name}`;
@@ -159,6 +217,7 @@ export class McpGateway {
   private workspaceFsProvider: import("./workspace-fs-provider.js").ServerWorkspaceFsProvider | null =
     null;
   private exposureService: import("./port-exposures.js").ExposureService | null = null;
+  private subagentRunner: CloudSubagentRunner | null = null;
 
   constructor(
     private readonly db: Db,
@@ -199,6 +258,11 @@ export class McpGateway {
 
   setExposureService(service: import("./port-exposures.js").ExposureService): void {
     this.exposureService = service;
+  }
+
+  /** 云端子代理执行器（由 CloudAgentRuntime 注入；MCP 客户端可直接调用 re_spawn_subagent） */
+  setSubagentRunner(runner: CloudSubagentRunner): void {
+    this.subagentRunner = runner;
   }
 
   private enrichResolvedTool(
@@ -376,6 +440,9 @@ export class McpGateway {
         agentId: agent.id,
       }),
     );
+    if (this.subagentRunner) {
+      tools.push(this.enrichResolvedTool(subagentToolDef(agent.id)));
+    }
     const usedNames = new Set(tools.map((t) => t.qualifiedName));
 
     const mcpMode = getAgentMcpMode(agent);
@@ -678,6 +745,16 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<McpToolResult | McpCreateTaskResult> {
     void opts;
+    // 云端子代理：以隔离上下文 mini-loop 执行子任务（MCP 客户端可直接调用）
+    if (tool.providerId === SUBAGENT_PROVIDER_ID && tool.agentId) {
+      if (!this.subagentRunner) return textResult("子代理执行器未启用", true);
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (!agent) return textResult("Agent not found", true);
+      const answer = await this.subagentRunner.run(tenantId, agent, args, {});
+      return textResult(answer, false);
+    }
     if (tool.agentScoped && tool.agentId && this.agentService) {
       const agent = await this.db.query.agents.findFirst({
         where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),

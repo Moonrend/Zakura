@@ -922,6 +922,76 @@ export const networkAuditLogs = pgTable(
   (t) => [index("network_audit_tenant_time").on(t.tenantId, t.createdAt)],
 );
 
+/**
+ * Cloud Agent 持久会话：状态与连接解耦，多设备共享同一事件流。
+ * 每个 Agent 的会话相互隔离。
+ */
+export const cloudAgentSessions = pgTable(
+  "cloud_agent_sessions",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    title: text("title").notNull().default("新对话"),
+    /** active | archived */
+    status: text("status").notNull().default("active"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** 单调递增事件序号 */
+    lastSeq: integer("last_seq").notNull().default(0),
+    activeRunId: text("active_run_id"),
+    ...timestamps,
+  },
+  (t) => [
+    index("cloud_agent_sessions_agent").on(t.agentId, t.updatedAt),
+    index("cloud_agent_sessions_tenant").on(t.tenantId),
+  ],
+);
+
+/** 追加写事件日志：断线续传 / 多设备同步的权威源 */
+export const cloudAgentEvents = pgTable(
+  "cloud_agent_events",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    /** 见 CloudAgentEventType */
+    type: text("type").notNull(),
+    runId: text("run_id"),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cloud_agent_events_session_seq").on(t.sessionId, t.seq),
+    index("cloud_agent_events_session").on(t.sessionId, t.seq),
+  ],
+);
+
+export const cloudAgentRuns = pgTable(
+  "cloud_agent_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+    /** queued | running | completed | cancelled | failed */
+    status: text("status").notNull().default("queued"),
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("cloud_agent_runs_session").on(t.sessionId, t.createdAt)],
+);
+
 export const schema = {
   platformMeta,
   tenants,
@@ -956,6 +1026,9 @@ export const schema = {
   networkSecurityPolicies,
   portExposures,
   networkAuditLogs,
+  cloudAgentSessions,
+  cloudAgentEvents,
+  cloudAgentRuns,
 };
 
 export type PlatformMeta = typeof platformMeta.$inferSelect;
@@ -991,3 +1064,6 @@ export type TunnelProviderSetting = typeof tunnelProviderSettings.$inferSelect;
 export type NetworkSecurityPolicy = typeof networkSecurityPolicies.$inferSelect;
 export type PortExposure = typeof portExposures.$inferSelect;
 export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
+export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;
+export type CloudAgentEventRow = typeof cloudAgentEvents.$inferSelect;
+export type CloudAgentRun = typeof cloudAgentRuns.$inferSelect;

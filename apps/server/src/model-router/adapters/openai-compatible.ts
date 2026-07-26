@@ -8,9 +8,19 @@ import type {
   ModelUpstreamProtocol,
 } from "@zakura/shared";
 import { OPENAI_COMPATIBLE_PROTOCOLS } from "@zakura/shared";
-import { parseOpenAIToolCalls, type ModelProtocolAdapter } from "../adapter.js";
-import { apiError, buildHeaders, httpJson } from "../http.js";
-import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
+import {
+  parseOpenAIToolCalls,
+  type ChatStreamCallbacks,
+  type ModelProtocolAdapter,
+} from "../adapter.js";
+import { apiError, buildHeaders, httpJson, httpSse } from "../http.js";
+import {
+  absorbChatStreamChunk,
+  buildOpenAIChatCompletion,
+  chatStreamStateToResult,
+  createChatStreamState,
+  toModelChatResult,
+} from "../openai-response.js";
 import type { ResolvedRoute } from "../types.js";
 
 type OpenAiCompatProtocol = (typeof OPENAI_COMPATIBLE_PROTOCOLS)[number];
@@ -60,6 +70,14 @@ function mapMessages(messages: ModelChatMessage[]) {
       role: m.role,
       content: m.content,
     };
+    // 多模态：user 消息带 parts 时转 OpenAI content 数组
+    if (m.role === "user" && m.parts?.length) {
+      base.content = m.parts.map((p) =>
+        p.type === "text"
+          ? { type: "text", text: p.text }
+          : { type: "image_url", image_url: { url: p.imageUrl.url } },
+      );
+    }
     if (m.name) base.name = m.name;
     if (m.toolCallId) base.tool_call_id = m.toolCallId;
     if (m.toolCalls?.length) base.tool_calls = m.toolCalls;
@@ -121,6 +139,59 @@ async function chat(
       : undefined,
   });
   return toModelChatResult(openai, res.data);
+}
+
+/** SSE 流式 chat：解析 data: 行累积 delta；连接失败/非 2xx 抛错由上层回退 */
+async function chatStream(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+  options: ModelChatInvokeOptions | undefined,
+  callbacks: ChatStreamCallbacks,
+): Promise<ModelChatResult> {
+  const body: Record<string, unknown> = {
+    model: route.model,
+    messages: mapMessages(messages),
+    stream: true,
+  };
+  if (route.options.temperature != null) body.temperature = route.options.temperature;
+  if (route.options.maxTokens != null) body.max_tokens = route.options.maxTokens;
+  if (options?.tools?.length) body.tools = options.tools;
+  if (options?.toolChoice) body.tool_choice = options.toolChoice;
+  if (options?.extensions) Object.assign(body, options.extensions);
+
+  const state = createChatStreamState();
+  let stopped = false;
+  await httpSse(
+    "chat(stream)",
+    chatUrl(route),
+    {
+      method: "POST",
+      headers: {
+        ...buildHeaders(route.upstream.config, route.upstream.protocol),
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
+      timeoutMs: timeout(route),
+    },
+    (payload) => {
+      if (stopped) return;
+      if (payload === "[DONE]") {
+        stopped = true;
+        return;
+      }
+      let chunk: unknown;
+      try {
+        chunk = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      const err = (chunk as { error?: { message?: string } }).error;
+      if (err?.message) throw new Error(`chat(stream) upstream error: ${err.message}`);
+      const delta = absorbChatStreamChunk(state, chunk);
+      if (delta) callbacks.onDelta?.(delta);
+    },
+  );
+  return chatStreamStateToResult(state, route.model);
 }
 
 async function embed(
@@ -227,7 +298,7 @@ async function generateImage(
   };
 }
 
-const handlers = { chat, embed, rerank, generateImage };
+const handlers = { chat, chatStream, embed, rerank, generateImage };
 
 /** OpenAI / Azure / 自定义及 new-api 常见兼容渠道共享实现 */
 export function createOpenAiCompatibleAdapter(

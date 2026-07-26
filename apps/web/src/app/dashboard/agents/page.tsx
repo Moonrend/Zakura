@@ -88,7 +88,7 @@ export default function AgentsListPage() {
       if (!res.apiKey?.rawKey) {
         setOpen(false);
         resetCreate();
-        router.push(`/dashboard/agents/${res.id}/general`);
+        router.push(`/chat?agent=${res.id}`);
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));

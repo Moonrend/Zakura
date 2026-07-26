@@ -31,7 +31,7 @@ function AgentSettingsChrome({ children }: { children: React.ReactNode }) {
   const { id, agent, list } = useAgentDetail();
 
   const activeSeg =
-    AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "general";
+    AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "chat";
   const pageLabel =
     AGENT_SUBNAV.find((s) => s.href === activeSeg)?.label ?? "设置";
 

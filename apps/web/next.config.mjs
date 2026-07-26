@@ -1,5 +1,65 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * markstream-react 的 exports 仅声明了 `import` 条件，未提供 `require`/`default`。
+ * Next webpack / turbopack 解析包根路径时会报 “Package path . is not exported”。
+ * 用精确别名绕过，同时保留 `markstream-react/index.css` 等子路径走官方 exports。
+ */
+const markstreamDist = path.join(
+  __dirname,
+  "node_modules/markstream-react/dist",
+);
+const emptyModule = path.join(__dirname, "src/lib/empty-module.js");
+/** 未安装的可选 peer → 空模块，避免 Next 编译失败 */
+const optionalPeerAliases = {
+  "@terrastruct/d2": emptyModule,
+  "@antv/infographic": emptyModule,
+  katex: emptyModule,
+  "katex/contrib/mhchem": emptyModule,
+  mermaid: emptyModule,
+  "stream-monaco": emptyModule,
+  "stream-markdown": emptyModule,
+};
+const markstreamAliases = {
+  "markstream-react$": path.join(markstreamDist, "index.js"),
+  "markstream-react/next$": path.join(markstreamDist, "next.js"),
+  "markstream-react/server$": path.join(markstreamDist, "server.js"),
+  ...optionalPeerAliases,
+};
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  transpilePackages: ["markstream-react"],
+  turbopack: {
+    resolveAlias: {
+      "markstream-react": path.join(markstreamDist, "index.js"),
+      "markstream-react/next": path.join(markstreamDist, "next.js"),
+      "markstream-react/server": path.join(markstreamDist, "server.js"),
+      "@terrastruct/d2": "./src/lib/empty-module.js",
+      "@antv/infographic": "./src/lib/empty-module.js",
+      katex: "./src/lib/empty-module.js",
+      "katex/contrib/mhchem": "./src/lib/empty-module.js",
+      mermaid: "./src/lib/empty-module.js",
+      "stream-monaco": "./src/lib/empty-module.js",
+      "stream-markdown": "./src/lib/empty-module.js",
+    },
+  },
+  webpack: (config, { webpack }) => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      ...markstreamAliases,
+    };
+    // 动态 import / 深层子路径有时绕过 resolve.alias，再用替换兜底
+    const optionalPeerPattern =
+      /^(?:@terrastruct\/d2|@antv\/infographic|katex(?:\/.*)?|mermaid|stream-monaco|stream-markdown)$/;
+    config.plugins.push(
+      new webpack.NormalModuleReplacementPlugin(optionalPeerPattern, emptyModule),
+    );
+    return config;
+  },
   async rewrites() {
     const api = process.env.ZAKURA_API_URL || "http://127.0.0.1:8787";
     return [{ source: "/api/:path*", destination: `${api}/api/:path*` }];
