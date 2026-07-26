@@ -277,6 +277,91 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     }
   });
 
+  app.get("/v1/agents/:agentId/fs/download", async (c) => {
+    const fs = getFs(cfg.storageRoot, c.req.param("agentId"));
+    const path = c.req.query("path");
+    if (!path?.trim()) return c.json({ error: "path is required" }, 400);
+    try {
+      const file = await fs.readBytes(path);
+      return new Response(file.data, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(file.size),
+          "Content-Disposition": `attachment; filename="${encodeURIComponent(file.name)}"`,
+        },
+      });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/v1/agents/:agentId/fs/upload", async (c) => {
+    const fs = getFs(cfg.storageRoot, c.req.param("agentId"));
+    try {
+      const form = await c.req.parseBody();
+      const destPath = String(form.path ?? "").trim();
+      if (!destPath) return c.json({ error: "path is required" }, 400);
+      const file = form.file;
+      if (!file || typeof file === "string") {
+        return c.json({ error: "file is required" }, 400);
+      }
+      const data = Buffer.from(await file.arrayBuffer());
+      return c.json(await fs.writeBytes(destPath, data));
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/v1/agents/:agentId/fs/archive", async (c) => {
+    const fs = getFs(cfg.storageRoot, c.req.param("agentId"));
+    const body = await c.req.json<{ paths?: string[] }>().catch(() => ({} as { paths?: string[] }));
+    const paths = body.paths ?? [];
+    try {
+      const { filename, buffer } = await fs.archive(paths);
+      return new Response(buffer, {
+        headers: {
+          "Content-Type": "application/gzip",
+          "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
+        },
+      });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/v1/agents/:agentId/fs/extract", async (c) => {
+    const fs = getFs(cfg.storageRoot, c.req.param("agentId"));
+    const body = await c.req
+      .json<{ path?: string; destination?: string }>()
+      .catch(() => ({} as { path?: string; destination?: string }));
+    if (!body.path?.trim()) return c.json({ error: "path is required" }, 400);
+    try {
+      return c.json(await fs.extract(body.path, body.destination));
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/v1/agents/:agentId/fs/rename", async (c) => {
+    const fs = getFs(cfg.storageRoot, c.req.param("agentId"));
+    const body = await c.req
+      .json<{ oldPath?: string; newPath?: string }>()
+      .catch(() => ({} as { oldPath?: string; newPath?: string }));
+    if (!body.oldPath?.trim() || !body.newPath?.trim()) {
+      return c.json({ error: "oldPath and newPath are required" }, 400);
+    }
+    try {
+      return c.json(await fs.renameApi(body.oldPath, body.newPath));
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
   // --- Migration ---
   app.post("/v1/agents/:agentId/migration/export", async (c) => {
     const agentId = c.req.param("agentId");

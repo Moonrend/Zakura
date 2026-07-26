@@ -1,6 +1,5 @@
 import type { Hono } from "hono";
-import { LocalWorkspaceFs, PathJailError, type WorkspaceFs } from "@zakura/core";
-import { agentFs } from "../services/agent-fs.js";
+import { PathJailError, type WorkspaceFs } from "@zakura/core";
 import type { AgentService } from "../services/agents.js";
 import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provider.js";
 
@@ -45,7 +44,6 @@ async function resolveAgentFs(
       agent: NonNullable<Awaited<ReturnType<AgentService["get"]>>>;
       denied: false;
       fs: WorkspaceFs;
-      localRoot: string | null;
     }
 > {
   const agent = await agentService.get(tenantId, agentId);
@@ -53,19 +51,17 @@ async function resolveAgentFs(
   if (requireFs && !agent.enableFs) {
     return { agent, denied: true as const };
   }
-  // 直接按 binding 打开本机/Runner 文件，不再二次查 agents、不在热路径写 README
   const fs = await fsProvider.forAgentBinding({
     id: agent.id,
     tenantId: agent.tenantId,
     runtimeNodeId: agent.runtimeNodeId,
   });
-  const localRoot = fs instanceof LocalWorkspaceFs ? fs.getRoot() : null;
-  return { agent, fs, localRoot, denied: false as const };
+  return { agent, fs, denied: false as const };
 }
 
 /**
  * Agent workspace filesystem HTTP API.
- * Routes through WorkspaceFsProvider so remote-bound agents hit Runner FS.
+ * 所有操作统一经 WorkspaceFsProvider，本机与远程 Runner 共用同一接口。
  */
 export function registerAgentFsRoutes(
   app: Hono<{ Variables: SessionVars }>,
@@ -143,27 +139,12 @@ export function registerAgentFsRoutes(
     const path = c.req.query("path");
     if (!path?.trim()) return c.json({ error: "path is required" }, 400);
     try {
-      if (resolved.localRoot) {
-        const file = agentFs.readBytes(resolved.localRoot, path);
-        const { readFileSync } = await import("node:fs");
-        const data = readFileSync(file.abs);
-        return new Response(data, {
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "Content-Length": String(data.length),
-            "Content-Disposition": `attachment; filename="${encodeURIComponent(file.name)}"`,
-          },
-        });
-      }
-      // Remote: text path via WorkspaceFs
-      const text = await resolved.fs.readText(path);
-      const data = Buffer.from(text.content, "utf8");
-      const name = path.split("/").filter(Boolean).pop() || "download";
-      return new Response(data, {
+      const file = await resolved.fs.readBytes(path);
+      return new Response(file.data, {
         headers: {
           "Content-Type": "application/octet-stream",
-          "Content-Length": String(data.length),
-          "Content-Disposition": `attachment; filename="${encodeURIComponent(name)}"`,
+          "Content-Length": String(file.size),
+          "Content-Disposition": `attachment; filename="${encodeURIComponent(file.name)}"`,
         },
       });
     } catch (err) {
@@ -182,13 +163,10 @@ export function registerAgentFsRoutes(
     );
     if (!resolved) return c.json({ error: "Not found" }, 404);
     if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
-    if (!resolved.localRoot) {
-      return c.json({ error: "Archive is only supported on local runner workspaces" }, 501);
-    }
     const body = await c.req.json<{ paths?: string[] }>().catch(() => ({} as { paths?: string[] }));
     const paths = body.paths ?? [];
     try {
-      const { filename, buffer } = await agentFs.archive(resolved.localRoot, paths);
+      const { filename, buffer } = await resolved.fs.archive(paths);
       return new Response(buffer, {
         headers: {
           "Content-Type": "application/gzip",
@@ -247,13 +225,7 @@ export function registerAgentFsRoutes(
         return c.json({ error: "file is required" }, 400);
       }
       const data = Buffer.from(await file.arrayBuffer());
-      if (resolved.localRoot) {
-        const result = agentFs.writeBytes(resolved.localRoot, destPath, data);
-        return c.json(result);
-      }
-      // Remote text upload
-      const result = await resolved.fs.writeText(destPath, data.toString("utf8"));
-      return c.json({ path: result.path, size: data.length });
+      return c.json(await resolved.fs.writeBytes(destPath, data));
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, e.status);
@@ -332,13 +304,10 @@ export function registerAgentFsRoutes(
     );
     if (!resolved) return c.json({ error: "Not found" }, 404);
     if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
-    if (!resolved.localRoot) {
-      return c.json({ error: "Extract is only supported on local runner workspaces" }, 501);
-    }
     const body = await c.req.json<{ path?: string; destination?: string }>();
     if (!body.path?.trim()) return c.json({ error: "path is required" }, 400);
     try {
-      return c.json(await agentFs.extract(resolved.localRoot, body.path, body.destination));
+      return c.json(await resolved.fs.extract(body.path, body.destination));
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, e.status);

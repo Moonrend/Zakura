@@ -9,7 +9,7 @@ import type { McpToolResult, MemoryProviderKind, McpToolAnnotations } from "@zak
 import { AGENT_WORKSPACE_ROOT } from "@zakura/shared";
 import type { Agent } from "../db/schema.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
-import { PathJailError } from "./agent-fs.js";
+import { PathJailError } from "@zakura/core";
 import { isComputerEnvEnabled } from "./agent-caps.js";
 import type { AgentWorkspaceService } from "./agent-workspace.js";
 import { MEMORY_LAYERS, type MemoryStore } from "./memory-store.js";

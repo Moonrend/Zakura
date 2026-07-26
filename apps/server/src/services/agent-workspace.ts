@@ -29,7 +29,7 @@ import {
   finishAgentProgress,
   logAgentProgress,
 } from "./agent-progress.js";
-import { ensureWorkspaceDir } from "./agent-fs.js";
+import { ensureWorkspaceDir } from "@zakura/core";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
 
 function isLoopbackHost(host: string): boolean {

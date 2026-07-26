@@ -55,6 +55,28 @@ export type WriteResult = {
   revision?: string;
 };
 
+export type ReadBytesResult = {
+  path: string;
+  data: Buffer;
+  size: number;
+  name: string;
+};
+
+export type WriteBytesResult = {
+  path: string;
+  size: number;
+};
+
+export type ArchiveResult = {
+  filename: string;
+  buffer: Buffer;
+};
+
+export type ExtractResult = {
+  destination: string;
+  ok: true;
+};
+
 export interface WorkspaceFs {
   stat(path: string): Promise<{
     path: string;
@@ -81,6 +103,11 @@ export interface WorkspaceFs {
   move(from: string, to: string): Promise<{ from: string; to: string }>;
   renameApi(oldPath: string, newPath: string): Promise<{ ok: true; path: string }>;
   exists(path: string): Promise<boolean>;
+  /** 二进制下载（HTTP / 大文件上传等） */
+  readBytes(path: string): Promise<ReadBytesResult>;
+  writeBytes(path: string, data: Buffer): Promise<WriteBytesResult>;
+  archive(paths: string[]): Promise<ArchiveResult>;
+  extract(archivePath: string, destPath?: string): Promise<ExtractResult>;
 }
 
 export interface WorkspaceFsProvider {

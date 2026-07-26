@@ -10,7 +10,6 @@ import { agents } from "../db/schema.js";
 import { and, eq } from "drizzle-orm";
 import { agentWorkspaceHostPath } from "./agent-workspace.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
-import { mkdirSync } from "node:fs";
 
 export type AgentFsBinding = {
   id: string;
@@ -77,10 +76,9 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
     return clientFs;
   }
 
-  /** 本机磁盘直读；仅 mkdir，不写 README（README 在 start/ensureLocal 时写入） */
+  /** 本机磁盘；LocalWorkspaceFs 构造时会 ensureWorkspaceDir */
   private openLocal(agentId: string): WorkspaceFs {
     const root = agentWorkspaceHostPath(this.config, agentId);
-    mkdirSync(root, { recursive: true });
     return new LocalWorkspaceFs(root);
   }
 

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   accessSync,
   constants,
+  createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -11,7 +13,10 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
 import { dirname, join, basename, resolve } from "node:path";
+import { createGunzip } from "node:zlib";
+import { pipeline } from "node:stream/promises";
 import {
   PathJailError,
   resolveInRoot,
@@ -33,6 +38,41 @@ const MAX_TEXT_EDIT_BYTES = 8 * 1024 * 1024;
 export function contentRevision(data: Buffer | string): string {
   const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
   return `sha256:${createHash("sha256").update(buf).digest("hex")}`;
+}
+
+/** 初始化工作区目录并写入默认 README（仅首次）。 */
+export function ensureWorkspaceDir(root: string): void {
+  mkdirSync(root, { recursive: true });
+  const readme = join(root, "README.md");
+  if (!existsSync(readme)) {
+    writeFileSync(
+      readme,
+      [
+        "# Agent Workspace",
+        "",
+        "This directory is the isolated filesystem for one Zakura agent.",
+        "All `fs_*` and `shell_exec` tools share this directory (`/workspace` in the container).",
+        "Preinstalled: python3, node/npm, gcc/g++. See /etc/zakura/capabilities.txt.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  }
+}
+
+function runTar(args: string[], cwd: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("tar", args, { cwd, windowsHide: true });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      if (code === 0) resolvePromise();
+      else reject(new Error(stderr.trim() || `tar exited with code ${code}`));
+    });
+  });
 }
 
 function modeString(mode: number, isDir: boolean): string {
@@ -71,7 +111,7 @@ function applyEdit(raw: string, oldText: string, newText: string): string {
  */
 export class LocalWorkspaceFs implements WorkspaceFs {
   constructor(private readonly root: string) {
-    mkdirSync(root, { recursive: true });
+    ensureWorkspaceDir(root);
   }
 
   getRoot(): string {
@@ -301,6 +341,93 @@ export class LocalWorkspaceFs implements WorkspaceFs {
     } catch {
       return false;
     }
+  }
+
+  async readBytes(path: string) {
+    const abs = resolveInRoot(this.root, path);
+    const st = statSync(abs);
+    if (!st.isFile()) throw new Error(`Not a file: ${path}`);
+    const data = readFileSync(abs);
+    return {
+      path: toApiPath(this.root, abs),
+      data,
+      size: data.length,
+      name: basename(abs),
+    };
+  }
+
+  async writeBytes(path: string, data: Buffer) {
+    const abs = resolveInRoot(this.root, path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, data);
+    return { path: toApiPath(this.root, abs), size: data.length };
+  }
+
+  async archive(paths: string[]) {
+    const cleaned = paths
+      .map((p) => (p || ".").replace(/\\/g, "/").replace(/^\/+/, "") || ".")
+      .filter((p, i, arr) => arr.indexOf(p) === i);
+    if (cleaned.length === 0) throw new Error("paths are required");
+
+    for (const p of cleaned) {
+      resolveInRoot(this.root, p);
+    }
+
+    const tmpName = `.zakura-archive-${Date.now()}.tar.gz`;
+    const tmpAbs = join(this.root, tmpName);
+    try {
+      const args = ["-czf", tmpName, ...cleaned.map((p) => (p === "." ? "." : p))];
+      await runTar(args, this.root);
+      const buffer = readFileSync(tmpAbs);
+      const base =
+        cleaned.length === 1 && cleaned[0] !== "."
+          ? basename(cleaned[0]).replace(/[^\w.-]+/g, "_") || "archive"
+          : "workspace";
+      return { filename: `${base}.tar.gz`, buffer };
+    } finally {
+      try {
+        rmSync(tmpAbs, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async extract(archivePath: string, destPath?: string) {
+    const abs = resolveInRoot(this.root, archivePath);
+    const st = statSync(abs);
+    if (!st.isFile()) throw new Error(`Not a file: ${archivePath}`);
+
+    const lower = abs.toLowerCase();
+    let destRel = destPath;
+    if (!destRel) {
+      const base = basename(abs);
+      let stem = base;
+      if (stem.toLowerCase().endsWith(".tar.gz")) stem = stem.slice(0, -7);
+      else if (stem.toLowerCase().endsWith(".tgz")) stem = stem.slice(0, -4);
+      else if (stem.toLowerCase().endsWith(".zip")) stem = stem.slice(0, -4);
+      else if (stem.toLowerCase().endsWith(".gz")) stem = stem.slice(0, -3);
+      destRel = join(dirname(toWorkspacePath(this.root, abs)), stem).replace(/\\/g, "/");
+    }
+    const destAbs = resolveInRoot(this.root, destRel);
+    mkdirSync(destAbs, { recursive: true });
+
+    if (lower.endsWith(".zip")) {
+      await runTar(["-xf", abs, "-C", destAbs], this.root);
+    } else if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz") || lower.endsWith(".tar")) {
+      const compressed = lower.endsWith(".tar.gz") || lower.endsWith(".tgz");
+      await runTar(
+        compressed ? ["-xzf", abs, "-C", destAbs] : ["-xf", abs, "-C", destAbs],
+        this.root,
+      );
+    } else if (lower.endsWith(".gz")) {
+      const outFile = join(destAbs, basename(abs).replace(/\.gz$/i, ""));
+      await pipeline(createReadStream(abs), createGunzip(), createWriteStream(outFile));
+    } else {
+      throw new Error("Unsupported archive type (use .tar.gz, .tgz, .tar, or .zip)");
+    }
+
+    return { destination: toApiPath(this.root, destAbs), ok: true as const };
   }
 }
 

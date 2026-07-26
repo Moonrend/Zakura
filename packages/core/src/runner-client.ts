@@ -229,6 +229,97 @@ export class RunnerClient {
     return (await res.json()) as { path: string; ok: true };
   }
 
+  async downloadBytes(
+    agentId: string,
+    path: string,
+  ): Promise<{ data: Buffer; size: number; name: string }> {
+    const url = new URL(
+      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/download`,
+    );
+    url.searchParams.set("path", path);
+    const res = await this.fetchImpl(url, { headers: this.headers() });
+    if (!res.ok) throw new Error(await res.text());
+    const data = Buffer.from(await res.arrayBuffer());
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match = disposition.match(/filename="([^"]+)"/);
+    const name = match?.[1] ? decodeURIComponent(match[1]) : path.split("/").filter(Boolean).pop() || "download";
+    return { data, size: data.length, name };
+  }
+
+  async uploadBytes(
+    agentId: string,
+    path: string,
+    data: Buffer,
+  ): Promise<{ path: string; size: number }> {
+    const form = new FormData();
+    form.append("path", path);
+    form.append("file", new Blob([data]), path.split("/").filter(Boolean).pop() || "upload");
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/upload`,
+      {
+        method: "POST",
+        headers: this.headers(),
+        body: form,
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { path: string; size: number };
+  }
+
+  async archivePaths(
+    agentId: string,
+    paths: string[],
+  ): Promise<{ filename: string; buffer: Buffer }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/archive`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ paths }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match?.[1] ? decodeURIComponent(match[1]) : "archive.tar.gz";
+    return { filename, buffer };
+  }
+
+  async extractArchive(
+    agentId: string,
+    archivePath: string,
+    destination?: string,
+  ): Promise<{ destination: string; ok: true }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/extract`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ path: archivePath, destination }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { destination: string; ok: true };
+  }
+
+  async rename(
+    agentId: string,
+    oldPath: string,
+    newPath: string,
+  ): Promise<{ ok: true; path: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/rename`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ oldPath, newPath }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { ok: true; path: string };
+  }
+
   async exportMigration(
     agentId: string,
     body: {
@@ -396,11 +487,12 @@ export class RunnerClient {
       async deleteApi(path: string, recursive?: boolean) {
         return client.delete(agentId, path, recursive);
       },
-      async move() {
-        throw new Error("move via remote not implemented in MVP client");
+      async move(from: string, to: string) {
+        await client.rename(agentId, from, to);
+        return { from, to };
       },
-      async renameApi() {
-        throw new Error("rename via remote not implemented in MVP client");
+      async renameApi(oldPath: string, newPath: string) {
+        return client.rename(agentId, oldPath, newPath);
       },
       async exists(path: string) {
         try {
@@ -409,6 +501,19 @@ export class RunnerClient {
         } catch {
           return false;
         }
+      },
+      async readBytes(path: string) {
+        const file = await client.downloadBytes(agentId, path);
+        return { path, ...file };
+      },
+      async writeBytes(path: string, data: Buffer) {
+        return client.uploadBytes(agentId, path, data);
+      },
+      async archive(paths: string[]) {
+        return client.archivePaths(agentId, paths);
+      },
+      async extract(archivePath: string, destPath?: string) {
+        return client.extractArchive(agentId, archivePath, destPath);
       },
     };
   }

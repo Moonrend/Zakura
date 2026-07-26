@@ -23,8 +23,12 @@ export type {
   ReadResult,
   ReadTextResult,
   WriteResult,
+  ReadBytesResult,
+  WriteBytesResult,
+  ArchiveResult,
+  ExtractResult,
 } from "./workspace-fs.js";
-export { LocalWorkspaceFs, contentRevision } from "./local-workspace-fs.js";
+export { LocalWorkspaceFs, contentRevision, ensureWorkspaceDir } from "./local-workspace-fs.js";
 export {
   matchExcludePattern,
   shouldExcludePath,
