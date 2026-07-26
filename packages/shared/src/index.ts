@@ -438,12 +438,17 @@ export type { PublicMcpToolDescriptor } from "./mcp-tool-descriptor.js";
 
 export {
   CLOUD_AGENT_EVENT_TYPES,
+  CLOUD_AGENT_SESSION_KINDS,
   parseCloudAgentConfig,
+  parseCloudAgentSessionKind,
+  parseCloudAgentSessionOrigin,
 } from "./cloud-agent.js";
 export type {
   CloudAgentEventType,
   CloudAgentRunStatus,
   CloudAgentSessionStatus,
+  CloudAgentSessionKind,
+  CloudAgentSessionOrigin,
   CloudAgentUserMessagePayload,
   CloudAgentRunStartPayload,
   CloudAgentAssistantDeltaPayload,

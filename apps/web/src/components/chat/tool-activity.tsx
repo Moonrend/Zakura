@@ -15,6 +15,7 @@ import {
   Info,
   Link2,
   Loader2,
+  MessagesSquare,
   Monitor,
   MoveRight,
   Search,
@@ -84,6 +85,25 @@ type Described = {
   /** 展开后的详情；null 表示无详情可展开 */
   detail: ReactNode;
 };
+
+/** 子代理/委派运行记录链接：完整对话已落库为独立会话，可跳转查看 */
+function ChildSessionLink({ call }: { call: TimelineToolCall }) {
+  if (!call.childSessionId) return null;
+  const params = new URLSearchParams({ session: call.childSessionId });
+  if (call.childAgentId) params.set("agent", call.childAgentId);
+  return (
+    <a
+      href={`/chat?${params.toString()}`}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e: MouseEvent) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 text-[12px] text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
+    >
+      <MessagesSquare className="h-3 w-3" />
+      查看完整对话记录
+    </a>
+  );
+}
 
 function FilePathButton({
   path,
@@ -277,6 +297,7 @@ function describeCall(
           <>
             {str(args.task).length > 80 ? <Block text={str(args.task)} /> : null}
             {resultBlock}
+            <ChildSessionLink call={call} />
           </>
         ),
       };
@@ -288,6 +309,7 @@ function describeCall(
           <>
             {str(args.task).length > 90 ? <Block text={str(args.task)} /> : null}
             {resultBlock}
+            <ChildSessionLink call={call} />
           </>
         ),
       };

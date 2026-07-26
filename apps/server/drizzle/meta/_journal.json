@@ -155,6 +155,13 @@
       "when": 1785300000000,
       "tag": "0021_cloud_agent",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785400000000,
+      "tag": "0022_cloud_agent_session_kind",
+      "breakpoints": true
     }
   ]
 }

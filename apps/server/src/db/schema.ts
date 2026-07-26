@@ -939,6 +939,10 @@ export const cloudAgentSessions = pgTable(
     title: text("title").notNull().default("新对话"),
     /** active | archived */
     status: text("status").notNull().default("active"),
+    /** 会话类型标记，见 CloudAgentSessionKind：chat | subagent | delegate | system */
+    kind: text("kind").notNull().default("chat"),
+    /** 来源链接（CloudAgentSessionOrigin）：父会话/父 Run/调用方 Agent */
+    originJson: text("origin_json").notNull().default("{}"),
     createdByUserId: text("created_by_user_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -949,6 +953,7 @@ export const cloudAgentSessions = pgTable(
   },
   (t) => [
     index("cloud_agent_sessions_agent").on(t.agentId, t.updatedAt),
+    index("cloud_agent_sessions_agent_kind").on(t.agentId, t.kind, t.updatedAt),
     index("cloud_agent_sessions_tenant").on(t.tenantId),
   ],
 );

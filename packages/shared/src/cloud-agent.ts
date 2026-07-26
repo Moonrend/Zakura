@@ -35,6 +35,76 @@ export type CloudAgentRunStatus =
 
 export type CloudAgentSessionStatus = "active" | "archived";
 
+/**
+ * 会话类型标记：所有由平台产生的对话历史都落库为会话，用 kind 区分来源。
+ * - chat     用户直接对话（默认，聊天界面展示的类型）
+ * - subagent 子代理运行记录（agent loop 或外部 MCP 客户端派生）
+ * - delegate 跨 Agent 委派记录（落在目标 Agent 名下）
+ * - system   其他系统调用产生的对话（定时任务、API 集成等）
+ */
+export const CLOUD_AGENT_SESSION_KINDS = [
+  "chat",
+  "subagent",
+  "delegate",
+  "system",
+] as const;
+
+export type CloudAgentSessionKind = (typeof CLOUD_AGENT_SESSION_KINDS)[number];
+
+export function parseCloudAgentSessionKind(raw: unknown): CloudAgentSessionKind | null {
+  return typeof raw === "string" &&
+    (CLOUD_AGENT_SESSION_KINDS as readonly string[]).includes(raw)
+    ? (raw as CloudAgentSessionKind)
+    : null;
+}
+
+/**
+ * 会话来源链接：非 chat 会话记录「谁产生了这段对话」，
+ * 支持从子代理/委派会话回溯到父会话与触发它的工具调用。
+ */
+export type CloudAgentSessionOrigin = {
+  /** 触发来源：agent_loop（主循环工具调用）/ mcp（外部 MCP 客户端）/ api（REST 创建）/ system */
+  source?: "agent_loop" | "mcp" | "api" | "system";
+  /** 父会话（同租户；委派场景下属于调用方 Agent） */
+  parentSessionId?: string;
+  parentRunId?: string;
+  /** 触发本会话的父会话工具调用 id */
+  parentToolCallId?: string;
+  /** 调用方 Agent（委派场景 = 发起委派的 Agent） */
+  callerAgentId?: string;
+  callerAgentName?: string;
+  /** 子代理嵌套深度：1=主循环直接派生，2=子代理再派生，… */
+  depth?: number;
+};
+
+export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOrigin {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const o = raw as Record<string, unknown>;
+  const out: CloudAgentSessionOrigin = {};
+  if (
+    o.source === "agent_loop" ||
+    o.source === "mcp" ||
+    o.source === "api" ||
+    o.source === "system"
+  ) {
+    out.source = o.source;
+  }
+  for (const key of [
+    "parentSessionId",
+    "parentRunId",
+    "parentToolCallId",
+    "callerAgentId",
+    "callerAgentName",
+  ] as const) {
+    const v = o[key];
+    if (typeof v === "string" && v) out[key] = v.slice(0, 200);
+  }
+  if (typeof o.depth === "number" && o.depth >= 1 && o.depth <= 10) {
+    out.depth = Math.floor(o.depth);
+  }
+  return out;
+}
+
 /** 用户消息附件（已上传至 Agent 工作区） */
 export type CloudAgentAttachment = {
   /** 原始文件名 */
@@ -107,6 +177,10 @@ export type CloudAgentToolCallResultPayload = {
   /** 截断后的结果文本，供 UI 展示 */
   resultText: string;
   durationMs: number;
+  /** 本次调用派生的子会话（子代理/委派运行记录），UI 可跳转查看完整对话 */
+  childSessionId?: string;
+  /** 子会话所属 Agent（委派时为目标 Agent；缺省=当前 Agent） */
+  childAgentId?: string;
 };
 
 export type CloudAgentRunStatusPayload = {
@@ -183,6 +257,12 @@ export type CloudAgentConfig = {
    * 不设置则不限制，循环直到模型结束或用户取消。
    */
   maxToolRounds?: number;
+  /**
+   * 子代理最大嵌套深度（1-5，默认 2）：
+   * 1 = 仅主循环可派生子代理；2 = 子代理可再派生一层；以此类推。
+   * 达到该深度的子代理工具面中不再包含派生工具。
+   */
+  maxSubagentDepth?: number;
   /** 是否向模型暴露工具（默认 true） */
   enableTools?: boolean;
   /** 自动记忆：运行前召回 + 运行后提取写入（默认 true，需 Agent 开启 Memory） */
@@ -203,6 +283,9 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.model === "string" && cloud.model.trim()) out.model = cloud.model.trim();
   if (typeof cloud.maxToolRounds === "number" && cloud.maxToolRounds > 0) {
     out.maxToolRounds = Math.floor(cloud.maxToolRounds);
+  }
+  if (typeof cloud.maxSubagentDepth === "number" && cloud.maxSubagentDepth >= 1) {
+    out.maxSubagentDepth = Math.min(Math.floor(cloud.maxSubagentDepth), 5);
   }
   if (typeof cloud.enableTools === "boolean") out.enableTools = cloud.enableTools;
   if (typeof cloud.autoMemory === "boolean") out.autoMemory = cloud.autoMemory;

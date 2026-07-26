@@ -3,10 +3,18 @@
  * SSE 使用 fetch（带 Authorization），支持 afterSeq 断点续传与多设备同步。
  */
 import type { Hono } from "hono";
-import { parseCloudAgentConfig, type CloudAgentAttachment } from "@zakura/shared";
+import {
+  parseCloudAgentConfig,
+  parseCloudAgentSessionKind,
+  parseCloudAgentSessionOrigin,
+  type CloudAgentAttachment,
+} from "@zakura/shared";
 import type { AppVariables } from "./routes.js";
 import type { AgentService } from "../services/agents.js";
-import type { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
+import type {
+  CloudAgentSessionStore,
+  SessionKindFilter,
+} from "../services/cloud-agent-session.js";
 import type { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import type { ModelRouterService } from "../services/model-router.js";
 
@@ -15,21 +23,43 @@ function sessionDto(row: {
   agentId: string;
   title: string;
   status: string;
+  kind: string;
+  originJson: string;
   lastSeq: number;
   activeRunId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
+  let origin: unknown = {};
+  try {
+    origin = parseCloudAgentSessionOrigin(JSON.parse(row.originJson || "{}"));
+  } catch {
+    origin = {};
+  }
   return {
     id: row.id,
     agentId: row.agentId,
     title: row.title,
     status: row.status,
+    kind: row.kind,
+    origin,
     lastSeq: row.lastSeq,
     activeRunId: row.activeRunId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/** kinds 查询参数：逗号分隔的类型列表或 "all"；非法值忽略，缺省 = 仅 chat */
+function parseKindsParam(raw: string | undefined): SessionKindFilter | undefined {
+  const v = raw?.trim();
+  if (!v) return undefined;
+  if (v === "all") return "all";
+  const kinds = v
+    .split(",")
+    .map((s) => parseCloudAgentSessionKind(s.trim()))
+    .filter((k): k is NonNullable<typeof k> => k !== null);
+  return kinds.length > 0 ? kinds : undefined;
 }
 
 export function registerCloudAgentRoutes(
@@ -72,6 +102,8 @@ export function registerCloudAgentRoutes(
       systemPrompt?: string;
       model?: string | null;
       maxToolRounds?: number | null;
+      /** 子代理最大嵌套深度（1-5）；null/0 恢复默认（2） */
+      maxSubagentDepth?: number | null;
       enableTools?: boolean;
       autoMemory?: boolean;
       autoTitle?: boolean;
@@ -97,6 +129,13 @@ export function registerCloudAgentRoutes(
       if (body.maxToolRounds == null || body.maxToolRounds <= 0) delete next.maxToolRounds;
       else next.maxToolRounds = body.maxToolRounds;
     }
+    if (body.maxSubagentDepth !== undefined) {
+      if (body.maxSubagentDepth == null || body.maxSubagentDepth <= 0) {
+        delete next.maxSubagentDepth;
+      } else {
+        next.maxSubagentDepth = body.maxSubagentDepth;
+      }
+    }
     if (body.enableTools !== undefined) next.enableTools = body.enableTools;
     if (body.autoMemory !== undefined) next.autoMemory = body.autoMemory;
     if (body.autoTitle !== undefined) next.autoTitle = body.autoTitle;
@@ -115,9 +154,11 @@ export function registerCloudAgentRoutes(
     if (!q) return c.json({ results: [] });
     const agentId = c.req.query("agentId")?.trim() || undefined;
     const limitRaw = Number(c.req.query("limit") ?? "20");
+    const kinds = parseKindsParam(c.req.query("kinds"));
     const hits = await store.searchSessions(session.tenantId, q, {
       agentId,
       limit: Number.isFinite(limitRaw) ? limitRaw : 20,
+      ...(kinds ? { kinds } : {}),
     });
     const agents = await agentService.list(session.tenantId);
     const byId = new Map(agents.map((a) => [a.id, a]));
@@ -138,6 +179,7 @@ export function registerCloudAgentRoutes(
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     const rows = await store.listSessions(session.tenantId, agentId, {
       includeArchived: c.req.query("all") === "1",
+      kinds: parseKindsParam(c.req.query("kinds")),
     });
     return c.json({ sessions: rows.map(sessionDto) });
   });
@@ -147,12 +189,23 @@ export function registerCloudAgentRoutes(
     const agentId = c.req.param("id");
     const agent = await requireAgent(session.tenantId, agentId);
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const body = await c.req.json<{ title?: string }>().catch(() => ({} as { title?: string }));
+    const body = await c.req
+      .json<{ title?: string; kind?: string; origin?: unknown }>()
+      .catch(() => ({}) as { title?: string; kind?: string; origin?: unknown });
+    const kind = body.kind !== undefined ? parseCloudAgentSessionKind(body.kind) : null;
+    if (body.kind !== undefined && !kind) {
+      return c.json({ error: `无效的会话类型: ${String(body.kind)}` }, 400);
+    }
+    // API 创建的非 chat 会话默认标记 source=api（系统集成产生的对话历史）
+    const origin = parseCloudAgentSessionOrigin(body.origin);
+    if (kind && kind !== "chat" && !origin.source) origin.source = "api";
     const created = await store.createSession({
       tenantId: session.tenantId,
       agentId,
       title: body.title,
       createdByUserId: session.userId === "api-key" ? null : session.userId,
+      ...(kind ? { kind } : {}),
+      ...(Object.keys(origin).length ? { origin } : {}),
     });
     return c.json(sessionDto(created), 201);
   });
@@ -175,12 +228,24 @@ export function registerCloudAgentRoutes(
 
   app.patch("/api/agents/:id/cloud/sessions/:sid", async (c) => {
     const session = c.get("session")!;
-    const body = await c.req.json<{ title?: string; status?: "active" | "archived" }>();
+    const body = await c.req.json<{
+      title?: string;
+      status?: "active" | "archived";
+      kind?: string;
+    }>();
+    const kind = body.kind !== undefined ? parseCloudAgentSessionKind(body.kind) : null;
+    if (body.kind !== undefined && !kind) {
+      return c.json({ error: `无效的会话类型: ${String(body.kind)}` }, 400);
+    }
     const updated = await store.updateSession(
       session.tenantId,
       c.req.param("id"),
       c.req.param("sid"),
-      body,
+      {
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        ...(kind ? { kind } : {}),
+      },
     );
     if (!updated) return c.json({ error: "Not found" }, 404);
     return c.json(sessionDto(updated));

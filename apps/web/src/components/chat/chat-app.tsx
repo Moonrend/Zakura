@@ -14,6 +14,7 @@ import {
   FolderOpen,
   Image as ImageIcon,
   LayoutDashboard,
+  ListFilter,
   Loader2,
   MoreHorizontal,
   PanelLeft,
@@ -66,8 +67,10 @@ import {
   sendCloudMessage,
   subscribeCloudEvents,
   updateCloudSession,
+  SESSION_KIND_LABELS,
   type ChatModelOption,
   type CloudAgentAttachment,
+  type CloudAgentSessionKind,
   type CloudSearchHit,
   type CloudSession,
 } from "@/lib/cloud-agent";
@@ -78,6 +81,15 @@ import { RunLogDrawer } from "./run-log-drawer";
 
 const AGENT_KEY = "zakura_chat_agent";
 const DEFAULT_MODEL = "__default__";
+
+/** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
+const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: string }> = [
+  { value: "chat", label: SESSION_KIND_LABELS.chat },
+  { value: "subagent", label: SESSION_KIND_LABELS.subagent },
+  { value: "delegate", label: SESSION_KIND_LABELS.delegate },
+  { value: "system", label: SESSION_KIND_LABELS.system },
+  { value: "all", label: "全部类型" },
+];
 
 function groupSessions(sessions: CloudSession[]): Array<{
   label: string;
@@ -108,6 +120,8 @@ export function ChatApp() {
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CloudSession[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  /** 会话类型过滤：chat=日常对话；subagent/delegate/system=系统产生的对话记录 */
+  const [kindFilter, setKindFilter] = useState<CloudAgentSessionKind | "all">("chat");
   const [events, setEvents] = useState<CloudAgentEvent[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -140,6 +154,8 @@ export function ChatApp() {
   const fileNonceRef = useRef(1);
   /** 跨 Agent 打开搜索结果：切换后应加载的目标会话 */
   const pendingSessionRef = useRef<{ agentId: string; sessionId: string } | null>(null);
+  /** 最新类型过滤值（供稳定回调读取，避免依赖引发的重订阅） */
+  const kindFilterRef = useRef<CloudAgentSessionKind | "all">("chat");
 
   const isMobile = useIsMobile();
   const agent = agents.find((a) => a.id === agentId) ?? null;
@@ -177,13 +193,19 @@ export function ChatApp() {
         setAgents(list);
         setAuthed(true);
         // ?agent=<id|slug> 优先（控制台跳转），其次上次使用的 Agent
-        const fromUrl = new URLSearchParams(window.location.search).get("agent");
+        const params = new URLSearchParams(window.location.search);
+        const fromUrl = params.get("agent");
         const saved = localStorage.getItem(AGENT_KEY);
         const initial =
           list.find((a) => a.id === fromUrl || a.slug === fromUrl) ??
           list.find((a) => a.id === saved) ??
           list[0] ??
           null;
+        // ?session=<id> 深链（如从工具调用跳转到子代理会话）
+        const fromUrlSession = params.get("session");
+        if (initial && fromUrlSession) {
+          pendingSessionRef.current = { agentId: initial.id, sessionId: fromUrlSession };
+        }
         setAgentId(initial?.id ?? null);
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
@@ -200,7 +222,8 @@ export function ChatApp() {
 
   const refreshSessions = useCallback(async () => {
     if (!agentId) return [];
-    const res = await listCloudSessions(agentId);
+    const kinds = kindFilterRef.current === "all" ? ("all" as const) : [kindFilterRef.current];
+    const res = await listCloudSessions(agentId, { kinds });
     setSessions(res.sessions);
     return res.sessions;
   }, [agentId]);
@@ -254,7 +277,10 @@ export function ChatApp() {
     (async () => {
       try {
         const [list, cfg, chatModels] = await Promise.all([
-          listCloudSessions(agentId).then((r) => r.sessions),
+          listCloudSessions(agentId, {
+            kinds:
+              kindFilterRef.current === "all" ? ("all" as const) : [kindFilterRef.current],
+          }).then((r) => r.sessions),
           getCloudConfig(agentId),
           listChatModels(),
         ]);
@@ -286,6 +312,28 @@ export function ChatApp() {
       cancelled = true;
     };
   }, [agentId, authed, loadSession]);
+
+  // —— 类型过滤变化：重载列表并校正选中会话 ——
+  useEffect(() => {
+    const prev = kindFilterRef.current;
+    kindFilterRef.current = kindFilter;
+    if (prev === kindFilter || !agentId || !authed) return;
+    void (async () => {
+      try {
+        const list = await refreshSessions();
+        if (sessionId && list.some((s) => s.id === sessionId)) return;
+        if (list[0]) await loadSession(agentId, list[0].id);
+        else {
+          setSessionId(null);
+          setEvents([]);
+          seqRef.current = 0;
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅响应过滤变化
+  }, [kindFilter]);
 
   // —— SSE 订阅 ——
   useEffect(() => {
@@ -652,24 +700,61 @@ export function ChatApp() {
             <SquarePen className="h-4 w-4" />
             新对话
           </button>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
-            <Input
-              value={searchQ}
-              onChange={(e) => setSearchQ(e.target.value)}
-              placeholder="搜索对话"
-              className="h-8 border-0 bg-transparent pl-7 shadow-none focus-visible:bg-muted/60 focus-visible:ring-0"
-            />
-            {searching && (
-              <button
-                type="button"
-                aria-label="清除"
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/70 hover:text-foreground"
-                onClick={() => setSearchQ("")}
+          <div className="flex items-center gap-1">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+              <Input
+                value={searchQ}
+                onChange={(e) => setSearchQ(e.target.value)}
+                placeholder="搜索对话"
+                className="h-8 border-0 bg-transparent pl-7 shadow-none focus-visible:bg-muted/60 focus-visible:ring-0"
+              />
+              {searching && (
+                <button
+                  type="button"
+                  aria-label="清除"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/70 hover:text-foreground"
+                  onClick={() => setSearchQ("")}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            {/* 会话类型过滤：查看子代理/委派/系统产生的对话记录 */}
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="会话类型筛选"
+                    title={
+                      kindFilter === "all"
+                        ? "全部类型"
+                        : SESSION_KIND_LABELS[kindFilter]
+                    }
+                    className={cn(
+                      "shrink-0 rounded-lg p-1.5 hover:bg-muted/60",
+                      kindFilter !== "chat"
+                        ? "text-primary"
+                        : "text-muted-foreground",
+                    )}
+                  />
+                }
               >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
+                <ListFilter className="h-4 w-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-32">
+                {KIND_FILTER_OPTIONS.map((opt) => (
+                  <DropdownMenuItem
+                    key={opt.value}
+                    onClick={() => setKindFilter(opt.value)}
+                  >
+                    <span className="min-w-0 flex-1">{opt.label}</span>
+                    {kindFilter === opt.value && <Check className="h-3.5 w-3.5" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
@@ -750,6 +835,11 @@ export function ChatApp() {
                               }}
                             >
                               <span className="truncate">{s.title}</span>
+                              {s.kind && s.kind !== "chat" ? (
+                                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                                  {SESSION_KIND_LABELS[s.kind] ?? s.kind}
+                                </span>
+                              ) : null}
                               {s.activeRunId ? (
                                 <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" />
                               ) : null}

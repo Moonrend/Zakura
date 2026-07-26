@@ -456,6 +456,52 @@ describe("runSubagent", () => {
     runtimeNodeId: null,
   } as unknown as import("../src/db/schema.js").Agent;
 
+  type FakeEvent = {
+    sessionId: string;
+    type: string;
+    runId: string | null;
+    payload: Record<string, unknown>;
+  };
+
+  /** 内存版会话存储：验证子代理对话历史确实作为 kind 会话落库 */
+  function makeFakeStore() {
+    const events: FakeEvent[] = [];
+    const sessions: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const store = {
+      createSession: async (input: Record<string, unknown>) => {
+        const session = { id: `sess-${(n += 1)}`, lastSeq: 0, activeRunId: null, ...input };
+        sessions.push(session);
+        return session;
+      },
+      createRun: async (sessionId: string) => ({
+        id: `run-${(n += 1)}`,
+        sessionId,
+        status: "queued",
+        cancelRequested: false,
+      }),
+      markRunStarted: async () => {},
+      appendEvent: async (input: {
+        sessionId: string;
+        type: string;
+        runId?: string | null;
+        payload: unknown;
+      }) => {
+        const ev: FakeEvent = {
+          sessionId: input.sessionId,
+          type: input.type,
+          runId: input.runId ?? null,
+          payload: input.payload as Record<string, unknown>,
+        };
+        events.push(ev);
+        return { ...ev, id: `ev-${events.length}`, seq: events.length, createdAt: "" };
+      },
+      isCancelRequested: async () => false,
+      finishRun: async () => {},
+    };
+    return { store, events, sessions };
+  }
+
   function makeRuntime(handlers: {
     chat: (messages: Array<{ role: string; content: string | null }>, options?: unknown) => {
       content: string | null;
@@ -489,27 +535,34 @@ describe("runSubagent", () => {
       },
     };
     const modelRouter = {
-      chat: async (_tenant: string, messages: unknown[], _input: unknown, options: unknown) => {
+      // 统一循环引擎全部走流式接口
+      chatStream: async (
+        _tenant: string,
+        messages: unknown[],
+        _input: unknown,
+        options: unknown,
+      ) => {
         chatInputs.push({ messages, options });
         const res = handlers.chat(
           messages as Array<{ role: string; content: string | null }>,
           options,
         );
-        return { ...res, model: "test", openai: {} };
+        return { ...res, model: "test", routeSlug: "test-route", openai: {} };
       },
     };
+    const { store, events, sessions } = makeFakeStore();
     const runtime = new CloudAgentRuntime({
-      store: {} as never,
+      store: store as never,
       gateway: gateway as never,
       modelRouter: modelRouter as never,
       agentService: {} as never,
     });
-    return { runtime, chatInputs, toolCalls };
+    return { runtime, chatInputs, toolCalls, events, sessions };
   }
 
   it("runs an isolated tool loop and returns the final answer", async () => {
     let round = 0;
-    const { runtime, chatInputs, toolCalls } = makeRuntime({
+    const { runtime, chatInputs, toolCalls, events, sessions } = makeRuntime({
       chat: () => {
         round += 1;
         if (round === 1) {
@@ -528,21 +581,24 @@ describe("runSubagent", () => {
       },
     });
 
-    const progress: string[] = [];
+    const progress: Array<{ message: string; data?: Record<string, unknown> }> = [];
     const answer = await runtime.runSubagent(
       "t1",
       fakeAgent,
       { task: "统计 a.txt 行数", expected_output: "一句话结论" },
-      { onProgress: (m) => progress.push(m) },
+      {
+        onProgress: (message, data) => progress.push({ message, ...(data ? { data } : {}) }),
+        origin: { source: "agent_loop", parentSessionId: "parent-1", parentRunId: "prun-1" },
+      },
     );
 
-    assert.equal(answer, "最终结论：a.txt 共 3 行");
+    assert.equal(answer.text, "最终结论：a.txt 共 3 行");
     assert.deepEqual(toolCalls, ["re_fs_read"]);
-    // 子代理工具集不包含 spawn_subagent（防递归）
+    // 默认深度上限 2：depth=1 的子代理仍可继续派生（工具面保留 spawn_subagent）
     const defs = (chatInputs[0]!.options as {
       tools: Array<{ function: { name: string } }>;
     }).tools;
-    assert.equal(defs.some((d) => d.function.name === "re_spawn_subagent"), false);
+    assert.equal(defs.some((d) => d.function.name === "re_spawn_subagent"), true);
     assert.equal(defs.some((d) => d.function.name === "re_fs_read"), true);
     // 系统提示词包含任务契约；用户消息包含任务与期望输出
     const sys = (chatInputs[0]!.messages[0] as { content: string }).content;
@@ -553,6 +609,40 @@ describe("runSubagent", () => {
     const secondMsgs = chatInputs[1]!.messages as Array<{ role: string; content: string | null }>;
     assert.equal(secondMsgs.some((m) => m.role === "tool" && m.content?.includes("result-of-re_fs_read")), true);
     assert.equal(progress.length >= 2, true);
+
+    // —— 对话历史落库为 kind=subagent 会话 ——
+    assert.equal(sessions.length, 1);
+    const session = sessions[0]!;
+    assert.equal(session.kind, "subagent");
+    assert.equal(answer.sessionId, session.id);
+    assert.match(String(session.title), /统计 a\.txt 行数/);
+    const origin = session.origin as Record<string, unknown>;
+    assert.equal(origin.source, "agent_loop");
+    assert.equal(origin.parentSessionId, "parent-1");
+    // 事件流完整：任务、Run 生命周期、工具调用、最终回复
+    const types = events.map((e) => e.type);
+    for (const t of [
+      "user_message",
+      "run_start",
+      "tool_call_start",
+      "tool_call_args",
+      "tool_call_result",
+      "assistant_message",
+      "run_end",
+    ]) {
+      assert.equal(types.includes(t), true, `缺少事件 ${t}`);
+    }
+    const userEv = events.find((e) => e.type === "user_message")!;
+    assert.match(String(userEv.payload.content), /统计 a\.txt 行数/);
+    const finalEv = events.find((e) => e.type === "assistant_message")!;
+    assert.equal(finalEv.payload.content, "最终结论：a.txt 共 3 行");
+    const endEv = events.find((e) => e.type === "run_end")!;
+    assert.equal(endEv.payload.status, "completed");
+    // 进度回调携带子会话 id，父会话可链接
+    assert.equal(
+      progress.some((p) => p.data && p.data.childSessionId === session.id),
+      true,
+    );
   });
 
   it("requires a task", async () => {
@@ -560,8 +650,109 @@ describe("runSubagent", () => {
     await assert.rejects(runtime.runSubagent("t1", fakeAgent, {}, {}), /task 必填/);
   });
 
-  it("stops when parent run is cancelled", async () => {
-    const { runtime } = makeRuntime({
+  it("allows nested spawn within depth limit and records the chain", async () => {
+    const { runtime, chatInputs, toolCalls, events, sessions } = makeRuntime({
+      chat: (messages) => {
+        const userText = messages.find((m) => m.role === "user")?.content ?? "";
+        // 第二级子代理：直接给出结果
+        if (userText.includes("子任务A")) return { content: "A 完成" };
+        // 第一级子代理：先派生下一级，拿到结果后总结
+        const hasToolResult = messages.some((m) => m.role === "tool");
+        if (!hasToolResult) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "c1",
+                type: "function",
+                function: {
+                  name: "re_spawn_subagent",
+                  arguments: '{"task":"子任务A"}',
+                },
+              },
+            ],
+          };
+        }
+        return { content: "总结：A 完成" };
+      },
+    });
+
+    const answer = await runtime.runSubagent(
+      "t1",
+      fakeAgent,
+      { task: "拆解并完成大任务" },
+      { origin: { source: "agent_loop", parentSessionId: "root", parentRunId: "r0" } },
+    );
+
+    assert.equal(answer.text, "总结：A 完成");
+    // 嵌套派生走 hook 并行执行，不经过 gateway.callTool
+    assert.equal(toolCalls.includes("re_spawn_subagent"), false);
+
+    // 两级子代理会话都落库，链路完整
+    assert.equal(sessions.length, 2);
+    const [level1, level2] = sessions as Array<Record<string, unknown>>;
+    assert.equal(level1!.kind, "subagent");
+    assert.equal(level2!.kind, "subagent");
+    assert.equal(answer.sessionId, level1!.id);
+    const origin2 = level2!.origin as Record<string, unknown>;
+    assert.equal(origin2.source, "agent_loop");
+    assert.equal(origin2.parentSessionId, level1!.id);
+    assert.equal(origin2.parentToolCallId, "c1");
+    assert.equal(origin2.depth, 2);
+
+    // 第一级会话的 tool_call_result 带第二级子会话链接
+    const resultEv = events.find(
+      (e) => e.type === "tool_call_result" && e.sessionId === level1!.id,
+    );
+    assert.ok(resultEv);
+    assert.equal(resultEv!.payload.childSessionId, level2!.id);
+    assert.match(String(resultEv!.payload.resultText), /A 完成/);
+
+    // 深度上限（默认 2）：第一级工具面含 spawn，第二级已剔除
+    const level1Defs = (chatInputs[0]!.options as {
+      tools: Array<{ function: { name: string } }>;
+    }).tools;
+    assert.equal(level1Defs.some((d) => d.function.name === "re_spawn_subagent"), true);
+    const level2Input = chatInputs.find((ci) =>
+      (ci.messages as Array<{ role: string; content: string | null }>).some(
+        (m) => m.role === "user" && m.content?.includes("子任务A"),
+      ),
+    )!;
+    const level2Defs = (level2Input.options as {
+      tools: Array<{ function: { name: string } }>;
+    }).tools;
+    assert.equal(level2Defs.some((d) => d.function.name === "re_spawn_subagent"), false);
+    // 第一级提示词允许嵌套派生，第二级不再提及
+    const sys1 = (chatInputs[0]!.messages[0] as { content: string }).content;
+    assert.match(sys1, /派生下一级子代理/);
+    const sys2 = (level2Input.messages[0] as { content: string }).content;
+    assert.equal(/派生下一级子代理/.test(sys2), false);
+
+    // 两级 Run 都完成
+    const ends = events.filter((e) => e.type === "run_end");
+    assert.equal(ends.length, 2);
+    assert.equal(ends.every((e) => e.payload.status === "completed"), true);
+  });
+
+  it("stops nesting at configured maxSubagentDepth", async () => {
+    const deepAgent = {
+      ...(fakeAgent as unknown as Record<string, unknown>),
+      configJson: JSON.stringify({ cloud: { maxSubagentDepth: 1 } }),
+    } as unknown as import("../src/db/schema.js").Agent;
+    const { runtime, chatInputs } = makeRuntime({
+      chat: () => ({ content: "直接完成" }),
+    });
+    const answer = await runtime.runSubagent("t1", deepAgent, { task: "简单任务" }, {});
+    assert.equal(answer.text, "直接完成");
+    // maxDepth=1：depth-1 子代理即达上限，工具面不含 spawn_subagent
+    const defs = (chatInputs[0]!.options as {
+      tools: Array<{ function: { name: string } }>;
+    }).tools;
+    assert.equal(defs.some((d) => d.function.name === "re_spawn_subagent"), false);
+  });
+
+  it("stops when parent run is cancelled and records it", async () => {
+    const { runtime, events } = makeRuntime({
       chat: () => ({
         content: null,
         toolCalls: [
@@ -584,5 +775,9 @@ describe("runSubagent", () => {
       ),
       /已取消/,
     );
+    // 取消也留下完整记录：run_end(cancelled)
+    const endEv = events.find((e) => e.type === "run_end");
+    assert.ok(endEv);
+    assert.equal(endEv!.payload.status, "cancelled");
   });
 });

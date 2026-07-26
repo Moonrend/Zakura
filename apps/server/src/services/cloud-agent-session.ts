@@ -7,6 +7,8 @@ import type {
   CloudAgentEvent,
   CloudAgentEventPayload,
   CloudAgentEventType,
+  CloudAgentSessionKind,
+  CloudAgentSessionOrigin,
 } from "@zakura/shared";
 import type { Db } from "../db/client.js";
 import {
@@ -69,6 +71,15 @@ export type CloudSessionSearchHit = {
   snippet: string | null;
 };
 
+/** 会话类型过滤：缺省只看 chat（聊天界面的默认视图）；"all" = 全部类型 */
+export type SessionKindFilter = CloudAgentSessionKind[] | "all";
+
+function kindCondition(kinds: SessionKindFilter | undefined) {
+  if (kinds === "all") return [];
+  const list = kinds && kinds.length > 0 ? kinds : (["chat"] as CloudAgentSessionKind[]);
+  return [inArray(cloudAgentSessions.kind, list)];
+}
+
 export class CloudAgentSessionStore {
   /** sessionId → listeners */
   private readonly listeners = new Map<string, Set<SessionListener>>();
@@ -94,7 +105,7 @@ export class CloudAgentSessionStore {
   async searchSessions(
     tenantId: string,
     query: string,
-    opts?: { agentId?: string; limit?: number },
+    opts?: { agentId?: string; limit?: number; kinds?: SessionKindFilter },
   ): Promise<CloudSessionSearchHit[]> {
     const q = query.trim();
     if (!q) return [];
@@ -129,6 +140,7 @@ export class CloudAgentSessionStore {
           eq(cloudAgentSessions.tenantId, tenantId),
           eq(cloudAgentSessions.status, "active"),
           ...(opts?.agentId ? [eq(cloudAgentSessions.agentId, opts.agentId)] : []),
+          ...kindCondition(opts?.kinds),
           matchCond,
         ),
       )
@@ -184,6 +196,10 @@ export class CloudAgentSessionStore {
     agentId: string;
     title?: string;
     createdByUserId?: string | null;
+    /** 会话类型标记；缺省 chat。子代理/委派/系统调用产生的对话用对应类型 */
+    kind?: CloudAgentSessionKind;
+    /** 来源链接（父会话/父 Run/调用方 Agent），非 chat 会话应尽量填写 */
+    origin?: CloudAgentSessionOrigin;
   }): Promise<CloudAgentSession> {
     const id = newId();
     const now = new Date();
@@ -193,6 +209,8 @@ export class CloudAgentSessionStore {
       agentId: input.agentId,
       title: input.title?.trim() || "新对话",
       status: "active",
+      kind: input.kind ?? "chat",
+      originJson: JSON.stringify(input.origin ?? {}),
       createdByUserId: input.createdByUserId ?? null,
       lastSeq: 0,
       activeRunId: null,
@@ -207,19 +225,15 @@ export class CloudAgentSessionStore {
   async listSessions(
     tenantId: string,
     agentId: string,
-    opts?: { limit?: number; includeArchived?: boolean },
+    opts?: { limit?: number; includeArchived?: boolean; kinds?: SessionKindFilter },
   ): Promise<CloudAgentSession[]> {
     const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
-    const cond = opts?.includeArchived
-      ? and(
-          eq(cloudAgentSessions.tenantId, tenantId),
-          eq(cloudAgentSessions.agentId, agentId),
-        )
-      : and(
-          eq(cloudAgentSessions.tenantId, tenantId),
-          eq(cloudAgentSessions.agentId, agentId),
-          eq(cloudAgentSessions.status, "active"),
-        );
+    const cond = and(
+      eq(cloudAgentSessions.tenantId, tenantId),
+      eq(cloudAgentSessions.agentId, agentId),
+      ...(opts?.includeArchived ? [] : [eq(cloudAgentSessions.status, "active")]),
+      ...kindCondition(opts?.kinds),
+    );
     const rows = await this.db
       .select()
       .from(cloudAgentSessions)
@@ -248,7 +262,12 @@ export class CloudAgentSessionStore {
     tenantId: string,
     agentId: string,
     sessionId: string,
-    patch: { title?: string; status?: "active" | "archived" },
+    patch: {
+      title?: string;
+      status?: "active" | "archived";
+      /** 重新打类型标记（如把一段 chat 归档为 system） */
+      kind?: CloudAgentSessionKind;
+    },
   ): Promise<CloudAgentSession | null> {
     const existing = await this.getSession(tenantId, agentId, sessionId);
     if (!existing) return null;
@@ -257,6 +276,7 @@ export class CloudAgentSessionStore {
       .set({
         ...(patch.title !== undefined ? { title: patch.title.trim() || existing.title } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
+        ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
         updatedAt: new Date(),
       })
       .where(eq(cloudAgentSessions.id, sessionId));

@@ -131,7 +131,8 @@ export const SUBAGENT_TOOL_QUALIFIED = `re_${SUBAGENT_TOOL_NAME}`;
 
 /**
  * 云端子代理执行器接口：由 CloudAgentRuntime 注入。
- * MCP 客户端与 agent loop 都经此在云端运行隔离上下文的子代理。
+ * MCP 客户端与 agent loop 都经此在云端运行隔离上下文的子代理；
+ * 每次运行的完整对话都落库为 kind=subagent 的会话（sessionId 返回给调用方）。
  */
 export interface CloudSubagentRunner {
   run(
@@ -143,8 +144,12 @@ export interface CloudSubagentRunner {
       isCancelled?: () => Promise<boolean>;
       /** 进度回调（agent loop 用于 run_log） */
       onProgress?: (message: string, data?: Record<string, unknown>) => void;
+      /** 会话来源链接（缺省视为外部 MCP 触发） */
+      origin?: import("@zakura/shared").CloudAgentSessionOrigin;
+      /** 嵌套深度（缺省 1；子代理再派生时逐级 +1，达配置上限后不可再派生） */
+      depth?: number;
     },
-  ): Promise<string>;
+  ): Promise<{ text: string; sessionId: string }>;
 }
 
 function subagentToolDef(agentId: string): ResolvedTool {
@@ -158,7 +163,8 @@ function subagentToolDef(agentId: string): ResolvedTool {
       "在云端启动一个子代理（subagent）独立完成一个子任务。子代理与你共享同一工作区和全部工具，" +
       "但拥有全新的隔离上下文（看不到当前对话），运行结束后只返回最终结果。" +
       "适用于：可并行的独立子任务（同一轮发起多个调用即并行执行）、需要大量中间探索但只需要结论的调研、" +
-      "避免冗长中间产物占用主对话上下文。task 必须自包含——子代理没有你的记忆与对话背景。",
+      "避免冗长中间产物占用主对话上下文。task 必须自包含——子代理没有你的记忆与对话背景。" +
+      "子代理在嵌套深度限制内也能继续派生自己的子代理，复杂任务可分层拆解。",
     inputSchema: {
       type: "object",
       required: ["task"],
@@ -752,8 +758,10 @@ export class McpGateway {
         where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
       });
       if (!agent) return textResult("Agent not found", true);
-      const answer = await this.subagentRunner.run(tenantId, agent, args, {});
-      return textResult(answer, false);
+      const answer = await this.subagentRunner.run(tenantId, agent, args, {
+        origin: { source: "mcp" },
+      });
+      return textResult(answer.text, false);
     }
     if (tool.agentScoped && tool.agentId && this.agentService) {
       const agent = await this.db.query.agents.findFirst({

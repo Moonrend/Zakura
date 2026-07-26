@@ -5,20 +5,36 @@ import type {
   CloudAgentConfig,
   CloudAgentEvent,
   CloudAgentRunStatus,
+  CloudAgentSessionKind,
+  CloudAgentSessionOrigin,
 } from "@zakura/shared";
 import { api } from "@/lib/api";
 
-export type { CloudAgentAttachment };
+export type { CloudAgentAttachment, CloudAgentSessionKind, CloudAgentSessionOrigin };
+
+/** 会话类型过滤参数：类型数组或 "all"；缺省=仅 chat */
+export type SessionKindsFilter = CloudAgentSessionKind[] | "all";
 
 export type CloudSession = {
   id: string;
   agentId: string;
   title: string;
   status: string;
+  /** 会话类型标记：chat（用户对话）| subagent（子代理）| delegate（委派）| system */
+  kind: CloudAgentSessionKind;
+  /** 来源链接：父会话/父 Run/调用方 Agent（非 chat 会话） */
+  origin: CloudAgentSessionOrigin;
   lastSeq: number;
   activeRunId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export const SESSION_KIND_LABELS: Record<CloudAgentSessionKind, string> = {
+  chat: "对话",
+  subagent: "子代理",
+  delegate: "委派",
+  system: "系统",
 };
 
 export type TimelineToolCall = {
@@ -30,6 +46,10 @@ export type TimelineToolCall = {
   isError?: boolean;
   durationMs?: number;
   status: "running" | "done";
+  /** 本次调用派生的子会话（子代理/委派运行记录），可跳转查看完整对话 */
+  childSessionId?: string;
+  /** 子会话所属 Agent（委派时为目标 Agent） */
+  childAgentId?: string;
 };
 
 export type TimelineMemoryItem = {
@@ -204,6 +224,8 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         call.resultText = typeof p.resultText === "string" ? p.resultText : "";
         call.durationMs = typeof p.durationMs === "number" ? p.durationMs : undefined;
         if (typeof p.name === "string") call.name = p.name;
+        if (typeof p.childSessionId === "string") call.childSessionId = p.childSessionId;
+        if (typeof p.childAgentId === "string") call.childAgentId = p.childAgentId;
       }
       continue;
     }
@@ -413,10 +435,19 @@ export function eventsToRunLogs(events: CloudAgentEvent[]): RunLogEntry[] {
   return logs;
 }
 
-export async function listCloudSessions(agentId: string) {
-  return api<{ sessions: CloudSession[] }>(`/api/agents/${agentId}/cloud/sessions`, {
-    cacheTtlMs: false,
-  });
+export async function listCloudSessions(
+  agentId: string,
+  opts?: { kinds?: SessionKindsFilter },
+) {
+  const params = new URLSearchParams();
+  if (opts?.kinds) {
+    params.set("kinds", opts.kinds === "all" ? "all" : opts.kinds.join(","));
+  }
+  const qs = params.toString();
+  return api<{ sessions: CloudSession[] }>(
+    `/api/agents/${agentId}/cloud/sessions${qs ? `?${qs}` : ""}`,
+    { cacheTtlMs: false },
+  );
 }
 
 export async function createCloudSession(agentId: string, title?: string) {
@@ -483,7 +514,12 @@ export async function retryCloudRun(agentId: string, sessionId: string) {
 export async function updateCloudSession(
   agentId: string,
   sessionId: string,
-  patch: { title?: string; status?: "active" | "archived" },
+  patch: {
+    title?: string;
+    status?: "active" | "archived";
+    /** 重新打类型标记 */
+    kind?: CloudAgentSessionKind;
+  },
 ) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {
     method: "PATCH",
