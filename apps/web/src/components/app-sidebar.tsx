@@ -10,6 +10,7 @@ import {
   Cable,
   ChevronRight,
   CloudDownload,
+  Cpu,
   Globe,
   KeyRound,
   LogOut,
@@ -26,6 +27,7 @@ import {
   Building2,
   Users,
   ShieldCheck,
+  Route,
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { AGENT_SUBNAV } from "@/lib/agents";
@@ -374,6 +376,27 @@ export function AppSidebar({
       href: "/dashboard/memory",
       label: "记忆",
       icon: Brain,
+    },
+    {
+      id: "models",
+      href: "/dashboard/models",
+      label: "模型路由",
+      icon: Cpu,
+      isActive: (path) =>
+        path === "/dashboard/models" || path.startsWith("/dashboard/models/"),
+      children: [
+        {
+          href: "/dashboard/models",
+          label: "模型",
+          icon: Route,
+          isActive: (path) => path === "/dashboard/models",
+        },
+        {
+          href: "/dashboard/models/upstreams",
+          label: "上游",
+          icon: Server,
+        },
+      ],
     },
     {
       id: "runners",

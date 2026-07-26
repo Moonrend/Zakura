@@ -179,6 +179,146 @@ export const memoryProviders = pgTable(
 );
 
 /**
+ * 模型上游连接（API 端点 + 协议）。
+ * 一个上游可承载多种能力的路由。
+ */
+export const modelUpstreams = pgTable(
+  "model_upstreams",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    protocol: text("protocol").notNull(),
+    configJson: text("config_json").notNull().default("{}"),
+    status: text("status").notNull().default("ready"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("model_upstreams_tenant_slug").on(t.tenantId, t.slug),
+    index("model_upstreams_tenant").on(t.tenantId),
+  ],
+);
+
+/**
+ * 模型路由：将能力类型 + 别名映射到上游 + 模型名。
+ * 同 alias 多供应商按 weight 加权随机；priority 用于跨 alias / fallback 顺序。
+ */
+export const modelRoutes = pgTable(
+  "model_routes",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    capability: text("capability").notNull(),
+    /** 逻辑模型别名；同 alias 可挂多个上游 */
+    alias: text("alias"),
+    upstreamId: text("upstream_id")
+      .notNull()
+      .references(() => modelUpstreams.id, { onDelete: "cascade" }),
+    model: text("model").notNull(),
+    optionsJson: text("options_json").notNull().default("{}"),
+    priority: text("priority").notNull().default("100"),
+    /** 同 alias 内加权随机权重，越大越容易被选中 */
+    weight: text("weight").notNull().default("100"),
+    isDefault: boolean("is_default").notNull().default(false),
+    status: text("status").notNull().default("ready"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("model_routes_tenant_slug").on(t.tenantId, t.slug),
+    index("model_routes_tenant").on(t.tenantId),
+    index("model_routes_capability").on(t.tenantId, t.capability),
+    index("model_routes_alias").on(t.tenantId, t.capability, t.alias),
+    index("model_routes_upstream").on(t.upstreamId),
+  ],
+);
+
+/**
+ * 上游模型库存：每个上游同步/手填的模型单独一行。
+ * nativeModel = 上游原始调用名；canonicalModel = 系统规范名（聚合调度键）。
+ */
+export const upstreamModels = pgTable(
+  "upstream_models",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    upstreamId: text("upstream_id")
+      .notNull()
+      .references(() => modelUpstreams.id, { onDelete: "cascade" }),
+    /** 上游原始模型名，实际 HTTP 调用时使用 */
+    nativeModel: text("native_model").notNull(),
+    /** 系统规范名（如 deepseek-v4-flash），同名多上游聚合 */
+    canonicalModel: text("canonical_model").notNull(),
+    displayName: text("display_name"),
+    capability: text("capability").notNull(),
+    weight: text("weight").notNull().default("100"),
+    enabled: boolean("enabled").notNull().default(true),
+    isDefault: boolean("is_default").notNull().default(false),
+    optionsJson: text("options_json").notNull().default("{}"),
+    metaJson: text("meta_json").notNull().default("{}"),
+    status: text("status").notNull().default("ready"),
+    lastError: text("last_error"),
+    syncedAt: timestamp("synced_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("upstream_models_unique").on(
+      t.tenantId,
+      t.upstreamId,
+      t.nativeModel,
+      t.capability,
+    ),
+    index("upstream_models_tenant").on(t.tenantId),
+    index("upstream_models_canonical").on(
+      t.tenantId,
+      t.capability,
+      t.canonicalModel,
+    ),
+    index("upstream_models_upstream").on(t.upstreamId),
+  ],
+);
+
+/**
+ * 从 models.dev / llm-metadata 导入的模型目录缓存（租户级）。
+ */
+export const modelCatalogEntries = pgTable(
+  "model_catalog_entries",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    providerId: text("provider_id").notNull(),
+    providerName: text("provider_name").notNull(),
+    modelId: text("model_id").notNull(),
+    name: text("name").notNull(),
+    metaJson: text("meta_json").notNull().default("{}"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("model_catalog_unique").on(
+      t.tenantId,
+      t.source,
+      t.providerId,
+      t.modelId,
+    ),
+    index("model_catalog_tenant").on(t.tenantId),
+    index("model_catalog_provider").on(t.tenantId, t.providerId),
+  ],
+);
+
+/**
  * Runtime nodes (local implicit Runner + remote Runner Agents).
  * Declared before agents so FK columns can reference it.
  */
@@ -791,6 +931,10 @@ export const schema = {
   tenantMemberships,
   tenantInvites,
   memoryProviders,
+  modelUpstreams,
+  modelRoutes,
+  upstreamModels,
+  modelCatalogEntries,
   runtimeNodes,
   agents,
   workspaceMigrations,
@@ -822,6 +966,10 @@ export type OauthLoginState = typeof oauthLoginStates.$inferSelect;
 export type TenantMembership = typeof tenantMemberships.$inferSelect;
 export type TenantInvite = typeof tenantInvites.$inferSelect;
 export type MemoryProvider = typeof memoryProviders.$inferSelect;
+export type ModelUpstream = typeof modelUpstreams.$inferSelect;
+export type ModelRoute = typeof modelRoutes.$inferSelect;
+export type UpstreamModel = typeof upstreamModels.$inferSelect;
+export type ModelCatalogEntryRow = typeof modelCatalogEntries.$inferSelect;
 export type RuntimeNode = typeof runtimeNodes.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type WorkspaceMigration = typeof workspaceMigrations.$inferSelect;

@@ -162,6 +162,45 @@ export const MEMORY_PROVIDER_KINDS = [
 ] as const;
 export type MemoryProviderKind = (typeof MEMORY_PROVIDER_KINDS)[number];
 
+export {
+  MODEL_UPSTREAM_PROTOCOLS,
+  OPENAI_COMPATIBLE_PROTOCOLS,
+  MODEL_CAPABILITIES,
+  MODEL_ROUTE_STRATEGIES,
+  MODEL_CATALOG_SOURCES,
+  MODEL_UPSTREAM_PROTOCOL_META,
+  MODEL_UPSTREAM_DEFAULT_BASE_URLS,
+  BAILIAN_ENDPOINTS,
+  MODEL_CAPABILITY_META,
+  MODEL_UPSTREAM_FORM_FIELDS,
+  applyUpstreamProtocolDefaults,
+  type ModelUpstreamProtocol,
+  type ModelCapability,
+  type ModelRouteStrategy,
+  type ModelCatalogSource,
+  type ModelUpstreamConfig,
+  type ModelUpstreamFormField,
+  type ModelUpstreamRegion,
+  type ModelUpstreamProtocolMeta,
+  type ModelRouteOptions,
+  type ModelToolDefinition,
+  type ModelToolCall,
+  type ModelToolChoice,
+  type ModelChatMessage,
+  type ModelChatInvokeOptions,
+  type OpenAIChatCompletion,
+  type OpenAIChatCompletionChoice,
+  type ModelChatResult,
+  type ModelEmbeddingResult,
+  type ModelRerankResult,
+  type ModelRerankDocument,
+  type ModelImageResult,
+  type ModelCatalogEntry,
+  type UpstreamModelRecord,
+  type LogicalModelGroup,
+  normalizeCanonicalModelId,
+} from "./model-router.js";
+
 export const MEMORY_PROVIDER_KIND_META: Record<
   MemoryProviderKind,
   { name: string; description: string; storesLocally: boolean }

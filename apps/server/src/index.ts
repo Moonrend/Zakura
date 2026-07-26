@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { loadConfig } from "./config.js";
 import { createDb } from "./db/client.js";
 import { bindProviderRuntime, registerBuiltinProviders } from "./providers/index.js";
+import { registerBuiltinModelAdapters } from "./model-router/index.js";
 import { DockerRuntime } from "./runtime/docker.js";
 import { Orchestrator } from "./services/orchestrator.js";
 import { McpGateway } from "./services/mcp-gateway.js";
@@ -11,6 +12,11 @@ import { AgentService } from "./services/agents.js";
 import { AgentBrowserService } from "./services/agent-cdp.js";
 import { MemoryStore } from "./services/memory-store.js";
 import { MemoryProvidersService } from "./services/memory-providers.js";
+import { ModelRouterService } from "./services/model-router.js";
+import { ModelRoutesService } from "./services/model-routes.js";
+import { ModelUpstreamsService } from "./services/model-upstreams.js";
+import { ModelCatalogService } from "./services/model-catalog.js";
+import { UpstreamModelsService } from "./services/upstream-models.js";
 import { ToolCallStore } from "./services/tool-call-store.js";
 import { OauthService } from "./services/oauth.js";
 import { createApiApp } from "./api/routes.js";
@@ -38,6 +44,7 @@ import {
 async function main() {
   const config = loadConfig();
   registerBuiltinProviders();
+  registerBuiltinModelAdapters();
 
   await runMigrations(config.databaseUrl);
 
@@ -59,6 +66,20 @@ async function main() {
   const agentService = new AgentService(db, runtime, config, runtimeNodes);
   const memoryStore = new MemoryStore(db);
   const memoryProviders = new MemoryProvidersService(db);
+  const modelRouter = new ModelRouterService(db);
+  const modelUpstreams = new ModelUpstreamsService(db, (tenantId) =>
+    modelRouter.invalidateCache(tenantId),
+  );
+  const modelRoutes = new ModelRoutesService(db, modelUpstreams, (tenantId) =>
+    modelRouter.invalidateCache(tenantId),
+  );
+  const modelCatalog = new ModelCatalogService(db);
+  const upstreamModelsSvc = new UpstreamModelsService(
+    db,
+    modelUpstreams,
+    modelCatalog,
+    (tenantId) => modelRouter.invalidateCache(tenantId),
+  );
   const toolCallStore = new ToolCallStore(db);
   const oauth = new OauthService(db, config);
   const workspaceFsProvider = new ServerWorkspaceFsProvider(db, config, runtimeNodes);
@@ -146,6 +167,11 @@ async function main() {
       agentService,
       memoryStore,
       memoryProviders,
+      modelRouter,
+      modelUpstreams,
+      modelRoutes,
+      modelCatalog,
+      upstreamModels: upstreamModelsSvc,
       toolCallStore,
       oauth,
       runtimeNodes,

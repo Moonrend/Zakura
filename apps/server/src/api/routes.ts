@@ -53,6 +53,7 @@ import { OauthError, isRedirectUriRegistered, type OauthService } from "../servi
 import { isCimdClientId } from "../services/oauth-cimd.js";
 import { PROVIDER_CATEGORY_META } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
+import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
@@ -301,6 +302,11 @@ export async function createApiApp(deps: {
   agentService: AgentService;
   memoryStore: MemoryStore;
   memoryProviders: MemoryProvidersService;
+  modelRouter?: import("../services/model-router.js").ModelRouterService;
+  modelUpstreams?: import("../services/model-upstreams.js").ModelUpstreamsService;
+  modelRoutes?: import("../services/model-routes.js").ModelRoutesService;
+  modelCatalog?: import("../services/model-catalog.js").ModelCatalogService;
+  upstreamModels?: import("../services/upstream-models.js").UpstreamModelsService;
   toolCallStore: ToolCallStore;
   oauth: OauthService;
   runtimeNodes?: RuntimeNodeService;
@@ -320,6 +326,11 @@ export async function createApiApp(deps: {
     agentService,
     memoryStore,
     memoryProviders,
+    modelRouter,
+    modelUpstreams,
+    modelRoutes,
+    modelCatalog,
+    upstreamModels,
     toolCallStore,
     oauth,
     runtimeNodes,
@@ -1967,6 +1978,7 @@ export async function createApiApp(deps: {
       const { input, embeddingError } = await withEmbedding(
         base,
         resolved?.kind === "builtin" ? resolved.config : null,
+        { tenantId: session.tenantId, modelRouter },
       );
       const item = await memoryStore.add(session.tenantId, agent.id, input);
       return c.json(
@@ -1992,14 +2004,14 @@ export async function createApiApp(deps: {
       );
       const cfg = parseEmbeddingConfig(resolved.config);
       if (!cfg) {
-        return c.json({ error: "请先在记忆 Provider 中启用 embedding 并填写 baseUrl/model" }, 400);
+        return c.json({ error: "请先在记忆 Provider 中启用 embedding，并配置路由或 baseUrl/model" }, 400);
       }
       const result = await reembedAgentMemories(
         memoryStore,
         session.tenantId,
         agent.id,
         cfg,
-        { limit: 100 },
+        { limit: 100, modelRouter },
       );
       const stats = await memoryStore.embeddingStats(session.tenantId, agent.id);
       return c.json({ ...result, stats });
@@ -2096,6 +2108,7 @@ export async function createApiApp(deps: {
         const { input, embeddingError } = await withEmbedding(
           { content: body.content },
           resolved.config,
+          { tenantId: session.tenantId, modelRouter },
         );
         if (input.embedding) {
           patch.embedding = input.embedding;
@@ -2142,6 +2155,16 @@ export async function createApiApp(deps: {
   // Agent workspace filesystem — routes via WorkspaceFsProvider (local or remote)
   if (workspaceFsProvider) {
     registerAgentFsRoutes(app, agentService, workspaceFsProvider);
+  }
+
+  if (modelRouter && modelUpstreams && modelRoutes) {
+    registerModelRouterRoutes(app, {
+      upstreams: modelUpstreams,
+      routes: modelRoutes,
+      router: modelRouter,
+      catalog: modelCatalog,
+      upstreamModels,
+    });
   }
 
   registerTenantRoutes(app, {

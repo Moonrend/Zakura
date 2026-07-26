@@ -4,6 +4,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Trash2, HeartPulse, Star } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  EmbeddingConfigFields,
+  embeddingFromConfig,
+  embeddingSummary,
+  embeddingToConfig,
+  useEmbeddingRoutes,
+  validateEmbeddingForm,
+  type EmbeddingFormValue,
+} from "@/components/embedding-config-fields";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,6 +73,11 @@ const KIND_ITEMS = [
   { value: "openviking", label: "OpenViking" },
 ];
 
+const EMPTY_EMBEDDING: EmbeddingFormValue = {
+  enabled: false,
+  routeId: "__default__",
+};
+
 export default function GlobalMemoryPage() {
   const [data, setData] = useState<Payload | null>(null);
   const [kinds, setKinds] = useState<KindMeta[]>([]);
@@ -74,15 +88,14 @@ export default function GlobalMemoryPage() {
   const [isDefault, setIsDefault] = useState(false);
   const [defaultUserId, setDefaultUserId] = useState("default");
   const [maxChars, setMaxChars] = useState("32000");
-  const [embEnabled, setEmbEnabled] = useState(false);
-  const [embBaseUrl, setEmbBaseUrl] = useState("");
-  const [embApiKey, setEmbApiKey] = useState("");
-  const [embModel, setEmbModel] = useState("text-embedding-3-small");
-  const [embDimensions, setEmbDimensions] = useState("");
+  const [embedding, setEmbedding] = useState<EmbeddingFormValue>(EMPTY_EMBEDDING);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [headerName, setHeaderName] = useState("Authorization");
   const [busy, setBusy] = useState(false);
+
+  const { routes: embeddingRoutes, loading: routesLoading, reload: reloadRoutes } =
+    useEmbeddingRoutes();
 
   const load = useCallback(async () => {
     try {
@@ -118,11 +131,7 @@ export default function GlobalMemoryPage() {
       p?.config.embedding && typeof p.config.embedding === "object"
         ? (p.config.embedding as Record<string, unknown>)
         : {};
-    setEmbEnabled(emb.enabled === true);
-    setEmbBaseUrl(String(emb.baseUrl ?? ""));
-    setEmbApiKey(String(emb.apiKey ?? ""));
-    setEmbModel(String(emb.model ?? "text-embedding-3-small"));
-    setEmbDimensions(emb.dimensions != null ? String(emb.dimensions) : "");
+    setEmbedding(embeddingFromConfig(emb, embeddingRoutes));
     setBaseUrl(String(p?.config.baseUrl ?? ""));
     setApiKey(String(p?.config.apiKey ?? ""));
     setHeaderName(String(p?.config.headerName ?? "Authorization"));
@@ -130,6 +139,12 @@ export default function GlobalMemoryPage() {
 
   function openCreate() {
     resetForm(null);
+    if (embeddingRoutes.length > 0) {
+      setEmbedding({
+        enabled: false,
+        routeId: embeddingRoutes.find((r) => r.isDefault)?.id ?? "__default__",
+      });
+    }
     setOpen(true);
   }
 
@@ -138,19 +153,20 @@ export default function GlobalMemoryPage() {
     setOpen(true);
   }
 
+  useEffect(() => {
+    if (!open || !edit || kind !== "builtin") return;
+    const emb =
+      edit.config.embedding && typeof edit.config.embedding === "object"
+        ? (edit.config.embedding as Record<string, unknown>)
+        : {};
+    setEmbedding(embeddingFromConfig(emb, embeddingRoutes));
+  }, [open, edit, kind, embeddingRoutes]);
+
   function buildConfig(): Record<string, unknown> {
     if (kind === "builtin") {
       return {
         defaultUserId,
-        embedding: {
-          enabled: embEnabled,
-          baseUrl: embBaseUrl,
-          apiKey: embApiKey,
-          model: embModel,
-          ...(embDimensions.trim()
-            ? { dimensions: Number(embDimensions) || undefined }
-            : {}),
-        },
+        embedding: embeddingToConfig(embedding),
       };
     }
     if (kind === "traditional") return { maxChars: Number(maxChars) || 32000 };
@@ -168,6 +184,13 @@ export default function GlobalMemoryPage() {
     if (!name.trim()) {
       toast.error("请填写名称");
       return;
+    }
+    if (kind === "builtin" && embedding.enabled) {
+      const embErr = validateEmbeddingForm(embedding, embeddingRoutes);
+      if (embErr) {
+        toast.error(embErr);
+        return;
+      }
     }
     if ((kind === "mem0" || kind === "openviking") && !baseUrl.trim() && !edit) {
       toast.error(kind === "mem0" ? "mem0 需要 Base URL" : "OpenViking 需要 Base URL");
@@ -261,6 +284,7 @@ export default function GlobalMemoryPage() {
               <TableRow>
                 <TableHead>名称</TableHead>
                 <TableHead>类型</TableHead>
+                <TableHead>向量</TableHead>
                 <TableHead>默认</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>引用 Agent</TableHead>
@@ -270,7 +294,7 @@ export default function GlobalMemoryPage() {
             <TableBody>
               {data.providers.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground">
+                  <TableCell colSpan={7} className="text-muted-foreground">
                     暂无 Provider
                   </TableCell>
                 </TableRow>
@@ -280,6 +304,8 @@ export default function GlobalMemoryPage() {
                     (a) => a.memoryProviderId === p.id || (!a.memoryProviderId && p.isDefault),
                   );
                   const meta = kindMeta.get(p.kind);
+                  const embLabel =
+                    p.kind === "builtin" ? embeddingSummary(p.config, embeddingRoutes) : null;
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
@@ -294,6 +320,9 @@ export default function GlobalMemoryPage() {
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline">{meta?.name ?? p.kind}</Badge>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {embLabel ?? (p.kind === "builtin" ? "未启用" : "—")}
                       </TableCell>
                       <TableCell>{p.isDefault ? <Badge>默认</Badge> : "—"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{p.status}</TableCell>
@@ -383,56 +412,13 @@ export default function GlobalMemoryPage() {
               </div>
             )}
             {kind === "builtin" && (
-              <div className="space-y-3 rounded-lg border border-border p-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>启用向量语义种子</Label>
-                  </div>
-                  <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} />
-                </div>
-                {embEnabled && (
-                  <>
-                    <div>
-                      <Label>Embedding Base URL</Label>
-                      <Input
-                        className="mt-1"
-                        value={embBaseUrl}
-                        onChange={(e) => setEmbBaseUrl(e.target.value)}
-                        placeholder="https://api.openai.com/v1"
-                      />
-                    </div>
-                    <div>
-                      <Label>API Key</Label>
-                      <Input
-                        className="mt-1"
-                        type="password"
-                        value={embApiKey}
-                        onChange={(e) => setEmbApiKey(e.target.value)}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <Label>模型</Label>
-                        <Input
-                          className="mt-1"
-                          value={embModel}
-                          onChange={(e) => setEmbModel(e.target.value)}
-                          placeholder="text-embedding-3-small"
-                        />
-                      </div>
-                      <div>
-                        <Label>维度（可选）</Label>
-                        <Input
-                          className="mt-1"
-                          value={embDimensions}
-                          onChange={(e) => setEmbDimensions(e.target.value)}
-                          placeholder="1536"
-                        />
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
+              <EmbeddingConfigFields
+                value={embedding}
+                onChange={setEmbedding}
+                routes={embeddingRoutes}
+                routesLoading={routesLoading}
+                onReloadRoutes={() => void reloadRoutes()}
+              />
             )}
             {kind === "traditional" && (
               <div>

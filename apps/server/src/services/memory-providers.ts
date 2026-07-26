@@ -371,13 +371,10 @@ export class MemoryProvidersService {
           ? (config.embedding as Record<string, unknown>)
           : {};
       const embEnabled = embedding.enabled === true;
-      const baseUrl =
-        typeof embedding.baseUrl === "string" ? embedding.baseUrl.trim() : "";
-      const model =
-        typeof embedding.model === "string" ? embedding.model.trim() : "text-embedding-3-small";
-      if (embEnabled && !baseUrl) {
-        throw new Error("启用 Built-in 向量检索时需要 embedding.baseUrl（OpenAI 兼容 /v1）");
-      }
+      const routeId =
+        typeof embedding.routeId === "string" ? embedding.routeId.trim() : "";
+      const routeSlug =
+        typeof embedding.routeSlug === "string" ? embedding.routeSlug.trim() : "";
       return {
         defaultUserId:
           typeof config.defaultUserId === "string" && config.defaultUserId.trim()
@@ -385,13 +382,8 @@ export class MemoryProvidersService {
             : "default",
         embedding: {
           enabled: embEnabled,
-          baseUrl,
-          apiKey: typeof embedding.apiKey === "string" ? embedding.apiKey : "",
-          model: model || "text-embedding-3-small",
-          dimensions:
-            typeof embedding.dimensions === "number" && embedding.dimensions > 0
-              ? Math.floor(embedding.dimensions)
-              : undefined,
+          ...(routeId ? { routeId } : {}),
+          ...(routeSlug ? { routeSlug } : {}),
         },
       };
     }

@@ -8,6 +8,9 @@ import { createHash } from "node:crypto";
 
 export type EmbeddingConfig = {
   enabled: boolean;
+  /** 使用模型路由（优先于内联 baseUrl） */
+  routeId?: string;
+  routeSlug?: string;
   baseUrl: string;
   apiKey?: string;
   model: string;
@@ -22,15 +25,39 @@ export function parseEmbeddingConfig(
   if (!raw || typeof raw !== "object") return null;
   const e = raw as Record<string, unknown>;
   if (e.enabled !== true) return null;
+
+  const routeId = typeof e.routeId === "string" ? e.routeId.trim() : undefined;
+  const routeSlug = typeof e.routeSlug === "string" ? e.routeSlug.trim() : undefined;
   const baseUrl = typeof e.baseUrl === "string" ? e.baseUrl.trim().replace(/\/$/, "") : "";
   const model = typeof e.model === "string" ? e.model.trim() : "";
+  const useRouter = Boolean(routeId || routeSlug) || !baseUrl;
+
+  // 仅模型路由：无 baseUrl 时走 router（含租户默认）
+  if (useRouter) {
+    const dimensions =
+      typeof e.dimensions === "number" && e.dimensions > 0
+        ? Math.floor(e.dimensions)
+        : undefined;
+    return {
+      enabled: true,
+      routeId: routeId || undefined,
+      routeSlug: routeSlug || undefined,
+      baseUrl: "",
+      model: model || "router",
+      dimensions,
+    };
+  }
+
   if (!baseUrl || !model) return null;
+
   const dimensions =
     typeof e.dimensions === "number" && e.dimensions > 0
       ? Math.floor(e.dimensions)
       : undefined;
   return {
     enabled: true,
+    routeId,
+    routeSlug,
     baseUrl,
     apiKey: typeof e.apiKey === "string" ? e.apiKey : undefined,
     model,

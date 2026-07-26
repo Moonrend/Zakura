@@ -4,6 +4,7 @@ import {
   parseEmbeddingConfig,
   type EmbeddingConfig,
 } from "./embedding-client.js";
+import type { ModelRouterService } from "./model-router.js";
 import type { MemoryInput } from "./memory-store.js";
 import type { MemoryStore } from "./memory-store.js";
 
@@ -13,21 +14,54 @@ export function embeddingConfigFromProvider(
   return parseEmbeddingConfig(config);
 }
 
+async function embedContent(
+  cfg: EmbeddingConfig,
+  content: string,
+  tenantId: string | undefined,
+  router: ModelRouterService | null | undefined,
+): Promise<{ vector: number[]; model: string }> {
+  const preferRouter =
+    Boolean(tenantId && router) &&
+    (Boolean(cfg.routeId || cfg.routeSlug) || !cfg.baseUrl.trim());
+
+  if (preferRouter && tenantId && router) {
+    const result = await router.embed(tenantId, [content.trim()], {
+      capability: "embedding",
+      routeId: cfg.routeId,
+      slug: cfg.routeSlug,
+    });
+    const vector = result.vectors[0];
+    if (!vector?.length) throw new Error("embedding response missing vector");
+    return { vector, model: result.model };
+  }
+  if (!cfg.baseUrl.trim()) {
+    throw new Error("未配置 embedding 模型路由，且无可用 Base URL");
+  }
+  const vector = await embedText(cfg, content.trim());
+  return { vector, model: cfg.model };
+}
+
 /** Best-effort embed for write path; never blocks write on failure (caller may log). */
 export async function withEmbedding(
   input: MemoryInput,
   providerConfig: Record<string, unknown> | null | undefined,
+  opts?: { tenantId?: string; modelRouter?: ModelRouterService | null },
 ): Promise<{ input: MemoryInput; embeddingError?: string }> {
   const cfg = providerConfig ? parseEmbeddingConfig(providerConfig) : null;
   if (!cfg) return { input };
 
   try {
-    const vector = await embedText(cfg, input.content.trim());
+    const { vector, model } = await embedContent(
+      cfg,
+      input.content,
+      opts?.tenantId,
+      opts?.modelRouter,
+    );
     return {
       input: {
         ...input,
         embedding: vector,
-        embeddingModel: cfg.model,
+        embeddingModel: model,
       },
     };
   } catch (err) {
@@ -43,7 +77,7 @@ export async function reembedAgentMemories(
   tenantId: string,
   agentId: string,
   cfg: EmbeddingConfig,
-  opts?: { limit?: number },
+  opts?: { limit?: number; modelRouter?: ModelRouterService | null },
 ): Promise<{ updated: number; failed: number; errors: string[] }> {
   const missing = await store.listMissingEmbeddings(
     tenantId,
@@ -55,8 +89,13 @@ export async function reembedAgentMemories(
   const errors: string[] = [];
   for (const m of missing) {
     try {
-      const vector = await embedText(cfg, m.content);
-      await store.setEmbedding(tenantId, agentId, m.id, vector, cfg.model);
+      const { vector, model } = await embedContent(
+        cfg,
+        m.content,
+        tenantId,
+        opts?.modelRouter,
+      );
+      await store.setEmbedding(tenantId, agentId, m.id, vector, model);
       updated++;
     } catch (err) {
       failed++;
