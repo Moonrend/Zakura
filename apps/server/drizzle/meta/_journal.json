@@ -169,6 +169,13 @@
       "when": 1785500000000,
       "tag": "0023_file_shares",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785600000000,
+      "tag": "0024_platform_services",
+      "breakpoints": true
     }
   ]
 }

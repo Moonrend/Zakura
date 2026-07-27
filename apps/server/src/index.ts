@@ -41,6 +41,9 @@ import {
   reconcileOrphanExposures,
 } from "./services/port-exposures.js";
 import { FileShareService } from "./services/file-shares.js";
+import { PlatformServiceManager } from "./services/platform-services.js";
+import { PlatformServiceUsageService } from "./services/platform-service-usage.js";
+import { bindPlatformServiceRuntime } from "./platform-services/runtime-bind.js";
 
 async function main() {
   const config = loadConfig();
@@ -62,6 +65,24 @@ async function main() {
 
   const runtime = new DockerRuntime();
   const orchestrator = new Orchestrator(db, runtime, config);
+  const platformServices = new PlatformServiceManager(db, runtime, config);
+  const platformServiceUsage = new PlatformServiceUsageService(db, config);
+  bindPlatformServiceRuntime(platformServices, platformServiceUsage);
+  await platformServices.ensureRows().catch((err) => {
+    console.warn("[platform-services] ensure rows:", err);
+  });
+  void platformServices
+    .ensureDesired()
+    .then((r) => {
+      if (r.started || r.failed) {
+        console.log(
+          `[platform-services] ensure on boot: started=${r.started} failed=${r.failed}`,
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn("[platform-services] ensure on boot failed:", err);
+    });
   const gateway = new McpGateway(db, orchestrator, runtime);
   const runtimeNodes = new RuntimeNodeService(db, config);
   const agentService = new AgentService(db, runtime, config, runtimeNodes);
@@ -198,6 +219,8 @@ async function main() {
       exposures,
       fileShares,
       networkAudit,
+      platformServices,
+      platformServiceUsage,
     }),
   );
 

@@ -66,8 +66,11 @@ docker compose up -d --build
 可选：
 
 ```bash
-docker compose --profile components up -d   # SearXNG / OpenViking 示例
+docker compose --profile components up -d   # SearXNG / OpenViking 手动示例（可选）
 docker compose --profile postgres up -d     # 外部 Postgres，再改 DATABASE_URL
+
+# 推荐：在控制台「自托管服务」由系统托管 SearXNG / Jina Reader / Firecrawl / Crawl4AI
+# （主机单例 Docker，多 Agent 共用；SaaS 可配租户用量限额；在「网页」中选用）
 ```
 
 ## 发布镜像（GHCR + Docker Hub）

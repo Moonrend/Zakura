@@ -17,12 +17,22 @@ function defaultConfig(kind: CapabilityKind): Record<string, unknown> {
   if (kind === "web-search") {
     return {
       defaultEngine: "duckduckgo",
-      engines: { duckduckgo: { enabled: true } },
+      engines: {
+        duckduckgo: {
+          enabled: true,
+          slots: [{ id: "default", label: "默认" }],
+        },
+      },
     };
   }
   return {
     defaultBackend: "native",
-    backends: { native: { enabled: true } },
+    backends: {
+      native: {
+        enabled: true,
+        slots: [{ id: "default", label: "默认" }],
+      },
+    },
   };
 }
 

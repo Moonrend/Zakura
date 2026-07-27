@@ -40,8 +40,18 @@ import {
   readInstanceConfig,
   saveCapabilityConfig,
 } from "../services/capabilities.js";
-import { listSearchEngineMeta } from "../capabilities/web-search/index.js";
-import { listFetchBackendMeta } from "../capabilities/web-fetch/index.js";
+import {
+  listSearchEngineMeta,
+  mergeWebSearchConfig,
+  redactWebSearchConfig,
+  type WebSearchConfig,
+} from "../capabilities/web-search/index.js";
+import {
+  listFetchBackendMeta,
+  mergeWebFetchConfig,
+  redactWebFetchConfig,
+  type WebFetchConfig,
+} from "../capabilities/web-fetch/index.js";
 import { MEMORY_LAYERS, type MemoryStore } from "../services/memory-store.js";
 import {
   isMemoryProviderKind,
@@ -73,6 +83,9 @@ import type { SecurityPolicyService } from "../services/network-security.js";
 import type { ExposureService } from "../services/port-exposures.js";
 import type { FileShareService } from "../services/file-shares.js";
 import type { NetworkAuditService } from "../services/network-audit.js";
+import type { PlatformServiceManager } from "../services/platform-services.js";
+import type { PlatformServiceUsageService } from "../services/platform-service-usage.js";
+import { registerPlatformServiceRoutes } from "./platform-service-routes.js";
 import { McpStoreService } from "../services/mcp-store.js";
 import {
   McpUpstreamOauthService,
@@ -323,6 +336,8 @@ export async function createApiApp(deps: {
   exposures?: ExposureService;
   fileShares?: FileShareService;
   networkAudit?: NetworkAuditService;
+  platformServices?: PlatformServiceManager;
+  platformServiceUsage?: PlatformServiceUsageService;
 }) {
   const {
     db,
@@ -348,6 +363,8 @@ export async function createApiApp(deps: {
     exposures,
     fileShares,
     networkAudit,
+    platformServices,
+    platformServiceUsage,
   } = deps;
   const mcpStore = new McpStoreService(config);
   const upstreamOauth = new McpUpstreamOauthService(config);
@@ -453,6 +470,14 @@ export async function createApiApp(deps: {
   });
 
   app.get("/api/health", (c) => c.json({ status: "ok", service: "zakura" }));
+
+  if (platformServices && platformServiceUsage) {
+    registerPlatformServiceRoutes(app as never, {
+      config,
+      platformServices,
+      platformServiceUsage,
+    });
+  }
 
   app.get("/api/runtime/docker", async (c) => {
     const ping = await runtime.ping();
@@ -821,7 +846,7 @@ export async function createApiApp(deps: {
       session.tenantId,
       "web-search",
     );
-    const capabilityConfig = readInstanceConfig(config, instance);
+    const capabilityConfig = readInstanceConfig<WebSearchConfig>(config, instance);
     return c.json({
       instance: {
         id: instance.id,
@@ -831,7 +856,8 @@ export async function createApiApp(deps: {
         slug: instance.slug,
       },
       engines: listSearchEngineMeta(),
-      config: capabilityConfig,
+      // Secrets never leave the server (tenant isolation)
+      config: redactWebSearchConfig(capabilityConfig),
     });
   });
 
@@ -842,6 +868,12 @@ export async function createApiApp(deps: {
       ensureCapabilityInstance(db, orchestrator, session.tenantId, "web-search"),
       ensureCapabilityInstance(db, orchestrator, session.tenantId, "web-fetch"),
     ]);
+    const managed =
+      platformServices != null
+        ? (await platformServices.list()).filter(
+            (s) => s.mode !== "disabled" && (s.healthStatus === "healthy" || s.status === "running"),
+          )
+        : [];
     return c.json({
       webSearch: {
         instance: {
@@ -852,7 +884,9 @@ export async function createApiApp(deps: {
           slug: searchInst.slug,
         },
         engines: listSearchEngineMeta(),
-        config: readInstanceConfig(config, searchInst),
+        config: redactWebSearchConfig(
+          readInstanceConfig<WebSearchConfig>(config, searchInst),
+        ),
       },
       webFetch: {
         instance: {
@@ -863,8 +897,18 @@ export async function createApiApp(deps: {
           slug: fetchInst.slug,
         },
         backends: listFetchBackendMeta(),
-        config: readInstanceConfig(config, fetchInst),
+        config: redactWebFetchConfig(
+          readInstanceConfig<WebFetchConfig>(config, fetchInst),
+        ),
       },
+      platformServices: managed.map((s) => ({
+        key: s.key,
+        name: s.name,
+        mode: s.mode,
+        healthStatus: s.healthStatus,
+        mapsTo: s.mapsTo,
+        endpointUrl: s.endpointUrl,
+      })),
     });
   });
 
@@ -872,18 +916,29 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const body = await c.req.json<Record<string, unknown>>();
     try {
+      // Merge secrets under this tenant only — never accept other tenants' data
+      const existing = await ensureCapabilityInstance(
+        db,
+        orchestrator,
+        session.tenantId,
+        "web-search",
+      );
+      const previous = readInstanceConfig<WebSearchConfig>(config, existing);
+      const merged = mergeWebSearchConfig(body, previous);
       const instance = await saveCapabilityConfig(
         db,
         orchestrator,
         config,
         session.tenantId,
         "web-search",
-        body,
+        merged as unknown as Record<string, unknown>,
       );
       return c.json({
         ok: true,
         instance,
-        config: instance ? readInstanceConfig(config, instance) : body,
+        config: instance
+          ? redactWebSearchConfig(readInstanceConfig<WebSearchConfig>(config, instance))
+          : redactWebSearchConfig(merged),
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -898,7 +953,7 @@ export async function createApiApp(deps: {
       session.tenantId,
       "web-fetch",
     );
-    const capabilityConfig = readInstanceConfig(config, instance);
+    const capabilityConfig = readInstanceConfig<WebFetchConfig>(config, instance);
     return c.json({
       instance: {
         id: instance.id,
@@ -908,7 +963,7 @@ export async function createApiApp(deps: {
         slug: instance.slug,
       },
       backends: listFetchBackendMeta(),
-      config: capabilityConfig,
+      config: redactWebFetchConfig(capabilityConfig),
     });
   });
 
@@ -916,18 +971,28 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const body = await c.req.json<Record<string, unknown>>();
     try {
+      const existing = await ensureCapabilityInstance(
+        db,
+        orchestrator,
+        session.tenantId,
+        "web-fetch",
+      );
+      const previous = readInstanceConfig<WebFetchConfig>(config, existing);
+      const merged = mergeWebFetchConfig(body, previous);
       const instance = await saveCapabilityConfig(
         db,
         orchestrator,
         config,
         session.tenantId,
         "web-fetch",
-        body,
+        merged as unknown as Record<string, unknown>,
       );
       return c.json({
         ok: true,
         instance,
-        config: instance ? readInstanceConfig(config, instance) : body,
+        config: instance
+          ? redactWebFetchConfig(readInstanceConfig<WebFetchConfig>(config, instance))
+          : redactWebFetchConfig(merged),
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

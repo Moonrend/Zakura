@@ -32,7 +32,6 @@ import {
 } from "./tailscale-admin.js";
 import {
   HeadscaleAdminClient,
-  HEADSCALE_PLATFORM_TAG,
   headscaleTenantUserName,
   type HeadscaleNode,
 } from "./headscale-admin.js";
@@ -1884,8 +1883,9 @@ export class NetworkSettingsService {
       .replace(/^-+|-+$/g, "")
       .slice(0, 63);
 
-    // Platform Headscale / OSS cloud: prefer host Tailscale IP when available.
-    let serverUrl = this.config.publicBaseUrl;
+    // Runner → Server：始终走公网 URL（Caddy / ZAKURA_PUBLIC_URL）。
+    // 8787 默认不映射到宿主机，mesh IP:8787 会 RST；Tailscale 只用于 Server → Runner。
+    const serverUrl = this.config.publicBaseUrl;
     if (opts.enableTailscale && tsAuthKey) {
       if (platformMode) {
         let platformKey = hs.platformAuthKey;
@@ -1899,22 +1899,24 @@ export class NetworkSettingsService {
               await this.refreshPlatformHeadscale();
             }
           } catch {
-            /* fall through to public URL */
+            /* host join is best-effort */
           }
         }
         if (platformKey) {
-          serverUrl = await this.hostTailscale.resolveServerUrl({
-            authKey: platformKey,
-            tags: [HEADSCALE_PLATFORM_TAG],
-            loginServer: hs.url,
-            platformHeadscale: true,
-          });
+          await this.hostTailscale
+            .ensurePlatformHost({
+              authKey: platformKey,
+              loginServer: hs.url,
+            })
+            .catch(() => null);
         }
       } else if (!this.config.multiTenant) {
-        serverUrl = await this.hostTailscale.resolveServerUrl({
-          authKey: tsAuthKey,
-          tags,
-        });
+        await this.hostTailscale
+          .ensureAndGetIp({
+            authKey: tsAuthKey,
+            tags,
+          })
+          .catch(() => null);
       }
     }
     tHost = performance.now();

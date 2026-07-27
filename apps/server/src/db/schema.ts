@@ -564,6 +564,82 @@ export const settings = pgTable(
   (t) => [uniqueIndex("settings_owner_key").on(t.ownerKey, t.key)],
 );
 
+/**
+ * Host-level shared services (SearXNG / Jina Reader / Firecrawl / Crawl4AI).
+ * One row per service_key for the whole deployment — not per-tenant.
+ */
+export const platformServices = pgTable(
+  "platform_services",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    serviceKey: text("service_key").notNull(),
+    /** disabled | managed | external */
+    mode: text("mode").notNull().default("disabled"),
+    /** running | stopped — admin intent when mode=managed */
+    desiredState: text("desired_state").notNull().default("stopped"),
+    /** stopped | starting | running | stopping | error */
+    status: text("status").notNull().default("stopped"),
+    healthStatus: text("health_status").notNull().default("unknown"),
+    configEnc: text("config_enc").notNull().default("{}"),
+    endpointUrl: text("endpoint_url"),
+    /** JSON: [{ name, dockerId, role }] */
+    containersJson: text("containers_json").notNull().default("[]"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("platform_services_key").on(t.serviceKey)],
+);
+
+/**
+ * SaaS quotas for platform-managed services.
+ * tenantId null / "__platform__" = platform default (use scopeKey).
+ */
+export const platformServiceQuotas = pgTable(
+  "platform_service_quotas",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    /**
+     * Tenant id, or "__platform__" for site-wide defaults.
+     * Null is avoided so unique index works on all engines.
+     */
+    scopeKey: text("scope_key").notNull(),
+    /** Service key or "*" for all managed services */
+    serviceKey: text("service_key").notNull(),
+    monthlyLimit: integer("monthly_limit"),
+    dailyLimit: integer("daily_limit"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("platform_service_quotas_scope").on(t.scopeKey, t.serviceKey)],
+);
+
+/** Request counters for managed platform services (SaaS metering). */
+export const platformServiceUsage = pgTable(
+  "platform_service_usage",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Optional user attribution; empty string when unknown (unique key friendly). */
+    userId: text("user_id").notNull().default(""),
+    serviceKey: text("service_key").notNull(),
+    /** YYYY-MM or YYYY-MM-DD */
+    period: text("period").notNull(),
+    requestCount: integer("request_count").notNull().default(0),
+    errorCount: integer("error_count").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("platform_service_usage_unique").on(
+      t.tenantId,
+      t.userId,
+      t.serviceKey,
+      t.period,
+    ),
+    index("platform_service_usage_tenant_period").on(t.tenantId, t.period),
+  ],
+);
+
 export const mcpPolicies = pgTable("mcp_policies", {
   id: text("id").primaryKey().$defaultFn(newId),
   tenantId: text("tenant_id")
@@ -1058,6 +1134,9 @@ export const schema = {
   managedContainers,
   agentBindings,
   settings,
+  platformServices,
+  platformServiceQuotas,
+  platformServiceUsage,
   mcpPolicies,
   memories,
   memoryEdges,
@@ -1097,6 +1176,9 @@ export type ProviderCatalog = typeof providerCatalog.$inferSelect;
 export type ComponentInstance = typeof componentInstances.$inferSelect;
 export type ManagedContainer = typeof managedContainers.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
+export type PlatformService = typeof platformServices.$inferSelect;
+export type PlatformServiceQuota = typeof platformServiceQuotas.$inferSelect;
+export type PlatformServiceUsageRow = typeof platformServiceUsage.$inferSelect;
 export type McpPolicy = typeof mcpPolicies.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type MemoryEdge = typeof memoryEdges.$inferSelect;

@@ -43,6 +43,8 @@ export const searchEngines: SearchEngine[] = [
     id: "tavily",
     name: "Tavily",
     description: "面向 Agent 的搜索 API",
+    docsUrl: "https://tavily.com",
+    apiKeyUrl: "https://app.tavily.com/home",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Tavily");
@@ -74,6 +76,8 @@ export const searchEngines: SearchEngine[] = [
     id: "serper",
     name: "Serper",
     description: "Google 结果（Serper.dev）",
+    docsUrl: "https://serper.dev",
+    apiKeyUrl: "https://serper.dev/api-key",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Serper");
@@ -97,6 +101,8 @@ export const searchEngines: SearchEngine[] = [
     id: "brave",
     name: "Brave",
     description: "Brave Search API",
+    docsUrl: "https://brave.com/search/api/",
+    apiKeyUrl: "https://api-dashboard.search.brave.com/",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Brave");
@@ -121,6 +127,8 @@ export const searchEngines: SearchEngine[] = [
     id: "exa",
     name: "Exa",
     description: "神经搜索 / 语义检索",
+    docsUrl: "https://exa.ai",
+    apiKeyUrl: "https://dashboard.exa.ai/api-keys",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Exa");
@@ -153,6 +161,8 @@ export const searchEngines: SearchEngine[] = [
     id: "jina",
     name: "Jina",
     description: "Jina Search (s.jina.ai)",
+    docsUrl: "https://jina.ai",
+    apiKeyUrl: "https://jina.ai/api-dashboard/",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Jina");
@@ -181,6 +191,8 @@ export const searchEngines: SearchEngine[] = [
     id: "google",
     name: "Google",
     description: "Google Custom Search JSON API",
+    docsUrl: "https://developers.google.com/custom-search",
+    apiKeyUrl: "https://developers.google.com/custom-search/v1/introduction",
     requiresApiKey: true,
     extraFields: [{ key: "cx", title: "Search Engine ID (cx)", placeholder: "CSE cx" }],
     async search(req, creds) {
@@ -205,6 +217,8 @@ export const searchEngines: SearchEngine[] = [
     id: "bing",
     name: "Bing",
     description: "Bing Web Search API v7",
+    docsUrl: "https://www.microsoft.com/en-us/bing/apis/bing-web-search-api",
+    apiKeyUrl: "https://portal.azure.com/",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Bing");
@@ -230,7 +244,9 @@ export const searchEngines: SearchEngine[] = [
   {
     id: "searxng",
     name: "SearXNG",
-    description: "自托管元搜索（HTTP JSON，无需 Docker）",
+    description: "自托管元搜索（平台托管或填写 Base URL）",
+    docsUrl: "https://docs.searxng.org/",
+    platformServiceKey: "searxng",
     requiresApiKey: false,
     requiresBaseUrl: true,
     async search(req, creds) {
@@ -254,6 +270,7 @@ export const searchEngines: SearchEngine[] = [
     id: "duckduckgo",
     name: "DuckDuckGo",
     description: "Instant Answer + HTML 结果（无需 Key）",
+    docsUrl: "https://duckduckgo.com/",
     requiresApiKey: false,
     async search(req) {
       const url = new URL("https://api.duckduckgo.com/");
@@ -317,6 +334,8 @@ export const searchEngines: SearchEngine[] = [
     id: "bocha",
     name: "Bocha",
     description: "博查 AI 搜索",
+    docsUrl: "https://open.bochaai.com/",
+    apiKeyUrl: "https://open.bochaai.com/",
     requiresApiKey: true,
     async search(req, creds) {
       const apiKey = requireKey(creds, "Bocha");
@@ -353,6 +372,8 @@ export const searchEngines: SearchEngine[] = [
     id: "sogou",
     name: "Sogou",
     description: "搜狗搜索（开放平台 / 自定义网关）",
+    docsUrl: "https://open.sogou.com/",
+    apiKeyUrl: "https://open.sogou.com/",
     requiresApiKey: true,
     requiresBaseUrl: true,
     extraFields: [{ key: "pid", title: "pid（可选）" }],
@@ -383,6 +404,8 @@ export const searchEngines: SearchEngine[] = [
     id: "yandex",
     name: "Yandex",
     description: "Yandex Cloud Search API",
+    docsUrl: "https://yandex.cloud/en/docs/search-api/",
+    apiKeyUrl: "https://console.yandex.cloud/",
     requiresApiKey: true,
     requiresBaseUrl: true,
     extraFields: [

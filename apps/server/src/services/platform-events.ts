@@ -6,6 +6,8 @@
  */
 import type { AgentProgressSnapshot } from "./agent-progress.js";
 
+import type { PlatformServiceProgressSnapshot } from "./platform-service-progress.js";
+
 export type PlatformEvent =
   | {
       type: "agent_progress";
@@ -31,6 +33,13 @@ export type PlatformEvent =
       message: string;
       level: "info" | "warn" | "error" | "ok";
     }
+  | {
+      /** Host-level platform service deploy/stop progress (all tenants receive). */
+      type: "platform_service_progress";
+      ts: number;
+      serviceKey: string;
+      snapshot: PlatformServiceProgressSnapshot;
+    }
   | { type: "runner_node"; ts: number; nodeId: string }
   | { type: "agent_fs_changed"; ts: number; agentId: string; path: string };
 
@@ -38,6 +47,7 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "agent_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "mcp_instance" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "mcp_progress" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "platform_service_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "runner_node" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">;
 
@@ -69,6 +79,20 @@ class PlatformEventBus {
         fn(full);
       } catch (err) {
         console.warn("[platform-events] listener error:", err);
+      }
+    }
+  }
+
+  /** Broadcast to every subscribed tenant (host-level services). */
+  publishAll(event: PlatformEventInput): void {
+    const full = { ...event, ts: Date.now() } as PlatformEvent;
+    for (const set of this.listeners.values()) {
+      for (const fn of set) {
+        try {
+          fn(full);
+        } catch (err) {
+          console.warn("[platform-events] listener error:", err);
+        }
       }
     }
   }

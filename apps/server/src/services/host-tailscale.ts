@@ -79,20 +79,19 @@ export class HostTailscaleService {
     return !this.config.multiTenant;
   }
 
-  /** Resolve http(s) URL runners should dial when Tailscale is enabled. */
-  async resolveServerUrl(opts: {
-    authKey: string;
+  /**
+   * Runner 回连地址：始终返回公网 URL。
+   * Tailscale/Headscale 仅用于 Server → Runner；host 侧仍可通过 ensureAndGetIp 加入 mesh。
+   * （宿主机默认不监听 8787，mesh IP:port 会 RST。）
+   */
+  async resolveServerUrl(_opts?: {
+    authKey?: string;
     tags?: string[];
     loginServer?: string;
     /** SaaS + Headscale platform mode */
     platformHeadscale?: boolean;
   }): Promise<string> {
-    if (!this.hostMayJoinMesh({ platformHeadscale: opts.platformHeadscale })) {
-      return this.config.publicBaseUrl;
-    }
-    const ip = await this.ensureAndGetIp(opts).catch(() => null);
-    if (!ip) return this.config.publicBaseUrl;
-    return `http://${ip}:${this.config.port}`;
+    return this.config.publicBaseUrl;
   }
 
   async ensureAndGetIp(opts: {

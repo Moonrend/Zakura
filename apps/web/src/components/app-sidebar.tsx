@@ -29,6 +29,7 @@ import {
   Users,
   ShieldCheck,
   Route,
+  Container,
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { AGENT_SUBNAV } from "@/lib/agents";
@@ -379,6 +380,20 @@ export function AppSidebar({
       isActive: (path) =>
         path === "/dashboard/web" || path.startsWith("/dashboard/web/"),
     },
+    // Host infra: OSS admin always; SaaS only platform super-admin (not tenants)
+    ...(!multiTenant || isPlatformAdmin
+      ? [
+          {
+            id: "platform-services",
+            href: "/dashboard/platform-services",
+            label: "自托管服务",
+            icon: Container,
+            isActive: (path: string) =>
+              path === "/dashboard/platform-services" ||
+              path.startsWith("/dashboard/platform-services/"),
+          } satisfies NavEntry,
+        ]
+      : []),
     {
       id: "memory",
       href: "/dashboard/memory",

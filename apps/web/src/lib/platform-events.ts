@@ -7,6 +7,24 @@
  */
 import type { ProgressSnapshot } from "@/lib/agents";
 
+export type PlatformServiceProgressSnapshot = {
+  serviceKey: string;
+  phase: string;
+  percent: number;
+  running: boolean;
+  done: boolean;
+  error: string | null;
+  message: string;
+  events: Array<{
+    ts: number;
+    level: string;
+    step: string;
+    message: string;
+    percent?: number;
+  }>;
+  updatedAt: number;
+};
+
 export type PlatformEvent =
   | { type: "agent_progress"; ts: number; agentId: string; snapshot: ProgressSnapshot }
   | {
@@ -26,6 +44,12 @@ export type PlatformEvent =
       step: string;
       message: string;
       level: "info" | "warn" | "error" | "ok";
+    }
+  | {
+      type: "platform_service_progress";
+      ts: number;
+      serviceKey: string;
+      snapshot: PlatformServiceProgressSnapshot;
     }
   | { type: "runner_node"; ts: number; nodeId: string }
   | { type: "agent_fs_changed"; ts: number; agentId: string; path: string };

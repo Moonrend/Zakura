@@ -60,6 +60,7 @@ export const fetchBackends: FetchBackend[] = [
     id: "native",
     name: "Native",
     description: "直接 HTTP 抓取并粗提取正文（无额外依赖）",
+    docsUrl: "https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API",
     requiresApiKey: false,
     async fetch(req) {
       const url = assertHttpUrl(req.url);
@@ -89,11 +90,17 @@ export const fetchBackends: FetchBackend[] = [
   {
     id: "jina-reader",
     name: "Jina Reader",
-    description: "r.jina.ai 将网页转为 Markdown",
+    description: "r.jina.ai 或自托管 jina-ai/reader，将网页转为 Markdown",
+    docsUrl: "https://jina.ai/reader",
+    apiKeyUrl: "https://jina.ai/api-dashboard/",
+    platformServiceKey: "jina-reader",
     requiresApiKey: false,
+    requiresBaseUrl: false,
     async fetch(req, creds) {
       const target = assertHttpUrl(req.url);
-      const endpoint = `https://r.jina.ai/${target}`;
+      const base = (creds.baseUrl ?? "https://r.jina.ai").replace(/\/$/, "");
+      // Self-host and cloud both accept /{url}
+      const endpoint = `${base}/${target}`;
       const headers: Record<string, string> = {
         Accept: "text/markdown",
         "X-Return-Format": "markdown",
@@ -116,9 +123,137 @@ export const fetchBackends: FetchBackend[] = [
     },
   },
   {
+    id: "firecrawl",
+    name: "Firecrawl",
+    description: "Firecrawl scrape API（自托管或云端）；需 Base URL 或平台托管",
+    docsUrl: "https://docs.firecrawl.dev/",
+    apiKeyUrl: "https://www.firecrawl.dev/app/api-keys",
+    platformServiceKey: "firecrawl",
+    requiresApiKey: false,
+    requiresBaseUrl: true,
+    async fetch(req, creds) {
+      const target = assertHttpUrl(req.url);
+      const base = (creds.baseUrl ?? "").replace(/\/$/, "");
+      if (!base) throw new Error("Firecrawl 需要 Base URL（平台托管或自建实例）");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (creds.apiKey) headers.Authorization = `Bearer ${creds.apiKey}`;
+
+      // Prefer v1 scrape, fall back to v0 /scrape
+      const paths = [`${base}/v1/scrape`, `${base}/v0/scrape`, `${base}/scrape`];
+      let lastErr = "no endpoint";
+      for (const endpoint of paths) {
+        try {
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              url: target,
+              formats: ["markdown"],
+              onlyMainContent: true,
+            }),
+            signal: AbortSignal.timeout(req.timeoutMs ?? 60000),
+          });
+          if (!res.ok) {
+            lastErr = `HTTP ${res.status}`;
+            if (res.status === 404) continue;
+            throw new Error(`Firecrawl ${lastErr}`);
+          }
+          const data = (await res.json()) as {
+            data?: { markdown?: string; content?: string; title?: string; metadata?: { title?: string } };
+            markdown?: string;
+            content?: string;
+            success?: boolean;
+          };
+          const content =
+            data.data?.markdown ??
+            data.data?.content ??
+            data.markdown ??
+            data.content ??
+            JSON.stringify(data);
+          return {
+            url: target,
+            title: data.data?.title ?? data.data?.metadata?.title,
+            content: String(content).slice(0, 120_000),
+            contentType: "text/markdown",
+            backend: "firecrawl",
+          };
+        } catch (err) {
+          lastErr = err instanceof Error ? err.message : String(err);
+          if (endpoint === paths[paths.length - 1]) break;
+        }
+      }
+      throw new Error(`Firecrawl 失败: ${lastErr}`);
+    },
+  },
+  {
+    id: "crawl4ai",
+    name: "Crawl4AI",
+    description: "Crawl4AI Docker API（/crawl）；需 Base URL 或平台托管",
+    docsUrl: "https://docs.crawl4ai.com/",
+    platformServiceKey: "crawl4ai",
+    requiresApiKey: false,
+    requiresBaseUrl: true,
+    async fetch(req, creds) {
+      const target = assertHttpUrl(req.url);
+      const base = (creds.baseUrl ?? "").replace(/\/$/, "");
+      if (!base) throw new Error("Crawl4AI 需要 Base URL（平台托管或自建实例）");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      };
+      if (creds.apiKey) headers.Authorization = `Bearer ${creds.apiKey}`;
+
+      const res = await fetch(`${base}/crawl`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          urls: [target],
+          priority: 10,
+        }),
+        signal: AbortSignal.timeout(req.timeoutMs ?? 90000),
+      });
+      if (!res.ok) throw new Error(`Crawl4AI HTTP ${res.status}`);
+      const data = (await res.json()) as {
+        results?: Array<{
+          url?: string;
+          markdown?: string | { raw_markdown?: string; fit_markdown?: string };
+          cleaned_html?: string;
+          title?: string;
+          metadata?: { title?: string };
+        }>;
+        detail?: string;
+      };
+      const first = data.results?.[0];
+      if (!first) {
+        throw new Error(data.detail || "Crawl4AI 无结果");
+      }
+      let content = "";
+      if (typeof first.markdown === "string") content = first.markdown;
+      else if (first.markdown && typeof first.markdown === "object") {
+        content =
+          first.markdown.fit_markdown ||
+          first.markdown.raw_markdown ||
+          "";
+      }
+      if (!content) content = first.cleaned_html ?? "";
+      return {
+        url: first.url ?? target,
+        title: first.title ?? first.metadata?.title,
+        content: content.slice(0, 120_000),
+        contentType: "text/markdown",
+        backend: "crawl4ai",
+      };
+    },
+  },
+  {
     id: "cloudflare-markdown",
     name: "Cloudflare Markdown",
     description: "markdown.new / Cloudflare Browser Rendering Markdown",
+    docsUrl: "https://developers.cloudflare.com/browser-rendering/",
+    apiKeyUrl: "https://dash.cloudflare.com/profile/api-tokens",
     requiresApiKey: false,
     requiresBaseUrl: false,
     async fetch(req, creds: BackendCredentials) {

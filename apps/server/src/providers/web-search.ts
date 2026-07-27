@@ -9,15 +9,37 @@ import type {
   SearchEngineId,
 } from "@zakura/shared";
 import { SEARCH_ENGINE_IDS } from "@zakura/shared";
+import { normalizeSlots } from "../capabilities/cred-slots.js";
 import {
   enabledEngines,
   listSearchEngineMeta,
+  mergeWebSearchConfig,
   runWebSearch,
+  type EngineRuntimeConfig,
   type WebSearchConfig,
 } from "../capabilities/web-search/index.js";
 
 function parseConfig(raw: Record<string, unknown>): WebSearchConfig {
-  const engines = (raw.engines as WebSearchConfig["engines"]) ?? {};
+  const enginesIn = (raw.engines as Record<string, EngineRuntimeConfig | undefined>) ?? {};
+  const engines: WebSearchConfig["engines"] = {};
+  for (const [id, cfg] of Object.entries(enginesIn)) {
+    if (!cfg || !SEARCH_ENGINE_IDS.includes(id as SearchEngineId)) continue;
+    const slots = normalizeSlots(cfg);
+    engines[id as SearchEngineId] = {
+      enabled: Boolean(cfg.enabled),
+      slots: slots.length
+        ? slots.map((s) => ({
+            id: s.id,
+            label: s.label,
+            usePlatform: s.usePlatform,
+            apiKey: s.apiKey,
+            baseUrl: s.baseUrl,
+            extra: s.extra,
+          }))
+        : undefined,
+      // keep legacy fields out of stored form after normalize
+    };
+  }
   const defaultEngine =
     typeof raw.defaultEngine === "string" &&
     SEARCH_ENGINE_IDS.includes(raw.defaultEngine as SearchEngineId)
@@ -35,7 +57,7 @@ const configSchema: ProviderConfigSchema = {
       type: "string",
       title: "默认引擎",
       enum: [...SEARCH_ENGINE_IDS],
-      description: "在管理台「网页搜索」分区配置各引擎后生效",
+      description: "在管理台「网页」中配置各引擎后生效",
     },
   },
 };
@@ -45,7 +67,7 @@ export function createWebSearchProvider(): ProviderPlugin {
     id: "web-search",
     name: "网页搜索",
     description: "多引擎搜索 API（Tavily / Serper / Brave / SearXNG 等）",
-    version: "0.1.0",
+    version: "0.2.0",
     category: "web-search",
     capabilities: ["search", "tools", "builtin"],
     configSchema,
@@ -104,12 +126,16 @@ export function createWebSearchProvider(): ProviderPlugin {
       if (toolName !== "web_search") return textResult(`Unknown tool: ${toolName}`, true);
       try {
         const cfg = parseConfig(handle.config);
-        const result = await runWebSearch(cfg, {
-          query: String(args.query ?? ""),
-          engine: typeof args.engine === "string" ? args.engine : undefined,
-          limit: typeof args.limit === "number" ? args.limit : undefined,
-          language: typeof args.language === "string" ? args.language : undefined,
-        });
+        const result = await runWebSearch(
+          cfg,
+          {
+            query: String(args.query ?? ""),
+            engine: typeof args.engine === "string" ? args.engine : undefined,
+            limit: typeof args.limit === "number" ? args.limit : undefined,
+            language: typeof args.language === "string" ? args.language : undefined,
+          },
+          { tenantId: handle.tenantId },
+        );
         return textResult(JSON.stringify(result, null, 2));
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
@@ -117,3 +143,5 @@ export function createWebSearchProvider(): ProviderPlugin {
     },
   };
 }
+
+export { mergeWebSearchConfig, parseConfig as parseWebSearchConfig };

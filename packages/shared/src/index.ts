@@ -59,6 +59,8 @@ export interface ContainerSpec {
   workingDir?: string;
   network?: string;
   labels?: Record<string, string>;
+  /** Docker HostConfig.ShmSize in bytes (e.g. Crawl4AI needs ~1g) */
+  shmSize?: number;
   healthcheck?: {
     test: string[];
     intervalMs?: number;
@@ -284,8 +286,26 @@ export const SEARCH_ENGINE_IDS = [
 ] as const;
 export type SearchEngineId = (typeof SEARCH_ENGINE_IDS)[number];
 
-export const FETCH_BACKEND_IDS = ["native", "jina-reader", "cloudflare-markdown"] as const;
+export const FETCH_BACKEND_IDS = [
+  "native",
+  "jina-reader",
+  "cloudflare-markdown",
+  "firecrawl",
+  "crawl4ai",
+] as const;
 export type FetchBackendId = (typeof FETCH_BACKEND_IDS)[number];
+
+/** Host-level shared services managed by Zakura (one instance per deployment). */
+export const PLATFORM_SERVICE_KEYS = [
+  "searxng",
+  "jina-reader",
+  "firecrawl",
+  "crawl4ai",
+] as const;
+export type PlatformServiceKey = (typeof PLATFORM_SERVICE_KEYS)[number];
+
+export const PLATFORM_SERVICE_MODES = ["disabled", "managed", "external"] as const;
+export type PlatformServiceMode = (typeof PLATFORM_SERVICE_MODES)[number];
 
 export const BUILTIN_PROVIDER_IDS = [
   "web-search",

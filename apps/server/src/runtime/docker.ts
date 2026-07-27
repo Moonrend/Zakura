@@ -182,6 +182,9 @@ export class DockerRuntime implements ContainerRuntime {
         RestartPolicy: spec.restartPolicy
           ? { Name: spec.restartPolicy, MaximumRetryCount: 0 }
           : { Name: "unless-stopped" },
+        ...(typeof spec.shmSize === "number" && spec.shmSize > 0
+          ? { ShmSize: spec.shmSize }
+          : {}),
       },
       Healthcheck: spec.healthcheck
         ? {
@@ -416,7 +419,11 @@ export class DockerRuntime implements ContainerRuntime {
       tail,
       timestamps: true,
     });
-    return buf.toString("utf8");
+    // Docker multiplexes stdout/stderr when TTY is off
+    const raw = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as unknown as string);
+    const demuxed = demuxDockerExecOutput(raw);
+    const text = [demuxed.stdout, demuxed.stderr].filter(Boolean).join("");
+    return text || raw.toString("utf8");
   }
 
   async hasImage(image: string): Promise<boolean> {
@@ -428,14 +435,40 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  async ensureImage(image: string): Promise<void> {
-    if (await this.hasImage(image)) return;
+  /**
+   * Pull image if missing. onProgress receives raw dockerode status lines
+   * (e.g. "abc123 Pulling fs layer", "Downloading [====>] 12MB/40MB").
+   */
+  async ensureImage(
+    image: string,
+    onProgress?: (line: string) => void,
+  ): Promise<void> {
+    if (await this.hasImage(image)) {
+      onProgress?.(`Image already present: ${image}`);
+      return;
+    }
     await new Promise<void>((resolve, reject) => {
       this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
         if (err) return reject(dockerErr(err));
         this.docker.modem.followProgress(
           stream,
           (e: Error | null) => (e ? reject(dockerErr(e)) : resolve()),
+          (event: {
+            status?: string;
+            progress?: string;
+            id?: string;
+            error?: string;
+          }) => {
+            if (!onProgress) return;
+            if (event.error) {
+              onProgress(event.error);
+              return;
+            }
+            const parts = [event.id, event.status, event.progress]
+              .map((p) => (typeof p === "string" ? p.trim() : ""))
+              .filter(Boolean);
+            if (parts.length) onProgress(parts.join(" "));
+          },
         );
       });
     });
