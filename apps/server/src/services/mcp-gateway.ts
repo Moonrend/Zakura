@@ -160,28 +160,32 @@ function subagentToolDef(agentId: string): ResolvedTool {
     instanceId: null,
     providerId: SUBAGENT_PROVIDER_ID,
     localName: SUBAGENT_TOOL_NAME,
-    title: "云端子代理",
-    description:
-      "在云端启动一个子代理（subagent）独立完成一个子任务。子代理与你共享同一工作区和全部工具，" +
-      "但拥有全新的隔离上下文（看不到当前对话），运行结束后只返回最终结果。" +
-      "适用于：可并行的独立子任务（同一轮发起多个调用即并行执行）、需要大量中间探索但只需要结论的调研、" +
-      "避免冗长中间产物占用主对话上下文。task 必须自包含——子代理没有你的记忆与对话背景。" +
-      "子代理在嵌套深度限制内也能继续派生自己的子代理，复杂任务可分层拆解。",
+    title: "Cloud subagent",
+    description: [
+      "[Callable now] Spawn a cloud subagent for an independent subtask; the final result is returned by this tool.",
+      "The subagent shares this Agent's workspace and full tool surface, but has an isolated context (no current chat/memory).",
+      "Use for: parallel subtasks (multiple re_spawn_subagent in one turn run in parallel), research that only needs a conclusion, work whose intermediate steps would fill the main context.",
+      "task must be self-contained; put necessary background in context; put desired format in expected_output.",
+      "After completion, integrate the returned conclusion into your reply to the user. Subagents may nest within the depth limit; do not nest for simple tasks.",
+    ].join(" "),
     inputSchema: {
       type: "object",
       required: ["task"],
       properties: {
         task: {
           type: "string",
-          description: "子任务描述：目标、范围与验收标准需自包含、可独立执行",
+          description:
+            "[Required] Self-contained subtask: goal, scope, acceptance criteria. The subagent cannot see the parent chat — do not write dependencies like \"continue above\".",
         },
         context: {
           type: "string",
-          description: "可选背景信息（子代理看不到当前对话，历史结论需在此显式给出）",
+          description:
+            "Optional background: paths, constraints, prior conclusions, file content summaries. The subagent has no memory — include anything it needs.",
         },
         expected_output: {
           type: "string",
-          description: "可选期望输出格式（如：JSON 数组 / 要点列表 / 产物文件路径）",
+          description:
+            "Optional desired output format, e.g. JSON array, Markdown bullets, workspace artifact path list.",
         },
       },
     },

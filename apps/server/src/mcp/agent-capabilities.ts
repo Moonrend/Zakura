@@ -1,6 +1,11 @@
 /**
  * Agent MCP 对外能力声明（2025-11-25 core + 2026-07-28 extensions 前向兼容）
  */
+import { buildAgentMcpInstructions } from "./instructions.js";
+
+export { buildAgentMcpInstructions } from "./instructions.js";
+export type { AgentMcpInstructionsOpts } from "./instructions.js";
+
 export const AGENT_MCP_PROTOCOL_VERSIONS = ["2025-11-25", "2026-07-28"] as const;
 
 /** 官方扩展 ID（SEP-2133 / SEP-2663 / SEP-1865） */
@@ -36,6 +41,7 @@ export function buildAgentMcpCapabilities(opts?: { pathSlug?: string }) {
 export function buildDiscoverResult(opts: {
   pathSlug: string;
   instructions?: string;
+  agentName?: string;
 }) {
   const capabilities = buildAgentMcpCapabilities({ pathSlug: opts.pathSlug });
   return {
@@ -44,7 +50,11 @@ export function buildDiscoverResult(opts: {
     capabilities,
     instructions:
       opts.instructions ??
-      "Zakura Agent MCP gateway. Supports tools / resources / prompts / completions / tasks. Prefer extension io.modelcontextprotocol/tasks for async tool calls.",
+      buildAgentMcpInstructions({
+        pathSlug: opts.pathSlug,
+        agentName: opts.agentName,
+        detail: "brief",
+      }),
     ttlMs: 3_600_000,
     cacheScope: "private" as const,
     _meta: {

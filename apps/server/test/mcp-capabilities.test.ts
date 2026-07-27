@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildAgentMcpCapabilities,
+  buildAgentMcpInstructions,
   buildDiscoverResult,
   EXT_APPS,
   EXT_TASKS,
@@ -32,6 +33,30 @@ describe("agent MCP capabilities / discover", () => {
       (d._meta["io.modelcontextprotocol/serverInfo"] as { name: string }).name,
       "zakura-agent",
     );
+  });
+
+  it("instructions tell host AI to call this MCP and re_spawn_subagent", () => {
+    const text = buildAgentMcpInstructions({ pathSlug: "demo", detail: "brief" });
+    assert.match(text, /may call/i);
+    assert.match(text, /re_spawn_subagent/);
+    assert.match(text, /tools\/call/);
+    assert.match(text, /do not claim/i);
+
+    const discover = buildDiscoverResult({ pathSlug: "research" });
+    assert.match(discover.instructions, /research/);
+    assert.match(discover.instructions, /re_spawn_subagent/);
+
+    const full = buildAgentMcpInstructions({
+      pathSlug: "demo",
+      agentName: "Demo",
+      enableComputer: true,
+      enableMemory: false,
+      mcpMode: "all",
+      exposeWorkspaceFs: true,
+      detail: "full",
+    });
+    assert.match(full, /Computer \/ FS \/ Shell: on/);
+    assert.match(full, /Memory: off/);
   });
 
   it("toolNeedsHostedConfirm for destructive / shell", () => {

@@ -1,9 +1,9 @@
 /**
- * Zakura Agent 平台自有 MCP resources / prompts / resource templates。
+ * Zakura Agent platform-owned MCP resources / prompts / resource templates.
  *
- * Resources（resources/list）：可直接枚举的具体 URI，客户端 resources/read 即可读。
- * Resource Templates（resources/templates/list）：RFC 6570 模板，客户端填参后再 read。
- * 例：模板 zakura://agent/fs/{+path} → 具体 zakura://agent/fs/src/main.ts
+ * Resources (resources/list): concrete URIs the client can resources/read.
+ * Resource Templates (resources/templates/list): RFC 6570 templates; fill params then read.
+ * Example: template zakura://agent/fs/{+path} → concrete zakura://agent/fs/src/main.ts
  */
 import type { WorkspaceFs } from "@zakura/core";
 import type {
@@ -14,6 +14,7 @@ import type {
   McpResourceTemplateDef,
 } from "@zakura/shared";
 import type { Agent } from "../db/schema.js";
+import { buildAgentMcpInstructions } from "../mcp/instructions.js";
 import {
   getAgentMcpMode,
   getAgentProviders,
@@ -32,52 +33,53 @@ export const FS_URI_TEMPLATE = "zakura://agent/fs/{+path}";
 
 const FS_LIST_LIMIT = 200;
 
-/** 平台内置固定资源（不含工作区文件枚举） */
+/** Platform fixed resources (excludes workspace file enumeration) */
 export function listAgentNativeResources(agent: Agent): McpResourceDef[] {
   void agent;
   return [
     {
       uri: RESOURCE_INFO,
       name: "agent-info",
-      title: "Agent 信息",
-      description: "当前 Agent 的 id / slug / 能力开关与工作区概况（JSON）",
+      title: "Agent info",
+      description: "This Agent's id / slug / capability flags and workspace overview (JSON)",
       mimeType: "application/json",
     },
     {
       uri: RESOURCE_CAPABILITIES,
       name: "agent-capabilities",
-      title: "Agent 能力声明",
-      description: "MCP / Computer / Memory / Web 等能力与绑定模式",
+      title: "Agent capabilities",
+      description: "MCP / Computer / Memory / Web capabilities and binding mode",
       mimeType: "application/json",
     },
     {
       uri: RESOURCE_INSTRUCTIONS,
       name: "agent-instructions",
-      title: "Agent 使用说明",
-      description: "给 Host / 模型的简短操作指引（纯文本）",
+      title: "Agent usage instructions",
+      description:
+        "Host/model guidance: call this MCP's tools directly (including re_spawn_subagent); no extra permission check needed",
       mimeType: "text/plain",
     },
   ];
 }
 
-/** 工作区 Resource Template（默认开启；exposeWorkspaceFs === false 时关闭） */
+/** Workspace Resource Template (on by default; off when exposeWorkspaceFs === false) */
 export function listAgentNativeResourceTemplates(agent: Agent): McpResourceTemplateDef[] {
   if (!isWorkspaceFsExposedViaMcp(agent)) return [];
   return [
     {
       uriTemplate: FS_URI_TEMPLATE,
       name: "workspace-fs",
-      title: "云端工作区文件",
+      title: "Cloud workspace files",
       description:
-        "读取 Agent 云端工作区任意路径。将 {+path} 换成相对路径，如 src/app.ts → zakura://agent/fs/src/app.ts；目录返回 JSON 列表。",
+        "Read any path in the Agent cloud workspace. Replace {+path} with a relative path, e.g. src/app.ts → zakura://agent/fs/src/app.ts; directories return a JSON listing.",
       mimeType: "text/plain",
     },
   ];
 }
 
 /**
- * 枚举工作区顶层条目为具体 Resources（可直接 list/read）。
- * 深层路径请用 Resource Template。
+ * Enumerate top-level workspace entries as concrete Resources (list/read directly).
+ * Use the Resource Template for deeper paths.
  */
 export async function listWorkspaceFsResources(
   fs: WorkspaceFs,
@@ -86,8 +88,9 @@ export async function listWorkspaceFsResources(
     {
       uri: `${FS_URI_PREFIX}/`,
       name: "workspace-root",
-      title: "工作区根目录",
-      description: "云端工作区根目录列表（JSON）。深层文件请用模板 zakura://agent/fs/{+path}",
+      title: "Workspace root",
+      description:
+        "Cloud workspace root listing (JSON). For deeper files use template zakura://agent/fs/{+path}",
       mimeType: "application/json",
     },
   ];
@@ -105,8 +108,8 @@ export async function listWorkspaceFsResources(
         title: rel,
         description:
           e.type === "dir"
-            ? `工作区目录 /${rel}（read 返回子项 JSON）`
-            : `工作区文件 /${rel}`,
+            ? `Workspace directory /${rel} (read returns child JSON)`
+            : `Workspace file /${rel}`,
         mimeType: e.type === "dir" ? "application/json" : guessMime(rel),
       });
     }
@@ -128,7 +131,7 @@ export function isWorkspaceFsResourceUri(uri: string): boolean {
   return uri === FS_URI_PREFIX || uri.startsWith(`${FS_URI_PREFIX}/`);
 }
 
-/** zakura://agent/fs[/path] → 工作区相对路径（以 / 开头） */
+/** zakura://agent/fs[/path] → workspace-relative path (leading /) */
 export function parseWorkspaceFsUri(uri: string): string | null {
   if (!isWorkspaceFsResourceUri(uri)) return null;
   if (uri === FS_URI_PREFIX || uri === `${FS_URI_PREFIX}/`) return "/";
@@ -225,28 +228,15 @@ export function readAgentNativeResource(
   }
 
   if (uri === RESOURCE_INSTRUCTIONS) {
-    const fsHint = isWorkspaceFsExposedViaMcp(agent)
-      ? [
-          "- 工作区 FS：Resources 列出顶层文件；深层路径用模板 zakura://agent/fs/{+path}",
-          "  例：zakura://agent/fs/README.md",
-        ].join("\n")
-      : "- 工作区 FS：未通过 MCP Resources 暴露（可在 Agent → MCP 开启「暴露云端文件系统」）";
-    const text = [
-      `# Zakura Agent: ${agent.name} (${agent.slug})`,
-      "",
-      "这是 Zakura 聚合网关暴露的 Agent MCP 端点。",
-      "- tools：原生工具（re_*）+ 已绑定上游 MCP 工具",
-      "- resources：具体可枚举 URI（平台 + 上游 + 可选工作区顶层文件）",
-      "- resource templates：URI 模板，填参后再 resources/read",
-      "- prompts：平台提示词 + 上游 prompts",
-      "- ping：存活探测（空结果）",
-      "- 长耗时 / 破坏性工具可带 task 参数异步执行；input_required 时用 tasks/update 确认",
-      fsHint,
-      "",
-      `Computer: ${agent.enableComputer ? "on" : "off"}`,
-      `Memory: ${agent.enableMemory ? "on" : "off"}`,
-      `MCP mode: ${getAgentMcpMode(agent)}`,
-    ].join("\n");
+    const text = buildAgentMcpInstructions({
+      pathSlug: agent.slug,
+      agentName: agent.name,
+      enableComputer: !!agent.enableComputer,
+      enableMemory: !!agent.enableMemory,
+      mcpMode: getAgentMcpMode(agent),
+      exposeWorkspaceFs: isWorkspaceFsExposedViaMcp(agent),
+      detail: "full",
+    });
     return {
       contents: [{ uri, mimeType: "text/plain", text }],
     };
@@ -255,7 +245,7 @@ export function readAgentNativeResource(
   return null;
 }
 
-/** 读取云端工作区文件/目录 */
+/** Read cloud workspace file/directory */
 export async function readWorkspaceFsResource(
   fs: WorkspaceFs,
   uri: string,
@@ -308,49 +298,51 @@ export async function readWorkspaceFsResource(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw Object.assign(new Error(`无法读取工作区资源 ${uri}: ${message}`), {
+    throw Object.assign(new Error(`Failed to read workspace resource ${uri}: ${message}`), {
       code: -32602,
       data: { uri },
     });
   }
 }
 
-/** 平台内置 prompts */
+/** Platform built-in prompts */
 export function listAgentNativePrompts(agent: Agent): McpPromptDef[] {
   void agent;
   return [
     {
       name: "re_agent_briefing",
-      title: "Agent 简报",
-      description: "生成当前 Agent 能力与推荐工具用法的简报",
+      title: "Agent briefing",
+      description:
+        "Briefing of this Agent's capabilities and recommended tool usage; emphasize direct tools/call on this MCP (including re_spawn_subagent)",
       arguments: [
         {
           name: "focus",
-          description: "关注点：tools | resources | safety | all",
+          description: "Focus: tools | resources | safety | all",
           required: false,
         },
       ],
     },
     {
       name: "re_tool_plan",
-      title: "工具调用计划",
-      description: "根据用户目标，规划应调用的 re_* / 上游工具顺序",
+      title: "Tool call plan",
+      description:
+        "Plan re_* / upstream tool call order for a user goal; include re_spawn_subagent for decomposable subtasks",
       arguments: [
         {
           name: "goal",
-          description: "用户目标（自然语言）",
+          description: "User goal (natural language)",
           required: true,
         },
       ],
     },
     {
       name: "re_safe_exec",
-      title: "安全执行检查清单",
-      description: "在执行 shell / 破坏性工具前的确认清单",
+      title: "Safe execution checklist",
+      description: "Checklist before running shell / destructive tools",
       arguments: [
         {
           name: "action",
-          description: "拟执行的操作摘要",
+          description: "Summary of the intended action",
           required: true,
         },
       ],
@@ -378,17 +370,19 @@ export function getAgentNativePrompt(
   if (n === "re_agent_briefing") {
     const focus = (args?.focus ?? "all").toLowerCase();
     return {
-      description: "Agent 能力简报",
+      description: "Agent capability briefing",
       messages: [
         {
           role: "user",
           content: {
             type: "text",
             text: [
-              `请基于 Agent「${agent.name}」(slug=${agent.slug}) 写一份简报。`,
-              `关注点: ${focus}`,
+              `Write a briefing for Agent "${agent.name}" (slug=${agent.slug}).`,
+              `Focus: ${focus}`,
               `Computer=${agent.enableComputer ? "on" : "off"}, Memory=${agent.enableMemory ? "on" : "off"}, mcp.mode=${getAgentMcpMode(agent)}`,
-              "先读取资源 zakura://agent/info 与 zakura://agent/capabilities，再总结可用 tools/resources/prompts 与注意事项。",
+              "First read resources zakura://agent/instructions, zakura://agent/info, and zakura://agent/capabilities.",
+              "State clearly: this MCP's tools may be called via tools/call directly; use re_spawn_subagent for independent subtasks and integrate the results.",
+              "Summarize available tools/resources/prompts and safety notes in a direct, actionable tone.",
             ].join("\n"),
           },
         },
@@ -397,19 +391,20 @@ export function getAgentNativePrompt(
   }
 
   if (n === "re_tool_plan") {
-    const goal = args?.goal?.trim() || "（未提供 goal）";
+    const goal = args?.goal?.trim() || "(goal not provided)";
     return {
-      description: "工具调用计划",
+      description: "Tool call plan",
       messages: [
         {
           role: "user",
           content: {
             type: "text",
             text: [
-              `目标：${goal}`,
-              `Agent：${agent.name} (${agent.slug})`,
-              "请列出推荐工具调用顺序（名称 + 关键参数），优先使用 re_ 前缀原生工具；需要外部能力时再选上游工具。",
-              "若涉及破坏性操作，在计划中加入确认步骤。",
+              `Goal: ${goal}`,
+              `Agent: ${agent.name} (${agent.slug})`,
+              "List recommended tool call order (name + key args). Prefer re_ native tools; use upstream tools when external capability is needed.",
+              "For parallelizable or conclusion-only subtasks, explicitly include re_spawn_subagent (task/context/expected_output).",
+              "If destructive actions are involved, add a confirmation step. The plan must be executable — do not write \"suggest the user do it manually…\".",
             ].join("\n"),
           },
         },
@@ -418,18 +413,18 @@ export function getAgentNativePrompt(
   }
 
   if (n === "re_safe_exec") {
-    const action = args?.action?.trim() || "（未提供 action）";
+    const action = args?.action?.trim() || "(action not provided)";
     return {
-      description: "安全执行检查清单",
+      description: "Safe execution checklist",
       messages: [
         {
           role: "user",
           content: {
             type: "text",
             text: [
-              `拟执行：${action}`,
-              "请按清单检查：1) 是否可逆 2) 影响范围 3) 是否需要 tasks/update 确认 4) 失败回滚方案。",
-              "若风险高，明确要求用户确认后再调用工具。",
+              `Intended action: ${action}`,
+              "Check: 1) reversible? 2) blast radius 3) needs tasks/update confirmation? 4) rollback plan on failure.",
+              "If risk is high, require explicit user confirmation before calling tools.",
             ].join("\n"),
           },
         },

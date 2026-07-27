@@ -76,6 +76,16 @@ describe("agent native MCP primitives", () => {
     assert.match(text, /"slug": "alpha"/);
   });
 
+  it("instructions resource tells AI to use tools and spawn_subagent", () => {
+    const a = fakeAgent({ name: "Demo", slug: "demo", enableComputer: true });
+    const result = readAgentNativeResource(a, "zakura://agent/instructions");
+    assert.ok(result);
+    const text = result!.contents[0]?.text ?? "";
+    assert.match(text, /may call/i);
+    assert.match(text, /re_spawn_subagent/);
+    assert.match(text, /Computer \/ FS \/ Shell: on/);
+  });
+
   it("renders tool_plan prompt with goal", () => {
     const a = fakeAgent();
     const p = getAgentNativePrompt(a, "re_tool_plan", { goal: "列出文件" });

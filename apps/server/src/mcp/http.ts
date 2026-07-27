@@ -48,6 +48,7 @@ import type { ZakuraTaskStore } from "../services/mcp-task-store.js";
 import type { McpAuthContext, OauthService } from "../services/oauth.js";
 import {
   buildAgentMcpCapabilities,
+  buildAgentMcpInstructions,
   buildDiscoverResult,
   toolNeedsHostedConfirm,
 } from "./agent-capabilities.js";
@@ -183,8 +184,10 @@ function createAgentMcpServer(opts: {
     },
     {
       capabilities: buildAgentMcpCapabilities({ pathSlug }),
-      instructions:
-        "Zakura Agent MCP gateway. Tools / resources / prompts / completions / tasks. Long-running or destructive tools may return CreateTaskResult; poll tasks/get and submit input via tasks/update when status is input_required. Extensions: io.modelcontextprotocol/tasks, io.modelcontextprotocol/apps.",
+      instructions: buildAgentMcpInstructions({
+        pathSlug,
+        detail: "brief",
+      }),
       taskStore: taskStore as TaskStore,
       taskMessageQueue,
     },
