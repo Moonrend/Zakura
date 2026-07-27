@@ -18,6 +18,7 @@ describe("agent MCP capabilities / discover", () => {
     assert.ok(caps.tasks?.requests?.tools?.call);
     assert.ok(caps.resources);
     assert.ok(caps.prompts);
+    assert.ok(caps.logging);
     assert.deepEqual(caps.extensions?.[EXT_TASKS], {});
     assert.deepEqual(caps.extensions?.[EXT_APPS], {});
   });

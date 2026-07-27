@@ -24,6 +24,7 @@ import {
   PingRequestSchema,
   ReadResourceRequestSchema,
   RequestSchema,
+  SetLevelRequestSchema,
   isInitializeRequest,
   type CallToolResult,
   type CompleteResult,
@@ -195,6 +196,19 @@ function createAgentMcpServer(opts: {
 
   // 显式注册 ping（SDK Protocol 默认也有；再挂一次避免被覆盖/热更新丢 handler）
   server.setRequestHandler(PingRequestSchema, async () => ({}));
+
+  // 兼容客户端在握手后无条件发送 logging/setLevel（否则会 -32601 Method not found）
+  server.setRequestHandler(SetLevelRequestSchema, async () => ({}));
+
+  // 未知方法：把 method 写进错误信息，便于 Inspector / 客户端排障
+  server.fallbackRequestHandler = async (request) => {
+    const method =
+      request && typeof request === "object" && "method" in request
+        ? String((request as { method: unknown }).method)
+        : "unknown";
+    console.warn(`[mcp] Method not found on agent ${pathSlug}: ${method}`);
+    throw new McpError(ErrorCode.MethodNotFound, `Method not found: ${method}`);
+  };
 
   // 覆盖默认 getTask：附带托管 inputRequests
   server.setRequestHandler(GetTaskRequestSchema, async (request) => {

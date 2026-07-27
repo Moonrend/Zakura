@@ -15,6 +15,8 @@ export function buildAgentMcpCapabilities(opts?: { pathSlug?: string }) {
     resources: {},
     prompts: {},
     completions: {},
+    // 部分客户端（Claude / 旧 Inspector）在未检查 capability 时也会发 logging/setLevel
+    logging: {},
     // 2025-11-25 experimental tasks（旧客户端）
     tasks: {
       list: {},
