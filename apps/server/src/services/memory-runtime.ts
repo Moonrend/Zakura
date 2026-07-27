@@ -172,10 +172,9 @@ export async function buildMemoryContext(
         .map((r) => {
           const content = (r.memory ?? r.content ?? "").trim();
           if (!content) return null;
-          return {
-            id: typeof r.id === "string" ? r.id : undefined,
-            content,
-          };
+          const item: { id?: string; content: string } = { content };
+          if (typeof r.id === "string") item.id = r.id;
+          return item;
         })
         .filter((x): x is { id?: string; content: string } => x != null);
       return {
