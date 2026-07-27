@@ -405,6 +405,7 @@ export type {
 } from "./mcp-oauth.js";
 
 export {
+  DEFAULT_AGENT_AUTO_INSTALL_MCPS,
   rankInstallPreview,
   pickPreferredInstallPreview,
 } from "./mcp-config.js";
@@ -463,6 +464,9 @@ export type {
   CloudAgentRunErrorPayload,
   CloudAgentRunLogPayload,
   CloudAgentMemoryUpdatedPayload,
+  CloudAgentContextSourceKind,
+  CloudAgentContextSourceItem,
+  CloudAgentContextSourcesPayload,
   CloudAgentSessionUpdatePayload,
   CloudAgentEventPayload,
   CloudAgentEvent,

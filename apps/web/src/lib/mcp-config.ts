@@ -4,6 +4,7 @@
  */
 
 import {
+  DEFAULT_AGENT_AUTO_INSTALL_MCPS,
   MCP_OAUTH_TIER_META,
   pickPreferredInstallPreview,
   type McpAuthMode,
@@ -26,7 +27,11 @@ export type {
   UnifiedMcpConfig,
 } from "@zakura/shared";
 
-export { pickPreferredInstallPreview, rankInstallPreview } from "@zakura/shared";
+export {
+  DEFAULT_AGENT_AUTO_INSTALL_MCPS,
+  pickPreferredInstallPreview,
+  rankInstallPreview,
+} from "@zakura/shared";
 
 const TIER_A: McpOauthContract = {
   tier: "A",
@@ -40,6 +45,23 @@ const TIER_B_PRE: McpOauthContract = {
 
 /** 官方推荐远程 HTTP MCP（独立「官方商店」页） */
 export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
+  // 无鉴权默认 MCP（新建 Agent 自动安装）
+  ...DEFAULT_AGENT_AUTO_INSTALL_MCPS,
+  {
+    id: "context7",
+    name: "Context7",
+    description: "为任意库拉取最新文档与代码示例（可选 API Key 提高限额）",
+    kind: "http",
+    auth: "none",
+    mcpUrl: "https://mcp.context7.com/mcp",
+    headerName: "CONTEXT7_API_KEY",
+    docsUrl: "https://context7.com/docs/resources/all-clients",
+    repositoryUrl: "https://github.com/upstash/context7",
+    tags: ["dev", "docs", "recommended", "no-auth"],
+    source: "curated",
+    icon: "C7",
+    group: "dev",
+  },
   {
     id: "notion",
     name: "Notion",

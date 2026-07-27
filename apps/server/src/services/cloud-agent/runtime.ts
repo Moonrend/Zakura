@@ -13,6 +13,7 @@ import {
   parseCloudAgentConfig,
   type CloudAgentAttachment,
   type CloudAgentConfig,
+  type CloudAgentContextSourceItem,
   type CloudAgentSessionOrigin,
   type ModelChatContentPart,
   type ModelChatMessage,
@@ -22,7 +23,11 @@ import type { WorkspaceFsProvider, WorkspaceFs } from "@zakura/core";
 import type { Agent } from "../../db/schema.js";
 import { newId } from "../../db/schema.js";
 import { SUBAGENT_TOOL_QUALIFIED, type McpGateway } from "../mcp-gateway.js";
-import { mapConcurrent } from "../../model-router/http.js";
+import {
+  isAbortError,
+  mapConcurrent,
+  ModelCallAbortedError,
+} from "../../model-router/http.js";
 import type { ModelRouterService } from "../model-router.js";
 import type { AgentService } from "../agents.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
@@ -201,8 +206,24 @@ export class CloudAgentRuntime {
       isFirstTurn,
     }).catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[cloud-agent] run failed:", message);
       try {
+        // 引擎已收尾（cancelled/completed/failed）则不重复写事件
+        const current = await this.store.getRun(run.id);
+        if (current && current.status !== "queued" && current.status !== "running") {
+          return;
+        }
+        // 取消引发的异常：收尾为 cancelled 而非 failed
+        if (isAbortError(err) || (await this.store.isCancelRequested(run.id))) {
+          await this.store.appendEvent({
+            sessionId: input.sessionId,
+            type: "run_end",
+            runId: run.id,
+            payload: { runId: run.id, status: "cancelled" },
+          });
+          await this.store.finishRun(input.sessionId, run.id, "cancelled");
+          return;
+        }
+        console.error("[cloud-agent] run failed:", message);
         await failRun(this.store, input.sessionId, run.id, message);
       } catch (e) {
         console.error("[cloud-agent] failed to record run error:", e);
@@ -263,6 +284,7 @@ export class CloudAgentRuntime {
       Boolean(this.deps.memoryProviders);
     let resolvedMemory: ResolvedMemory | null = null;
     let memoryContext = "";
+    const sourceItems: CloudAgentContextSourceItem[] = [];
     if (autoMemoryOn) {
       try {
         resolvedMemory = await resolveAgentMemory(this.deps.memoryProviders!, agent);
@@ -278,6 +300,15 @@ export class CloudAgentRuntime {
             await this.log(sessionId, runId, "info", `记忆召回 ${ctx.count} 条`, {
               retrievalMode: ctx.retrievalMode,
             });
+            for (const m of ctx.items) {
+              sourceItems.push({
+                kind: "memory",
+                title: m.layer ? `记忆 · ${m.layer}` : "记忆",
+                content: m.content,
+                ...(m.id ? { id: m.id } : {}),
+                ...(m.layer ? { layer: m.layer } : {}),
+              });
+            }
           }
         }
       } catch (err) {
@@ -315,12 +346,32 @@ export class CloudAgentRuntime {
           droppedMessages: older.length,
           summaryChars: historySummary.length,
         });
+        if (historySummary) {
+          sourceItems.push({
+            kind: "summary",
+            title: "对话摘要",
+            content: historySummary,
+          });
+        }
       } catch (err) {
         // 摘要失败：硬截断，保底继续
         historyMsgs = historyMsgs.slice(-COMPACT_KEEP_RECENT * 2);
         await this.log(sessionId, runId, "warn", "历史摘要失败，改为截断", {
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+    }
+
+    if (sourceItems.length > 0) {
+      try {
+        await this.store.appendEvent({
+          sessionId,
+          type: "context_sources",
+          runId,
+          payload: { runId, items: sourceItems },
+        });
+      } catch (err) {
+        console.warn("[cloud-agent] context_sources publish failed:", err);
       }
     }
 
@@ -702,7 +753,7 @@ export class CloudAgentRuntime {
 
       if (result.status === "cancelled") {
         opts.onProgress?.(`子代理[${shortId}] 已取消`, { childSessionId: session.id });
-        throw new Error("子代理已取消（父任务取消或会话被终止）");
+        throw new ModelCallAbortedError("子代理已取消（父任务取消或会话被终止）");
       }
       opts.onProgress?.(`子代理[${shortId}] 完成（${result.rounds} 轮）`, {
         childSessionId: session.id,
@@ -715,7 +766,7 @@ export class CloudAgentRuntime {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // 取消已由引擎收尾；其余异常补记失败事件后向父级抛出
-      if (!/已取消/.test(message)) {
+      if (!isAbortError(err) && !(await isCancelledChain())) {
         opts.onProgress?.(`子代理[${shortId}] 失败`, {
           childSessionId: session.id,
           error: message.slice(0, 300),
@@ -821,7 +872,9 @@ export class CloudAgentRuntime {
         },
       });
 
-      if (result.status === "cancelled") throw new Error("父 Run 已取消");
+      if (result.status === "cancelled") {
+        throw new ModelCallAbortedError("委派已取消（父 Run 取消或会话被终止）");
+      }
       const answer = result.finalText.trim();
       return {
         text: (answer ? `[${target.name}] ${answer}` : `[${target.name}] （无回复内容）`).slice(
@@ -833,7 +886,7 @@ export class CloudAgentRuntime {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (!/已取消/.test(message)) {
+      if (!isAbortError(err) && !(await opts.isCancelled())) {
         try {
           await failRun(this.store, session.id, run.id, message);
         } catch (e) {

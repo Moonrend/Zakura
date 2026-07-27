@@ -321,7 +321,9 @@ export function ChatApp() {
     void (async () => {
       try {
         const list = await refreshSessions();
-        if (sessionId && list.some((s) => s.id === sessionId)) return;
+        // 草稿态（新对话未落库）：只刷新列表，不自动选中
+        if (!sessionId) return;
+        if (list.some((s) => s.id === sessionId)) return;
         if (list[0]) await loadSession(agentId, list[0].id);
         else {
           setSessionId(null);
@@ -390,20 +392,16 @@ export function ChatApp() {
     }
   }
 
-  async function handleNewSession() {
+  /** 进入「新对话」草稿态：不落库，发消息时再创建会话 */
+  function handleNewSession() {
     if (!agentId) return;
-    try {
-      const created = await createCloudSession(agentId);
-      setSessions((prev) => [created, ...prev]);
-      setEvents([]);
-      setVariantByMessage({});
-      setBranchByParent({});
-      seqRef.current = 0;
-      setSessionId(created.id);
-      composerRef.current?.focus();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
+    setSessionId(null);
+    setEvents([]);
+    setVariantByMessage({});
+    setBranchByParent({});
+    seqRef.current = 0;
+    setAttachments([]);
+    composerRef.current?.focus();
   }
 
   async function handleDeleteSession(sid: string) {
@@ -692,10 +690,15 @@ export function ChatApp() {
           <button
             type="button"
             onClick={() => {
-              void handleNewSession();
+              handleNewSession();
               closeNavOnMobile();
             }}
-            className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground hover:bg-muted/60"
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm",
+              sessionId === null
+                ? "bg-muted text-foreground"
+                : "text-foreground hover:bg-muted/60",
+            )}
           >
             <SquarePen className="h-4 w-4" />
             新对话

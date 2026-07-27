@@ -16,8 +16,10 @@ export {
   executeWithFallback,
 } from "./executor.js";
 export {
+  isAbortError,
   isRetryableModelError,
   withModelRetries,
+  ModelCallAbortedError,
   UpstreamHttpError,
 } from "./http.js";
 export { weightedShuffle, orderRoutesForStrategy } from "./strategy.js";

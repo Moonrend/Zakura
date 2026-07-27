@@ -74,6 +74,10 @@ const CAPABILITY_LABEL: Record<string, string> = {
   image: "生图",
 };
 
+type FlatRow = Deployment & {
+  groupDisplayName: string;
+};
+
 export default function ModelRoutesPage() {
   return (
     <Suspense fallback={<div className="text-sm text-muted-foreground">…</div>}>
@@ -120,6 +124,20 @@ function ModelRoutesPageInner() {
     () => upstreams.map((u) => ({ value: u.id, label: u.name })),
     [upstreams],
   );
+
+  const rows = useMemo<FlatRow[]>(
+    () =>
+      groups.flatMap((g) =>
+        g.deployments.map((d) => ({
+          ...d,
+          groupDisplayName: g.displayName || g.canonicalModel,
+        })),
+      ),
+    [groups],
+  );
+
+  const allSelected =
+    rows.length > 0 && rows.every((r) => selected.has(r.id));
 
   const load = useCallback(async () => {
     try {
@@ -351,128 +369,120 @@ function ModelRoutesPageInner() {
         </Select>
       </div>
 
-      <div className="space-y-4">
-        {groups.map((g) => (
-          <div
-            key={`${g.capability}:${g.canonicalModel}`}
-            className="rounded-lg border border-border"
-          >
-            <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-              <span className="font-medium">{g.displayName || g.canonicalModel}</span>
-              <code className="text-xs text-muted-foreground">{g.canonicalModel}</code>
-              <Badge variant="outline">
-                {CAPABILITY_LABEL[g.capability] ?? g.capability}
-              </Badge>
-              {g.isDefault ? (
-                <Badge variant="secondary" className="gap-1">
-                  <Star className="size-3" />
-                  默认
-                </Badge>
-              ) : null}
-              <span className="text-xs text-muted-foreground">
-                {g.deployments.length} 个上游
-              </span>
-            </div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-10">
-                    <Checkbox
-                      checked={
-                        g.deployments.length > 0 &&
-                        g.deployments.every((d) => selected.has(d.id))
-                      }
-                      onCheckedChange={(v) => {
-                        setSelected((prev) => {
-                          const next = new Set(prev);
-                          for (const d of g.deployments) {
-                            if (v) next.add(d.id);
-                            else next.delete(d.id);
-                          }
-                          return next;
-                        });
-                      }}
-                      aria-label="全选本组"
-                    />
-                  </TableHead>
-                  <TableHead>上游</TableHead>
-                  <TableHead>原始名</TableHead>
-                  <TableHead>权重</TableHead>
-                  <TableHead>启用</TableHead>
-                  <TableHead />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {g.deployments.map((d) => (
-                  <TableRow key={d.id} className={!d.enabled ? "opacity-50" : undefined}>
-                    <TableCell>
-                      <Checkbox
-                        checked={selected.has(d.id)}
-                        onCheckedChange={(v) => {
-                          setSelected((prev) => {
-                            const next = new Set(prev);
-                            if (v) next.add(d.id);
-                            else next.delete(d.id);
-                            return next;
-                          });
-                        }}
-                        aria-label={`选择 ${d.nativeModel}`}
-                      />
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {d.upstream?.name ?? d.upstreamId}
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs">{d.nativeModel}</code>
-                    </TableCell>
-                    <TableCell className="text-sm">{d.weight}</TableCell>
-                    <TableCell>
-                      <Switch
-                        checked={d.enabled}
-                        onCheckedChange={() => void toggleEnabled(d)}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <TableActions>
-                        {!d.isDefault ? (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="设为默认"
-                            onClick={() => void setDefault(d)}
-                          >
-                            <Star className="size-3.5" />
-                          </Button>
-                        ) : null}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openEdit(d)}
-                        >
-                          编辑
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="删除"
-                          onClick={() => void remove(d.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </TableActions>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ))}
-        {groups.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">
-            暂无模型。请先配置上游，再在上游页点击「同步模型」，或在此手填。
-          </div>
-        ) : null}
-      </div>
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">
+          暂无模型。请先配置上游，再在上游页点击「同步模型」，或在此手填。
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  checked={allSelected}
+                  onCheckedChange={(v) => {
+                    setSelected(() => {
+                      if (v) return new Set(rows.map((r) => r.id));
+                      return new Set();
+                    });
+                  }}
+                  aria-label="全选"
+                />
+              </TableHead>
+              <TableHead>模型</TableHead>
+              <TableHead>能力</TableHead>
+              <TableHead>上游</TableHead>
+              <TableHead>原始名</TableHead>
+              <TableHead className="w-16">权重</TableHead>
+              <TableHead className="w-16">启用</TableHead>
+              <TableHead className="w-28" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((d) => (
+              <TableRow key={d.id} className={!d.enabled ? "opacity-50" : undefined}>
+                <TableCell>
+                  <Checkbox
+                    checked={selected.has(d.id)}
+                    onCheckedChange={(v) => {
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (v) next.add(d.id);
+                        else next.delete(d.id);
+                        return next;
+                      });
+                    }}
+                    aria-label={`选择 ${d.nativeModel}`}
+                  />
+                </TableCell>
+                <TableCell className="min-w-0 max-w-[14rem]">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-medium">
+                      {d.groupDisplayName}
+                    </span>
+                    {d.isDefault ? (
+                      <Badge variant="secondary" className="shrink-0 gap-0.5 text-[10px]">
+                        <Star className="size-2.5" />
+                        默认
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <code className="block truncate text-[10px] text-muted-foreground">
+                    {d.canonicalModel}
+                  </code>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className="text-[10px]">
+                    {CAPABILITY_LABEL[d.capability] ?? d.capability}
+                  </Badge>
+                </TableCell>
+                <TableCell className="max-w-[8rem] truncate text-sm">
+                  {d.upstream?.name ?? d.upstreamId}
+                </TableCell>
+                <TableCell className="max-w-[10rem]">
+                  <code className="block truncate text-xs">{d.nativeModel}</code>
+                </TableCell>
+                <TableCell className="text-sm tabular-nums">{d.weight}</TableCell>
+                <TableCell>
+                  <Switch
+                    checked={d.enabled}
+                    onCheckedChange={() => void toggleEnabled(d)}
+                  />
+                </TableCell>
+                <TableCell>
+                  <TableActions>
+                    {!d.isDefault ? (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        title="设为默认"
+                        onClick={() => void setDefault(d)}
+                      >
+                        <Star className="size-3.5" />
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => openEdit(d)}
+                    >
+                      编辑
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="删除"
+                      onClick={() => void remove(d.id)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </TableActions>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent className="max-w-md">

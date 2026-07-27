@@ -170,6 +170,7 @@ async function chatStream(
         ...buildHeaders(route.upstream.config, route.upstream.protocol),
         Accept: "text/event-stream",
       },
+      ...(callbacks.signal ? { signal: callbacks.signal } : {}),
       body: JSON.stringify(body),
       timeoutMs: timeout(route),
     },

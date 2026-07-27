@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus } from "lucide-react";
+import { Bot, Brain, HardDrive, Loader2, Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import {
   fetchAgents,
@@ -26,8 +26,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
 export default function AgentsListPage() {
   const router = useRouter();
@@ -116,62 +116,86 @@ export default function AgentsListPage() {
       />
 
       {loading ? (
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 rounded-lg" />
+          ))}
+        </div>
+      ) : list.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-12 text-center">
+          <p className="mb-3 text-sm text-muted-foreground">暂无 Agent</p>
+          <Button
+            size="sm"
+            onClick={() => {
+              resetCreate();
+              setOpen(true);
+            }}
+          >
+            <Plus />
+            新建 Agent
+          </Button>
+        </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>名称</TableHead>
-              <TableHead>Slug</TableHead>
-              <TableHead>环境</TableHead>
-              <TableHead>能力</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {list.map((a) => {
-              const ws = getWorkspaceStatus(a);
-              return (
-                <TableRow key={a.id}>
-                  <TableCell>
-                    <Link
-                      href={`/dashboard/agents/${a.id}/general`}
-                      className="font-medium underline-offset-2 hover:underline"
-                    >
-                      {a.name}
-                    </Link>
-                  </TableCell>
-                  <TableCell>
-                    <code className="text-[11px] text-muted-foreground">{a.slug}</code>
-                  </TableCell>
-                  <TableCell>
-                    {needsContainer(a) ? (
-                      <Badge variant={statusVariant(ws)}>
-                        {workspaceStatusLabel(ws)}
-                      </Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {[
-                      needsContainer(a) ? "电脑" : null,
-                      a.enableMemory ? "记忆" : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ") || "—"}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-            {!list.length ? (
-              <TableRow>
-                <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
-                  暂无 Agent
-                </TableCell>
-              </TableRow>
-            ) : null}
-          </TableBody>
-        </Table>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {list.map((a) => {
+            const ws = getWorkspaceStatus(a);
+            const hasComputer = needsContainer(a);
+            const caps = [
+              hasComputer ? "电脑" : null,
+              a.enableMemory ? "记忆" : null,
+            ].filter(Boolean) as string[];
+
+            return (
+              <Link
+                key={a.id}
+                href={`/dashboard/agents/${a.id}/general`}
+                className={cn(
+                  "group flex flex-col gap-3 rounded-lg border border-border bg-card p-4",
+                  "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex items-start gap-2.5">
+                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Bot className="size-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium group-hover:underline underline-offset-2">
+                        {a.name}
+                      </div>
+                      <code className="block truncate text-[10px] text-muted-foreground">
+                        {a.slug}
+                      </code>
+                    </div>
+                  </div>
+                  {hasComputer ? (
+                    <Badge variant={statusVariant(ws)} className="shrink-0">
+                      {workspaceStatusLabel(ws)}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {hasComputer ? (
+                    <Badge variant="outline" className="gap-1 text-[10px]">
+                      <HardDrive className="size-3" />
+                      电脑
+                    </Badge>
+                  ) : null}
+                  {a.enableMemory ? (
+                    <Badge variant="outline" className="gap-1 text-[10px]">
+                      <Brain className="size-3" />
+                      记忆
+                    </Badge>
+                  ) : null}
+                  {caps.length === 0 ? (
+                    <span className="text-[11px] text-muted-foreground">无扩展能力</span>
+                  ) : null}
+                </div>
+              </Link>
+            );
+          })}
+        </div>
       )}
 
       <Dialog

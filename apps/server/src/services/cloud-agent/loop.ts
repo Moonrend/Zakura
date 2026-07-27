@@ -17,8 +17,12 @@ import { newId } from "../../db/schema.js";
 import type { McpGateway } from "../mcp-gateway.js";
 import type { ModelRouterService } from "../model-router.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
+import { isAbortError } from "../../model-router/http.js";
 import { compactToolResultsInPlace } from "./messages.js";
 import { mcpResultToText, parseToolArgs } from "./tools.js";
+
+/** 取消标记轮询间隔：取消后最长这么久就会掐断上游流 */
+const CANCEL_POLL_MS = 700;
 
 export type AgentLoopDeps = {
   store: CloudAgentSessionStore;
@@ -208,6 +212,8 @@ async function streamModelRound(
     cloud: CloudAgentConfig;
     messages: ModelChatMessage[];
     definitions: ModelToolDefinition[];
+    /** 取消检查（本 Run 标记 + 祖先链）；轮询命中即掐断上游流 */
+    isCancelled: () => Promise<boolean>;
   },
 ): Promise<{
   publisher: DeltaPublisher;
@@ -217,6 +223,16 @@ async function streamModelRound(
   const maxAttempts = 3;
   for (let attempt = 1; ; attempt += 1) {
     const publisher = new DeltaPublisher(deps.store, sessionId, runId, newId());
+    // 流式期间轮询取消标记：命中则 abort，fetch 立即断开，不再等模型把话说完
+    const ctrl = new AbortController();
+    const poll = setInterval(() => {
+      void input.isCancelled().then(
+        (yes) => {
+          if (yes && !ctrl.signal.aborted) ctrl.abort();
+        },
+        () => {},
+      );
+    }, CANCEL_POLL_MS);
     try {
       const result = await deps.modelRouter.chatStream(
         tenantId,
@@ -228,16 +244,18 @@ async function streamModelRound(
         definitions.length
           ? { tools: definitions, toolChoice: "auto" }
           : undefined,
-        { onDelta: (text) => publisher.push(text) },
+        { onDelta: (text) => publisher.push(text), signal: ctrl.signal },
       );
       await publisher.drain();
       return { publisher, result };
     } catch (err) {
       await publisher.drain();
+      // 取消引发的中断：直接抛出，由 runAgentLoop 走取消收尾（不重试）
+      if (isAbortError(err) || ctrl.signal.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const retryable = (err as { retryable?: boolean }).retryable === true;
       if (!retryable || attempt >= maxAttempts) throw err;
-      if (await deps.store.isCancelRequested(runId)) throw err;
+      if (await input.isCancelled()) throw err;
       if (publisher.emitted) {
         await deps.store.appendEvent({
           sessionId,
@@ -255,6 +273,8 @@ async function streamModelRound(
         { error: message.slice(0, 600) },
       );
       await new Promise((r) => setTimeout(r, 1500 * attempt));
+    } finally {
+      clearInterval(poll);
     }
   }
 }
@@ -286,14 +306,26 @@ export async function runAgentLoop(
     });
 
     const roundStarted = Date.now();
-    const { publisher, result } = await streamModelRound(deps, {
-      tenantId,
-      sessionId,
-      runId,
-      cloud,
-      messages,
-      definitions,
-    });
+    let publisher: DeltaPublisher;
+    let result: Awaited<ReturnType<ModelRouterService["chatStream"]>>;
+    try {
+      ({ publisher, result } = await streamModelRound(deps, {
+        tenantId,
+        sessionId,
+        runId,
+        cloud,
+        messages,
+        definitions,
+        isCancelled: cancelled,
+      }));
+    } catch (err) {
+      // 取消掐断的流：收尾为 cancelled 而非 failed（错误不是故障）
+      if (isAbortError(err) || (await cancelled())) {
+        await finishCancelled(store, sessionId, runId);
+        return { status: "cancelled", finalText: lastText, rounds: round };
+      }
+      throw err;
+    }
 
     const toolCalls = result.toolCalls ?? [];
     const text = result.content ?? "";
@@ -365,8 +397,36 @@ export async function runAgentLoop(
       preResolved = await input.hooks.preResolveCalls(toolCalls);
     }
 
-    for (const call of toolCalls) {
-      if (await cancelled()) break;
+    /** 取消时为尚未执行的调用补发结果事件，避免 UI 里永远停在「运行中」 */
+    const abandonRemaining = async (from: number): Promise<void> => {
+      for (const call of toolCalls.slice(from)) {
+        await store.appendEvent({
+          sessionId,
+          type: "tool_call_result",
+          runId,
+          payload: {
+            toolCallId: call.id,
+            name: call.function.name,
+            isError: true,
+            resultText: "（已取消：该工具调用未执行）",
+            durationMs: 0,
+          },
+        });
+        messages.push({
+          role: "tool",
+          content: "（已取消：该工具调用未执行）",
+          toolCallId: call.id,
+          name: call.function.name,
+        });
+      }
+    };
+
+    for (const [index, call] of toolCalls.entries()) {
+      if (await cancelled()) {
+        await abandonRemaining(index);
+        await finishCancelled(store, sessionId, runId);
+        return { status: "cancelled", finalText: lastText, rounds: round + 1 };
+      }
 
       const modelName = call.function.name;
       const qualified = nameMap.get(modelName) ?? modelName;
@@ -389,6 +449,12 @@ export async function runAgentLoop(
           }),
         };
       } catch (err) {
+        // 取消引发的工具中断：补齐剩余调用后整体收尾为 cancelled
+        if (isAbortError(err) || (await cancelled())) {
+          await abandonRemaining(index);
+          await finishCancelled(store, sessionId, runId);
+          return { status: "cancelled", finalText: lastText, rounds: round + 1 };
+        }
         outcome = {
           result: {
             content: [

@@ -53,6 +53,7 @@ import { OauthError, isRedirectUriRegistered, type OauthService } from "../servi
 import { isCimdClientId } from "../services/oauth-cimd.js";
 import { PROVIDER_CATEGORY_META } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
+import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
@@ -70,6 +71,7 @@ import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provide
 import type { NetworkSettingsService } from "../services/network-settings.js";
 import type { SecurityPolicyService } from "../services/network-security.js";
 import type { ExposureService } from "../services/port-exposures.js";
+import type { FileShareService } from "../services/file-shares.js";
 import type { NetworkAuditService } from "../services/network-audit.js";
 import { McpStoreService } from "../services/mcp-store.js";
 import {
@@ -319,6 +321,7 @@ export async function createApiApp(deps: {
   networkSettings?: NetworkSettingsService;
   securityPolicy?: SecurityPolicyService;
   exposures?: ExposureService;
+  fileShares?: FileShareService;
   networkAudit?: NetworkAuditService;
 }) {
   const {
@@ -343,6 +346,7 @@ export async function createApiApp(deps: {
     networkSettings,
     securityPolicy,
     exposures,
+    fileShares,
     networkAudit,
   } = deps;
   const mcpStore = new McpStoreService(config);
@@ -384,9 +388,10 @@ export async function createApiApp(deps: {
       config.edition === "saas" &&
       (/^\/api\/invites\/[^/]+$/.test(path) ||
         /^\/api\/invites\/[^/]+\/accept$/.test(path));
+    const isFileSharePublic = /^\/api\/files\/shared\/[^/]+$/.test(path);
 
     // probe/import require auth — intentional
-    if (publicPaths.has(path) || isInvitePublic) {
+    if (publicPaths.has(path) || isInvitePublic || isFileSharePublic) {
       // Optional session for invite accept
       if (isInvitePublic) {
         const auth = c.req.header("authorization");
@@ -1166,9 +1171,25 @@ export async function createApiApp(deps: {
   app.get("/api/instances/:id", async (c) => {
     const session = c.get("session")!;
     const id = c.req.param("id");
-    const fresh = await loadInstanceWithContainers(db, session.tenantId, id);
+    let fresh = await loadInstanceWithContainers(db, session.tenantId, id);
     if (!fresh) {
       return c.json({ error: "Not found" }, 404);
+    }
+
+    // MCP 服务器（含远程 HTTP）访问详情时自动启动，避免长期 stopped 无法看工具
+    if (
+      fresh.providerId !== "web-search" &&
+      fresh.providerId !== "web-fetch" &&
+      fresh.status !== "running" &&
+      fresh.status !== "starting"
+    ) {
+      try {
+        await orchestrator.ensureStarted(session.tenantId, id);
+        fresh =
+          (await loadInstanceWithContainers(db, session.tenantId, id)) ?? fresh;
+      } catch {
+        /* 保持当前状态，下方仍返回实例信息 */
+      }
     }
 
     let handle: Awaited<ReturnType<typeof orchestrator.toHandle>> | null = null;
@@ -1468,6 +1489,31 @@ export async function createApiApp(deps: {
     if (!body.name?.trim()) return c.json({ error: "name required" }, 400);
     try {
       const result = await agentService.create(session.tenantId, body);
+      // 无鉴权官方 MCP（如 Grep）：安装到租户并绑定到新 Agent
+      try {
+        const { ensureDefaultAgentMcps, bindDefaultMcpsToAgent } = await import(
+          "../services/default-mcps.js"
+        );
+        const defaultIds = await ensureDefaultAgentMcps(
+          db,
+          orchestrator,
+          config,
+          session.tenantId,
+        );
+        if (defaultIds.length) {
+          await bindDefaultMcpsToAgent(
+            db,
+            session.tenantId,
+            result.agent.id,
+            defaultIds,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          "[api] default MCP auto-install failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
       return c.json(
         {
           ...agentService.serialize(result.agent),
@@ -2159,6 +2205,9 @@ export async function createApiApp(deps: {
   // Agent workspace filesystem — routes via WorkspaceFsProvider (local or remote)
   if (workspaceFsProvider) {
     registerAgentFsRoutes(app, agentService, workspaceFsProvider);
+    if (fileShares) {
+      registerFileShareRoutes(app, fileShares, agentService, workspaceFsProvider);
+    }
   }
 
   if (modelRouter && modelUpstreams && modelRoutes) {
@@ -2227,6 +2276,14 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = new CloudAgentSessionStore(db);
+    // 进程重启会丢掉内存中的 agent loop：把 DB 里仍标记运行中的 Run 收尾，
+    // 否则这些会话在 UI 上会永远显示「进行中」且无法发送新消息
+    void cloudStore
+      .recoverInterruptedRuns()
+      .then((n) => {
+        if (n > 0) console.log(`[cloud-agent] recovered ${n} interrupted run(s)`);
+      })
+      .catch((err) => console.warn("[cloud-agent] recover interrupted runs failed:", err));
     if (modelRouter) {
       const cloudRuntime = new CloudAgentRuntime({
         store: cloudStore,

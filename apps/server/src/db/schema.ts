@@ -857,6 +857,45 @@ export const networkSecurityPolicies = pgTable(
 );
 
 /**
+ * Temporary public download links for workspace files (agent → user share).
+ * Raw token is only returned once; DB stores sha256 hash.
+ */
+export const fileShares = pgTable(
+  "file_shares",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** sha256 hex of the raw share token */
+    tokenHash: text("token_hash").notNull(),
+    /** Workspace-relative path, e.g. /uploads/report.pdf */
+    path: text("path").notNull(),
+    fileName: text("file_name").notNull(),
+    mimeType: text("mime_type"),
+    sizeBytes: integer("size_bytes"),
+    /** active | revoked | expired */
+    status: text("status").notNull().default("active"),
+    ttlMinutes: integer("ttl_minutes").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    downloadCount: integer("download_count").notNull().default(0),
+    /** inline | attachment */
+    disposition: text("disposition").notNull().default("attachment"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("file_shares_token").on(t.tokenHash),
+    index("file_shares_agent").on(t.agentId, t.status),
+    index("file_shares_tenant").on(t.tenantId),
+    index("file_shares_expires").on(t.expiresAt),
+  ],
+);
+
+/**
  * Active / historical port exposures (workspace port → public or tailnet URL).
  */
 export const portExposures = pgTable(
@@ -1029,6 +1068,7 @@ export const schema = {
   networkIntegrations,
   tunnelProviderSettings,
   networkSecurityPolicies,
+  fileShares,
   portExposures,
   networkAuditLogs,
   cloudAgentSessions,
@@ -1067,6 +1107,7 @@ export type OauthRefreshToken = typeof oauthRefreshTokens.$inferSelect;
 export type NetworkIntegration = typeof networkIntegrations.$inferSelect;
 export type TunnelProviderSetting = typeof tunnelProviderSettings.$inferSelect;
 export type NetworkSecurityPolicy = typeof networkSecurityPolicies.$inferSelect;
+export type FileShare = typeof fileShares.$inferSelect;
 export type PortExposure = typeof portExposures.$inferSelect;
 export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
 export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;

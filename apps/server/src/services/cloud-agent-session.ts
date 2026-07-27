@@ -291,7 +291,11 @@ export class CloudAgentSessionStore {
     return true;
   }
 
-  /** 追加事件并 fan-out；seq 在事务内递增 */
+  /**
+   * 追加事件并 fan-out。
+   * seq 通过 last_seq 原子 +1（UPDATE … RETURNING）分配，避免子代理并行
+   * 写同一会话（如多路 onProgress / run_log）时读到相同 lastSeq 撞唯一约束。
+   */
   async appendEvent(input: {
     sessionId: string;
     type: CloudAgentEventType;
@@ -302,11 +306,17 @@ export class CloudAgentSessionStore {
     const now = new Date();
 
     const event = await this.db.transaction(async (tx) => {
-      const session = await tx.query.cloudAgentSessions.findFirst({
-        where: eq(cloudAgentSessions.id, input.sessionId),
-      });
-      if (!session) throw new Error("会话不存在");
-      const seq = session.lastSeq + 1;
+      // 行级锁 + 原子递增：并发事务会串行化在同一 session 行上
+      const [allocated] = await tx
+        .update(cloudAgentSessions)
+        .set({
+          lastSeq: sql`${cloudAgentSessions.lastSeq} + 1`,
+          updatedAt: now,
+        })
+        .where(eq(cloudAgentSessions.id, input.sessionId))
+        .returning();
+      if (!allocated) throw new Error("会话不存在");
+      const seq = allocated.lastSeq;
       await tx.insert(cloudAgentEvents).values({
         id: eventId,
         sessionId: input.sessionId,
@@ -316,10 +326,6 @@ export class CloudAgentSessionStore {
         payloadJson: JSON.stringify(input.payload),
         createdAt: now,
       });
-      await tx
-        .update(cloudAgentSessions)
-        .set({ lastSeq: seq, updatedAt: now })
-        .where(eq(cloudAgentSessions.id, input.sessionId));
       return {
         id: eventId,
         sessionId: input.sessionId,
@@ -410,6 +416,60 @@ export class CloudAgentSessionStore {
   async isCancelRequested(runId: string): Promise<boolean> {
     const run = await this.getRun(runId);
     return Boolean(run?.cancelRequested);
+  }
+
+  /**
+   * 恢复被进程中断的 Run（服务重启/崩溃）。
+   * 内存里的 agent loop 随进程消失，但 DB 里的 Run 仍是 queued/running、
+   * 会话仍挂着 activeRunId，UI 会永远显示「进行中」。启动时把它们标记为
+   * failed 并补齐 run_error/run_end 事件，前端重连即可看到真实状态。
+   * 返回恢复的 Run 数量。
+   */
+  async recoverInterruptedRuns(): Promise<number> {
+    const stale = await this.db
+      .select()
+      .from(cloudAgentRuns)
+      .where(inArray(cloudAgentRuns.status, ["queued", "running"]));
+    if (stale.length === 0) return 0;
+
+    const message = "服务重启，该运行已中断";
+    for (const run of stale) {
+      try {
+        // 事件先落库：SSE 重连的客户端据此结束「进行中」状态
+        await this.appendEvent({
+          sessionId: run.sessionId,
+          type: "run_error",
+          runId: run.id,
+          payload: { runId: run.id, message },
+        });
+        await this.appendEvent({
+          sessionId: run.sessionId,
+          type: "run_end",
+          runId: run.id,
+          payload: { runId: run.id, status: "failed" },
+        });
+      } catch (err) {
+        // 会话已删除等：仍要把 Run 状态改掉，避免下次启动重复处理
+        console.warn(`[cloud-agent] recover run ${run.id} event failed:`, err);
+      }
+      await this.finishRun(run.sessionId, run.id, "failed", message);
+    }
+
+    // 兜底：清理指向已不存在 Run 的 activeRunId（历史数据/异常删除）
+    await this.db
+      .update(cloudAgentSessions)
+      .set({ activeRunId: null })
+      .where(
+        and(
+          sql`${cloudAgentSessions.activeRunId} IS NOT NULL`,
+          sql`NOT EXISTS (
+            SELECT 1 FROM ${cloudAgentRuns}
+            WHERE ${cloudAgentRuns.id} = ${cloudAgentSessions.activeRunId}
+              AND ${cloudAgentRuns.status} IN ('queued', 'running')
+          )`,
+        ),
+      );
+    return stale.length;
   }
 
   async finishRun(

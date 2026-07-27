@@ -317,7 +317,12 @@ export class MemoryStore {
     tenantId: string,
     agentId: string,
     opts?: { maxChars?: number },
-  ): Promise<{ text: string; count: number; truncated: boolean }> {
+  ): Promise<{
+    text: string;
+    count: number;
+    truncated: boolean;
+    items: Array<{ id: string; content: string; layer: string }>;
+  }> {
     const rows = await this.db
       .select()
       .from(memories)
@@ -327,21 +332,25 @@ export class MemoryStore {
 
     const maxChars = opts?.maxChars ?? 32_000;
     const parts: string[] = [];
+    const items: Array<{ id: string; content: string; layer: string }> = [];
     let used = 0;
     let truncated = false;
     for (const r of rows) {
-      const line = `- ${r.content.trim()}`;
+      const content = r.content.trim();
+      const line = `- ${content}`;
       if (used + line.length + 1 > maxChars) {
         truncated = true;
         break;
       }
       parts.push(line);
+      items.push({ id: r.id, content, layer: r.layer });
       used += line.length + 1;
     }
     return {
       text: parts.join("\n"),
       count: rows.length,
       truncated,
+      items,
     };
   }
 

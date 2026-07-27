@@ -40,6 +40,7 @@ import {
   ExposureService,
   reconcileOrphanExposures,
 } from "./services/port-exposures.js";
+import { FileShareService } from "./services/file-shares.js";
 
 async function main() {
   const config = loadConfig();
@@ -121,6 +122,19 @@ async function main() {
   if (orphaned > 0) {
     console.warn(`[network] marked ${orphaned} orphan exposure(s) after restart`);
   }
+  // MCP 服务器（含远程 HTTP）统一自动启动；远程无本地进程，status 表示启用
+  void orchestrator
+    .autoStartMcpInstances()
+    .then((r) => {
+      if (r.started || r.failed) {
+        console.log(
+          `[mcp] auto-start on boot: started=${r.started} failed=${r.failed} skipped=${r.skipped}`,
+        );
+      }
+    })
+    .catch((err) => {
+      console.warn("[mcp] auto-start on boot failed:", err);
+    });
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
   );
@@ -133,6 +147,8 @@ async function main() {
   gateway.setTaskStore(taskStore);
   gateway.setWorkspaceFsProvider(workspaceFsProvider);
   gateway.setExposureService(exposures);
+  const fileShares = new FileShareService(db, config);
+  gateway.setFileShareService(fileShares);
 
   const app = new Hono();
   app.use(
@@ -180,6 +196,7 @@ async function main() {
       networkSettings,
       securityPolicy,
       exposures,
+      fileShares,
       networkAudit,
     }),
   );

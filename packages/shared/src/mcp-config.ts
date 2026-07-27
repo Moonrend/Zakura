@@ -80,6 +80,26 @@ export type UnifiedMcpConfig = {
   };
 };
 
+/**
+ * 无需鉴权的 HTTP MCP：新建 Agent 时默认安装到租户并绑定。
+ * 官方商店页也会展示这些条目（与 CURATED 目录合并）。
+ */
+export const DEFAULT_AGENT_AUTO_INSTALL_MCPS: UnifiedMcpConfig[] = [
+  {
+    id: "grep",
+    name: "Grep",
+    description: "在百万级 GitHub 公开仓库中搜索代码（Vercel Grep，无需鉴权）",
+    kind: "http",
+    auth: "none",
+    mcpUrl: "https://mcp.grep.app",
+    docsUrl: "https://vercel.com/blog/grep-a-million-github-repositories-via-mcp",
+    tags: ["dev", "search", "recommended", "no-auth"],
+    source: "curated",
+    icon: "GR",
+    group: "dev",
+  },
+];
+
 /** 商店 / Registry 安装方案预览（与后端 InstallPreviewOption 对齐） */
 export type StoreInstallPreview = {
   id: string;

@@ -80,6 +80,7 @@ const READ_ONLY_NAMES = new Set([
   "agent_info",
   "list_exposers",
   "list_exposures",
+  "list_file_urls",
   "fs_read",
   "fs_list",
   "fs_stat",
@@ -103,6 +104,7 @@ const DESTRUCTIVE_NAMES = new Set([
   "delete_memory",
   "containers_stop",
   "unexpose_port",
+  "revoke_file_url",
   "fs_write",
   "fs_edit",
   "fs_move",
@@ -114,6 +116,7 @@ const OPEN_WORLD_NAMES = new Set([
   "web_search",
   "web_fetch",
   "expose_port",
+  "get_file_url",
 ]);
 
 /** 从工具名推断 ChatGPT 要求的 annotations */
@@ -126,7 +129,7 @@ export function inferToolAnnotations(
     existing?.readOnlyHint ??
     (READ_ONLY_NAMES.has(base) ||
       base.startsWith("list_") ||
-      base.startsWith("get_") ||
+      (base.startsWith("get_") && base !== "get_file_url") ||
       base.endsWith("_list") ||
       base.endsWith("_info") ||
       base.endsWith("_stats") ||

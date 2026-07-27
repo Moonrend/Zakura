@@ -72,13 +72,37 @@ function needsUpstreamAuth(i: InstanceDetail): boolean {
   );
 }
 
+/** 远程 HTTP MCP 无本地进程；status 表示平台侧启用 */
+function isRemoteMcp(providerId: string) {
+  return providerId === "generic-mcp" || providerId === "google-workspace";
+}
+
 function statusVariant(
   status: string,
+  healthStatus?: string,
 ): "default" | "secondary" | "success" | "warn" | "danger" {
+  if (status === "running" && healthStatus === "unhealthy") return "danger";
   if (status === "running") return "success";
   if (status === "starting" || status === "stopping") return "warn";
   if (status === "error" || status === "unhealthy") return "danger";
   return "secondary";
+}
+
+function statusLabel(status: string, providerId: string, healthStatus?: string): string {
+  if (isRemoteMcp(providerId)) {
+    if (status === "running") {
+      if (healthStatus === "unhealthy") return "不可用";
+      return "已启用";
+    }
+    if (status === "starting") return "启用中";
+    if (status === "stopping") return "停用中";
+    return "未启用";
+  }
+  if (status === "running") return "运行中";
+  if (status === "starting") return "启动中";
+  if (status === "stopping") return "停止中";
+  if (status === "stopped") return "已停止";
+  return status;
 }
 
 export default function McpServerDetailPage() {
@@ -170,7 +194,16 @@ function McpServerDetailInner() {
     setActionBusy(true);
     try {
       await api(`/api/instances/${id}/${action}`, { method: "POST" });
-      toast.success(action === "start" ? "已启动" : "已停止");
+      const remote = instance ? isRemoteMcp(instance.providerId) : false;
+      toast.success(
+        action === "start"
+          ? remote
+            ? "已启用"
+            : "已启动"
+          : remote
+            ? "已停用"
+            : "已停止",
+      );
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -316,7 +349,16 @@ function McpServerDetailInner() {
             {instance.name}
             <code className="text-[11px] font-normal text-muted-foreground">{instance.slug}</code>
             <Badge variant="outline">{providerLabel(instance.providerId)}</Badge>
-            <Badge variant={statusVariant(instance.status)}>{instance.status}</Badge>
+            <Badge
+              variant={statusVariant(instance.status, instance.healthStatus)}
+              title={
+                isRemoteMcp(instance.providerId)
+                  ? "远程 MCP 无本地进程；此状态表示是否已在平台启用（使用时会自动启用）"
+                  : undefined
+              }
+            >
+              {statusLabel(instance.status, instance.providerId, instance.healthStatus)}
+            </Badge>
             {authNeeded ? <Badge variant="destructive">需 OAuth</Badge> : null}
           </span>
         }
@@ -329,7 +371,7 @@ function McpServerDetailInner() {
                 disabled={actionBusy}
                 onClick={() => void startStop("stop")}
               >
-                停止
+                {isRemoteMcp(instance.providerId) ? "停用" : "停止"}
               </Button>
             ) : (
               <Button
@@ -338,7 +380,7 @@ function McpServerDetailInner() {
                 disabled={actionBusy}
                 onClick={() => void startStop("start")}
               >
-                启动
+                {isRemoteMcp(instance.providerId) ? "启用" : "启动"}
               </Button>
             )}
             <Button

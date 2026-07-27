@@ -28,6 +28,7 @@ const TYPE_LABEL: Record<string, string> = {
   run_error: "错误",
   run_log: "日志",
   memory_updated: "记忆更新",
+  context_sources: "上下文来源",
   session_update: "会话更新",
 };
 
@@ -57,6 +58,10 @@ function summarize(ev: CloudAgentEvent): string {
     case "run_error":
       return String(p.message ?? "");
     case "memory_updated": {
+      const items = Array.isArray(p.items) ? p.items : [];
+      return `${items.length} 条`;
+    }
+    case "context_sources": {
       const items = Array.isArray(p.items) ? p.items : [];
       return `${items.length} 条`;
     }

@@ -205,6 +205,78 @@ export function listAgentNativeTools(
           to: { type: "string" },
         },
       }),
+      tool(
+        "get_file_url",
+        [
+          "Create a temporary public HTTPS URL for a workspace file so you can share it with the user or external systems.",
+          "Anyone with the link can download until it expires or is revoked.",
+          "Returns url, share_id, expires_at, file_name, size_bytes.",
+          "Prefer this over embedding large binary content in chat. Max 32MB.",
+        ].join(" "),
+        {
+          type: "object",
+          required: ["path"],
+          properties: {
+            path: {
+              type: "string",
+              description: "Workspace-relative file path, e.g. /uploads/report.pdf",
+            },
+            ttl_minutes: {
+              type: "integer",
+              description: "Link lifetime in minutes (default 60, max 10080 = 7 days)",
+            },
+            disposition: {
+              type: "string",
+              enum: ["attachment", "inline"],
+              description:
+                "attachment (download) or inline (browser preview for images/PDF). Default attachment.",
+            },
+          },
+        },
+        {
+          annotations: {
+            readOnlyHint: false,
+            openWorldHint: true,
+            idempotentHint: false,
+          },
+        },
+      ),
+      tool(
+        "revoke_file_url",
+        "Revoke a previously created file share URL by share_id from get_file_url / list_file_urls.",
+        {
+          type: "object",
+          required: ["share_id"],
+          properties: {
+            share_id: {
+              type: "string",
+              description: "Share id returned by get_file_url",
+            },
+          },
+        },
+        {
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            openWorldHint: false,
+          },
+        },
+      ),
+      tool(
+        "list_file_urls",
+        "List recent file share links created for this agent (active and revoked). URLs are not re-exported after creation.",
+        {
+          type: "object",
+          properties: {},
+        },
+        {
+          annotations: {
+            readOnlyHint: true,
+            openWorldHint: false,
+            idempotentHint: true,
+          },
+        },
+      ),
     );
   }
 
@@ -623,9 +695,10 @@ export async function callAgentNativeTool(
   memoryProviders?: MemoryProvidersService | null,
   workspaceFsProvider?: WorkspaceFsProvider | null,
   exposures?: import("./port-exposures.js").ExposureService | null,
+  fileShares?: import("./file-shares.js").FileShareService | null,
 ): Promise<McpToolResult> {
   try {
-    // 仅 fs_* 时打开磁盘/Runner；避免 shell/browser 等工具每次都查节点、建 FS
+    // 仅 fs_* / get_file_url 时打开磁盘/Runner；避免 shell/browser 等工具每次都查节点、建 FS
     let fsOnce: WorkspaceFs | null = null;
     const getFs = async (): Promise<WorkspaceFs> => {
       if (fsOnce) return fsOnce;
@@ -811,7 +884,10 @@ export async function callAgentNativeTool(
         name === "shell_exec" ||
         name.startsWith("computer_") ||
         name === "desktop_info" ||
-        name.startsWith("browser_"))
+        name.startsWith("browser_") ||
+        name === "get_file_url" ||
+        name === "revoke_file_url" ||
+        name === "list_file_urls")
     ) {
       return textResult("电脑环境未启用", true);
     }
@@ -827,6 +903,66 @@ export async function callAgentNativeTool(
     const kind = resolved?.kind ?? "builtin";
 
     switch (name) {
+      case "get_file_url": {
+        if (!fileShares) return textResult("File share service unavailable", true);
+        try {
+          const share = await fileShares.create(agent.tenantId, agent.id, await getFs(), {
+            path: String(args.path ?? ""),
+            ttlMinutes:
+              typeof args.ttl_minutes === "number" ? args.ttl_minutes : undefined,
+            disposition:
+              args.disposition === "inline"
+                ? "inline"
+                : args.disposition === "attachment"
+                  ? "attachment"
+                  : undefined,
+          });
+          return okJson({
+            share_id: share.id,
+            url: share.url,
+            path: share.path,
+            file_name: share.fileName,
+            mime_type: share.mimeType,
+            size_bytes: share.sizeBytes,
+            expires_at: share.expiresAt,
+            ttl_minutes: share.ttlMinutes,
+            disposition: share.disposition,
+            note: "Anyone with this URL can download the file until it expires or is revoked. Send the url to the user.",
+          });
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err), true);
+        }
+      }
+      case "revoke_file_url": {
+        if (!fileShares) return textResult("File share service unavailable", true);
+        const shareId = String(args.share_id ?? "").trim();
+        if (!shareId) return textResult("share_id is required", true);
+        const revoked = await fileShares.revoke(agent.tenantId, agent.id, shareId);
+        if (!revoked) return textResult("Share not found", true);
+        return okJson({
+          ok: true,
+          share_id: revoked.id,
+          status: revoked.status,
+          path: revoked.path,
+        });
+      }
+      case "list_file_urls": {
+        if (!fileShares) return textResult("File share service unavailable", true);
+        const items = await fileShares.listForAgent(agent.tenantId, agent.id);
+        return okJson({
+          shares: items.map((s) => ({
+            share_id: s.id,
+            path: s.path,
+            file_name: s.fileName,
+            status: s.status,
+            expires_at: s.expiresAt,
+            size_bytes: s.sizeBytes,
+            download_count: s.downloadCount,
+            disposition: s.disposition,
+          })),
+          note: "Raw download URLs are only returned once by get_file_url.",
+        });
+      }
       case "fs_read":
         return okJson(
           await (await getFs()).read(String(args.path), {

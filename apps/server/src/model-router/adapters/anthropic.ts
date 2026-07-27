@@ -371,6 +371,7 @@ async function chatStream(
       headers: { ...buildRequestHeaders(route), Accept: "text/event-stream" },
       body: JSON.stringify(body),
       timeoutMs: timeout(route),
+      ...(callbacks.signal ? { signal: callbacks.signal } : {}),
     },
     (payload) => {
       let event: unknown;

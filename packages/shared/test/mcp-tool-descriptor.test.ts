@@ -22,6 +22,13 @@ describe("mcp-tool-descriptor (ChatGPT Apps SDK)", () => {
     const shell = inferToolAnnotations("shell_exec");
     assert.equal(shell.openWorldHint, true);
     assert.equal(shell.readOnlyHint, false);
+
+    const share = inferToolAnnotations("get_file_url", {
+      readOnlyHint: false,
+      openWorldHint: true,
+    });
+    assert.equal(share.readOnlyHint, false);
+    assert.equal(share.openWorldHint, true);
   });
 
   it("toPublicToolDescriptor 补齐 title/annotations/securitySchemes/_meta", () => {

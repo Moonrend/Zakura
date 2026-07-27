@@ -15,6 +15,7 @@ import {
   executeImage,
   executeRerank,
   executeWithFallback,
+  isAbortError,
   isRetryableModelError,
   withModelRetries,
   RouteResolver,
@@ -140,6 +141,8 @@ export class ModelRouterService {
           upstreamId: route.upstream.id,
         };
       } catch (err) {
+        // 调用方取消：不重试、不故障转移，原样抛给上层走取消收尾
+        if (isAbortError(err)) throw err;
         if (emitted) {
           throw new ChatStreamPartialError(
             `${route.routeSlug}: 流式输出中断（${err instanceof Error ? err.message : String(err)}）`,

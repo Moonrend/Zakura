@@ -19,6 +19,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "run_error",
   "run_log",
   "memory_updated",
+  /** 系统为本轮回答注入的上下文来源（记忆召回、对话摘要等） */
+  "context_sources",
   "session_update",
 ] as const;
 
@@ -214,6 +216,35 @@ export type CloudAgentMemoryUpdatedPayload = {
   items: Array<{ id?: string; content: string; layer?: string }>;
 };
 
+/** 上下文来源条目（注入进模型的记忆 / 摘要，或工具检索到的材料） */
+export type CloudAgentContextSourceKind =
+  | "memory"
+  | "file"
+  | "search"
+  | "web"
+  | "summary"
+  | "other";
+
+export type CloudAgentContextSourceItem = {
+  kind: CloudAgentContextSourceKind;
+  /** 列表标题 */
+  title: string;
+  /** 正文摘要或全文 */
+  content?: string;
+  /** 工作区文件路径 */
+  path?: string;
+  /** 网页 URL */
+  url?: string;
+  id?: string;
+  layer?: string;
+};
+
+/** 系统为本轮 Run 注入的上下文来源（运行前召回等） */
+export type CloudAgentContextSourcesPayload = {
+  runId: string;
+  items: CloudAgentContextSourceItem[];
+};
+
 /** 会话元数据变更（如自动标题），供多端实时同步 */
 export type CloudAgentSessionUpdatePayload = {
   title?: string;
@@ -234,6 +265,7 @@ export type CloudAgentEventPayload =
   | CloudAgentRunErrorPayload
   | CloudAgentRunLogPayload
   | CloudAgentMemoryUpdatedPayload
+  | CloudAgentContextSourcesPayload
   | CloudAgentSessionUpdatePayload;
 
 export type CloudAgentEvent = {

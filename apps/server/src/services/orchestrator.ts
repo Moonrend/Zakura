@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne, notInArray } from "drizzle-orm";
 import {
   decryptJson,
   DecryptError,
@@ -20,6 +20,13 @@ import {
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import { platformEvents } from "./platform-events.js";
+
+/** 租户能力面板，不走 MCP 服务器自动启动 */
+const CAPABILITY_PROVIDER_IDS = ["web-search", "web-fetch"] as const;
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export class InstanceNotFoundError extends Error {
   constructor(instanceId: string) {
@@ -206,8 +213,79 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * 确保实例可用。远程 HTTP MCP 无本地进程，status 仅表示平台侧启用；
+   * 网关与启动恢复统一走此方法，避免 stopped 导致工具不可见。
+   */
+  async ensureStarted(tenantId: string, instanceId: string): Promise<InstanceHandle> {
+    let instance = await this.requireInstance(tenantId, instanceId);
+    if (instance.status === "running") {
+      return this.toHandle(tenantId, instanceId);
+    }
+    if (instance.status === "starting") {
+      for (let i = 0; i < 60; i++) {
+        await sleep(500);
+        instance = await this.requireInstance(tenantId, instanceId);
+        if (instance.status === "running") {
+          return this.toHandle(tenantId, instanceId);
+        }
+        if (instance.status !== "starting") break;
+      }
+      if (instance.status === "running") {
+        return this.toHandle(tenantId, instanceId);
+      }
+    }
+    return this.startInstance(tenantId, instanceId);
+  }
+
+  /**
+   * 启动所有 MCP 服务器实例（跳过网页搜索/抓取能力）。
+   * 用于进程启动恢复；单实例失败不影响其它。
+   */
+  async autoStartMcpInstances(opts?: {
+    tenantId?: string;
+  }): Promise<{ started: number; failed: number; skipped: number }> {
+    const filters = [
+      notInArray(componentInstances.providerId, [...CAPABILITY_PROVIDER_IDS]),
+      ne(componentInstances.status, "running"),
+    ];
+    if (opts?.tenantId) {
+      filters.unshift(eq(componentInstances.tenantId, opts.tenantId));
+    }
+    const rows = await this.db
+      .select()
+      .from(componentInstances)
+      .where(and(...filters));
+
+    let started = 0;
+    let failed = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      if (row.status === "starting" || row.status === "stopping") {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await this.ensureStarted(row.tenantId, row.id);
+        started += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn(
+          `[orch] auto-start ${row.slug} (${row.providerId}):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    return { started, failed, skipped };
+  }
+
   async startInstance(tenantId: string, instanceId: string): Promise<InstanceHandle> {
     const instance = await this.requireInstance(tenantId, instanceId);
+
+    // 幂等：已在运行则直接返回（避免 stdio 容器被重复拉起）
+    if (instance.status === "running") {
+      return this.toHandle(tenantId, instanceId);
+    }
 
     const tenant = await this.db.query.tenants.findFirst({
       where: eq(tenants.id, instance.tenantId),

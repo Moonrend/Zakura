@@ -219,6 +219,41 @@ function describeCall(
         ),
         detail: resultBlock,
       };
+    case "get_file_url": {
+      const path = str(args.path) || "?";
+      let fileName = "";
+      try {
+        const parsed = JSON.parse(result) as { file_name?: string; url?: string };
+        if (typeof parsed.file_name === "string") fileName = parsed.file_name;
+      } catch {
+        /* ignore */
+      }
+      return {
+        icon: Link2,
+        label: (
+          <>
+            生成分享链接{" "}
+            <FilePathButton path={path} onOpenFile={onOpenFile} />
+            {fileName && fileName !== path.split("/").pop() ? (
+              <span className="text-muted-foreground/70"> · {fileName}</span>
+            ) : null}
+          </>
+        ),
+        detail: resultBlock,
+      };
+    }
+    case "revoke_file_url":
+      return {
+        icon: Link2,
+        label: <>撤销分享链接</>,
+        detail: resultBlock,
+      };
+    case "list_file_urls":
+      return {
+        icon: Link2,
+        label: <>列出分享链接</>,
+        detail: resultBlock,
+      };
     case "shell_exec": {
       const cmd = str(args.command);
       return {

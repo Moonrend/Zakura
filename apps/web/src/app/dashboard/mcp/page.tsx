@@ -3,14 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { CloudDownload, Store } from "lucide-react";
+import { CloudDownload, Server, Store } from "lucide-react";
 import { api } from "@/lib/api";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 
 type InstanceRow = {
   id: string;
@@ -51,17 +51,41 @@ function needsUpstreamAuth(i: InstanceRow): boolean {
   );
 }
 
+/** 远程 HTTP MCP 无本地进程；status 表示平台侧启用，非容器生命周期 */
+function isRemoteMcp(providerId: string) {
+  return providerId === "generic-mcp" || providerId === "google-workspace";
+}
+
 function statusVariant(
   status: string,
+  healthStatus?: string,
 ): "default" | "secondary" | "success" | "warn" | "danger" {
+  if (status === "running" && healthStatus === "unhealthy") return "danger";
   if (status === "running") return "success";
   if (status === "starting" || status === "stopping") return "warn";
   if (status === "error" || status === "unhealthy") return "danger";
   return "secondary";
 }
 
-function formatError(err: string | null | undefined): string {
-  if (!err) return "—";
+function statusLabel(i: InstanceRow): string {
+  if (isRemoteMcp(i.providerId)) {
+    if (i.status === "running") {
+      if (i.healthStatus === "unhealthy") return "不可用";
+      return "已启用";
+    }
+    if (i.status === "starting") return "启用中";
+    if (i.status === "stopping") return "停用中";
+    return "未启用";
+  }
+  if (i.status === "running") return "运行中";
+  if (i.status === "starting") return "启动中";
+  if (i.status === "stopping") return "停止中";
+  if (i.status === "stopped") return "已停止";
+  return i.status;
+}
+
+function formatError(err: string | null | undefined): string | null {
+  if (!err) return null;
   return err.replace(/^(AUTH_REQUIRED|UNREACHABLE):\s*/, "");
 }
 
@@ -109,7 +133,11 @@ export default function McpServersPage() {
       <SettingsHeader title="服务器" />
 
       {loading ? (
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 rounded-lg" />
+          ))}
+        </div>
       ) : instances.length === 0 ? (
         <div className="rounded-lg border border-dashed py-12 text-center">
           <p className="mb-3 text-sm text-muted-foreground">暂无 MCP 服务器</p>
@@ -138,54 +166,72 @@ export default function McpServersPage() {
           </div>
         </div>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>名称</TableHead>
-              <TableHead>Slug</TableHead>
-              <TableHead>Provider</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>错误</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {instances.map((i) => {
-              const authNeeded = needsUpstreamAuth(i);
-              return (
-                <TableRow key={i.id}>
-                  <TableCell>
-                    <Link
-                      href={`/dashboard/mcp/${i.id}`}
-                      className="font-medium underline-offset-2 hover:underline"
-                    >
-                      {i.name}
-                    </Link>
-                    {authNeeded ? (
-                      <Badge variant="destructive" className="ml-1.5 text-[10px]">
-                        需 OAuth
-                      </Badge>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    <code className="text-[11px] text-muted-foreground">{i.slug}</code>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{providerLabel(i.providerId)}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={statusVariant(i.status)}>{i.status}</Badge>
-                  </TableCell>
-                  <TableCell
-                    className="max-w-xs truncate text-xs text-muted-foreground"
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {instances.map((i) => {
+            const authNeeded = needsUpstreamAuth(i);
+            const errorText = formatError(i.lastError);
+
+            return (
+              <Link
+                key={i.id}
+                href={`/dashboard/mcp/${i.id}`}
+                className={cn(
+                  "group flex flex-col gap-3 rounded-lg border border-border bg-card p-4",
+                  "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex items-start gap-2.5">
+                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                      <Server className="size-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="truncate text-sm font-medium group-hover:underline underline-offset-2">
+                          {i.name}
+                        </span>
+                        {authNeeded ? (
+                          <Badge variant="destructive" className="text-[10px]">
+                            需 OAuth
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <code className="block truncate text-[10px] text-muted-foreground">
+                        {i.slug}
+                      </code>
+                    </div>
+                  </div>
+                  <Badge
+                    variant={statusVariant(i.status, i.healthStatus)}
+                    className="shrink-0"
+                    title={
+                      isRemoteMcp(i.providerId)
+                        ? "远程 MCP 无本地进程；此状态表示是否已在平台启用"
+                        : undefined
+                    }
+                  >
+                    {statusLabel(i)}
+                  </Badge>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant="outline" className="text-[10px]">
+                    {providerLabel(i.providerId)}
+                  </Badge>
+                </div>
+
+                {errorText ? (
+                  <p
+                    className="line-clamp-2 text-[11px] text-muted-foreground"
                     title={i.lastError ?? undefined}
                   >
-                    {formatError(i.lastError)}
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
+                    {errorText}
+                  </p>
+                ) : null}
+              </Link>
+            );
+          })}
+        </div>
       )}
     </div>
   );

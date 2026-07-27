@@ -30,6 +30,29 @@ export class UpstreamHttpError extends Error {
   }
 }
 
+/**
+ * 调用方主动中断（用户取消 Run / 父任务取消）。
+ * 与网络瞬时中断区分：绝不重试、绝不故障转移，直接向上冒泡走取消收尾。
+ */
+export class ModelCallAbortedError extends Error {
+  readonly aborted = true;
+  constructor(message = "调用已被取消") {
+    super(message);
+    this.name = "ModelCallAbortedError";
+  }
+}
+
+/** 是否为「调用方主动取消」引发的错误（含 cause 链） */
+export function isAbortError(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let i = 0; cur && i < 6; i += 1) {
+    if (cur instanceof ModelCallAbortedError) return true;
+    if ((cur as { aborted?: unknown })?.aborted === true) return true;
+    cur = cur instanceof Error ? cur.cause : null;
+  }
+  return false;
+}
+
 /** 收集 err 及其 cause 链上的全部 message，便于匹配底层网络错误 */
 function errorChainText(err: unknown): string {
   const parts: string[] = [];
@@ -57,6 +80,8 @@ const TRANSIENT_NETWORK_RE =
  * 4xx 业务错误（无效请求、鉴权失败等）不重试。
  */
 export function isRetryableModelError(err: unknown): boolean {
+  // 主动取消不是瞬时故障：必须先于网络正则判断（正则含 aborted）
+  if (isAbortError(err)) return false;
   let cur: unknown = err;
   for (let i = 0; cur instanceof Error && i < 6; i += 1) {
     if (cur instanceof UpstreamHttpError) {
@@ -132,6 +157,9 @@ export async function httpJson<T>(
  *
  * 超时模型：timeoutMs 仅约束「建立连接直至响应头」；流式读取阶段
  * 采用空闲超时（两次数据块之间的最大间隔），长回复不再被总时长掐断。
+ *
+ * init.signal 为调用方的中断信号（用户取消 Run）：触发时立即断开上游连接，
+ * 并抛出 ModelCallAbortedError（不可重试），与超时/网络中断区分开。
  */
 export async function httpSse(
   prefix: string,
@@ -141,9 +169,13 @@ export async function httpSse(
 ): Promise<void> {
   const timeoutMs = init.timeoutMs ?? 60000;
   const idleTimeoutMs = init.idleTimeoutMs ?? Math.max(timeoutMs, 120_000);
-  const { timeoutMs: _drop, idleTimeoutMs: _drop2, ...rest } = init;
+  const { timeoutMs: _drop, idleTimeoutMs: _drop2, signal: external, ...rest } = init;
 
   const ctrl = new AbortController();
+  const abortedByCaller = () =>
+    ctrl.abort(new ModelCallAbortedError(`${prefix} 已被调用方取消`));
+  if (external?.aborted) abortedByCaller();
+  external?.addEventListener("abort", abortedByCaller, { once: true });
   let timer: ReturnType<typeof setTimeout> | null = setTimeout(
     () => ctrl.abort(new Error(`${prefix} 连接超时（${timeoutMs}ms）`)),
     timeoutMs,
@@ -219,6 +251,7 @@ export async function httpSse(
     throw err;
   } finally {
     if (timer) clearTimeout(timer);
+    external?.removeEventListener("abort", abortedByCaller);
   }
 }
 

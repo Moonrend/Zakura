@@ -3,6 +3,8 @@
 import type {
   CloudAgentAttachment,
   CloudAgentConfig,
+  CloudAgentContextSourceItem,
+  CloudAgentContextSourceKind,
   CloudAgentEvent,
   CloudAgentRunStatus,
   CloudAgentSessionKind,
@@ -10,7 +12,13 @@ import type {
 } from "@zakura/shared";
 import { api } from "@/lib/api";
 
-export type { CloudAgentAttachment, CloudAgentSessionKind, CloudAgentSessionOrigin };
+export type {
+  CloudAgentAttachment,
+  CloudAgentContextSourceItem,
+  CloudAgentContextSourceKind,
+  CloudAgentSessionKind,
+  CloudAgentSessionOrigin,
+};
 
 /** 会话类型过滤参数：类型数组或 "all"；缺省=仅 chat */
 export type SessionKindsFilter = CloudAgentSessionKind[] | "all";
@@ -94,6 +102,8 @@ export type TimelineItem =
       runId?: string | null;
     }
   | { kind: "memory"; id: string; items: TimelineMemoryItem[]; seq: number }
+  /** 系统注入的上下文来源（记忆召回、摘要等）；UI 汇总到「来源」按钮 */
+  | { kind: "sources"; id: string; items: CloudAgentContextSourceItem[]; seq: number }
   | { kind: "error"; id: string; message: string; seq: number };
 
 function parseTimelineAttachments(raw: unknown): CloudAgentAttachment[] {
@@ -115,10 +125,261 @@ function parseTimelineAttachments(raw: unknown): CloudAgentAttachment[] {
   return out;
 }
 
+const SOURCE_KINDS = new Set<string>([
+  "memory",
+  "file",
+  "search",
+  "web",
+  "summary",
+  "other",
+]);
+
+function parseContextSourceItems(raw: unknown): CloudAgentContextSourceItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CloudAgentContextSourceItem[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.title !== "string" || !o.title.trim()) continue;
+    const kind =
+      typeof o.kind === "string" && SOURCE_KINDS.has(o.kind)
+        ? (o.kind as CloudAgentContextSourceKind)
+        : "other";
+    const entry: CloudAgentContextSourceItem = {
+      kind,
+      title: o.title.trim().slice(0, 200),
+    };
+    if (typeof o.content === "string" && o.content) entry.content = o.content;
+    if (typeof o.path === "string" && o.path) entry.path = o.path;
+    if (typeof o.url === "string" && o.url) entry.url = o.url;
+    if (typeof o.id === "string" && o.id) entry.id = o.id;
+    if (typeof o.layer === "string" && o.layer) entry.layer = o.layer;
+    out.push(entry);
+  }
+  return out;
+}
+
+function tryParseToolArgs(raw?: string): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function toolArgStr(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+function truncateText(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/** 从信息检索类工具调用派生「来源」条目（读文件 / 搜索 / 抓取 / 记忆检索） */
+function deriveSourceFromTool(
+  call: TimelineToolCall,
+): CloudAgentContextSourceItem | null {
+  if (call.status !== "done" || call.isError) return null;
+  const name = call.name.replace(/^re_/, "");
+  const args = tryParseToolArgs(call.arguments);
+  const snippet = call.resultText
+    ? truncateText(call.resultText.trim(), 400)
+    : undefined;
+
+  if (name === "fs_read" || name === "fs_stat") {
+    const path = toolArgStr(args.path);
+    if (!path) return null;
+    return {
+      kind: "file",
+      title: path.split("/").pop() || path,
+      path,
+      ...(snippet ? { content: snippet } : {}),
+    };
+  }
+
+  if (
+    /^(memory_|search_memory|list_memories|get_memory|memory_context)/.test(name) &&
+    !/^(add_memory|update_memory|delete_memory|pin_memory)/.test(name)
+  ) {
+    const q = toolArgStr(args.query) || toolArgStr(args.q) || toolArgStr(args.content);
+    return {
+      kind: "memory",
+      title: q ? `记忆检索 “${truncateText(q, 40)}”` : "记忆检索",
+      ...(snippet ? { content: snippet } : {}),
+    };
+  }
+
+  const query = toolArgStr(args.query) || toolArgStr(args.q);
+  if (query && /search/i.test(name)) {
+    return {
+      kind: "search",
+      title: `搜索 “${truncateText(query, 60)}”`,
+      ...(snippet ? { content: snippet } : {}),
+    };
+  }
+
+  const url = toolArgStr(args.url);
+  if (url && /fetch|crawl|scrape|read_url|web_fetch/i.test(name)) {
+    return {
+      kind: "web",
+      title: truncateText(url, 80),
+      url,
+      ...(snippet ? { content: snippet } : {}),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * 汇总本回合「来源」：系统注入（记忆/摘要）+ 工具检索到的材料。
+ * 去重键优先 path/url/id，否则 title+content 前缀。
+ */
+export function collectTurnSources(
+  items: TimelineItem[],
+): CloudAgentContextSourceItem[] {
+  const out: CloudAgentContextSourceItem[] = [];
+  const seen = new Set<string>();
+  const push = (item: CloudAgentContextSourceItem) => {
+    const key =
+      item.path ||
+      item.url ||
+      item.id ||
+      `${item.kind}:${item.title}:${(item.content ?? "").slice(0, 80)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(item);
+  };
+
+  for (const it of items) {
+    if (it.kind === "sources") {
+      for (const s of it.items) push(s);
+    } else if (it.kind === "tool") {
+      const derived = deriveSourceFromTool(it.call);
+      if (derived) push(derived);
+    }
+  }
+  return out;
+}
+
+/** Agent 通过 get_file_url 生成的可下载分享文件（UI 附件卡片） */
+export type SharedFileAttachment = {
+  shareId: string;
+  url: string;
+  path: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  disposition: "inline" | "attachment";
+  expiresAt?: string;
+  toolCallId: string;
+};
+
+function tryParseJsonObject(raw?: string): Record<string, unknown> | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // resultText 可能前后夹杂说明文字，尝试截取首个 JSON 对象
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        const parsed = JSON.parse(trimmed.slice(start, end + 1)) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed as Record<string, unknown>;
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/** 解析 get_file_url / re_get_file_url 工具结果为分享附件 */
+export function parseSharedFileFromTool(
+  call: TimelineToolCall,
+): SharedFileAttachment | null {
+  if (call.status !== "done" || call.isError) return null;
+  const name = call.name.replace(/^re_/, "");
+  if (name !== "get_file_url") return null;
+  const o = tryParseJsonObject(call.resultText);
+  if (!o) return null;
+  const url = typeof o.url === "string" ? o.url.trim() : "";
+  if (!url) return null;
+  const path =
+    (typeof o.path === "string" && o.path) ||
+    toolArgStr(tryParseToolArgs(call.arguments).path) ||
+    "";
+  const fileName =
+    (typeof o.file_name === "string" && o.file_name) ||
+    (typeof o.fileName === "string" && o.fileName) ||
+    (path ? path.split("/").pop() : "") ||
+    "file";
+  const mimeType =
+    (typeof o.mime_type === "string" && o.mime_type) ||
+    (typeof o.mimeType === "string" && o.mimeType) ||
+    "application/octet-stream";
+  const sizeRaw = o.size_bytes ?? o.sizeBytes;
+  const sizeBytes = typeof sizeRaw === "number" && sizeRaw >= 0 ? sizeRaw : 0;
+  const shareId =
+    (typeof o.share_id === "string" && o.share_id) ||
+    (typeof o.shareId === "string" && o.shareId) ||
+    call.toolCallId;
+  const disposition = o.disposition === "inline" ? "inline" : "attachment";
+  const expiresAt =
+    typeof o.expires_at === "string"
+      ? o.expires_at
+      : typeof o.expiresAt === "string"
+        ? o.expiresAt
+        : undefined;
+  return {
+    shareId,
+    url,
+    path,
+    fileName,
+    mimeType,
+    sizeBytes,
+    disposition,
+    expiresAt,
+    toolCallId: call.toolCallId,
+  };
+}
+
+/** 汇总本回合 Agent 通过 get_file_url 分享的文件（去重 by shareId/url） */
+export function collectTurnSharedFiles(
+  items: TimelineItem[],
+): SharedFileAttachment[] {
+  const out: SharedFileAttachment[] = [];
+  const seen = new Set<string>();
+  for (const it of items) {
+    if (it.kind !== "tool") continue;
+    const file = parseSharedFileFromTool(it.call);
+    if (!file) continue;
+    const key = file.shareId || file.url;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(file);
+  }
+  return out;
+}
+
 /** 将事件日志还原为 UI 时间线（多设备重连后可确定性重建） */
 export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const toolMap = new Map<string, TimelineToolCall>();
+  /** toolCallId → 所属 runId，用于 Run 结束时只收尾自己的工具调用 */
+  const toolRunIds = new Map<string, string | null>();
   /** 被 assistant_rollback 丢弃的流式消息（模型中断重试），其 delta 不渲染 */
   const rolledBack = new Set<string>();
   for (const ev of events) {
@@ -206,6 +467,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         status: "running",
       };
       toolMap.set(id, call);
+      toolRunIds.set(id, ev.runId);
       items.push({ kind: "tool", id, call, seq: ev.seq });
       continue;
     }
@@ -258,6 +520,13 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       }
       continue;
     }
+    if (ev.type === "context_sources") {
+      const parsed = parseContextSourceItems(p.items);
+      if (parsed.length) {
+        items.push({ kind: "sources", id: ev.id, items: parsed, seq: ev.seq });
+      }
+      continue;
+    }
     if (ev.type === "run_error") {
       flushAssistant();
       items.push({
@@ -266,6 +535,23 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         message: typeof p.message === "string" ? p.message : "未知错误",
         seq: ev.seq,
       });
+      continue;
+    }
+    // Run 结束：把该 Run 里仍挂着的工具调用收尾，避免永远显示「运行中」
+    // （服务端已为取消补发结果事件；这里兜底历史数据与进程中断的情况）
+    if (ev.type === "run_end") {
+      const status = typeof p.status === "string" ? p.status : "";
+      if (status === "completed") continue;
+      for (const [id, call] of toolMap) {
+        if (call.status !== "running") continue;
+        if (toolRunIds.get(id) !== ev.runId) continue;
+        call.status = "done";
+        call.isError = true;
+        call.resultText =
+          status === "cancelled"
+            ? "（已取消：该工具调用未完成）"
+            : "（该工具调用未完成：运行已中断）";
+      }
     }
   }
   flushAssistant();
@@ -364,7 +650,8 @@ export function buildConversationTurns(
         ev.type === "tool_call_result" ||
         ev.type === "run_status" ||
         ev.type === "run_error" ||
-        ev.type === "memory_updated")
+        ev.type === "memory_updated" ||
+        ev.type === "context_sources")
     ) {
       const list = eventsByRun.get(ev.runId) ?? [];
       list.push(ev);

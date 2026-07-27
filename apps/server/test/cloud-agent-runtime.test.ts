@@ -116,11 +116,12 @@ describe("eventsToMessages", () => {
     assert.match(msgs[2]!.content ?? "", /取消或中断/);
   });
 
-  it("ignores run_log / memory_updated / session_update", () => {
+  it("ignores run_log / memory_updated / context_sources / session_update", () => {
     const msgs = eventsToMessages([
       { type: "user_message", runId: "r1", payload: { content: "hi" } },
       { type: "run_log", runId: "r1", payload: { level: "info", message: "x" } },
       { type: "memory_updated", runId: "r1", payload: { items: [] } },
+      { type: "context_sources", runId: "r1", payload: { items: [] } },
       { type: "session_update", runId: "r1", payload: { title: "t" } },
       { type: "assistant_message", runId: "r1", payload: { content: "hey" } },
     ]);

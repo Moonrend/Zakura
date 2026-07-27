@@ -58,6 +58,8 @@ import type { ToolCallStore } from "./tool-call-store.js";
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
 
+type InstanceRow = typeof componentInstances.$inferSelect;
+
 export interface ResolvedTool {
   qualifiedName: string;
   instanceId: string | null;
@@ -223,6 +225,7 @@ export class McpGateway {
   private workspaceFsProvider: import("./workspace-fs-provider.js").ServerWorkspaceFsProvider | null =
     null;
   private exposureService: import("./port-exposures.js").ExposureService | null = null;
+  private fileShareService: import("./file-shares.js").FileShareService | null = null;
   private subagentRunner: CloudSubagentRunner | null = null;
 
   constructor(
@@ -266,9 +269,93 @@ export class McpGateway {
     this.exposureService = service;
   }
 
+  setFileShareService(service: import("./file-shares.js").FileShareService): void {
+    this.fileShareService = service;
+  }
+
   /** 云端子代理执行器（由 CloudAgentRuntime 注入；MCP 客户端可直接调用 re_spawn_subagent） */
   setSubagentRunner(runner: CloudSubagentRunner): void {
     this.subagentRunner = runner;
+  }
+
+  /**
+   * 解析 Agent 应暴露的 MCP 实例，并对未运行的实例自动启动。
+   * 远程 HTTP MCP 无本地进程，status=stopped 只表示未启用；使用前应自动拉起。
+   */
+  private async resolveAgentMcpInstances(agent: Agent): Promise<InstanceRow[]> {
+    if (!this.agentService) return [];
+    const mcpMode = getAgentMcpMode(agent);
+    const boundIds =
+      mcpMode === "selected"
+        ? new Set(await this.agentService.boundInstanceIds(agent.id))
+        : null;
+
+    const all = await this.db
+      .select()
+      .from(componentInstances)
+      .where(eq(componentInstances.tenantId, agent.tenantId));
+
+    const candidates = all.filter((instance) => {
+      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) return false;
+      if (boundIds && !boundIds.has(instance.id)) return false;
+      return true;
+    });
+
+    return this.ensureInstancesRunning(agent.tenantId, candidates);
+  }
+
+  /** 租户策略下的 MCP 实例列表（自动启动） */
+  private async resolveTenantMcpInstances(
+    tenantId: string,
+    allowedInstanceIds: string[] | null,
+  ): Promise<InstanceRow[]> {
+    const all = await this.db
+      .select()
+      .from(componentInstances)
+      .where(eq(componentInstances.tenantId, tenantId));
+
+    const allow =
+      allowedInstanceIds && allowedInstanceIds.length > 0
+        ? new Set(allowedInstanceIds)
+        : null;
+
+    const candidates = all.filter((instance) => {
+      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) return false;
+      if (allow && !allow.has(instance.id)) return false;
+      return true;
+    });
+
+    return this.ensureInstancesRunning(tenantId, candidates);
+  }
+
+  private async ensureInstancesRunning(
+    tenantId: string,
+    candidates: InstanceRow[],
+  ): Promise<InstanceRow[]> {
+    const ready: InstanceRow[] = [];
+    for (const instance of candidates) {
+      if (instance.status === "running") {
+        ready.push(instance);
+        continue;
+      }
+      try {
+        await this.orchestrator.ensureStarted(tenantId, instance.id);
+        const fresh =
+          (await this.db.query.componentInstances.findFirst({
+            where: and(
+              eq(componentInstances.id, instance.id),
+              eq(componentInstances.tenantId, tenantId),
+            ),
+          })) ?? instance;
+        if (fresh.status === "running") ready.push(fresh);
+      } catch (err) {
+        console.warn(
+          `[mcp] auto-start ${instance.slug}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    return ready;
   }
 
   private enrichResolvedTool(
@@ -451,29 +538,70 @@ export class McpGateway {
     }
     const usedNames = new Set(tools.map((t) => t.qualifiedName));
 
-    const mcpMode = getAgentMcpMode(agent);
-    const boundIds =
-      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
-
-    const instances = await this.db
+    // 能力实例（搜索/抓取）仅在 Agent 显式开启且 running 时注入
+    const capabilityInstances = await this.db
       .select()
       .from(componentInstances)
       .where(
         and(
           eq(componentInstances.tenantId, agent.tenantId),
           eq(componentInstances.status, "running"),
+          inArray(componentInstances.providerId, ["web-search", "web-fetch"]),
         ),
       );
 
-    for (const instance of instances) {
+    for (const instance of capabilityInstances) {
       if (instance.providerId === "web-search" && !isWebSearchEnabledForAgent(agent)) continue;
       if (instance.providerId === "web-fetch" && !isWebFetchEnabledForAgent(agent)) continue;
-
-      // Non-capability MCP/plugins: respect bindings when mode=selected
-      if (!CAPABILITY_PROVIDER_IDS.has(instance.providerId)) {
-        if (boundIds && !boundIds.has(instance.id)) continue;
+      if (!globalRegistry.has(instance.providerId)) continue;
+      const plugin = globalRegistry.get(instance.providerId);
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
+      } catch {
+        continue;
       }
+      let listed: McpToolDef[] = [];
+      try {
+        listed = await plugin.listTools(handle);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
+        continue;
+      }
+      for (const t of listed) {
+        let name = withRePrefix(t.name);
+        if (usedNames.has(name)) {
+          name = withRePrefix(qualify(instance.slug, t.name));
+        }
+        if (usedNames.has(name)) continue;
+        usedNames.add(name);
+        tools.push(
+          this.enrichResolvedTool(
+            {
+              qualifiedName: name,
+              instanceId: instance.id,
+              providerId: instance.providerId,
+              localName: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              title: t.title,
+              outputSchema: t.outputSchema,
+              annotations: t.annotations,
+              securitySchemes: t.securitySchemes,
+              _meta: t._meta,
+              execution: t.execution,
+              agentId: agent.id,
+            },
+            instance.slug,
+          ),
+        );
+      }
+    }
 
+    const instances = await this.resolveAgentMcpInstances(agent);
+
+    for (const instance of instances) {
       if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       let handle: InstanceHandle;
@@ -571,19 +699,7 @@ export class McpGateway {
       : null;
     const includeBuiltin = opts?.includeBuiltin ?? policyResolved?.includeBuiltin ?? false;
 
-    const whereClause =
-      allowedInstances && allowedInstances.length > 0
-        ? and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-            inArray(componentInstances.id, allowedInstances),
-          )
-        : and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-          );
-
-    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const instances = await this.resolveTenantMcpInstances(tenantId, allowedInstances);
 
     const tools: ResolvedTool[] = [];
     if (includeBuiltin) {
@@ -591,6 +707,7 @@ export class McpGateway {
     }
 
     for (const instance of instances) {
+      if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       let handle: InstanceHandle;
       try {
@@ -778,6 +895,7 @@ export class McpGateway {
         this.memoryProviders,
         this.workspaceFsProvider,
         this.exposureService,
+        this.fileShareService,
       );
     }
 
@@ -1000,23 +1118,9 @@ export class McpGateway {
       }
     }
 
-    const mcpMode = getAgentMcpMode(agent);
-    const boundIds =
-      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
-
-    const instances = await this.db
-      .select()
-      .from(componentInstances)
-      .where(
-        and(
-          eq(componentInstances.tenantId, agent.tenantId),
-          eq(componentInstances.status, "running"),
-        ),
-      );
+    const instances = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
-      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
-      if (boundIds && !boundIds.has(instance.id)) continue;
       if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       if (typeof plugin.listResources !== "function") continue;
@@ -1093,19 +1197,7 @@ export class McpGateway {
       ? (JSON.parse(policyResolved.instanceIds) as string[])
       : null;
 
-    const whereClause =
-      allowedInstances && allowedInstances.length > 0
-        ? and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-            inArray(componentInstances.id, allowedInstances),
-          )
-        : and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-          );
-
-    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const instances = await this.resolveTenantMcpInstances(tenantId, allowedInstances);
     const resources: ResolvedResource[] = [];
 
     for (const instance of instances) {
@@ -1268,23 +1360,9 @@ export class McpGateway {
       });
     }
 
-    const mcpMode = getAgentMcpMode(agent);
-    const boundIds =
-      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
-
-    const instances = await this.db
-      .select()
-      .from(componentInstances)
-      .where(
-        and(
-          eq(componentInstances.tenantId, agent.tenantId),
-          eq(componentInstances.status, "running"),
-        ),
-      );
+    const instances = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
-      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
-      if (boundIds && !boundIds.has(instance.id)) continue;
       if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       if (typeof plugin.listPrompts !== "function") continue;
@@ -1363,19 +1441,7 @@ export class McpGateway {
       ? (JSON.parse(policyResolved.instanceIds) as string[])
       : null;
 
-    const whereClause =
-      allowedInstances && allowedInstances.length > 0
-        ? and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-            inArray(componentInstances.id, allowedInstances),
-          )
-        : and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-          );
-
-    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const instances = await this.resolveTenantMcpInstances(tenantId, allowedInstances);
     const prompts: ResolvedPrompt[] = [];
 
     for (const instance of instances) {
@@ -1496,23 +1562,9 @@ export class McpGateway {
       });
     }
 
-    const mcpMode = getAgentMcpMode(agent);
-    const boundIds =
-      mcpMode === "selected" ? new Set(await this.agentService.boundInstanceIds(agent.id)) : null;
-
-    const instances = await this.db
-      .select()
-      .from(componentInstances)
-      .where(
-        and(
-          eq(componentInstances.tenantId, agent.tenantId),
-          eq(componentInstances.status, "running"),
-        ),
-      );
+    const instances = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
-      if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) continue;
-      if (boundIds && !boundIds.has(instance.id)) continue;
       if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       if (typeof plugin.listResourceTemplates !== "function") continue;
@@ -1591,19 +1643,7 @@ export class McpGateway {
       ? (JSON.parse(policyResolved.instanceIds) as string[])
       : null;
 
-    const whereClause =
-      allowedInstances && allowedInstances.length > 0
-        ? and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-            inArray(componentInstances.id, allowedInstances),
-          )
-        : and(
-            eq(componentInstances.tenantId, tenantId),
-            eq(componentInstances.status, "running"),
-          );
-
-    const instances = await this.db.select().from(componentInstances).where(whereClause);
+    const instances = await this.resolveTenantMcpInstances(tenantId, allowedInstances);
     const templates: ResolvedResourceTemplate[] = [];
 
     for (const instance of instances) {
@@ -1709,11 +1749,15 @@ export class McpGateway {
             and(
               eq(componentInstances.tenantId, tenantId),
               eq(componentInstances.slug, parsed.slug),
-              eq(componentInstances.status, "running"),
             ),
           );
         const instance = instances[0];
         if (instance) {
+          try {
+            await this.orchestrator.ensureStarted(tenantId, instance.id);
+          } catch {
+            /* fall through — toHandle may still work or complete fails cleanly */
+          }
           instanceId = instance.id;
           providerId = instance.providerId;
           localUri = parsed.localUri;

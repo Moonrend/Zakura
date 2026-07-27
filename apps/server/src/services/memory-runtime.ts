@@ -48,12 +48,20 @@ export async function buildMemoryContext(
   count: number;
   truncated?: boolean;
   note?: string;
+  /** 结构化条目，供 UI「来源」展示 */
+  items: Array<{ id?: string; content: string; layer?: string }>;
 }> {
   const { kind, config, provider } = resolved;
 
   if (kind === "traditional") {
     if (!memory) {
-      return { text: "", retrievalMode: "full_dump", count: 0, note: "local store missing" };
+      return {
+        text: "",
+        retrievalMode: "full_dump",
+        count: 0,
+        note: "local store missing",
+        items: [],
+      };
     }
     const dump = await memory.dumpAll(agent.tenantId, agent.id, {
       maxChars: typeof config.maxChars === "number" ? config.maxChars : 32_000,
@@ -67,12 +75,19 @@ export async function buildMemoryContext(
       count: dump.count,
       truncated: dump.truncated,
       note: "传统记忆无向量检索；调用 memory_context 即整包返回。",
+      items: dump.items,
     };
   }
 
   if (kind === "builtin") {
     if (!memory) {
-      return { text: "", retrievalMode: "keyword_graph", count: 0, note: "local store missing" };
+      return {
+        text: "",
+        retrievalMode: "keyword_graph",
+        count: 0,
+        note: "local store missing",
+        items: [],
+      };
     }
     const embCfg = parseEmbeddingConfig(config);
     if (query?.trim()) {
@@ -110,6 +125,11 @@ export async function buildMemoryContext(
         note: embCfg
           ? `Built-in hybrid：pgvector 语义种子 + 关键词 + 图谱${embNote}`
           : "未启用 embedding；仅关键词 + 图谱。可在记忆 Provider 中开启向量。",
+        items: packed.results.map((r) => ({
+          id: r.id,
+          content: r.content,
+          layer: r.layer,
+        })),
       };
     }
     const pinned = await memory.list(agent.tenantId, agent.id, {
@@ -119,10 +139,12 @@ export async function buildMemoryContext(
     const recent = await memory.list(agent.tenantId, agent.id, { limit: 15 });
     const seen = new Set<string>();
     const lines: string[] = [];
+    const items: Array<{ id?: string; content: string; layer?: string }> = [];
     for (const r of [...pinned, ...recent]) {
       if (seen.has(r.id)) continue;
       seen.add(r.id);
       lines.push(`- [${r.layer}] ${r.content}`);
+      items.push({ id: r.id, content: r.content, layer: r.layer });
     }
     return {
       text: lines.length
@@ -131,6 +153,7 @@ export async function buildMemoryContext(
       retrievalMode: "pinned_recent",
       count: lines.length,
       note: "无 query 时返回钉选 + 最近条目（聚焦召回请传 query）。",
+      items,
     };
   }
 
@@ -145,11 +168,22 @@ export async function buildMemoryContext(
         limit: 12,
       });
       const text = formatMem0Context(results);
+      const items = results
+        .map((r) => {
+          const content = (r.memory ?? r.content ?? "").trim();
+          if (!content) return null;
+          return {
+            id: typeof r.id === "string" ? r.id : undefined,
+            content,
+          };
+        })
+        .filter((x): x is { id?: string; content: string } => x != null);
       return {
         text,
         retrievalMode: "mem0_semantic",
         count: results.length,
         note: "语义检索由外部 mem0 完成（其侧需 embedder + 向量库）。",
+        items,
       };
     } catch (err) {
       return {
@@ -157,6 +191,7 @@ export async function buildMemoryContext(
         retrievalMode: "mem0_error",
         count: 0,
         note: err instanceof Error ? err.message : String(err),
+        items: [],
       };
     }
   }
@@ -167,8 +202,9 @@ export async function buildMemoryContext(
       retrievalMode: "openviking",
       count: 0,
       note: "OpenViking 请通过其自身 MCP/API 浏览上下文；此处不整包注入。",
+      items: [],
     };
   }
 
-  return { text: "", retrievalMode: "none", count: 0 };
+  return { text: "", retrievalMode: "none", count: 0, items: [] };
 }
