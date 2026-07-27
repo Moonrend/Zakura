@@ -864,11 +864,15 @@ export async function getCloudConfig(agentId: string) {
 
 export async function saveCloudConfig(
   agentId: string,
-  cloud: Omit<CloudAgentConfig, "maxToolRounds" | "model"> & {
+  cloud: Partial<
+    Omit<CloudAgentConfig, "maxToolRounds" | "model" | "maxSubagentDepth">
+  > & {
     /** null 表示清除限制 */
     maxToolRounds?: number | null;
     /** 空串/undefined 表示恢复默认路由 */
     model?: string | null;
+    /** null/0 恢复默认嵌套深度（2） */
+    maxSubagentDepth?: number | null;
   },
 ) {
   return api<{ cloud: CloudAgentConfig }>(`/api/agents/${agentId}/cloud/config`, {

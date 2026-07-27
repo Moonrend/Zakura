@@ -11,6 +11,7 @@ export type AgentListItem = {
   id: string;
   name: string;
   slug: string;
+  description?: string;
   enableComputer: boolean;
   enableMemory: boolean;
   memoryProviderId?: string | null;
@@ -194,7 +195,7 @@ export async function fetchAgentProgress(id: string) {
 }
 
 export const AGENT_SUBNAV = [
-  { href: "general", label: "概览" },
+  { href: "general", label: "设置" },
   { href: "computer", label: "电脑" },
   { href: "web", label: "网页" },
   { href: "memory", label: "记忆" },

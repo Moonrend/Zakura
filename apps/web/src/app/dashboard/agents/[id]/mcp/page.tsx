@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { toast } from "sonner";
-import { CloudDownload, RefreshCw, Save, Store } from "lucide-react";
+import { CloudDownload, RefreshCw, Store } from "lucide-react";
 import {
   fetchAgent,
   fetchAgentProviders,
@@ -18,7 +18,13 @@ import {
   McpResourcesExplorer,
   McpToolsExplorer,
 } from "@/components/mcp/capability-explorers";
-import { SettingsHeader } from "@/components/settings-shell";
+import {
+  SettingsHeader,
+  SettingsRow,
+  SettingsSaveIndicator,
+  SettingsSection,
+} from "@/components/settings-shell";
+import { useAutoSave } from "@/hooks/use-auto-save";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -31,7 +37,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 
 function providerLabel(id: string) {
   switch (id) {
@@ -46,25 +59,33 @@ function providerLabel(id: string) {
   }
 }
 
+type McpBindingState = {
+  mode: "all" | "selected";
+  selected: string[];
+  exposeFs: boolean;
+};
+
 export default function AgentMcpPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
   const [opts, setOpts] = useState<AgentProviderOptions | null>(null);
   const [detail, setDetail] = useState<AgentDetail | null>(null);
-  const [mode, setMode] = useState<"all" | "selected">("selected");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [exposeFs, setExposeFs] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState<McpBindingState | null>(null);
   const [capsBusy, setCapsBusy] = useState(false);
   const [tab, setTab] = useState("bindings");
+  const selectedRef = useRef<string[]>([]);
 
   const loadBindings = useCallback(async () => {
     try {
       const p = await fetchAgentProviders(id);
       setOpts(p);
-      setMode(p.mcp.mode);
-      setExposeFs(p.mcp.exposeWorkspaceFs !== false);
-      setSelected(new Set(p.mcp.instances.filter((i) => i.bound).map((i) => i.id)));
+      const selected = p.mcp.instances.filter((i) => i.bound).map((i) => i.id);
+      selectedRef.current = selected;
+      setState({
+        mode: p.mcp.mode,
+        selected,
+        exposeFs: p.mcp.exposeWorkspaceFs !== false,
+      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -92,41 +113,59 @@ export default function AgentMcpPage() {
     }
   }, [tab, detail, loadCapabilities]);
 
-  function toggleInstance(instanceId: string, on: boolean) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(instanceId);
-      else next.delete(instanceId);
-      return next;
-    });
-  }
-
-  async function saveBindings() {
-    setBusy(true);
-    try {
+  const persist = useCallback(
+    async (patch: Partial<McpBindingState>) => {
+      const mode = patch.mode ?? state?.mode ?? "selected";
+      const selected = patch.selected ?? selectedRef.current;
+      const exposeFs = patch.exposeFs ?? state?.exposeFs ?? true;
       const res = await saveAgentProviders(id, {
         mcp: {
           mode,
-          instanceIds: mode === "selected" ? [...selected] : undefined,
+          instanceIds: mode === "selected" ? selected : undefined,
           exposeWorkspaceFs: exposeFs,
         },
       });
       setOpts(res.options);
-      setMode(res.options.mcp.mode);
-      setExposeFs(res.options.mcp.exposeWorkspaceFs !== false);
-      setSelected(
-        new Set(res.options.mcp.instances.filter((i) => i.bound).map((i) => i.id)),
-      );
+      const nextSelected = res.options.mcp.instances
+        .filter((i) => i.bound)
+        .map((i) => i.id);
+      selectedRef.current = nextSelected;
+      setState({
+        mode: res.options.mcp.mode,
+        selected: nextSelected,
+        exposeFs: res.options.mcp.exposeWorkspaceFs !== false,
+      });
       setDetail(null);
-      toast.success("已保存");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
+    },
+    [id, state?.mode, state?.exposeFs],
+  );
+
+  const { status, error, saveNow } = useAutoSave(persist);
+
+  function setMode(mode: "all" | "selected") {
+    setState((prev) => (prev ? { ...prev, mode } : prev));
+    saveNow({ mode });
   }
 
-  if (!opts) {
+  function setExposeFs(exposeFs: boolean) {
+    setState((prev) => (prev ? { ...prev, exposeFs } : prev));
+    saveNow({ exposeFs });
+  }
+
+  function toggleInstance(instanceId: string, on: boolean) {
+    setState((prev) => {
+      if (!prev) return prev;
+      const set = new Set(prev.selected);
+      if (on) set.add(instanceId);
+      else set.delete(instanceId);
+      const selected = [...set];
+      selectedRef.current = selected;
+      saveNow({ selected, mode: "selected" });
+      return { ...prev, selected, mode: "selected" };
+    });
+  }
+
+  if (!opts || !state) {
     return (
       <div className="space-y-5">
         <Skeleton className="h-8 w-40" />
@@ -136,6 +175,7 @@ export default function AgentMcpPage() {
   }
 
   const instances = opts.mcp.instances;
+  const selectedSet = new Set(state.selected);
   const tools =
     detail?.tools.map((t) => ({
       qualifiedName: t.name,
@@ -156,24 +196,7 @@ export default function AgentMcpPage() {
           <>
             {tab === "bindings" ? (
               <>
-                <Select
-                  value={mode}
-                  onValueChange={(v) => {
-                    if (v != null) setMode(v as "all" | "selected");
-                  }}
-                  items={[
-                    { value: "all", label: "全部 running" },
-                    { value: "selected", label: "仅所选" },
-                  ]}
-                >
-                  <SelectTrigger className="h-8 w-36">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部 running</SelectItem>
-                    <SelectItem value="selected">仅所选</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SettingsSaveIndicator status={status} error={error} />
                 <Button
                   size="sm"
                   variant="outline"
@@ -192,10 +215,6 @@ export default function AgentMcpPage() {
                   <CloudDownload />
                   导入
                 </Button>
-                <Button size="sm" disabled={busy} onClick={() => void saveBindings()}>
-                  <Save />
-                  保存
-                </Button>
               </>
             ) : (
               <Button
@@ -205,7 +224,7 @@ export default function AgentMcpPage() {
                 onClick={() => void loadCapabilities()}
               >
                 <RefreshCw className={capsBusy ? "animate-spin" : undefined} />
-                刷新能力
+                刷新
               </Button>
             )}
           </>
@@ -220,7 +239,9 @@ export default function AgentMcpPage() {
       >
         <TabsList variant="line" className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="bindings">绑定</TabsTrigger>
-          <TabsTrigger value="tools">工具{detail ? ` · ${tools.length}` : ""}</TabsTrigger>
+          <TabsTrigger value="tools">
+            工具{detail ? ` · ${tools.length}` : ""}
+          </TabsTrigger>
           <TabsTrigger value="resources">
             资源
             {detail
@@ -233,19 +254,46 @@ export default function AgentMcpPage() {
         </TabsList>
 
         <TabsContent value="bindings" className="mt-4 space-y-4">
-          <div className="flex items-start justify-between gap-4 rounded-lg border border-border p-4">
-            <div className="space-y-1">
-              <p className="text-sm font-medium">暴露云端文件系统</p>
-              <p className="text-xs text-muted-foreground">向 MCP 暴露工作区文件</p>
+          <SettingsSection>
+            <SettingsRow label="暴露工作区文件" htmlFor="mcp-expose-fs">
+              <Switch
+                id="mcp-expose-fs"
+                checked={state.exposeFs}
+                onCheckedChange={(v) => setExposeFs(Boolean(v))}
+              />
+            </SettingsRow>
+            <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-3">
+              <div className="text-sm font-medium">挂载模式</div>
+              <Select
+                value={state.mode}
+                onValueChange={(v) => {
+                  if (v === "all" || v === "selected") setMode(v);
+                }}
+                items={[
+                  { value: "all", label: "全部" },
+                  { value: "selected", label: "仅所选" },
+                ]}
+              >
+                <SelectTrigger className="h-8 w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部</SelectItem>
+                  <SelectItem value="selected">仅所选</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-            <Switch checked={exposeFs} onCheckedChange={setExposeFs} />
-          </div>
+          </SettingsSection>
 
           {instances.length === 0 ? (
-            <div className="rounded-lg border border-dashed py-12 text-center">
+            <div className="rounded-xl border border-dashed py-12 text-center">
               <p className="mb-3 text-sm text-muted-foreground">暂无 MCP 实例</p>
               <div className="flex flex-wrap justify-center gap-2">
-                <Button size="sm" nativeButton={false} render={<Link href="/dashboard/mcp/store" />}>
+                <Button
+                  size="sm"
+                  nativeButton={false}
+                  render={<Link href="/dashboard/mcp/store" />}
+                >
                   <Store />
                   商店
                 </Button>
@@ -261,57 +309,63 @@ export default function AgentMcpPage() {
               </div>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>类型</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right">绑定</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {instances.map((inst) => {
-                  const bound = mode === "all" ? true : selected.has(inst.id);
-                  return (
-                    <TableRow key={inst.id}>
-                      <TableCell>
-                        <Link
-                          href={`/dashboard/mcp/${inst.id}`}
-                          className="font-medium underline-offset-2 hover:underline"
-                        >
-                          {inst.name}
-                        </Link>
-                      </TableCell>
-                      <TableCell>
-                        <code className="text-[11px] text-muted-foreground">{inst.slug}</code>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{providerLabel(inst.providerId)}</Badge>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={statusVariant(inst.status)}>{inst.status}</Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Switch
-                          checked={bound}
-                          disabled={mode === "all"}
-                          onCheckedChange={(v) => toggleInstance(inst.id, v)}
-                        />
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <div className="overflow-hidden rounded-xl border border-border/80 bg-card">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>名称</TableHead>
+                    <TableHead>Slug</TableHead>
+                    <TableHead>类型</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead className="text-right">绑定</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {instances.map((inst) => {
+                    const bound =
+                      state.mode === "all" ? true : selectedSet.has(inst.id);
+                    return (
+                      <TableRow key={inst.id}>
+                        <TableCell>
+                          <Link
+                            href={`/dashboard/mcp/${inst.id}`}
+                            className="font-medium underline-offset-2 hover:underline"
+                          >
+                            {inst.name}
+                          </Link>
+                        </TableCell>
+                        <TableCell>
+                          <code className="text-[11px] text-muted-foreground">
+                            {inst.slug}
+                          </code>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">
+                            {providerLabel(inst.providerId)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={statusVariant(inst.status)}>
+                            {inst.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Switch
+                            checked={bound}
+                            disabled={state.mode === "all"}
+                            onCheckedChange={(v) =>
+                              toggleInstance(inst.id, Boolean(v))
+                            }
+                          />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
           )}
 
-          {mode === "all" && instances.length > 0 ? (
-            <p className="text-xs text-muted-foreground">
-              已挂载全部运行中实例
-            </p>
-          ) : null}
         </TabsContent>
 
         <TabsContent value="tools" className="mt-4">

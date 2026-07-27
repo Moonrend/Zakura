@@ -6,7 +6,12 @@ import { toast } from "sonner";
 import { Pin, Plus, Search, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAgentDetail } from "@/components/agent-detail-context";
-import { TableActions } from "@/components/settings-shell";
+import {
+  SettingsHeader,
+  SettingsRow,
+  SettingsSection,
+  TableActions,
+} from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -263,17 +268,19 @@ export default function AgentMemoryPage() {
 
   return (
     <div className="space-y-5">
-      <section className="grid gap-3 rounded-lg border border-border bg-card p-4 sm:grid-cols-2">
-        <div className="flex items-center justify-between sm:col-span-2">
-          <Label>为本 Agent 启用记忆</Label>
+      <SettingsHeader title="记忆" />
+
+      <SettingsSection>
+        <SettingsRow label="启用" htmlFor="mem-enable">
           <Switch
+            id="mem-enable"
             checked={agent.enableMemory}
             disabled={busy}
             onCheckedChange={(v) => void toggleMemory(v)}
           />
-        </div>
-        <div className="sm:col-span-2">
-          <Label>记忆 Provider</Label>
+        </SettingsRow>
+        <div className="space-y-1.5 border-t border-border/60 pt-3">
+          <Label>Provider</Label>
           <Select
             value={providerId}
             onValueChange={(v) => {
@@ -285,7 +292,7 @@ export default function AgentMemoryPage() {
             items={providerItems}
             disabled={!agent.enableMemory || busy || providerItems.length === 0}
           >
-            <SelectTrigger className="mt-1">
+            <SelectTrigger>
               <SelectValue placeholder="选择 Provider" />
             </SelectTrigger>
             <SelectContent>
@@ -296,29 +303,26 @@ export default function AgentMemoryPage() {
               ))}
             </SelectContent>
           </Select>
-          {meta.provider ? (
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
-              {meta.provider.name} · {meta.provider.kind}
-            </p>
-          ) : (
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
-              无 Provider ·{" "}
+          {!meta.provider ? (
+            <p className="text-[11px] text-muted-foreground">
               <Link href="/dashboard/memory" className="underline">
-                去创建
+                创建 Provider
               </Link>
             </p>
-          )}
+          ) : null}
         </div>
-      </section>
+      </SettingsSection>
 
       {kind === "builtin" && storesLocally && agent.enableMemory ? (
         <BuiltinEmbeddingPanel agentId={id} initial={meta.embedding ?? undefined} />
       ) : null}
 
       {!storesLocally ? (
-        <section className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
-          数据由外部服务管理（{kind}）。
-        </section>
+        <SettingsSection>
+          <p className="text-sm text-muted-foreground">
+            数据由外部服务管理（{kind}）。
+          </p>
+        </SettingsSection>
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -627,26 +631,20 @@ function BuiltinEmbeddingPanel({
   if (!info) return null;
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="text-sm font-medium">Built-in 向量索引</div>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {info.enabled
-              ? `pgvector${info.model ? ` · ${info.model}` : ""}`
-              : "未启用。在设置 → 记忆中开启向量语义种子。"}
-          </p>
-        </div>
+    <SettingsSection
+      title="向量索引"
+      action={
         <Button
           size="sm"
           variant="outline"
           disabled={!info.enabled || busy}
           onClick={() => void reembed()}
         >
-          重建向量
+          重建
         </Button>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+      }
+    >
+      <div className="flex flex-wrap gap-1.5 text-[11px]">
         <Badge variant="secondary">总 {info.stats.total}</Badge>
         <Badge variant="outline">已嵌入 {info.stats.withEmbedding}</Badge>
         <Badge variant="outline">缺失 {info.stats.missing}</Badge>
@@ -654,6 +652,6 @@ function BuiltinEmbeddingPanel({
           <Badge variant="outline">过期 {info.stats.stale}</Badge>
         ) : null}
       </div>
-    </section>
+    </SettingsSection>
   );
 }

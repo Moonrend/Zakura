@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -9,6 +10,7 @@ import {
   Bot,
   Check,
   ChevronsUpDown,
+  ExternalLink,
   FileClock,
   File as FileIcon,
   FolderOpen,
@@ -48,6 +50,16 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { SettingsRow, SettingsSaveIndicator } from "@/components/settings-shell";
+import { useAutoSave } from "@/hooks/use-auto-save";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
@@ -133,6 +145,7 @@ export function ChatApp() {
   const [enableTools, setEnableTools] = useState(true);
   const [autoMemory, setAutoMemory] = useState(true);
   const [autoTitle, setAutoTitle] = useState(true);
+  const [maxSubagentDepth, setMaxSubagentDepth] = useState("2");
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [hasChatRoute, setHasChatRoute] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -292,6 +305,7 @@ export function ChatApp() {
         setEnableTools(cfg.cloud.enableTools !== false);
         setAutoMemory(cfg.cloud.autoMemory !== false);
         setAutoTitle(cfg.cloud.autoTitle !== false);
+        setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
         setModels(chatModels);
         const pending = pendingSessionRef.current;
         pendingSessionRef.current = null;
@@ -586,22 +600,38 @@ export function ChatApp() {
     }
   }
 
-  async function handleSaveSettings() {
-    if (!agentId) return;
-    try {
-      await saveCloudConfig(agentId, {
-        systemPrompt,
-        model: model.trim() || undefined,
-        enableTools,
-        autoMemory,
-        autoTitle,
-      });
-      toast.success("已保存");
-      setSettingsOpen(false);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
+  type ChatSettingsPatch = {
+    systemPrompt?: string;
+    enableTools?: boolean;
+    autoMemory?: boolean;
+    autoTitle?: boolean;
+    maxSubagentDepth?: string;
+  };
+
+  const persistChatSettings = useCallback(
+    async (patch: ChatSettingsPatch) => {
+      if (!agentId) return;
+      const body: Parameters<typeof saveCloudConfig>[1] = {};
+      if (patch.systemPrompt !== undefined) body.systemPrompt = patch.systemPrompt;
+      if (patch.enableTools !== undefined) body.enableTools = patch.enableTools;
+      if (patch.autoMemory !== undefined) body.autoMemory = patch.autoMemory;
+      if (patch.autoTitle !== undefined) body.autoTitle = patch.autoTitle;
+      if (patch.maxSubagentDepth !== undefined) {
+        const n = Number(patch.maxSubagentDepth);
+        body.maxSubagentDepth =
+          Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 5) : null;
+      }
+      await saveCloudConfig(agentId, body);
+    },
+    [agentId],
+  );
+
+  const {
+    status: settingsSaveStatus,
+    error: settingsSaveError,
+    schedule: scheduleSettings,
+    saveNow: saveSettingsNow,
+  } = useAutoSave(persistChatSettings, { debounceMs: 550 });
 
   const modelItems = useMemo(() => {
     const items = [
@@ -1109,39 +1139,106 @@ export function ChatApp() {
 
       <RunLogDrawer open={logOpen} onOpenChange={setLogOpen} events={events} />
 
-      {/* 设置 */}
+      {/* 设置（自动保存；完整分类见 Agent 设置页） */}
       <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
         <SheetContent className="sm:max-w-md">
           <SheetHeader>
-            <SheetTitle>{agent?.name ?? "Agent"} 设置</SheetTitle>
-            <SheetDescription className="sr-only">Cloud Agent 配置</SheetDescription>
+            <div className="flex items-start justify-between gap-2 pr-6">
+              <SheetTitle>{agent?.name ?? "Agent"} 设置</SheetTitle>
+              <SettingsSaveIndicator
+                status={settingsSaveStatus}
+                error={settingsSaveError}
+              />
+            </div>
+            <SheetDescription className="sr-only">Agent 设置</SheetDescription>
           </SheetHeader>
           <ScrollArea className="min-h-0 flex-1">
-            <div className="mt-4 space-y-5 px-1 pb-6">
-              <div className="space-y-2">
+            <div className="mt-4 space-y-1 px-1 pb-6">
+              <div className="space-y-2 pb-3">
                 <Label htmlFor="chat-system">系统提示词</Label>
                 <Textarea
                   id="chat-system"
                   value={systemPrompt}
-                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  onChange={(e) => {
+                    setSystemPrompt(e.target.value);
+                    scheduleSettings({ systemPrompt: e.target.value });
+                  }}
                   className="min-h-28"
                 />
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">工具调用</div>
-                <Switch checked={enableTools} onCheckedChange={setEnableTools} />
+              <Separator />
+              <SettingsRow label="工具调用">
+                <Switch
+                  checked={enableTools}
+                  onCheckedChange={(v) => {
+                    setEnableTools(v);
+                    saveSettingsNow({ enableTools: v });
+                  }}
+                />
+              </SettingsRow>
+              <Separator />
+              <SettingsRow label="自动记忆">
+                <Switch
+                  checked={autoMemory}
+                  onCheckedChange={(v) => {
+                    setAutoMemory(v);
+                    saveSettingsNow({ autoMemory: v });
+                  }}
+                />
+              </SettingsRow>
+              <Separator />
+              <SettingsRow label="自动标题">
+                <Switch
+                  checked={autoTitle}
+                  onCheckedChange={(v) => {
+                    setAutoTitle(v);
+                    saveSettingsNow({ autoTitle: v });
+                  }}
+                />
+              </SettingsRow>
+              <Separator />
+              <div className="flex items-center justify-between gap-4 py-3">
+                <Label>子代理深度</Label>
+                <Select
+                  value={maxSubagentDepth}
+                  onValueChange={(v) => {
+                    if (v == null) return;
+                    setMaxSubagentDepth(v);
+                    saveSettingsNow({ maxSubagentDepth: v });
+                  }}
+                  items={[
+                    { value: "1", label: "1" },
+                    { value: "2", label: "2" },
+                    { value: "3", label: "3" },
+                    { value: "4", label: "4" },
+                    { value: "5", label: "5" },
+                  ]}
+                >
+                  <SelectTrigger className="w-20">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1</SelectItem>
+                    <SelectItem value="2">2</SelectItem>
+                    <SelectItem value="3">3</SelectItem>
+                    <SelectItem value="4">4</SelectItem>
+                    <SelectItem value="5">5</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">自动记忆</div>
-                <Switch checked={autoMemory} onCheckedChange={setAutoMemory} />
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">自动标题</div>
-                <Switch checked={autoTitle} onCheckedChange={setAutoTitle} />
-              </div>
-              <Button className="w-full" onClick={() => void handleSaveSettings()}>
-                保存
-              </Button>
+              {agentId ? (
+                <Button
+                  variant="outline"
+                  className="mt-2 w-full"
+                  nativeButton={false}
+                  render={
+                    <Link href={`/dashboard/agents/${agentId}/general`} />
+                  }
+                >
+                  全部设置
+                  <ExternalLink className="size-3.5 opacity-70" />
+                </Button>
+              ) : null}
             </div>
           </ScrollArea>
         </SheetContent>
