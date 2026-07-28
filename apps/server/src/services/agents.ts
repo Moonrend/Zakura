@@ -92,10 +92,18 @@ export class AgentService {
       workspaceImage?: string | null;
       config?: Record<string, unknown>;
       createApiKey?: boolean;
+      /** 默认 false；onboarding 可显式打开 */
+      enableComputer?: boolean;
+      /** 默认 false；onboarding 可显式打开 */
+      enableMemory?: boolean;
+      memoryProviderId?: string | null;
     },
   ) {
-    // 创建默认零能力；Slug 由名称自动生成；冲突时自动加后缀
-    const caps = normalizeCaps({});
+    // 默认零能力；Slug 由名称自动生成；冲突时自动加后缀
+    const caps = normalizeCaps({
+      enableComputer: input.enableComputer,
+      enableMemory: input.enableMemory,
+    });
     let slug = slugify(input.name);
     const now = new Date();
 
@@ -137,6 +145,7 @@ export class AgentService {
         enableComputer: caps.enableComputer,
         enableBrowser: caps.enableBrowser,
         enableMemory: caps.enableMemory,
+        memoryProviderId: input.memoryProviderId ?? null,
         workspaceImage: input.workspaceImage ?? null,
         configJson: JSON.stringify(defaultConfig),
         createdAt: now,

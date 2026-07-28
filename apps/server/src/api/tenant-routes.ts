@@ -3,8 +3,12 @@ import { eq } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { tenants } from "../db/schema.js";
-import { isSessionAdmin } from "../services/auth.js";
+import { isSessionAdmin, switchTenantSession } from "../services/auth.js";
+import type { AgentService } from "../services/agents.js";
+import type { MemoryProvidersService } from "../services/memory-providers.js";
 import { NetworkSettingsService } from "../services/network-settings.js";
+import { bootstrapOnboarding } from "../services/onboarding-bootstrap.js";
+import type { Orchestrator } from "../services/orchestrator.js";
 import { RuntimeNodeService } from "../services/runtime-nodes.js";
 import {
   TenantAccessError,
@@ -42,11 +46,21 @@ export function registerTenantRoutes(
     db: Db;
     config: AppConfig;
     tenants: TenantService;
+    agentService?: AgentService;
+    memoryProviders?: MemoryProvidersService;
+    orchestrator?: Orchestrator;
     runtimeNodes?: RuntimeNodeService;
     networkSettings?: NetworkSettingsService;
   },
 ) {
-  const { db, config, tenants: tenantService } = deps;
+  const {
+    db,
+    config,
+    tenants: tenantService,
+    agentService,
+    memoryProviders,
+    orchestrator,
+  } = deps;
 
   /** Tenants the current user can access (OSS: always the single default). */
   app.get("/api/tenants", async (c) => {
@@ -101,6 +115,38 @@ export function registerTenantRoutes(
     }
   });
 
+  app.delete("/api/tenant/current", async (c) => {
+    const session = c.get("session")!;
+    if (session.userId === "api-key") return c.json({ error: "Forbidden" }, 403);
+    try {
+      const memberships = await tenantService.listForUser(session.userId);
+      const next = memberships.find((item) => item.tenant.id !== session.tenantId);
+      if (!next) {
+        return c.json({ error: "You must keep at least one team" }, 400);
+      }
+      const token = await switchTenantSession(
+        db,
+        config.secret,
+        session.userId,
+        next.tenant.id,
+      );
+      if (!token) return c.json({ error: "Could not switch teams" }, 500);
+      await tenantService.deleteTenant(session.tenantId, session.userId);
+      return c.json({
+        ok: true,
+        session: token,
+        team: {
+          id: next.tenant.id,
+          name: next.tenant.name,
+          onboardingCompleted: next.tenant.onboardingCompleted,
+        },
+      });
+    } catch (err) {
+      const e = handleTenantErr(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
   app.get("/api/tenant/onboarding", async (c) => {
     const session = c.get("session")!;
     try {
@@ -136,6 +182,37 @@ export function registerTenantRoutes(
     } catch (err) {
       const e = handleTenantErr(err);
       return c.json(e.body, e.status);
+    }
+  });
+
+  /**
+   * 引导一键就绪：创建默认 Agent、开启记忆；
+   * OSS 额外开启电脑环境并异步启动本机工作区。
+   */
+  app.post("/api/tenant/onboarding/bootstrap", async (c) => {
+    const session = c.get("session")!;
+    if (session.userId === "api-key") return c.json({ error: "Forbidden" }, 403);
+    if (!agentService || !memoryProviders || !orchestrator) {
+      return c.json({ error: "Onboarding bootstrap unavailable" }, 503);
+    }
+    try {
+      const result = await bootstrapOnboarding({
+        db,
+        config,
+        tenants: tenantService,
+        agentService,
+        memoryProviders,
+        orchestrator,
+        tenantId: session.tenantId,
+        userId: session.userId,
+      });
+      return c.json(result);
+    } catch (err) {
+      console.error("[api] POST /api/tenant/onboarding/bootstrap", err);
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        400,
+      );
     }
   });
 }

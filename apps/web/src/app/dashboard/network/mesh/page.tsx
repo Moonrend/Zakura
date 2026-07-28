@@ -251,7 +251,7 @@ export default function NetworkMeshPage() {
           </pre>
         ) : null}
 
-        <SettingsSection title="本租户设备">
+        <SettingsSection title="当前团队设备">
           {tailnet.length === 0 && data.devices.length === 0 ? (
             <p className="text-sm text-muted-foreground">暂无设备。创建 Runner 并启用安装脚本后将出现在此。</p>
           ) : (

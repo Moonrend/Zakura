@@ -43,7 +43,6 @@ function CallbackInner() {
         setSession(res.session);
         setStatus("ok");
         setMsg("登录成功，正在跳转…");
-        toast.success("ZeroCat 登录成功");
         const next =
           res.next ??
           (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");

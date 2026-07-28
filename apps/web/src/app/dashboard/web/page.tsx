@@ -432,7 +432,7 @@ export default function WebPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="网页"
-        description="按租户隔离的搜索 / 抓取配置。同一服务可添加多个凭据，调用时轮询。"
+        description="按团队隔离的搜索 / 抓取配置。同一服务可添加多个凭据，调用时轮询。"
         actions={
           <Button size="sm" disabled={saving || !loaded} onClick={() => void saveAll()}>
             <Save className="size-3.5" />
@@ -582,7 +582,7 @@ export default function WebPage() {
                   {editRow.slot.label ? ` · ${editRow.slot.label}` : ""}
                 </DialogTitle>
                 <DialogDescription>
-                  凭据仅保存在当前租户配置中，不会跨租户共享。
+                  凭据仅保存在当前团队配置中，不会跨团队共享。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">

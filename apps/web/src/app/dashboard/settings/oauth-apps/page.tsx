@@ -45,7 +45,7 @@ type ScopeTab = "tenant" | "platform";
 
 /**
  * OAuth 客户端配置：
- * - 本租户：任意管理员可自建（用户自己的 Google/GitHub OAuth App）
+ * - 当前团队：任意管理员可自建（用户自己的 Google/GitHub OAuth App）
  * - 整站：SaaS 超管 / OSS 管理员（默认回退）
  *
  * Google 不接受 API Key，仅 OAuth Client ID/Secret。
@@ -134,7 +134,7 @@ export default function OauthAppsSettingsPage() {
           scopes: res.app.scopes,
         },
       }));
-      toast.success(`已保存 ${app.name}（${tab === "tenant" ? "本租户" : "整站"}）`);
+      toast.success(`已保存 ${app.name}（${tab === "tenant" ? "当前团队" : "整站"}）`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -156,7 +156,7 @@ export default function OauthAppsSettingsPage() {
           variant={tab === "tenant" ? "default" : "outline"}
           onClick={() => setTab("tenant")}
         >
-          本租户
+          当前团队
         </Button>
         {canPlatform ? (
           <Button

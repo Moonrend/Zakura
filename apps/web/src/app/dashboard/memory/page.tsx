@@ -483,7 +483,7 @@ export default function GlobalMemoryPage() {
               </>
             )}
             <div className="flex items-center justify-between">
-              <Label>设为租户默认</Label>
+              <Label>设为团队默认</Label>
               <Switch checked={isDefault} onCheckedChange={setIsDefault} />
             </div>
             <div className="flex justify-end gap-2 pt-2">

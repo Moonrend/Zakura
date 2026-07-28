@@ -62,7 +62,13 @@ function guessNameFromUrl(url: string): string {
   }
 }
 
-export function McpImportPanel() {
+type McpImportPanelProps = {
+  /** 嵌入 onboarding 时不跳出当前流程。 */
+  embedded?: boolean;
+  onComplete?: (result: { instanceIds: string[] }) => void;
+};
+
+export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelProps = {}) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("url");
   const [busy, setBusy] = useState(false);
@@ -123,25 +129,27 @@ export function McpImportPanel() {
             unsub();
             if (msg.ok) {
               toast.success("OAuth 授权成功");
-              router.push(
-                `/dashboard/mcp/${msg.instanceId || res.instance.id}`,
-              );
+              onComplete?.({ instanceIds: [msg.instanceId || res.instance.id] });
+              if (!embedded) {
+                router.push(`/dashboard/mcp/${msg.instanceId || res.instance.id}`);
+              }
             } else {
               toast.error(msg.error || "OAuth 授权失败");
-              router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
+              if (!embedded) router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
             }
           });
           return;
         }
         if (preparedTab && !preparedTab.closed) preparedTab.close();
         toast.error(res.oauth?.error || "OAuth 启动失败");
-        router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
+        if (!embedded) router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
         return;
       }
 
       if (res.authRequired) {
         toast.message("已导入，上游需要授权");
-        router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
+        onComplete?.({ instanceIds: [res.instance.id] });
+        if (!embedded) router.push(`/dashboard/mcp/${res.instance.id}?oauth=1`);
         return;
       }
 
@@ -150,7 +158,8 @@ export function McpImportPanel() {
           ? `已导入 ${res.instance.slug}`
           : `已创建（${res.startError ?? "未启动"}）`,
       );
-      router.push(`/dashboard/mcp/${res.instance.id}`);
+      onComplete?.({ instanceIds: [res.instance.id] });
+      if (!embedded) router.push(`/dashboard/mcp/${res.instance.id}`);
     } catch (err) {
       if (preparedTab && !preparedTab.closed) preparedTab.close();
       toast.error(err instanceof Error ? err.message : String(err));
@@ -191,13 +200,19 @@ export function McpImportPanel() {
     try {
       const res = await api<{
         count: number;
-        results: Array<{ slug: string; started: boolean; startError?: string }>;
+        results: Array<{
+          instance: { id: string };
+          slug: string;
+          started: boolean;
+          startError?: string;
+        }>;
       }>("/api/mcp/import-vscode", {
         method: "POST",
         json: { config: vscodeJson, keys, start: startAfter },
       });
       toast.success(`已导入 ${res.count} 个 MCP`);
-      router.push("/dashboard/mcp");
+      onComplete?.({ instanceIds: res.results.map((result) => result.instance.id) });
+      if (!embedded) router.push("/dashboard/mcp");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -242,7 +257,8 @@ export function McpImportPanel() {
           ? `已启动 ${res.instance.slug}`
           : `已创建（${res.startError ?? "未启动"}）`,
       );
-      router.push(`/dashboard/mcp/${res.instance.id}`);
+      onComplete?.({ instanceIds: [res.instance.id] });
+      if (!embedded) router.push(`/dashboard/mcp/${res.instance.id}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {

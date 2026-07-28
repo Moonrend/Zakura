@@ -18,11 +18,23 @@ export type TenantRole = "owner" | "admin" | "member";
 export type MembershipStatus = "active" | "suspended";
 
 export type TenantOnboardingSteps = {
-  agentCreated?: boolean;
-  computerEnabled?: boolean;
-  memoryConfigured?: boolean;
+  /** 用户已填写称呼并写入记忆 */
+  profileNamed?: boolean;
+  /** SaaS：已配置 AI 上游（可跳过） */
+  aiProviderConfigured?: boolean;
+  /** 已接入至少一个上游 MCP（可跳过） */
   mcpConnected?: boolean;
+  /** 已查看 Agent MCP 接入说明 */
   connectReady?: boolean;
+  /** 已引导试用内置对话 Agent（有 AI 上游时） */
+  agentTried?: boolean;
+
+  /** @deprecated 自动准备不再写入；保留兼容旧数据 */
+  agentCreated?: boolean;
+  /** @deprecated */
+  computerEnabled?: boolean;
+  /** @deprecated */
+  memoryConfigured?: boolean;
 };
 
 const ADMIN_ROLES: TenantRole[] = ["owner", "admin"];
@@ -185,6 +197,19 @@ export class TenantService {
       .returning();
     if (!row) throw new TenantAccessError("Tenant not found", 404);
     return row;
+  }
+
+  async deleteTenant(tenantId: string, actorUserId: string) {
+    await this.requireMembership(tenantId, actorUserId, "owner");
+    const tenant = await this.db.query.tenants.findFirst({
+      where: eq(tenants.id, tenantId),
+    });
+    if (!tenant) throw new TenantAccessError("Team not found", 404);
+    if (tenant.isDefault) {
+      throw new TenantAccessError("The default team cannot be deleted", 400);
+    }
+    await this.db.delete(tenants).where(eq(tenants.id, tenantId));
+    return { ok: true as const };
   }
 
   async listMembers(tenantId: string) {

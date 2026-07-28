@@ -103,7 +103,7 @@ export default function AdminPage() {
     setLoading(true);
     try {
       if (!me.multiTenant || !me.isPlatformAdmin) {
-        toast.error("超级管理后台仅在 SaaS 多租户部署下可用");
+        toast.error("超级管理后台仅在 SaaS 多团队部署下可用");
         router.replace("/dashboard/agents");
         return;
       }
@@ -278,7 +278,7 @@ export default function AdminPage() {
               }
             />
           </SettingsField>
-          <SettingsField label="首次登录自动注册租户">
+          <SettingsField label="首次登录自动创建团队">
             <Switch
               checked={oauthDraft.allowRegistration}
               onCheckedChange={(v) => setOauthDraft((d) => ({ ...d, allowRegistration: v }))}
@@ -384,7 +384,7 @@ export default function AdminPage() {
           <TableHeader>
             <TableRow>
               <TableHead>用户</TableHead>
-              <TableHead>租户</TableHead>
+              <TableHead>团队</TableHead>
               <TableHead>平台管理员</TableHead>
               <TableHead>Local Runner</TableHead>
             </TableRow>
@@ -433,15 +433,15 @@ export default function AdminPage() {
 
       <SettingsSection title="共享 Runner">
         <p className="mb-3 text-sm text-muted-foreground">
-          将管理员持有的远程 Runner 标记为共享后，任意租户都可绑定使用。共享 Runner
-          每租户同时仅允许 1 个活跃工作区（Agent 绑定不限），并禁止宿主机容器分配与归档；允许
+          将管理员持有的远程 Runner 标记为共享后，任意团队都可绑定使用。共享 Runner
+          每个团队同时仅允许 1 个活跃工作区（Agent 绑定不限），并禁止宿主机容器分配与归档；允许
           Cloudflare Quick Tunnel 端口暴露。
         </p>
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>名称</TableHead>
-              <TableHead>所属租户</TableHead>
+              <TableHead>所属团队</TableHead>
               <TableHead>创建者</TableHead>
               <TableHead>状态</TableHead>
               <TableHead>共享</TableHead>
@@ -480,7 +480,7 @@ export default function AdminPage() {
             {!runners.length ? (
               <TableRow>
                 <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
-                  暂无远程 Runner。请先在任一管理员租户下创建 Runner。
+                  暂无远程 Runner。请先在任一管理员团队下创建 Runner。
                 </TableCell>
               </TableRow>
             ) : null}
@@ -488,7 +488,7 @@ export default function AdminPage() {
         </Table>
       </SettingsSection>
 
-      <SettingsSection title="全部租户">
+      <SettingsSection title="全部团队">
         <Table>
           <TableHeader>
             <TableRow>

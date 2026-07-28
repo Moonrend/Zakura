@@ -107,7 +107,7 @@ export function PlatformHeadscalePanel({ onSaved }: { onSaved?: () => void }) {
 
   return (
     <SettingsSection title="平台 Headscale">
-      <p className="text-sm text-muted-foreground">SaaS 租户托管组网</p>
+      <p className="text-sm text-muted-foreground">SaaS 团队托管组网</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Badge variant={cfg?.ready ? "default" : "secondary"}>
           {cfg?.ready ? "已就绪" : draft.enabled ? "未就绪" : "关闭"}

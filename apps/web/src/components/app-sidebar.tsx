@@ -26,7 +26,6 @@ import {
   Wrench,
   HardDrive,
   Building2,
-  Users,
   ShieldCheck,
   Route,
   Container,
@@ -514,32 +513,27 @@ export function AppSidebar({
       icon: KeyRound,
     },
     {
-      id: "settings-tenant",
-      href: "/dashboard/settings/tenant",
-      label: "租户",
-      icon: Building2,
+      id: "settings",
+      href: "/dashboard/settings/team",
+      label: "设置",
+      icon: Settings2,
       children: [
         {
-          href: "/dashboard/settings/tenant",
-          label: "设置",
-          icon: Settings2,
+          href: "/dashboard/settings/team",
+          label: "团队",
+          icon: Building2,
         },
         {
           href: "/dashboard/settings/oauth-apps",
           label: "OAuth 应用",
           icon: KeyRound,
         },
-        // Members / multi-tenant switcher are SaaS-only
+        // Multi-team switcher is SaaS-only. Members live in the team settings page.
         ...(multiTenant
           ? [
               {
-                href: "/dashboard/settings/members",
-                label: "成员",
-                icon: Users,
-              } satisfies SubNavItem,
-              {
-                href: "/dashboard/settings/tenants",
-                label: "切换 / 新建",
+                href: "/dashboard/settings/teams",
+                label: "所有团队",
                 icon: Building2,
               } satisfies SubNavItem,
             ]
@@ -587,7 +581,7 @@ export function AppSidebar({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-56">
                 <DropdownMenuGroup>
-                  <DropdownMenuLabel>切换租户</DropdownMenuLabel>
+                  <DropdownMenuLabel>切换团队</DropdownMenuLabel>
                   {tenantList.map((item) => (
                     <DropdownMenuItem
                       key={item.tenant.id}
@@ -601,8 +595,8 @@ export function AppSidebar({
                   ))}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => router.push("/dashboard/settings/tenants")}>
-                  管理租户…
+                <DropdownMenuItem onClick={() => router.push("/dashboard/settings/teams")}>
+                  管理团队…
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

@@ -153,7 +153,7 @@ export default function NetworkSecurityPage() {
             }
           />
         </SettingsField>
-        <SettingsField label="租户最大并发">
+        <SettingsField label="团队最大并发">
           <Input
             className="w-24"
             type="number"

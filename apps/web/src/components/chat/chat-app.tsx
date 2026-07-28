@@ -137,6 +137,7 @@ export function ChatApp() {
   const [events, setEvents] = useState<CloudAgentEvent[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [agentReady, setAgentReady] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
@@ -167,6 +168,10 @@ export function ChatApp() {
   const fileNonceRef = useRef(1);
   /** 跨 Agent 打开搜索结果：切换后应加载的目标会话 */
   const pendingSessionRef = useRef<{ agentId: string; sessionId: string } | null>(null);
+  /** 引导页等深链：自动发送的首条消息（只消费一次） */
+  const pendingPromptRef = useRef<string | null>(null);
+  const autoPromptSentRef = useRef(false);
+  const focusComposerAfterPromptRef = useRef(false);
   /** 最新类型过滤值（供稳定回调读取，避免依赖引发的重订阅） */
   const kindFilterRef = useRef<CloudAgentSessionKind | "all">("chat");
 
@@ -218,6 +223,12 @@ export function ChatApp() {
         const fromUrlSession = params.get("session");
         if (initial && fromUrlSession) {
           pendingSessionRef.current = { agentId: initial.id, sessionId: fromUrlSession };
+        }
+        // ?prompt= 引导试用：新开对话并自动发送
+        const fromPrompt = params.get("prompt");
+        if (fromPrompt?.trim()) {
+          pendingPromptRef.current = fromPrompt.trim();
+          autoPromptSentRef.current = false;
         }
         setAgentId(initial?.id ?? null);
       } catch (err) {
@@ -283,6 +294,7 @@ export function ChatApp() {
   // —— 切换 Agent：加载会话/配置/模型 ——
   useEffect(() => {
     if (!agentId || !authed) return;
+    setAgentReady(false);
     localStorage.setItem(AGENT_KEY, agentId);
     setAttachments([]);
     setFileRequest(null);
@@ -309,7 +321,13 @@ export function ChatApp() {
         setModels(chatModels);
         const pending = pendingSessionRef.current;
         pendingSessionRef.current = null;
-        if (pending && pending.agentId === agentId) {
+        // 有待发送 prompt 时开新会话草稿，避免挂在旧对话上
+        if (pendingPromptRef.current) {
+          setSessionId(null);
+          setEvents([]);
+          seqRef.current = 0;
+          setSessions(list);
+        } else if (pending && pending.agentId === agentId) {
           await loadSession(agentId, pending.sessionId);
         } else if (list.length > 0) {
           await loadSession(agentId, list[0]!.id);
@@ -318,6 +336,7 @@ export function ChatApp() {
           setEvents([]);
           seqRef.current = 0;
         }
+        if (!cancelled) setAgentReady(true);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
       }
@@ -326,6 +345,54 @@ export function ChatApp() {
       cancelled = true;
     };
   }, [agentId, authed, loadSession]);
+
+  // 引导深链：Agent 就绪后自动发送首条消息
+  useEffect(() => {
+    if (!agentId || !authed || !agentReady || autoPromptSentRef.current) return;
+    const prompt = pendingPromptRef.current;
+    if (!prompt) return;
+    autoPromptSentRef.current = true;
+    pendingPromptRef.current = null;
+    setInput(prompt);
+    void (async () => {
+      setSending(true);
+      try {
+        const created = await createCloudSession(agentId);
+        setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+        setSessionId(created.id);
+        seqRef.current = 0;
+        setEvents([]);
+        await sendCloudMessage(agentId, created.id, prompt, null);
+        await refreshSessions();
+        await loadSession(agentId, created.id);
+        focusComposerAfterPromptRef.current = true;
+        // 清掉 URL 上的 prompt，避免刷新重复发送
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("prompt");
+          window.history.replaceState({}, "", url.pathname + url.search);
+        } catch {
+          /* ignore */
+        }
+      } catch (err) {
+        autoPromptSentRef.current = false;
+        pendingPromptRef.current = prompt;
+        toast.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSending(false);
+        setInput("");
+      }
+    })();
+  }, [agentId, agentReady, authed, loadSession, refreshSessions]);
+
+  useEffect(() => {
+    if (sending || !focusComposerAfterPromptRef.current) return;
+    focusComposerAfterPromptRef.current = false;
+    requestAnimationFrame(() => {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      composerRef.current?.focus({ preventScroll: true });
+    });
+  }, [sending, sessionId]);
 
   // —— 类型过滤变化：重载列表并校正选中会话 ——
   useEffect(() => {

@@ -18,6 +18,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { UpstreamModelSetup } from "@/components/models/upstream-model-setup";
 import {
   Select,
   SelectContent,
@@ -66,29 +67,6 @@ type Upstream = {
   status: string;
   meta?: ProtocolMeta;
 };
-
-type UpstreamModelRow = {
-  id: string;
-  nativeModel: string;
-  canonicalModel: string;
-  displayName?: string | null;
-  capability: string;
-  weight: number;
-  enabled: boolean;
-  status: string;
-};
-
-const CAPABILITY_LABEL: Record<string, string> = {
-  chat: "对话",
-  embedding: "向量化",
-  rerank: "重排序",
-  image: "生图",
-};
-
-const CAPABILITY_ITEMS = Object.entries(CAPABILITY_LABEL).map(([value, label]) => ({
-  value,
-  label,
-}));
 
 const FALLBACK_PROTOCOLS: ProtocolMeta[] = [
   {
@@ -170,7 +148,6 @@ export default function ModelUpstreamsPage() {
   const [busy, setBusy] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [selectedUpstreams, setSelectedUpstreams] = useState<Set<string>>(new Set());
-  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
 
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("openai");
@@ -181,13 +158,6 @@ export default function ModelUpstreamsPage() {
   const [deploymentId, setDeploymentId] = useState("");
   const [rerankBaseUrl, setRerankBaseUrl] = useState("");
   const [region, setRegion] = useState("cn");
-
-  const [models, setModels] = useState<UpstreamModelRow[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [addingModel, setAddingModel] = useState(false);
-  const [newNative, setNewNative] = useState("");
-  const [newCanonical, setNewCanonical] = useState("");
-  const [newCapability, setNewCapability] = useState("chat");
 
   const protocolItems = useMemo(
     () =>
@@ -206,8 +176,6 @@ export default function ModelUpstreamsPage() {
 
   const allUpstreamSelected =
     upstreams.length > 0 && upstreams.every((u) => selectedUpstreams.has(u.id));
-  const allModelsSelected =
-    models.length > 0 && models.every((m) => selectedModels.has(m.id));
 
   const load = useCallback(async () => {
     try {
@@ -236,36 +204,9 @@ export default function ModelUpstreamsPage() {
     }
   }, []);
 
-  const loadModels = useCallback(async (upstreamId: string) => {
-    setModelsLoading(true);
-    try {
-      const res = await api<{ models: UpstreamModelRow[] }>(
-        `/api/upstream-models?upstreamId=${encodeURIComponent(upstreamId)}`,
-      );
-      setModels(res.models);
-      setSelectedModels(new Set());
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setModelsLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    if (open && edit) {
-      void loadModels(edit.id);
-      setNewNative("");
-      setNewCanonical("");
-      setNewCapability("chat");
-    } else {
-      setModels([]);
-      setSelectedModels(new Set());
-    }
-  }, [open, edit, loadModels]);
 
   function resetForm(u?: Upstream | null) {
     setEdit(u ?? null);
@@ -405,68 +346,10 @@ export default function ModelUpstreamsPage() {
             (res.message ? ` · ${res.message}` : ""),
         );
       }
-      if (edit?.id === id) await loadModels(id);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setSyncingId(null);
-    }
-  }
-
-  async function addModel() {
-    if (!edit) return;
-    if (!newNative.trim()) {
-      toast.error("请填写上游原始模型名");
-      return;
-    }
-    setAddingModel(true);
-    try {
-      await api("/api/upstream-models", {
-        method: "POST",
-        json: {
-          upstreamId: edit.id,
-          nativeModel: newNative.trim(),
-          canonicalModel: newCanonical.trim() || undefined,
-          capability: newCapability,
-        },
-      });
-      toast.success("已添加模型");
-      setNewNative("");
-      setNewCanonical("");
-      await loadModels(edit.id);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAddingModel(false);
-    }
-  }
-
-  async function removeSelectedModels() {
-    if (!edit) return;
-    const ids = [...selectedModels];
-    if (ids.length === 0) return;
-    if (!confirm(`确认删除选中的 ${ids.length} 个模型？`)) return;
-    try {
-      await api("/api/upstream-models/batch-delete", {
-        method: "POST",
-        json: { ids },
-      });
-      toast.success(`已删除 ${ids.length} 个模型`);
-      await loadModels(edit.id);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function removeModel(id: string) {
-    if (!edit) return;
-    if (!confirm("确认从该上游移除该模型？")) return;
-    try {
-      await api(`/api/upstream-models/${id}`, { method: "DELETE" });
-      toast.success("已删除");
-      await loadModels(edit.id);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -771,179 +654,7 @@ export default function ModelUpstreamsPage() {
 
             {edit ? (
               <div className="space-y-3 border-t border-border pt-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-sm font-medium">该上游的模型</h3>
-                    <p className="text-[11px] text-muted-foreground">
-                      原始名为上游调用名；规范名用于系统聚合。可从上游同步或手填。
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {selectedModels.size > 0 ? (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => void removeSelectedModels()}
-                      >
-                        <Trash2 className="size-3.5" />
-                        删除（{selectedModels.size}）
-                      </Button>
-                    ) : null}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={syncingId === edit.id}
-                      onClick={() => void syncModels(edit.id)}
-                    >
-                      {syncingId === edit.id ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="size-3.5" />
-                      )}
-                      从上游同步
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-end gap-2 rounded-md border border-border p-2.5">
-                  <div className="min-w-[140px] flex-1">
-                    <Label className="text-xs">原始名</Label>
-                    <Input
-                      className="mt-1"
-                      value={newNative}
-                      onChange={(e) => setNewNative(e.target.value)}
-                      placeholder="model-id"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          void addModel();
-                        }
-                      }}
-                    />
-                  </div>
-                  <div className="min-w-[120px] flex-1">
-                    <Label className="text-xs">规范名（可选）</Label>
-                    <Input
-                      className="mt-1"
-                      value={newCanonical}
-                      onChange={(e) => setNewCanonical(e.target.value)}
-                      placeholder="自动匹配"
-                    />
-                  </div>
-                  <div className="w-[110px]">
-                    <Label className="text-xs">能力</Label>
-                    <Select
-                      value={newCapability}
-                      onValueChange={(v) => {
-                        if (v != null) setNewCapability(v);
-                      }}
-                      items={CAPABILITY_ITEMS}
-                    >
-                      <SelectTrigger className="mt-1">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CAPABILITY_ITEMS.map((c) => (
-                          <SelectItem key={c.value} value={c.value}>
-                            {c.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <Button
-                    size="sm"
-                    disabled={addingModel || !newNative.trim()}
-                    onClick={() => void addModel()}
-                  >
-                    {addingModel ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Plus className="size-3.5" />
-                    )}
-                    添加
-                  </Button>
-                </div>
-
-                {modelsLoading ? (
-                  <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-                    <Loader2 className="size-3.5 animate-spin" />
-                    加载模型…
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto rounded-md border border-border">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-10">
-                          <Checkbox
-                            checked={allModelsSelected}
-                            onCheckedChange={(v) => {
-                              if (v) setSelectedModels(new Set(models.map((m) => m.id)));
-                              else setSelectedModels(new Set());
-                            }}
-                            aria-label="全选模型"
-                          />
-                        </TableHead>
-                        <TableHead className="min-w-[140px]">原始名</TableHead>
-                        <TableHead className="min-w-[140px]">规范名</TableHead>
-                        <TableHead className="min-w-[72px]">能力</TableHead>
-                        <TableHead className="w-12" />
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {models.map((m) => (
-                        <TableRow key={m.id}>
-                          <TableCell>
-                            <Checkbox
-                              checked={selectedModels.has(m.id)}
-                              onCheckedChange={(v) =>
-                                setSelectedModels((prev) =>
-                                  toggleId(prev, m.id, Boolean(v)),
-                                )
-                              }
-                              aria-label={`选择 ${m.nativeModel}`}
-                            />
-                          </TableCell>
-                          <TableCell>
-                            <code className="text-xs break-all">{m.nativeModel}</code>
-                          </TableCell>
-                          <TableCell>
-                            <code className="text-xs break-all text-muted-foreground">
-                              {m.canonicalModel}
-                            </code>
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline">
-                              {CAPABILITY_LABEL[m.capability] ?? m.capability}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              title="删除"
-                              onClick={() => void removeModel(m.id)}
-                            >
-                              <Trash2 className="size-3.5" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                      {models.length === 0 ? (
-                        <TableRow>
-                          <TableCell
-                            colSpan={5}
-                            className="text-center text-muted-foreground"
-                          >
-                            暂无模型。可手填或从上游同步。
-                          </TableCell>
-                        </TableRow>
-                      ) : null}
-                    </TableBody>
-                  </Table>
-                  </div>
-                )}
+                <UpstreamModelSetup upstreamId={edit.id} />
               </div>
             ) : null}
           </div>

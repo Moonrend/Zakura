@@ -30,7 +30,7 @@ type TenantItem = {
   };
 };
 
-export default function TenantsSettingsPage() {
+export default function TeamsSettingsPage() {
   const router = useRouter();
   const [list, setList] = useState<TenantItem[]>([]);
   const [currentId, setCurrentId] = useState("");
@@ -54,7 +54,7 @@ export default function TenantsSettingsPage() {
       const enabled = !!(platform.multiTenant ?? tenantsRes.multiTenant);
       setMultiTenant(enabled);
       if (!enabled) {
-        router.replace("/dashboard/settings/tenant");
+        router.replace("/dashboard/settings/team");
         return;
       }
       setList(tenantsRes.tenants);
@@ -79,7 +79,7 @@ export default function TenantsSettingsPage() {
         { method: "POST", json: { tenantId } },
       );
       setSession(res.session);
-      toast.success("已切换租户");
+      toast.success("已切换团队");
       router.push(
         res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
       );
@@ -103,7 +103,7 @@ export default function TenantsSettingsPage() {
         json: { name: name.trim() },
       });
       setSession(res.session);
-      toast.success("租户已创建");
+      toast.success("团队已创建");
       setOpen(false);
       router.push("/onboarding");
     } catch (err) {
@@ -122,16 +122,16 @@ export default function TenantsSettingsPage() {
   return (
     <div className="space-y-5">
       <SettingsHeader
-        title="我的租户"
+        title="所有团队"
         actions={
           <Button size="sm" onClick={() => setOpen(true)}>
             <Plus className="size-3.5" />
-            新建租户
+            新建团队
           </Button>
         }
       />
 
-      <SettingsSection title="租户列表">
+      <SettingsSection title="团队列表">
         <ul className="divide-y rounded-lg border">
           {list.map((item) => (
             <li
@@ -180,10 +180,10 @@ export default function TenantsSettingsPage() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>新建租户</DialogTitle>
+            <DialogTitle>新建团队</DialogTitle>
           </DialogHeader>
           <div className="space-y-1.5">
-            <Label htmlFor="tenant-name">名称</Label>
+            <Label htmlFor="tenant-name">团队名称</Label>
             <Input
               id="tenant-name"
               value={name}

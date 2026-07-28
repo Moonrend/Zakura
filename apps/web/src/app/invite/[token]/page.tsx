@@ -57,7 +57,7 @@ export default function InviteAcceptPage() {
           : { email: info?.email, password, name: name || undefined },
       });
       setSession(res.session);
-      toast.success("已加入租户");
+      toast.success("已加入团队");
       router.push(
         res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
       );
@@ -75,7 +75,7 @@ export default function InviteAcceptPage() {
       </div>
       <div className="w-full max-w-[380px] space-y-5 animate-in-page">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight">加入租户</h1>
+          <h1 className="text-lg font-semibold tracking-tight">加入团队</h1>
           <p className="mt-1 text-sm text-muted-foreground">接受邀请成为团队成员</p>
         </div>
 
@@ -90,7 +90,7 @@ export default function InviteAcceptPage() {
         ) : (
           <>
             <div className="rounded-md border px-3 py-3 text-sm">
-              <div className="text-muted-foreground">租户</div>
+              <div className="text-muted-foreground">团队</div>
               <div className="font-medium">{info.tenant.name}</div>
               <div className="mt-2 text-muted-foreground">邀请邮箱</div>
               <div className="font-medium">{info.email}</div>

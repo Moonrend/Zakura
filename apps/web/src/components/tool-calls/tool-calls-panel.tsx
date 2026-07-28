@@ -208,7 +208,7 @@ function CallRow({
                   {item.agentName || item.agentSlug || "Agent"}
                 </Link>
               ) : (
-                <span>租户级</span>
+                <span>团队级</span>
               )
             ) : null}
             <span className="inline-flex items-center gap-1">

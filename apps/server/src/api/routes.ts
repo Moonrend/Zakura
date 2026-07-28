@@ -2389,6 +2389,9 @@ export async function createApiApp(deps: {
     db,
     config,
     tenants: tenantService,
+    agentService,
+    memoryProviders,
+    orchestrator,
     runtimeNodes,
     networkSettings,
   });

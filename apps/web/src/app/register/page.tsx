@@ -126,7 +126,7 @@ export default function RegisterPage() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="tenantName">工作区名称</Label>
+            <Label htmlFor="tenantName">团队名称</Label>
             <Input
               id="tenantName"
               placeholder="可选，默认用邮箱前缀"

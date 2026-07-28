@@ -85,7 +85,7 @@ export default function NetworkOverviewPage() {
       </div>
 
       {data.hostJoinsTailscale === false ? (
-        <p className="text-xs text-muted-foreground">控制面不入租户 Tailnet</p>
+        <p className="text-xs text-muted-foreground">控制面不加入团队 Tailnet</p>
       ) : null}
 
       <div className="grid gap-3 sm:grid-cols-3">

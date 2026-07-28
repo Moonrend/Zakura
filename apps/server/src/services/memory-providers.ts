@@ -126,27 +126,31 @@ export class MemoryProvidersService {
   }
 
   async ensureDefault(tenantId: string): Promise<MemoryProvider> {
-    const existing = await this.db.query.memoryProviders.findFirst({
-      where: eq(memoryProviders.tenantId, tenantId),
-    });
-    if (existing) {
+    const pickDefault = async (): Promise<MemoryProvider | null> => {
       const def = await this.db.query.memoryProviders.findFirst({
         where: and(
           eq(memoryProviders.tenantId, tenantId),
           eq(memoryProviders.isDefault, true),
         ),
       });
-      if (!def) {
-        await this.db
-          .update(memoryProviders)
-          .set({ isDefault: true, updatedAt: new Date() })
-          .where(eq(memoryProviders.id, existing.id));
-        return { ...existing, isDefault: true };
-      }
-      return def;
-    }
+      if (def) return def;
+      const any = await this.db.query.memoryProviders.findFirst({
+        where: eq(memoryProviders.tenantId, tenantId),
+        orderBy: [asc(memoryProviders.createdAt)],
+      });
+      if (!any) return null;
+      await this.db
+        .update(memoryProviders)
+        .set({ isDefault: true, updatedAt: new Date() })
+        .where(eq(memoryProviders.id, any.id));
+      return { ...any, isDefault: true };
+    };
+
+    const existing = await pickDefault();
+    if (existing) return existing;
 
     const now = new Date();
+    // 并发引导 / Strict Mode 双请求：用唯一约束 (tenant_id, slug) 做幂等
     const [row] = await this.db
       .insert(memoryProviders)
       .values({
@@ -161,8 +165,15 @@ export class MemoryProvidersService {
         createdAt: now,
         updatedAt: now,
       })
+      .onConflictDoNothing({
+        target: [memoryProviders.tenantId, memoryProviders.slug],
+      })
       .returning();
-    return row;
+    if (row) return row;
+
+    const raced = await pickDefault();
+    if (raced) return raced;
+    throw new Error("Failed to ensure default memory provider");
   }
 
   async create(tenantId: string, input: MemoryProviderInput) {

@@ -54,7 +54,7 @@ function AgentSettingsChrome({ children }: { children: React.ReactNode }) {
         json: {},
       });
       await navigator.clipboard.writeText(res.rawKey);
-      toast.success("API Key 已复制");
+      toast.success("已复制");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }

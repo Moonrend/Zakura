@@ -116,7 +116,7 @@ export function EmbeddingConfigFields({
     () => [
       {
         value: DEFAULT_ROUTE,
-        label: `租户默认（${routes.find((r) => r.isDefault)?.name ?? "按权重自动选择"}）`,
+        label: `团队默认（${routes.find((r) => r.isDefault)?.name ?? "按权重自动选择"}）`,
       },
       ...routes.map((r) => ({
         value: r.id,

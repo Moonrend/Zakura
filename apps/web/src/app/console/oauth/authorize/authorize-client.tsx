@@ -82,7 +82,6 @@ export default function OauthAuthorizePage() {
       });
       setSession(res.session);
       setMe(await api<Me>("/api/me"));
-      toast.success("已登录");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -171,7 +170,7 @@ export default function OauthAuthorizePage() {
           <div className="space-y-3">
             <div className="rounded-md border px-3 py-2 text-[12px]">
               已登录为 <span className="font-medium">{me.user.email}</span>
-              <span className="text-muted-foreground"> · {me.tenant.name}</span>
+              <span className="text-muted-foreground"> · 团队 {me.tenant.name}</span>
             </div>
             <div className="flex gap-2">
               <Button className="flex-1" disabled={busy || !info} onClick={() => void approve()}>

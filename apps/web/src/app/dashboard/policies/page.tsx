@@ -220,7 +220,7 @@ export default function PoliciesPage() {
                   setApiKeyId(v === "__default__" ? "" : v);
                 }}
                 items={[
-                  { value: "__default__", label: "租户默认" },
+                  { value: "__default__", label: "团队默认" },
                   ...keys.map((k) => ({
                     value: k.id,
                     label: `${k.name} (${k.keyPrefix}…)`,
@@ -231,7 +231,7 @@ export default function PoliciesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__default__">租户默认</SelectItem>
+                  <SelectItem value="__default__">团队默认</SelectItem>
                   {keys.map((k) => (
                     <SelectItem key={k.id} value={k.id}>
                       {k.name} ({k.keyPrefix}…)
