@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import MarkdownRender from "markstream-react";
 import {
   BookmarkCheck,
@@ -293,16 +293,17 @@ function ReasoningBlock({
   active: boolean;
 }) {
   const [open, setOpen] = useState(active);
-  const [userToggled, setUserToggled] = useState(false);
+  const wasActiveRef = useRef(active);
 
   useEffect(() => {
-    if (active) {
+    const wasActive = wasActiveRef.current;
+    if (active && !wasActive) {
       setOpen(true);
-      setUserToggled(false);
-      return;
+    } else if (!active && wasActive) {
+      setOpen(false);
     }
-    if (!userToggled) setOpen(false);
-  }, [active, userToggled]);
+    wasActiveRef.current = active;
+  }, [active]);
 
   if (!content.trim()) return null;
 
@@ -313,7 +314,6 @@ function ReasoningBlock({
         aria-expanded={open}
         aria-controls={`reasoning-${id}`}
         onClick={() => {
-          setUserToggled(true);
           setOpen((v) => !v);
         }}
         className="group inline-flex h-7 items-center gap-1 rounded-lg px-1.5 text-xs text-muted-foreground transition-colors duration-150 ease-fluid hover:bg-muted/60 hover:text-foreground"
