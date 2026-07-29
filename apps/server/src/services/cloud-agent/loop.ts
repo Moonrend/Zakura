@@ -8,6 +8,8 @@
  */
 import type {
   CloudAgentConfig,
+  CloudAgentEventType,
+  CloudAgentRunOptions,
   ModelChatMessage,
   ModelToolCall,
   ModelToolDefinition,
@@ -56,6 +58,8 @@ export type AgentLoopInput = {
   /** 工具执行身份（委派场景 = 目标 Agent） */
   agent: Agent;
   cloud: CloudAgentConfig;
+  /** 本次用户触发 Run 的模型调用选项；不影响后台摘要/标题/记忆调用。 */
+  options?: CloudAgentRunOptions;
   sessionId: string;
   runId: string;
   /** system + 上下文 + 本回合用户消息；引擎就地追加 assistant/tool 轮次 */
@@ -89,6 +93,10 @@ export class DeltaPublisher {
     private readonly sessionId: string,
     private readonly runId: string,
     readonly messageId: string,
+    private readonly eventType: Extract<
+      CloudAgentEventType,
+      "assistant_delta" | "reasoning_delta"
+    > = "assistant_delta",
   ) {}
 
   get emitted(): boolean {
@@ -118,7 +126,7 @@ export class DeltaPublisher {
       .then(() =>
         this.store.appendEvent({
           sessionId: this.sessionId,
-          type: "assistant_delta",
+          type: this.eventType,
           runId: this.runId,
           payload: { messageId: this.messageId, delta: chunk },
         }),
@@ -210,6 +218,7 @@ async function streamModelRound(
     sessionId: string;
     runId: string;
     cloud: CloudAgentConfig;
+    options?: CloudAgentRunOptions;
     messages: ModelChatMessage[];
     definitions: ModelToolDefinition[];
     /** 取消检查（本 Run 标记 + 祖先链）；轮询命中即掐断上游流 */
@@ -217,12 +226,21 @@ async function streamModelRound(
   },
 ): Promise<{
   publisher: DeltaPublisher;
+  reasoningPublisher: DeltaPublisher;
   result: Awaited<ReturnType<ModelRouterService["chatStream"]>>;
 }> {
   const { tenantId, sessionId, runId, cloud, messages, definitions } = input;
   const maxAttempts = 3;
   for (let attempt = 1; ; attempt += 1) {
-    const publisher = new DeltaPublisher(deps.store, sessionId, runId, newId());
+    const messageId = newId();
+    const publisher = new DeltaPublisher(deps.store, sessionId, runId, messageId);
+    const reasoningPublisher = new DeltaPublisher(
+      deps.store,
+      sessionId,
+      runId,
+      messageId,
+      "reasoning_delta",
+    );
     // 流式期间轮询取消标记：命中则 abort，fetch 立即断开，不再等模型把话说完
     const ctrl = new AbortController();
     const poll = setInterval(() => {
@@ -242,21 +260,35 @@ async function streamModelRound(
           ...(cloud.model ? { alias: cloud.model } : {}),
         },
         definitions.length
-          ? { tools: definitions, toolChoice: "auto" }
-          : undefined,
-        { onDelta: (text) => publisher.push(text), signal: ctrl.signal },
+          ? {
+              tools: definitions,
+              toolChoice: "auto",
+              ...(input.options?.reasoning
+                ? { routeOptions: { reasoning: input.options.reasoning } }
+                : {}),
+            }
+          : input.options?.reasoning
+            ? { routeOptions: { reasoning: input.options.reasoning } }
+            : undefined,
+        {
+          onDelta: (text) => publisher.push(text),
+          onReasoningDelta: (text) => reasoningPublisher.push(text),
+          signal: ctrl.signal,
+        },
       );
       await publisher.drain();
-      return { publisher, result };
+      await reasoningPublisher.drain();
+      return { publisher, reasoningPublisher, result };
     } catch (err) {
       await publisher.drain();
+      await reasoningPublisher.drain();
       // 取消引发的中断：直接抛出，由 runAgentLoop 走取消收尾（不重试）
       if (isAbortError(err) || ctrl.signal.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const retryable = (err as { retryable?: boolean }).retryable === true;
       if (!retryable || attempt >= maxAttempts) throw err;
       if (await input.isCancelled()) throw err;
-      if (publisher.emitted) {
+      if (publisher.emitted || reasoningPublisher.emitted) {
         await deps.store.appendEvent({
           sessionId,
           type: "assistant_rollback",
@@ -284,7 +316,7 @@ export async function runAgentLoop(
   input: AgentLoopInput,
 ): Promise<AgentLoopResult> {
   const { store } = deps;
-  const { tenantId, agent, cloud, sessionId, runId, messages, definitions, nameMap } = input;
+  const { tenantId, agent, cloud, options, sessionId, runId, messages, definitions, nameMap } = input;
 
   const cancelled = async (): Promise<boolean> =>
     (await store.isCancelRequested(runId)) ||
@@ -317,6 +349,7 @@ export async function runAgentLoop(
         messages,
         definitions,
         isCancelled: cancelled,
+        ...(options ? { options } : {}),
       }));
     } catch (err) {
       // 取消掐断的流：收尾为 cancelled 而非 failed（错误不是故障）

@@ -1,5 +1,6 @@
 import type {
   ModelCapability,
+  ModelCatalogEntry,
   ModelRouteOptions,
   ModelUpstreamConfig,
   ModelUpstreamProtocol,
@@ -15,6 +16,7 @@ export type ResolvedRoute = {
   model: string;
   weight: number;
   options: ModelRouteOptions;
+  meta?: ModelCatalogEntry;
   upstream: {
     id: string;
     protocol: ModelUpstreamProtocol;
@@ -56,6 +58,27 @@ export function parseRouteOptions(raw: Record<string, unknown>): ModelRouteOptio
   if (raw.responseFormat === "url" || raw.responseFormat === "b64_json") {
     opts.responseFormat = raw.responseFormat;
   }
+  if (raw.reasoning && typeof raw.reasoning === "object") {
+    const r = raw.reasoning as Record<string, unknown>;
+    const reasoning: NonNullable<ModelRouteOptions["reasoning"]> = {};
+    if (typeof r.enabled === "boolean") reasoning.enabled = r.enabled;
+    if (typeof r.effort === "string" && r.effort.trim()) {
+      reasoning.effort = r.effort.trim();
+    }
+    if (r.summary === "auto" || r.summary === "concise" || r.summary === "detailed") {
+      reasoning.summary = r.summary;
+    }
+    if (typeof r.budgetTokens === "number" && r.budgetTokens > 0) {
+      reasoning.budgetTokens = Math.floor(r.budgetTokens);
+    }
+    if (typeof r.includeThoughts === "boolean") {
+      reasoning.includeThoughts = r.includeThoughts;
+    }
+    if (Object.keys(reasoning).length > 0) opts.reasoning = reasoning;
+  }
+  if (raw.extensions && typeof raw.extensions === "object") {
+    opts.extensions = raw.extensions as Record<string, unknown>;
+  }
   return opts;
 }
 
@@ -67,6 +90,7 @@ export function rowToResolvedRoute(input: {
   model: string;
   weight?: string | number | null;
   optionsJson: string;
+  metaJson?: string;
   upstreamId: string;
   protocol: string;
   configJson: string;
@@ -76,6 +100,10 @@ export function rowToResolvedRoute(input: {
       ? input.weight
       : Number(input.weight ?? 100);
   const protocol = input.protocol as ModelUpstreamProtocol;
+  const meta = input.metaJson
+    ? (parseJsonRecord(input.metaJson) as unknown as ModelCatalogEntry)
+    : undefined;
+
   return {
     routeId: input.routeId,
     routeSlug: input.routeSlug,
@@ -84,6 +112,7 @@ export function rowToResolvedRoute(input: {
     model: input.model,
     weight: Number.isFinite(weightNum) && weightNum > 0 ? weightNum : 100,
     options: parseRouteOptions(parseJsonRecord(input.optionsJson)),
+    meta,
     upstream: {
       id: input.upstreamId,
       protocol,

@@ -1112,6 +1112,71 @@ export const cloudAgentRuns = pgTable(
   (t) => [index("cloud_agent_runs_session").on(t.sessionId, t.createdAt)],
 );
 
+/**
+ * 租户级技能注册表。技能内容（SKILL.md + 捆绑资源）以 JSON 存在 filesJson，
+ * 安装到 Agent 时再写入各自工作区，避免重复下载与外网依赖。
+ */
+export const skills = pgTable(
+  "skills",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** 目录名，租户内唯一 */
+    name: text("name").notNull(),
+    title: text("title").notNull().default(""),
+    description: text("description").notNull().default(""),
+    /** commit sha / "builtin" / 抓取时间戳 */
+    version: text("version"),
+    builtin: boolean("builtin").notNull().default(false),
+    /** SkillSource JSON */
+    sourceJson: text("source_json").notNull().default("{}"),
+    homepage: text("homepage"),
+    license: text("license"),
+    /** SkillFile[] JSON */
+    filesJson: text("files_json").notNull().default("[]"),
+    fileCount: integer("file_count").notNull().default(0),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("skills_tenant_name").on(t.tenantId, t.name),
+    index("skills_tenant").on(t.tenantId),
+  ],
+);
+
+/** 技能在单个 Agent 上的安装记录（文件已写入该 Agent 工作区） */
+export const agentSkills = pgTable(
+  "agent_skills",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    skillId: text("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** 工作区内路径，如 /skills/find-skills */
+    path: text("path").notNull(),
+    version: text("version"),
+    /** installed | error */
+    status: text("status").notNull().default("installed"),
+    error: text("error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agent_skills_agent_name").on(t.agentId, t.name),
+    index("agent_skills_tenant").on(t.tenantId),
+    index("agent_skills_skill").on(t.skillId),
+  ],
+);
+
 export const schema = {
   platformMeta,
   tenants,
@@ -1153,6 +1218,8 @@ export const schema = {
   cloudAgentSessions,
   cloudAgentEvents,
   cloudAgentRuns,
+  skills,
+  agentSkills,
 };
 
 export type PlatformMeta = typeof platformMeta.$inferSelect;
@@ -1195,3 +1262,5 @@ export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
 export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;
 export type CloudAgentEventRow = typeof cloudAgentEvents.$inferSelect;
 export type CloudAgentRun = typeof cloudAgentRuns.$inferSelect;
+export type SkillRow = typeof skills.$inferSelect;
+export type AgentSkillRow = typeof agentSkills.$inferSelect;

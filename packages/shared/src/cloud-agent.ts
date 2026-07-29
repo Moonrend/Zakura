@@ -8,6 +8,7 @@
 export const CLOUD_AGENT_EVENT_TYPES = [
   "user_message",
   "run_start",
+  "reasoning_delta",
   "assistant_delta",
   "assistant_message",
   "assistant_rollback",
@@ -138,11 +139,19 @@ export type CloudAgentRunStartPayload = {
    * 缺省（旧事件）= 按 seq 推断为最近一条用户消息。
    */
   replyToMessageId?: string;
+  /** 本次 Run 的调用时模型选项（如思考强度覆盖）。 */
+  options?: CloudAgentRunOptions;
 };
 
 export type CloudAgentAssistantDeltaPayload = {
   messageId: string;
   /** 增量文本（append） */
+  delta: string;
+};
+
+export type CloudAgentReasoningDeltaPayload = {
+  messageId: string;
+  /** 思考过程增量文本（append） */
   delta: string;
 };
 
@@ -254,6 +263,7 @@ export type CloudAgentSessionUpdatePayload = {
 export type CloudAgentEventPayload =
   | CloudAgentUserMessagePayload
   | CloudAgentRunStartPayload
+  | CloudAgentReasoningDeltaPayload
   | CloudAgentAssistantDeltaPayload
   | CloudAgentAssistantMessagePayload
   | CloudAgentAssistantRollbackPayload
@@ -301,6 +311,10 @@ export type CloudAgentConfig = {
   autoMemory?: boolean;
   /** 首轮结束后由模型自动生成会话标题（默认 true） */
   autoTitle?: boolean;
+};
+
+export type CloudAgentRunOptions = {
+  reasoning?: import("./model-router.js").ModelReasoningOptions;
 };
 
 export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {

@@ -4,21 +4,23 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
+import { ChevronDown, Loader2, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   Select,
   SelectContent,
@@ -34,7 +36,6 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-
 type CapabilityMeta = { capability: string; name: string; description: string };
 
 type Upstream = {
@@ -56,6 +57,16 @@ type Deployment = {
   enabled: boolean;
   isDefault: boolean;
   status: string;
+  options?: {
+    reasoning?: {
+      enabled?: boolean;
+      effort?: string;
+      budgetTokens?: number;
+      summary?: string;
+      includeThoughts?: boolean;
+    };
+  };
+  meta?: Record<string, unknown>;
   upstream?: Upstream;
 };
 
@@ -65,6 +76,12 @@ type LogicalModel = {
   capability: string;
   isDefault: boolean;
   deployments: Deployment[];
+};
+
+type ModelMatchFailure = {
+  nativeModel: string;
+  displayName?: string;
+  canonicalModel: string;
 };
 
 const CAPABILITY_LABEL: Record<string, string> = {
@@ -77,6 +94,78 @@ const CAPABILITY_LABEL: Record<string, string> = {
 type FlatRow = Deployment & {
   groupDisplayName: string;
 };
+
+type ReasoningPreset = "default" | "off" | (string & {});
+
+const REASONING_LABELS: Record<string, string> = {
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "X-High",
+  max: "Max",
+};
+
+function reasoningLabel(value: string): string {
+  const normalized = value.toLowerCase();
+  return (
+    REASONING_LABELS[normalized] ??
+    value
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
+}
+
+function reasoningPresetsFromLevels(
+  levels?: readonly string[],
+): Array<{ value: ReasoningPreset; label: string }> {
+  if (!levels) return [{ value: "default", label: "默认" }];
+  const items: Array<{ value: ReasoningPreset; label: string }> = [
+    { value: "default", label: "默认" },
+  ];
+  const seen = new Set<string>(["default"]);
+  for (const raw of levels) {
+    const value = String(raw).trim();
+    if (!value) continue;
+    const normalized = value.toLowerCase();
+    if (normalized === "none") {
+      if (!seen.has("off")) {
+        items.push({ value: "off", label: "关闭" });
+        seen.add("off");
+      }
+      continue;
+    }
+    if (seen.has(normalized)) continue;
+    items.push({ value: value as ReasoningPreset, label: reasoningLabel(value) });
+    seen.add(normalized);
+  }
+  return items;
+}
+
+function readReasoningLevelsFromMetaJson(raw: string): string[] | undefined {
+  try {
+    const meta = JSON.parse(raw) as { reasoningLevels?: unknown };
+    return Array.isArray(meta.reasoningLevels)
+      ? meta.reasoningLevels.map(String).filter(Boolean)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeReasoningPreset(value?: string): ReasoningPreset {
+  if (value?.trim() && value !== "none") return value.trim() as ReasoningPreset;
+  return "default";
+}
+
+function formatUnmatchedModels(models?: ModelMatchFailure[]): string | null {
+  if (!models?.length) return null;
+  return `以下模型仍匹配失败，需要手动选数据：${models
+    .map((model) => model.nativeModel)
+    .join("、")}`;
+}
 
 export default function ModelRoutesPage() {
   return (
@@ -96,6 +185,7 @@ function ModelRoutesPageInner() {
   );
   const [refreshingMeta, setRefreshingMeta] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
   const [editDep, setEditDep] = useState<Deployment | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -103,9 +193,13 @@ function ModelRoutesPageInner() {
   const [upstreamId, setUpstreamId] = useState("");
   const [nativeModel, setNativeModel] = useState("");
   const [canonicalModel, setCanonicalModel] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [capability, setCapability] = useState("chat");
   const [weight, setWeight] = useState("100");
   const [isDefault, setIsDefault] = useState(false);
+  const [reasoningPreset, setReasoningPreset] = useState<ReasoningPreset>("default");
+  const [reasoningBudget, setReasoningBudget] = useState("");
+  const [metaJson, setMetaJson] = useState("{}");
 
   const capabilityItems = useMemo(
     () =>
@@ -138,6 +232,17 @@ function ModelRoutesPageInner() {
 
   const allSelected =
     rows.length > 0 && rows.every((r) => selected.has(r.id));
+  const formReasoningPresets = useMemo(
+    () => reasoningPresetsFromLevels(readReasoningLevelsFromMetaJson(metaJson)),
+    [metaJson],
+  );
+
+  useEffect(() => {
+    if (!formReasoningPresets.some((item) => item.value === reasoningPreset)) {
+      setReasoningPreset("default");
+      setReasoningBudget("");
+    }
+  }, [formReasoningPresets, reasoningPreset]);
 
   const load = useCallback(async () => {
     try {
@@ -169,12 +274,16 @@ function ModelRoutesPageInner() {
         imported: number;
         renamed?: number;
         rematched?: number;
+        unmatchedModels?: ModelMatchFailure[];
+        message?: string;
       }>("/api/model-catalog/refresh", { method: "POST", json: {} });
       toast.success(
         `元数据已刷新（导入 ${res.imported} 条${
           res.renamed != null ? `，重命名 ${res.renamed}` : ""
         }）`,
       );
+      const unmatchedText = formatUnmatchedModels(res.unmatchedModels);
+      if (unmatchedText) toast.message(unmatchedText);
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -188,9 +297,14 @@ function ModelRoutesPageInner() {
     setUpstreamId(upstreams[0]?.id ?? "");
     setNativeModel("");
     setCanonicalModel("");
+    setDisplayName("");
     setCapability(capFilter !== "all" ? capFilter : "chat");
     setWeight("100");
     setIsDefault(false);
+    setReasoningPreset("default");
+    setReasoningBudget("");
+    setMetaJson("{}");
+    setMetaOpen(false);
     setAddOpen(true);
   }
 
@@ -199,9 +313,24 @@ function ModelRoutesPageInner() {
     setUpstreamId(d.upstreamId);
     setNativeModel(d.nativeModel);
     setCanonicalModel(d.canonicalModel);
+    setDisplayName(d.displayName ?? "");
     setCapability(d.capability);
     setWeight(String(d.weight));
     setIsDefault(d.isDefault);
+    setReasoningPreset(
+      d.options?.reasoning
+        ? d.options.reasoning.enabled === false
+          ? "off"
+          : normalizeReasoningPreset(d.options.reasoning.effort)
+        : "default",
+    );
+    setReasoningBudget(
+      d.options?.reasoning?.budgetTokens != null
+        ? String(d.options.reasoning.budgetTokens)
+        : "",
+    );
+    setMetaJson(JSON.stringify(d.meta ?? {}, null, 2));
+    setMetaOpen(false);
     setAddOpen(true);
   }
 
@@ -212,14 +341,41 @@ function ModelRoutesPageInner() {
     }
     setBusy(true);
     try {
+      let parsedMeta: Record<string, unknown> | undefined;
+      try {
+        parsedMeta = metaJson.trim() ? JSON.parse(metaJson) : {};
+      } catch {
+        toast.error("元数据 JSON 格式不正确");
+        setBusy(false);
+        return;
+      }
+      const options = {
+        ...(reasoningPreset === "default"
+          ? {}
+          : reasoningPreset === "off"
+            ? { reasoning: { enabled: false } }
+            : {
+                reasoning: {
+                  enabled: true,
+                  effort: reasoningPreset,
+                  ...(reasoningBudget.trim()
+                    ? { budgetTokens: Number(reasoningBudget) || undefined }
+                    : {}),
+                },
+              }),
+      };
       if (editDep) {
         await api(`/api/upstream-models/${editDep.id}`, {
           method: "PATCH",
           json: {
             nativeModel: nativeModel.trim(),
             canonicalModel: canonicalModel.trim() || undefined,
+            displayName: displayName.trim() || null,
+            capability,
             weight: Number(weight) || 100,
             isDefault,
+            options,
+            meta: parsedMeta,
           },
         });
         toast.success("已更新");
@@ -230,9 +386,12 @@ function ModelRoutesPageInner() {
             upstreamId,
             nativeModel: nativeModel.trim(),
             canonicalModel: canonicalModel.trim() || undefined,
+            displayName: displayName.trim() || undefined,
             capability,
             weight: Number(weight) || 100,
             isDefault,
+            options,
+            meta: parsedMeta,
           },
         });
         toast.success("已添加");
@@ -484,14 +643,21 @@ function ModelRoutesPageInner() {
         </Table>
       )}
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{editDep ? "编辑部署" : "手填模型"}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            {!editDep ? (
-              <>
+      <Sheet open={addOpen} onOpenChange={setAddOpen}>
+        <SheetContent
+          side="right"
+          className="w-full gap-0 overflow-hidden p-0 sm:max-w-xl"
+        >
+          <SheetHeader className="border-b border-border pr-12">
+            <SheetTitle>{editDep ? "编辑部署" : "手填模型"}</SheetTitle>
+            <SheetDescription>
+              {editDep ? "修改模型部署参数与默认调用选项。" : "选择上游并添加一个模型部署。"}
+            </SheetDescription>
+          </SheetHeader>
+
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4">
+            <div className="space-y-4">
+              {!editDep ? (
                 <div>
                   <Label>上游</Label>
                   <Select
@@ -501,7 +667,7 @@ function ModelRoutesPageInner() {
                     }}
                     items={upstreamItems}
                   >
-                    <SelectTrigger className="mt-1">
+                    <SelectTrigger className="mt-1 w-full">
                       <SelectValue placeholder="选择上游" />
                     </SelectTrigger>
                     <SelectContent>
@@ -513,66 +679,138 @@ function ModelRoutesPageInner() {
                     </SelectContent>
                   </Select>
                 </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  上游：{editDep.upstream?.name ?? editDep.upstreamId}
+                </p>
+              )}
+              <div>
+                <Label>上游原始名（调用时使用）</Label>
+                <Input
+                  className="mt-1"
+                  value={nativeModel}
+                  onChange={(e) => setNativeModel(e.target.value)}
+                  placeholder="DeepSeek-V4-Flash"
+                />
+              </div>
+              <div>
+                <Label>规范名（可选，留空则自动匹配/归一化）</Label>
+                <Input
+                  className="mt-1"
+                  value={canonicalModel}
+                  onChange={(e) => setCanonicalModel(e.target.value)}
+                  placeholder="deepseek-v4-flash"
+                />
+              </div>
+              <div>
+                <Label>显示名</Label>
+                <Input
+                  className="mt-1"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="自动使用目录名称"
+                />
+              </div>
+              <div>
+                <Label>能力</Label>
+                <Select
+                  value={capability}
+                  onValueChange={(v) => {
+                    if (v != null) setCapability(v);
+                  }}
+                  items={capabilityItems}
+                >
+                  <SelectTrigger className="mt-1 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {capabilityItems.map((c) => (
+                      <SelectItem key={c.value} value={c.value}>
+                        {c.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>权重</Label>
+                <Input
+                  className="mt-1"
+                  type="number"
+                  min={1}
+                  value={weight}
+                  onChange={(e) => setWeight(e.target.value)}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch checked={isDefault} onCheckedChange={setIsDefault} />
+                <Label>设为该能力默认模型</Label>
+              </div>
+              <div className="space-y-2 rounded-md border border-border p-3">
                 <div>
-                  <Label>能力</Label>
+                  <Label>默认思考强度</Label>
                   <Select
-                    value={capability}
+                    value={reasoningPreset}
                     onValueChange={(v) => {
-                      if (v != null) setCapability(v);
+                      if (!v) return;
+                      setReasoningPreset(v as ReasoningPreset);
+                      if (v === "default" || v === "off") setReasoningBudget("");
                     }}
-                    items={capabilityItems}
+                    items={formReasoningPresets}
                   >
-                    <SelectTrigger className="mt-1">
+                    <SelectTrigger className="mt-1 w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {capabilityItems.map((c) => (
-                        <SelectItem key={c.value} value={c.value}>
-                          {c.label}
+                      {formReasoningPresets.map((preset) => (
+                        <SelectItem key={preset.value} value={preset.value}>
+                          {preset.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
-              </>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                上游：{editDep.upstream?.name ?? editDep.upstreamId}
-              </p>
-            )}
-            <div>
-              <Label>上游原始名（调用时使用）</Label>
-              <Input
-                className="mt-1"
-                value={nativeModel}
-                onChange={(e) => setNativeModel(e.target.value)}
-                placeholder="DeepSeek-V4-Flash"
-              />
+                {reasoningPreset !== "default" && reasoningPreset !== "off" ? (
+                  <div>
+                    <Label>Token 预算</Label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={1}
+                      value={reasoningBudget}
+                      onChange={(e) => setReasoningBudget(e.target.value)}
+                      placeholder="自动"
+                    />
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="rounded-md border border-border">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm font-medium transition-colors hover:bg-muted/50"
+                  onClick={() => setMetaOpen((v) => !v)}
+                >
+                  <span>模型元数据 JSON</span>
+                  <ChevronDown
+                    className={`size-4 shrink-0 text-muted-foreground transition-transform ${metaOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+                {metaOpen ? (
+                  <div className="border-t border-border p-3">
+                    <Textarea
+                      className="min-h-56 max-h-[45vh] font-mono text-xs"
+                      value={metaJson}
+                      onChange={(e) => setMetaJson(e.target.value)}
+                    />
+                  </div>
+                ) : null}
+              </div>
             </div>
-            <div>
-              <Label>规范名（可选，留空则自动匹配/归一化）</Label>
-              <Input
-                className="mt-1"
-                value={canonicalModel}
-                onChange={(e) => setCanonicalModel(e.target.value)}
-                placeholder="deepseek-v4-flash"
-              />
-            </div>
-            <div>
-              <Label>权重</Label>
-              <Input
-                className="mt-1"
-                type="number"
-                min={1}
-                value={weight}
-                onChange={(e) => setWeight(e.target.value)}
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <Switch checked={isDefault} onCheckedChange={setIsDefault} />
-              <Label>设为该能力默认模型</Label>
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
+          </div>
+
+          <div className="shrink-0 border-t border-border bg-popover p-4">
+            <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setAddOpen(false)}>
                 取消
               </Button>
@@ -581,8 +819,8 @@ function ModelRoutesPageInner() {
               </Button>
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

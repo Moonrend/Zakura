@@ -22,6 +22,7 @@
     "@zakura/shared": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "fuse.js": "^7.5.0",
     "lucide-react": "^1.24.0",
     "markstream-react": "^0.0.55",
     "next": "^15.3.3",

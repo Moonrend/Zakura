@@ -16,6 +16,8 @@ export function buildSystemPrompt(
     historySummary?: string;
     peerAgents?: string;
     subagents?: boolean;
+    /** 已启用技能的「名称 + 路径 + 描述」清单 */
+    skills?: string;
   },
 ): string {
   const providers = getAgentProviders(agent);
@@ -59,6 +61,17 @@ export function buildSystemPrompt(
       "- 子代理在嵌套深度限制内也能继续派生自己的子代理，复杂任务可分层拆解。",
     );
   }
+  if (extra?.skills) {
+    lines.push(
+      "",
+      "# 技能",
+      "已安装以下技能（Skill）——它们是针对特定任务写好的操作手册，只有名称与简介在此，正文需要时再读：",
+      extra.skills,
+      "",
+      "- 当前任务命中某个技能的适用场景时，先用 re_read_skill 读取其 SKILL.md，再按它说的做；不要凭印象猜内容。",
+      "- 用户需要某项能力而现有技能都不覆盖时，可用 re_search_skills 搜索、re_install_skill 安装（安装会写入用户工作区，事先说明你要装什么）。",
+    );
+  }
   lines.push(
     "",
     "# 回复风格",
@@ -96,6 +109,8 @@ export function buildSubagentPrompt(
     expectedOutput?: string;
     /** 是否允许本子代理继续派生下一级子代理（未达嵌套深度上限） */
     subagents?: boolean;
+    /** 已启用技能清单（与主代理共享工作区，因此同样可用） */
+    skills?: string;
   },
 ): string {
   const lines = [
@@ -124,6 +139,14 @@ export function buildSubagentPrompt(
       ? `- 按主代理要求的格式输出：${extra.expectedOutput}`
       : "- 汇总结论与关键数据；有文件产出时给出工作区路径。",
   ];
+  if (extra?.skills) {
+    lines.push(
+      "",
+      "# 可用技能",
+      "工作区已安装以下技能（任务相关时先用 re_read_skill 读取全文再执行）：",
+      extra.skills,
+    );
+  }
   if (cloud.systemPrompt?.trim()) {
     lines.push("", "# Agent 自定义指令（对你同样生效）", cloud.systemPrompt.trim());
   }

@@ -6,21 +6,17 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   Archive,
-  ArrowUp,
+  ArrowDown,
   Bot,
   Check,
   ChevronsUpDown,
   ExternalLink,
   FileClock,
-  File as FileIcon,
   FolderOpen,
-  Image as ImageIcon,
   LayoutDashboard,
   ListFilter,
-  Loader2,
   MoreHorizontal,
   PanelLeft,
-  Paperclip,
   Pencil,
   Search,
   Settings2,
@@ -29,7 +25,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { CloudAgentEvent } from "@zakura/shared";
+import type { CloudAgentEvent, CloudAgentRunOptions } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -41,7 +37,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Sheet,
   SheetContent,
@@ -86,13 +81,23 @@ import {
   type CloudSearchHit,
   type CloudSession,
 } from "@/lib/cloud-agent";
-import { fsUpload } from "@/lib/agent-fs";
+import { formatSize, fsUploadWithProgress } from "@/lib/agent-fs";
+import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { ChatMessages } from "./chat-messages";
+import {
+  Composer,
+  type ComposerModelItem,
+  type ComposerReasoningValue,
+  type PendingUpload,
+  reasoningItemsFromLevels,
+} from "./composer";
 import { FilePanel } from "./file-panel";
 import { RunLogDrawer } from "./run-log-drawer";
 
 const AGENT_KEY = "zakura_chat_agent";
 const DEFAULT_MODEL = "__default__";
+const REASONING_KEY = "zakura_chat_reasoning";
 
 /** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
 const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: string }> = [
@@ -143,6 +148,14 @@ export function ChatApp() {
   const [logOpen, setLogOpen] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [model, setModel] = useState("");
+  const [reasoning, setReasoning] = useState<ComposerReasoningValue>(() => {
+    if (typeof window === "undefined") return "default";
+    const saved = localStorage.getItem(REASONING_KEY);
+    if (saved === "none") return "off";
+    if (saved === "default" || saved === "off") return saved;
+    if (saved?.trim() && saved.length <= 64) return saved as ComposerReasoningValue;
+    return "default";
+  });
   const [enableTools, setEnableTools] = useState(true);
   const [autoMemory, setAutoMemory] = useState(true);
   const [autoTitle, setAutoTitle] = useState(true);
@@ -160,12 +173,21 @@ export function ChatApp() {
     null,
   );
   const [attachments, setAttachments] = useState<CloudAgentAttachment[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  /** 待发送图片的本地预览地址（object URL），key 为工作区路径 */
+  const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
+  /** 正在上传的文件（含进度），用于在输入框里显示占位片 */
+  const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  /** 上传中的请求，用于取消 */
+  const uploadAbortsRef = useRef<Map<string, AbortController>>(new Map());
   const seqRef = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const attachInputRef = useRef<HTMLInputElement>(null);
   const fileNonceRef = useRef(1);
+  /** 每个会话各自的输入草稿；切换会话不丢已敲的字 */
+  const draftsRef = useRef<Map<string, string>>(new Map());
+  const draftKeyRef = useRef<string>("__new__");
+  const latestInputRef = useRef("");
+  /** 预览 object URL 的真实来源，便于在状态更新之外安全释放 */
+  const previewsRef = useRef<Record<string, string>>({});
   /** 跨 Agent 打开搜索结果：切换后应加载的目标会话 */
   const pendingSessionRef = useRef<{ agentId: string; sessionId: string } | null>(null);
   /** 引导页等深链：自动发送的首条消息（只消费一次） */
@@ -186,6 +208,38 @@ export function ChatApp() {
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
   const grouped = useMemo(() => groupSessions(sessions), [sessions]);
   const searching = searchQ.trim().length > 0;
+  /**
+   * 本地模糊命中：已经拉到的会话直接在前端 Fuse 一遍。
+   * 服务端搜索有 250ms 防抖 + 往返，本地这层让「刚敲完就有结果」，
+   * 也能容忍标题里的错字（服务端的 ILIKE 做不到）。
+   */
+  const localSessionHits = useFuzzySearch(sessions, searchQ, {
+    keys: ["title"],
+    emptyReturnsAll: false,
+    limit: 8,
+  });
+  /** 服务端结果为准，本地独有的标题命中补在后面 */
+  const mergedHits = useMemo<CloudSearchHit[] | null>(() => {
+    if (!searching) return null;
+    const local: CloudSearchHit[] = localSessionHits.map((s) => ({
+      ...s,
+      snippet: null,
+      agentName: agent?.name ?? null,
+      agentSlug: agent?.slug ?? null,
+    }));
+    if (searchHits === null) return local;
+    const seen = new Set(searchHits.map((h) => h.id));
+    return [...searchHits, ...local.filter((h) => !seen.has(h.id))];
+  }, [searching, localSessionHits, searchHits, agent?.name, agent?.slug]);
+  /** 尚未开始的对话：输入框上浮到视觉中线，首条消息发出后再流动回底部 */
+  const emptyConversation = turns.length === 0;
+  const {
+    scrollRef,
+    contentRef,
+    atBottom,
+    scrollToBottom,
+    sync: syncScroll,
+  } = useStickToBottom<HTMLDivElement, HTMLDivElement>();
 
   // 初始按视口决定：桌面展开，移动端收起（覆盖式抽屉，避免首帧闪现）
   useEffect(() => {
@@ -199,6 +253,12 @@ export function ChatApp() {
   const closeNavOnMobile = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
+
+  const runOptions = useMemo<CloudAgentRunOptions | undefined>(() => {
+    if (reasoning === "default") return undefined;
+    if (reasoning === "off") return { reasoning: { enabled: false } };
+    return { reasoning: { enabled: true, effort: reasoning } };
+  }, [reasoning]);
 
   // —— 鉴权 + Agent 列表 ——
   useEffect(() => {
@@ -296,6 +356,9 @@ export function ChatApp() {
     if (!agentId || !authed) return;
     setAgentReady(false);
     localStorage.setItem(AGENT_KEY, agentId);
+    for (const url of Object.values(previewsRef.current)) URL.revokeObjectURL(url);
+    previewsRef.current = {};
+    setAttachmentPreviews({});
     setAttachments([]);
     setFileRequest(null);
     let cancelled = false;
@@ -389,10 +452,10 @@ export function ChatApp() {
     if (sending || !focusComposerAfterPromptRef.current) return;
     focusComposerAfterPromptRef.current = false;
     requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      scrollToBottom("smooth");
       composerRef.current?.focus({ preventScroll: true });
     });
-  }, [sending, sessionId]);
+  }, [sending, sessionId, scrollToBottom]);
 
   // —— 类型过滤变化：重载列表并校正选中会话 ——
   useEffect(() => {
@@ -443,9 +506,42 @@ export function ChatApp() {
     };
   }, [agentId, sessionId, mergeEvent]);
 
+  // 新内容到达时跟随到底部（用户已向上翻阅时不打扰）
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [itemCount, runActive]);
+    syncScroll("smooth");
+  }, [itemCount, runActive, syncScroll]);
+
+  // 切换会话：直接落到底部，不做动画
+  useEffect(() => {
+    if (!sessionId) return;
+    requestAnimationFrame(() => scrollToBottom("auto"));
+  }, [sessionId, scrollToBottom]);
+
+  useEffect(() => {
+    latestInputRef.current = input;
+  }, [input]);
+
+  // 切换会话时把当前草稿存起来，并恢复目标会话的草稿
+  useEffect(() => {
+    const nextKey = sessionId ?? "__new__";
+    if (draftKeyRef.current === nextKey) return;
+    const pending = latestInputRef.current;
+    if (pending.trim()) draftsRef.current.set(draftKeyRef.current, pending);
+    else draftsRef.current.delete(draftKeyRef.current);
+    draftKeyRef.current = nextKey;
+    const restored = draftsRef.current.get(nextKey) ?? "";
+    latestInputRef.current = restored;
+    setInput(restored);
+  }, [sessionId]);
+
+  // 卸载时释放尚未发送的图片预览地址
+  useEffect(() => {
+    const previews = previewsRef;
+    return () => {
+      for (const url of Object.values(previews.current)) URL.revokeObjectURL(url);
+      previews.current = {};
+    };
+  }, []);
 
   // —— 搜索（防抖） ——
   useEffect(() => {
@@ -462,8 +558,7 @@ export function ChatApp() {
     return () => clearTimeout(timer);
   }, [searchQ]);
 
-  async function openSearchHit(hit: CloudSearchHit) {
-    setSearchQ("");
+  async function openSearchHit(hit: CloudSearchHit) {    setSearchQ("");
     setSearchHits(null);
     if (hit.agentId !== agentId) {
       pendingSessionRef.current = { agentId: hit.agentId, sessionId: hit.id };
@@ -481,7 +576,7 @@ export function ChatApp() {
     setVariantByMessage({});
     setBranchByParent({});
     seqRef.current = 0;
-    setAttachments([]);
+    clearAttachments();
     composerRef.current?.focus();
   }
 
@@ -543,52 +638,152 @@ export function ChatApp() {
     return last.activeRunId ?? undefined;
   }
 
-  function openFileInPanel(path: string) {
+  /** 稳定引用：工具行会以它作为 memo 依赖，重建会让缓存全部失效 */
+  const openFileInPanel = useCallback((path: string) => {
     setFilePanelOpen(true);
     fileNonceRef.current += 1;
     setFileRequest({ path, nonce: fileNonceRef.current });
+  }, []);
+
+  /** 图片附件的本地预览：object URL 由 previewsRef 统一持有并释放 */
+  function dropPreview(path: string) {
+    const url = previewsRef.current[path];
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    const next = { ...previewsRef.current };
+    delete next[path];
+    previewsRef.current = next;
+    setAttachmentPreviews(next);
   }
 
-  /** 附件先上传到工作区 /uploads，发送时把元数据挂在消息上 */
-  async function handleAttachFiles(files: FileList | null) {
-    if (!files?.length || !agentId) return;
+  function clearAttachments() {
+    for (const url of Object.values(previewsRef.current)) URL.revokeObjectURL(url);
+    previewsRef.current = {};
+    setAttachmentPreviews({});
+    setAttachments([]);
+  }
+
+  function removeAttachment(path: string) {
+    dropPreview(path);
+    setAttachments((prev) => prev.filter((a) => a.path !== path));
+  }
+
+  /** 单个附件上限；服务端 multipart 也按这个量级设限 */
+  const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
+  /** 一条消息最多挂多少个附件 */
+  const MAX_ATTACHMENTS = 10;
+
+  /**
+   * 附件先上传到工作区 /uploads，发送时把元数据挂在消息上。
+   * 每个文件独立并发上传：一个失败不影响其余文件，也不必排队等前一个传完。
+   */
+  async function handleAttachFiles(files: File[]) {
+    if (files.length === 0 || !agentId) return;
     if (!agent?.enableComputer) {
       toast.error("该 Agent 未开启电脑环境，无法上传文件");
       return;
     }
-    setUploading(true);
+
+    const accepted: File[] = [];
+    for (const f of files) {
+      if (f.size === 0) {
+        toast.error(`${f.name}：空文件，已跳过`);
+        continue;
+      }
+      if (f.size > MAX_UPLOAD_BYTES) {
+        toast.error(`${f.name}：超过 ${formatSize(MAX_UPLOAD_BYTES)} 上限`);
+        continue;
+      }
+      accepted.push(f);
+    }
+    if (accepted.length === 0) return;
+
+    const room = MAX_ATTACHMENTS - attachments.length - uploads.length;
+    if (room <= 0) {
+      toast.error(`一条消息最多 ${MAX_ATTACHMENTS} 个附件`);
+      return;
+    }
+    if (accepted.length > room) {
+      toast.error(`一条消息最多 ${MAX_ATTACHMENTS} 个附件，已保留前 ${room} 个`);
+      accepted.length = room;
+    }
+
+    await Promise.all(accepted.map((f) => uploadOne(agentId, f)));
+  }
+
+  async function uploadOne(targetAgentId: string, file: File) {
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const controller = new AbortController();
+    uploadAbortsRef.current.set(id, controller);
+    setUploads((prev) => [...prev, { id, name: file.name, size: file.size, progress: 0 }]);
+
     try {
-      for (const f of Array.from(files)) {
-        if (f.size > 32 * 1024 * 1024) {
-          toast.error(`${f.name}: 超过 32MB 上限`);
-          continue;
-        }
-        const safeName = f.name.replace(/[\\/:*?"<>|]+/g, "_");
-        const res = await fsUpload(agentId, `/uploads/${Date.now()}-${safeName}`, f);
-        setAttachments((prev) => [
-          ...prev,
-          {
-            name: f.name,
-            path: res.path,
-            mime: f.type || "application/octet-stream",
-            size: f.size,
-            kind: f.type.startsWith("image/") ? "image" : "file",
-          },
-        ]);
+      const safeName = file.name.replace(/[\\/:*?"<>|]+/g, "_");
+      const res = await fsUploadWithProgress(
+        targetAgentId,
+        `/uploads/${id}-${safeName}`,
+        file,
+        {
+          signal: controller.signal,
+          onProgress: (ratio) =>
+            setUploads((prev) =>
+              prev.map((u) => (u.id === id ? { ...u, progress: ratio } : u)),
+            ),
+        },
+      );
+      const isImage = file.type.startsWith("image/");
+      setAttachments((prev) => [
+        ...prev,
+        {
+          name: file.name,
+          path: res.path,
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+          kind: isImage ? "image" : "file",
+        },
+      ]);
+      if (isImage) {
+        const next = { ...previewsRef.current, [res.path]: URL.createObjectURL(file) };
+        previewsRef.current = next;
+        setAttachmentPreviews(next);
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      // 用户主动取消不是错误，不弹提示
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        toast.error(`${file.name}：${err instanceof Error ? err.message : String(err)}`);
+      }
     } finally {
-      setUploading(false);
+      uploadAbortsRef.current.delete(id);
+      setUploads((prev) => prev.filter((u) => u.id !== id));
     }
   }
+
+  const cancelUpload = useCallback((id: string) => {
+    uploadAbortsRef.current.get(id)?.abort();
+  }, []);
+
+  // 离开页面时中止在途上传，避免请求悬着
+  useEffect(() => {
+    const aborts = uploadAbortsRef.current;
+    return () => {
+      for (const controller of aborts.values()) controller.abort();
+      aborts.clear();
+    };
+  }, []);
 
   async function handleSend() {
     if (!agentId || sending || runActive) return;
     const content = input.trim();
     if (!content && attachments.length === 0) return;
     const sentAttachments = attachments;
+    const sentPreviews = previewsRef.current;
     setInput("");
+    latestInputRef.current = "";
+    draftsRef.current.delete(draftKeyRef.current);
+    // 预览地址随消息一起「离开」输入框，交给消息流的附件卡片自己渲染
+    for (const url of Object.values(sentPreviews)) URL.revokeObjectURL(url);
+    previewsRef.current = {};
+    setAttachmentPreviews({});
     setAttachments([]);
     setSending(true);
     try {
@@ -596,15 +791,26 @@ export function ChatApp() {
       if (!sid) {
         const created = await createCloudSession(agentId);
         setSessions((prev) => [created, ...prev]);
+        // 会话 key 提前对齐，避免草稿同步 effect 把已发送内容存回「新对话」
+        draftKeyRef.current = created.id;
         setSessionId(created.id);
         seqRef.current = 0;
         setEvents([]);
         sid = created.id;
       }
-      await sendCloudMessage(agentId, sid, content, parentForSend(), sentAttachments);
+      await sendCloudMessage(
+        agentId,
+        sid,
+        content,
+        parentForSend(),
+        sentAttachments,
+        runOptions,
+      );
       await refreshSessions();
+      scrollToBottom("smooth");
     } catch (err) {
       setInput(content);
+      latestInputRef.current = content;
       setAttachments(sentAttachments);
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -615,7 +821,7 @@ export function ChatApp() {
   async function handleRegenerate(messageId: string) {
     if (!agentId || !sessionId || runActive) return;
     try {
-      await regenerateCloudRun(agentId, sessionId, messageId);
+      await regenerateCloudRun(agentId, sessionId, messageId, runOptions);
       setVariantByMessage((prev) => {
         const next = { ...prev };
         delete next[messageId];
@@ -635,6 +841,8 @@ export function ChatApp() {
         sessionId,
         content.trim(),
         parentKey === "" ? null : parentKey,
+        undefined,
+        runOptions,
       );
       setBranchByParent((prev) => {
         const next = { ...prev };
@@ -665,6 +873,11 @@ export function ChatApp() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function handleReasoningChange(value: ComposerReasoningValue) {
+    setReasoning(value);
+    localStorage.setItem(REASONING_KEY, value);
   }
 
   type ChatSettingsPatch = {
@@ -700,20 +913,49 @@ export function ChatApp() {
     saveNow: saveSettingsNow,
   } = useAutoSave(persistChatSettings, { debounceMs: 550 });
 
-  const modelItems = useMemo(() => {
-    const items = [
-      { value: DEFAULT_MODEL, label: "默认模型", keywords: ["default"] },
+  const modelItems = useMemo<ComposerModelItem[]>(() => {
+    const defaultModel = models.find((m) => m.isDefault) ?? null;
+    const items: ComposerModelItem[] = [
+      {
+        value: DEFAULT_MODEL,
+        label: "默认模型",
+        keywords: ["default", "默认"],
+        reasoning: defaultModel?.reasoning,
+        reasoningLevels: defaultModel?.reasoningLevels,
+        defaultReasonLevel: defaultModel?.defaultReasonLevel,
+      },
       ...models.map((m) => ({
         value: m.alias,
         label: m.name,
+        hint: m.upstream,
         keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
+        reasoning: m.reasoning,
+        reasoningLevels: m.reasoningLevels,
+        defaultReasonLevel: m.defaultReasonLevel,
       })),
     ];
+    // 配置里存着的模型可能已从模型列表里下线，仍要能显示当前选中项
     if (model && !models.some((m) => m.alias === model)) {
-      items.push({ value: model, label: model, keywords: [] });
+      items.push({ value: model, label: model });
     }
     return items;
   }, [models, model]);
+
+  const selectedModelItem = useMemo(
+    () => modelItems.find((item) => item.value === (model || DEFAULT_MODEL)) ?? null,
+    [modelItems, model],
+  );
+  const reasoningItems = useMemo(
+    () => reasoningItemsFromLevels(selectedModelItem?.reasoningLevels),
+    [selectedModelItem?.reasoningLevels],
+  );
+
+  useEffect(() => {
+    if (!reasoningItems.some((item) => item.value === reasoning)) {
+      setReasoning("default");
+      localStorage.setItem(REASONING_KEY, "default");
+    }
+  }, [reasoning, reasoningItems]);
 
   if (!authed) {
     return (
@@ -791,13 +1033,13 @@ export function ChatApp() {
               closeNavOnMobile();
             }}
             className={cn(
-              "flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm",
+              "group/new flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 ease-fluid",
               sessionId === null
                 ? "bg-muted text-foreground"
                 : "text-foreground hover:bg-muted/60",
             )}
           >
-            <SquarePen className="h-4 w-4" />
+            <SquarePen className="h-4 w-4 transition-transform duration-300 ease-overshoot group-hover/new:-rotate-12" />
             新对话
           </button>
           <div className="flex items-center gap-1">
@@ -862,12 +1104,12 @@ export function ChatApp() {
         <ScrollArea className="min-h-0 flex-1">
           {searching ? (
             <div className="flex flex-col gap-0.5 p-2 pt-0">
-              {searchHits === null ? (
+              {mergedHits === null || (mergedHits.length === 0 && searchHits === null) ? (
                 <div className="px-2 py-3 text-xs text-muted-foreground">搜索中…</div>
-              ) : searchHits.length === 0 ? (
+              ) : mergedHits.length === 0 ? (
                 <div className="px-2 py-3 text-xs text-muted-foreground">无结果</div>
               ) : (
-                searchHits.map((hit) => (
+                mergedHits.map((hit) => (
                   <button
                     key={hit.id}
                     type="button"
@@ -875,7 +1117,7 @@ export function ChatApp() {
                       void openSearchHit(hit);
                       closeNavOnMobile();
                     }}
-                    className="flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left hover:bg-muted/60"
+                    className="animate-rise flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-150 ease-fluid hover:bg-muted/60"
                   >
                     <span className="flex items-center gap-1.5">
                       <span className="min-w-0 flex-1 truncate text-sm">{hit.title}</span>
@@ -906,12 +1148,19 @@ export function ChatApp() {
                       <div
                         key={s.id}
                         className={cn(
-                          "group flex items-center rounded-lg text-sm",
+                          "group animate-rise relative flex items-center rounded-lg text-sm",
+                          "transition-colors duration-150 ease-fluid",
                           s.id === sessionId
                             ? "bg-muted text-foreground"
                             : "text-foreground/80 hover:bg-muted/60",
                         )}
                       >
+                        {s.id === sessionId && (
+                          <span
+                            aria-hidden
+                            className="animate-pop absolute top-1/2 left-0 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-foreground/60"
+                          />
+                        )}
                         {renamingId === s.id ? (
                           <Input
                             autoFocus
@@ -941,7 +1190,10 @@ export function ChatApp() {
                                 </span>
                               ) : null}
                               {s.activeRunId ? (
-                                <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" />
+                                <span
+                                  aria-label="运行中"
+                                  className="running-halo relative h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70 text-foreground/70"
+                                />
                               ) : null}
                             </button>
                             <DropdownMenu>
@@ -1053,144 +1305,80 @@ export function ChatApp() {
           </Button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <ChatMessages
-            turns={turns}
-            runActive={runActive}
-            activeRunId={activeSession?.activeRunId}
-            agentName={agent?.name}
-            canAct={hasChatRoute && !runActive && !sending}
-            onRegenerate={(mid) => void handleRegenerate(mid)}
-            onEditSend={(parentKey, content) => void handleEditSend(parentKey, content)}
-            onSelectVariant={(mid, runId) =>
-              setVariantByMessage((prev) => ({ ...prev, [mid]: runId }))
-            }
-            onSelectBranch={(parentKey, mid) =>
-              setBranchByParent((prev) => ({ ...prev, [parentKey]: mid }))
-            }
-            onOpenFile={openFileInPanel}
-          />
-          <div ref={bottomRef} />
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        >
+          <div ref={contentRef} className="flex min-h-full flex-col">
+            <ChatMessages
+              turns={turns}
+              runActive={runActive}
+              activeRunId={activeSession?.activeRunId}
+              agentName={agent?.name}
+              canAct={hasChatRoute && !runActive && !sending}
+              onRegenerate={(mid) => void handleRegenerate(mid)}
+              onEditSend={(parentKey, content) => void handleEditSend(parentKey, content)}
+              onSelectVariant={(mid, runId) =>
+                setVariantByMessage((prev) => ({ ...prev, [mid]: runId }))
+              }
+              onSelectBranch={(parentKey, mid) =>
+                setBranchByParent((prev) => ({ ...prev, [parentKey]: mid }))
+              }
+              onOpenFile={openFileInPanel}
+            />
+          </div>
         </div>
 
         {/* 组合器 */}
-        <div className="shrink-0 px-2.5 pb-[max(env(safe-area-inset-bottom),0.625rem)] pt-1 md:px-4 md:pb-4">
-          <div className="mx-auto max-w-3xl">
-            <div className="rounded-3xl border border-border/70 bg-background shadow-sm transition-shadow focus-within:border-ring/40 focus-within:shadow-md">
-              {/* 待发送附件 */}
-              {attachments.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 px-3 pt-3">
-                  {attachments.map((a) => (
-                    <span
-                      key={a.path}
-                      className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/40 py-1 pl-2.5 pr-1.5 text-xs"
-                      title={a.path}
-                    >
-                      {a.kind === "image" ? (
-                        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      ) : (
-                        <FileIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      )}
-                      <span className="max-w-40 truncate">{a.name}</span>
-                      <button
-                        type="button"
-                        aria-label="移除附件"
-                        className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                        onClick={() =>
-                          setAttachments((prev) => prev.filter((x) => x.path !== a.path))
-                        }
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <Textarea
-                ref={composerRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={hasChatRoute ? "发送消息…" : "请先配置 chat 模型路由"}
-                disabled={!hasChatRoute || sending}
-                rows={1}
-                className="max-h-48 min-h-11 w-full resize-none border-0 bg-transparent px-4 pt-3 text-base shadow-none focus-visible:ring-0 md:text-[15px]"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void handleSend();
-                  }
-                }}
-              />
-              {/* 底部工具行：附件 + 模型选择 + 发送 */}
-              <div className="flex items-center gap-1 p-2 pl-2.5">
-                <input
-                  ref={attachInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => {
-                    void handleAttachFiles(e.target.files);
-                    e.target.value = "";
-                  }}
-                />
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label="添加附件"
-                  className="h-8 w-8 rounded-full text-muted-foreground"
-                  disabled={!agent?.enableComputer || uploading || sending}
-                  title={
-                    agent?.enableComputer
-                      ? "上传文件到 Agent 工作区"
-                      : "需要开启电脑环境才能上传文件"
-                  }
-                  onClick={() => attachInputRef.current?.click()}
-                >
-                  {uploading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Paperclip className="h-4 w-4" />
-                  )}
-                </Button>
-                <SearchableSelect
-                  items={modelItems}
-                  value={model || DEFAULT_MODEL}
-                  onValueChange={(v) => void handleModelChange(v)}
-                  placeholder="模型"
-                  searchPlaceholder="搜索模型…"
-                  triggerClassName="h-8 w-auto min-w-28 max-w-56 rounded-full border-0 shadow-none bg-transparent hover:bg-muted/60 text-xs text-muted-foreground"
-                />
-                <div className="flex-1" />
-                {runActive ? (
-                  <Button
-                    size="icon"
-                    className="h-9 w-9 shrink-0 rounded-full"
-                    variant="secondary"
-                    onClick={() => void handleCancel()}
-                    aria-label="停止"
-                  >
-                    <Square className="h-4 w-4" />
-                  </Button>
-                ) : (
-                  <Button
-                    size="icon"
-                    className="h-9 w-9 shrink-0 rounded-full"
-                    disabled={
-                      !hasChatRoute ||
-                      sending ||
-                      uploading ||
-                      (!input.trim() && attachments.length === 0)
-                    }
-                    onClick={() => void handleSend()}
-                    aria-label="发送"
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </Button>
-                )}
-              </div>
-            </div>
-          </div>
+        <div className="relative shrink-0 px-2.5 pt-1 pb-[max(env(safe-area-inset-bottom),0.625rem)] md:px-4 md:pb-4">
+          {!atBottom && !emptyConversation && (
+            <button
+              type="button"
+              onClick={() => scrollToBottom("smooth")}
+              className="animate-pop absolute top-0 left-1/2 z-10 flex -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-full border border-border/70 bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:text-foreground"
+            >
+              <ArrowDown className="size-3.5" />
+              回到底部
+            </button>
+          )}
+          <Composer
+            value={input}
+            onValueChange={setInput}
+            onSend={() => void handleSend()}
+            onStop={() => void handleCancel()}
+            textareaRef={composerRef}
+            routeReady={hasChatRoute}
+            sending={sending}
+            runActive={runActive}
+            attachments={attachments}
+            attachmentPreviews={attachmentPreviews}
+            uploads={uploads}
+            canAttach={Boolean(agent?.enableComputer)}
+            attachHint={
+              agent?.enableComputer
+                ? "上传文件到工作区（也可直接拖入或粘贴）"
+                : "需要开启电脑环境才能上传文件"
+            }
+            onAttachFiles={(files) => void handleAttachFiles(files)}
+            onRemoveAttachment={removeAttachment}
+            onCancelUpload={cancelUpload}
+            models={modelItems}
+            model={model || DEFAULT_MODEL}
+            onModelChange={(v) => void handleModelChange(v)}
+            reasoning={reasoning}
+            reasoningItems={reasoningItems}
+            onReasoningChange={handleReasoningChange}
+          />
         </div>
+
+        {/* 空会话时输入框浮到视觉中线；首条消息发出后 flex-grow 归零，输入框顺势落回底部 */}
+        <div
+          aria-hidden
+          className={cn(
+            "shrink-0 transition-[flex-grow] duration-[520ms] ease-fluid",
+            emptyConversation ? "grow-[0.82]" : "grow-0",
+          )}
+        />
       </div>
 
       {/* ===== 文件面板（移动端全屏覆盖） ===== */}

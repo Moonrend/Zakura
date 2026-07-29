@@ -14,11 +14,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Disclosure } from "@/components/ui/disclosure";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -34,10 +30,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { hostOf } from "@/lib/tool-result";
 import type {
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
 } from "@/lib/cloud-agent";
+import { Favicon } from "./web-sources";
 
 const KIND_META: Record<
   CloudAgentContextSourceKind,
@@ -84,85 +82,94 @@ function SourceActions({
 
 function SourceItem({
   item,
+  index,
   onOpenFile,
 }: {
   item: CloudAgentContextSourceItem;
+  index: number;
   onOpenFile?: (path: string) => void;
 }) {
   const meta = KIND_META[item.kind] ?? KIND_META.other;
   const Icon = meta.icon;
   const hasBody = Boolean(item.content?.trim());
   const [open, setOpen] = useState(false);
+  const domain = item.url ? hostOf(item.url) : "";
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <div className="rounded-lg border border-border/60 bg-muted/15">
-        <CollapsibleTrigger
-          disabled={!hasBody}
-          className={cn(
-            "flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors",
-            hasBody && "hover:bg-muted/40",
-            !hasBody && "cursor-default",
-          )}
-        >
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-            <Icon className="size-3.5" />
-          </span>
-          <span className="min-w-0 flex-1 space-y-1">
-            <span className="flex flex-wrap items-center gap-1.5">
-              <Badge variant="secondary" className="font-normal">
-                {meta.label}
+    <div
+      style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
+      className="animate-rise overflow-hidden rounded-lg border border-border/60 bg-muted/15 transition-colors duration-200 ease-fluid hover:border-border"
+    >
+      <button
+        type="button"
+        disabled={!hasBody}
+        aria-expanded={hasBody ? open : undefined}
+        onClick={() => hasBody && setOpen((v) => !v)}
+        className={cn(
+          "flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors duration-150",
+          hasBody && "hover:bg-muted/40",
+          !hasBody && "cursor-default",
+        )}
+      >
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          {domain ? <Favicon domain={domain} className="size-4" /> : <Icon className="size-3.5" />}
+        </span>
+        <span className="min-w-0 flex-1 space-y-1">
+          <span className="flex flex-wrap items-center gap-1.5">
+            <Badge variant="secondary" className="font-normal">
+              {meta.label}
+            </Badge>
+            {item.layer ? (
+              <Badge variant="outline" className="font-normal">
+                {item.layer}
               </Badge>
-              {item.layer ? (
-                <Badge variant="outline" className="font-normal">
-                  {item.layer}
-                </Badge>
-              ) : null}
-            </span>
-            <span className="block truncate text-sm text-foreground">{item.title}</span>
-            {item.path ? (
-              <span className="block truncate font-mono text-[11px] text-muted-foreground">
-                {item.path}
-              </span>
-            ) : null}
-            {item.url && !item.path ? (
-              <span className="block truncate font-mono text-[11px] text-muted-foreground">
-                {item.url}
-              </span>
             ) : null}
           </span>
-          {hasBody ? (
-            <ChevronDown
-              className={cn(
-                "mt-1 size-4 shrink-0 text-muted-foreground/60 transition-transform",
-                open && "rotate-180",
-              )}
-            />
+          <span className="block truncate text-sm text-foreground">{item.title}</span>
+          {item.path ? (
+            <span className="block truncate font-mono text-[11px] text-muted-foreground">
+              {item.path}
+            </span>
           ) : null}
-        </CollapsibleTrigger>
-
+          {item.url && !item.path ? (
+            <span className="block truncate font-mono text-[11px] text-muted-foreground">
+              {domain || item.url}
+            </span>
+          ) : null}
+        </span>
         {hasBody ? (
-          <CollapsibleContent>
+          <ChevronDown
+            className={cn(
+              "mt-1 size-4 shrink-0 text-muted-foreground/60 transition-transform duration-300 ease-overshoot",
+              open && "rotate-180",
+            )}
+          />
+        ) : null}
+      </button>
+
+      {hasBody ? (
+        <Disclosure open={open}>
+          <div>
             <Separator />
             <div className="space-y-2.5 px-3 py-2.5">
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-muted-foreground">
+              <pre className="max-h-48 overflow-auto font-sans text-xs leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
                 {item.content}
               </pre>
               <SourceActions item={item} onOpenFile={onOpenFile} />
             </div>
-          </CollapsibleContent>
-        ) : (
-          (item.path || item.url) && (
-            <>
-              <Separator />
-              <div className="px-3 py-2">
-                <SourceActions item={item} onOpenFile={onOpenFile} />
-              </div>
-            </>
-          )
-        )}
-      </div>
-    </Collapsible>
+          </div>
+        </Disclosure>
+      ) : (
+        (item.path || item.url) && (
+          <>
+            <Separator />
+            <div className="px-3 py-2">
+              <SourceActions item={item} onOpenFile={onOpenFile} />
+            </div>
+          </>
+        )
+      )}
+    </div>
   );
 }
 
@@ -227,6 +234,7 @@ export function AnswerSourcesSheet({
                   item.id ?? item.path ?? item.url ?? `${item.kind}-${item.title}-${i}`
                 }
                 item={item}
+                index={i}
                 onOpenFile={onOpenFile}
               />
             ))}

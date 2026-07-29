@@ -14,6 +14,7 @@ import {
   type CloudAgentAttachment,
   type CloudAgentConfig,
   type CloudAgentContextSourceItem,
+  type CloudAgentRunOptions,
   type CloudAgentSessionOrigin,
   type ModelChatContentPart,
   type ModelChatMessage,
@@ -89,6 +90,8 @@ export type CloudAgentRuntimeDeps = {
   memoryProviders?: MemoryProvidersService | null;
   /** 工作区文件系统（可选；缺省时图片附件仅以文本注记传给模型） */
   workspaceFsProvider?: WorkspaceFsProvider | null;
+  /** 技能服务（可选；缺省时不注入技能摘要） */
+  skills?: import("../skills/service.js").SkillsService | null;
 };
 
 export class CloudAgentRuntime {
@@ -119,6 +122,8 @@ export class CloudAgentRuntime {
     retry?: boolean;
     /** 随消息上传的附件（已在 Agent 工作区） */
     attachments?: CloudAgentAttachment[];
+    /** 本次用户触发 Run 的调用时模型选项。 */
+    options?: CloudAgentRunOptions;
   }): Promise<{ runId: string }> {
     const content = input.content?.trim() ?? "";
     const attachments = parseAttachments(input.attachments);
@@ -193,7 +198,11 @@ export class CloudAgentRuntime {
       sessionId: input.sessionId,
       type: "run_start",
       runId: run.id,
-      payload: { runId: run.id, replyToMessageId: targetMessageId },
+      payload: {
+        runId: run.id,
+        replyToMessageId: targetMessageId,
+        ...(input.options ? { options: input.options } : {}),
+      },
     });
 
     // 异步执行，HTTP 立即返回；客户端通过事件流接收结果
@@ -204,6 +213,7 @@ export class CloudAgentRuntime {
       runId: run.id,
       targetMessageId,
       isFirstTurn,
+      ...(input.options ? { options: input.options } : {}),
     }).catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
       try {
@@ -250,6 +260,7 @@ export class CloudAgentRuntime {
     runId: string;
     targetMessageId: string;
     isFirstTurn: boolean;
+    options?: CloudAgentRunOptions;
   }): Promise<void> {
     const { tenantId, agent, sessionId, runId } = input;
     await this.store.markRunStarted(runId);
@@ -430,11 +441,15 @@ export class CloudAgentRuntime {
     const hasSubagent = definitions.some(
       (d) => d.function.name === SUBAGENT_TOOL_QUALIFIED,
     );
+    const skillsSummary = this.deps.skills
+      ? await this.deps.skills.promptSummary(tenantId, agent.id)
+      : "";
     const systemPrompt = buildSystemPrompt(agent, cloud, {
       memoryContext: memoryContext || undefined,
       historySummary: historySummary || undefined,
       peerAgents: peerAgentsDesc || undefined,
       subagents: hasSubagent,
+      skills: skillsSummary || undefined,
     });
     const messages: ModelChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -460,6 +475,7 @@ export class CloudAgentRuntime {
       messages,
       definitions,
       nameMap,
+      ...(input.options ? { options: input.options } : {}),
       ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
       hooks: {
         toolTitle: (modelName) =>
@@ -512,20 +528,17 @@ export class CloudAgentRuntime {
 
   /**
    * 将消息里 `workspace:` 占位的图片部件解析为 data URI。
-   * 预算控制：最多解析最近 6 张、单张 ≤8MB；超预算/读失败的图片
-   * 退化为纯文本注记（content 中已包含路径，模型可用 fs 工具处理）。
+   * 与 AI SDK / AI Gateway 的多模态形态保持一致：图片作为独立
+   * content part 传给支持 image input 的模型；不在这里做小尺寸截断。
+   * 不支持图片的路由会在协议适配器里丢弃 image part。
    */
   private async resolveWorkspaceImages(
     agent: Agent,
     messages: ModelChatMessage[],
   ): Promise<void> {
     const provider = this.deps.workspaceFsProvider;
-    const MAX_IMAGES = 6;
-    const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
-    let budget = MAX_IMAGES;
     let fs: WorkspaceFs | undefined;
 
-    // 从最新消息往前，优先保证近期图片可见
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const m = messages[i]!;
       if (!m.parts?.length) continue;
@@ -538,7 +551,7 @@ export class CloudAgentRuntime {
           resolved.push(part);
           continue;
         }
-        if (!provider || budget <= 0) continue;
+        if (!provider) continue;
         const path = part.imageUrl.url.slice(WORKSPACE_IMAGE_PREFIX.length);
         try {
           if (fs === undefined) {
@@ -549,14 +562,13 @@ export class CloudAgentRuntime {
             });
           }
           const file = await fs.readBytes(path);
-          if (file.data.length === 0 || file.data.length > MAX_IMAGE_BYTES) continue;
+          if (file.data.length === 0) continue;
           resolved.push({
             type: "image_url",
             imageUrl: {
               url: `data:${guessImageMime(path)};base64,${file.data.toString("base64")}`,
             },
           });
-          budget -= 1;
         } catch {
           // 文件被移动/删除等：仅保留文本注记
         }
@@ -702,12 +714,16 @@ export class CloudAgentRuntime {
       depth,
     });
 
+    const subagentSkills = this.deps.skills
+      ? await this.deps.skills.promptSummary(tenantId, agent.id)
+      : "";
     const messages: ModelChatMessage[] = [
       {
         role: "system",
         content: buildSubagentPrompt(agent, cloud, {
           expectedOutput: expected || undefined,
           subagents: canSpawn,
+          skills: subagentSkills || undefined,
         }),
       },
       { role: "user", content: userContent },

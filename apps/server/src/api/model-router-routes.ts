@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import {
   MODEL_CATALOG_SOURCES,
   type ModelCatalogSource,
+  type ModelChatContentPart,
   type ModelChatInvokeOptions,
   type ModelChatMessage,
   type ModelToolCall,
@@ -14,6 +15,7 @@ import type { ModelRouterService } from "../services/model-router.js";
 import type { ModelRoutesService } from "../services/model-routes.js";
 import type { ModelUpstreamsService } from "../services/model-upstreams.js";
 import type { UpstreamModelsService } from "../services/upstream-models.js";
+import { parseRouteOptions } from "../model-router/types.js";
 
 type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
@@ -198,6 +200,7 @@ export function registerModelRouterRoutes(
         enabled?: boolean;
         isDefault?: boolean;
         options?: Record<string, unknown>;
+        meta?: Record<string, unknown>;
       }>();
       if (
         !body.upstreamId ||
@@ -218,6 +221,7 @@ export function registerModelRouterRoutes(
           enabled: body.enabled,
           isDefault: body.isDefault,
           options: body.options,
+          meta: body.meta,
         });
         router.invalidateCache(session.tenantId);
         return c.json(created, 201);
@@ -235,13 +239,22 @@ export function registerModelRouterRoutes(
         weight?: number;
         enabled?: boolean;
         isDefault?: boolean;
+        capability?: string;
         options?: Record<string, unknown>;
+        meta?: Record<string, unknown>;
       }>();
+      const patch = {
+        ...body,
+        capability:
+          body.capability && isModelCapability(body.capability)
+            ? body.capability
+            : undefined,
+      };
       try {
         const updated = await upstreamModels.update(
           session.tenantId,
           c.req.param("id"),
-          body,
+          patch,
         );
         router.invalidateCache(session.tenantId);
         return c.json(updated);
@@ -301,6 +314,7 @@ export function registerModelRouterRoutes(
         isDefault: m.isDefault,
         status: m.status,
         enabled: m.enabled,
+        meta: m.meta,
         upstream: m.upstream,
       }));
       return c.json({ routes: asRoutes, capabilities: routes.meta() });
@@ -418,6 +432,8 @@ export function registerModelRouterRoutes(
       canonicalModel?: string;
       nativeModel?: string;
       displayName?: string | null;
+      capability?: string;
+      meta?: Record<string, unknown>;
     }>();
 
     if (upstreamModels) {
@@ -436,7 +452,12 @@ export function registerModelRouterRoutes(
             weight: body.weight,
             enabled: body.enabled,
             isDefault: body.isDefault,
+            capability:
+              body.capability && isModelCapability(body.capability)
+                ? body.capability
+                : undefined,
             options: body.options,
+            meta: body.meta,
           });
           router.invalidateCache(session.tenantId);
           return c.json({
@@ -592,17 +613,20 @@ export function registerModelRouterRoutes(
     const body = await c.req.json<{
       messages?: Array<{
         role?: string;
-        content?: string | null;
+        content?: unknown;
         name?: string;
         toolCalls?: unknown;
         toolCallId?: string;
         tool_calls?: unknown;
         tool_call_id?: string;
+        parts?: unknown;
       }>;
       tools?: ModelToolDefinition[];
       toolChoice?: ModelChatInvokeOptions["toolChoice"];
       tool_choice?: ModelChatInvokeOptions["toolChoice"];
       extensions?: Record<string, unknown>;
+      reasoning?: unknown;
+      routeOptions?: Record<string, unknown>;
       routeId?: string;
       slug?: string;
       alias?: string;
@@ -637,6 +661,40 @@ export function registerModelRouterRoutes(
       return out.length ? out : undefined;
     }
 
+    function parseMessageParts(raw: unknown): ModelChatContentPart[] | undefined {
+      if (!Array.isArray(raw) || raw.length === 0) return undefined;
+      const out: ModelChatContentPart[] = [];
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        const o = item as Record<string, unknown>;
+        if (o.type === "text" && typeof o.text === "string") {
+          out.push({ type: "text", text: o.text });
+          continue;
+        }
+        if (o.type !== "image_url") continue;
+        const imageUrl = o.imageUrl ?? o.image_url;
+        if (!imageUrl || typeof imageUrl !== "object") continue;
+        const url = (imageUrl as Record<string, unknown>).url;
+        if (typeof url === "string" && url.trim()) {
+          out.push({ type: "image_url", imageUrl: { url } });
+        }
+      }
+      return out.length ? out : undefined;
+    }
+
+    function parseMessageContent(raw: unknown): string | null {
+      if (typeof raw === "string") return raw;
+      if (raw == null) return null;
+      const parts = parseMessageParts(raw);
+      if (!parts) return null;
+      const text = parts
+        .filter((p): p is Extract<ModelChatContentPart, { type: "text" }> => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+        .trim();
+      return text || null;
+    }
+
     const messages: ModelChatMessage[] = body.messages.map((m) => ({
       role: (m.role === "system" ||
       m.role === "assistant" ||
@@ -644,7 +702,7 @@ export function registerModelRouterRoutes(
       m.role === "user"
         ? m.role
         : "user") as ModelChatMessage["role"],
-      content: m.content ?? null,
+      content: parseMessageContent(m.content),
       name: typeof m.name === "string" ? m.name : undefined,
       toolCallId:
         typeof m.toolCallId === "string"
@@ -653,11 +711,16 @@ export function registerModelRouterRoutes(
             ? m.tool_call_id
             : undefined,
       toolCalls: parseToolCalls(m.toolCalls ?? m.tool_calls),
+      parts: parseMessageParts(m.parts) ?? parseMessageParts(m.content),
     }));
 
     const invokeOptions: ModelChatInvokeOptions = {
       tools: body.tools,
       toolChoice: body.toolChoice ?? body.tool_choice,
+      routeOptions: {
+        ...parseRouteOptions(body.routeOptions ?? {}),
+        ...parseRouteOptions({ reasoning: body.reasoning }),
+      },
       extensions: body.extensions,
     };
 

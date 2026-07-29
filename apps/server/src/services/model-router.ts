@@ -124,6 +124,11 @@ export class ModelRouterService {
           if (text) emitted = true;
           callbacks.onDelta?.(text);
         },
+        onReasoningDelta: (text) => {
+          if (text) emitted = true;
+          callbacks.onReasoningDelta?.(text);
+        },
+        signal: callbacks.signal,
       };
       try {
         const result = await withModelRetries(

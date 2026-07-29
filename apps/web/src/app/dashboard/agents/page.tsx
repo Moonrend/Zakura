@@ -27,7 +27,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { NoSearchResult, SearchField } from "@/components/ui/search-field";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { cn } from "@/lib/utils";
+
+/** 名称最重要，其次 slug，最后描述 */
+const AGENT_KEYS = [
+  { name: "name", weight: 3 },
+  { name: "slug", weight: 2 },
+  { name: "description", weight: 1 },
+];
 
 export default function AgentsListPage() {
   const router = useRouter();
@@ -39,6 +48,8 @@ export default function AgentsListPage() {
   const [createdUrl, setCreatedUrl] = useState<string | null>(null);
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState("");
+  const filtered = useFuzzySearch(list, q, { keys: AGENT_KEYS });
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -136,8 +147,20 @@ export default function AgentsListPage() {
           </Button>
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {list.map((a) => {
+        <>
+          {list.length > 4 ? (
+            <SearchField
+              value={q}
+              onValueChange={setQ}
+              placeholder="搜索 Agent（名称、slug、描述）"
+              className="max-w-sm"
+            />
+          ) : null}
+          {filtered.length === 0 ? (
+            <NoSearchResult query={q} />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filtered.map((a) => {
             const ws = getWorkspaceStatus(a);
             const hasComputer = needsContainer(a);
             const caps = [
@@ -194,8 +217,10 @@ export default function AgentsListPage() {
                 </div>
               </Link>
             );
-          })}
-        </div>
+              })}
+            </div>
+          )}
+        </>
       )}
 
       <Dialog

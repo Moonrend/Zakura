@@ -8,6 +8,7 @@ import {
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
   type CloudAgentAttachment,
+  type CloudAgentRunOptions,
 } from "@zakura/shared";
 import type { AppVariables } from "./routes.js";
 import type { AgentService } from "../services/agents.js";
@@ -17,6 +18,7 @@ import type {
 } from "../services/cloud-agent-session.js";
 import type { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import type { ModelRouterService } from "../services/model-router.js";
+import { parseRouteOptions } from "../model-router/types.js";
 
 function sessionDto(row: {
   id: string;
@@ -60,6 +62,15 @@ function parseKindsParam(raw: string | undefined): SessionKindFilter | undefined
     .map((s) => parseCloudAgentSessionKind(s.trim()))
     .filter((k): k is NonNullable<typeof k> => k !== null);
   return kinds.length > 0 ? kinds : undefined;
+}
+
+function parseRunOptions(raw: unknown): CloudAgentRunOptions | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const routeOptions = parseRouteOptions({ reasoning: o.reasoning });
+  const out: CloudAgentRunOptions = {};
+  if (routeOptions.reasoning) out.reasoning = routeOptions.reasoning;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function registerCloudAgentRoutes(
@@ -272,11 +283,13 @@ export function registerCloudAgentRoutes(
       content?: string;
       parentRunId?: string | null;
       attachments?: CloudAgentAttachment[];
+      options?: unknown;
     }>();
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     if (!body.content?.trim() && attachments.length === 0) {
       return c.json({ error: "content 必填" }, 400);
     }
+    const options = parseRunOptions(body.options);
     try {
       const result = await runtime.startTurn({
         tenantId: session.tenantId,
@@ -285,6 +298,7 @@ export function registerCloudAgentRoutes(
         content: body.content ?? "",
         ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
         ...(attachments.length ? { attachments } : {}),
+        ...(options ? { options } : {}),
       });
       return c.json(result, 202);
     } catch (err) {
@@ -299,8 +313,9 @@ export function registerCloudAgentRoutes(
     }
     const session = c.get("session")!;
     const body = await c.req
-      .json<{ messageId?: string }>()
-      .catch(() => ({}) as { messageId?: string });
+      .json<{ messageId?: string; options?: unknown }>()
+      .catch(() => ({}) as { messageId?: string; options?: unknown });
+    const options = parseRunOptions(body.options);
     try {
       const result = await runtime.startTurn({
         tenantId: session.tenantId,
@@ -309,6 +324,7 @@ export function registerCloudAgentRoutes(
         ...(body.messageId
           ? { regenerateOfMessageId: body.messageId }
           : { retry: true }),
+        ...(options ? { options } : {}),
       });
       return c.json(result, 202);
     } catch (err) {
@@ -322,12 +338,17 @@ export function registerCloudAgentRoutes(
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
+    const body = await c.req
+      .json<{ options?: unknown }>()
+      .catch(() => ({}) as { options?: unknown });
+    const options = parseRunOptions(body.options);
     try {
       const result = await runtime.startTurn({
         tenantId: session.tenantId,
         agentId: c.req.param("id"),
         sessionId: c.req.param("sid"),
         retry: true,
+        ...(options ? { options } : {}),
       });
       return c.json(result, 202);
     } catch (err) {

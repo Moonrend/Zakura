@@ -29,6 +29,7 @@ import {
   ShieldCheck,
   Route,
   Container,
+  Sparkles,
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { AGENT_SUBNAV } from "@/lib/agents";
@@ -89,6 +90,7 @@ const AGENT_ICONS: Record<string, IconComp> = {
   computer: Monitor,
   web: Globe,
   memory: Brain,
+  skills: Sparkles,
   mcp: Cable,
   connect: Plug,
   "tool-calls": Wrench,
@@ -398,6 +400,14 @@ export function AppSidebar({
       href: "/dashboard/memory",
       label: "记忆",
       icon: Brain,
+    },
+    {
+      id: "skills",
+      href: "/dashboard/skills",
+      label: "技能",
+      icon: Sparkles,
+      isActive: (path) =>
+        path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
     },
     {
       id: "models",

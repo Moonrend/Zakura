@@ -5,10 +5,12 @@ import type {
   ModelChatResult,
   ModelEmbeddingResult,
   ModelImageResult,
+  ModelReasoningOptions,
   ModelRerankResult,
 } from "@zakura/shared";
 import type { ChatStreamCallbacks, ModelProtocolAdapter } from "./adapter.js";
 import { isRetryableModelError, withModelRetries } from "./http.js";
+import { normalizeToolCallHistory } from "./messages.js";
 import { resolveAdapterForCapability } from "./registry.js";
 import type { ResolvedRoute } from "./types.js";
 
@@ -28,14 +30,63 @@ async function invokeWithAdapter<T>(
   return run(adapter);
 }
 
+function normalizeInvokeReasoning(
+  route: ResolvedRoute,
+  reasoning: ModelReasoningOptions,
+): ModelReasoningOptions | undefined {
+  const levels = route.meta?.reasoningLevels?.map((v) => v.toLowerCase());
+  if (levels && levels.length === 0) return undefined;
+  if (levels && reasoning.enabled === false) {
+    return levels.includes("none") ? { enabled: false } : undefined;
+  }
+  if (
+    levels &&
+    reasoning.effort &&
+    !levels.includes(reasoning.effort.toLowerCase())
+  ) {
+    return undefined;
+  }
+  if (route.meta?.reasoning === false) return undefined;
+  return reasoning;
+}
+
+export function applyInvokeRouteOptions(
+  route: ResolvedRoute,
+  options?: ModelChatInvokeOptions,
+): ResolvedRoute {
+  if (!options?.routeOptions || Object.keys(options.routeOptions).length === 0) {
+    return route;
+  }
+  return {
+    ...route,
+    options: {
+      ...route.options,
+      ...options.routeOptions,
+      ...(options.routeOptions.reasoning
+        ? {
+            reasoning: normalizeInvokeReasoning(
+              route,
+              options.routeOptions.reasoning,
+            ),
+          }
+        : {}),
+      extensions: {
+        ...(route.options.extensions ?? {}),
+        ...(options.routeOptions.extensions ?? {}),
+      },
+    },
+  };
+}
+
 export async function executeChat(
   route: ResolvedRoute,
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
 ): Promise<ModelChatResult> {
+  const normalizedMessages = normalizeToolCallHistory(messages);
   return invokeWithAdapter(route, "chat", async (adapter) => {
     if (!adapter.chat) throw new Error(`协议 ${adapter.protocol} 未实现 chat`);
-    return adapter.chat(route, messages, options);
+    return adapter.chat(applyInvokeRouteOptions(route, options), normalizedMessages, options);
   });
 }
 
@@ -49,12 +100,14 @@ export async function executeChatStream(
   options: ModelChatInvokeOptions | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
+  const normalizedMessages = normalizeToolCallHistory(messages);
   return invokeWithAdapter(route, "chat", async (adapter) => {
+    const nextRoute = applyInvokeRouteOptions(route, options);
     if (adapter.chatStream) {
-      return adapter.chatStream(route, messages, options, callbacks);
+      return adapter.chatStream(nextRoute, normalizedMessages, options, callbacks);
     }
     if (!adapter.chat) throw new Error(`协议 ${adapter.protocol} 未实现 chat`);
-    const result = await adapter.chat(route, messages, options);
+    const result = await adapter.chat(nextRoute, normalizedMessages, options);
     if (result.content) callbacks.onDelta?.(result.content);
     return result;
   });

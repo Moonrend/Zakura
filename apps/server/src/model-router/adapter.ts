@@ -11,9 +11,10 @@ import type {
 } from "@zakura/shared";
 import type { ResolvedRoute } from "./types.js";
 
-/** 流式回调：onDelta 收到增量文本；结束后仍返回完整 ModelChatResult */
+/** 流式回调：onDelta 收到回答增量，onReasoningDelta 收到思考增量；结束后仍返回完整 ModelChatResult */
 export type ChatStreamCallbacks = {
   onDelta?: (text: string) => void;
+  onReasoningDelta?: (text: string) => void;
   /** 外部中断信号（如用户取消 Run）：触发时立即掐断上游流 */
   signal?: AbortSignal;
 };

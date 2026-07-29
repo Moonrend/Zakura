@@ -37,6 +37,8 @@ import {
 import {
   BAILIAN_ENDPOINTS,
   MODEL_UPSTREAM_DEFAULT_BASE_URLS,
+  MODEL_UPSTREAM_PROTOCOL_META,
+  MODEL_UPSTREAM_PROTOCOLS,
   type ModelUpstreamProtocol,
 } from "@zakura/shared";
 
@@ -68,52 +70,20 @@ type Upstream = {
   meta?: ProtocolMeta;
 };
 
-const FALLBACK_PROTOCOLS: ProtocolMeta[] = [
-  {
-    protocol: "openai",
-    name: "OpenAI",
-    description: "OpenAI",
-    fields: ["baseUrl", "apiKey"],
-    keywords: ["openai", "gpt"],
-  },
-  {
-    protocol: "bailian",
-    name: "阿里云百炼 DashScope",
-    description: "DashScope",
-    fields: ["baseUrl", "apiKey", "region"],
-    keywords: ["ali", "dashscope", "百炼"],
-  },
-  {
-    protocol: "deepseek",
-    name: "DeepSeek",
-    description: "DeepSeek",
-    fields: ["baseUrl", "apiKey"],
-  },
-  {
-    protocol: "azure-openai",
-    name: "Azure OpenAI",
-    description: "Azure OpenAI",
-    fields: ["baseUrl", "apiKey", "apiVersion", "deploymentId"],
-  },
-  {
-    protocol: "anthropic",
-    name: "Anthropic",
-    description: "Anthropic",
-    fields: ["baseUrl", "apiKey"],
-  },
-  {
-    protocol: "gemini",
-    name: "Gemini",
-    description: "Gemini",
-    fields: ["baseUrl", "apiKey"],
-  },
-  {
-    protocol: "custom",
-    name: "自定义",
-    description: "自定义",
-    fields: ["baseUrl", "apiKey", "rerankBaseUrl"],
-  },
-];
+type ModelMatchFailure = {
+  nativeModel: string;
+  displayName?: string;
+  canonicalModel: string;
+};
+
+const FALLBACK_PROTOCOLS: ProtocolMeta[] = MODEL_UPSTREAM_PROTOCOLS.map((protocol) => ({
+  protocol,
+  ...MODEL_UPSTREAM_PROTOCOL_META[protocol],
+  fields: [...MODEL_UPSTREAM_PROTOCOL_META[protocol].fields],
+  keywords: MODEL_UPSTREAM_PROTOCOL_META[protocol].keywords
+    ? [...MODEL_UPSTREAM_PROTOCOL_META[protocol].keywords]
+    : undefined,
+}));
 
 const REGION_ITEMS: { value: string; label: string }[] = [
   { value: "cn", label: "国内" },
@@ -138,6 +108,12 @@ function toggleId(set: Set<string>, id: string, on: boolean): Set<string> {
   if (on) next.add(id);
   else next.delete(id);
   return next;
+}
+
+function formatUnmatchedModels(models?: ModelMatchFailure[]): string | null {
+  if (!models?.length) return null;
+  const names = models.map((m) => m.nativeModel).join("、");
+  return `以下模型匹配失败，需要手动选数据：${names}`;
 }
 
 export default function ModelUpstreamsPage() {
@@ -334,10 +310,12 @@ export default function ModelUpstreamsPage() {
         created: number;
         updated: number;
         message?: string;
+        unmatchedModels?: ModelMatchFailure[];
       }>(`/api/model-upstreams/${id}/sync-models`, {
         method: "POST",
         json: {},
       });
+      const unmatchedText = formatUnmatchedModels(res.unmatchedModels);
       if (res.synced === 0) {
         toast.message(res.message ?? "未同步到模型，可手填");
       } else {
@@ -346,6 +324,7 @@ export default function ModelUpstreamsPage() {
             (res.message ? ` · ${res.message}` : ""),
         );
       }
+      if (unmatchedText) toast.message(unmatchedText);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {

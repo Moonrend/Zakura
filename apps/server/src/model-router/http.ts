@@ -165,7 +165,7 @@ export async function httpSse(
   prefix: string,
   url: string,
   init: RequestInit & { timeoutMs?: number; idleTimeoutMs?: number },
-  onData: (payload: string) => void,
+  onData: (payload: string) => void | boolean,
 ): Promise<void> {
   const timeoutMs = init.timeoutMs ?? 60000;
   const idleTimeoutMs = init.idleTimeoutMs ?? Math.max(timeoutMs, 120_000);
@@ -206,6 +206,7 @@ export async function httpSse(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let shouldStop = false;
     const consume = (final: boolean) => {
       let idx: number;
       while ((idx = buffer.indexOf("\n")) >= 0) {
@@ -213,7 +214,10 @@ export async function httpSse(
         buffer = buffer.slice(idx + 1);
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
-        if (payload) onData(payload);
+        if (payload && onData(payload) === false) {
+          shouldStop = true;
+          return;
+        }
       }
       // 尾部无换行的最后一行也不能丢
       if (final) {
@@ -221,7 +225,9 @@ export async function httpSse(
         buffer = "";
         if (line.startsWith("data:")) {
           const payload = line.slice(5).trim();
-          if (payload) onData(payload);
+          if (payload && onData(payload) === false) {
+            shouldStop = true;
+          }
         }
       }
     };
@@ -231,9 +237,15 @@ export async function httpSse(
       armIdle();
       buffer += decoder.decode(value, { stream: true });
       consume(false);
+      if (shouldStop) {
+        await reader.cancel().catch(() => {});
+        break;
+      }
     }
-    buffer += decoder.decode();
-    consume(true);
+    if (!shouldStop) {
+      buffer += decoder.decode();
+      consume(true);
+    }
   } catch (err) {
     // Abort 时 fetch/read 抛出的往往是 DOMException/TypeError，
     // 换成我们自己带上下文的原因；网络层错误统一加前缀便于定位。

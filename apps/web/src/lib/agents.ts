@@ -199,6 +199,7 @@ export const AGENT_SUBNAV = [
   { href: "computer", label: "电脑" },
   { href: "web", label: "网页" },
   { href: "memory", label: "记忆" },
+  { href: "skills", label: "技能" },
   { href: "mcp", label: "MCP" },
   { href: "connect", label: "接入" },
   { href: "tool-calls", label: "调用记录" },

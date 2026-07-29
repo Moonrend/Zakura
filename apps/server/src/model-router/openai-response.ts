@@ -56,6 +56,7 @@ export function buildOpenAIChatCompletion(input: {
 /** OpenAI 流式 chunk 中 choices[0].delta 的累积状态 */
 export type ChatStreamState = {
   content: string;
+  reasoning: string;
   toolCalls: Array<{ id: string; name: string; arguments: string }>;
   finishReason: string | null;
   model: string | null;
@@ -63,20 +64,28 @@ export type ChatStreamState = {
 };
 
 export function createChatStreamState(): ChatStreamState {
-  return { content: "", toolCalls: [], finishReason: null, model: null };
+  return { content: "", reasoning: "", toolCalls: [], finishReason: null, model: null };
 }
 
 /**
  * 吸收一个已解析的流式 chunk（chat.completion.chunk）。
  * 返回本 chunk 新增的文本增量（无则空串）。
  */
-export function absorbChatStreamChunk(state: ChatStreamState, chunk: unknown): string {
-  if (!chunk || typeof chunk !== "object") return "";
+export function absorbChatStreamChunk(
+  state: ChatStreamState,
+  chunk: unknown,
+): { content: string; reasoning: string } {
+  const empty = { content: "", reasoning: "" };
+  if (!chunk || typeof chunk !== "object") return empty;
   const o = chunk as {
     model?: string;
     choices?: Array<{
       delta?: {
         content?: string | null;
+        reasoning?: string | null;
+        reasoning_content?: string | null;
+        reasoning_text?: string | null;
+        thinking?: string | null;
         tool_calls?: Array<{
           index?: number;
           id?: string;
@@ -96,10 +105,10 @@ export function absorbChatStreamChunk(state: ChatStreamState, chunk: unknown): s
     };
   }
   const choice = o.choices?.[0];
-  if (!choice) return "";
+  if (!choice) return empty;
   if (choice.finish_reason) state.finishReason = choice.finish_reason;
   const delta = choice.delta;
-  if (!delta) return "";
+  if (!delta) return empty;
   for (const tc of delta.tool_calls ?? []) {
     const idx = tc.index ?? state.toolCalls.length;
     while (state.toolCalls.length <= idx) {
@@ -110,11 +119,19 @@ export function absorbChatStreamChunk(state: ChatStreamState, chunk: unknown): s
     if (tc.function?.name) slot.name += tc.function.name;
     if (tc.function?.arguments) slot.arguments += tc.function.arguments;
   }
+  const reasoning =
+    delta.reasoning_content ??
+    delta.reasoning ??
+    delta.reasoning_text ??
+    delta.thinking;
+  if (typeof reasoning === "string" && reasoning) {
+    state.reasoning += reasoning;
+  }
   if (typeof delta.content === "string" && delta.content) {
     state.content += delta.content;
-    return delta.content;
+    return { content: delta.content, reasoning: reasoning ?? "" };
   }
-  return "";
+  return { content: "", reasoning: reasoning ?? "" };
 }
 
 /** 将累积状态封为统一 ModelChatResult */
@@ -122,11 +139,15 @@ export function chatStreamStateToResult(
   state: ChatStreamState,
   fallbackModel: string,
 ): ModelChatResult {
-  const toolCalls: ModelToolCall[] | undefined = state.toolCalls.length
-    ? state.toolCalls.map((t, i) => ({
+  const completeToolCalls = state.toolCalls.filter((t) => t.name.trim());
+  const includeToolCalls =
+    state.finishReason === "tool_calls" ||
+    (state.finishReason !== "stop" && !state.content && completeToolCalls.length > 0);
+  const toolCalls: ModelToolCall[] | undefined = includeToolCalls
+    ? completeToolCalls.map((t, i) => ({
         id: t.id || `call_${i}`,
         type: "function" as const,
-        function: { name: t.name || "tool", arguments: t.arguments || "{}" },
+        function: { name: t.name, arguments: t.arguments || "{}" },
       }))
     : undefined;
   const openai = buildOpenAIChatCompletion({

@@ -21,6 +21,8 @@ import {
   createChatStreamState,
   toModelChatResult,
 } from "../openai-response.js";
+import { acceptsImageInput, imageOmittedText } from "../media.js";
+import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
 
 type OpenAiCompatProtocol = (typeof OPENAI_COMPATIBLE_PROTOCOLS)[number];
@@ -64,7 +66,11 @@ function timeout(route: ResolvedRoute): number {
   return route.upstream.config.timeoutMs ?? 60000;
 }
 
-function mapMessages(messages: ModelChatMessage[]) {
+export function mapOpenAiCompatibleMessages(
+  route: ResolvedRoute,
+  messages: ModelChatMessage[],
+) {
+  const supportsImage = acceptsImageInput(route);
   return messages.map((m) => {
     const base: Record<string, unknown> = {
       role: m.role,
@@ -72,11 +78,18 @@ function mapMessages(messages: ModelChatMessage[]) {
     };
     // 多模态：user 消息带 parts 时转 OpenAI content 数组
     if (m.role === "user" && m.parts?.length) {
-      base.content = m.parts.map((p) =>
-        p.type === "text"
-          ? { type: "text", text: p.text }
-          : { type: "image_url", image_url: { url: p.imageUrl.url } },
-      );
+      base.content = m.parts.map((p) => {
+        if (p.type === "image_url") {
+          if (supportsImage) {
+            return {
+              type: "image_url",
+              image_url: { url: p.imageUrl.url, detail: "auto" },
+            };
+          }
+          return { type: "text", text: imageOmittedText() };
+        }
+        return { type: "text", text: p.text };
+      });
     }
     if (m.name) base.name = m.name;
     if (m.toolCallId) base.tool_call_id = m.toolCallId;
@@ -92,12 +105,13 @@ async function chat(
 ): Promise<ModelChatResult> {
   const body: Record<string, unknown> = {
     model: route.model,
-    messages: mapMessages(messages),
+    messages: mapOpenAiCompatibleMessages(route, messages),
   };
   if (route.options.temperature != null) body.temperature = route.options.temperature;
   if (route.options.maxTokens != null) body.max_tokens = route.options.maxTokens;
   if (options?.tools?.length) body.tools = options.tools;
   if (options?.toolChoice) body.tool_choice = options.toolChoice;
+  applyReasoningOptions(route.upstream.protocol, body, route.options, route.meta);
   if (options?.extensions) Object.assign(body, options.extensions);
 
   const res = await httpJson<{
@@ -122,14 +136,18 @@ async function chat(
   if (!res.ok) throw apiError("chat", res.status, res.data, res.text);
 
   const choice = res.data?.choices?.[0];
-  const toolCalls = parseOpenAIToolCalls(choice?.message?.tool_calls);
+  const finishReason = choice?.finish_reason ?? null;
+  const toolCalls =
+    finishReason === "stop"
+      ? undefined
+      : parseOpenAIToolCalls(choice?.message?.tool_calls);
   const openai = buildOpenAIChatCompletion({
     id: res.data?.id,
     created: res.data?.created,
     model: res.data?.model ?? route.model,
     content: choice?.message?.content ?? null,
     toolCalls,
-    finishReason: choice?.finish_reason ?? null,
+    finishReason,
     usage: res.data?.usage
       ? {
           promptTokens: res.data.usage.prompt_tokens,
@@ -150,13 +168,14 @@ async function chatStream(
 ): Promise<ModelChatResult> {
   const body: Record<string, unknown> = {
     model: route.model,
-    messages: mapMessages(messages),
+    messages: mapOpenAiCompatibleMessages(route, messages),
     stream: true,
   };
   if (route.options.temperature != null) body.temperature = route.options.temperature;
   if (route.options.maxTokens != null) body.max_tokens = route.options.maxTokens;
   if (options?.tools?.length) body.tools = options.tools;
   if (options?.toolChoice) body.tool_choice = options.toolChoice;
+  applyReasoningOptions(route.upstream.protocol, body, route.options, route.meta);
   if (options?.extensions) Object.assign(body, options.extensions);
 
   const state = createChatStreamState();
@@ -178,7 +197,7 @@ async function chatStream(
       if (stopped) return;
       if (payload === "[DONE]") {
         stopped = true;
-        return;
+        return false;
       }
       let chunk: unknown;
       try {
@@ -189,7 +208,8 @@ async function chatStream(
       const err = (chunk as { error?: { message?: string } }).error;
       if (err?.message) throw new Error(`chat(stream) upstream error: ${err.message}`);
       const delta = absorbChatStreamChunk(state, chunk);
-      if (delta) callbacks.onDelta?.(delta);
+      if (delta.reasoning) callbacks.onReasoningDelta?.(delta.reasoning);
+      if (delta.content) callbacks.onDelta?.(delta.content);
     },
   );
   return chatStreamStateToResult(state, route.model);

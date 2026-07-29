@@ -134,6 +134,85 @@ export function listAgentNativeTools(
       "List this agent's port exposures (active and recent). Use to find exposure_id/url or before unexpose_port.",
       { type: "object", properties: {} },
     ),
+    tool(
+      "list_skills",
+      [
+        "List Agent Skills installed in this agent's workspace (name, description, path, enabled).",
+        "Skills are reusable playbooks stored as SKILL.md files; read one with read_skill before doing the task it covers.",
+      ].join(" "),
+      {
+        type: "object",
+        properties: {
+          include_disabled: { type: "boolean", default: false },
+        },
+      },
+      { annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false } },
+    ),
+    tool(
+      "read_skill",
+      [
+        "Read an installed skill's SKILL.md (default) or one of its bundled files.",
+        "Do this before executing a task the skill covers — the body holds the actual instructions.",
+      ].join(" "),
+      {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string", description: "Skill name from list_skills" },
+          path: {
+            type: "string",
+            description:
+              "Optional file inside the skill directory, e.g. references/api.md. Defaults to SKILL.md",
+          },
+        },
+      },
+      { annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false } },
+    ),
+    tool(
+      "search_skills",
+      [
+        "Search skill stores (Zakura builtin catalog, skills.sh registry, GitHub) for an installable skill.",
+        "Use when the user needs a capability you have no playbook for. Returns install_spec strings to pass to install_skill.",
+      ].join(" "),
+      {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Keywords, e.g. \"react performance\"" },
+          store: {
+            type: "string",
+            enum: ["all", "builtin", "skills-sh", "github"],
+            default: "all",
+          },
+        },
+      },
+      { annotations: { readOnlyHint: true, openWorldHint: true } },
+    ),
+    tool(
+      "install_skill",
+      [
+        "Install a skill into this agent's workspace so it can be read later.",
+        "source accepts owner/repo, owner/repo@skill, a GitHub/GitLab URL, a SKILL.md link, builtin:<name>, or a whole `npx skills add …` command.",
+        "Alternatively pass path to register a skill directory you just authored in the workspace.",
+        "Tell the user what you are installing before calling this — it persists in their workspace.",
+      ].join(" "),
+      {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Install spec / URL / npx command" },
+          names: {
+            type: "array",
+            items: { type: "string" },
+            description: "When the source holds several skills, install only these",
+          },
+          path: {
+            type: "string",
+            description:
+              "Workspace directory containing a SKILL.md to register, e.g. /skills/my-skill",
+          },
+        },
+      },
+      { annotations: { readOnlyHint: false, openWorldHint: true, idempotentHint: false } },
+    ),
   ];
 
   const computerOn = isComputerEnvEnabled(agent);

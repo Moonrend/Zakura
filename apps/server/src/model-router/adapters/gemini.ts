@@ -12,7 +12,9 @@ import {
   type ModelProtocolAdapter,
 } from "../adapter.js";
 import { apiError, httpJson, httpSse, mapConcurrent } from "../http.js";
+import { acceptsImageInput, imageOmittedText } from "../media.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
+import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
 
 const GEMINI_EMBED_CONCURRENCY = 8;
@@ -32,7 +34,7 @@ function geminiRole(role: ModelChatMessage["role"]): string {
   return "user";
 }
 
-function toGeminiContents(messages: ModelChatMessage[]) {
+function toGeminiContents(route: ResolvedRoute, messages: ModelChatMessage[]) {
   const systemParts = messages
     .filter((m) => m.role === "system")
     .map((m) => m.content)
@@ -40,6 +42,7 @@ function toGeminiContents(messages: ModelChatMessage[]) {
     .join("\n\n");
 
   const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
+  const supportsImage = acceptsImageInput(route);
 
   for (const m of messages) {
     if (m.role === "system") continue;
@@ -83,6 +86,10 @@ function toGeminiContents(messages: ModelChatMessage[]) {
       for (const p of m.parts) {
         if (p.type === "text") {
           if (p.text) parts.push({ text: p.text });
+          continue;
+        }
+        if (!supportsImage) {
+          parts.push({ text: imageOmittedText() });
           continue;
         }
         const dataUri = parseDataUri(p.imageUrl.url);
@@ -133,7 +140,7 @@ function buildChatBody(
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
 ): Record<string, unknown> {
-  const { systemParts, contents } = toGeminiContents(messages);
+  const { systemParts, contents } = toGeminiContents(route, messages);
   const body: Record<string, unknown> = { contents };
   const genConfig: Record<string, unknown> = {};
   if (route.options.temperature != null) genConfig.temperature = route.options.temperature;
@@ -144,6 +151,7 @@ function buildChatBody(
   }
   const tools = mapTools(options);
   if (tools) body.tools = tools;
+  applyReasoningOptions(route.upstream.protocol, body, route.options);
   if (options?.extensions) Object.assign(body, options.extensions);
   return body;
 }
@@ -225,22 +233,31 @@ async function chat(
 /** Gemini streamGenerateContent 分片的累积状态 */
 export type GeminiStreamState = {
   text: string;
+  reasoning: string;
   toolCalls: ModelToolCall[];
   finishReason: string | null;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
 };
 
 export function createGeminiStreamState(): GeminiStreamState {
-  return { text: "", toolCalls: [], finishReason: null };
+  return { text: "", reasoning: "", toolCalls: [], finishReason: null };
 }
 
 /** 吸收一个流式 GenerateContentResponse 分片，返回新增文本 */
-export function absorbGeminiStreamChunk(state: GeminiStreamState, chunk: unknown): string {
-  if (!chunk || typeof chunk !== "object") return "";
+export function absorbGeminiStreamChunk(
+  state: GeminiStreamState,
+  chunk: unknown,
+): { content: string; reasoning: string } {
+  const empty = { content: "", reasoning: "" };
+  if (!chunk || typeof chunk !== "object") return empty;
   const o = chunk as {
     candidates?: Array<{
       content?: {
-        parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }>;
+        parts?: Array<{
+          text?: string;
+          thought?: boolean;
+          functionCall?: { name?: string; args?: unknown };
+        }>;
       };
       finishReason?: string;
     }>;
@@ -260,13 +277,19 @@ export function absorbGeminiStreamChunk(state: GeminiStreamState, chunk: unknown
     };
   }
   const candidate = o.candidates?.[0];
-  if (!candidate) return "";
+  if (!candidate) return empty;
   if (candidate.finishReason) state.finishReason = candidate.finishReason;
   let added = "";
+  let reasoningAdded = "";
   for (const p of candidate.content?.parts ?? []) {
     if (p.text) {
-      state.text += p.text;
-      added += p.text;
+      if (p.thought) {
+        state.reasoning += p.text;
+        reasoningAdded += p.text;
+      } else {
+        state.text += p.text;
+        added += p.text;
+      }
     }
     if (p.functionCall?.name) {
       state.toolCalls.push({
@@ -279,7 +302,7 @@ export function absorbGeminiStreamChunk(state: GeminiStreamState, chunk: unknown
       });
     }
   }
-  return added;
+  return { content: added, reasoning: reasoningAdded };
 }
 
 export function geminiStreamStateToResult(
@@ -328,7 +351,8 @@ async function chatStream(
         return;
       }
       const delta = absorbGeminiStreamChunk(state, chunk);
-      if (delta) callbacks.onDelta?.(delta);
+      if (delta.reasoning) callbacks.onReasoningDelta?.(delta.reasoning);
+      if (delta.content) callbacks.onDelta?.(delta.content);
     },
   );
   return geminiStreamStateToResult(state, route.model);

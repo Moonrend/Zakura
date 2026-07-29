@@ -6,6 +6,7 @@ import type {
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
   CloudAgentEvent,
+  CloudAgentRunOptions,
   CloudAgentRunStatus,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
@@ -86,6 +87,14 @@ export type TimelineItem =
     }
   | {
       kind: "assistant";
+      id: string;
+      content: string;
+      final: boolean;
+      seq: number;
+      runId?: string | null;
+    }
+  | {
+      kind: "reasoning";
       id: string;
       content: string;
       final: boolean;
@@ -395,6 +404,13 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     runId: string | null;
     final: boolean;
   } | null = null;
+  let currentReasoning: {
+    id: string;
+    content: string;
+    seq: number;
+    runId: string | null;
+    final: boolean;
+  } | null = null;
 
   const flushAssistant = () => {
     if (!currentAssistant) return;
@@ -408,10 +424,23 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     });
     currentAssistant = null;
   };
+  const flushReasoning = () => {
+    if (!currentReasoning) return;
+    items.push({
+      kind: "reasoning",
+      id: currentReasoning.id,
+      content: currentReasoning.content,
+      final: currentReasoning.final,
+      seq: currentReasoning.seq,
+      runId: currentReasoning.runId,
+    });
+    currentReasoning = null;
+  };
 
   for (const ev of events) {
     const p = ev.payload as Record<string, unknown>;
     if (ev.type === "user_message") {
+      flushReasoning();
       flushAssistant();
       const attachments = parseTimelineAttachments(p.attachments);
       items.push({
@@ -423,7 +452,24 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       });
       continue;
     }
+    if (ev.type === "reasoning_delta") {
+      const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
+      if (rolledBack.has(mid)) continue;
+      if (!currentReasoning || currentReasoning.id !== mid) {
+        flushReasoning();
+        currentReasoning = {
+          id: mid,
+          content: "",
+          seq: ev.seq,
+          runId: ev.runId,
+          final: false,
+        };
+      }
+      if (typeof p.delta === "string") currentReasoning.content += p.delta;
+      continue;
+    }
     if (ev.type === "assistant_delta") {
+      flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
       if (rolledBack.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
@@ -440,6 +486,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "assistant_message") {
+      flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
       if (rolledBack.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
@@ -458,6 +505,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "tool_call_start") {
+      flushReasoning();
       flushAssistant();
       const id = typeof p.toolCallId === "string" ? p.toolCallId : ev.id;
       const call: TimelineToolCall = {
@@ -528,6 +576,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "run_error") {
+      flushReasoning();
       flushAssistant();
       items.push({
         kind: "error",
@@ -555,6 +604,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     }
   }
   flushAssistant();
+  flushReasoning();
   return items;
 }
 
@@ -643,6 +693,7 @@ export function buildConversationTurns(
     if (
       ev.runId &&
       (ev.type === "assistant_delta" ||
+        ev.type === "reasoning_delta" ||
         ev.type === "assistant_message" ||
         ev.type === "assistant_rollback" ||
         ev.type === "tool_call_start" ||
@@ -761,10 +812,12 @@ export async function sendCloudMessage(
   content: string,
   parentRunId?: string | null,
   attachments?: CloudAgentAttachment[],
+  options?: CloudAgentRunOptions,
 ) {
   const json: Record<string, unknown> = { content };
   if (parentRunId !== undefined) json.parentRunId = parentRunId;
   if (attachments?.length) json.attachments = attachments;
+  if (options && Object.keys(options).length > 0) json.options = options;
   return api<{ runId: string }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/messages`, {
     method: "POST",
     json,
@@ -776,10 +829,14 @@ export async function regenerateCloudRun(
   agentId: string,
   sessionId: string,
   messageId?: string,
+  options?: CloudAgentRunOptions,
 ) {
+  const json: Record<string, unknown> = {};
+  if (messageId) json.messageId = messageId;
+  if (options && Object.keys(options).length > 0) json.options = options;
   return api<{ runId: string }>(
     `/api/agents/${agentId}/cloud/sessions/${sessionId}/regenerate`,
-    { method: "POST", json: messageId ? { messageId } : {} },
+    { method: "POST", json },
   );
 }
 
@@ -791,10 +848,14 @@ export async function cancelCloudRun(agentId: string, sessionId: string, runId?:
 }
 
 /** 失败后重试：不追加用户消息，基于现有历史重新运行 */
-export async function retryCloudRun(agentId: string, sessionId: string) {
+export async function retryCloudRun(
+  agentId: string,
+  sessionId: string,
+  options?: CloudAgentRunOptions,
+) {
   return api<{ runId: string }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/retry`, {
     method: "POST",
-    json: {},
+    json: options && Object.keys(options).length > 0 ? { options } : {},
   });
 }
 
@@ -829,7 +890,30 @@ export async function searchCloudSessions(q: string, agentId?: string) {
   });
 }
 
-export type ChatModelOption = { alias: string; name: string; upstream?: string };
+export type ChatModelOption = {
+  alias: string;
+  name: string;
+  upstream?: string;
+  isDefault?: boolean;
+  reasoning?: boolean;
+  reasoningLevels?: string[];
+  defaultReasonLevel?: string;
+};
+
+function intersectStringSets(values: string[][]): string[] | undefined {
+  if (values.length === 0) return undefined;
+  const display = new Map<string, string>();
+  for (const v of values.flat()) {
+    const text = String(v).trim();
+    if (text) display.set(text.toLowerCase(), text);
+  }
+  let acc = new Set((values[0] ?? []).map((v) => String(v).trim().toLowerCase()).filter(Boolean));
+  for (const list of values.slice(1)) {
+    const next = new Set(list.map((v) => String(v).trim().toLowerCase()).filter(Boolean));
+    acc = new Set([...acc].filter((v) => next.has(v)));
+  }
+  return [...acc].map((v) => display.get(v) ?? v);
+}
 
 /** 可用 chat 模型（模型路由 alias 去重） */
 export async function listChatModels(): Promise<ChatModelOption[]> {
@@ -839,18 +923,73 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
         alias?: string;
         name?: string;
         enabled?: boolean;
+        isDefault?: boolean;
+        meta?: {
+          reasoning?: boolean;
+          reasoningLevels?: string[];
+          defaultReasonLevel?: string;
+        };
         upstream?: { name?: string } | null;
       }>;
     }>(`/api/model-routes?capability=chat`);
-    const seen = new Set<string>();
-    const out: ChatModelOption[] = [];
+    const byAlias = new Map<
+      string,
+      {
+        alias: string;
+        name: string;
+        upstreams: string[];
+        isDefault: boolean;
+        reasoningFlags: boolean[];
+        levels: string[][];
+        defaultReasonLevel?: string;
+      }
+    >();
     for (const r of res.routes ?? []) {
       const alias = r.alias?.trim();
-      if (!alias || seen.has(alias) || r.enabled === false) continue;
-      seen.add(alias);
-      out.push({ alias, name: r.name || alias, upstream: r.upstream?.name });
+      if (!alias || r.enabled === false) continue;
+      const entry =
+        byAlias.get(alias) ??
+        {
+          alias,
+          name: r.name || alias,
+          upstreams: [],
+          isDefault: false,
+          reasoningFlags: [],
+          levels: [],
+        };
+      if (r.name && entry.name === alias) entry.name = r.name;
+      if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
+        entry.upstreams.push(r.upstream.name);
+      }
+      if (r.isDefault) entry.isDefault = true;
+      if (typeof r.meta?.reasoning === "boolean") {
+        entry.reasoningFlags.push(r.meta.reasoning);
+      }
+      if (Array.isArray(r.meta?.reasoningLevels)) {
+        entry.levels.push(r.meta.reasoningLevels.map(String).filter(Boolean));
+      }
+      if (!entry.defaultReasonLevel && r.meta?.defaultReasonLevel) {
+        entry.defaultReasonLevel = r.meta.defaultReasonLevel;
+      }
+      byAlias.set(alias, entry);
     }
-    return out;
+    return [...byAlias.values()].map((entry) => {
+      const reasoningLevels = intersectStringSets(entry.levels);
+      return {
+        alias: entry.alias,
+        name: entry.name,
+        upstream: entry.upstreams.join(", ") || undefined,
+        isDefault: entry.isDefault,
+        reasoning:
+          entry.reasoningFlags.length > 0
+            ? entry.reasoningFlags.every(Boolean)
+            : reasoningLevels
+              ? reasoningLevels.length > 0
+              : undefined,
+        reasoningLevels,
+        defaultReasonLevel: entry.defaultReasonLevel,
+      };
+    });
   } catch {
     return [];
   }

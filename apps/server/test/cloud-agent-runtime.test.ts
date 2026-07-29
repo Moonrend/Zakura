@@ -314,12 +314,12 @@ describe("chat stream accumulation", () => {
       absorbChatStreamChunk(state, {
         model: "gpt-x",
         choices: [{ delta: { content: "你" } }],
-      }),
+      }).content,
       "你",
     );
-    assert.equal(
+    assert.deepEqual(
       absorbChatStreamChunk(state, { choices: [{ delta: { content: "好" } }] }),
-      "好",
+      { content: "好", reasoning: "" },
     );
     absorbChatStreamChunk(state, {
       choices: [
@@ -353,6 +353,7 @@ describe("chat stream accumulation", () => {
 
     const result = chatStreamStateToResult(state, "fallback");
     assert.equal(result.content, "你好");
+    assert.equal(state.reasoning, "");
     assert.equal(result.model, "gpt-x");
     assert.equal(result.finishReason, "tool_calls");
     assert.equal(result.toolCalls?.length, 1);
@@ -360,6 +361,24 @@ describe("chat stream accumulation", () => {
     assert.equal(result.toolCalls?.[0]?.function.name, "web_search");
     assert.equal(result.toolCalls?.[0]?.function.arguments, '{"q":"天气"}');
     assert.equal(result.usage?.totalTokens, 15);
+  });
+
+  it("accumulates reasoning deltas separately from content", () => {
+    const state = createChatStreamState();
+    assert.deepEqual(
+      absorbChatStreamChunk(state, {
+        choices: [{ delta: { reasoning_content: "先想一下。" } }],
+      }),
+      { content: "", reasoning: "先想一下。" },
+    );
+    assert.deepEqual(
+      absorbChatStreamChunk(state, {
+        choices: [{ delta: { content: "结论" } }],
+      }),
+      { content: "结论", reasoning: "" },
+    );
+    assert.equal(state.reasoning, "先想一下。");
+    assert.equal(state.content, "结论");
   });
 
   it("fills missing tool call ids", () => {
@@ -371,6 +390,27 @@ describe("chat stream accumulation", () => {
     });
     const result = chatStreamStateToResult(state, "m");
     assert.equal(result.toolCalls?.[0]?.id, "call_0");
+  });
+
+  it("does not expose stray streamed tool calls when the model stops normally", () => {
+    const state = createChatStreamState();
+    absorbChatStreamChunk(state, {
+      choices: [
+        {
+          delta: {
+            content: "最终答案",
+            tool_calls: [{ index: 0, function: { name: "web_search", arguments: "{}" } }],
+          },
+          finish_reason: "stop",
+        },
+      ],
+    });
+
+    const result = chatStreamStateToResult(state, "m");
+    assert.equal(result.content, "最终答案");
+    assert.equal(result.finishReason, "stop");
+    assert.equal(result.toolCalls, undefined);
+    assert.equal(result.openai.choices[0]!.message.tool_calls, undefined);
   });
 });
 

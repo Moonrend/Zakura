@@ -55,7 +55,19 @@ type SyncResult = {
   updated: number;
   message?: string;
   models?: UpstreamModelItem[];
+  unmatchedModels?: Array<{
+    nativeModel: string;
+    displayName?: string;
+    canonicalModel: string;
+  }>;
 };
+
+function formatUnmatchedModels(models?: SyncResult["unmatchedModels"]): string | null {
+  if (!models?.length) return null;
+  return `以下模型匹配失败，需要手动选数据：${models
+    .map((model) => model.nativeModel)
+    .join("、")}`;
+}
 
 export function UpstreamModelSetup({
   upstreamId,
@@ -124,9 +136,12 @@ export function UpstreamModelSetup({
         `/api/model-upstreams/${upstreamId}/sync-models`,
         { method: "POST", json: {} },
       );
+      const unmatchedText = formatUnmatchedModels(result.unmatchedModels);
       setSyncMessage(
         result.synced > 0
-          ? `已解析 ${result.synced} 个模型`
+          ? [`已解析 ${result.synced} 个模型`, result.message, unmatchedText]
+              .filter(Boolean)
+              .join("；")
           : result.message ?? "未能从上游读取模型列表",
       );
       const syncedModels = result.models ?? [];
@@ -135,6 +150,7 @@ export function UpstreamModelSetup({
       if (result.synced > 0 && variant === "manage") {
         toast.success(`已同步 ${result.synced} 个模型`);
       }
+      if (unmatchedText) toast.message(unmatchedText);
       if (!next.some((model) => model.capability === "chat")) setManualOpen(true);
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : String(error));

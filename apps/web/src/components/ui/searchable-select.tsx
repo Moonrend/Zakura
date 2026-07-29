@@ -4,6 +4,7 @@ import * as React from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { CheckIcon, ChevronDownIcon, SearchIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 
 export type SearchableSelectItem = {
   value: string;
@@ -22,16 +23,16 @@ type SearchableSelectProps = {
   triggerClassName?: string;
 };
 
-function itemMatches(item: SearchableSelectItem, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  if (item.label.toLowerCase().includes(q)) return true;
-  if (item.value.toLowerCase().includes(q)) return true;
-  return (item.keywords ?? []).some((k) => k.toLowerCase().includes(q));
-}
+/** 标签权重最高，其次是取值，最后才是别名 */
+const FUZZY_KEYS = [
+  { name: "label", weight: 3 },
+  { name: "value", weight: 2 },
+  { name: "keywords", weight: 1 },
+];
 
 /**
  * 外观像 Select 的可搜索下拉：触发器为按钮，搜索框在弹出层内。
+ * 过滤走 Fuse 模糊匹配，容忍错字与缺字符。
  */
 export function SearchableSelect({
   items,
@@ -51,10 +52,7 @@ export function SearchableSelect({
     [items, value],
   );
 
-  const filtered = React.useMemo(
-    () => items.filter((i) => itemMatches(i, query)),
-    [items, query],
-  );
+  const filtered = useFuzzySearch(items, query, { keys: FUZZY_KEYS });
 
   React.useEffect(() => {
     if (!open) setQuery("");
@@ -113,8 +111,14 @@ export function SearchableSelect({
               />
             </div>
             <div className="max-h-64 overflow-auto p-1">
-              <Combobox.Empty className="px-2 py-3 text-center text-xs text-muted-foreground">
-                无匹配项
+              {/*
+                Base UI 的 Empty 必须常驻 DOM（aria-live 区域），只有 children 会被置空。
+                内边距放在子节点上，否则有结果时列表顶部会多出一条空白。
+              */}
+              <Combobox.Empty>
+                <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                  无匹配项
+                </div>
               </Combobox.Empty>
               <Combobox.List>
                 {(item: SearchableSelectItem) => (

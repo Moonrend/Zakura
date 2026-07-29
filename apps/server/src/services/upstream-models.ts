@@ -12,7 +12,11 @@ import {
   upstreamModels,
   type UpstreamModel,
 } from "../db/schema.js";
-import { parseJsonRecord, parseRouteOptions } from "../model-router/types.js";
+import {
+  parseJsonRecord,
+  parseRouteOptions,
+  parseUpstreamConfig,
+} from "../model-router/types.js";
 import type { ModelCatalogService } from "./model-catalog.js";
 import type { ModelUpstreamsService } from "./model-upstreams.js";
 import { isModelCapability } from "./model-routes.js";
@@ -88,6 +92,20 @@ export type UpstreamModelInput = {
   options?: ModelRouteOptions;
   meta?: Record<string, unknown>;
 };
+
+export type UpstreamModelMatchFailure = {
+  nativeModel: string;
+  displayName?: string;
+  canonicalModel: string;
+};
+
+function formatUnmatchedModelMessage(unmatchedModels: UpstreamModelMatchFailure[]) {
+  if (unmatchedModels.length === 0) return undefined;
+  const names = unmatchedModels.map((m) => m.nativeModel);
+  const shown = names.slice(0, 8).join("、");
+  const more = names.length > 8 ? ` 等 ${names.length} 个` : "";
+  return `目录未匹配到 ${shown}${more}，需要手动选数据`;
+}
 
 export class UpstreamModelsService {
   constructor(
@@ -204,7 +222,13 @@ export class UpstreamModelsService {
 
     const capability = input.capability;
 
-    const resolved = await this.resolveNames(tenantId, nativeModel, input.canonicalModel);
+    const resolved = await this.resolveNames(
+      tenantId,
+      nativeModel,
+      input.canonicalModel,
+      undefined,
+      this.catalogHintsForUpstream(upstream),
+    );
     const now = new Date();
 
     if (input.isDefault) {
@@ -253,6 +277,7 @@ export class UpstreamModelsService {
       weight?: number;
       enabled?: boolean;
       isDefault?: boolean;
+      capability?: ModelCapability;
       options?: ModelRouteOptions;
       meta?: Record<string, unknown>;
     },
@@ -262,8 +287,11 @@ export class UpstreamModelsService {
     });
     if (!existing) throw new Error("Not found");
 
-    if (patch.isDefault === true) {
-      await this.clearDefault(tenantId, existing.capability as ModelCapability);
+    const capability = patch.capability ?? (existing.capability as ModelCapability);
+    if (!isModelCapability(capability)) throw new Error("不支持的能力");
+    const isDefault = patch.isDefault ?? existing.isDefault;
+    if (isDefault && (patch.isDefault === true || capability !== existing.capability)) {
+      await this.clearDefault(tenantId, capability);
     }
 
     const nativeModel = patch.nativeModel?.trim() ?? existing.nativeModel;
@@ -279,7 +307,14 @@ export class UpstreamModelsService {
     if (patch.canonicalModel?.trim()) {
       canonicalModel = normalizeCanonicalModelId(patch.canonicalModel);
     } else if (patch.nativeModel?.trim() && patch.nativeModel.trim() !== existing.nativeModel) {
-      const resolved = await this.resolveNames(tenantId, nativeModel);
+      const upstream = await this.upstreams.getRow(tenantId, existing.upstreamId);
+      const resolved = await this.resolveNames(
+        tenantId,
+        nativeModel,
+        undefined,
+        undefined,
+        upstream ? this.catalogHintsForUpstream(upstream) : undefined,
+      );
       canonicalModel = resolved.canonicalModel;
       if (displayName == null) displayName = resolved.displayName;
       metaJson = JSON.stringify(resolved.meta ?? {});
@@ -291,12 +326,13 @@ export class UpstreamModelsService {
         nativeModel,
         canonicalModel,
         displayName,
+        capability,
         weight:
           patch.weight != null && patch.weight > 0
             ? String(Math.floor(patch.weight))
             : existing.weight,
         enabled: patch.enabled ?? existing.enabled,
-        isDefault: patch.isDefault ?? existing.isDefault,
+        isDefault,
         optionsJson:
           patch.options != null
             ? JSON.stringify(patch.options)
@@ -391,6 +427,7 @@ export class UpstreamModelsService {
     let updated = 0;
     const touchedKeys = new Set<string>();
     const results: UpstreamModel[] = [];
+    const unmatchedByNativeModel = new Map<string, UpstreamModelMatchFailure>();
 
     for (const remoteModel of remote.models) {
       const nativeModel = remoteModel.id.trim();
@@ -401,7 +438,15 @@ export class UpstreamModelsService {
         nativeModel,
         undefined,
         remoteModel.name,
+        this.catalogHintsForUpstream(upstream),
       );
+      if (resolved.matchStatus === "unmatched") {
+        unmatchedByNativeModel.set(nativeModel, {
+          nativeModel,
+          displayName: remoteModel.name,
+          canonicalModel: resolved.canonicalModel,
+        });
+      }
       const inferred = inferCapabilitiesFromModelId(nativeModel);
       const capabilities: ModelCapability[] =
         remoteModel.capability && isModelCapability(remoteModel.capability)
@@ -501,12 +546,14 @@ export class UpstreamModelsService {
       slug: upstream.slug,
       protocol: upstream.protocol,
     };
+    const unmatchedModels = [...unmatchedByNativeModel.values()];
     return {
       synced: created + updated,
       created,
       updated,
       pruned,
       message: remote.message,
+      unmatchedModels,
       models: results.map((r) => serializeUpstreamModel(r, up)),
     };
   }
@@ -519,8 +566,23 @@ export class UpstreamModelsService {
       .where(eq(upstreamModels.tenantId, tenantId));
 
     let updated = 0;
+    const unmatchedByNativeModel = new Map<string, UpstreamModelMatchFailure>();
     for (const row of rows) {
-      const resolved = await this.resolveNames(tenantId, row.nativeModel);
+      const upstream = await this.upstreams.getRow(tenantId, row.upstreamId);
+      const resolved = await this.resolveNames(
+        tenantId,
+        row.nativeModel,
+        undefined,
+        undefined,
+        upstream ? this.catalogHintsForUpstream(upstream) : undefined,
+      );
+      if (resolved.matchStatus === "unmatched") {
+        unmatchedByNativeModel.set(row.nativeModel, {
+          nativeModel: row.nativeModel,
+          displayName: row.displayName ?? undefined,
+          canonicalModel: resolved.canonicalModel,
+        });
+      }
       if (
         resolved.canonicalModel === row.canonicalModel &&
         (resolved.displayName || null) === (row.displayName || null)
@@ -547,7 +609,13 @@ export class UpstreamModelsService {
       updated += 1;
     }
     this.onMutate?.(tenantId);
-    return { rematched: rows.length, renamed: updated };
+    const unmatchedModels = [...unmatchedByNativeModel.values()];
+    return {
+      rematched: rows.length,
+      renamed: updated,
+      unmatchedModels,
+      message: formatUnmatchedModelMessage(unmatchedModels),
+    };
   }
 
   private async clearDefault(tenantId: string, capability: ModelCapability) {
@@ -568,11 +636,17 @@ export class UpstreamModelsService {
     nativeModel: string,
     canonicalOverride?: string,
     remoteName?: string,
+    hints?: {
+      providerId?: string;
+      providerName?: string;
+      apiBase?: string;
+    },
   ): Promise<{
     canonicalModel: string;
     displayName: string;
     capabilities: ModelCapability[];
     meta?: ModelCatalogEntry;
+    matchStatus: "override" | "catalog" | "unmatched";
   }> {
     if (canonicalOverride?.trim()) {
       const canonicalModel = normalizeCanonicalModelId(canonicalOverride);
@@ -580,10 +654,11 @@ export class UpstreamModelsService {
         canonicalModel,
         displayName: remoteName?.trim() || canonicalOverride.trim(),
         capabilities: [],
+        matchStatus: "override",
       };
     }
 
-    const match = await this.catalog.matchBest(tenantId, nativeModel);
+    const match = await this.catalog.matchBest(tenantId, nativeModel, hints);
     if (match) {
       const fromCatalog = (match.capabilities ?? []).filter(isModelCapability);
       const inferred = inferCapabilitiesFromModelId(nativeModel);
@@ -592,6 +667,7 @@ export class UpstreamModelsService {
         displayName: match.name || remoteName?.trim() || match.modelId,
         capabilities: fromCatalog.length > 0 ? fromCatalog : inferred,
         meta: match,
+        matchStatus: "catalog",
       };
     }
 
@@ -600,6 +676,23 @@ export class UpstreamModelsService {
       canonicalModel: fallback || nativeModel.trim().toLowerCase(),
       displayName: remoteName?.trim() || nativeModel.trim(),
       capabilities: inferCapabilitiesFromModelId(nativeModel),
+      matchStatus: "unmatched",
+    };
+  }
+
+  private catalogHintsForUpstream(upstream: {
+    protocol: string;
+    name?: string;
+    configJson: string;
+  }) {
+    const config = parseUpstreamConfig(
+      parseJsonRecord(upstream.configJson),
+      upstream.protocol as Parameters<typeof parseUpstreamConfig>[1],
+    );
+    return {
+      providerId: upstream.protocol,
+      providerName: upstream.name,
+      apiBase: config.baseUrl,
     };
   }
 }

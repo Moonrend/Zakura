@@ -10,7 +10,9 @@ import {
   type ModelProtocolAdapter,
 } from "../adapter.js";
 import { apiError, httpJson, httpSse } from "../http.js";
+import { acceptsImageInput, imageOmittedText } from "../media.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
+import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
 
 function apiKey(route: ResolvedRoute): string {
@@ -38,12 +40,13 @@ type AnthropicContentBlock =
         | { type: "url"; url: string };
     };
 
-function toAnthropicMessages(messages: ModelChatMessage[]): {
+function toAnthropicMessages(route: ResolvedRoute, messages: ModelChatMessage[]): {
   system?: string;
   messages: Array<{ role: string; content: string | AnthropicContentBlock[] }>;
 } {
   const systemParts: string[] = [];
   const out: Array<{ role: string; content: string | AnthropicContentBlock[] }> = [];
+  const supportsImage = acceptsImageInput(route);
 
   for (const m of messages) {
     if (m.role === "system") {
@@ -89,6 +92,10 @@ function toAnthropicMessages(messages: ModelChatMessage[]): {
       for (const p of m.parts) {
         if (p.type === "text") {
           if (p.text) blocks.push({ type: "text", text: p.text });
+          continue;
+        }
+        if (!supportsImage) {
+          blocks.push({ type: "text", text: imageOmittedText() });
           continue;
         }
         const dataUri = parseDataUri(p.imageUrl.url);
@@ -149,7 +156,7 @@ function buildBody(
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
 ): Record<string, unknown> {
-  const mapped = toAnthropicMessages(messages);
+  const mapped = toAnthropicMessages(route, messages);
   const body: Record<string, unknown> = {
     model: route.model,
     max_tokens: route.options.maxTokens ?? 4096,
@@ -162,6 +169,7 @@ function buildBody(
   if (tools) body.tools = tools;
   const toolChoice = mapToolChoice(options);
   if (toolChoice) body.tool_choice = toolChoice;
+  applyReasoningOptions(route.upstream.protocol, body, route.options);
   if (options?.extensions) Object.assign(body, options.extensions);
   return body;
 }
@@ -249,15 +257,24 @@ async function chat(
 export type AnthropicStreamState = {
   model: string | null;
   text: string;
+  reasoning: string;
   /** content block index → 工具调用累积 */
   tools: Map<number, { id: string; name: string; args: string }>;
+  thinkingBlocks: Set<number>;
   stopReason: string | null;
   inputTokens?: number;
   outputTokens?: number;
 };
 
 export function createAnthropicStreamState(): AnthropicStreamState {
-  return { model: null, text: "", tools: new Map(), stopReason: null };
+  return {
+    model: null,
+    text: "",
+    reasoning: "",
+    tools: new Map(),
+    thinkingBlocks: new Set(),
+    stopReason: null,
+  };
 }
 
 /**
@@ -267,16 +284,18 @@ export function createAnthropicStreamState(): AnthropicStreamState {
 export function absorbAnthropicStreamEvent(
   state: AnthropicStreamState,
   event: unknown,
-): string {
-  if (!event || typeof event !== "object") return "";
+): { content: string; reasoning: string } {
+  const empty = { content: "", reasoning: "" };
+  if (!event || typeof event !== "object") return empty;
   const ev = event as {
     type?: string;
     message?: { model?: string; usage?: { input_tokens?: number } };
     index?: number;
-    content_block?: { type?: string; id?: string; name?: string };
+    content_block?: { type?: string; id?: string; name?: string; thinking?: string };
     delta?: {
       type?: string;
       text?: string;
+      thinking?: string;
       partial_json?: string;
       stop_reason?: string;
     };
@@ -289,7 +308,7 @@ export function absorbAnthropicStreamEvent(
       if (ev.message?.usage?.input_tokens != null) {
         state.inputTokens = ev.message.usage.input_tokens;
       }
-      return "";
+      return empty;
     case "content_block_start":
       if (ev.content_block?.type === "tool_use" && ev.index != null) {
         state.tools.set(ev.index, {
@@ -298,27 +317,41 @@ export function absorbAnthropicStreamEvent(
           args: "",
         });
       }
-      return "";
+      if (ev.content_block?.type === "thinking" && ev.index != null) {
+        state.thinkingBlocks.add(ev.index);
+        if (ev.content_block.thinking) {
+          state.reasoning += ev.content_block.thinking;
+          return { content: "", reasoning: ev.content_block.thinking };
+        }
+      }
+      return empty;
     case "content_block_delta": {
       const d = ev.delta;
       if (d?.type === "text_delta" && typeof d.text === "string") {
         state.text += d.text;
-        return d.text;
+        return { content: d.text, reasoning: "" };
+      }
+      if (
+        (d?.type === "thinking_delta" || state.thinkingBlocks.has(ev.index ?? -1)) &&
+        typeof d?.thinking === "string"
+      ) {
+        state.reasoning += d.thinking;
+        return { content: "", reasoning: d.thinking };
       }
       if (d?.type === "input_json_delta" && typeof d.partial_json === "string") {
         const slot = ev.index != null ? state.tools.get(ev.index) : undefined;
         if (slot) slot.args += d.partial_json;
       }
-      return "";
+      return empty;
     }
     case "message_delta":
       if (ev.delta?.stop_reason) state.stopReason = ev.delta.stop_reason;
       if (ev.usage?.output_tokens != null) state.outputTokens = ev.usage.output_tokens;
-      return "";
+      return empty;
     case "error":
       throw new Error(`anthropic stream error: ${ev.error?.message ?? "unknown"}`);
     default:
-      return "";
+      return empty;
   }
 }
 
@@ -381,7 +414,8 @@ async function chatStream(
         return;
       }
       const delta = absorbAnthropicStreamEvent(state, event);
-      if (delta) callbacks.onDelta?.(delta);
+      if (delta.reasoning) callbacks.onReasoningDelta?.(delta.reasoning);
+      if (delta.content) callbacks.onDelta?.(delta.content);
     },
   );
   return anthropicStreamStateToResult(state, route.model);

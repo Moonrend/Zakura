@@ -1,17 +1,17 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import MarkdownRender from "markstream-react";
 import {
   BookmarkCheck,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   File as FileIcon,
   Image as ImageIcon,
-  Loader2,
   Pencil,
   RefreshCw,
 } from "lucide-react";
@@ -35,6 +35,7 @@ import type {
   TimelineToolCall,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
+import { Disclosure } from "@/components/ui/disclosure";
 import { ToolActivity } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 
@@ -282,6 +283,63 @@ function MemoryChip({ items }: { items: TimelineMemoryItem[] }) {
   );
 }
 
+function ReasoningBlock({
+  id,
+  content,
+  active,
+}: {
+  id: string;
+  content: string;
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(active);
+  const [userToggled, setUserToggled] = useState(false);
+
+  useEffect(() => {
+    if (active) {
+      setOpen(true);
+      setUserToggled(false);
+      return;
+    }
+    if (!userToggled) setOpen(false);
+  }, [active, userToggled]);
+
+  if (!content.trim()) return null;
+
+  return (
+    <div className="flex w-full max-w-[min(100%,42rem)] flex-col items-start">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`reasoning-${id}`}
+        onClick={() => {
+          setUserToggled(true);
+          setOpen((v) => !v);
+        }}
+        className="group inline-flex h-7 items-center gap-1 rounded-lg px-1.5 text-xs text-muted-foreground transition-colors duration-150 ease-fluid hover:bg-muted/60 hover:text-foreground"
+      >
+        <ChevronDown
+          className={cn(
+            "size-3.5 transition-transform duration-200 ease-fluid",
+            open ? "rotate-0" : "-rotate-90",
+          )}
+        />
+        <span>{active ? "思考中" : "思考过程"}</span>
+      </button>
+      <Disclosure open={open} className="w-full" innerClassName="w-full">
+        <div
+          id={`reasoning-${id}`}
+          className="mt-1 border-l-2 border-border/70 pl-3 text-[13px] leading-6 text-muted-foreground"
+        >
+          <div className={cn(MD_CLASS, "text-[13px] leading-6 text-muted-foreground")}>
+            <MarkdownRender content={content} final={!active} fade={false} />
+          </div>
+        </div>
+      </Disclosure>
+    </div>
+  );
+}
+
 /** 回答下方统一操作栏：复制 / 重新生成 / 来源 / 记忆 / 变体切换 */
 function AnswerToolbar({
   copyText,
@@ -412,6 +470,15 @@ function renderRunItems(
           </div>
         </div>,
       );
+    } else if (it.kind === "reasoning") {
+      blocks.push(
+        <ReasoningBlock
+          key={`r-${it.id}-${it.seq}`}
+          id={`${it.id}-${it.seq}`}
+          content={it.content}
+          active={opts.showStatus && it.runId === lastStatus?.runId}
+        />,
+      );
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -434,10 +501,15 @@ function renderRunItems(
     blocks.push(
       <div
         key={`s-${lastStatus.id}`}
-        className="flex items-center gap-2 text-xs text-muted-foreground"
+        className="animate-rise flex items-center gap-2 text-xs"
       >
-        <Loader2 className="h-3 w-3 animate-spin" />
-        <span>
+        <span className="running-halo relative flex size-3.5 items-center justify-center text-muted-foreground">
+          <span
+            className="size-2.5 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+            aria-hidden
+          />
+        </span>
+        <span className="text-shimmer">
           {STATUS_LABEL[lastStatus.status] ?? `${lastStatus.status}…`}
           {lastStatus.status === "tool" && lastStatus.detail ? (
             <span className="font-mono"> {lastStatus.detail}</span>
@@ -500,9 +572,9 @@ export function ChatMessages({
 
   if (turns.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 px-6">
-        <p className="text-xl font-medium text-foreground/80">
-          {agentName ? `有什么可以帮忙的？` : "开始对话"}
+      <div className="mt-auto flex flex-col items-center px-6 pb-8">
+        <p className="animate-rise text-2xl font-medium tracking-tight text-foreground/85">
+          {agentName ? "有什么可以帮忙的？" : "开始对话"}
         </p>
       </div>
     );
@@ -532,9 +604,9 @@ export function ChatMessages({
               (isLast && canAct));
 
           return (
-            <div key={turn.message.id} className="flex flex-col gap-2.5">
+            <div key={turn.message.id} className="animate-rise flex flex-col gap-2.5">
               {editing ? (
-                <div className="ml-auto w-full max-w-[85%] rounded-2xl border border-border bg-muted/20 p-2">
+                <div className="animate-rise ml-auto w-full max-w-[85%] rounded-2xl border border-border bg-muted/20 p-2">
                   <Textarea
                     autoFocus
                     value={draft}
@@ -543,6 +615,8 @@ export function ChatMessages({
                     onKeyDown={(e) => {
                       if (e.key === "Escape") setEditingId(null);
                       if (e.key === "Enter" && !e.shiftKey) {
+                        // 输入法组字中的回车是确认候选词，不能当作发送
+                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         e.preventDefault();
                         if (draft.trim()) {
                           onEditSend(turn.message.parentKey, draft.trim());
@@ -571,7 +645,7 @@ export function ChatMessages({
                 <div className="group flex flex-col items-end gap-1">
                   <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
                   <div className="flex items-end justify-end gap-1">
-                    <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
+                    <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:translate-x-1.5 md:opacity-0 md:transition-[opacity,transform] md:duration-200 md:ease-fluid md:group-hover:translate-x-0 md:group-hover:opacity-100 md:focus-within:translate-x-0 md:focus-within:opacity-100">
                       <CopyButton text={turn.message.content} />
                       <Tooltip>
                         <TooltipTrigger

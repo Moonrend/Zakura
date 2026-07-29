@@ -53,3 +53,7 @@ export { generateRunnerToken, hashRunnerToken, isRunnerToken } from "./runner-to
 export { RunnerClient } from "./runner-client.js";
 export type { RunnerClientOptions } from "./runner-client.js";
 export { toDockerHostPath, unwrapShellCommand } from "./docker-path.js";
+export {
+  resolveDockerContextSocketPath,
+  type DockerContextSocketOptions,
+} from "./docker-endpoint.js";

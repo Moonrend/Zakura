@@ -54,6 +54,7 @@ import type { MemoryStore } from "./memory-store.js";
 import type { MemoryProvidersService } from "./memory-providers.js";
 import type { Orchestrator } from "./orchestrator.js";
 import type { ToolCallStore } from "./tool-call-store.js";
+import { callSkillTool, isSkillToolName } from "./skills/tools.js";
 
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
@@ -231,6 +232,7 @@ export class McpGateway {
   private exposureService: import("./port-exposures.js").ExposureService | null = null;
   private fileShareService: import("./file-shares.js").FileShareService | null = null;
   private subagentRunner: CloudSubagentRunner | null = null;
+  private skillsService: import("./skills/service.js").SkillsService | null = null;
 
   constructor(
     private readonly db: Db,
@@ -280,6 +282,11 @@ export class McpGateway {
   /** 云端子代理执行器（由 CloudAgentRuntime 注入；MCP 客户端可直接调用 re_spawn_subagent） */
   setSubagentRunner(runner: CloudSubagentRunner): void {
     this.subagentRunner = runner;
+  }
+
+  /** 技能服务：re_list_skills / re_read_skill / re_search_skills / re_install_skill 的执行方 */
+  setSkillsService(service: import("./skills/service.js").SkillsService): void {
+    this.skillsService = service;
   }
 
   /**
@@ -889,6 +896,9 @@ export class McpGateway {
         where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
       });
       if (!agent) return textResult("Agent not found", true);
+      if (isSkillToolName(tool.localName)) {
+        return callSkillTool(this.skillsService, agent, tool.localName, args);
+      }
       return callAgentNativeTool(
         agent,
         this.agentService.workspace,

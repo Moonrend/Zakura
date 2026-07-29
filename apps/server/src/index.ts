@@ -41,6 +41,7 @@ import {
   reconcileOrphanExposures,
 } from "./services/port-exposures.js";
 import { FileShareService } from "./services/file-shares.js";
+import { SkillsService } from "./services/skills/index.js";
 import { PlatformServiceManager } from "./services/platform-services.js";
 import { PlatformServiceUsageService } from "./services/platform-service-usage.js";
 import { bindPlatformServiceRuntime } from "./platform-services/runtime-bind.js";
@@ -170,6 +171,8 @@ async function main() {
   gateway.setExposureService(exposures);
   const fileShares = new FileShareService(db, config);
   gateway.setFileShareService(fileShares);
+  const skillsService = new SkillsService({ db, agentService, fsProvider: workspaceFsProvider });
+  gateway.setSkillsService(skillsService);
 
   const app = new Hono();
   app.use(
@@ -221,6 +224,7 @@ async function main() {
       networkAudit,
       platformServices,
       platformServiceUsage,
+      skills: skillsService,
     }),
   );
 

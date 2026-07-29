@@ -461,8 +461,8 @@ export function FilePanel({
     <aside
       className={
         overlay
-          ? "fixed inset-0 z-50 flex flex-col bg-background"
-          : "flex h-full w-[400px] shrink-0 flex-col border-l border-border/60 bg-muted/10"
+          ? "animate-rise fixed inset-0 z-50 flex flex-col bg-background"
+          : "animate-slide-in-right flex h-full w-[400px] shrink-0 flex-col border-l border-border/60 bg-muted/10"
       }
     >
       {/* 头部 */}

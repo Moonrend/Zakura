@@ -20,6 +20,20 @@ export const MODEL_UPSTREAM_PROTOCOLS = [
   "volcengine",
   "baidu",
   "lingyiwanwu",
+  "vercel-ai-gateway",
+  "groq",
+  "together",
+  "fireworks",
+  "cerebras",
+  "deepinfra",
+  "novita",
+  "parasail",
+  "baseten",
+  "lambda",
+  "huggingface",
+  "sambanova",
+  "hyperbolic",
+  "nebius",
   "custom",
 ] as const;
 export type ModelUpstreamProtocol = (typeof MODEL_UPSTREAM_PROTOCOLS)[number];
@@ -44,6 +58,20 @@ export const OPENAI_COMPATIBLE_PROTOCOLS = [
   "volcengine",
   "baidu",
   "lingyiwanwu",
+  "vercel-ai-gateway",
+  "groq",
+  "together",
+  "fireworks",
+  "cerebras",
+  "deepinfra",
+  "novita",
+  "parasail",
+  "baseten",
+  "lambda",
+  "huggingface",
+  "sambanova",
+  "hyperbolic",
+  "nebius",
 ] as const satisfies readonly ModelUpstreamProtocol[];
 
 /** 模型能力类型 */
@@ -236,6 +264,90 @@ export const MODEL_UPSTREAM_PROTOCOL_META: Record<
     keywords: ["lingyi", "yi", "零一"],
     source: "new-api:LingYiWanWu",
   },
+  "vercel-ai-gateway": {
+    name: "Vercel AI Gateway",
+    description: "Vercel AI Gateway",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["vercel", "ai gateway", "gateway"],
+  },
+  groq: {
+    name: "Groq",
+    description: "Groq",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["groq", "llama", "mixtral"],
+  },
+  together: {
+    name: "Together AI",
+    description: "Together AI",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["together", "togetherai"],
+  },
+  fireworks: {
+    name: "Fireworks AI",
+    description: "Fireworks AI",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["fireworks"],
+  },
+  cerebras: {
+    name: "Cerebras",
+    description: "Cerebras",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["cerebras"],
+  },
+  deepinfra: {
+    name: "DeepInfra",
+    description: "DeepInfra",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["deepinfra"],
+  },
+  novita: {
+    name: "Novita AI",
+    description: "Novita AI",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["novita"],
+  },
+  parasail: {
+    name: "Parasail",
+    description: "Parasail",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["parasail"],
+  },
+  baseten: {
+    name: "Baseten",
+    description: "Baseten",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["baseten"],
+  },
+  lambda: {
+    name: "Lambda",
+    description: "Lambda",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["lambda", "lambda labs"],
+  },
+  huggingface: {
+    name: "Hugging Face",
+    description: "Hugging Face Router",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["huggingface", "hf", "router"],
+  },
+  sambanova: {
+    name: "SambaNova",
+    description: "SambaNova Cloud",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["sambanova", "sambacloud"],
+  },
+  hyperbolic: {
+    name: "Hyperbolic",
+    description: "Hyperbolic",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["hyperbolic"],
+  },
+  nebius: {
+    name: "Nebius AI Studio",
+    description: "Nebius AI Studio",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["nebius", "ai studio"],
+  },
   custom: {
     name: "自定义",
     description: "自定义",
@@ -268,6 +380,20 @@ export const MODEL_UPSTREAM_DEFAULT_BASE_URLS: Partial<
   volcengine: "https://ark.cn-beijing.volces.com/api/v3",
   baidu: "https://qianfan.baidubce.com/v2",
   lingyiwanwu: "https://api.lingyiwanwu.com/v1",
+  "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1",
+  groq: "https://api.groq.com/openai/v1",
+  together: "https://api.together.xyz/v1",
+  fireworks: "https://api.fireworks.ai/inference/v1",
+  cerebras: "https://api.cerebras.ai/v1",
+  deepinfra: "https://api.deepinfra.com/v1/openai",
+  novita: "https://api.novita.ai/v3/openai",
+  parasail: "https://api.parasail.io/v1",
+  baseten: "https://inference.baseten.co/v1",
+  lambda: "https://api.lambda.ai/v1",
+  huggingface: "https://router.huggingface.co/v1",
+  sambanova: "https://api.sambanova.ai/v1",
+  hyperbolic: "https://api.hyperbolic.xyz/v1",
+  nebius: "https://api.studio.nebius.ai/v1",
 };
 
 /** 百炼 DashScope 区域端点 */
@@ -368,6 +494,20 @@ export function applyUpstreamProtocolDefaults(
     case "volcengine":
     case "baidu":
     case "lingyiwanwu":
+    case "vercel-ai-gateway":
+    case "groq":
+    case "together":
+    case "fireworks":
+    case "cerebras":
+    case "deepinfra":
+    case "novita":
+    case "parasail":
+    case "baseten":
+    case "lambda":
+    case "huggingface":
+    case "sambanova":
+    case "hyperbolic":
+    case "nebius":
       return {
         ...base,
         baseUrl:
@@ -407,6 +547,26 @@ export function applyUpstreamProtocolDefaults(
 }
 
 /** 路由级选项（存于 model_routes.options_json） */
+export const MODEL_REASONING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type ModelReasoningEffort = (typeof MODEL_REASONING_EFFORTS)[number];
+
+export interface ModelReasoningOptions {
+  enabled?: boolean;
+  /** Reasoning effort is metadata-driven; providers may add values beyond our built-ins. */
+  effort?: string;
+  summary?: "auto" | "concise" | "detailed";
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+}
+
 export interface ModelRouteOptions {
   dimensions?: number;
   topN?: number;
@@ -417,6 +577,7 @@ export interface ModelRouteOptions {
   size?: string;
   quality?: string;
   responseFormat?: "url" | "b64_json";
+  reasoning?: ModelReasoningOptions;
   /** 扩展字段：预留 provider-specific / tool 相关选项 */
   extensions?: Record<string, unknown>;
 }
@@ -473,6 +634,8 @@ export interface ModelChatMessage {
 export interface ModelChatInvokeOptions {
   tools?: ModelToolDefinition[];
   toolChoice?: ModelToolChoice;
+  /** 本次调用覆盖路由默认选项；用于运行时模型参数（如 reasoning）。 */
+  routeOptions?: Partial<ModelRouteOptions>;
   /** 透传扩展参数（各协议适配器可选择性消费） */
   extensions?: Record<string, unknown>;
 }
@@ -546,6 +709,9 @@ export interface ModelCatalogEntry {
   /** chat | embedding | image 等推断能力 */
   capabilities: ModelCapability[];
   reasoning?: boolean;
+  /** 可选 reasoning 档位，来自 models.dev overlay / 元数据源；不要在 UI 中臆造。 */
+  reasoningLevels?: string[];
+  defaultReasonLevel?: string;
   toolCall?: boolean;
   attachment?: boolean;
   openWeights?: boolean;
@@ -563,6 +729,8 @@ export interface ModelCatalogEntry {
   /** models.dev / metadata 原始 api base（若有，仅参考） */
   apiBase?: string;
   npm?: string;
+  /** 上游目录原始字段，便于后续不用改 schema 就消费新 metadata。 */
+  raw?: Record<string, unknown>;
 }
 
 /**

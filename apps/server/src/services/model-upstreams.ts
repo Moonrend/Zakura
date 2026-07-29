@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
+  OPENAI_COMPATIBLE_PROTOCOLS,
   MODEL_UPSTREAM_PROTOCOLS,
   MODEL_UPSTREAM_PROTOCOL_META,
   applyUpstreamProtocolDefaults,
@@ -21,6 +22,23 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   return base || "upstream";
+}
+
+const OPTIONAL_API_KEY_PROTOCOLS = new Set<ModelUpstreamProtocol>([
+  "custom",
+  "ollama",
+]);
+
+function requiresApiKey(protocol: ModelUpstreamProtocol): boolean {
+  return (
+    (protocol === "anthropic" ||
+      protocol === "gemini" ||
+      protocol === "bailian" ||
+      (OPENAI_COMPATIBLE_PROTOCOLS as readonly ModelUpstreamProtocol[]).includes(
+        protocol,
+      )) &&
+    !OPTIONAL_API_KEY_PROTOCOLS.has(protocol)
+  );
 }
 
 export function serializeUpstream(row: ModelUpstream) {
@@ -98,27 +116,7 @@ export class ModelUpstreamsService {
     if (protocol === "azure-openai" && !parsed.apiVersion) {
       throw new Error("Azure OpenAI 需要配置 apiVersion");
     }
-    if (
-      (protocol === "gemini" ||
-        protocol === "anthropic" ||
-        protocol === "bailian" ||
-        protocol === "openai" ||
-        protocol === "deepseek" ||
-        protocol === "moonshot" ||
-        protocol === "siliconflow" ||
-        protocol === "openrouter" ||
-        protocol === "zhipu" ||
-        protocol === "minimax" ||
-        protocol === "mistral" ||
-        protocol === "xai" ||
-        protocol === "perplexity" ||
-        protocol === "jina" ||
-        protocol === "cohere" ||
-        protocol === "volcengine" ||
-        protocol === "baidu" ||
-        protocol === "lingyiwanwu") &&
-      !parsed.apiKey
-    ) {
+    if (requiresApiKey(protocol) && !parsed.apiKey) {
       throw new Error(`${MODEL_UPSTREAM_PROTOCOL_META[protocol].name} 需要配置 API Key`);
     }
     return {

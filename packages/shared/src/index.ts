@@ -170,6 +170,7 @@ export {
   MODEL_CAPABILITIES,
   MODEL_ROUTE_STRATEGIES,
   MODEL_CATALOG_SOURCES,
+  MODEL_REASONING_EFFORTS,
   MODEL_UPSTREAM_PROTOCOL_META,
   MODEL_UPSTREAM_DEFAULT_BASE_URLS,
   BAILIAN_ENDPOINTS,
@@ -180,6 +181,8 @@ export {
   type ModelCapability,
   type ModelRouteStrategy,
   type ModelCatalogSource,
+  type ModelReasoningEffort,
+  type ModelReasoningOptions,
   type ModelUpstreamConfig,
   type ModelUpstreamFormField,
   type ModelUpstreamRegion,
@@ -458,6 +461,32 @@ export type { McpCreateTaskResult } from "./mcp-tool-descriptor.js";
 export type { PublicMcpToolDescriptor } from "./mcp-tool-descriptor.js";
 
 export {
+  AGENT_SKILLS_DIR,
+  SKILL_MANIFEST_FILE,
+  SKILL_MAX_FILES,
+  SKILL_MAX_FILE_BYTES,
+  SKILL_MAX_TOTAL_BYTES,
+  SKILL_DISCOVERY_DIRS,
+  SKILL_STORES,
+} from "./skills.js";
+export type {
+  SkillStoreId,
+  SkillStoreMeta,
+  SkillSourceKind,
+  SkillSource,
+  SkillFrontmatter,
+  SkillFile,
+  SkillPackage,
+  SkillRecord,
+  AgentSkillStatus,
+  AgentSkillRecord,
+  SkillSearchItem,
+  SkillResolveResult,
+  SkillInstallRequest,
+  SkillInstallResult,
+} from "./skills.js";
+
+export {
   CLOUD_AGENT_EVENT_TYPES,
   CLOUD_AGENT_SESSION_KINDS,
   parseCloudAgentConfig,
@@ -472,6 +501,7 @@ export type {
   CloudAgentSessionOrigin,
   CloudAgentUserMessagePayload,
   CloudAgentRunStartPayload,
+  CloudAgentReasoningDeltaPayload,
   CloudAgentAssistantDeltaPayload,
   CloudAgentAssistantMessagePayload,
   CloudAgentAssistantRollbackPayload,
@@ -491,4 +521,5 @@ export type {
   CloudAgentEventPayload,
   CloudAgentEvent,
   CloudAgentConfig,
+  CloudAgentRunOptions,
 } from "./cloud-agent.js";

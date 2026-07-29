@@ -33,6 +33,10 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
     await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch((err) => {
       console.warn("[db] CREATE EXTENSION vector:", err);
     });
+    // 会话标题模糊搜索用；装不上（托管库未提供 / 权限不足）时搜索自动回退 ILIKE
+    await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`.catch((err) => {
+      console.warn("[db] CREATE EXTENSION pg_trgm（会话搜索将回退 ILIKE）:", err);
+    });
     const db = drizzlePg(sql);
     await migratePg(db, { migrationsFolder });
     await sql.end({ timeout: 5 });

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
-import { toDockerHostPath } from "@zakura/core";
+import { resolveDockerContextSocketPath, toDockerHostPath } from "@zakura/core";
 import {
   AGENT_PORT_CDP,
   AGENT_PORT_NOVNC,
@@ -96,7 +96,8 @@ export class RunnerDockerWorkspace {
     private readonly publicHost: string,
     dockerOpts?: Docker.DockerOptions,
   ) {
-    this.docker = new Docker(dockerOpts);
+    const socketPath = dockerOpts ? undefined : resolveDockerContextSocketPath();
+    this.docker = new Docker(socketPath ? { socketPath } : dockerOpts);
   }
 
   workspacePath(agentId: string): string {

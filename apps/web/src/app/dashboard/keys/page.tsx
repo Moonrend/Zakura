@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SearchField } from "@/components/ui/search-field";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 
 type KeyRow = {
   id: string;
@@ -34,6 +36,8 @@ export default function KeysPage() {
   const [name, setName] = useState("mcp");
   const [created, setCreated] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState("");
+  const filtered = useFuzzySearch(rows, q, { keys: ["name", "keyPrefix"] });
 
   const load = useCallback(async () => {
     try {
@@ -71,7 +75,16 @@ export default function KeysPage() {
       {loading ? (
         <Skeleton className="h-40 w-full rounded-lg" />
       ) : (
-        <Table>
+        <>
+          {rows.length > 5 ? (
+            <SearchField
+              value={q}
+              onValueChange={setQ}
+              placeholder="搜索 API Key"
+              className="max-w-sm"
+            />
+          ) : null}
+          <Table>
           <TableHeader>
             <TableRow>
               <TableHead>名称</TableHead>
@@ -81,7 +94,7 @@ export default function KeysPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((r) => (
+            {filtered.map((r) => (
               <TableRow key={r.id}>
                 <TableCell className="font-medium">{r.name}</TableCell>
                 <TableCell>
@@ -93,15 +106,16 @@ export default function KeysPage() {
                 </TableCell>
               </TableRow>
             ))}
-            {!rows.length ? (
+            {!filtered.length ? (
               <TableRow>
                 <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
-                  暂无 Key
+                  {rows.length ? `没有匹配「${q}」的 Key` : "暂无 Key"}
                 </TableCell>
               </TableRow>
             ) : null}
           </TableBody>
-        </Table>
+          </Table>
+        </>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>

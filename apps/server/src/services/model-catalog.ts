@@ -7,7 +7,11 @@ import {
   type ModelCatalogSource,
 } from "@zakura/shared";
 import type { Db } from "../db/client.js";
-import { modelCatalogEntries, newId } from "../db/schema.js";
+import {
+  modelCatalogEntries,
+  newId,
+  type ModelCatalogEntryRow,
+} from "../db/schema.js";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const LLM_METADATA_URL = "https://basellm.github.io/llm-metadata/api/all.json";
@@ -19,7 +23,8 @@ function inferCapabilities(model: Record<string, unknown>): ModelCapability[] {
   const modalities = model.modalities as
     | { input?: string[]; output?: string[] }
     | undefined;
-  const outputs = modalities?.output ?? [];
+  const inputs = (modalities?.input ?? []).map((m) => String(m).toLowerCase());
+  const outputs = (modalities?.output ?? []).map((m) => String(m).toLowerCase());
 
   if (
     id.includes("embed") ||
@@ -46,6 +51,11 @@ function inferCapabilities(model: Record<string, unknown>): ModelCapability[] {
   ) {
     caps.add("image");
   }
+  if (inputs.includes("image") || outputs.includes("text")) {
+    if (!caps.has("embedding") && !caps.has("rerank")) {
+      caps.add("chat");
+    }
+  }
   if (caps.size === 0 || outputs.includes("text") || !outputs.length) {
     if (!caps.has("embedding") && !caps.has("rerank")) {
       caps.add("chat");
@@ -65,6 +75,18 @@ function normalizeEntry(
   const cost = model.cost as ModelCatalogEntry["cost"] | undefined;
   const limit = model.limit as { context?: number; output?: number } | undefined;
   const modalities = model.modalities as ModelCatalogEntry["modalities"] | undefined;
+  const reasoningOptions = parseReasoningOptions(model.reasoning_options);
+  const reasoningLevelsRaw =
+    model.reasoningLevels ?? model.reasoning_levels ?? reasoningOptions.levels;
+  const reasoningLevels = Array.isArray(reasoningLevelsRaw)
+    ? reasoningLevelsRaw.map(String).filter(Boolean)
+    : undefined;
+  const defaultReasonLevel =
+    typeof model.defaultReasonLevel === "string"
+      ? model.defaultReasonLevel
+      : typeof model.default_reason_level === "string"
+        ? model.default_reason_level
+        : reasoningOptions.defaultLevel;
   return {
     source,
     providerId,
@@ -74,7 +96,9 @@ function normalizeEntry(
     description: typeof model.description === "string" ? model.description : undefined,
     family: typeof model.family === "string" ? model.family : undefined,
     capabilities: inferCapabilities({ ...model, id: modelId }),
-    reasoning: model.reasoning === true,
+    reasoning: model.reasoning === true || Boolean(reasoningLevels?.length),
+    reasoningLevels,
+    defaultReasonLevel,
     toolCall: model.tool_call === true || model.toolCall === true,
     attachment: model.attachment === true,
     openWeights: model.open_weights === true || model.openWeights === true,
@@ -91,7 +115,106 @@ function normalizeEntry(
     knowledge: typeof model.knowledge === "string" ? model.knowledge : undefined,
     apiBase: typeof providerMeta?.api === "string" ? providerMeta.api : undefined,
     npm: typeof providerMeta?.npm === "string" ? providerMeta.npm : undefined,
+    raw: model,
   };
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return Boolean(v && typeof v === "object" && !Array.isArray(v));
+}
+
+function parseReasoningOptions(raw: unknown): {
+  levels?: string[];
+  defaultLevel?: string;
+} {
+  if (!Array.isArray(raw)) return {};
+  const levels: string[] = [];
+  for (const item of raw) {
+    if (!isPlainRecord(item)) continue;
+    if (item.type === "toggle" && !levels.includes("none")) {
+      levels.push("none");
+    }
+    if (item.type === "effort" && Array.isArray(item.values)) {
+      for (const value of item.values) {
+        const level = String(value).trim();
+        if (level && !levels.includes(level)) levels.push(level);
+      }
+    }
+  }
+  return {
+    ...(levels.length ? { levels } : {}),
+    ...(levels.includes("auto") ? { defaultLevel: "auto" } : {}),
+  };
+}
+
+type CatalogMatchHints = {
+  source?: ModelCatalogSource;
+  limit?: number;
+  providerId?: string;
+  providerName?: string;
+  apiBase?: string;
+};
+
+function lastSlashSegment(raw: string): string | null {
+  const trimmed = raw.trim();
+  const idx = trimmed.lastIndexOf("/");
+  if (idx < 0) return null;
+  const segment = trimmed.slice(idx + 1).trim();
+  return segment && segment !== trimmed ? segment : null;
+}
+
+function normalizeUrlForMatch(raw?: string): string | undefined {
+  if (!raw?.trim()) return undefined;
+  try {
+    const u = new URL(raw.trim());
+    u.hash = "";
+    u.search = "";
+    return u.toString().replace(/\/+$/, "").toLowerCase();
+  } catch {
+    return raw.trim().replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function sameApiBase(a?: string, b?: string): boolean {
+  const aa = normalizeUrlForMatch(a);
+  const bb = normalizeUrlForMatch(b);
+  if (!aa || !bb) return false;
+  return aa === bb || aa.startsWith(`${bb}/`) || bb.startsWith(`${aa}/`);
+}
+
+function hintRank(entry: ModelCatalogEntry, opts?: CatalogMatchHints): number {
+  let score = 0;
+  if (opts?.apiBase && sameApiBase(entry.apiBase, opts.apiBase)) score += 40;
+  const providerId = opts?.providerId?.trim().toLowerCase();
+  if (providerId && entry.providerId.toLowerCase() === providerId) score += 20;
+  const providerName = opts?.providerName?.trim().toLowerCase();
+  if (providerName) {
+    const name = entry.providerName.toLowerCase();
+    if (name === providerName) score += 12;
+    else if (name.includes(providerName) || providerName.includes(name)) score += 6;
+  }
+  if (entry.reasoningLevels?.length) score += 2;
+  if (entry.raw && Object.keys(entry.raw).length > 0) score += 1;
+  return score;
+}
+
+function rowsToRankedMatches(
+  rows: ModelCatalogEntryRow[],
+  opts: CatalogMatchHints | undefined,
+  score: number | ((entry: ModelCatalogEntry) => number),
+) {
+  return rows
+    .map((r) => {
+      const meta = JSON.parse(r.metaJson) as ModelCatalogEntry;
+      return {
+        ...meta,
+        id: r.id,
+        score: typeof score === "function" ? score(meta) : score,
+        __rank: hintRank(meta, opts),
+      };
+    })
+    .sort((a, b) => b.__rank - a.__rank || a.providerName.localeCompare(b.providerName))
+    .map(({ __rank: _rank, ...item }) => item);
 }
 
 /** 解析 models.dev /api.json：{ [providerId]: { id, name, api, models: { [id]: {...} } } } */
@@ -175,13 +298,18 @@ export function parseLlmMetadataPayload(data: unknown): ModelCatalogEntry[] {
 }
 
 export class ModelCatalogService {
+  private readonly ensureInFlight = new Map<string, Promise<void>>();
+
   constructor(private readonly db: Db) {}
 
   sources() {
     return MODEL_CATALOG_SOURCES.map((source) => ({
       source,
       name: source === "models.dev" ? "models.dev" : "LLM Metadata",
-      url: source === "models.dev" ? MODELS_DEV_URL : LLM_METADATA_URL,
+      url:
+        source === "models.dev"
+          ? MODELS_DEV_URL
+          : LLM_METADATA_URL,
     }));
   }
 
@@ -315,6 +443,56 @@ export class ModelCatalogService {
     return { imported: entries.length, source };
   }
 
+  private async countSource(
+    tenantId: string,
+    source: ModelCatalogSource,
+  ): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(modelCatalogEntries)
+      .where(
+        and(
+          eq(modelCatalogEntries.tenantId, tenantId),
+          eq(modelCatalogEntries.source, source),
+        ),
+      );
+    return rows[0]?.count ?? 0;
+  }
+
+  /**
+   * 懒加载模型元数据目录。同步上游模型/匹配规范名时，租户还没有
+   * models.dev 或 llm-metadata 缓存就自动拉取，避免必须先手动刷新。
+   */
+  async ensureTenantCatalog(tenantId: string): Promise<void> {
+    const existing = this.ensureInFlight.get(tenantId);
+    if (existing) return existing;
+
+    const task = (async () => {
+      const errors: string[] = [];
+      for (const source of MODEL_CATALOG_SOURCES) {
+        const count = await this.countSource(tenantId, source);
+        if (count > 0) continue;
+        try {
+          await this.importFrom(tenantId, source);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push(`${source}: ${message}`);
+          console.warn(`[model-catalog] auto import ${source} failed:`, message);
+        }
+      }
+      if (errors.length === MODEL_CATALOG_SOURCES.length) {
+        console.warn(`[model-catalog] auto import skipped matching: ${errors.join("; ")}`);
+      }
+    })();
+
+    this.ensureInFlight.set(tenantId, task);
+    try {
+      await task;
+    } finally {
+      this.ensureInFlight.delete(tenantId);
+    }
+  }
+
   async clear(tenantId: string, source?: ModelCatalogSource) {
     if (source) {
       await this.db
@@ -339,10 +517,12 @@ export class ModelCatalogService {
   async match(
     tenantId: string,
     modelQuery: string,
-    opts?: { source?: ModelCatalogSource; limit?: number },
+    opts?: CatalogMatchHints,
   ) {
     const q = modelQuery.trim();
     if (!q) return { matches: [] as Array<ModelCatalogEntry & { id: string; score: number }> };
+
+    await this.ensureTenantCatalog(tenantId);
 
     const conditions = [eq(modelCatalogEntries.tenantId, tenantId)];
     if (opts?.source) conditions.push(eq(modelCatalogEntries.source, opts.source));
@@ -356,11 +536,7 @@ export class ModelCatalogService {
 
     if (exact.length > 0) {
       return {
-        matches: exact.map((r) => ({
-          ...(JSON.parse(r.metaJson) as ModelCatalogEntry),
-          id: r.id,
-          score: 1,
-        })),
+        matches: rowsToRankedMatches(exact, opts, 1),
       };
     }
 
@@ -378,11 +554,7 @@ export class ModelCatalogService {
 
     if (caseInsensitive.length > 0) {
       return {
-        matches: caseInsensitive.map((r) => ({
-          ...(JSON.parse(r.metaJson) as ModelCatalogEntry),
-          id: r.id,
-          score: 1,
-        })),
+        matches: rowsToRankedMatches(caseInsensitive, opts, 1),
       };
     }
 
@@ -400,11 +572,7 @@ export class ModelCatalogService {
         .limit(opts?.limit ?? 20);
       if (normRows.length > 0) {
         return {
-          matches: normRows.map((r) => ({
-            ...(JSON.parse(r.metaJson) as ModelCatalogEntry),
-            id: r.id,
-            score: 0.98,
-          })),
+          matches: rowsToRankedMatches(normRows, opts, 0.98),
         };
       }
     }
@@ -426,20 +594,19 @@ export class ModelCatalogService {
       .limit(opts?.limit ?? 20);
 
     return {
-      matches: fuzzy.map((r) => {
-        const meta = JSON.parse(r.metaJson) as ModelCatalogEntry;
+      matches: rowsToRankedMatches(fuzzy, opts, (meta) => {
         const idLower = meta.modelId.toLowerCase();
         const qLower = q.toLowerCase();
         const idNorm = normalizeCanonicalModelId(meta.modelId);
-        const score =
+        return (
           idLower === qLower || idNorm === qNorm
             ? 1
             : idNorm.endsWith(`/${qNorm}`) || idNorm.endsWith(`-${qNorm}`)
               ? 0.9
               : idLower.includes(qLower) || idNorm.includes(qNorm)
                 ? 0.7
-                : 0.5;
-        return { ...meta, id: r.id, score };
+                : 0.5
+        );
       }),
     };
   }
@@ -448,10 +615,22 @@ export class ModelCatalogService {
   async matchBest(
     tenantId: string,
     modelQuery: string,
+    opts?: Omit<CatalogMatchHints, "limit">,
   ): Promise<(ModelCatalogEntry & { id: string; score: number }) | null> {
-    const { matches } = await this.match(tenantId, modelQuery, { limit: 5 });
-    const best = matches[0];
-    if (!best || best.score < 0.7) return null;
+    const pickBest = async (query: string) => {
+      const { matches } = await this.match(tenantId, query, { ...opts, limit: 5 });
+      const best = matches[0];
+      return best && best.score >= 0.7 ? best : null;
+    };
+
+    const best = await pickBest(modelQuery);
+    const fallbackQuery = lastSlashSegment(modelQuery);
+    if (!fallbackQuery || (best && best.score >= 0.98)) return best;
+
+    const fallbackBest = await pickBest(fallbackQuery);
+    if (fallbackBest && (!best || fallbackBest.score >= best.score)) {
+      return fallbackBest;
+    }
     return best;
   }
 

@@ -10,6 +10,8 @@ import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { NoSearchResult, SearchField } from "@/components/ui/search-field";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { cn } from "@/lib/utils";
 
 type InstanceRow = {
@@ -92,6 +94,14 @@ function formatError(err: string | null | undefined): string | null {
 export default function McpServersPage() {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const filtered = useFuzzySearch(instances, q, {
+    keys: [
+      { name: "name", weight: 3 },
+      { name: "slug", weight: 2 },
+      { name: "providerId", weight: 1 },
+    ],
+  });
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -166,8 +176,20 @@ export default function McpServersPage() {
           </div>
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {instances.map((i) => {
+        <>
+          {instances.length > 4 ? (
+            <SearchField
+              value={q}
+              onValueChange={setQ}
+              placeholder="搜索 MCP 服务器"
+              className="max-w-sm"
+            />
+          ) : null}
+          {filtered.length === 0 ? (
+            <NoSearchResult query={q} />
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filtered.map((i) => {
             const authNeeded = needsUpstreamAuth(i);
             const errorText = formatError(i.lastError);
 
@@ -230,8 +252,10 @@ export default function McpServersPage() {
                 ) : null}
               </Link>
             );
-          })}
-        </div>
+              })}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

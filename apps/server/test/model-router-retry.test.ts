@@ -212,6 +212,43 @@ describe("httpSse", () => {
     assert.deepEqual(payloads, ['{"a":1}', "[DONE]"]);
   });
 
+  it("lets the data callback stop reading without waiting for upstream close", async () => {
+    let cancelled = false;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal ?? null;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(encoder.encode("data: [DONE]\n\n"));
+          signal?.addEventListener("abort", () => {
+            try {
+              c.error(signal.reason);
+            } catch {
+              /* already closed */
+            }
+          });
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+
+    const payloads: string[] = [];
+    await httpSse(
+      "t",
+      "http://x",
+      { method: "POST", idleTimeoutMs: 1000 },
+      (p) => {
+        payloads.push(p);
+        return false;
+      },
+    );
+
+    assert.deepEqual(payloads, ["[DONE]"]);
+    assert.equal(cancelled, true);
+  });
+
   it("aborts on idle timeout during streaming", async () => {
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       const signal = init?.signal ?? null;

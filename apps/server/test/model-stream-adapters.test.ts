@@ -23,7 +23,7 @@ describe("anthropic stream accumulation", () => {
         type: "content_block_delta",
         index: 0,
         delta: { type: "text_delta", text: "查一下" },
-      }),
+      }).content,
       "查一下",
     );
     absorbAnthropicStreamEvent(state, {
@@ -82,6 +82,24 @@ describe("anthropic stream accumulation", () => {
       }),
     );
   });
+
+  it("accumulates thinking deltas separately", () => {
+    const state = createAnthropicStreamState();
+    absorbAnthropicStreamEvent(state, {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking" },
+    });
+    assert.deepEqual(
+      absorbAnthropicStreamEvent(state, {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "先分析" },
+      }),
+      { content: "", reasoning: "先分析" },
+    );
+    assert.equal(state.reasoning, "先分析");
+  });
 });
 
 describe("gemini stream accumulation", () => {
@@ -90,7 +108,7 @@ describe("gemini stream accumulation", () => {
     assert.equal(
       absorbGeminiStreamChunk(state, {
         candidates: [{ content: { parts: [{ text: "让我" }] } }],
-      }),
+      }).content,
       "让我",
     );
     absorbGeminiStreamChunk(state, {
@@ -112,6 +130,21 @@ describe("gemini stream accumulation", () => {
     assert.equal(result.toolCalls?.[0]?.function.arguments, '{"path":"a.txt"}');
     assert.equal(result.finishReason, "stop");
     assert.equal(result.usage?.totalTokens, 8);
+  });
+
+  it("keeps thought parts out of answer text", () => {
+    const state = createGeminiStreamState();
+    assert.deepEqual(
+      absorbGeminiStreamChunk(state, {
+        candidates: [{ content: { parts: [{ text: "先想", thought: true }] } }],
+      }),
+      { content: "", reasoning: "先想" },
+    );
+    absorbGeminiStreamChunk(state, {
+      candidates: [{ content: { parts: [{ text: "答案" }] } }],
+    });
+    assert.equal(state.reasoning, "先想");
+    assert.equal(state.text, "答案");
   });
 
   it("throws on error payloads", () => {

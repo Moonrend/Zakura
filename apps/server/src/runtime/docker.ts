@@ -2,6 +2,7 @@ import Docker from "dockerode";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
 import {
+  resolveDockerContextSocketPath,
   toDockerHostPath,
   type ContainerRuntime,
   type CreateContainerOptions,
@@ -100,7 +101,8 @@ export class DockerRuntime implements ContainerRuntime {
   private readonly docker: Docker;
 
   constructor(options?: Docker.DockerOptions) {
-    this.docker = new Docker(options);
+    const socketPath = options ? undefined : resolveDockerContextSocketPath();
+    this.docker = new Docker(socketPath ? { socketPath } : options);
   }
 
   async ping(): Promise<{ ok: true; version: string } | { ok: false; error: string }> {

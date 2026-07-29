@@ -45,6 +45,8 @@ import {
 } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SearchField } from "@/components/ui/search-field";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { cn } from "@/lib/utils";
 
 type AccessMode = "public" | "tailscale" | null;
@@ -52,6 +54,16 @@ type AccessMode = "public" | "tailscale" | null;
 export default function RunnersPage() {
   const [rows, setRows] = useState<RuntimeNode[]>([]);
   const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const filtered = useFuzzySearch(rows, q, {
+    keys: [
+      { name: "name", weight: 3 },
+      { name: "kind", weight: 1 },
+      { name: "hostInfo.hostname", weight: 2 },
+      { name: "hostInfo.primaryIp", weight: 2 },
+      { name: "endpoint", weight: 1 },
+    ],
+  });
   const [refreshing, setRefreshing] = useState(false);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -174,7 +186,16 @@ export default function RunnersPage() {
       {loading ? (
         <Skeleton className="h-48 w-full rounded-lg" />
       ) : (
-        <Table>
+        <>
+          {rows.length > 5 ? (
+            <SearchField
+              value={q}
+              onValueChange={setQ}
+              placeholder="搜索 Runner（名称、主机、IP）"
+              className="max-w-sm"
+            />
+          ) : null}
+          <Table>
           <TableHeader>
             <TableRow>
               <TableHead>名称</TableHead>
@@ -187,7 +208,7 @@ export default function RunnersPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((r) => {
+            {filtered.map((r) => {
               const host = isRunnerHostInfo(r.hostInfo) ? r.hostInfo : {};
               const hostLine =
                 host.hostname || host.primaryIp
@@ -280,18 +301,19 @@ export default function RunnersPage() {
                 </TableRow>
               );
             })}
-            {!rows.length ? (
+            {!filtered.length ? (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
                   <div className="flex flex-col items-center gap-2">
                     <Cpu className="size-8 opacity-40" />
-                    <div>暂无 Runner</div>
+                    <div>{rows.length ? `没有匹配「${q}」的 Runner` : "暂无 Runner"}</div>
                   </div>
                 </TableCell>
               </TableRow>
             ) : null}
           </TableBody>
-        </Table>
+          </Table>
+        </>
       )}
 
       <Dialog

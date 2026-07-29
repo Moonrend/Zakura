@@ -102,6 +102,59 @@ export async function fsUpload(agentId: string, path: string, file: File) {
   return data as { path: string; size: number };
 }
 
+/**
+ * 带进度、可中止的上传。
+ *
+ * fetch 至今拿不到上传进度（ReadableStream 上传各家浏览器支持不齐），
+ * 几十兆的文件在进度条上只能干等，所以这条路径走 XHR。
+ */
+export function fsUploadWithProgress(
+  agentId: string,
+  path: string,
+  file: File,
+  opts: { onProgress?: (ratio: number) => void; signal?: AbortSignal } = {},
+): Promise<{ path: string; size: number }> {
+  return new Promise((resolve, reject) => {
+    if (opts.signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const form = new FormData();
+    form.set("path", path);
+    form.set("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/agents/${agentId}/fs/upload`);
+    for (const [key, value] of Object.entries(sessionHeader())) {
+      xhr.setRequestHeader(key, value);
+    }
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && e.total > 0) opts.onProgress?.(e.loaded / e.total);
+    });
+    xhr.addEventListener("load", () => {
+      let data: unknown = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        /* 非 JSON 响应（网关错误页等），下面按状态码处理 */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        opts.onProgress?.(1);
+        resolve(data as { path: string; size: number });
+      } else {
+        reject(new Error((data as { error?: string }).error || `HTTP ${xhr.status}`));
+      }
+    });
+    xhr.addEventListener("error", () => reject(new Error("上传失败，请检查网络")));
+    xhr.addEventListener("timeout", () => reject(new Error("上传超时")));
+    xhr.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+
+    opts.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(form);
+  });
+}
+
 async function downloadBlob(url: string, init?: RequestInit, fallbackName = "download") {
   const res = await fetch(url, {
     ...init,

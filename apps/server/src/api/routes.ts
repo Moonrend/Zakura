@@ -73,6 +73,7 @@ import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
+import { registerSkillRoutes } from "./skill-routes.js";
 import { registerNetworkRoutes } from "./network-routes.js";
 import { loadSaasServer } from "../saas-loader.js";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
@@ -338,6 +339,7 @@ export async function createApiApp(deps: {
   networkAudit?: NetworkAuditService;
   platformServices?: PlatformServiceManager;
   platformServiceUsage?: PlatformServiceUsageService;
+  skills?: import("../services/skills/index.js").SkillsService;
 }) {
   const {
     db,
@@ -365,6 +367,7 @@ export async function createApiApp(deps: {
     networkAudit,
     platformServices,
     platformServiceUsage,
+    skills,
   } = deps;
   const mcpStore = new McpStoreService(config);
   const upstreamOauth = new McpUpstreamOauthService(config);
@@ -1579,6 +1582,10 @@ export async function createApiApp(deps: {
           err instanceof Error ? err.message : err,
         );
       }
+      // 推荐内置技能：写入新 Agent 工作区（失败不影响建 Agent）
+      if (skills) {
+        void skills.installRecommended(session.tenantId, result.agent.id);
+      }
       return c.json(
         {
           ...agentService.serialize(result.agent),
@@ -2358,6 +2365,7 @@ export async function createApiApp(deps: {
         memoryStore,
         memoryProviders,
         workspaceFsProvider,
+        skills,
       });
       // MCP 客户端可经 re_spawn_subagent 在云端运行子代理
       gateway.setSubagentRunner({
@@ -2454,6 +2462,9 @@ export async function createApiApp(deps: {
   }
   if (migrations) {
     registerMigrationRoutes(app, { migrations, agentService });
+  }
+  if (skills) {
+    registerSkillRoutes(app, { skills, agentService });
   }
   if (networkSettings && securityPolicy && exposures && networkAudit) {
     registerNetworkRoutes(app, {

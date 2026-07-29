@@ -65,6 +65,23 @@ export function extractSnippet(payloadJson: string, query: string, radius = 40):
 
 const SEARCHABLE_EVENT_TYPES = ["user_message", "assistant_message"] as const;
 
+/**
+ * 标题模糊命中的最低相似度。
+ * 0.2 太松（三四个字的标题里随便撞上一个三元组就进来），0.4 又会把
+ * “部署脚步 → 部署脚本” 这类真正想要的错字命中挡掉。
+ */
+const TITLE_SIMILARITY_THRESHOLD = 0.3;
+
+/**
+ * drizzle 的 `execute()` 返回值随驱动而异：postgres-js 给的是类数组的 RowList，
+ * PGlite 给的是 `{ rows: [...] }`。两种都得认。
+ */
+function rowCount(res: unknown): number {
+  if (Array.isArray(res)) return res.length;
+  const rows = (res as { rows?: unknown } | null)?.rows;
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 export type CloudSessionSearchHit = {
   session: CloudAgentSession;
   /** 命中消息的上下文摘录（标题命中时可能为 null） */
@@ -90,17 +107,25 @@ export class CloudAgentSessionStore {
 
   private ensureTrgm(): Promise<boolean> {
     if (!this.trgmReady) {
+      // 只探测，不建东西：扩展与 GIN 索引都由迁移（0026_session_search_trgm）
+      // 在部署期建好。在请求路径里 CREATE INDEX 会锁住整张会话表的写入。
       this.trgmReady = this.db
-        .execute(sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`)
-        .then(() => true)
+        .execute(sql`SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'`)
+        .then((res) => rowCount(res) > 0)
         .catch(() => false);
     }
     return this.trgmReady;
   }
 
   /**
-   * 会话搜索：标题 + 消息内容 ILIKE 子串匹配（对中英文都稳定），
-   * pg_trgm 可用时叠加标题模糊匹配（容忍拼写偏差）。按最近更新排序。
+   * 会话搜索。
+   *
+   * 标题走 pg_trgm 模糊匹配（`similarity` 取词级与整串的较大值），消息内容走
+   * ILIKE 子串匹配——payload 是整条 JSON，对它做三元组相似度既慢又全是噪声。
+   * 排序按「相关度优先、其次最近更新」：改名成 “部署脚本” 的会话，搜 “部署脚步”
+   * 也能排在前面，而不是被一堆刚更新过的无关会话压下去。
+   *
+   * pg_trgm 不可用时（PGlite / 无 CREATE EXTENSION 权限）整体回退到纯 ILIKE。
    */
   async searchSessions(
     tenantId: string,
@@ -124,16 +149,31 @@ export class CloudAgentSessionStore {
         ),
       );
 
+    /**
+     * 标题相关度 0–1。
+     * `word_similarity(q, title)` 衡量「q 是否作为一个词出现在标题里」，
+     * 对“长标题 + 短查询”比整串 similarity 友好得多；两者取大值兼顾两种形态。
+     */
+    const titleScore = trgmOk
+      ? sql<number>`greatest(
+          similarity(${cloudAgentSessions.title}, ${q}),
+          word_similarity(${q}, ${cloudAgentSessions.title})
+        )`
+      : sql<number>`0`;
+
+    /** 子串命中直接给满分，保证精确匹配永远排最前 */
+    const rank = sql<number>`case when ${cloudAgentSessions.title} ilike ${pattern} then 1.0 else ${titleScore} end`;
+
     const matchCond = trgmOk
       ? or(
           ilike(cloudAgentSessions.title, pattern),
-          sql`similarity(${cloudAgentSessions.title}, ${q}) > 0.2`,
+          sql`${titleScore} > ${TITLE_SIMILARITY_THRESHOLD}`,
           exists(eventMatch),
         )
       : or(ilike(cloudAgentSessions.title, pattern), exists(eventMatch));
 
     const rows = await this.db
-      .select()
+      .select({ session: cloudAgentSessions, rank })
       .from(cloudAgentSessions)
       .where(
         and(
@@ -144,11 +184,11 @@ export class CloudAgentSessionStore {
           matchCond,
         ),
       )
-      .orderBy(desc(cloudAgentSessions.updatedAt))
+      .orderBy(desc(rank), desc(cloudAgentSessions.updatedAt))
       .limit(limit);
 
     const hits: CloudSessionSearchHit[] = [];
-    for (const session of rows) {
+    for (const { session } of rows) {
       const [ev] = await this.db
         .select({ payloadJson: cloudAgentEvents.payloadJson })
         .from(cloudAgentEvents)
