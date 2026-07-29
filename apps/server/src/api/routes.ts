@@ -2464,7 +2464,7 @@ export async function createApiApp(deps: {
     registerMigrationRoutes(app, { migrations, agentService });
   }
   if (skills) {
-    registerSkillRoutes(app, { skills, agentService });
+    registerSkillRoutes(app, { skills, agentService, multiTenant: config.multiTenant });
   }
   if (networkSettings && securityPolicy && exposures && networkAudit) {
     registerNetworkRoutes(app, {

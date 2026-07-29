@@ -314,6 +314,15 @@ export function SkillRegistryPanel({
                     {skill.version.slice(0, 8)}
                   </span>
                 ) : null}
+                {skill.updateAvailable ? (
+                  <Badge
+                    variant="outline"
+                    className="border-primary/40 text-[10px] text-primary"
+                    title="平台缓存里已有更新版本，点右侧刷新即可更新"
+                  >
+                    有新版本
+                  </Badge>
+                ) : null}
               </div>
               <p className="line-clamp-1 text-xs text-muted-foreground">
                 {skill.description}

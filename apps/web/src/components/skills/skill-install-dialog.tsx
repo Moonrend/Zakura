@@ -58,7 +58,8 @@ export function SkillInstallDialog({
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
   const [targetAgents, setTargetAgents] = useState<string[]>([]);
-  const [allAgents, setAllAgents] = useState(false);
+  /** 默认装给所有 Agent：技能是能力补充，绝大多数场景就是希望全员可用 */
+  const [allAgents, setAllAgents] = useState(true);
 
   const load = useCallback(async () => {
     if (!source.trim()) return;
@@ -80,8 +81,9 @@ export function SkillInstallDialog({
 
   useEffect(() => {
     if (!open) return;
-    setTargetAgents(defaultAgentIds ?? (agents.length === 1 ? [agents[0]!.id] : []));
-    setAllAgents(false);
+    // 显式传入目标（从某个 Agent 的技能页进来）时按传入的来，否则默认全选
+    setTargetAgents(defaultAgentIds ?? []);
+    setAllAgents(!defaultAgentIds?.length);
     void load();
     // defaultAgentIds/agents 变化不应重新解析
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -208,18 +210,25 @@ export function SkillInstallDialog({
               </ScrollArea>
 
               <div className="border-t border-border p-2.5">
-                <p className="px-1 pb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-                  安装到
-                </p>
+                <div className="flex items-center gap-1.5 px-1 pb-1.5">
+                  <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                    安装到
+                  </p>
+                  <span className="ml-auto text-[11px] text-muted-foreground">
+                    {allAgents ? `全部 ${agents.length}` : `已选 ${targetAgents.length}`}
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={() => {
-                    setAllAgents((v) => !v);
+                    setAllAgents(true);
                     setTargetAgents([]);
                   }}
                   className={cn(
                     "mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
-                    allAgents ? "bg-primary/10 text-primary" : "hover:bg-muted/60",
+                    allAgents
+                      ? "bg-primary/10 font-medium text-primary"
+                      : "hover:bg-muted/60",
                   )}
                 >
                   <Users className="size-3.5" />

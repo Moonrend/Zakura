@@ -36,10 +36,16 @@ const VALUE_FLAGS: Record<string, "skills" | "ref" | "ignore"> = {
   "--tag": "ref",
 };
 
+/** 抓取失败的粗分类，供调用方决定要不要换 token 重试 */
+export type SkillSourceErrorCode = "parse" | "not_found" | "forbidden" | "rate_limit" | "http";
+
 export class SkillSourceError extends Error {
-  constructor(message: string) {
+  readonly code: SkillSourceErrorCode;
+
+  constructor(message: string, code: SkillSourceErrorCode = "parse") {
     super(message);
     this.name = "SkillSourceError";
+    this.code = code;
   }
 }
 
@@ -294,10 +300,12 @@ function parseSpec(spec: string, raw: string, flagSkills: string[], flagRef?: st
     });
   }
 
-  // 形如 example.com 的域名托管技能：skills.sh 上有，但没有可公开抓取的地址
-  if (/^[\w-]+(\.[\w-]+)+$/.test(base) && !base.includes("/")) {
+  // 形如 example.com / example.com@skill 的域名托管技能：
+  // skills.sh 上有这类条目，但没有可公开抓取的地址
+  const host = base.split("@")[0]!;
+  if (!host.includes("/") && /^[\w-]+(\.[\w-]+)+$/.test(host)) {
     throw new SkillSourceError(
-      `暂不支持域名托管的技能：${base}。请改用 GitHub 仓库（owner/repo）或 SKILL.md 直链`,
+      `暂不支持域名托管的技能：${host}。请改用 GitHub 仓库（owner/repo）或 SKILL.md 直链`,
     );
   }
 
@@ -430,8 +438,24 @@ function parseScalar(raw: string): unknown {
   return value;
 }
 
+/** YAML 折叠标量（`>`）：同段内换行折成空格，空行才是真正的段落分隔 */
+function foldLines(lines: string[]): string {
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (!line) {
+      if (current.length) paragraphs.push(current.join(" "));
+      current = [];
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length) paragraphs.push(current.join(" "));
+  return paragraphs.join("\n\n");
+}
+
 /**
- * 极简 YAML frontmatter 解析：标量、块级列表、单层嵌套对象。
+ * 极简 YAML frontmatter 解析：标量、块标量（| 与 >）、块级列表、单层嵌套对象。
  * 覆盖 Agent Skills 规范用到的全部字段；解析失败按无 frontmatter 处理。
  */
 export function parseSkillMarkdown(text: string): {
@@ -456,6 +480,29 @@ export function parseSkillMarkdown(text: string): {
     if (!kv) continue;
     const key = kv[1]!;
     const value = kv[2]!;
+
+    // YAML 块标量：`|` 保留换行、`>` 折叠成空格，后缀 -/+ 控制结尾换行。
+    // 技能仓库里长 description 基本都是这么写的，不解开会得到字面量 "|-"。
+    const block = /^([|>])([+-]?)(\d*)$/.exec(value);
+    if (block) {
+      const folded = block[1] === ">";
+      const collected: string[] = [];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const next = lines[j]!;
+        if (!next.trim()) {
+          collected.push("");
+          continue;
+        }
+        if (indentOf(next) === 0) break;
+        collected.push(next.trimStart());
+      }
+      i = j - 1;
+      while (collected.length && collected[collected.length - 1] === "") collected.pop();
+      frontmatter[key] = folded ? foldLines(collected) : collected.join("\n");
+      continue;
+    }
+
     if (value !== "") {
       frontmatter[key] = parseScalar(value);
       continue;

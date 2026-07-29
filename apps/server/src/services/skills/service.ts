@@ -9,20 +9,26 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import type { WorkspaceFs } from "@zakura/core";
 import {
   AGENT_SKILLS_DIR,
+  CURATED_SKILL_REPOS,
   SKILL_MANIFEST_FILE,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
   type AgentSkillRecord,
+  type SkillCacheStatus,
   type SkillFile,
   type SkillPackage,
   type SkillRecord,
+  type SkillRepoSummary,
   type SkillResolveResult,
+  type SkillSearchPage,
   type SkillSource,
+  type SkillStoreId,
 } from "@zakura/shared";
 import type { Db } from "../../db/client.js";
 import {
   agentSkills,
   newId,
+  platformSkillRepos,
   skills,
   type Agent,
   type AgentSkillRow,
@@ -32,7 +38,21 @@ import type { AgentService } from "../agents.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import { platformEvents } from "../platform-events.js";
 import { BUILTIN_SKILLS, builtinToPackage, getBuiltinSkill } from "./builtin.js";
-import { fetchSkillPackages } from "./fetch.js";
+import { fetchSkillPackages, hydratePackage, probeRepoEtag } from "./fetch.js";
+import {
+  CACHE_FULL_BYTES,
+  REPO_REFRESH_BATCH,
+  REPO_REFRESH_INTERVAL_MS,
+  SkillRepoCache,
+  cacheScopeSource,
+  curatedRepoBySlug,
+  curatedRepoKey,
+  repoKeyOf,
+  toRepoSummary,
+  type CachedRepo,
+} from "./cache.js";
+import { searchSkillStores, type CuratedSkillEntry } from "./store.js";
+import { PLATFORM_SCOPE, SkillTokenStore } from "./tokens.js";
 import {
   SkillSourceError,
   normalizeSkillName,
@@ -49,6 +69,9 @@ export const SKILLS_ROOT = `/${AGENT_SKILLS_DIR}`;
 export function skillWorkspacePath(name: string): string {
   return `${SKILLS_ROOT}/${name}`;
 }
+
+/** 同一租户多久才重新扫一遍"哪些 Agent 少装了内置技能" */
+const BUILTIN_BACKFILL_INTERVAL_MS = 5 * 60 * 1000;
 
 function parseSource(raw: string): SkillSource {
   try {
@@ -67,7 +90,23 @@ function parseFiles(raw: string): SkillFile[] {
   }
 }
 
-function toRecord(row: SkillRow, agentIds: string[]): SkillRecord {
+/** 按 `-s/--skill`（或 UI 勾选）过滤缓存里的技能；不指定就全要 */
+function filterPackages(packages: SkillPackage[], wanted?: string[]): SkillPackage[] {
+  if (!wanted?.length || wanted.includes("*")) return packages;
+  const keys = new Set(wanted.map((w) => normalizeSkillName(w)));
+  const hit = packages.filter(
+    (p) =>
+      keys.has(normalizeSkillName(p.name)) ||
+      keys.has(normalizeSkillName(p.source.path?.split("/").pop() ?? "")),
+  );
+  // 仓库整组选中：路径里任一段命中也算
+  if (hit.length) return hit;
+  return packages.filter((p) =>
+    (p.source.path ?? "").split("/").some((seg) => keys.has(normalizeSkillName(seg))),
+  );
+}
+
+function toRecord(row: SkillRow, agentIds: string[], upstreamVersion?: string | null): SkillRecord {
   return {
     id: row.id,
     name: row.name,
@@ -81,6 +120,10 @@ function toRecord(row: SkillRow, agentIds: string[]): SkillRecord {
     fileCount: row.fileCount,
     sizeBytes: row.sizeBytes,
     agentIds,
+    repoKey: row.repoKey,
+    updateAvailable: Boolean(
+      upstreamVersion && row.version && upstreamVersion !== row.version,
+    ),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -109,23 +152,50 @@ export interface SkillsServiceDeps {
   db: Db;
   agentService: AgentService;
   fsProvider: ServerWorkspaceFsProvider;
-  /** GitHub PAT，提升抓取限额 */
+  /** 加密密钥，用于令牌存储 */
+  secret?: string | undefined;
+  /** GitHub PAT，提升抓取限额（等价于平台级令牌） */
   githubToken?: string | undefined;
+  /** 是否启动后台缓存刷新（测试里关掉） */
+  backgroundRefresh?: boolean;
 }
 
 export class SkillsService {
   private readonly db: Db;
   private readonly agentService: AgentService;
   private readonly fsProvider: ServerWorkspaceFsProvider;
-  private readonly githubToken: string | undefined;
+  private readonly cache: SkillRepoCache;
+  private readonly tokens: SkillTokenStore;
   /** 已同步过内置技能的租户，避免每次请求重复写库 */
   private readonly builtinSynced = new Set<string>();
+  /** 上次给全部 Agent 补装内置技能的时间 */
+  private readonly builtinBackfilled = new Map<string, number>();
+  /** 正在抓取的仓库，防止同一仓库被并发重复拉 */
+  private readonly inflight = new Map<string, Promise<CachedRepo | null>>();
+  /** 正在后台补齐捆绑文件的仓库 */
+  private readonly hydrating = new Set<string>();
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: SkillsServiceDeps) {
     this.db = deps.db;
     this.agentService = deps.agentService;
     this.fsProvider = deps.fsProvider;
-    this.githubToken = deps.githubToken ?? process.env.GITHUB_TOKEN ?? undefined;
+    this.cache = new SkillRepoCache(deps.db);
+    this.tokens = new SkillTokenStore({
+      db: deps.db,
+      secret: deps.secret ?? process.env.ZAKURA_SECRET ?? "zakura-dev-secret",
+      envToken: deps.githubToken ?? process.env.GITHUB_TOKEN ?? undefined,
+    });
+    if (deps.backgroundRefresh !== false) this.startBackgroundRefresh();
+  }
+
+  /** 令牌存储（API 层直接用） */
+  get tokenStore(): SkillTokenStore {
+    return this.tokens;
+  }
+
+  get repoCache(): SkillRepoCache {
+    return this.cache;
   }
 
   // —— 注册表 ——
@@ -165,6 +235,8 @@ export class SkillsService {
 
   async list(tenantId: string): Promise<SkillRecord[]> {
     await this.syncBuiltins(tenantId);
+    // 存量 Agent 缺的内置技能后台补齐，不阻塞列表返回
+    void this.backfillBuiltins(tenantId);
     const rows = await this.db
       .select()
       .from(skills)
@@ -182,7 +254,22 @@ export class SkillsService {
       list.push(inst.agentId);
       bySkill.set(inst.skillId, list);
     }
-    return rows.map((row) => toRecord(row, bySkill.get(row.id) ?? []));
+    // 平台缓存里的版本，用来标记「有新版本」
+    const repoVersions = await this.upstreamVersions(rows);
+    return rows.map((row) =>
+      toRecord(row, bySkill.get(row.id) ?? [], row.repoKey ? repoVersions.get(row.repoKey) : null),
+    );
+  }
+
+  /** 批量读出这些技能所属仓库在平台缓存中的版本 */
+  private async upstreamVersions(rows: SkillRow[]): Promise<Map<string, string | null>> {
+    const keys = [...new Set(rows.map((r) => r.repoKey).filter((k): k is string => Boolean(k)))];
+    if (!keys.length) return new Map();
+    const cached = await this.db
+      .select({ repoKey: platformSkillRepos.repoKey, version: platformSkillRepos.version })
+      .from(platformSkillRepos)
+      .where(inArray(platformSkillRepos.repoKey, keys));
+    return new Map(cached.map((r) => [r.repoKey, r.version]));
   }
 
   async get(
@@ -231,6 +318,8 @@ export class SkillsService {
       filesJson: JSON.stringify(pkg.files),
       fileCount: pkg.files.length,
       sizeBytes: pkg.sizeBytes,
+      // 指回平台缓存，用于「上游有没有新版本」的判断
+      repoKey: builtin ? null : repoKeyOf(pkg.source),
       updatedAt: now,
     };
 
@@ -253,7 +342,10 @@ export class SkillsService {
   async resolve(tenantId: string, input: string): Promise<SkillResolveResult> {
     const source = parseSkillSource(input);
     // 预览只需要 SKILL.md：一个几十技能的仓库不必先拉几百个捆绑文件
-    const { packages, warnings } = await this.loadPackages(source, { manifestOnly: true });
+    const { packages, warnings } = await this.loadPackages(source, {
+      manifestOnly: true,
+      tenantId,
+    });
     const existing = await this.db
       .select({ name: skills.name })
       .from(skills)
@@ -283,7 +375,7 @@ export class SkillsService {
 
   private async loadPackages(
     source: SkillSource,
-    opts: { manifestOnly?: boolean } = {},
+    opts: { manifestOnly?: boolean; tenantId?: string } = {},
   ): Promise<{ packages: SkillPackage[]; warnings: string[] }> {
     if (source.kind === "builtin") {
       const wanted = source.builtinId ?? source.skills?.[0];
@@ -294,10 +386,382 @@ export class SkillsService {
       if (!def) throw new SkillSourceError(`未知的内置技能：${wanted}`);
       return { packages: [builtinToPackage(def)], warnings: [] };
     }
-    return fetchSkillPackages(source, {
-      githubToken: this.githubToken,
-      ...(opts.manifestOnly ? { manifestOnly: true } : {}),
+
+    const repoKey = repoKeyOf(source);
+    if (!repoKey) {
+      // 直链之类无法按仓库缓存，照旧直抓
+      const token = await this.tokens.platformToken();
+      return fetchSkillPackages(source, {
+        githubToken: token,
+        ...(opts.manifestOnly ? { manifestOnly: true } : {}),
+      });
+    }
+
+    const cached = await this.ensureRepo(repoKey, source, opts.tenantId);
+    if (!cached) throw new SkillSourceError("技能来源暂时不可用");
+
+    const wanted = filterPackages(cached.packages, source.skills);
+    if (!wanted.length) {
+      throw new SkillSourceError(
+        source.skills?.length
+          ? `未找到指定技能：${source.skills.join("、")}。该来源提供：${cached.packages
+              .slice(0, 12)
+              .map((p) => p.name)
+              .join("、")}`
+          : "未找到可安装的技能",
+      );
+    }
+
+    // 预览不需要正文之外的东西；安装才补齐捆绑文件
+    const packages = opts.manifestOnly
+      ? wanted
+      : await Promise.all(
+          wanted.map((pkg) =>
+            pkg.assets?.length
+              ? hydratePackage(pkg, { githubToken: cached.token })
+              : Promise.resolve(pkg),
+          ),
+        );
+
+    return { packages, warnings: cached.warnings };
+  }
+
+  /**
+   * 取得某个仓库的可用内容：优先平台缓存，其次零配额 ETag 探测，最后才真正抓取。
+   * 同一仓库的并发请求合并成一次抓取。
+   */
+  private async ensureRepo(
+    repoKey: string,
+    source: SkillSource,
+    tenantId?: string,
+  ): Promise<(CachedRepo & { token?: string | undefined }) | null> {
+    const cached = await this.cache.read(repoKey);
+    if (cached?.fresh && cached.packages.length) return cached;
+
+    const pending = this.inflight.get(repoKey);
+    if (pending) {
+      const done = await pending;
+      if (done) return done;
+    }
+
+    const task = this.refreshRepo(repoKey, source, tenantId, cached);
+    this.inflight.set(repoKey, task);
+    try {
+      const fresh = await task;
+      if (fresh) return fresh;
+    } finally {
+      this.inflight.delete(repoKey);
+    }
+    // 抓取失败但有旧内容时降级使用，避免一次网络抖动让所有租户装不了
+    return cached?.packages.length ? cached : null;
+  }
+
+  private async refreshRepo(
+    repoKey: string,
+    source: SkillSource,
+    tenantId: string | undefined,
+    cached: CachedRepo | null,
+  ): Promise<CachedRepo | null> {
+    const scope = cacheScopeSource(source);
+    const platformToken = await this.tokens.platformToken();
+
+    // 有旧内容先探一次 ETag：codeload 的 HEAD 不计 GitHub API 配额
+    if (cached?.packages.length && cached.row.upstreamEtag) {
+      const etag = await probeRepoEtag(scope, { githubToken: platformToken });
+      if (etag && etag === cached.row.upstreamEtag) {
+        await this.cache.touch(repoKey, etag);
+        return { ...cached, fresh: true };
+      }
+    }
+
+    try {
+      const { packages, warnings, usedTenantToken, token } = await this.fetchWithTokens(
+        scope,
+        tenantId,
+        platformToken,
+      );
+      const etag = await probeRepoEtag(scope, { githubToken: platformToken });
+
+      if (usedTenantToken) {
+        // 私有仓库内容不进共享缓存，只回给当前租户
+        const hydrated = await this.hydrateAll(packages, token);
+        return {
+          row: cached?.row ?? ({} as CachedRepo["row"]),
+          packages: hydrated,
+          warnings,
+          fresh: true,
+        };
+      }
+
+      // 先把清单写进缓存让预览立刻可用，捆绑文件在后台补——
+      // 一个 18 技能的仓库全量水合要 8 秒，不该让第一个用户等着。
+      const row = await this.cache.write({
+        repoKey,
+        source: scope,
+        packages,
+        warnings,
+        etag,
+        partial: true,
+      });
+      this.hydrateLater(repoKey, scope, packages, warnings, etag, token);
+      return { row, packages, warnings, fresh: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (cached?.packages.length) {
+        await this.cache.markError(repoKey, message);
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  private async hydrateAll(
+    packages: SkillPackage[],
+    token: string | undefined,
+  ): Promise<SkillPackage[]> {
+    return Promise.all(
+      packages.map((p) =>
+        p.assets?.length ? hydratePackage(p, { githubToken: token }) : Promise.resolve(p),
+      ),
+    );
+  }
+
+  /**
+   * 后台补齐捆绑文件并回写缓存。
+   * 体积超过预算的仓库保持"仅清单"，安装时再按需拉——两种情况都不耗 API 配额。
+   */
+  private hydrateLater(
+    repoKey: string,
+    source: SkillSource,
+    packages: SkillPackage[],
+    warnings: string[],
+    etag: string | null,
+    token: string | undefined,
+  ): void {
+    const assetBytes = packages.reduce(
+      (sum, p) => sum + (p.assets ?? []).reduce((s, a) => s + a.size, 0),
+      0,
+    );
+    if (!assetBytes || assetBytes > CACHE_FULL_BYTES) return;
+    if (this.hydrating.has(repoKey)) return;
+    this.hydrating.add(repoKey);
+
+    void (async () => {
+      try {
+        const hydrated = await this.hydrateAll(packages, token);
+        await this.cache.write({
+          repoKey,
+          source,
+          packages: hydrated,
+          warnings,
+          etag,
+          partial: false,
+        });
+      } catch (err) {
+        console.warn(
+          `[skills] hydrate ${repoKey}:`,
+          err instanceof Error ? err.message : err,
+        );
+      } finally {
+        this.hydrating.delete(repoKey);
+      }
+    })();
+  }
+
+  /**
+   * 令牌升级：先用平台令牌（或匿名），404/403 才换租户自备令牌重试。
+   * 这样只有平台确实看不到的私有仓库才会用到租户凭据，也就天然做到了隔离。
+   */
+  private async fetchWithTokens(
+    source: SkillSource,
+    tenantId: string | undefined,
+    platformToken: string | undefined,
+  ): Promise<{
+    packages: SkillPackage[];
+    warnings: string[];
+    usedTenantToken: boolean;
+    token: string | undefined;
+  }> {
+    try {
+      const res = await fetchSkillPackages(source, {
+        githubToken: platformToken,
+        manifestOnly: true,
+      });
+      if (platformToken) void this.tokens.markUsed(PLATFORM_SCOPE, "github");
+      return { ...res, usedTenantToken: false, token: platformToken };
+    } catch (err) {
+      const code = err instanceof SkillSourceError ? err.code : "http";
+      if (!tenantId || (code !== "not_found" && code !== "forbidden")) throw err;
+      const tenantToken = await this.tokens.tenantToken(tenantId);
+      if (!tenantToken) throw err;
+      const res = await fetchSkillPackages(source, {
+        githubToken: tenantToken,
+        manifestOnly: true,
+      });
+      void this.tokens.markUsed(tenantId, "github");
+      return { ...res, usedTenantToken: true, token: tenantToken };
+    }
+  }
+
+  // —— 平台缓存维护 ——
+
+  /** 官方仓库预置占位，让它们在首次同步前也能出现在商店里 */
+  async seedCuratedRepos(): Promise<void> {
+    for (const repo of CURATED_SKILL_REPOS) {
+      const [owner, name] = repo.slug.split("/");
+      if (!owner || !name) continue;
+      await this.cache
+        .ensurePlaceholder(curatedRepoKey(repo.slug), {
+          kind: "github",
+          owner,
+          repo: name,
+          store: "github",
+        })
+        .catch(() => undefined);
+    }
+  }
+
+  private startBackgroundRefresh(): void {
+    if (this.refreshTimer) return;
+    // 启动稍微延后，别和迁移/引导抢资源
+    const kick = setTimeout(() => {
+      void this.seedCuratedRepos().then(() => this.refreshStaleRepos());
+    }, 15_000);
+    kick.unref?.();
+    this.refreshTimer = setInterval(() => {
+      void this.refreshStaleRepos();
+    }, REPO_REFRESH_INTERVAL_MS);
+    this.refreshTimer.unref?.();
+  }
+
+  stopBackgroundRefresh(): void {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = null;
+  }
+
+  /** 后台刷新一批过期仓库（官方仓库与被引用多的优先） */
+  async refreshStaleRepos(limit = REPO_REFRESH_BATCH): Promise<number> {
+    let refreshed = 0;
+    try {
+      const rows = await this.cache.staleRepos(limit);
+      for (const row of rows) {
+        const source = JSON.parse(row.sourceJson) as SkillSource;
+        const cached = await this.cache.read(row.repoKey);
+        const res = await this.refreshRepo(row.repoKey, source, undefined, cached).catch(
+          (err: unknown) => {
+            console.warn(
+              `[skills] refresh ${row.repoKey}:`,
+              err instanceof Error ? err.message : err,
+            );
+            return null;
+          },
+        );
+        if (res) refreshed++;
+      }
+    } catch (err) {
+      console.warn("[skills] refreshStaleRepos:", err instanceof Error ? err.message : err);
+    }
+    return refreshed;
+  }
+
+  /** 平台缓存概况 */
+  async cacheStatus(): Promise<SkillCacheStatus> {
+    const rows = await this.cache.list();
+    return {
+      repos: rows.map(toRepoSummary),
+      totalSkills: rows.reduce((sum, r) => sum + r.skillCount, 0),
+      totalBytes: rows.reduce((sum, r) => sum + r.sizeBytes, 0),
+      refreshIntervalMs: REPO_REFRESH_INTERVAL_MS,
+    };
+  }
+
+  /** 商店入口：官方仓库列表（未同步的也列出来，标记 pending） */
+  async listRepos(): Promise<SkillRepoSummary[]> {
+    const rows = await this.cache.list();
+    const byKey = new Map(rows.map((r) => [r.repoKey, r]));
+    const out: SkillRepoSummary[] = [];
+    for (const repo of CURATED_SKILL_REPOS) {
+      const key = curatedRepoKey(repo.slug);
+      const row = byKey.get(key);
+      byKey.delete(key);
+      out.push(
+        row
+          ? toRepoSummary(row)
+          : {
+              repoKey: key,
+              slug: repo.slug,
+              name: repo.name,
+              description: repo.description,
+              publisher: repo.publisher,
+              skillCount: 0,
+              sizeBytes: 0,
+              version: null,
+              checkedAt: null,
+              fetchedAt: null,
+              partial: false,
+              pending: true,
+              lastError: null,
+            },
+      );
+    }
+    // 其余被租户装过、顺带缓存下来的仓库排在官方之后
+    for (const row of byKey.values()) {
+      if (row.skillCount > 0) out.push(toRepoSummary(row));
+    }
+    return out;
+  }
+
+  /** 立即同步一个仓库（管理端「立即更新」按钮 / 首次访问触发） */
+  async syncRepo(slug: string): Promise<SkillRepoSummary | null> {
+    const [owner, name] = slug.split("/");
+    if (!owner || !name) throw new SkillSourceError(`仓库标识无效：${slug}`);
+    const repoKey = curatedRepoKey(slug);
+    const source: SkillSource = { kind: "github", owner, repo: name, store: "github" };
+    await this.cache.ensurePlaceholder(repoKey, source);
+    const cached = await this.cache.read(repoKey);
+    await this.refreshRepo(repoKey, source, undefined, cached);
+    const row = await this.cache.read(repoKey);
+    return row ? toRepoSummary(row.row) : null;
+  }
+
+  /** 跨商店搜索：curated 一栏直接读平台缓存 */
+  async search(
+    tenantId: string,
+    opts: {
+      query: string;
+      store?: SkillStoreId | "all";
+      repoSlug?: string | undefined;
+      offset?: number;
+      limit?: number;
+    },
+  ): Promise<SkillSearchPage> {
+    const registered = await this.list(tenantId);
+    const installedNames = new Set(registered.map((s) => s.name.toLowerCase()));
+    const needCurated = !opts.store || opts.store === "all" || opts.store === "curated";
+    const curated = needCurated ? await this.curatedEntries() : [];
+    const githubToken = await this.tokens.platformToken();
+    return searchSkillStores({
+      query: opts.query,
+      ...(opts.store ? { store: opts.store } : {}),
+      ...(opts.repoSlug ? { repoSlug: opts.repoSlug } : {}),
+      ...(opts.offset != null ? { offset: opts.offset } : {}),
+      ...(opts.limit != null ? { limit: opts.limit } : {}),
+      installedNames,
+      curated,
+      githubToken,
     });
+  }
+
+  /** 平台缓存里的技能压平成搜索条目 */
+  private async curatedEntries(): Promise<CuratedSkillEntry[]> {
+    const rows = await this.cache.listSkills();
+    return rows.map(({ slug, pkg }) => ({
+      slug,
+      name: pkg.name,
+      title: pkg.title,
+      description: pkg.description,
+      publisher: curatedRepoBySlug(slug)?.publisher ?? slug.split("/")[0] ?? "",
+    }));
   }
 
   // —— 安装 ——
@@ -327,7 +791,7 @@ export class SkillsService {
       const source = parseSkillSource(opts.source);
       // 用户在预览里勾选了哪些，就只下载哪些的捆绑文件
       const scoped = opts.names?.length ? { ...source, skills: opts.names } : source;
-      const loaded = await this.loadPackages(scoped);
+      const loaded = await this.loadPackages(scoped, { tenantId });
       warnings.push(...loaded.warnings);
       const wanted = opts.names?.length
         ? loaded.packages.filter((p) =>
@@ -493,9 +957,61 @@ export class SkillsService {
     }
   }
 
+  /**
+   * 把推荐内置技能补齐到该租户的所有 Agent。
+   *
+   * 新建 Agent 走 installRecommended；这里负责"存量 Agent"与"新增内置技能"
+   * 两种漏装场景。写工作区可能较慢，调用方按需后台触发即可。
+   */
+  async backfillBuiltins(tenantId: string): Promise<number> {
+    const last = this.builtinBackfilled.get(tenantId) ?? 0;
+    if (Date.now() - last < BUILTIN_BACKFILL_INTERVAL_MS) return 0;
+    this.builtinBackfilled.set(tenantId, Date.now());
+
+    let installed = 0;
+    try {
+      await this.syncBuiltins(tenantId);
+      const names = BUILTIN_SKILLS.filter((s) => s.recommended).map((s) => s.name);
+      if (!names.length) return 0;
+      const rows = await this.db
+        .select()
+        .from(skills)
+        .where(and(eq(skills.tenantId, tenantId), inArray(skills.name, names)));
+      if (!rows.length) return 0;
+
+      const agents = await this.agentService.list(tenantId);
+      if (!agents.length) return 0;
+      const existing = await this.db
+        .select({ agentId: agentSkills.agentId, name: agentSkills.name })
+        .from(agentSkills)
+        .where(and(eq(agentSkills.tenantId, tenantId), inArray(agentSkills.name, names)));
+      const have = new Set(existing.map((r) => `${r.agentId}:${r.name}`));
+
+      for (const agent of agents) {
+        for (const row of rows) {
+          if (have.has(`${agent.id}:${row.name}`)) continue;
+          try {
+            await this.installToAgent(agent, row);
+            installed++;
+          } catch (err) {
+            console.warn(
+              `[skills] 补装 ${row.name} 到 ${agent.slug} 失败:`,
+              err instanceof Error ? err.message : err,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[skills] backfillBuiltins:", err instanceof Error ? err.message : err);
+    }
+    return installed;
+  }
+
   // —— Agent 视角 ——
 
   async listForAgent(tenantId: string, agentId: string): Promise<AgentSkillRecord[]> {
+    // 新 Agent / 新内置技能的补装在后台跑，首屏不等它
+    void this.backfillBuiltins(tenantId);
     const rows = await this.db
       .select()
       .from(agentSkills)

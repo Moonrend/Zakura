@@ -7,6 +7,7 @@ import {
   discoverManifests,
   manifestDir,
 } from "../src/services/skills/discover.js";
+import { matchesRequested } from "../src/services/skills/fetch.js";
 
 /** yetone/kill-ai-slop 的真实布局：技能放在 skill/（单数） */
 const KILL_AI_SLOP = [
@@ -135,8 +136,45 @@ describe("技能发现：单文件兜底", () => {
   });
 });
 
-describe("技能发现：捆绑文件", () => {
-  it("只收本技能目录下的文件", () => {
+describe("-s/--skill 过滤", () => {
+  const stitch = [
+    "stitch::generate-design",
+    "generate-design",
+    "generate-design",
+    "plugins/stitch-design/skills/generate-design",
+    "plugins",
+    "stitch-design",
+    "skills",
+    "generate-design",
+  ];
+
+  it("没有指定时全都要", () => {
+    assert.equal(matchesRequested(undefined, "anything"), true);
+    assert.equal(matchesRequested(["*"], "anything"), true);
+  });
+
+  it("按 frontmatter 名命中", () => {
+    assert.equal(matchesRequested(["stitch::generate-design"], ...stitch), true);
+  });
+
+  it("按目录名命中", () => {
+    assert.equal(matchesRequested(["generate-design"], ...stitch), true);
+  });
+
+  it("归一化后命中（冒号视作连字符）", () => {
+    assert.equal(matchesRequested(["react:components"], "react-components"), true);
+  });
+
+  it("按路径中的插件目录整组命中", () => {
+    assert.equal(matchesRequested(["stitch-design"], ...stitch), true);
+  });
+
+  it("不相干的名字不命中", () => {
+    assert.equal(matchesRequested(["remotion"], ...stitch), false);
+  });
+});
+
+describe("技能发现：捆绑文件", () => {  it("只收本技能目录下的文件", () => {
     const files = bundlePaths("skill", KILL_AI_SLOP, "skill/SKILL.md", ["skill"]);
     assert.deepEqual(files, [
       "skill/README.md",

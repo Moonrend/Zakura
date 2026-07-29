@@ -2,16 +2,33 @@
  * 技能 HTTP API：商店检索、来源解析预览、安装到 Agent、注册表与单 Agent 管理。
  */
 import type { Hono } from "hono";
-import type { SkillStoreId } from "@zakura/shared";
+import type { SkillStoreId, SkillTokenScope } from "@zakura/shared";
 import { SKILL_STORES } from "@zakura/shared";
 import type { AgentService } from "../services/agents.js";
 import { SkillSourceError, type SkillsService } from "../services/skills/index.js";
-import { searchSkillStores } from "../services/skills/store.js";
 import { BUILTIN_SKILLS } from "../services/skills/builtin.js";
 
 type SessionVars = {
-  session?: { userId: string; tenantId: string; email: string; role: string };
+  session?: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    role: string;
+    isPlatformAdmin?: boolean;
+  };
 };
+
+/**
+ * 平台令牌只有超管能配。多租户下必须是 isPlatformAdmin；
+ * OSS 单租户没有超管概念，租户管理员即可。
+ */
+function canManagePlatformToken(
+  session: NonNullable<SessionVars["session"]>,
+  multiTenant: boolean,
+): boolean {
+  if (multiTenant) return session.isPlatformAdmin === true;
+  return session.role === "owner" || session.role === "admin";
+}
 
 function errorResponse(err: unknown): { status: 400 | 404 | 502; body: { error: string } } {
   const message = err instanceof Error ? err.message : String(err);
@@ -30,9 +47,11 @@ function parseStore(raw: string | undefined): SkillStoreId | "all" {
 
 export function registerSkillRoutes(
   app: Hono<{ Variables: SessionVars }>,
-  deps: { skills: SkillsService; agentService: AgentService },
+  deps: { skills: SkillsService; agentService: AgentService; multiTenant?: boolean },
 ) {
   const { skills, agentService } = deps;
+  const isPlatformAdmin = (session: NonNullable<SessionVars["session"]>) =>
+    canManagePlatformToken(session, deps.multiTenant ?? false);
 
   /** 商店元信息 + 内置技能目录 */
   app.get("/api/skills/stores", (c) =>
@@ -49,20 +68,114 @@ export function registerSkillRoutes(
     }),
   );
 
-  /** 跨商店搜索 */
+  /** 跨商店搜索（分页；repo= 时只浏览该仓库内的技能） */
   app.get("/api/skills/search", async (c) => {
     const session = c.get("session")!;
     const query = c.req.query("q") ?? "";
     const store = parseStore(c.req.query("store"));
+    const repoSlug = c.req.query("repo") ?? undefined;
+    const offset = Number.parseInt(c.req.query("offset") ?? "0", 10) || 0;
+    const limitRaw = Number.parseInt(c.req.query("limit") ?? "", 10);
     try {
-      const registered = await skills.list(session.tenantId);
-      const installedNames = new Set(registered.map((s) => s.name.toLowerCase()));
-      const { items, errors } = await searchSkillStores({ query, store, installedNames });
-      return c.json({ items, errors, total: items.length });
+      const page = await skills.search(session.tenantId, {
+        query,
+        store,
+        repoSlug,
+        offset,
+        ...(Number.isFinite(limitRaw) && limitRaw > 0 ? { limit: limitRaw } : {}),
+      });
+      return c.json(page);
     } catch (err) {
       const e = errorResponse(err);
       return c.json(e.body, e.status);
     }
+  });
+
+  /** 已同步到平台的技能仓库（商店入口） */
+  app.get("/api/skills/repos", async (c) => {
+    try {
+      return c.json({ repos: await skills.listRepos() });
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  /** 立即同步某个仓库到平台缓存 */
+  app.post("/api/skills/repos/:owner/:repo/sync", async (c) => {
+    const slug = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    try {
+      const summary = await skills.syncRepo(slug);
+      if (!summary) return c.json({ error: `同步失败：${slug}` }, 502);
+      return c.json({ repo: summary });
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  /** 平台缓存概况 */
+  app.get("/api/skills/cache", async (c) => {
+    try {
+      return c.json(await skills.cacheStatus());
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  // —— 来源令牌 ——
+
+  /** 列出可见令牌：租户自备的，加上（管理员可见的）平台默认 */
+  app.get("/api/skills/tokens", async (c) => {
+    const session = c.get("session")!;
+    const isAdmin = isPlatformAdmin(session);
+    try {
+      const tokens = await skills.tokenStore.list(session.tenantId, isAdmin);
+      return c.json({ tokens, canManagePlatform: isAdmin });
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.put("/api/skills/tokens/:provider", async (c) => {
+    const session = c.get("session")!;
+    const provider = c.req.param("provider") === "gitlab" ? "gitlab" : "github";
+    const body = (await c.req.json().catch(() => ({}))) as {
+      token?: string;
+      label?: string;
+      scope?: SkillTokenScope;
+    };
+    const scope: SkillTokenScope = body.scope === "platform" ? "platform" : "tenant";
+    if (scope === "platform" && !isPlatformAdmin(session)) {
+      return c.json({ error: "配置平台令牌需要平台管理员权限" }, 403);
+    }
+    if (!body.token?.trim()) return c.json({ error: "token is required" }, 400);
+    try {
+      const info = await skills.tokenStore.set({
+        scope,
+        tenantId: session.tenantId,
+        provider,
+        token: body.token,
+        label: body.label,
+      });
+      return c.json({ token: info });
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.delete("/api/skills/tokens/:provider", async (c) => {
+    const session = c.get("session")!;
+    const provider = c.req.param("provider") === "gitlab" ? "gitlab" : "github";
+    const scope: SkillTokenScope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (scope === "platform" && !isPlatformAdmin(session)) {
+      return c.json({ error: "配置平台令牌需要平台管理员权限" }, 403);
+    }
+    await skills.tokenStore.remove(scope, session.tenantId, provider);
+    return c.json({ ok: true });
   });
 
   /** 解析来源并预览（支持整条 npx 命令） */

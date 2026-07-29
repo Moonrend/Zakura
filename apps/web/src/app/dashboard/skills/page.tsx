@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Blocks, Sparkles } from "lucide-react";
+import { Blocks, Settings2, Sparkles } from "lucide-react";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +10,7 @@ import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import { listSkills, fetchSkillStores, type SkillRecord, type SkillStoreMeta } from "@/lib/skills";
 import { SkillStorePanel } from "@/components/skills/skill-store-panel";
 import { SkillRegistryPanel } from "@/components/skills/skill-registry-panel";
+import { SkillSettingsPanel } from "@/components/skills/skill-settings-panel";
 
 export default function SkillsPage() {
   const [agents, setAgents] = useState<AgentListItem[]>([]);
@@ -55,7 +56,7 @@ export default function SkillsPage() {
       />
 
       <Tabs defaultValue="store">
-        <TabsList variant="line" className="grid w-full max-w-xs grid-cols-2">
+        <TabsList variant="line" className="grid w-full max-w-md grid-cols-3">
           <TabsTrigger value="store">
             <Blocks className="size-4" />
             技能商店
@@ -68,6 +69,10 @@ export default function SkillsPage() {
                 {installedCount}
               </Badge>
             ) : null}
+          </TabsTrigger>
+          <TabsTrigger value="settings">
+            <Settings2 className="size-4" />
+            设置
           </TabsTrigger>
         </TabsList>
 
@@ -92,6 +97,10 @@ export default function SkillsPage() {
             loading={loading}
             onChanged={() => void loadSkills()}
           />
+        </TabsContent>
+
+        <TabsContent value="settings" className="mt-4">
+          <SkillSettingsPanel />
         </TabsContent>
       </Tabs>
     </div>

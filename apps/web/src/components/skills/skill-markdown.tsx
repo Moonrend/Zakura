@@ -1,6 +1,8 @@
 "use client";
 
 import MarkdownRender from "markstream-react";
+// 技能页不在 /chat 布局下，样式表需要自己带
+import "markstream-react/index.css";
 import { cn } from "@/lib/utils";
 
 /** SKILL.md 预览排版：与聊天区 Markdown 同一套尺度，稍紧凑 */

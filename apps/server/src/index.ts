@@ -171,7 +171,12 @@ async function main() {
   gateway.setExposureService(exposures);
   const fileShares = new FileShareService(db, config);
   gateway.setFileShareService(fileShares);
-  const skillsService = new SkillsService({ db, agentService, fsProvider: workspaceFsProvider });
+  const skillsService = new SkillsService({
+    db,
+    agentService,
+    fsProvider: workspaceFsProvider,
+    secret: config.secret,
+  });
   gateway.setSkillsService(skillsService);
 
   const app = new Hono();

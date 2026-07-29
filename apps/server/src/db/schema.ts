@@ -1138,12 +1138,89 @@ export const skills = pgTable(
     filesJson: text("files_json").notNull().default("[]"),
     fileCount: integer("file_count").notNull().default(0),
     sizeBytes: integer("size_bytes").notNull().default(0),
+    /** 指回 platform_skill_repos.repoKey，用于判断上游是否有新版本 */
+    repoKey: text("repo_key"),
     ...timestamps,
   },
   (t) => [
     uniqueIndex("skills_tenant_name").on(t.tenantId, t.name),
     index("skills_tenant").on(t.tenantId),
+    index("skills_repo_key").on(t.repoKey),
   ],
+);
+
+/**
+ * 跨租户共享的仓库级技能缓存（全局，无 tenantId）。
+ *
+ * 同一个技能仓库在 SaaS 下会被多个租户安装，逐租户重新下载既慢又会打爆
+ * GitHub 未鉴权的 60 次/小时配额。这里按「仓库 + ref」缓存一份完整内容，
+ * 租户安装时优先命中：新鲜就直接装（零网络），过期就先做一次不计配额的
+ * ETag 探测（codeload HEAD），没变只更新 checkedAt。
+ *
+ * 只缓存平台 token / 匿名可见的内容——用租户自备 token 才能读到的私有仓库
+ * 不会写进来，避免跨租户泄露。
+ */
+export const platformSkillRepos = pgTable(
+  "platform_skill_repos",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    /** 规范化来源标识，如 github:anthropics/skills@HEAD */
+    repoKey: text("repo_key").notNull(),
+    /** github | gitlab */
+    provider: text("provider").notNull().default("github"),
+    /** SkillSource JSON（不含 skills 过滤） */
+    sourceJson: text("source_json").notNull().default("{}"),
+    /** 解析后的分支/标签 */
+    ref: text("ref"),
+    /** commit sha 前 12 位，作为版本号 */
+    version: text("version"),
+    /** codeload tar.gz 的 ETag，用于零配额变更探测 */
+    upstreamEtag: text("upstream_etag"),
+    /** SkillPackage[] JSON */
+    packagesJson: text("packages_json").notNull().default("[]"),
+    /** true = 体积超限只存了清单，安装时需按需补齐捆绑文件 */
+    partial: boolean("partial").notNull().default(false),
+    skillCount: integer("skill_count").notNull().default(0),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    /** 抓取时产生的告警 JSON */
+    warningsJson: text("warnings_json").notNull().default("[]"),
+    /** 最近一次确认与上游一致的时间 */
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+    /** 最近一次真正下载内容的时间 */
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+    /** 被多少租户引用过，用于决定后台刷新优先级 */
+    refCount: integer("ref_count").notNull().default(0),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("platform_skill_repos_key").on(t.repoKey),
+    index("platform_skill_repos_checked").on(t.checkedAt),
+  ],
+);
+
+/**
+ * 技能来源的访问令牌。scopeKey = "platform"（整站默认）或 tenantId（租户自备）。
+ * 明文不出库：值用部署密钥加密后存 tokenEnc，API 只回显掩码。
+ */
+export const skillSourceTokens = pgTable(
+  "skill_source_tokens",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    /** "platform" 或 tenantId */
+    scopeKey: text("scope_key").notNull(),
+    /** github | gitlab */
+    provider: text("provider").notNull().default("github"),
+    /** encryptJson({ token }) */
+    tokenEnc: text("token_enc").notNull(),
+    /** 便于识别的备注，如 "ci-readonly" */
+    label: text("label"),
+    /** 末 4 位，用于界面回显 */
+    hint: text("hint"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("skill_source_tokens_scope").on(t.scopeKey, t.provider)],
 );
 
 /** 技能在单个 Agent 上的安装记录（文件已写入该 Agent 工作区） */
@@ -1220,6 +1297,8 @@ export const schema = {
   cloudAgentRuns,
   skills,
   agentSkills,
+  platformSkillRepos,
+  skillSourceTokens,
 };
 
 export type PlatformMeta = typeof platformMeta.$inferSelect;
@@ -1264,3 +1343,5 @@ export type CloudAgentEventRow = typeof cloudAgentEvents.$inferSelect;
 export type CloudAgentRun = typeof cloudAgentRuns.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 export type AgentSkillRow = typeof agentSkills.$inferSelect;
+export type PlatformSkillRepoRow = typeof platformSkillRepos.$inferSelect;
+export type SkillSourceTokenRow = typeof skillSourceTokens.$inferSelect;

@@ -3,20 +3,32 @@
 import { api } from "@/lib/api";
 import type {
   AgentSkillRecord,
+  SkillCacheStatus,
   SkillRecord,
+  SkillRepoSummary,
   SkillResolveResult,
   SkillSearchItem,
+  SkillSearchPage,
   SkillStoreId,
   SkillStoreMeta,
+  SkillTokenInfo,
+  SkillTokenProvider,
+  SkillTokenScope,
 } from "@zakura/shared";
 
 export type {
   AgentSkillRecord,
+  SkillCacheStatus,
   SkillRecord,
+  SkillRepoSummary,
   SkillResolveResult,
   SkillSearchItem,
+  SkillSearchPage,
   SkillStoreId,
   SkillStoreMeta,
+  SkillTokenInfo,
+  SkillTokenProvider,
+  SkillTokenScope,
 };
 
 export type BuiltinSkillMeta = {
@@ -37,6 +49,7 @@ export type SkillFileContent = {
 
 export const SKILL_STORE_LABEL: Record<SkillStoreId, string> = {
   builtin: "内置推荐",
+  curated: "官方仓库",
   "skills-sh": "skills.sh",
   github: "GitHub",
 };
@@ -51,15 +64,60 @@ export async function fetchSkillStores(): Promise<{
 export async function searchSkills(
   query: string,
   store: SkillStoreId | "all",
-): Promise<{
-  items: SkillSearchItem[];
-  errors: Array<{ store: SkillStoreId; error: string }>;
-  total: number;
-}> {
-  return api(
-    `/api/skills/search?q=${encodeURIComponent(query)}&store=${store}`,
-    { cacheTtlMs: 15_000 },
+  opts: { repo?: string; offset?: number; limit?: number } = {},
+): Promise<SkillSearchPage> {
+  const params = new URLSearchParams({ q: query, store });
+  if (opts.repo) params.set("repo", opts.repo);
+  if (opts.offset) params.set("offset", String(opts.offset));
+  if (opts.limit) params.set("limit", String(opts.limit));
+  return api(`/api/skills/search?${params.toString()}`, { cacheTtlMs: 15_000 });
+}
+
+/** 服务端已同步的技能仓库（商店入口） */
+export async function listSkillRepos(): Promise<SkillRepoSummary[]> {
+  const res = await api<{ repos: SkillRepoSummary[] }>("/api/skills/repos", {
+    cacheTtlMs: 30_000,
+  });
+  return res.repos;
+}
+
+export async function syncSkillRepo(slug: string): Promise<SkillRepoSummary> {
+  const res = await api<{ repo: SkillRepoSummary }>(
+    `/api/skills/repos/${slug}/sync`,
+    { method: "POST" },
   );
+  return res.repo;
+}
+
+export async function fetchSkillCacheStatus(): Promise<SkillCacheStatus> {
+  return api("/api/skills/cache");
+}
+
+export async function listSkillTokens(): Promise<{
+  tokens: SkillTokenInfo[];
+  canManagePlatform: boolean;
+}> {
+  return api("/api/skills/tokens");
+}
+
+export async function saveSkillToken(body: {
+  provider: SkillTokenProvider;
+  token: string;
+  scope: SkillTokenScope;
+  label?: string;
+}): Promise<SkillTokenInfo> {
+  const res = await api<{ token: SkillTokenInfo }>(
+    `/api/skills/tokens/${body.provider}`,
+    { method: "PUT", json: body },
+  );
+  return res.token;
+}
+
+export async function deleteSkillToken(
+  provider: SkillTokenProvider,
+  scope: SkillTokenScope,
+): Promise<void> {
+  await api(`/api/skills/tokens/${provider}?scope=${scope}`, { method: "DELETE" });
 }
 
 export async function resolveSkillSource(source: string): Promise<SkillResolveResult> {

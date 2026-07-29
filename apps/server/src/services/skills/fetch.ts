@@ -35,8 +35,12 @@ const FETCH_TIMEOUT_MS = 20_000;
 const USER_AGENT = "Zakura-Skills/1.0";
 /** 单个技能目录下最多下载的捆绑文件数（含 SKILL.md） */
 const MAX_BUNDLED_FILES = SKILL_MAX_FILES;
-/** 一个来源最多解析出的技能数 */
-const MAX_SKILLS_PER_SOURCE = 40;
+/**
+ * 一个来源最多解析出的技能数。
+ * 大仓库本身就是个商店（anthropics/skills 之类几十个技能），上限放宽，
+ * 由平台缓存 + 接口分页承担展示压力。
+ */
+const MAX_SKILLS_PER_SOURCE = 500;
 /** 并发下载数：既压住 raw.githubusercontent 的速率，也别让预览等太久 */
 const DOWNLOAD_CONCURRENCY = 8;
 /**
@@ -53,7 +57,77 @@ interface CachedTree {
 }
 
 const treeCache = new Map<string, { expires: number; value: CachedTree }>();
-const defaultBranchCache = new Map<string, { expires: number; value: string }>();
+
+/** ref 里带 refs/ 前缀时 raw 也认，统一在这里拼 */
+function rawBaseUrl(owner: string, repo: string, ref: string): string {
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${ref}`;
+}
+
+/**
+ * 零 API 配额的版本探测。
+ *
+ * codeload.github.com 走的是 git 打包通道，不计入 REST API 的 60 次/小时；
+ * 一个 HEAD 请求就能拿到随仓库内容变化的弱 ETag，用它判断"要不要重新抓"。
+ * 拿不到就返回 null，调用方回退到正常抓取。
+ */
+export async function probeRepoEtag(
+  source: SkillSource,
+  opts: FetchOptions = {},
+): Promise<string | null> {
+  const { owner, repo } = source;
+  if (source.kind !== "github" || !owner || !repo) return null;
+  // codeload 的 tar.gz 路径接受分支名、tag 与 sha；不指定就用 HEAD
+  const ref = source.ref || "HEAD";
+  const url = `https://codeload.github.com/${owner}/${repo}/tar.gz/${encodeURIComponent(ref)}`;
+  try {
+    const res = await fetchWithTimeout(url, { method: "HEAD" }, opts.signal);
+    if (!res.ok) return null;
+    return res.headers.get("etag");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 给"只缓存了清单"的技能补齐捆绑文件。
+ *
+ * 平台缓存对体积大的仓库只存 SKILL.md + 资源清单（pkg.assets），
+ * 真正安装时才按 assets 逐个从 raw.githubusercontent 拉——不消耗 API 配额。
+ */
+export async function hydratePackage(
+  pkg: SkillPackage,
+  opts: FetchOptions = {},
+): Promise<SkillPackage> {
+  const assets = pkg.assets ?? [];
+  if (!assets.length) return pkg;
+  const { owner, repo, ref, path: dir } = pkg.source;
+  if (pkg.source.kind !== "github" || !owner || !repo) return pkg;
+
+  const rawBase = rawBaseUrl(owner, repo, ref || "HEAD");
+  const have = new Set(pkg.files.map((f) => f.path));
+  const wanted = assets.filter((a) => !have.has(a.path));
+  const contents = await mapPool(wanted, DOWNLOAD_CONCURRENCY, async (asset) => {
+    const full = dir ? `${dir}/${asset.path}` : asset.path;
+    try {
+      return await httpText(`${rawBase}/${encodeURI(full)}`, opts);
+    } catch {
+      return null;
+    }
+  });
+
+  const files = [...pkg.files];
+  let total = files.reduce((sum, f) => sum + f.size, 0);
+  for (const [i, content] of contents.entries()) {
+    if (content == null) continue;
+    const size = Buffer.byteLength(content, "utf8");
+    if (size > SKILL_MAX_FILE_BYTES || total + size > SKILL_MAX_TOTAL_BYTES) continue;
+    files.push({ path: wanted[i]!.path, content, encoding: "utf8", size });
+    total += size;
+  }
+  const hydrated: SkillPackage = { ...pkg, files, sizeBytes: total };
+  delete hydrated.assets;
+  return hydrated;
+}
 
 function readCache<T>(store: Map<string, { expires: number; value: T }>, key: string): T | null {
   const hit = store.get(key);
@@ -117,13 +191,17 @@ async function httpJson<T>(url: string, opts: FetchOptions, accept = "applicatio
       throw new SkillSourceError(
         token
           ? "GitHub API 限流：请稍后重试"
-          : "GitHub API 限流（未鉴权每小时仅 60 次）：请稍后重试，或为服务端配置 GITHUB_TOKEN 环境变量",
+          : "GitHub API 限流（未鉴权每小时仅 60 次）：请在技能设置里配置 GitHub Token",
+        "rate_limit",
       );
     }
     if (res.status === 404) {
-      throw new SkillSourceError(`资源不存在（404）：${url}`);
+      throw new SkillSourceError(`资源不存在（404）：${url}`, "not_found");
     }
-    throw new SkillSourceError(`请求失败 ${res.status}：${url}`);
+    if (res.status === 401 || res.status === 403) {
+      throw new SkillSourceError(`无权访问（${res.status}）：${url}`, "forbidden");
+    }
+    throw new SkillSourceError(`请求失败 ${res.status}：${url}`, "http");
   }
   return (await res.json()) as T;
 }
@@ -167,7 +245,7 @@ function isTextFile(path: string): boolean {
 }
 
 /** -s/--skill 过滤：技能名、目录名、清单路径任一命中即可 */
-function matchesRequested(requested: string[] | undefined, ...aliases: string[]): boolean {
+export function matchesRequested(requested: string[] | undefined, ...aliases: string[]): boolean {
   if (!requested?.length || requested.includes("*")) return true;
   const pool = aliases.filter(Boolean).map((a) => a.toLowerCase());
   const normalized = pool.map(normalizeSkillName);
@@ -322,6 +400,8 @@ async function buildPackages(plans: ManifestPlan[], ctx: RepoContext): Promise<S
         plan.fallbackName,
         basename(plan.bundleDir ?? ""),
         plan.scopePath,
+        // 路径中的任一段：plugins/stitch-design/skills/x 可用 @stitch-design 整组选中
+        ...plan.scopePath.split("/"),
         // 单技能仓库常被写成 owner/repo@repo，仓库名也算别名
         plans.length === 1 ? ctx.repo : "",
       )
@@ -471,20 +551,8 @@ async function fetchGithub(source: SkillSource, opts: FetchOptions): Promise<Fet
   if (!owner || !repo) throw new SkillSourceError("GitHub 来源缺少 owner/repo");
 
   const warnings: string[] = [];
-  let ref = source.ref;
-
-  if (!ref) {
-    const cacheKey = `${owner}/${repo}`;
-    ref = readCache(defaultBranchCache, cacheKey) ?? "";
-    if (!ref) {
-      const info = await httpJson<{ default_branch?: string }>(
-        `https://api.github.com/repos/${owner}/${repo}`,
-        opts,
-      );
-      ref = info.default_branch || "main";
-      writeCache(defaultBranchCache, cacheKey, ref);
-    }
-  }
+  // 不传 ref 时直接用 HEAD：省掉一次仅为读 default_branch 的 API 调用
+  const ref = source.ref || "HEAD";
 
   const treeKey = `${owner}/${repo}@${ref}`;
   let cachedTree = readCache(treeCache, treeKey);
@@ -497,8 +565,13 @@ async function fetchGithub(source: SkillSource, opts: FetchOptions): Promise<Fet
       cachedTree = { tree: res.tree ?? [], sha: res.sha, truncated: res.truncated };
       writeCache(treeCache, treeKey, cachedTree);
     } catch (err) {
-      if (err instanceof SkillSourceError && err.message.includes("404")) {
-        throw new SkillSourceError(`仓库或分支不存在：${owner}/${repo}@${ref}`);
+      if (err instanceof SkillSourceError && err.code === "not_found") {
+        throw new SkillSourceError(
+          source.ref
+            ? `仓库或分支不存在：${owner}/${repo}@${ref}`
+            : `仓库不存在或不可访问：${owner}/${repo}`,
+          "not_found",
+        );
       }
       throw err;
     }
@@ -509,7 +582,7 @@ async function fetchGithub(source: SkillSource, opts: FetchOptions): Promise<Fet
 
   const blobs = cachedTree.tree.filter((e) => e.type === "blob");
   const sizes = new Map(blobs.map((e) => [e.path, e.size ?? 0]));
-  const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}`;
+  const rawBase = rawBaseUrl(owner, repo, ref);
   const ctx: RepoContext = {
     paths: blobs.map((e) => e.path),
     sizeOf: (p) => sizes.get(p) ?? 0,

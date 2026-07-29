@@ -2,7 +2,7 @@
  * 技能商店检索：内置目录 / skills.sh / GitHub 三个来源统一成 SkillSearchItem。
  * 外部结果做进程内 TTL 缓存，避免重复打上游限流。
  */
-import type { SkillSearchItem, SkillStoreId } from "@zakura/shared";
+import type { SkillSearchItem, SkillSearchPage, SkillStoreId } from "@zakura/shared";
 import { BUILTIN_SKILLS } from "./builtin.js";
 import { parseSkillSource } from "./source.js";
 
@@ -188,17 +188,69 @@ function directHit(query: string): SkillSearchItem | null {
   }
 }
 
+/**
+ * 官方仓库：内容已由服务端同步到平台缓存，搜索直接走本地，
+ * 既快又带完整描述（skills.sh 的接口是不返回描述的）。
+ */
+function searchCurated(
+  query: string,
+  cached: CuratedSkillEntry[],
+  repoSlug?: string,
+): SkillSearchItem[] {
+  const q = query.trim().toLowerCase();
+  return cached
+    .filter((entry) => {
+      if (repoSlug && entry.slug.toLowerCase() !== repoSlug.toLowerCase()) return false;
+      if (!q) return true;
+      return (
+        entry.name.toLowerCase().includes(q) ||
+        entry.title.toLowerCase().includes(q) ||
+        entry.description.toLowerCase().includes(q) ||
+        entry.slug.toLowerCase().includes(q)
+      );
+    })
+    .map<SkillSearchItem>((entry) => ({
+      id: `curated:${entry.slug}/${entry.name}`,
+      store: "curated",
+      name: entry.name,
+      title: entry.title || titleize(entry.name),
+      description: entry.description,
+      source: entry.slug,
+      installSpec: `${entry.slug}@${entry.name}`,
+      homepage: `https://github.com/${entry.slug}`,
+      cached: true,
+      repoSlug: entry.slug,
+      publisher: entry.publisher,
+    }));
+}
+
+/** 平台缓存里的一条技能（由 SkillsService 注入，store 层不碰数据库） */
+export interface CuratedSkillEntry {
+  slug: string;
+  name: string;
+  title: string;
+  description: string;
+  publisher: string;
+}
+
 export interface SkillSearchOptions {
   query: string;
   store?: SkillStoreId | "all";
   githubToken?: string | undefined;
   /** 已注册的技能名，用于标记 installed */
   installedNames?: Set<string>;
+  /** 平台缓存里的技能（curated 商店的数据源） */
+  curated?: CuratedSkillEntry[];
+  /** 只看某个仓库（商店内浏览） */
+  repoSlug?: string;
+  offset?: number;
+  limit?: number;
 }
 
-export async function searchSkillStores(
-  opts: SkillSearchOptions,
-): Promise<{ items: SkillSearchItem[]; errors: Array<{ store: SkillStoreId; error: string }> }> {
+const DEFAULT_LIMIT = 30;
+const MAX_LIMIT = 100;
+
+export async function searchSkillStores(opts: SkillSearchOptions): Promise<SkillSearchPage> {
   const store = opts.store ?? "all";
   const errors: Array<{ store: SkillStoreId; error: string }> = [];
   const tasks: Array<Promise<SkillSearchItem[]>> = [];
@@ -209,18 +261,28 @@ export async function searchSkillStores(
       return [] as SkillSearchItem[];
     });
 
-  if (store === "all" || store === "builtin") {
+  // 指定了仓库就只在该仓库内浏览，不掺外部搜索结果
+  const scoped = Boolean(opts.repoSlug);
+  if (!scoped && (store === "all" || store === "builtin")) {
     tasks.push(guard("builtin", Promise.resolve(searchBuiltin(opts.query))));
   }
-  if (store === "all" || store === "skills-sh") {
+  if (store === "all" || store === "curated") {
+    tasks.push(
+      guard(
+        "curated",
+        Promise.resolve(searchCurated(opts.query, opts.curated ?? [], opts.repoSlug)),
+      ),
+    );
+  }
+  if (!scoped && (store === "all" || store === "skills-sh")) {
     tasks.push(guard("skills-sh", searchSkillsSh(opts.query)));
   }
-  if (store === "all" || store === "github") {
+  if (!scoped && (store === "all" || store === "github")) {
     tasks.push(guard("github", searchGithub(opts.query, opts.githubToken)));
   }
 
   const results = (await Promise.all(tasks)).flat();
-  const direct = directHit(opts.query);
+  const direct = scoped ? null : directHit(opts.query);
   const items = direct ? [direct, ...results] : results;
 
   const seen = new Set<string>();
@@ -235,5 +297,15 @@ export async function searchSkillStores(
       if (opts.installedNames.has(item.name.toLowerCase())) item.installed = true;
     }
   }
-  return { items: deduped, errors };
+
+  const limit = Math.min(Math.max(opts.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  return {
+    items: deduped.slice(offset, offset + limit),
+    total: deduped.length,
+    offset,
+    limit,
+    hasMore: offset + limit < deduped.length,
+    errors,
+  };
 }

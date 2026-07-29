@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Download, Package, Sparkles, Star } from "lucide-react";
+import { BadgeCheck, CheckCircle2, Download, Package, Sparkles, Star, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ import { SKILL_STORE_LABEL, formatCount, type SkillSearchItem } from "@/lib/skil
 
 const STORE_BADGE: Record<string, "default" | "secondary" | "outline"> = {
   builtin: "default",
+  curated: "default",
   "skills-sh": "secondary",
   github: "outline",
 };
@@ -39,11 +40,15 @@ export function SkillCard({
         <div
           className={cn(
             "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70",
-            item.store === "builtin" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+            item.store === "builtin" || item.store === "curated"
+              ? "bg-primary/10 text-primary"
+              : "bg-muted text-muted-foreground",
           )}
         >
           {item.store === "builtin" ? (
             <Sparkles className="size-4" />
+          ) : item.store === "curated" ? (
+            <BadgeCheck className="size-4" />
           ) : (
             <Package className="size-4" />
           )}
@@ -86,6 +91,15 @@ export function SkillCard({
           <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
             <Star className="size-3" />
             {stars}
+          </span>
+        ) : null}
+        {item.cached ? (
+          <span
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
+            title="内容已在服务端缓存，安装无需联网"
+          >
+            <Zap className="size-3" />
+            本地可装
           </span>
         ) : null}
       </div>

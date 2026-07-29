@@ -208,8 +208,55 @@ describe("SKILL.md frontmatter", () => {
     assert.deepEqual(frontmatter["allowed-tools"], ["Read", "Write"]);
   });
 
-  it("解析嵌套 metadata", () => {
+  it("解析块标量：| 保留换行", () => {
+    const { frontmatter, body } = parseSkillMarkdown(
+      [
+        "---",
+        "name: demo",
+        "description: |-",
+        "  第一行",
+        "  第二行",
+        "version: v1.0",
+        "---",
+        "正文",
+      ].join("\n"),
+    );
+    assert.equal(frontmatter.description, "第一行\n第二行");
+    assert.equal(frontmatter.version, "v1.0");
+    assert.equal(body.trim(), "正文");
+  });
+
+  it("解析块标量：> 折叠成空格，空行分段", () => {
     const { frontmatter } = parseSkillMarkdown(
+      [
+        "---",
+        "name: demo",
+        "description: >-",
+        "  Find and remove AI slop from a web",
+        "  project. Use when the user asks.",
+        "",
+        "  第二段。",
+        "license: MIT",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    assert.equal(
+      frontmatter.description,
+      "Find and remove AI slop from a web project. Use when the user asks.\n\n第二段。",
+    );
+    assert.equal(frontmatter.license, "MIT");
+  });
+
+  it("块标量不会吞掉后续顶层字段", () => {
+    const { frontmatter } = parseSkillMarkdown(
+      ["---", "description: |", "  内容", "name: after-block", "---", ""].join("\n"),
+    );
+    assert.equal(frontmatter.name, "after-block");
+    assert.equal(frontmatter.description, "内容");
+  });
+
+  it("解析嵌套 metadata", () => {    const { frontmatter } = parseSkillMarkdown(
       "---\nname: x\ndescription: d\nmetadata:\n  internal: true\n  owner: team\n---\n正文",
     );
     assert.deepEqual(frontmatter.metadata, { internal: true, owner: "team" });

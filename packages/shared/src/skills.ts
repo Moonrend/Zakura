@@ -30,7 +30,7 @@ export const SKILL_DISCOVERY_DIRS = [
 ] as const;
 
 /** 技能商店 */
-export type SkillStoreId = "builtin" | "skills-sh" | "github";
+export type SkillStoreId = "builtin" | "curated" | "skills-sh" | "github";
 
 export interface SkillStoreMeta {
   id: SkillStoreId;
@@ -50,6 +50,13 @@ export const SKILL_STORES: SkillStoreMeta[] = [
     searchable: true,
   },
   {
+    id: "curated",
+    name: "官方仓库",
+    description: "服务端已同步到本地的主流技能仓库，安装无需联网",
+    url: "https://github.com/topics/agent-skills",
+    searchable: true,
+  },
+  {
     id: "skills-sh",
     name: "skills.sh",
     description: "开放 Agent Skills 生态目录，按安装量排序",
@@ -62,6 +69,78 @@ export const SKILL_STORES: SkillStoreMeta[] = [
     description: "搜索 GitHub 上包含 SKILL.md 的仓库",
     url: "https://github.com/topics/agent-skills",
     searchable: true,
+  },
+];
+
+/**
+ * 服务端预拉取并定期更新的技能仓库。
+ *
+ * 这些仓库本身就相当于一个商店（几十个技能），逐租户现拉既慢又费 GitHub 配额；
+ * 平台侧同步一份到数据库后，租户安装只是一次本地读取。
+ */
+export interface CuratedSkillRepo {
+  /** owner/repo，同时作为 installSpec 前缀 */
+  slug: string;
+  name: string;
+  description: string;
+  /** 展示用分组 */
+  publisher: string;
+  /** 优先同步（首次启动就拉） */
+  primary?: boolean;
+}
+
+export const CURATED_SKILL_REPOS: CuratedSkillRepo[] = [
+  {
+    slug: "anthropics/skills",
+    name: "Anthropic Skills",
+    description: "Anthropic 官方技能集：文档处理、前端设计、MCP 构建等",
+    publisher: "Anthropic",
+    primary: true,
+  },
+  {
+    slug: "openai/skills",
+    name: "OpenAI Skills",
+    description: "OpenAI 官方技能集",
+    publisher: "OpenAI",
+    primary: true,
+  },
+  {
+    slug: "vercel-labs/agent-skills",
+    name: "Vercel Agent Skills",
+    description: "Vercel 出品的前端与写作类技能",
+    publisher: "Vercel",
+    primary: true,
+  },
+  {
+    slug: "obra/superpowers",
+    name: "Superpowers",
+    description: "工程实践类技能：TDD、系统化调试、代码评审",
+    publisher: "obra",
+    primary: true,
+  },
+  {
+    slug: "anthropics/knowledge-work-plugins",
+    name: "Knowledge Work Plugins",
+    description: "Anthropic 知识工作插件集",
+    publisher: "Anthropic",
+  },
+  {
+    slug: "cursor/plugins",
+    name: "Cursor Plugins",
+    description: "Cursor 官方插件与技能",
+    publisher: "Cursor",
+  },
+  {
+    slug: "google-labs-code/stitch-skills",
+    name: "Stitch Skills",
+    description: "Google Labs Stitch 设计到代码工作流",
+    publisher: "Google Labs",
+  },
+  {
+    slug: "mattpocock/skills",
+    name: "Matt Pocock Skills",
+    description: "写作与 TypeScript 相关技能",
+    publisher: "mattpocock",
   },
 ];
 
@@ -151,6 +230,10 @@ export interface SkillRecord {
   sizeBytes: number;
   /** 已安装该技能的 Agent id */
   agentIds: string[];
+  /** 命中平台缓存时的仓库标识 */
+  repoKey?: string | null;
+  /** 平台缓存里已有更新版本 */
+  updateAvailable?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -193,6 +276,65 @@ export interface SkillSearchItem {
   homepage?: string;
   /** 已在本租户注册表中 */
   installed?: boolean;
+  /** curated：内容已在平台缓存里，安装无需联网 */
+  cached?: boolean;
+  /** curated：所属仓库（用于按仓库分组浏览） */
+  repoSlug?: string;
+  publisher?: string;
+}
+
+/** 分页参数：仓库型商店动辄几十上百个技能，不能一次全端上来 */
+export interface SkillSearchPage {
+  items: SkillSearchItem[];
+  /** 满足条件的总数（已知时） */
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  errors: Array<{ store: SkillStoreId; error: string }>;
+}
+
+/** 已同步到平台的技能仓库（商店入口） */
+export interface SkillRepoSummary {
+  repoKey: string;
+  slug: string;
+  name: string;
+  description: string;
+  publisher: string;
+  skillCount: number;
+  sizeBytes: number;
+  version: string | null;
+  /** 最近一次确认与上游一致 */
+  checkedAt: string | null;
+  fetchedAt: string | null;
+  /** 只缓存了清单，安装时补齐捆绑文件 */
+  partial: boolean;
+  /** 尚未同步（首次访问会触发拉取） */
+  pending: boolean;
+  lastError: string | null;
+}
+
+export type SkillTokenScope = "platform" | "tenant";
+export type SkillTokenProvider = "github" | "gitlab";
+
+/** 令牌只回显掩码，不回明文 */
+export interface SkillTokenInfo {
+  scope: SkillTokenScope;
+  provider: SkillTokenProvider;
+  /** 末 4 位 */
+  hint: string | null;
+  label: string | null;
+  updatedAt: string;
+  lastUsedAt: string | null;
+}
+
+/** 平台缓存概况（管理端展示） */
+export interface SkillCacheStatus {
+  repos: SkillRepoSummary[];
+  totalSkills: number;
+  totalBytes: number;
+  /** 下次后台刷新的间隔（毫秒） */
+  refreshIntervalMs: number;
 }
 
 /** 解析预览结果：一个来源可能包含多个技能 */
