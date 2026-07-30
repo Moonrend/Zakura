@@ -4,6 +4,7 @@
  *
  * 内容以 TS 常量保存（而非 .md 资源文件），保证 tsx 开发态与 dist 构建产物行为一致。
  */
+import { createHash } from "node:crypto";
 import { AGENT_SKILLS_DIR, type SkillFile, type SkillPackage } from "@zakura/shared";
 import { buildSkillMarkdown } from "./source.js";
 
@@ -58,9 +59,10 @@ const FIND_SKILLS: BuiltinSkillDef = {
 调用 \`re_search_skills\`，参数 \`query\` 用具体的关键词，\`store\` 可选：
 
 - \`builtin\` — Zakura 内置技能，针对本平台的工具面（浏览器、工作区、子代理、交付）编写，优先考虑
+- \`curated\` — Anthropic / OpenAI / Vercel 等官方仓库，平台已镜像到本地：秒装、描述完整，第三方技能先看这里
 - \`skills-sh\` — 开放生态目录（skills.sh），按安装量排序，覆盖面最广
 - \`github\` — 直接搜 GitHub 上带 SKILL.md 的仓库，适合找小众/新发布的技能
-- 不传则三个商店一起搜
+- 不传则所有商店一起搜
 
 关键词要具体。"react 性能" 比 "前端" 好，"changelog 生成" 比 "文档" 好。一次没搜到就换同义词再试（deploy → deployment → ci-cd）。
 
@@ -607,6 +609,23 @@ export function getBuiltinSkill(name: string): BuiltinSkillDef | undefined {
   return BUILTIN_SKILLS.find((s) => s.name.toLowerCase() === wanted);
 }
 
+/**
+ * 内置技能的版本 = 内容哈希。
+ *
+ * 用常量 "builtin" 当版本时，改了正文也没人知道内容变了，
+ * 已装到 Agent 工作区的旧文本就永远留在那儿。改成内容哈希后，
+ * 注册表与安装记录的版本一比就能判断该不该重写工作区。
+ */
+export function builtinVersion(def: BuiltinSkillDef): string {
+  const payload = JSON.stringify([
+    def.name,
+    def.description,
+    def.body,
+    (def.extraFiles ?? []).map((f) => [f.path, f.content]),
+  ]);
+  return `builtin-${createHash("sha256").update(payload).digest("hex").slice(0, 12)}`;
+}
+
 /** 内置定义 → 可安装的技能包 */
 export function builtinToPackage(def: BuiltinSkillDef): SkillPackage {
   const manifest = buildSkillMarkdown(
@@ -635,7 +654,7 @@ export function builtinToPackage(def: BuiltinSkillDef): SkillPackage {
     body: def.body,
     files,
     source: { kind: "builtin", builtinId: def.name, store: "builtin", raw: `builtin:${def.name}` },
-    version: "builtin",
+    version: builtinVersion(def),
     sizeBytes: files.reduce((sum, f) => sum + f.size, 0),
   };
 }

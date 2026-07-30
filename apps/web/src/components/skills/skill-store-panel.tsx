@@ -1,18 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
-  ArrowLeft,
   ArrowRight,
   BadgeCheck,
   GitFork,
   Loader2,
+  Package,
   RefreshCw,
   Search,
   Sparkles,
-  Store,
   Terminal,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,13 +21,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { AgentListItem } from "@/lib/agents";
 import {
-  SKILL_STORE_LABEL,
-  fetchSkillStores,
+  DEFAULT_SKILL_STORE,
+  SKILL_STORES,
+  formatRelative,
   listSkillRepos,
   searchSkills,
   syncSkillRepo,
   type SkillRepoSummary,
   type SkillSearchItem,
+  type SkillSearchPage,
   type SkillStoreId,
   type SkillStoreMeta,
 } from "@/lib/skills";
@@ -35,52 +37,44 @@ import { SkillCard, SkillCardSkeleton } from "@/components/skills/skill-card";
 import { SkillInstallDialog } from "@/components/skills/skill-install-dialog";
 
 const STORE_ICON: Record<SkillStoreId, typeof Sparkles> = {
-  builtin: Sparkles,
   curated: BadgeCheck,
-  "skills-sh": Store,
+  builtin: Sparkles,
+  "skills-sh": Package,
   github: GitFork,
 };
 
-const QUICK_QUERIES = [
-  "react",
-  "testing",
-  "deploy",
-  "code review",
-  "changelog",
-  "design",
-  "database",
-];
+const QUICK_QUERIES = ["react", "testing", "deploy", "code review", "pdf", "design", "database"];
 
 const PAGE_SIZE = 24;
 
-function relativeTime(iso: string | null): string {
-  if (!iso) return "未同步";
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 60_000) return "刚刚同步";
-  const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${mins} 分钟前同步`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} 小时前同步`;
-  return `${Math.round(hours / 24)} 天前同步`;
-}
+const EMPTY_PAGE: SkillSearchPage = {
+  store: DEFAULT_SKILL_STORE,
+  items: [],
+  total: 0,
+  offset: 0,
+  limit: PAGE_SIZE,
+  hasMore: false,
+};
 
-/** 官方仓库货架：服务端已同步到本地，点进去可以逐个浏览 */
-function RepoShelf({
+function RepoFilter({
   repos,
-  onOpen,
+  active,
+  onSelect,
   onSynced,
 }: {
   repos: SkillRepoSummary[];
-  onOpen: (repo: SkillRepoSummary) => void;
+  active: string | null;
+  onSelect: (slug: string | null) => void;
   onSynced: () => void;
 }) {
   const [syncing, setSyncing] = useState<string | null>(null);
+  const current = repos.find((r) => r.slug === active) ?? null;
 
-  async function sync(repo: SkillRepoSummary) {
-    setSyncing(repo.slug);
+  async function sync(slug: string) {
+    setSyncing(slug);
     try {
-      await syncSkillRepo(repo.slug);
-      toast.success(`${repo.name} 已同步`);
+      await syncSkillRepo(slug);
+      toast.success(`${slug} 已同步`);
       onSynced();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -90,77 +84,73 @@ function RepoShelf({
   }
 
   if (!repos.length) return null;
+
   return (
-    <section className="space-y-2.5">
-      <div className="flex items-center gap-2">
-        <BadgeCheck className="size-4 text-primary" />
-        <h3 className="text-sm font-medium">官方仓库</h3>
-        <span className="text-xs text-muted-foreground">
-          由服务端统一同步，安装无需联网
-        </span>
-      </div>
-      <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+    <div className="space-y-1.5">
+      <div className="scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 flex snap-x items-center gap-1.5 overflow-x-auto px-1 pb-1">
+        <button
+          type="button"
+          onClick={() => onSelect(null)}
+          className={cn(
+            "shrink-0 snap-start rounded-md border px-2.5 py-1 text-xs transition-colors",
+            active === null
+              ? "border-foreground/30 bg-muted font-medium text-foreground"
+              : "border-border text-muted-foreground hover:bg-muted/60",
+          )}
+        >
+          全部仓库
+        </button>
         {repos.map((repo) => (
-          <div
+          <button
             key={repo.repoKey}
-            className="group flex flex-col rounded-xl border border-border bg-card p-3.5 transition-colors hover:border-foreground/20"
+            type="button"
+            onClick={() => onSelect(repo.slug)}
+            title={repo.description || repo.slug}
+            className={cn(
+              "flex max-w-[min(18rem,72vw)] shrink-0 snap-start items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors",
+              active === repo.slug
+                ? "border-foreground/30 bg-muted font-medium text-foreground"
+                : "border-border text-muted-foreground hover:bg-muted/60",
+            )}
           >
-            <div className="flex items-start gap-2">
-              <button
-                type="button"
-                onClick={() => onOpen(repo)}
-                className="min-w-0 flex-1 text-left"
-              >
-                <span className="flex items-center gap-1.5 truncate text-sm font-medium group-hover:underline">
-                  {repo.name}
-                </span>
-                <span className="truncate font-mono text-[11px] text-muted-foreground">
-                  {repo.slug}
-                </span>
-              </button>
-              <Badge variant="secondary" className="shrink-0 text-[10px]">
-                {repo.publisher}
-              </Badge>
-            </div>
-
-            <p className="mt-1.5 line-clamp-2 flex-1 text-xs leading-5 text-muted-foreground">
-              {repo.description || "—"}
-            </p>
-
-            <div className="mt-2.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-              {repo.pending ? (
-                <span className="text-warning-foreground">尚未同步</span>
-              ) : (
-                <>
-                  <span>{repo.skillCount} 个技能</span>
-                  <span>·</span>
-                  <span>{relativeTime(repo.checkedAt)}</span>
-                </>
-              )}
-              <Button
-                size="icon"
-                variant="ghost"
-                className="ml-auto size-6"
-                title="立即同步"
-                disabled={syncing === repo.slug}
-                onClick={() => void sync(repo)}
-              >
-                {syncing === repo.slug ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-3.5" />
-                )}
-              </Button>
-            </div>
-            {repo.lastError ? (
-              <p className="mt-1 truncate text-[11px] text-destructive" title={repo.lastError}>
-                {repo.lastError}
-              </p>
-            ) : null}
-          </div>
+            <span className="min-w-0 truncate">{repo.name}</span>
+            <span className="shrink-0 tabular-nums opacity-60">
+              {repo.pending ? "待同步" : repo.skillCount}
+            </span>
+          </button>
         ))}
       </div>
-    </section>
+
+      {current ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="min-w-0 max-w-full truncate font-mono" title={current.slug}>
+            {current.slug}
+          </span>
+          <span>·</span>
+          <span>{current.pending ? "尚未同步" : `${formatRelative(current.checkedAt)}检查`}</span>
+          {current.partial ? <span>· 仅缓存清单，安装时补齐资源</span> : null}
+          <Button
+            size="xs"
+            variant="ghost"
+            className="ml-0 sm:ml-auto"
+            disabled={syncing === current.slug}
+            onClick={() => void sync(current.slug)}
+          >
+            {syncing === current.slug ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3" />
+            )}
+            同步
+          </Button>
+          {current.lastError ? (
+            <p className="w-full truncate text-destructive" title={current.lastError}>
+              {current.lastError}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -171,26 +161,25 @@ export function SkillStorePanel({
   onInstalled,
 }: {
   agents: AgentListItem[];
-  /** 缺省时组件自行拉取商店列表 */
   stores?: SkillStoreMeta[];
   defaultAgentIds?: string[];
   onInstalled?: () => void;
 }) {
-  const [fetchedStores, setFetchedStores] = useState<SkillStoreMeta[]>([]);
-  const stores = storesProp?.length ? storesProp : fetchedStores;
-  const [query, setQuery] = useState("");
-  const [store, setStore] = useState<SkillStoreId | "all">("all");
-  /** 进入某个仓库浏览时的作用域 */
-  const [repo, setRepo] = useState<SkillRepoSummary | null>(null);
+  const stores = storesProp?.length ? storesProp : SKILL_STORES;
+  const [store, setStore] = useState<SkillStoreId>(DEFAULT_SKILL_STORE);
+  const [queries, setQueries] = useState<Partial<Record<SkillStoreId, string>>>({});
+  const [debounced, setDebounced] = useState("");
+  const [repoSlug, setRepoSlug] = useState<string | null>(null);
   const [repos, setRepos] = useState<SkillRepoSummary[]>([]);
+  const [page, setPage] = useState<SkillSearchPage>(EMPTY_PAGE);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [items, setItems] = useState<SkillSearchItem[]>([]);
-  const [total, setTotal] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [errors, setErrors] = useState<Array<{ store: SkillStoreId; error: string }>>([]);
   const [installSource, setInstallSource] = useState<string | null>(null);
   const [command, setCommand] = useState("");
+  const requestId = useRef(0);
+
+  const query = queries[store] ?? "";
+  const meta = stores.find((s) => s.id === store);
 
   const loadRepos = useCallback(() => {
     void listSkillRepos()
@@ -198,71 +187,69 @@ export function SkillStorePanel({
       .catch(() => setRepos([]));
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await searchSkills(query, store, {
-        ...(repo ? { repo: repo.slug } : {}),
-        limit: PAGE_SIZE,
-      });
-      setItems(res.items);
-      setTotal(res.total);
-      setHasMore(res.hasMore);
-      setErrors(res.errors);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [query, store, repo]);
-
-  const loadMore = useCallback(async () => {
-    setLoadingMore(true);
-    try {
-      const res = await searchSkills(query, store, {
-        ...(repo ? { repo: repo.slug } : {}),
-        offset: items.length,
-        limit: PAGE_SIZE,
-      });
-      setItems((prev) => [...prev, ...res.items]);
-      setHasMore(res.hasMore);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [query, store, repo, items.length]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => void load(), 250);
-    return () => clearTimeout(timer);
-  }, [load]);
-
   useEffect(() => {
     loadRepos();
   }, [loadRepos]);
 
   useEffect(() => {
-    if (storesProp?.length) return;
-    void fetchSkillStores()
-      .then((res) => setFetchedStores(res.stores))
-      .catch(() => setFetchedStores([]));
-  }, [storesProp]);
+    const timer = setTimeout(() => setDebounced(query), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
 
-  const grouped = useMemo(() => {
-    if (store !== "all") return { [store]: items } as Record<string, SkillSearchItem[]>;
-    const out: Record<string, SkillSearchItem[]> = {};
-    for (const item of items) {
-      (out[item.store] ??= []).push(item);
+  const load = useCallback(async () => {
+    const id = ++requestId.current;
+    setLoading(true);
+    try {
+      const res = await searchSkills(debounced, store, {
+        ...(store === "curated" && repoSlug ? { repo: repoSlug } : {}),
+        limit: PAGE_SIZE,
+      });
+      if (id !== requestId.current) return;
+      setPage(res);
+      if (res.error) {
+        toast.error(`${meta?.name ?? store} 暂不可用：${res.error}`);
+      }
+    } catch (err) {
+      if (id !== requestId.current) return;
+      setPage({ ...EMPTY_PAGE, store });
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (id === requestId.current) setLoading(false);
     }
-    return out;
-  }, [items, store]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debounced, store, repoSlug]);
 
-  const counts = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const item of items) out[item.store] = (out[item.store] ?? 0) + 1;
-    return out;
-  }, [items]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function loadMore() {
+    setLoadingMore(true);
+    try {
+      const res = await searchSkills(debounced, store, {
+        ...(store === "curated" && repoSlug ? { repo: repoSlug } : {}),
+        offset: page.items.length,
+        limit: PAGE_SIZE,
+      });
+      if (res.store !== store) return;
+      setPage((prev) => ({ ...res, items: [...prev.items, ...res.items] }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function switchStore(next: SkillStoreId) {
+    if (next === store) return;
+    setStore(next);
+    setDebounced(queries[next] ?? "");
+    if (next !== "curated") setRepoSlug(null);
+  }
+
+  function setQuery(value: string) {
+    setQueries((prev) => ({ ...prev, [store]: value }));
+  }
 
   function openInstall(spec: string) {
     if (!agents.length) {
@@ -272,11 +259,10 @@ export function SkillStorePanel({
     setInstallSource(spec);
   }
 
-  async function openRepo(target: SkillRepoSummary) {
-    setRepo(target);
-    setStore("curated");
-    setQuery("");
-    if (target.pending) {
+  async function selectRepo(slug: string | null) {
+    setRepoSlug(slug);
+    const target = slug ? repos.find((r) => r.slug === slug) : null;
+    if (target?.pending) {
       toast.info(`正在同步 ${target.name}…`);
       try {
         await syncSkillRepo(target.slug);
@@ -288,18 +274,19 @@ export function SkillStorePanel({
     }
   }
 
-  const browsing = Boolean(repo);
+  const shown = page.items.length;
+  const showQuickQueries = !query && !repoSlug;
+  const repoCounts = useMemo(
+    () => repos.reduce((sum, r) => sum + r.skillCount, 0),
+    [repos],
+  );
 
   return (
-    <div className="space-y-5">
-      {/* 粘贴安装：npx 命令 / 仓库 / 链接 */}
-      <div className="rounded-xl border border-border bg-card p-4">
-        <div className="mb-2.5 flex items-center gap-2">
-          <Terminal className="size-4 text-muted-foreground" />
+    <div className="space-y-4">
+      <div className="rounded-xl border border-border bg-card p-3 sm:p-4">
+        <div className="mb-2 flex items-center gap-2">
+          <Terminal className="size-4 shrink-0 text-muted-foreground" />
           <span className="text-sm font-medium">从命令或链接安装</span>
-          <span className="text-xs text-muted-foreground">
-            支持 npx skills add、owner/repo、GitHub / GitLab 链接、SKILL.md 直链
-          </span>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row">
           <Textarea
@@ -316,7 +303,7 @@ export function SkillStorePanel({
             }}
           />
           <Button
-            className="shrink-0 self-start"
+            className="shrink-0 sm:self-start"
             disabled={!command.trim()}
             onClick={() => openInstall(command.trim())}
           >
@@ -326,160 +313,140 @@ export function SkillStorePanel({
         </div>
       </div>
 
-      {browsing ? (
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setRepo(null)}>
-            <ArrowLeft className="size-4" />
-            返回商店
-          </Button>
-          <span className="text-sm font-medium">{repo!.name}</span>
-          <span className="font-mono text-xs text-muted-foreground">{repo!.slug}</span>
-          <Badge variant="secondary" className="text-[10px]">
-            {repo!.skillCount} 个技能
-          </Badge>
-          {repo!.partial ? (
-            <span className="text-[11px] text-muted-foreground">
-              仅缓存清单，安装时补齐资源
-            </span>
-          ) : null}
-        </div>
-      ) : (
-        <>
-          <RepoShelf repos={repos} onOpen={(r) => void openRepo(r)} onSynced={loadRepos} />
-
-          {/* 商店切换 */}
-          <div className="flex flex-wrap items-center gap-1.5">
+      <div className="scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 flex snap-x items-center gap-1.5 overflow-x-auto px-1 pb-1">
+        {stores.map((s) => {
+          const Icon = STORE_ICON[s.id] ?? Package;
+          const count = s.id === "curated" ? repoCounts : undefined;
+          return (
             <Button
+              key={s.id}
               size="sm"
-              variant={store === "all" ? "default" : "outline"}
-              onClick={() => setStore("all")}
+              className="shrink-0 snap-start"
+              variant={store === s.id ? "default" : "outline"}
+              onClick={() => switchStore(s.id)}
+              title={s.description}
             >
-              全部
-              <Badge variant="secondary" className="ml-1 text-[10px]">
-                {total || "—"}
-              </Badge>
+              <Icon className="size-3.5" />
+              {s.name}
+              {store === s.id ? (
+                <Badge variant="secondary" className="ml-0.5 text-[10px] tabular-nums">
+                  {page.total}
+                </Badge>
+              ) : count ? (
+                <span className="ml-0.5 text-[10px] tabular-nums opacity-60">{count}</span>
+              ) : null}
             </Button>
-            {stores.map((s) => {
-              const Icon = STORE_ICON[s.id] ?? Store;
-              return (
-                <Button
-                  key={s.id}
-                  size="sm"
-                  variant={store === s.id ? "default" : "outline"}
-                  onClick={() => setStore(s.id)}
-                  title={s.description}
-                >
-                  <Icon className="size-3.5" />
-                  {s.name}
-                  <Badge variant="secondary" className="ml-1 text-[10px]">
-                    {counts[s.id] ?? 0}
-                  </Badge>
-                </Button>
-              );
-            })}
-          </div>
-        </>
-      )}
+          );
+        })}
+      </div>
 
-      {/* 搜索 */}
       <div className="space-y-2">
-        <div className="relative max-w-md">
+        <div className="relative sm:max-w-md">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={
-              browsing ? `在 ${repo!.name} 内搜索…` : "搜索技能，如 react performance、pr review…"
-            }
+            placeholder={meta?.searchPlaceholder ?? "搜索技能…"}
             className="pl-8"
           />
+          {query ? (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="absolute top-1/2 right-2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="清空"
+            >
+              <X className="size-3.5" />
+            </button>
+          ) : null}
         </div>
-        {browsing ? null : (
+
+        {store === "curated" ? (
+          <RepoFilter
+            repos={repos}
+            active={repoSlug}
+            onSelect={(slug) => void selectRepo(slug)}
+            onSynced={loadRepos}
+          />
+        ) : showQuickQueries ? (
           <div className="flex flex-wrap gap-1">
             {QUICK_QUERIES.map((q) => (
               <button
                 key={q}
                 type="button"
                 onClick={() => setQuery(q)}
-                className={cn(
-                  "rounded-full border px-2.5 py-0.5 text-[11px] transition-colors",
-                  query === q
-                    ? "border-foreground/30 bg-muted text-foreground"
-                    : "border-border text-muted-foreground hover:bg-muted/60",
-                )}
+                className="rounded-full border border-border px-2.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted/60"
               >
                 {q}
               </button>
             ))}
           </div>
-        )}
+        ) : null}
       </div>
 
-      {errors.length ? (
-        <p className="text-xs text-warning-foreground">
-          部分商店暂不可用：
-          {errors.map((e) => `${SKILL_STORE_LABEL[e.store] ?? e.store}（${e.error}）`).join("，")}
-        </p>
+      {page.direct && page.store === store ? (
+        <button
+          type="button"
+          onClick={() => openInstall(page.direct!.installSpec)}
+          className="flex w-full items-center gap-2.5 rounded-xl border border-foreground/20 bg-muted/40 p-3 text-left transition-colors hover:bg-muted"
+        >
+          <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">
+              直接安装 {page.direct.source}
+            </span>
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">预览</span>
+        </button>
       ) : null}
 
-      {/* 结果 */}
       {loading ? (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <SkillCardSkeleton key={i} />
           ))}
         </div>
-      ) : !items.length ? (
-        <div className="rounded-xl border border-dashed border-border bg-card/50 p-10 text-center">
+      ) : !shown ? (
+        <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
           <p className="text-sm text-muted-foreground">
-            {query ? `没有找到「${query}」相关的技能` : "这里还没有技能"}
+            {page.error
+              ? `${meta?.name ?? store} 暂不可用`
+              : query
+                ? `在${meta?.name ?? "该商店"}没有找到「${query}」`
+                : `${meta?.name ?? "该商店"}还没有可安装的技能`}
           </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            换个关键词，或直接在上方粘贴仓库地址安装
-          </p>
-        </div>
-      ) : store === "all" && !browsing ? (
-        <div className="space-y-6">
-          {(Object.keys(grouped) as SkillStoreId[]).map((id) => (
-            <section key={id} className="space-y-2.5">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-medium">{SKILL_STORE_LABEL[id] ?? id}</h3>
-                <span className="text-xs text-muted-foreground">{grouped[id]!.length} 个</span>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                {grouped[id]!.map((item) => (
-                  <SkillCard
-                    key={item.id}
-                    item={item}
-                    onPreview={() => openInstall(item.installSpec)}
-                    onInstall={() => openInstall(item.installSpec)}
-                  />
-                ))}
-              </div>
-            </section>
-          ))}
+          {page.error ? <p className="mt-1 text-xs text-muted-foreground">{page.error}</p> : null}
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {items.map((item) => (
-            <SkillCard
-              key={item.id}
-              item={item}
-              onPreview={() => openInstall(item.installSpec)}
-              onInstall={() => openInstall(item.installSpec)}
-            />
-          ))}
-        </div>
-      )}
+        <>
+          <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+            {page.items.map((item: SkillSearchItem) => (
+              <SkillCard
+                key={item.id}
+                item={item}
+                onOpen={() => openInstall(item.installSpec)}
+              />
+            ))}
+          </div>
 
-      {hasMore ? (
-        <div className="flex justify-center">
-          <Button variant="outline" disabled={loadingMore} onClick={() => void loadMore()}>
-            {loadingMore ? <Loader2 className="size-4 animate-spin" /> : null}
-            加载更多（还有 {Math.max(total - items.length, 0)} 个）
-          </Button>
-        </div>
-      ) : null}
+          <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
+            <span className="tabular-nums">
+              {shown} / {page.total}
+            </span>
+            {page.hasMore ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={loadingMore}
+                onClick={() => void loadMore()}
+              >
+                {loadingMore ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                加载更多
+              </Button>
+            ) : null}
+          </div>
+        </>
+      )}
 
       <SkillInstallDialog
         open={Boolean(installSource)}

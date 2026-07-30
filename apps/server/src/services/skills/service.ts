@@ -13,22 +13,28 @@ import {
   SKILL_MANIFEST_FILE,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
+  SKILL_STORES,
   type AgentSkillRecord,
+  type SkillAutoUpdateStatus,
   type SkillCacheStatus,
   type SkillFile,
   type SkillPackage,
   type SkillRecord,
   type SkillRepoSummary,
   type SkillResolveResult,
+  type SkillSearchItem,
   type SkillSearchPage,
   type SkillSource,
   type SkillStoreId,
+  type SkillUpdateSummary,
 } from "@zakura/shared";
 import type { Db } from "../../db/client.js";
 import {
   agentSkills,
+  agents as agentsTable,
   newId,
   platformSkillRepos,
+  settings,
   skills,
   type Agent,
   type AgentSkillRow,
@@ -72,6 +78,11 @@ export function skillWorkspacePath(name: string): string {
 
 /** 同一租户多久才重新扫一遍"哪些 Agent 少装了内置技能" */
 const BUILTIN_BACKFILL_INTERVAL_MS = 5 * 60 * 1000;
+
+/** 自动更新：settings 表里的键（ownerKey = tenantId） */
+const AUTO_UPDATE_KEY = "skills.autoUpdate";
+/** 自动更新一轮最多处理多少个租户，避免大站一次性扫全表 */
+const AUTO_UPDATE_TENANT_BATCH = 25;
 
 function parseSource(raw: string): SkillSource {
   try {
@@ -124,6 +135,7 @@ function toRecord(row: SkillRow, agentIds: string[], upstreamVersion?: string | 
     updateAvailable: Boolean(
       upstreamVersion && row.version && upstreamVersion !== row.version,
     ),
+    upstreamVersion: upstreamVersion ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -156,8 +168,15 @@ export interface SkillsServiceDeps {
   secret?: string | undefined;
   /** GitHub PAT，提升抓取限额（等价于平台级令牌） */
   githubToken?: string | undefined;
-  /** 是否启动后台缓存刷新（测试里关掉） */
+  /** 是否启动后台缓存刷新与自动更新（测试里关掉） */
   backgroundRefresh?: boolean;
+}
+
+/** settings 表里存的自动更新状态 */
+interface StoredAutoUpdate {
+  enabled: boolean;
+  lastRunAt: string | null;
+  lastResult: SkillUpdateSummary | null;
 }
 
 export class SkillsService {
@@ -174,6 +193,10 @@ export class SkillsService {
   private readonly inflight = new Map<string, Promise<CachedRepo | null>>();
   /** 正在后台补齐捆绑文件的仓库 */
   private readonly hydrating = new Set<string>();
+  /** 一轮后台维护还没跑完时不叠加下一轮 */
+  private maintaining = false;
+  /** 租户轮转游标：租户数超过单轮批量时，下一轮从上次的位置接着走 */
+  private maintenanceCursor = 0;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: SkillsServiceDeps) {
@@ -200,9 +223,14 @@ export class SkillsService {
 
   // —— 注册表 ——
 
-  /** 把内置技能同步进租户注册表（幂等；内容变更时按 body 更新） */
-  async syncBuiltins(tenantId: string): Promise<void> {
-    if (this.builtinSynced.has(tenantId)) return;
+  /**
+   * 把内置技能同步进租户注册表（幂等）。
+   *
+   * 内置技能的版本是内容哈希，所以改了正文就会有新版本；这里只比版本，
+   * 一次比较同时覆盖 SKILL.md 与捆绑资源的改动。
+   */
+  async syncBuiltins(tenantId: string, force = false): Promise<void> {
+    if (!force && this.builtinSynced.has(tenantId)) return;
     try {
       const existing = await this.db
         .select()
@@ -213,14 +241,7 @@ export class SkillsService {
       for (const def of BUILTIN_SKILLS) {
         const pkg = builtinToPackage(def);
         const row = byName.get(pkg.name);
-        if (!row) {
-          await this.upsertPackage(tenantId, pkg, true);
-          continue;
-        }
-        const manifest = pkg.files.find((f) => f.path === SKILL_MANIFEST_FILE)?.content ?? "";
-        const currentManifest =
-          parseFiles(row.filesJson).find((f) => f.path === SKILL_MANIFEST_FILE)?.content ?? "";
-        if (manifest !== currentManifest) {
+        if (!row || row.version !== pkg.version) {
           await this.upsertPackage(tenantId, pkg, true);
         }
       }
@@ -625,11 +646,11 @@ export class SkillsService {
     if (this.refreshTimer) return;
     // 启动稍微延后，别和迁移/引导抢资源
     const kick = setTimeout(() => {
-      void this.seedCuratedRepos().then(() => this.refreshStaleRepos());
+      void this.seedCuratedRepos().then(() => this.runMaintenance());
     }, 15_000);
     kick.unref?.();
     this.refreshTimer = setInterval(() => {
-      void this.refreshStaleRepos();
+      void this.runMaintenance();
     }, REPO_REFRESH_INTERVAL_MS);
     this.refreshTimer.unref?.();
   }
@@ -637,6 +658,181 @@ export class SkillsService {
   stopBackgroundRefresh(): void {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = null;
+  }
+
+  /**
+   * 一轮后台维护：先把平台缓存刷新到最新，再让各租户的技能追上缓存。
+   *
+   * 顺序很重要——缓存没刷新就去比版本，只会得出"已是最新"的结论。
+   */
+  async runMaintenance(): Promise<void> {
+    if (this.maintaining) return;
+    this.maintaining = true;
+    try {
+      await this.refreshStaleRepos();
+      const tenantIds = await this.activeTenantIds(AUTO_UPDATE_TENANT_BATCH);
+      for (const tenantId of tenantIds) {
+        try {
+          // 内置技能始终跟随平台版本，不受自动更新开关影响：
+          // 它们是平台自身的一部分，与"要不要追第三方仓库的更新"是两件事。
+          // autoUpdateTenant 里已经包含这一步，所以开着的时候不重复跑。
+          if (await this.autoUpdateEnabled(tenantId)) {
+            await this.autoUpdateTenant(tenantId);
+          } else {
+            await this.backfillBuiltins(tenantId, { force: true });
+          }
+        } catch (err) {
+          console.warn(
+            `[skills] maintenance ${tenantId}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn("[skills] runMaintenance:", err instanceof Error ? err.message : err);
+    } finally {
+      this.maintaining = false;
+    }
+  }
+
+  /** 有 Agent 或有技能的租户才值得维护 */
+  private async activeTenantIds(limit: number): Promise<string[]> {
+    const [withAgents, withSkills] = await Promise.all([
+      this.db.selectDistinct({ tenantId: agentsTable.tenantId }).from(agentsTable),
+      this.db.selectDistinct({ tenantId: skills.tenantId }).from(skills),
+    ]);
+    const ids = new Set<string>();
+    for (const row of [...withAgents, ...withSkills]) ids.add(row.tenantId);
+    // 轮转起点跟着已处理过的租户走，避免总是只照顾前 N 个
+    const all = [...ids].sort();
+    if (all.length <= limit) return all;
+    const start = this.maintenanceCursor % all.length;
+    this.maintenanceCursor = (start + limit) % all.length;
+    return [...all.slice(start), ...all.slice(0, start)].slice(0, limit);
+  }
+
+  // —— 自动更新 ——
+
+  private async readAutoUpdate(tenantId: string): Promise<StoredAutoUpdate> {
+    try {
+      const row = await this.db.query.settings.findFirst({
+        where: and(eq(settings.ownerKey, tenantId), eq(settings.key, AUTO_UPDATE_KEY)),
+      });
+      if (!row) return { enabled: true, lastRunAt: null, lastResult: null };
+      const parsed = JSON.parse(row.value) as Partial<StoredAutoUpdate>;
+      return {
+        enabled: parsed.enabled !== false,
+        lastRunAt: parsed.lastRunAt ?? null,
+        lastResult: parsed.lastResult ?? null,
+      };
+    } catch {
+      return { enabled: true, lastRunAt: null, lastResult: null };
+    }
+  }
+
+  private async writeAutoUpdate(tenantId: string, next: StoredAutoUpdate): Promise<void> {
+    await this.db
+      .insert(settings)
+      .values({ id: newId(), ownerKey: tenantId, key: AUTO_UPDATE_KEY, value: JSON.stringify(next) })
+      .onConflictDoUpdate({
+        target: [settings.ownerKey, settings.key],
+        set: { value: JSON.stringify(next) },
+      });
+  }
+
+  /** 默认开启：技能是操作手册，跟着上游走通常比停在旧版本更符合预期 */
+  async autoUpdateEnabled(tenantId: string): Promise<boolean> {
+    return (await this.readAutoUpdate(tenantId)).enabled;
+  }
+
+  async setAutoUpdate(tenantId: string, enabled: boolean): Promise<SkillAutoUpdateStatus> {
+    const current = await this.readAutoUpdate(tenantId);
+    await this.writeAutoUpdate(tenantId, { ...current, enabled });
+    return this.autoUpdateStatus(tenantId);
+  }
+
+  async autoUpdateStatus(tenantId: string): Promise<SkillAutoUpdateStatus> {
+    const [stored, registered] = await Promise.all([
+      this.readAutoUpdate(tenantId),
+      this.list(tenantId),
+    ]);
+    return {
+      enabled: stored.enabled,
+      intervalMs: REPO_REFRESH_INTERVAL_MS,
+      lastRunAt: stored.lastRunAt,
+      lastResult: stored.lastResult,
+      pendingCount: registered.filter((s) => s.updateAvailable).length,
+    };
+  }
+
+  /**
+   * 把该租户的技能追到最新：内置技能按内容哈希，外部技能按平台缓存里的仓库版本。
+   *
+   * 只处理"平台缓存已经确认上游有变化"的技能——不再逐个技能去打上游，
+   * 一轮维护的网络开销就是刷新缓存那几个仓库，与租户数无关。
+   */
+  async autoUpdateTenant(tenantId: string): Promise<SkillUpdateSummary> {
+    const summary: SkillUpdateSummary = {
+      updated: [],
+      upToDate: 0,
+      builtinSynced: 0,
+      failed: [],
+    };
+
+    summary.builtinSynced = await this.backfillBuiltins(tenantId, { force: true });
+
+    const records = await this.list(tenantId);
+    for (const record of records) {
+      if (record.builtin) continue;
+      if (!record.updateAvailable) {
+        summary.upToDate++;
+        continue;
+      }
+      try {
+        await this.update(tenantId, record.id);
+        summary.updated.push(record.name);
+      } catch (err) {
+        summary.failed.push({
+          name: record.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const stored = await this.readAutoUpdate(tenantId);
+    await this.writeAutoUpdate(tenantId, {
+      ...stored,
+      lastRunAt: new Date().toISOString(),
+      lastResult: summary,
+    });
+    return summary;
+  }
+
+  /**
+   * 手动「立即检查更新」：先把该租户用到的仓库探一遍上游，再执行更新。
+   *
+   * 与后台维护的区别是不看开关、不等缓存 TTL——用户点了就该立刻看到结果。
+   */
+  async checkUpdatesNow(tenantId: string): Promise<SkillUpdateSummary> {
+    const rows = await this.db
+      .select({ repoKey: skills.repoKey, sourceJson: skills.sourceJson })
+      .from(skills)
+      .where(eq(skills.tenantId, tenantId));
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (!row.repoKey || seen.has(row.repoKey)) continue;
+      seen.add(row.repoKey);
+      const source = cacheScopeSource(parseSource(row.sourceJson));
+      const cached = await this.cache.read(row.repoKey);
+      await this.refreshRepo(row.repoKey, source, tenantId, cached).catch((err: unknown) => {
+        console.warn(
+          `[skills] checkUpdates ${row.repoKey}:`,
+          err instanceof Error ? err.message : err,
+        );
+        return null;
+      });
+    }
+    return this.autoUpdateTenant(tenantId);
   }
 
   /** 后台刷新一批过期仓库（官方仓库与被引用多的优先） */
@@ -724,12 +920,12 @@ export class SkillsService {
     return row ? toRepoSummary(row.row) : null;
   }
 
-  /** 跨商店搜索：curated 一栏直接读平台缓存 */
+  /** 商店检索：一次只查一个商店，curated 直接读平台缓存 */
   async search(
     tenantId: string,
     opts: {
       query: string;
-      store?: SkillStoreId | "all";
+      store: SkillStoreId;
       repoSlug?: string | undefined;
       offset?: number;
       limit?: number;
@@ -737,12 +933,13 @@ export class SkillsService {
   ): Promise<SkillSearchPage> {
     const registered = await this.list(tenantId);
     const installedNames = new Set(registered.map((s) => s.name.toLowerCase()));
-    const needCurated = !opts.store || opts.store === "all" || opts.store === "curated";
-    const curated = needCurated ? await this.curatedEntries() : [];
-    const githubToken = await this.tokens.platformToken();
+    const curated = opts.store === "curated" ? await this.curatedEntries() : [];
+    // 外部商店才需要令牌，本地商店不必为此查一次库
+    const githubToken =
+      opts.store === "github" ? await this.tokens.platformToken() : undefined;
     return searchSkillStores({
       query: opts.query,
-      ...(opts.store ? { store: opts.store } : {}),
+      store: opts.store,
       ...(opts.repoSlug ? { repoSlug: opts.repoSlug } : {}),
       ...(opts.offset != null ? { offset: opts.offset } : {}),
       ...(opts.limit != null ? { limit: opts.limit } : {}),
@@ -750,6 +947,54 @@ export class SkillsService {
       curated,
       githubToken,
     });
+  }
+
+  /**
+   * 跨商店检索（Agent 的 search_skills 工具用）。
+   *
+   * UI 一次只看一个商店，模型却是"帮我找个能做 X 的技能"——它需要一次问遍所有商店。
+   * 这里复用单商店检索并合并结果，商店本身的实现不必为两种调用方各写一遍。
+   */
+  async searchAcross(
+    tenantId: string,
+    opts: { query: string; store?: SkillStoreId | "all"; limit?: number },
+  ): Promise<{
+    items: SkillSearchItem[];
+    errors: Array<{ store: SkillStoreId; error: string }>;
+  }> {
+    const targets: SkillStoreId[] =
+      !opts.store || opts.store === "all"
+        ? SKILL_STORES.map((s) => s.id)
+        : [opts.store];
+    const pages = await Promise.all(
+      targets.map((store) =>
+        this.search(tenantId, { query: opts.query, store, ...(opts.limit ? { limit: opts.limit } : {}) }).catch(
+          (err: unknown): SkillSearchPage => ({
+            store,
+            items: [],
+            total: 0,
+            offset: 0,
+            limit: opts.limit ?? 0,
+            hasMore: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+      ),
+    );
+    const errors: Array<{ store: SkillStoreId; error: string }> = [];
+    const items: SkillSearchItem[] = [];
+    const seen = new Set<string>();
+    // 输入本身就是可安装来源时把直达条目排在最前
+    const direct = pages.find((p) => p.direct)?.direct;
+    for (const item of [...(direct ? [direct] : []), ...pages.flatMap((p) => p.items)]) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      items.push(item);
+    }
+    for (const page of pages) {
+      if (page.error) errors.push({ store: page.store, error: page.error });
+    }
+    return { items, errors };
   }
 
   /** 平台缓存里的技能压平成搜索条目 */
@@ -958,44 +1203,69 @@ export class SkillsService {
   }
 
   /**
-   * 把推荐内置技能补齐到该租户的所有 Agent。
+   * 让该租户所有 Agent 的内置技能与注册表保持一致。
    *
-   * 新建 Agent 走 installRecommended；这里负责"存量 Agent"与"新增内置技能"
-   * 两种漏装场景。写工作区可能较慢，调用方按需后台触发即可。
+   * 两件事：漏装的推荐内置技能补上；已装但版本落后的重写工作区。
+   * 后者是内置技能能随平台升级自动生效的关键——内置技能的版本是内容哈希，
+   * 改了正文就有新版本，比对安装记录的版本即可知道哪些 Agent 还留着旧文本。
+   *
+   * 新建 Agent 走 installRecommended；这里覆盖"存量 Agent"、"新增内置技能"、
+   * "内置技能内容更新"三种场景。写工作区可能较慢，调用方按需后台触发即可。
    */
-  async backfillBuiltins(tenantId: string): Promise<number> {
+  async backfillBuiltins(tenantId: string, opts: { force?: boolean } = {}): Promise<number> {
     const last = this.builtinBackfilled.get(tenantId) ?? 0;
-    if (Date.now() - last < BUILTIN_BACKFILL_INTERVAL_MS) return 0;
+    if (!opts.force && Date.now() - last < BUILTIN_BACKFILL_INTERVAL_MS) return 0;
     this.builtinBackfilled.set(tenantId, Date.now());
 
-    let installed = 0;
+    let synced = 0;
     try {
-      await this.syncBuiltins(tenantId);
-      const names = BUILTIN_SKILLS.filter((s) => s.recommended).map((s) => s.name);
-      if (!names.length) return 0;
+      await this.syncBuiltins(tenantId, opts.force);
       const rows = await this.db
         .select()
         .from(skills)
-        .where(and(eq(skills.tenantId, tenantId), inArray(skills.name, names)));
+        .where(and(eq(skills.tenantId, tenantId), eq(skills.builtin, true)));
       if (!rows.length) return 0;
 
       const agents = await this.agentService.list(tenantId);
       if (!agents.length) return 0;
-      const existing = await this.db
-        .select({ agentId: agentSkills.agentId, name: agentSkills.name })
+
+      const installed = await this.db
+        .select({
+          agentId: agentSkills.agentId,
+          name: agentSkills.name,
+          version: agentSkills.version,
+          status: agentSkills.status,
+        })
         .from(agentSkills)
-        .where(and(eq(agentSkills.tenantId, tenantId), inArray(agentSkills.name, names)));
-      const have = new Set(existing.map((r) => `${r.agentId}:${r.name}`));
+        .where(
+          and(
+            eq(agentSkills.tenantId, tenantId),
+            inArray(
+              agentSkills.name,
+              rows.map((r) => r.name),
+            ),
+          ),
+        );
+      const have = new Map(
+        installed.map((r) => [`${r.agentId}:${r.name}`, r] as const),
+      );
+      // 只有推荐技能会主动补装；非推荐的内置技能装了才跟着更新
+      const recommended = new Set(
+        BUILTIN_SKILLS.filter((s) => s.recommended).map((s) => s.name),
+      );
 
       for (const agent of agents) {
         for (const row of rows) {
-          if (have.has(`${agent.id}:${row.name}`)) continue;
+          const record = have.get(`${agent.id}:${row.name}`);
+          if (!record && !recommended.has(row.name)) continue;
+          // 版本一致且上次装成功 → 工作区里就是当前内容，跳过
+          if (record && record.status !== "error" && record.version === row.version) continue;
           try {
             await this.installToAgent(agent, row);
-            installed++;
+            synced++;
           } catch (err) {
             console.warn(
-              `[skills] 补装 ${row.name} 到 ${agent.slug} 失败:`,
+              `[skills] ${record ? "更新" : "补装"} ${row.name} 到 ${agent.slug} 失败:`,
               err instanceof Error ? err.message : err,
             );
           }
@@ -1004,7 +1274,7 @@ export class SkillsService {
     } catch (err) {
       console.warn("[skills] backfillBuiltins:", err instanceof Error ? err.message : err);
     }
-    return installed;
+    return synced;
   }
 
   // —— Agent 视角 ——
@@ -1168,7 +1438,11 @@ export class SkillsService {
     relPath?: string,
   ): Promise<{ path: string; content: string } | null> {
     const normalized = normalizeSkillName(name);
-    const rel = (relPath ?? SKILL_MANIFEST_FILE).replace(/^\/+/, "");
+    const rel = (relPath ?? SKILL_MANIFEST_FILE).replace(/\\/g, "/").replace(/^\/+/, "");
+    const relParts = rel.split("/");
+    if (!rel || relParts.some((part) => !part || part === "." || part === "..")) {
+      return null;
+    }
     const full = `${skillWorkspacePath(normalized)}/${rel}`;
 
     try {

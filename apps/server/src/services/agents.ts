@@ -39,6 +39,10 @@ import {
   assertNodeBindAllowed,
   resolveAccessibleNode,
 } from "./runner-access.js";
+import {
+  bindDefaultMcpsToAgent,
+  ensureDefaultAgentMcps,
+} from "./default-mcps.js";
 
 function slugify(input: string): string {
   return (
@@ -525,9 +529,47 @@ export class AgentService {
     return updated ?? agent;
   }
 
+  /** Ensure no-auth default MCPs (currently Grep) are installed, bound, and selected. */
+  async ensureDefaultMcpBindings(
+    tenantId: string,
+    agent: Agent,
+    orchestrator: Orchestrator,
+  ): Promise<Agent> {
+    const defaultIds = await ensureDefaultAgentMcps(
+      this.db,
+      orchestrator,
+      this.config,
+      tenantId,
+    );
+    if (!defaultIds.length) return agent;
+
+    await bindDefaultMcpsToAgent(this.db, tenantId, agent.id, defaultIds);
+
+    const prefs = getAgentProviders(agent);
+    if (prefs.mcp?.mode === "all") return agent;
+
+    const current = prefs.mcp?.instanceIds ?? [];
+    const selected = [...new Set([...current, ...defaultIds])];
+    if (selected.length === current.length && selected.every((id) => current.includes(id))) {
+      return agent;
+    }
+
+    return this.updateProviders(tenantId, agent.id, {
+      mcp: { mode: "selected", instanceIds: selected },
+    });
+  }
+
   async getProviderOptions(tenantId: string, agentId: string, orchestrator: Orchestrator) {
-    const agent = await this.get(tenantId, agentId);
+    let agent = await this.get(tenantId, agentId);
     if (!agent) throw new Error("Agent not found");
+    try {
+      agent = await this.ensureDefaultMcpBindings(tenantId, agent, orchestrator);
+    } catch (err) {
+      console.warn(
+        `[agent] default MCP bindings ${agent.slug}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
     const prefs = getAgentProviders(agent);
 
     const searchInst = await ensureCapabilityInstance(

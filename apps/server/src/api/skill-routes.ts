@@ -3,7 +3,7 @@
  */
 import type { Hono } from "hono";
 import type { SkillStoreId, SkillTokenScope } from "@zakura/shared";
-import { SKILL_STORES } from "@zakura/shared";
+import { DEFAULT_SKILL_STORE, SKILL_STORES } from "@zakura/shared";
 import type { AgentService } from "../services/agents.js";
 import { SkillSourceError, type SkillsService } from "../services/skills/index.js";
 import { BUILTIN_SKILLS } from "../services/skills/builtin.js";
@@ -40,9 +40,10 @@ function errorResponse(err: unknown): { status: 400 | 404 | 502; body: { error: 
   return { status: 400, body: { error: message } };
 }
 
-function parseStore(raw: string | undefined): SkillStoreId | "all" {
-  if (!raw || raw === "all") return "all";
-  return SKILL_STORES.some((s) => s.id === raw) ? (raw as SkillStoreId) : "all";
+function parseStore(raw: string | undefined): SkillStoreId {
+  return SKILL_STORES.some((s) => s.id === raw)
+    ? (raw as SkillStoreId)
+    : DEFAULT_SKILL_STORE;
 }
 
 export function registerSkillRoutes(
@@ -68,7 +69,7 @@ export function registerSkillRoutes(
     }),
   );
 
-  /** 跨商店搜索（分页；repo= 时只浏览该仓库内的技能） */
+  /** 单商店检索（分页；repo= 时只浏览该仓库内的技能） */
   app.get("/api/skills/search", async (c) => {
     const session = c.get("session")!;
     const query = c.req.query("q") ?? "";
@@ -118,6 +119,46 @@ export function registerSkillRoutes(
   app.get("/api/skills/cache", async (c) => {
     try {
       return c.json(await skills.cacheStatus());
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  // —— 自动更新 ——
+
+  /** 自动更新开关 + 上次运行结果 + 当前待更新数量 */
+  app.get("/api/skills/auto-update", async (c) => {
+    const session = c.get("session")!;
+    try {
+      return c.json(await skills.autoUpdateStatus(session.tenantId));
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.put("/api/skills/auto-update", async (c) => {
+    const session = c.get("session")!;
+    const body = (await c.req.json().catch(() => ({}))) as { enabled?: boolean };
+    if (typeof body.enabled !== "boolean") {
+      return c.json({ error: "enabled is required" }, 400);
+    }
+    try {
+      return c.json(await skills.setAutoUpdate(session.tenantId, body.enabled));
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  /** 立即检查并更新（不看开关，用户点了就跑） */
+  app.post("/api/skills/check-updates", async (c) => {
+    const session = c.get("session")!;
+    try {
+      const result = await skills.checkUpdatesNow(session.tenantId);
+      const status = await skills.autoUpdateStatus(session.tenantId);
+      return c.json({ result, status });
     } catch (err) {
       const e = errorResponse(err);
       return c.json(e.body, e.status);

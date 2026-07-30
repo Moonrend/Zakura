@@ -1556,26 +1556,15 @@ export async function createApiApp(deps: {
     }>();
     if (!body.name?.trim()) return c.json({ error: "name required" }, 400);
     try {
-      const result = await agentService.create(session.tenantId, body);
+      let result = await agentService.create(session.tenantId, body);
       // 无鉴权官方 MCP（如 Grep）：安装到租户并绑定到新 Agent
       try {
-        const { ensureDefaultAgentMcps, bindDefaultMcpsToAgent } = await import(
-          "../services/default-mcps.js"
-        );
-        const defaultIds = await ensureDefaultAgentMcps(
-          db,
-          orchestrator,
-          config,
+        const agent = await agentService.ensureDefaultMcpBindings(
           session.tenantId,
+          result.agent,
+          orchestrator,
         );
-        if (defaultIds.length) {
-          await bindDefaultMcpsToAgent(
-            db,
-            session.tenantId,
-            result.agent.id,
-            defaultIds,
-          );
-        }
+        result = { ...result, agent };
       } catch (err) {
         console.warn(
           "[api] default MCP auto-install failed:",

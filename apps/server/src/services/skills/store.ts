@@ -1,6 +1,12 @@
 /**
- * 技能商店检索：内置目录 / skills.sh / GitHub 三个来源统一成 SkillSearchItem。
- * 外部结果做进程内 TTL 缓存，避免重复打上游限流。
+ * 技能商店检索。
+ *
+ * 四个商店（官方仓库 / 内置 / skills.sh / GitHub）各自独立：一次请求只查一个商店，
+ * 分页、总数、错误都是该商店自己的。跨商店合并结果曾导致总数漂移与翻页重复，
+ * 而且慢商店会拖住快商店——按商店切分后这两个问题都不存在。
+ *
+ * 本地商店（官方仓库 / 内置）在内存里过滤后精确切片，可以深度翻页；
+ * 外部商店（skills.sh / GitHub）按上游一页的量抓取后做 TTL 缓存，避免重复打限流。
  */
 import type { SkillSearchItem, SkillSearchPage, SkillStoreId } from "@zakura/shared";
 import { BUILTIN_SKILLS } from "./builtin.js";
@@ -9,6 +15,11 @@ import { parseSkillSource } from "./source.js";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 12_000;
 const USER_AGENT = "Zakura-Skills/1.0";
+
+export const DEFAULT_LIMIT = 24;
+export const MAX_LIMIT = 100;
+/** 外部商店单次向上游要的条数（本地再按 limit 切片） */
+const UPSTREAM_PAGE = 100;
 
 const cache = new Map<string, { expires: number; items: SkillSearchItem[] }>();
 
@@ -51,17 +62,21 @@ function titleize(name: string): string {
     .join(" ");
 }
 
+/** 统一的本地匹配规则：名字 / 标题 / 描述 / 来源任一命中 */
+function matches(q: string, ...fields: Array<string | undefined>): boolean {
+  if (!q) return true;
+  return fields.some((f) => f?.toLowerCase().includes(q));
+}
+
+// —— 内置 ——
+
 function searchBuiltin(query: string): SkillSearchItem[] {
   const q = query.trim().toLowerCase();
-  return BUILTIN_SKILLS.filter((s) => {
-    if (!q) return true;
-    return (
-      s.name.toLowerCase().includes(q) ||
-      s.title.toLowerCase().includes(q) ||
-      s.description.toLowerCase().includes(q) ||
-      (s.tags ?? []).some((t) => t.toLowerCase().includes(q))
-    );
-  }).map<SkillSearchItem>((s) => ({
+  return BUILTIN_SKILLS.filter(
+    (s) =>
+      matches(q, s.name, s.title, s.description) ||
+      (s.tags ?? []).some((t) => t.toLowerCase().includes(q)),
+  ).map<SkillSearchItem>((s) => ({
     id: `builtin:${s.name}`,
     store: "builtin",
     name: s.name,
@@ -69,8 +84,52 @@ function searchBuiltin(query: string): SkillSearchItem[] {
     description: s.description,
     source: "Zakura",
     installSpec: `builtin:${s.name}`,
+    cached: true,
   }));
 }
+
+// —— 官方仓库（平台缓存）——
+
+/** 平台缓存里的一条技能（由 SkillsService 注入，store 层不碰数据库） */
+export interface CuratedSkillEntry {
+  slug: string;
+  name: string;
+  title: string;
+  description: string;
+  publisher: string;
+}
+
+/**
+ * 官方仓库：内容已由服务端同步到平台缓存，搜索直接走本地，
+ * 既快又带完整描述（skills.sh 的接口是不返回描述的）。
+ */
+function searchCurated(
+  query: string,
+  entries: CuratedSkillEntry[],
+  repoSlug?: string,
+): SkillSearchItem[] {
+  const q = query.trim().toLowerCase();
+  return entries
+    .filter((entry) => {
+      if (repoSlug && entry.slug.toLowerCase() !== repoSlug.toLowerCase()) return false;
+      return matches(q, entry.name, entry.title, entry.description, entry.slug);
+    })
+    .map<SkillSearchItem>((entry) => ({
+      id: `curated:${entry.slug}/${entry.name}`,
+      store: "curated",
+      name: entry.name,
+      title: entry.title || titleize(entry.name),
+      description: entry.description,
+      source: entry.slug,
+      installSpec: `${entry.slug}@${entry.name}`,
+      homepage: `https://github.com/${entry.slug}`,
+      cached: true,
+      repoSlug: entry.slug,
+      publisher: entry.publisher,
+    }));
+}
+
+// —— skills.sh ——
 
 interface SkillsShHit {
   id: string;
@@ -84,11 +143,11 @@ interface SkillsShHit {
 async function searchSkillsSh(query: string): Promise<SkillSearchItem[]> {
   const q = query.trim();
   // 上游要求至少 2 个字符；空查询回落到几个高安装量的关键词做"推荐"
-  const queries = q.length >= 2 ? [q] : ["skills", "agent"];
+  const terms = q.length >= 2 ? [q] : ["skills", "agent"];
   const out: SkillSearchItem[] = [];
   const seen = new Set<string>();
 
-  for (const term of queries) {
+  for (const term of terms) {
     const key = `skills-sh:${term}`;
     let items = cached(key);
     if (!items) {
@@ -121,6 +180,8 @@ async function searchSkillsSh(query: string): Promise<SkillSearchItem[]> {
   return out.sort((a, b) => (b.installs ?? 0) - (a.installs ?? 0));
 }
 
+// —— GitHub ——
+
 interface GithubRepo {
   full_name: string;
   description?: string | null;
@@ -140,7 +201,7 @@ async function searchGithub(query: string, token?: string): Promise<SkillSearchI
   if (hit) return hit;
 
   const res = await getJson<{ items?: GithubRepo[] }>(
-    `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=stars&order=desc&per_page=24`,
+    `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=stars&order=desc&per_page=${UPSTREAM_PAGE}`,
     token,
   );
   const items = (res?.items ?? []).map<SkillSearchItem>((repo) => ({
@@ -160,9 +221,9 @@ async function searchGithub(query: string, token?: string): Promise<SkillSearchI
 
 /**
  * 输入本身就是一个可安装来源时（owner/repo、URL、npx 命令），
- * 把它作为第一条结果直出，用户不必先"搜到"才能装。
+ * 单独给出直达条目——不混进商店结果，免得污染分页与总数。
  */
-function directHit(query: string): SkillSearchItem | null {
+export function directSkillHit(query: string): SkillSearchItem | null {
   const q = query.trim();
   if (!q || q.length < 3) return null;
   if (!/[/:]/.test(q)) return null;
@@ -188,124 +249,71 @@ function directHit(query: string): SkillSearchItem | null {
   }
 }
 
-/**
- * 官方仓库：内容已由服务端同步到平台缓存，搜索直接走本地，
- * 既快又带完整描述（skills.sh 的接口是不返回描述的）。
- */
-function searchCurated(
-  query: string,
-  cached: CuratedSkillEntry[],
-  repoSlug?: string,
-): SkillSearchItem[] {
-  const q = query.trim().toLowerCase();
-  return cached
-    .filter((entry) => {
-      if (repoSlug && entry.slug.toLowerCase() !== repoSlug.toLowerCase()) return false;
-      if (!q) return true;
-      return (
-        entry.name.toLowerCase().includes(q) ||
-        entry.title.toLowerCase().includes(q) ||
-        entry.description.toLowerCase().includes(q) ||
-        entry.slug.toLowerCase().includes(q)
-      );
-    })
-    .map<SkillSearchItem>((entry) => ({
-      id: `curated:${entry.slug}/${entry.name}`,
-      store: "curated",
-      name: entry.name,
-      title: entry.title || titleize(entry.name),
-      description: entry.description,
-      source: entry.slug,
-      installSpec: `${entry.slug}@${entry.name}`,
-      homepage: `https://github.com/${entry.slug}`,
-      cached: true,
-      repoSlug: entry.slug,
-      publisher: entry.publisher,
-    }));
-}
-
-/** 平台缓存里的一条技能（由 SkillsService 注入，store 层不碰数据库） */
-export interface CuratedSkillEntry {
-  slug: string;
-  name: string;
-  title: string;
-  description: string;
-  publisher: string;
-}
-
 export interface SkillSearchOptions {
   query: string;
-  store?: SkillStoreId | "all";
+  /** 一次只查一个商店 */
+  store: SkillStoreId;
   githubToken?: string | undefined;
   /** 已注册的技能名，用于标记 installed */
   installedNames?: Set<string>;
   /** 平台缓存里的技能（curated 商店的数据源） */
   curated?: CuratedSkillEntry[];
-  /** 只看某个仓库（商店内浏览） */
-  repoSlug?: string;
+  /** 只看某个仓库（仅 curated 支持） */
+  repoSlug?: string | undefined;
   offset?: number;
   limit?: number;
 }
 
-const DEFAULT_LIMIT = 30;
-const MAX_LIMIT = 100;
+async function fetchStore(opts: SkillSearchOptions): Promise<SkillSearchItem[]> {
+  switch (opts.store) {
+    case "builtin":
+      return searchBuiltin(opts.query);
+    case "curated":
+      return searchCurated(opts.query, opts.curated ?? [], opts.repoSlug);
+    case "skills-sh":
+      return searchSkillsSh(opts.query);
+    case "github":
+      return searchGithub(opts.query, opts.githubToken);
+  }
+}
 
 export async function searchSkillStores(opts: SkillSearchOptions): Promise<SkillSearchPage> {
-  const store = opts.store ?? "all";
-  const errors: Array<{ store: SkillStoreId; error: string }> = [];
-  const tasks: Array<Promise<SkillSearchItem[]>> = [];
+  const limit = Math.min(Math.max(opts.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  // 浏览某个仓库时，直达条目只会碍事
+  const direct = opts.repoSlug ? null : directSkillHit(opts.query);
 
-  const guard = (id: SkillStoreId, p: Promise<SkillSearchItem[]>) =>
-    p.catch((err) => {
-      errors.push({ store: id, error: err instanceof Error ? err.message : String(err) });
-      return [] as SkillSearchItem[];
-    });
-
-  // 指定了仓库就只在该仓库内浏览，不掺外部搜索结果
-  const scoped = Boolean(opts.repoSlug);
-  if (!scoped && (store === "all" || store === "builtin")) {
-    tasks.push(guard("builtin", Promise.resolve(searchBuiltin(opts.query))));
+  let all: SkillSearchItem[];
+  let error: string | undefined;
+  try {
+    all = await fetchStore(opts);
+  } catch (err) {
+    all = [];
+    error = err instanceof Error ? err.message : String(err);
   }
-  if (store === "all" || store === "curated") {
-    tasks.push(
-      guard(
-        "curated",
-        Promise.resolve(searchCurated(opts.query, opts.curated ?? [], opts.repoSlug)),
-      ),
-    );
-  }
-  if (!scoped && (store === "all" || store === "skills-sh")) {
-    tasks.push(guard("skills-sh", searchSkillsSh(opts.query)));
-  }
-  if (!scoped && (store === "all" || store === "github")) {
-    tasks.push(guard("github", searchGithub(opts.query, opts.githubToken)));
-  }
-
-  const results = (await Promise.all(tasks)).flat();
-  const direct = scoped ? null : directHit(opts.query);
-  const items = direct ? [direct, ...results] : results;
 
   const seen = new Set<string>();
-  const deduped = items.filter((item) => {
+  const deduped = all.filter((item) => {
     if (seen.has(item.id)) return false;
     seen.add(item.id);
     return true;
   });
 
+  const items = deduped.slice(offset, offset + limit);
   if (opts.installedNames?.size) {
-    for (const item of deduped) {
+    for (const item of [...items, ...(direct ? [direct] : [])]) {
       if (opts.installedNames.has(item.name.toLowerCase())) item.installed = true;
     }
   }
 
-  const limit = Math.min(Math.max(opts.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
-  const offset = Math.max(opts.offset ?? 0, 0);
   return {
-    items: deduped.slice(offset, offset + limit),
+    store: opts.store,
+    items,
     total: deduped.length,
     offset,
     limit,
     hasMore: offset + limit < deduped.length,
-    errors,
+    ...(direct ? { direct } : {}),
+    ...(error ? { error } : {}),
   };
 }

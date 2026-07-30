@@ -32,10 +32,7 @@ export default function SkillsPage() {
   useEffect(() => {
     void (async () => {
       try {
-        const [agentList, storeMeta] = await Promise.all([
-          fetchAgents(),
-          fetchSkillStores(),
-        ]);
+        const [agentList, storeMeta] = await Promise.all([fetchAgents(), fetchSkillStores()]);
         setAgents(agentList);
         setStores(storeMeta.stores);
       } catch (err) {
@@ -46,20 +43,16 @@ export default function SkillsPage() {
   }, [loadSkills]);
 
   const installedCount = skills.length;
-  const deployedCount = new Set(skills.flatMap((s) => s.agentIds)).size;
 
   return (
     <div className="space-y-5">
-      <SettingsHeader
-        title="技能"
-        description="技能是写好的操作手册，安装后写入 Agent 工作区 /skills，模型按需读取，也可经 MCP 调用"
-      />
+      <SettingsHeader title="技能" />
 
       <Tabs defaultValue="store">
-        <TabsList variant="line" className="grid w-full max-w-md grid-cols-3">
+        <TabsList variant="line" className="grid w-full grid-cols-3 sm:max-w-md">
           <TabsTrigger value="store">
             <Blocks className="size-4" />
-            技能商店
+            商店
           </TabsTrigger>
           <TabsTrigger value="installed">
             <Sparkles className="size-4" />
@@ -77,20 +70,10 @@ export default function SkillsPage() {
         </TabsList>
 
         <TabsContent value="store" className="mt-4">
-          <SkillStorePanel
-            agents={agents}
-            stores={stores}
-            onInstalled={() => void loadSkills()}
-          />
+          <SkillStorePanel agents={agents} stores={stores} onInstalled={() => void loadSkills()} />
         </TabsContent>
 
-        <TabsContent value="installed" className="mt-4 space-y-3">
-          {installedCount ? (
-            <p className="text-xs text-muted-foreground">
-              {installedCount} 个技能，覆盖 {deployedCount} 个 Agent。删除技能会同时从各
-              Agent 的工作区移除对应目录。
-            </p>
-          ) : null}
+        <TabsContent value="installed" className="mt-4">
           <SkillRegistryPanel
             skills={skills}
             agents={agents}

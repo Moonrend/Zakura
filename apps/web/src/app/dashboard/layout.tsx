@@ -112,7 +112,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           isPlatformAdmin={!!me.isPlatformAdmin}
         />
         <SidebarInset>
-          <header className="z-20 shrink-0 border-b border-border/80 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70">
+          <header className="z-20 shrink-0 border-b border-border/80 bg-background">
             <div className="mx-auto flex h-12 w-full max-w-[var(--content-max)] items-center gap-2 px-4 md:px-6">
               <SidebarTrigger className="-ml-0.5" />
               <div className="min-w-0 truncate text-xs text-muted-foreground">
@@ -120,7 +120,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </div>
             </div>
           </header>
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="scrollbar-subtle scrollbar-gutter-stable min-h-0 flex-1 overflow-auto">
             <div className="mx-auto w-full max-w-[var(--content-max)] px-4 py-5 md:px-6 md:py-6">
               <div key={pathname} className="animate-in-page">
                 {children}

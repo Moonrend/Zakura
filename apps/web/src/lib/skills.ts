@@ -3,6 +3,7 @@
 import { api } from "@/lib/api";
 import type {
   AgentSkillRecord,
+  SkillAutoUpdateStatus,
   SkillCacheStatus,
   SkillRecord,
   SkillRepoSummary,
@@ -14,10 +15,14 @@ import type {
   SkillTokenInfo,
   SkillTokenProvider,
   SkillTokenScope,
+  SkillUpdateSummary,
 } from "@zakura/shared";
+
+export { DEFAULT_SKILL_STORE, SKILL_STORES } from "@zakura/shared";
 
 export type {
   AgentSkillRecord,
+  SkillAutoUpdateStatus,
   SkillCacheStatus,
   SkillRecord,
   SkillRepoSummary,
@@ -29,6 +34,7 @@ export type {
   SkillTokenInfo,
   SkillTokenProvider,
   SkillTokenScope,
+  SkillUpdateSummary,
 };
 
 export type BuiltinSkillMeta = {
@@ -48,7 +54,7 @@ export type SkillFileContent = {
 };
 
 export const SKILL_STORE_LABEL: Record<SkillStoreId, string> = {
-  builtin: "内置推荐",
+  builtin: "内置技能",
   curated: "官方仓库",
   "skills-sh": "skills.sh",
   github: "GitHub",
@@ -61,9 +67,10 @@ export async function fetchSkillStores(): Promise<{
   return api("/api/skills/stores", { cacheTtlMs: 60_000 });
 }
 
+/** 单商店检索：分页与总数都属于该商店 */
 export async function searchSkills(
   query: string,
-  store: SkillStoreId | "all",
+  store: SkillStoreId,
   opts: { repo?: string; offset?: number; limit?: number } = {},
 ): Promise<SkillSearchPage> {
   const params = new URLSearchParams({ q: query, store });
@@ -91,6 +98,22 @@ export async function syncSkillRepo(slug: string): Promise<SkillRepoSummary> {
 
 export async function fetchSkillCacheStatus(): Promise<SkillCacheStatus> {
   return api("/api/skills/cache");
+}
+
+export async function fetchSkillAutoUpdate(): Promise<SkillAutoUpdateStatus> {
+  return api("/api/skills/auto-update");
+}
+
+export async function setSkillAutoUpdate(enabled: boolean): Promise<SkillAutoUpdateStatus> {
+  return api("/api/skills/auto-update", { method: "PUT", json: { enabled } });
+}
+
+/** 立即探一遍上游并把有新版本的技能更新掉 */
+export async function checkSkillUpdates(): Promise<{
+  result: SkillUpdateSummary;
+  status: SkillAutoUpdateStatus;
+}> {
+  return api("/api/skills/check-updates", { method: "POST" });
 }
 
 export async function listSkillTokens(): Promise<{
@@ -219,6 +242,19 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 相对时间：刚刚 / 12 分钟前 / 3 小时前 / 2 天前 */
+export function formatRelative(iso: string | null | undefined, fallback = "从未"): string {
+  if (!iso) return fallback;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return fallback;
+  if (ms < 60_000) return "刚刚";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.round(hours / 24)} 天前`;
 }
 
 /** 去掉 SKILL.md 的 YAML frontmatter，只保留正文用于渲染 */

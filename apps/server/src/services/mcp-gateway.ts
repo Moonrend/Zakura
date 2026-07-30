@@ -15,6 +15,7 @@ import {
   DEFAULT_TASK_OPTIONAL_TOOLS,
   isCreateTaskResult,
   rewriteToolUiMeta,
+  SKILL_MANIFEST_FILE,
 } from "@zakura/shared";
 import type { ZakuraTaskStore } from "./mcp-task-store.js";
 import type { Db } from "../db/client.js";
@@ -58,6 +59,10 @@ import { callSkillTool, isSkillToolName } from "./skills/tools.js";
 
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
+
+const SKILLS_RESOURCE_URI = "zakura://agent/skills";
+const SKILL_RESOURCE_PREFIX = "zakura://agent/skills/";
+const SKILL_RESOURCE_TEMPLATE = "zakura://agent/skills/{name}/{+path}";
 
 type InstanceRow = typeof componentInstances.$inferSelect;
 
@@ -125,6 +130,50 @@ export interface ResolvedResourceTemplate {
 
 function qualify(instanceSlug: string, toolName: string): string {
   return `${instanceSlug}__${toolName}`;
+}
+
+function encodeUriPath(path: string): string {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
+
+function skillResourceUri(name: string, path = SKILL_MANIFEST_FILE): string {
+  return `${SKILL_RESOURCE_PREFIX}${encodeURIComponent(name)}/${encodeUriPath(path)}`;
+}
+
+function parseSkillResourceUri(
+  uri: string,
+): { list: true } | { list: false; name: string; path: string } | null {
+  if (uri === SKILLS_RESOURCE_URI || uri === `${SKILLS_RESOURCE_URI}/`) return { list: true };
+  if (!uri.startsWith(SKILL_RESOURCE_PREFIX)) return null;
+  const rest = uri.slice(SKILL_RESOURCE_PREFIX.length);
+  const [encodedName, ...pathParts] = rest.split("/");
+  if (!encodedName) return null;
+  try {
+    const name = decodeURIComponent(encodedName);
+    const path = pathParts.length
+      ? pathParts.map((part) => decodeURIComponent(part)).join("/")
+      : SKILL_MANIFEST_FILE;
+    return { list: false, name, path };
+  } catch {
+    return null;
+  }
+}
+
+function skillMime(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".md")) return "text/markdown";
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) {
+    return "text/javascript";
+  }
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "text/typescript";
+  if (lower.endsWith(".css")) return "text/css";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
+  return "text/plain";
 }
 
 /** 云端子代理工具：provider 标识 + 对外名 */
@@ -1078,6 +1127,75 @@ export class McpGateway {
     return row.dockerId;
   }
 
+  private async listActiveAgentSkills(agent: Agent) {
+    if (!this.skillsService) return [];
+    try {
+      const list = await this.skillsService.listForAgent(agent.tenantId, agent.id);
+      return list.filter((s) => s.enabled && s.status === "installed");
+    } catch (err) {
+      console.warn(
+        `[mcp] agent skill resources ${agent.slug}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return [];
+    }
+  }
+
+  private async readAgentSkillResource(
+    agent: Agent,
+    uri: string,
+  ): Promise<McpReadResourceResult | null> {
+    if (!this.skillsService) return null;
+    const parsed = parseSkillResourceUri(uri);
+    if (!parsed) return null;
+
+    const active = await this.listActiveAgentSkills(agent);
+    if (parsed.list) {
+      return {
+        contents: [
+          {
+            uri: SKILLS_RESOURCE_URI,
+            mimeType: "application/json",
+            text: JSON.stringify(
+              {
+                skills: active.map((s) => ({
+                  name: s.name,
+                  title: s.title,
+                  description: s.description,
+                  path: s.path,
+                  uri: skillResourceUri(s.name),
+                  builtin: s.builtin,
+                  version: s.version,
+                })),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    const found = active.find((s) => s.name === parsed.name);
+    if (!found) return null;
+    const file = await this.skillsService.readSkillFile(
+      agent.tenantId,
+      agent,
+      parsed.name,
+      parsed.path,
+    );
+    if (!file) return null;
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: skillMime(parsed.path),
+          text: file.content,
+        },
+      ],
+    };
+  }
+
   // ─── Resources ───────────────────────────────────────────────
 
   async listResourcesForAgent(agent: Agent): Promise<ResolvedResource[]> {
@@ -1099,6 +1217,41 @@ export class McpGateway {
         _meta: r._meta,
         agentId: agent.id,
       });
+    }
+
+    if (this.skillsService) {
+      const listUri = SKILLS_RESOURCE_URI;
+      if (!usedUris.has(listUri)) {
+        usedUris.add(listUri);
+        resources.push({
+          qualifiedUri: listUri,
+          instanceId: null,
+          providerId: AGENT_NATIVE_PROVIDER_ID,
+          localUri: listUri,
+          name: "agent-skills",
+          title: "Agent skills",
+          description: "Enabled skills installed for this Agent (JSON)",
+          mimeType: "application/json",
+          agentId: agent.id,
+        });
+      }
+
+      for (const skill of await this.listActiveAgentSkills(agent)) {
+        const uri = skillResourceUri(skill.name);
+        if (usedUris.has(uri)) continue;
+        usedUris.add(uri);
+        resources.push({
+          qualifiedUri: uri,
+          instanceId: null,
+          providerId: AGENT_NATIVE_PROVIDER_ID,
+          localUri: uri,
+          name: `skill:${skill.name}`,
+          title: `${skill.name} ${SKILL_MANIFEST_FILE}`,
+          description: skill.description,
+          mimeType: "text/markdown",
+          agentId: agent.id,
+        });
+      }
     }
 
     if (isWorkspaceFsExposedViaMcp(agent) && this.workspaceFsProvider) {
@@ -1270,6 +1423,16 @@ export class McpGateway {
       }
     }
 
+    if (opts?.agentId && parseSkillResourceUri(uri)) {
+      const agent = await this.db.query.agents.findFirst({
+        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
+      });
+      if (agent) {
+        const skill = await this.readAgentSkillResource(agent, uri);
+        if (skill) return skill;
+      }
+    }
+
     if (opts?.agentId && isAgentNativeResourceUri(uri) && !isWorkspaceFsResourceUri(uri)) {
       const agent = await this.db.query.agents.findFirst({
         where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
@@ -1325,6 +1488,8 @@ export class McpGateway {
         }
         return ws;
       }
+      const skill = await this.readAgentSkillResource(agent, match.localUri);
+      if (skill) return skill;
       const native = readAgentNativeResource(agent, match.localUri);
       if (!native) {
         throw Object.assign(new Error(`Resource not found: ${uri}`), {
@@ -1572,6 +1737,22 @@ export class McpGateway {
         mimeType: t.mimeType,
         title: t.title,
         _meta: t._meta,
+        agentId: agent.id,
+      });
+    }
+
+    if (this.skillsService && !used.has(SKILL_RESOURCE_TEMPLATE)) {
+      used.add(SKILL_RESOURCE_TEMPLATE);
+      templates.push({
+        qualifiedUriTemplate: SKILL_RESOURCE_TEMPLATE,
+        instanceId: null,
+        providerId: AGENT_NATIVE_PROVIDER_ID,
+        localUriTemplate: SKILL_RESOURCE_TEMPLATE,
+        name: "agent-skill-file",
+        title: "Agent skill files",
+        description:
+          `Read a file from an enabled installed skill. Use path=${SKILL_MANIFEST_FILE} for the manifest.`,
+        mimeType: "text/plain",
         agentId: agent.id,
       });
     }

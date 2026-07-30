@@ -233,7 +233,7 @@ export function SettingsCategoryNav({
   return (
     <nav
       className={cn(
-        "flex gap-1 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0",
+        "scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 flex gap-1 overflow-x-auto px-1 pb-1 md:mx-0 md:flex-col md:overflow-visible md:px-0 md:pb-0",
         className,
       )}
       aria-label="设置分类"

@@ -468,6 +468,7 @@ export {
   SKILL_MAX_TOTAL_BYTES,
   SKILL_DISCOVERY_DIRS,
   SKILL_STORES,
+  DEFAULT_SKILL_STORE,
   CURATED_SKILL_REPOS,
 } from "./skills.js";
 export type {
@@ -489,6 +490,8 @@ export type {
   SkillTokenProvider,
   SkillTokenInfo,
   SkillCacheStatus,
+  SkillUpdateSummary,
+  SkillAutoUpdateStatus,
   SkillResolveResult,
   SkillInstallRequest,
   SkillInstallResult,

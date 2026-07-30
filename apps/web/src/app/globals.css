@@ -57,6 +57,10 @@
   --duration-slow: 280ms;
   --duration-fluid: 420ms;
   --shadow-soft: 0 1px 2px oklch(0 0 0 / 4%), 0 4px 16px oklch(0 0 0 / 5%);
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: color-mix(in oklch, var(--foreground) 22%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 36%, transparent);
+  --scrollbar-track: transparent;
   /* Dashboard 主内容统一最大宽度 */
   --content-max: 64rem;
 }
@@ -101,6 +105,8 @@
   --chart-5: oklch(0.269 0 0);
 
   --shadow-soft: 0 1px 2px oklch(0 0 0 / 20%), 0 8px 24px oklch(0 0 0 / 28%);
+  --scrollbar-thumb: color-mix(in oklch, var(--foreground) 20%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 34%, transparent);
 }
 
 @theme inline {
@@ -163,6 +169,8 @@
     @apply font-sans;
     color-scheme: light;
     scroll-behavior: smooth;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
   }
 
   html.dark {
@@ -174,6 +182,33 @@
     font-family: var(--font-sans);
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     text-rendering: optimizeLegibility;
+  }
+
+  * {
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
+  }
+
+  *::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar-thumb {
+    min-height: 2rem;
+    border: 3px solid transparent;
+    border-radius: calc(var(--radius) - 4px);
+    background: var(--scrollbar-thumb);
+    background-clip: content-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: content-box;
   }
 
   code,
@@ -291,6 +326,28 @@
   .content-auto {
     content-visibility: auto;
     contain-intrinsic-size: auto 72px;
+  }
+
+  .scrollbar-subtle {
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    scrollbar-width: thin;
+  }
+
+  .scrollbar-subtle::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+
+  .scrollbar-x-compact::-webkit-scrollbar {
+    height: 8px;
+  }
+
+  .scrollbar-gutter-stable {
+    scrollbar-gutter: stable;
+  }
+
+  .scrollbar-edge-pad {
+    scroll-padding-inline: 0.25rem;
   }
 }
 
@@ -453,28 +510,13 @@
 
   /** 运行中的状态文本：一束高光在字上扫过，比转圈更安静也更有生命力 */
   .text-shimmer {
-    background: linear-gradient(
-      100deg,
-      var(--color-muted-foreground) 30%,
-      var(--color-foreground) 50%,
-      var(--color-muted-foreground) 70%
-    );
-    background-size: 220% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: shimmer-sweep 2.1s linear infinite;
+    color: var(--color-muted-foreground);
   }
 
-  /** 运行中的图标外圈：呼吸式光环 */
+  /** 运行中的图标保持为安静的静态状态点 */
   .running-halo::after {
     content: "";
-    position: absolute;
-    inset: -3px;
-    border-radius: 9999px;
-    border: 1px solid currentColor;
-    opacity: 0;
-    animation: halo-pulse 1.9s var(--ease-out-soft) infinite;
+    display: none;
   }
 
   /** 竖直连接线自上而下生长 */

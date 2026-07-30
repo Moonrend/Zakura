@@ -126,7 +126,7 @@ export default function AgentSkillsPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="技能"
-        description={`已安装 ${skills.length} 个，其中 ${enabledCount} 个已启用并注入到系统提示`}
+        description={`已安装 ${skills.length} 个 · 已启用 ${enabledCount} 个`}
         actions={
           <Button size="sm" onClick={() => setBrowsing((v) => !v)}>
             <Plus className="size-4" />
@@ -136,7 +136,7 @@ export default function AgentSkillsPage() {
       />
 
       {browsing ? (
-        <div className="rounded-xl border border-border bg-card/40 p-4">
+        <div className="rounded-xl border border-border bg-card/40 p-3 sm:p-4">
           <SkillStorePanel
             agents={agents}
             defaultAgentIds={[id]}
@@ -151,7 +151,7 @@ export default function AgentSkillsPage() {
       {unregistered.length ? (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted/40 p-3">
           <FolderPlus className="size-4 shrink-0 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">
+          <span className="w-full text-xs text-muted-foreground sm:w-auto">
             工作区里发现未登记的技能目录：
           </span>
           {unregistered.map((name) => (
@@ -176,12 +176,9 @@ export default function AgentSkillsPage() {
           ))}
         </div>
       ) : !skills.length ? (
-        <div className="rounded-xl border border-dashed border-border bg-card/50 p-10 text-center">
+        <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
           <Sparkles className="mx-auto mb-2 size-5 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">这个 Agent 还没有安装技能</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            点右上角「添加技能」浏览商店，或在技能页面批量安装
-          </p>
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-border">
@@ -189,14 +186,14 @@ export default function AgentSkillsPage() {
             <div
               key={skill.id}
               className={cn(
-                "flex items-center gap-3 bg-card px-4 py-3 transition-colors hover:bg-muted/40",
+                "flex items-start gap-2.5 bg-card px-3 py-2.5 transition-colors hover:bg-muted/40 sm:items-center sm:gap-3 sm:px-4 sm:py-3",
                 index > 0 && "border-t border-border",
                 !skill.enabled && "opacity-60",
               )}
             >
               <div
                 className={cn(
-                  "flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70",
+                  "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 sm:mt-0",
                   skill.status === "error"
                     ? "bg-destructive/10 text-destructive"
                     : skill.builtin
@@ -212,7 +209,7 @@ export default function AgentSkillsPage() {
               </div>
 
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                   <button
                     type="button"
                     onClick={() => void openPreview(skill)}
@@ -225,27 +222,33 @@ export default function AgentSkillsPage() {
                       内置
                     </Badge>
                   ) : null}
+                  {!skill.enabled ? (
+                    <Badge variant="outline" className="text-[10px]">
+                      已停用
+                    </Badge>
+                  ) : null}
                 </div>
                 <p className="line-clamp-1 text-xs text-muted-foreground">
-                  {skill.status === "error"
-                    ? (skill.error ?? "安装失败")
-                    : skill.description}
+                  {skill.status === "error" ? (skill.error ?? "安装失败") : skill.description}
                 </p>
+                <code className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground lg:hidden">
+                  {skill.path}
+                </code>
               </div>
 
               <code className="hidden shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground lg:block">
                 {skill.path}
               </code>
 
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1 sm:gap-2">
                 <Switch
                   checked={skill.enabled}
                   disabled={busy === skill.name}
                   onCheckedChange={(checked) => void toggle(skill, checked)}
-                  title={skill.enabled ? "已启用（注入系统提示）" : "已停用"}
+                  title={skill.enabled ? "已启用" : "已停用"}
                 />
                 <Button
-                  size="icon"
+                  size="icon-sm"
                   variant="ghost"
                   title="查看 SKILL.md"
                   onClick={() => void openPreview(skill)}
@@ -253,7 +256,7 @@ export default function AgentSkillsPage() {
                   <FileText className="size-4" />
                 </Button>
                 <Button
-                  size="icon"
+                  size="icon-sm"
                   variant="ghost"
                   title="卸载"
                   disabled={busy === skill.name}
@@ -273,15 +276,21 @@ export default function AgentSkillsPage() {
           if (!open) setPreview(null);
         }}
       >
-        <DialogContent className="flex h-[min(80vh,680px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
-          <DialogHeader className="border-b border-border px-5 py-3.5">
-            <DialogTitle className="text-base">{preview?.name}</DialogTitle>
-            <DialogDescription className="font-mono text-xs">
+        <DialogContent
+          className={cn(
+            "flex flex-col gap-0 overflow-hidden p-0",
+            "h-[100dvh] max-h-[100dvh] max-w-full rounded-none",
+            "sm:h-[min(84vh,700px)] sm:max-h-[84vh] sm:max-w-3xl sm:rounded-xl",
+          )}
+        >
+          <DialogHeader className="shrink-0 gap-1 border-b border-border px-4 py-3 pr-12 sm:px-5">
+            <DialogTitle className="truncate text-base">{preview?.name}</DialogTitle>
+            <DialogDescription className="truncate font-mono text-[11px]">
               /skills/{preview?.name}/SKILL.md
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="min-h-0 flex-1">
-            <div className="px-5 py-4">
+            <div className="px-4 py-4 sm:px-6">
               <SkillMarkdown content={preview?.content ?? ""} />
             </div>
           </ScrollArea>

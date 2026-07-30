@@ -4,11 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   Building2,
-  Check,
   Database,
   KeyRound,
   Loader2,
   RefreshCw,
+  RotateCw,
   Trash2,
   User,
 } from "lucide-react";
@@ -16,14 +16,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import {
+  checkSkillUpdates,
   deleteSkillToken,
+  fetchSkillAutoUpdate,
   fetchSkillCacheStatus,
   formatBytes,
+  formatRelative,
   listSkillTokens,
   saveSkillToken,
+  setSkillAutoUpdate,
   syncSkillRepo,
+  type SkillAutoUpdateStatus,
   type SkillCacheStatus,
   type SkillTokenInfo,
   type SkillTokenScope,
@@ -43,6 +49,7 @@ function TokenRow({
 }) {
   const [busy, setBusy] = useState(false);
   const envManaged = info.label === "GITHUB_TOKEN 环境变量";
+  const readOnly = info.scope === "platform";
 
   async function remove() {
     setBusy(true);
@@ -65,7 +72,7 @@ function TokenRow({
         <User className="size-4 shrink-0 text-muted-foreground" />
       )}
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-sm font-medium">{SCOPE_LABEL[info.scope]}</span>
           <Badge variant="outline" className="text-[10px]">
             {info.provider}
@@ -74,15 +81,15 @@ function TokenRow({
         </div>
         <p className="truncate text-[11px] text-muted-foreground">
           {info.label ?? "未命名"}
-          {info.lastUsedAt
-            ? ` · 最近使用 ${new Date(info.lastUsedAt).toLocaleString()}`
-            : " · 尚未使用"}
+          {info.lastUsedAt ? ` · 最近使用 ${formatRelative(info.lastUsedAt)}` : " · 尚未使用"}
         </p>
       </div>
-      {envManaged ? (
-        <span className="shrink-0 text-[11px] text-muted-foreground">由环境变量提供</span>
+      {readOnly ? (
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          {envManaged ? "由环境变量提供" : "在系统配置里管理"}
+        </span>
       ) : (
-        <Button size="icon" variant="ghost" disabled={busy} onClick={() => void remove()}>
+        <Button size="icon-sm" variant="ghost" disabled={busy} onClick={() => void remove()}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
         </Button>
       )}
@@ -90,12 +97,106 @@ function TokenRow({
   );
 }
 
-/** 来源令牌 + 平台缓存：解释「为什么装得快」并给出限流的解法 */
+function AutoUpdateSection({
+  status,
+  onChanged,
+}: {
+  status: SkillAutoUpdateStatus | null;
+  onChanged: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
+
+  async function toggle(enabled: boolean) {
+    setSaving(true);
+    try {
+      await setSkillAutoUpdate(enabled);
+      toast.success(enabled ? "已开启自动更新" : "已关闭自动更新");
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function checkNow() {
+    setChecking(true);
+    try {
+      const { result } = await checkSkillUpdates();
+      const parts: string[] = [];
+      if (result.updated.length) parts.push(`更新 ${result.updated.join("、")}`);
+      if (result.builtinSynced) parts.push(`内置技能同步 ${result.builtinSynced} 次`);
+      if (result.failed.length) parts.push(`${result.failed.length} 个失败`);
+      toast.success(parts.length ? parts.join("；") : "所有技能都已是最新版本");
+      onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <RotateCw className="size-4 text-muted-foreground" />
+        <h3 className="text-sm font-medium">自动更新</h3>
+        {status?.pendingCount ? (
+          <Badge variant="outline" className="border-primary/40 text-[10px] text-primary">
+            {status.pendingCount} 个待更新
+          </Badge>
+        ) : null}
+      </div>
+      <div className="space-y-2.5 rounded-xl border border-border bg-card p-3.5">
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">自动更新第三方技能</p>
+            <p className="text-[11px] text-muted-foreground">
+              {status?.lastRunAt
+                ? `上次运行 ${formatRelative(status.lastRunAt)}`
+                : "尚未运行过"}
+              {status?.lastResult
+                ? ` · 更新 ${status.lastResult.updated.length} 个，${status.lastResult.upToDate} 个已最新`
+                : ""}
+            </p>
+          </div>
+          <Switch
+            checked={status?.enabled ?? true}
+            disabled={saving || !status}
+            onCheckedChange={(checked) => void toggle(checked)}
+          />
+        </div>
+
+        {status?.lastResult?.failed.length ? (
+          <p className="truncate text-[11px] text-destructive">
+            上次失败：
+            {status.lastResult.failed.map((f) => `${f.name}（${f.error}）`).join("，")}
+          </p>
+        ) : null}
+
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={checking}
+          onClick={() => void checkNow()}
+        >
+          {checking ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <RotateCw className="size-3.5" />
+          )}
+          立即检查更新
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 export function SkillSettingsPanel() {
   const [tokens, setTokens] = useState<SkillTokenInfo[]>([]);
-  const [canManagePlatform, setCanManagePlatform] = useState(false);
   const [cache, setCache] = useState<SkillCacheStatus | null>(null);
-  const [scope, setScope] = useState<SkillTokenScope>("tenant");
+  const [autoUpdate, setAutoUpdate] = useState<SkillAutoUpdateStatus | null>(null);
   const [token, setToken] = useState("");
   const [label, setLabel] = useState("");
   const [saving, setSaving] = useState(false);
@@ -103,10 +204,14 @@ export function SkillSettingsPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [t, c] = await Promise.all([listSkillTokens(), fetchSkillCacheStatus()]);
+      const [t, c, a] = await Promise.all([
+        listSkillTokens(),
+        fetchSkillCacheStatus(),
+        fetchSkillAutoUpdate(),
+      ]);
       setTokens(t.tokens);
-      setCanManagePlatform(t.canManagePlatform);
       setCache(c);
+      setAutoUpdate(a);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -123,7 +228,7 @@ export function SkillSettingsPanel() {
       await saveSkillToken({
         provider: "github",
         token: token.trim(),
-        scope,
+        scope: "tenant",
         ...(label.trim() ? { label: label.trim() } : {}),
       });
       toast.success("令牌已保存");
@@ -152,16 +257,13 @@ export function SkillSettingsPanel() {
 
   return (
     <div className="space-y-6">
+      <AutoUpdateSection status={autoUpdate} onChanged={load} />
+
       <section className="space-y-3">
         <div className="flex items-center gap-2">
           <KeyRound className="size-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium">来源令牌</h3>
+          <h3 className="text-sm font-medium">本团队来源令牌</h3>
         </div>
-        <p className="text-xs leading-5 text-muted-foreground">
-          GitHub 未鉴权时每小时只允许 60 次 API 调用。配置令牌后额度提升到 5000
-          次/小时，也能读取私有仓库。抓取优先用整站令牌，读不到才会用团队令牌——
-          用团队令牌拿到的私有内容不会写入跨团队共享缓存。
-        </p>
 
         {tokens.length ? (
           <div className="space-y-1.5">
@@ -176,21 +278,6 @@ export function SkillSettingsPanel() {
         )}
 
         <div className="space-y-2.5 rounded-xl border border-border bg-card p-3.5">
-          {canManagePlatform ? (
-            <div className="flex gap-1.5">
-              {(["tenant", "platform"] as SkillTokenScope[]).map((s) => (
-                <Button
-                  key={s}
-                  size="sm"
-                  variant={scope === s ? "default" : "outline"}
-                  onClick={() => setScope(s)}
-                >
-                  {scope === s ? <Check className="size-3.5" /> : null}
-                  {SCOPE_LABEL[s]}
-                </Button>
-              ))}
-            </div>
-          ) : null}
           <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">GitHub Token</Label>
@@ -198,7 +285,7 @@ export function SkillSettingsPanel() {
                 type="password"
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder="ghp_… 或 github_pat_…（只读 public_repo 权限即可）"
+                placeholder="ghp_… 或 github_pat_…（读私有仓库需 repo 权限）"
                 className="font-mono text-xs"
               />
             </div>
@@ -208,10 +295,14 @@ export function SkillSettingsPanel() {
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 placeholder="可选"
-                className="w-40 text-xs"
+                className="text-xs sm:w-40"
               />
             </div>
-            <Button className="self-end" disabled={!token.trim() || saving} onClick={() => void save()}>
+            <Button
+              className="sm:self-end"
+              disabled={!token.trim() || saving}
+              onClick={() => void save()}
+            >
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               保存
             </Button>
@@ -220,7 +311,7 @@ export function SkillSettingsPanel() {
       </section>
 
       <section className="space-y-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <Database className="size-4 text-muted-foreground" />
           <h3 className="text-sm font-medium">平台缓存</h3>
           {cache ? (
@@ -230,10 +321,6 @@ export function SkillSettingsPanel() {
             </span>
           ) : null}
         </div>
-        <p className="text-xs leading-5 text-muted-foreground">
-          技能仓库由服务端统一拉取并定期检查更新，各团队安装时直接从本地读取，
-          既不占 GitHub 配额也无需等待下载。
-        </p>
 
         {cache?.repos.length ? (
           <div className="overflow-hidden rounded-xl border border-border">
@@ -241,12 +328,12 @@ export function SkillSettingsPanel() {
               <div
                 key={repo.repoKey}
                 className={cn(
-                  "flex items-center gap-3 bg-card px-3.5 py-2.5",
+                  "flex items-center gap-3 bg-card px-3 py-2.5 sm:px-3.5",
                   i > 0 && "border-t border-border",
                 )}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate font-mono text-xs">{repo.slug}</span>
                     {repo.partial ? (
                       <Badge variant="outline" className="text-[10px]">
@@ -262,16 +349,14 @@ export function SkillSettingsPanel() {
                   <p className="text-[11px] text-muted-foreground">
                     {repo.skillCount} 个技能 · {formatBytes(repo.sizeBytes)}
                     {repo.version ? ` · ${repo.version.slice(0, 8)}` : ""}
-                    {repo.checkedAt
-                      ? ` · ${new Date(repo.checkedAt).toLocaleString()} 检查`
-                      : ""}
+                    {repo.checkedAt ? ` · ${formatRelative(repo.checkedAt)}检查` : ""}
                   </p>
                   {repo.lastError ? (
                     <p className="truncate text-[11px] text-destructive">{repo.lastError}</p>
                   ) : null}
                 </div>
                 <Button
-                  size="icon"
+                  size="icon-sm"
                   variant="ghost"
                   title="立即同步"
                   disabled={syncing === repo.slug}

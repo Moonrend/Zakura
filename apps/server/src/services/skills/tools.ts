@@ -6,7 +6,6 @@ import { textResult } from "@zakura/core";
 import { SKILL_MANIFEST_FILE, type McpToolResult, type SkillStoreId } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import { normalizeSkillName } from "./source.js";
-import { searchSkillStores } from "./store.js";
 import type { SkillsService } from "./service.js";
 
 const SKILL_TOOL_NAMES = new Set(["list_skills", "read_skill", "search_skills", "install_skill"]);
@@ -73,12 +72,10 @@ export async function callSkillTool(
     if (name === "search_skills") {
       const query = str(args.query) ?? "";
       const store = (str(args.store) ?? "all") as SkillStoreId | "all";
-      const registered = await service.list(agent.tenantId);
-      const installedNames = new Set(registered.map((s) => s.name.toLowerCase()));
-      const { items, errors } = await searchSkillStores({
+      const { items, errors } = await service.searchAcross(agent.tenantId, {
         query,
         store,
-        installedNames,
+        limit: 25,
       });
       if (!items.length) {
         return textResult(

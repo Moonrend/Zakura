@@ -1,43 +1,41 @@
 "use client";
 
-import { BadgeCheck, CheckCircle2, Download, Package, Sparkles, Star, Zap } from "lucide-react";
+import { BadgeCheck, Check, Download, GitFork, Package, Sparkles, Star, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { SKILL_STORE_LABEL, formatCount, type SkillSearchItem } from "@/lib/skills";
+import { formatCount, type SkillSearchItem, type SkillStoreId } from "@/lib/skills";
 
-const STORE_BADGE: Record<string, "default" | "secondary" | "outline"> = {
-  builtin: "default",
-  curated: "default",
-  "skills-sh": "secondary",
-  github: "outline",
+const STORE_ICON: Record<SkillStoreId, typeof Sparkles> = {
+  builtin: Sparkles,
+  curated: BadgeCheck,
+  "skills-sh": Package,
+  github: GitFork,
 };
 
 export function SkillCard({
   item,
-  onPreview,
-  onInstall,
-  busy,
+  onOpen,
   className,
 }: {
   item: SkillSearchItem;
-  onPreview: () => void;
-  onInstall: () => void;
-  busy?: boolean;
+  onOpen: () => void;
   className?: string;
 }) {
   const installs = formatCount(item.installs);
   const stars = formatCount(item.stars);
+  const Icon = STORE_ICON[item.store] ?? Package;
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={onOpen}
       className={cn(
-        "group/skill relative flex flex-col gap-2.5 rounded-xl border border-border bg-card p-4 transition-colors hover:border-foreground/20",
+        "group flex w-full flex-col gap-2 rounded-xl border border-border bg-card p-3.5 text-left transition-colors hover:border-foreground/25 hover:bg-muted/30 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none sm:p-4",
         className,
       )}
     >
-      <div className="flex items-start gap-2.5">
-        <div
+      <div className="flex w-full items-start gap-2.5">
+        <span
           className={cn(
             "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70",
             item.store === "builtin" || item.store === "curated"
@@ -45,80 +43,71 @@ export function SkillCard({
               : "bg-muted text-muted-foreground",
           )}
         >
-          {item.store === "builtin" ? (
-            <Sparkles className="size-4" />
-          ) : item.store === "curated" ? (
-            <BadgeCheck className="size-4" />
-          ) : (
-            <Package className="size-4" />
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={onPreview}
-              className="truncate text-left text-sm font-medium hover:underline"
+          <Icon className="size-4" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="truncate text-sm font-medium group-hover:underline"
               title={item.name}
             >
               {item.name}
-            </button>
+            </span>
             {item.installed ? (
-              <CheckCircle2 className="size-3.5 shrink-0 text-success" aria-label="已安装" />
+              <Badge
+                variant="secondary"
+                className="shrink-0 gap-0.5 px-1 text-[10px] text-success"
+              >
+                <Check className="size-2.5" />
+                已装
+              </Badge>
             ) : null}
-          </div>
-          <p className="truncate text-xs text-muted-foreground" title={item.source}>
+          </span>
+          <span
+            className="block truncate font-mono text-[11px] text-muted-foreground"
+            title={item.source}
+          >
             {item.source}
-          </p>
-        </div>
+          </span>
+        </span>
       </div>
 
-      <p className="line-clamp-3 min-h-[3rem] text-xs leading-5 text-muted-foreground">
-        {item.description || "暂无描述，点开可预览 SKILL.md 全文"}
-      </p>
+      {item.description ? (
+        <p className="line-clamp-2 min-h-8 text-xs leading-4 text-muted-foreground sm:line-clamp-3 sm:min-h-12 sm:leading-5">
+          {item.description}
+        </p>
+      ) : null}
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant={STORE_BADGE[item.store] ?? "outline"} className="text-[10px]">
-          {SKILL_STORE_LABEL[item.store] ?? item.store}
-        </Badge>
+      <div className="flex w-full flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground">
         {installs ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
             <Download className="size-3" />
             {installs}
           </span>
         ) : null}
         {stars ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
             <Star className="size-3" />
             {stars}
           </span>
         ) : null}
         {item.cached ? (
-          <span
-            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
-            title="内容已在服务端缓存，安装无需联网"
-          >
+          <span className="inline-flex items-center gap-1">
             <Zap className="size-3" />
-            本地可装
+            缓存
           </span>
         ) : null}
+        <span className="ml-auto text-foreground/70 group-hover:text-foreground">
+          {item.installed ? "重装 →" : "安装 →"}
+        </span>
       </div>
-
-      <div className="mt-auto flex gap-1.5 pt-1">
-        <Button size="sm" variant="outline" className="flex-1" onClick={onPreview}>
-          预览
-        </Button>
-        <Button size="sm" className="flex-1" disabled={busy} onClick={onInstall}>
-          {item.installed ? "重新安装" : "安装"}
-        </Button>
-      </div>
-    </div>
+    </button>
   );
 }
 
 export function SkillCardSkeleton() {
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3.5 sm:p-4">
       <div className="flex items-center gap-2.5">
         <div className="size-8 shrink-0 animate-pulse rounded-lg bg-muted" />
         <div className="flex-1 space-y-1.5">
@@ -130,7 +119,7 @@ export function SkillCardSkeleton() {
         <div className="h-3 w-full animate-pulse rounded bg-muted/70" />
         <div className="h-3 w-5/6 animate-pulse rounded bg-muted/70" />
       </div>
-      <div className="h-8 w-full animate-pulse rounded-md bg-muted/60" />
+      <div className="h-3 w-1/3 animate-pulse rounded bg-muted/60" />
     </div>
   );
 }

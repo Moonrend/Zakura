@@ -29,48 +29,70 @@ export const SKILL_DISCOVERY_DIRS = [
   "plugins",
 ] as const;
 
-/** 技能商店 */
+/**
+ * 技能商店。
+ *
+ * 四个商店互不混排：每个商店有自己的检索方式、自己的分页、自己的搜索框状态。
+ * 这样「翻到第 3 页」「在这个商店里搜 react」这类操作语义唯一，
+ * 不会因为跨商店合并结果而出现总数漂移、翻页重复。
+ */
 export type SkillStoreId = "builtin" | "curated" | "skills-sh" | "github";
 
 export interface SkillStoreMeta {
   id: SkillStoreId;
   name: string;
+  /** 一行说明，商店切换后显示在搜索框下方 */
   description: string;
   url: string;
-  /** 是否支持关键词搜索（builtin 为本地过滤） */
-  searchable: boolean;
+  /** 搜索框占位符 */
+  searchPlaceholder: string;
+  /** 检索是否走本地（本地商店零延迟、总数精确、可深度翻页） */
+  local: boolean;
+  /** 可按仓库再细分（仅官方仓库） */
+  browsable: boolean;
 }
 
 export const SKILL_STORES: SkillStoreMeta[] = [
   {
-    id: "builtin",
-    name: "内置推荐",
-    description: "Zakura 为云端 Agent 定制的技能，开箱即用",
-    url: "https://agentskills.io",
-    searchable: true,
-  },
-  {
     id: "curated",
     name: "官方仓库",
-    description: "服务端已同步到本地的主流技能仓库，安装无需联网",
+    description: "Anthropic / OpenAI / Vercel 等官方技能集，服务端已同步到本地，安装无需联网",
     url: "https://github.com/topics/agent-skills",
-    searchable: true,
+    searchPlaceholder: "在官方仓库里搜索，如 pdf、code review…",
+    local: true,
+    browsable: true,
+  },
+  {
+    id: "builtin",
+    name: "内置技能",
+    description: "Zakura 为云端 Agent 定制，贴合本平台的原生工具与工作区",
+    url: "https://agentskills.io",
+    searchPlaceholder: "在内置技能里搜索…",
+    local: true,
+    browsable: false,
   },
   {
     id: "skills-sh",
     name: "skills.sh",
     description: "开放 Agent Skills 生态目录，按安装量排序",
     url: "https://skills.sh",
-    searchable: true,
+    searchPlaceholder: "在 skills.sh 上搜索，如 react performance…",
+    local: false,
+    browsable: false,
   },
   {
     id: "github",
     name: "GitHub",
-    description: "搜索 GitHub 上包含 SKILL.md 的仓库",
+    description: "搜索 GitHub 上包含 SKILL.md 的仓库，也可直接粘贴 owner/repo",
     url: "https://github.com/topics/agent-skills",
-    searchable: true,
+    searchPlaceholder: "搜索 GitHub 仓库，或粘贴 owner/repo…",
+    local: false,
+    browsable: false,
   },
 ];
+
+/** 默认落地的商店：本地、完整、有描述，首屏不依赖外网 */
+export const DEFAULT_SKILL_STORE: SkillStoreId = "curated";
 
 /**
  * 服务端预拉取并定期更新的技能仓库。
@@ -234,6 +256,8 @@ export interface SkillRecord {
   repoKey?: string | null;
   /** 平台缓存里已有更新版本 */
   updateAvailable?: boolean;
+  /** 平台缓存里的上游版本（updateAvailable 时用于展示） */
+  upstreamVersion?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -285,13 +309,21 @@ export interface SkillSearchItem {
 
 /** 分页参数：仓库型商店动辄几十上百个技能，不能一次全端上来 */
 export interface SkillSearchPage {
+  /** 当前商店（回显，便于客户端丢弃过期响应） */
+  store: SkillStoreId;
   items: SkillSearchItem[];
-  /** 满足条件的总数（已知时） */
+  /** 该商店下满足条件的总数 */
   total: number;
   offset: number;
   limit: number;
   hasMore: boolean;
-  errors: Array<{ store: SkillStoreId; error: string }>;
+  /**
+   * 搜索词本身就是一个可安装来源（owner/repo、URL、npx 命令）时的直达条目。
+   * 单独给出而不是塞进 items，避免污染商店的分页与总数。
+   */
+  direct?: SkillSearchItem;
+  /** 该商店不可用时的原因（其余商店不受影响） */
+  error?: string;
 }
 
 /** 已同步到平台的技能仓库（商店入口） */
@@ -335,6 +367,29 @@ export interface SkillCacheStatus {
   totalBytes: number;
   /** 下次后台刷新的间隔（毫秒） */
   refreshIntervalMs: number;
+}
+
+/** 一次自动更新的结果 */
+export interface SkillUpdateSummary {
+  /** 已更新到新版本的技能名 */
+  updated: string[];
+  /** 检查过但已是最新的数量 */
+  upToDate: number;
+  /** 内置技能补装/更新到 Agent 的次数 */
+  builtinSynced: number;
+  /** 更新失败的技能及原因 */
+  failed: Array<{ name: string; error: string }>;
+}
+
+/** 技能自动更新设置与上次运行情况 */
+export interface SkillAutoUpdateStatus {
+  enabled: boolean;
+  /** 后台检查间隔（毫秒） */
+  intervalMs: number;
+  lastRunAt: string | null;
+  lastResult: SkillUpdateSummary | null;
+  /** 当前有新版本可用的技能数（来自平台缓存对比） */
+  pendingCount: number;
 }
 
 /** 解析预览结果：一个来源可能包含多个技能 */

@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { useMe } from "@/components/me-context";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { PlatformHeadscalePanel } from "@/components/platform-headscale-panel";
+import { PlatformSkillTokenPanel } from "@/components/skills/platform-skill-token-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -248,6 +249,8 @@ export default function AdminPage() {
       </SettingsSection>
 
       <PlatformHeadscalePanel />
+
+      <PlatformSkillTokenPanel />
 
       <SettingsSection title="登录 OAuth · ZeroCat">
         <p className="text-sm text-muted-foreground">

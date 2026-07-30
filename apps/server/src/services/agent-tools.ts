@@ -171,7 +171,7 @@ export function listAgentNativeTools(
     tool(
       "search_skills",
       [
-        "Search skill stores (Zakura builtin catalog, skills.sh registry, GitHub) for an installable skill.",
+        "Search skill stores (curated official repos mirrored on this server, Zakura builtin catalog, skills.sh registry, GitHub) for an installable skill.",
         "Use when the user needs a capability you have no playbook for. Returns install_spec strings to pass to install_skill.",
       ].join(" "),
       {
@@ -180,8 +180,10 @@ export function listAgentNativeTools(
           query: { type: "string", description: "Keywords, e.g. \"react performance\"" },
           store: {
             type: "string",
-            enum: ["all", "builtin", "skills-sh", "github"],
+            enum: ["all", "curated", "builtin", "skills-sh", "github"],
             default: "all",
+            description:
+              "curated is served from this platform's local mirror — fastest and always has descriptions.",
           },
         },
       },

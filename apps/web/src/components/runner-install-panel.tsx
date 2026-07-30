@@ -91,7 +91,10 @@ export function RunnerInstallPanel({
           if (v === "curl" || v === "compose" || v === "docker") setTab(v);
         }}
       >
-        <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+        <TabsList
+          variant="line"
+          className="scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 w-[calc(100%+0.5rem)] justify-start overflow-x-auto px-1"
+        >
           <TabsTrigger value="curl">一键安装</TabsTrigger>
           <TabsTrigger value="compose">Compose</TabsTrigger>
           <TabsTrigger value="docker">Docker run</TabsTrigger>
