@@ -5,6 +5,7 @@ import {
   buildAgentMcpInstructions,
   buildDiscoverResult,
   EXT_APPS,
+  EXT_SKILLS,
   EXT_TASKS,
   toolNeedsHostedConfirm,
 } from "../src/mcp/agent-capabilities.js";
@@ -22,6 +23,10 @@ describe("agent MCP capabilities / discover", () => {
     assert.ok(caps.logging);
     assert.deepEqual(caps.extensions?.[EXT_TASKS], {});
     assert.deepEqual(caps.extensions?.[EXT_APPS], {});
+    assert.deepEqual(caps.extensions?.[EXT_SKILLS], {
+      index: "skill://index.json",
+      resourceTemplate: "skill://{name}/{+path}",
+    });
   });
 
   it("server/discover payload includes supportedVersions", () => {

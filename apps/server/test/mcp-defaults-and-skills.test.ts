@@ -16,6 +16,8 @@ describe("MCP defaults and skill resources", () => {
   let agentService: import("../src/services/agents.js").AgentService;
   let gateway: import("../src/services/mcp-gateway.js").McpGateway;
   let orchestrator: import("../src/services/orchestrator.js").Orchestrator;
+  let listForAgentCalls = 0;
+  let readSkillFileCalls = 0;
 
   before(async () => {
     dataDir = mkdtempSync(join(tmpdir(), "zakura-mcp-defaults-"));
@@ -125,44 +127,49 @@ describe("MCP defaults and skill resources", () => {
     gateway = new McpGateway(db, orchestrator, new DockerRuntime());
     gateway.setAgentService(agentService);
     gateway.setSkillsService({
-      listForAgent: async () => [
-        {
-          id: "install_1",
-          agentId,
-          skillId: "skill_1",
-          name: "demo-skill",
-          title: "Demo Skill",
-          description: "Demo description",
-          enabled: true,
-          path: "/skills/demo-skill",
-          version: "v1",
-          status: "installed",
-          error: null,
-          builtin: false,
-          createdAt: now.toISOString(),
-          updatedAt: now.toISOString(),
-        },
-        {
-          id: "install_2",
-          agentId,
-          skillId: "skill_2",
-          name: "disabled-skill",
-          title: "Disabled Skill",
-          description: "",
-          enabled: false,
-          path: "/skills/disabled-skill",
-          version: "v1",
-          status: "installed",
-          error: null,
-          builtin: false,
-          createdAt: now.toISOString(),
-          updatedAt: now.toISOString(),
-        },
-      ],
-      readSkillFile: async (_tenantId: string, _agent: unknown, name: string, path?: string) =>
-        name === "demo-skill"
+      listForAgent: async () => {
+        listForAgentCalls++;
+        return [
+          {
+            id: "install_1",
+            agentId,
+            skillId: "skill_1",
+            name: "demo-skill",
+            title: "Demo Skill",
+            description: "Demo description",
+            enabled: true,
+            path: "/skills/demo-skill",
+            version: "v1",
+            status: "installed",
+            error: null,
+            builtin: false,
+            createdAt: now.toISOString(),
+            updatedAt: now.toISOString(),
+          },
+          {
+            id: "install_2",
+            agentId,
+            skillId: "skill_2",
+            name: "disabled-skill",
+            title: "Disabled Skill",
+            description: "",
+            enabled: false,
+            path: "/skills/disabled-skill",
+            version: "v1",
+            status: "installed",
+            error: null,
+            builtin: false,
+            createdAt: now.toISOString(),
+            updatedAt: now.toISOString(),
+          },
+        ];
+      },
+      readSkillFile: async (_tenantId: string, _agent: unknown, name: string, path?: string) => {
+        readSkillFileCalls++;
+        return name === "demo-skill"
           ? { path: `/skills/demo-skill/${path ?? "SKILL.md"}`, content: "# Demo\n" }
-          : null,
+          : null;
+      },
     } as unknown as import("../src/services/skills/service.js").SkillsService);
   });
 
@@ -201,37 +208,59 @@ describe("MCP defaults and skill resources", () => {
     assert.deepEqual(bindings.map((b) => b.instanceId), ids);
   });
 
-  it("exposes enabled skills as MCP resources", async () => {
+  it("exposes enabled skills as SEP-2640 MCP resources", async () => {
     const agent = await agentService.get(tenantId, agentId);
     assert.ok(agent);
 
+    listForAgentCalls = 0;
+    readSkillFileCalls = 0;
     const resources = await gateway.listResourcesForAgent(agent!);
-    assert.ok(resources.some((r) => r.qualifiedUri === "zakura://agent/skills"));
-    assert.ok(
-      resources.some(
-        (r) => r.qualifiedUri === "zakura://agent/skills/demo-skill/SKILL.md",
-      ),
-    );
+    assert.equal(listForAgentCalls, 0, "resource listing should not eagerly enumerate skills");
+    assert.equal(readSkillFileCalls, 0, "resource listing should not eagerly read skill files");
+    assert.ok(resources.some((r) => r.qualifiedUri === "skill://index.json"));
     assert.equal(
-      resources.some(
-        (r) => r.qualifiedUri === "zakura://agent/skills/disabled-skill/SKILL.md",
-      ),
+      resources.some((r) => r.qualifiedUri === "skill://demo-skill/SKILL.md"),
       false,
+      "skill files are discovered through the index/template, not eagerly listed",
     );
 
-    const read = await gateway.readResource(
+    const index = await gateway.readResource(tenantId, "skill://index.json", { agentId });
+    assert.equal(index.contents[0]?.mimeType, "application/json");
+    const payload = JSON.parse(index.contents[0]?.text ?? "{}") as {
+      schema?: string;
+      skills?: Array<{
+        type: string;
+        name: string;
+        uri: string;
+        mimeType: string;
+      }>;
+      resourceTemplates?: string[];
+    };
+    assert.equal(payload.schema, "SEP-2640");
+    assert.deepEqual(payload.skills?.map((s) => s.name), ["demo-skill"]);
+    assert.equal(payload.skills?.[0]?.type, "skill-md");
+    assert.equal(payload.skills?.[0]?.uri, "skill://demo-skill/SKILL.md");
+    assert.equal(payload.skills?.[0]?.mimeType, "text/markdown");
+    assert.deepEqual(payload.resourceTemplates, ["skill://{name}/{+path}"]);
+    assert.equal(readSkillFileCalls, 0, "skill index should not eagerly read skill files");
+
+    const read = await gateway.readResource(tenantId, "skill://demo-skill/SKILL.md", {
+      agentId,
+    });
+    assert.equal(read.contents[0]?.mimeType, "text/markdown");
+    assert.equal(read.contents[0]?.text, "# Demo\n");
+    assert.equal(readSkillFileCalls, 1);
+
+    const legacyRead = await gateway.readResource(
       tenantId,
       "zakura://agent/skills/demo-skill/SKILL.md",
       { agentId },
     );
-    assert.equal(read.contents[0]?.mimeType, "text/markdown");
-    assert.equal(read.contents[0]?.text, "# Demo\n");
+    assert.equal(legacyRead.contents[0]?.text, "# Demo\n");
 
     const templates = await gateway.listResourceTemplatesForAgent(agent!);
     assert.ok(
-      templates.some(
-        (t) => t.qualifiedUriTemplate === "zakura://agent/skills/{name}/{+path}",
-      ),
+      templates.some((t) => t.qualifiedUriTemplate === "skill://{name}/{+path}"),
     );
   });
 });

@@ -136,6 +136,20 @@ describe("内置技能自动安装与更新", () => {
   it("没有变化时 backfill 不重复写工作区", async () => {
     assert.equal(await service.backfillBuiltins(tenantId, { force: true }), 0);
   });
+  it("读取技能文件时优先返回 Agent 工作区里的本地修改", async () => {
+    const { BUILTIN_SKILLS } = await import("../src/services/skills/builtin.js");
+    const target = BUILTIN_SKILLS.find((s) => s.recommended)!;
+    const localManifest = `---\nname: ${target.name}\ndescription: local edit\n---\n\n# Local edit\n`;
+    await fs.writeText(`/skills/${target.name}/SKILL.md`, localManifest);
+
+    const { agents } = await import("../src/db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const agent = await db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    assert.ok(agent);
+
+    const file = await service.readSkillFile(tenantId, agent!, target.name, "SKILL.md");
+    assert.equal(file?.content, localManifest);
+  });
 
   it("内置技能正文变更后自动重写已安装的 Agent", async () => {
     const { BUILTIN_SKILLS } = await import("../src/services/skills/builtin.js");

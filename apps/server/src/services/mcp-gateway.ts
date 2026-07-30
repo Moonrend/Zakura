@@ -60,9 +60,11 @@ import { callSkillTool, isSkillToolName } from "./skills/tools.js";
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
 
-const SKILLS_RESOURCE_URI = "zakura://agent/skills";
-const SKILL_RESOURCE_PREFIX = "zakura://agent/skills/";
-const SKILL_RESOURCE_TEMPLATE = "zakura://agent/skills/{name}/{+path}";
+const SKILL_INDEX_RESOURCE_URI = "skill://index.json";
+const SKILL_RESOURCE_PREFIX = "skill://";
+const SKILL_RESOURCE_TEMPLATE = "skill://{name}/{+path}";
+const LEGACY_SKILLS_RESOURCE_URI = "zakura://agent/skills";
+const LEGACY_SKILL_RESOURCE_PREFIX = "zakura://agent/skills/";
 
 type InstanceRow = typeof componentInstances.$inferSelect;
 
@@ -147,9 +149,22 @@ function skillResourceUri(name: string, path = SKILL_MANIFEST_FILE): string {
 function parseSkillResourceUri(
   uri: string,
 ): { list: true } | { list: false; name: string; path: string } | null {
-  if (uri === SKILLS_RESOURCE_URI || uri === `${SKILLS_RESOURCE_URI}/`) return { list: true };
-  if (!uri.startsWith(SKILL_RESOURCE_PREFIX)) return null;
-  const rest = uri.slice(SKILL_RESOURCE_PREFIX.length);
+  if (
+    uri === SKILL_INDEX_RESOURCE_URI ||
+    uri === LEGACY_SKILLS_RESOURCE_URI ||
+    uri === `${LEGACY_SKILLS_RESOURCE_URI}/`
+  ) {
+    return { list: true };
+  }
+
+  const rest = uri.startsWith(LEGACY_SKILL_RESOURCE_PREFIX)
+    ? uri.slice(LEGACY_SKILL_RESOURCE_PREFIX.length)
+    : uri.startsWith(SKILL_RESOURCE_PREFIX)
+      ? uri.slice(SKILL_RESOURCE_PREFIX.length)
+      : null;
+  if (rest === null) return null;
+  if (rest === "index.json") return { list: true };
+
   const [encodedName, ...pathParts] = rest.split("/");
   if (!encodedName) return null;
   try {
@@ -1154,19 +1169,23 @@ export class McpGateway {
       return {
         contents: [
           {
-            uri: SKILLS_RESOURCE_URI,
+            uri: SKILL_INDEX_RESOURCE_URI,
             mimeType: "application/json",
             text: JSON.stringify(
               {
+                schema: "SEP-2640",
                 skills: active.map((s) => ({
+                  type: "skill-md",
                   name: s.name,
                   title: s.title,
                   description: s.description,
-                  path: s.path,
                   uri: skillResourceUri(s.name),
+                  mimeType: "text/markdown",
+                  path: s.path,
                   builtin: s.builtin,
                   version: s.version,
                 })),
+                resourceTemplates: [SKILL_RESOURCE_TEMPLATE],
               },
               null,
               2,
@@ -1219,39 +1238,19 @@ export class McpGateway {
       });
     }
 
-    if (this.skillsService) {
-      const listUri = SKILLS_RESOURCE_URI;
-      if (!usedUris.has(listUri)) {
-        usedUris.add(listUri);
-        resources.push({
-          qualifiedUri: listUri,
-          instanceId: null,
-          providerId: AGENT_NATIVE_PROVIDER_ID,
-          localUri: listUri,
-          name: "agent-skills",
-          title: "Agent skills",
-          description: "Enabled skills installed for this Agent (JSON)",
-          mimeType: "application/json",
-          agentId: agent.id,
-        });
-      }
-
-      for (const skill of await this.listActiveAgentSkills(agent)) {
-        const uri = skillResourceUri(skill.name);
-        if (usedUris.has(uri)) continue;
-        usedUris.add(uri);
-        resources.push({
-          qualifiedUri: uri,
-          instanceId: null,
-          providerId: AGENT_NATIVE_PROVIDER_ID,
-          localUri: uri,
-          name: `skill:${skill.name}`,
-          title: `${skill.name} ${SKILL_MANIFEST_FILE}`,
-          description: skill.description,
-          mimeType: "text/markdown",
-          agentId: agent.id,
-        });
-      }
+    if (this.skillsService && !usedUris.has(SKILL_INDEX_RESOURCE_URI)) {
+      usedUris.add(SKILL_INDEX_RESOURCE_URI);
+      resources.push({
+        qualifiedUri: SKILL_INDEX_RESOURCE_URI,
+        instanceId: null,
+        providerId: AGENT_NATIVE_PROVIDER_ID,
+        localUri: SKILL_INDEX_RESOURCE_URI,
+        name: "agent-skills-index",
+        title: "Agent skills index",
+        description: "SEP-2640 skill discovery index for enabled installed skills",
+        mimeType: "application/json",
+        agentId: agent.id,
+      });
     }
 
     if (isWorkspaceFsExposedViaMcp(agent) && this.workspaceFsProvider) {

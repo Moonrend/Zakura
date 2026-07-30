@@ -11,6 +11,7 @@ export const AGENT_MCP_PROTOCOL_VERSIONS = ["2025-11-25", "2026-07-28"] as const
 /** 官方扩展 ID（SEP-2133 / SEP-2663 / SEP-1865） */
 export const EXT_TASKS = "io.modelcontextprotocol/tasks";
 export const EXT_APPS = "io.modelcontextprotocol/apps";
+export const EXT_SKILLS = "io.modelcontextprotocol/skills";
 
 export function buildAgentMcpCapabilities(opts?: { pathSlug?: string }) {
   void opts;
@@ -34,6 +35,10 @@ export function buildAgentMcpCapabilities(opts?: { pathSlug?: string }) {
     extensions: {
       [EXT_TASKS]: {},
       [EXT_APPS]: {},
+      [EXT_SKILLS]: {
+        index: "skill://index.json",
+        resourceTemplate: "skill://{name}/{+path}",
+      },
     },
   };
 }
