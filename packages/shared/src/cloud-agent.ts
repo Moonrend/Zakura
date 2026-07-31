@@ -22,6 +22,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "memory_updated",
   /** 系统为本轮回答注入的上下文来源（记忆召回、对话摘要等） */
   "context_sources",
+  /** 会话历史被压缩成可复用摘要（手动或自动触发） */
+  "context_compacted",
   "session_update",
 ] as const;
 
@@ -254,6 +256,18 @@ export type CloudAgentContextSourcesPayload = {
   items: CloudAgentContextSourceItem[];
 };
 
+/** 会话历史压缩摘要。旧事件仍保留在库中，后续上下文优先使用最新摘要。 */
+export type CloudAgentContextCompactedPayload = {
+  summary: string;
+  source: "manual" | "auto";
+  beforeChars: number;
+  afterChars: number;
+  droppedMessages: number;
+  keptMessages: number;
+  /** 手动压缩时记录内部 system 会话，便于审计压缩过程。 */
+  systemSessionId?: string;
+};
+
 /** 会话元数据变更（如自动标题），供多端实时同步 */
 export type CloudAgentSessionUpdatePayload = {
   title?: string;
@@ -276,6 +290,7 @@ export type CloudAgentEventPayload =
   | CloudAgentRunLogPayload
   | CloudAgentMemoryUpdatedPayload
   | CloudAgentContextSourcesPayload
+  | CloudAgentContextCompactedPayload
   | CloudAgentSessionUpdatePayload;
 
 export type CloudAgentEvent = {

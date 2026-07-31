@@ -78,7 +78,10 @@ export function registerCloudAgentRoutes(
   deps: {
     agentService: AgentService;
     store: CloudAgentSessionStore;
-    runtime: { startTurn: CloudAgentRuntime["startTurn"] };
+    runtime: {
+      startTurn: CloudAgentRuntime["startTurn"];
+      compactSession?: CloudAgentRuntime["compactSession"];
+    };
     modelRouter?: ModelRouterService;
   },
 ) {
@@ -364,6 +367,24 @@ export function registerCloudAgentRoutes(
     const body = await c.req.json<{ runId?: string }>().catch(() => ({} as { runId?: string }));
     const ok = await store.requestCancel(sid, body.runId ?? row.activeRunId);
     return c.json({ ok, runId: body.runId ?? row.activeRunId });
+  });
+
+  /** 手动压缩当前会话上下文；原始事件保留，后续 Run 优先使用摘要。 */
+  app.post("/api/agents/:id/cloud/sessions/:sid/compact", async (c) => {
+    if (!modelRouter || !runtime.compactSession) {
+      return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
+    }
+    const session = c.get("session")!;
+    try {
+      const result = await runtime.compactSession({
+        tenantId: session.tenantId,
+        agentId: c.req.param("id"),
+        sessionId: c.req.param("sid"),
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   /**

@@ -528,6 +528,7 @@ export type {
   CloudAgentContextSourceKind,
   CloudAgentContextSourceItem,
   CloudAgentContextSourcesPayload,
+  CloudAgentContextCompactedPayload,
   CloudAgentSessionUpdatePayload,
   CloudAgentEventPayload,
   CloudAgentEvent,

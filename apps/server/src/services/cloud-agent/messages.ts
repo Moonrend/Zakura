@@ -355,6 +355,26 @@ export function approxMessagesChars(messages: ModelChatMessage[]): number {
   return n;
 }
 
+export function messageTextForSummary(message: ModelChatMessage, limit = 600): string {
+  const chunks: string[] = [];
+  if (message.content) chunks.push(message.content);
+  if (message.toolCalls?.length) {
+    for (const call of message.toolCalls) {
+      chunks.push(
+        `tool_call ${call.function.name}: ${call.function.arguments.slice(0, limit)}`,
+      );
+    }
+  }
+  return chunks.join("\n").slice(0, limit);
+}
+
+export function buildCompactionDigest(messages: ModelChatMessage[]): string {
+  return messages
+    .map((m) => `${m.role}: ${messageTextForSummary(m)}`)
+    .join("\n")
+    .slice(0, 30_000);
+}
+
 /**
  * 循环内上下文超预算时就地压缩较旧的工具结果，返回压缩条数。
  * 只截断 tool 消息正文，不动 user/assistant 内容。

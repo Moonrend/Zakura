@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 import type { CloudAgentAttachment } from "@/lib/cloud-agent";
 import { formatSize } from "@/lib/agent-fs";
 import { ModelPicker, type ModelPickerItem } from "./model-picker";
+import { ContextWindowButton, type ContextWindowInfo } from "./context-window";
 
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
@@ -201,6 +202,11 @@ export function Composer({
   reasoning,
   reasoningItems,
   onReasoningChange,
+  contextWindow,
+  contextWindowOpen,
+  compactingContext,
+  onContextWindowOpenChange,
+  onCompactContext,
   className,
 }: {
   value: string;
@@ -226,6 +232,11 @@ export function Composer({
   reasoning: ComposerReasoningValue;
   reasoningItems: Array<{ value: ComposerReasoningValue; label: string }>;
   onReasoningChange: (value: ComposerReasoningValue) => void;
+  contextWindow: ContextWindowInfo;
+  contextWindowOpen: boolean;
+  compactingContext: boolean;
+  onContextWindowOpenChange: (open: boolean) => void;
+  onCompactContext: () => void;
   className?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -457,6 +468,15 @@ export function Composer({
           </Select>
 
           <div className="flex-1" />
+
+          <ContextWindowButton
+            info={contextWindow}
+            open={contextWindowOpen}
+            disabled={!routeReady}
+            compacting={compactingContext}
+            onOpenChange={onContextWindowOpenChange}
+            onCompact={onCompactContext}
+          />
 
           <Tooltip>
             <TooltipTrigger render={<span className="inline-flex" />}>

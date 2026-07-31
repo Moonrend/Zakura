@@ -113,6 +113,18 @@ export type TimelineItem =
   | { kind: "memory"; id: string; items: TimelineMemoryItem[]; seq: number }
   /** 系统注入的上下文来源（记忆召回、摘要等）；UI 汇总到「来源」按钮 */
   | { kind: "sources"; id: string; items: CloudAgentContextSourceItem[]; seq: number }
+  | {
+      kind: "compaction";
+      id: string;
+      summary: string;
+      beforeChars: number;
+      afterChars: number;
+      droppedMessages: number;
+      keptMessages: number;
+      source: "manual" | "auto";
+      systemSessionId?: string;
+      seq: number;
+    }
   | { kind: "error"; id: string; message: string; seq: number };
 
 function parseTimelineAttachments(raw: unknown): CloudAgentAttachment[] {
@@ -575,6 +587,21 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       }
       continue;
     }
+    if (ev.type === "context_compacted") {
+      items.push({
+        kind: "compaction",
+        id: ev.id,
+        summary: typeof p.summary === "string" ? p.summary : "",
+        beforeChars: typeof p.beforeChars === "number" ? p.beforeChars : 0,
+        afterChars: typeof p.afterChars === "number" ? p.afterChars : 0,
+        droppedMessages: typeof p.droppedMessages === "number" ? p.droppedMessages : 0,
+        keptMessages: typeof p.keptMessages === "number" ? p.keptMessages : 0,
+        source: p.source === "auto" ? "auto" : "manual",
+        systemSessionId: typeof p.systemSessionId === "string" ? p.systemSessionId : undefined,
+        seq: ev.seq,
+      });
+      continue;
+    }
     if (ev.type === "run_error") {
       flushReasoning();
       flushAssistant();
@@ -847,6 +874,22 @@ export async function cancelCloudRun(agentId: string, sessionId: string, runId?:
   });
 }
 
+export type CloudSessionCompactionResult = {
+  summary: string;
+  beforeChars: number;
+  afterChars: number;
+  droppedMessages: number;
+  keptMessages: number;
+  systemSessionId?: string;
+};
+
+export async function compactCloudSession(agentId: string, sessionId: string) {
+  return api<CloudSessionCompactionResult>(
+    `/api/agents/${agentId}/cloud/sessions/${sessionId}/compact`,
+    { method: "POST" },
+  );
+}
+
 /** 失败后重试：不追加用户消息，基于现有历史重新运行 */
 export async function retryCloudRun(
   agentId: string,
@@ -898,6 +941,7 @@ export type ChatModelOption = {
   reasoning?: boolean;
   reasoningLevels?: string[];
   defaultReasonLevel?: string;
+  contextLimit?: number;
 };
 
 function intersectStringSets(values: string[][]): string[] | undefined {
@@ -928,6 +972,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
           reasoning?: boolean;
           reasoningLevels?: string[];
           defaultReasonLevel?: string;
+          contextLimit?: number;
         };
         upstream?: { name?: string } | null;
       }>;
@@ -942,6 +987,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
         reasoningFlags: boolean[];
         levels: string[][];
         defaultReasonLevel?: string;
+        contextLimits: number[];
       }
     >();
     for (const r of res.routes ?? []) {
@@ -956,6 +1002,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
           isDefault: false,
           reasoningFlags: [],
           levels: [],
+          contextLimits: [],
         };
       if (r.name && entry.name === alias) entry.name = r.name;
       if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
@@ -970,6 +1017,9 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
       }
       if (!entry.defaultReasonLevel && r.meta?.defaultReasonLevel) {
         entry.defaultReasonLevel = r.meta.defaultReasonLevel;
+      }
+      if (typeof r.meta?.contextLimit === "number" && r.meta.contextLimit > 0) {
+        entry.contextLimits.push(r.meta.contextLimit);
       }
       byAlias.set(alias, entry);
     }
@@ -988,6 +1038,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
               : undefined,
         reasoningLevels,
         defaultReasonLevel: entry.defaultReasonLevel,
+        contextLimit: entry.contextLimits.length ? Math.min(...entry.contextLimits) : undefined,
       };
     });
   } catch {

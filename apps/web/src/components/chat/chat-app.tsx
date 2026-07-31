@@ -62,6 +62,7 @@ import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import {
   buildConversationTurns,
   cancelCloudRun,
+  compactCloudSession,
   createCloudSession,
   deleteCloudSession,
   getCloudConfig,
@@ -92,12 +93,14 @@ import {
   type PendingUpload,
   reasoningItemsFromLevels,
 } from "./composer";
+import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
 import { RunLogDrawer } from "./run-log-drawer";
 
 const AGENT_KEY = "zakura_chat_agent";
 const DEFAULT_MODEL = "__default__";
 const REASONING_KEY = "zakura_chat_reasoning";
+const DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000;
 
 /** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
 const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: string }> = [
@@ -130,6 +133,63 @@ function groupSessions(sessions: CloudSession[]): Array<{
   return groups.filter((g) => g.items.length > 0);
 }
 
+function eventTextWeight(ev: CloudAgentEvent): number {
+  const p = ev.payload as Record<string, unknown>;
+  let chars = 40;
+  if (typeof p.content === "string") chars += p.content.length;
+  if (typeof p.delta === "string") chars += p.delta.length;
+  if (typeof p.resultText === "string") chars += Math.min(p.resultText.length, 12_000);
+  if (typeof p.arguments === "string") chars += Math.min(p.arguments.length, 4_000);
+  if (Array.isArray(p.attachments)) {
+    chars += p.attachments.length * 160;
+  }
+  return chars;
+}
+
+function latestCompaction(events: CloudAgentEvent[]) {
+  return [...events].reverse().find((ev) => ev.type === "context_compacted") ?? null;
+}
+
+function buildContextWindowInfo(
+  events: CloudAgentEvent[],
+  modelItem: ChatModelOption | undefined,
+): ContextWindowInfo {
+  const compaction = latestCompaction(events);
+  const compactionSeq = compaction?.seq ?? 0;
+  const compactionPayload = (compaction?.payload ?? {}) as Record<string, unknown>;
+  const summary =
+    typeof compactionPayload.summary === "string" ? compactionPayload.summary : "";
+  const charsAfterCompaction = events
+    .filter((ev) => ev.seq > compactionSeq)
+    .reduce((sum, ev) => sum + eventTextWeight(ev), 0);
+  const summaryChars = summary ? summary.length + 80 : 0;
+  const usedTokens = Math.ceil((charsAfterCompaction + summaryChars) / 4);
+  const limitTokens = modelItem?.contextLimit ?? DEFAULT_CONTEXT_LIMIT_TOKENS;
+  const beforeChars =
+    typeof compactionPayload.beforeChars === "number" ? compactionPayload.beforeChars : 0;
+  const afterChars =
+    typeof compactionPayload.afterChars === "number" ? compactionPayload.afterChars : 0;
+  return {
+    usedTokens,
+    limitTokens,
+    ratio: limitTokens > 0 ? usedTokens / limitTokens : 0,
+    messageCount: events.filter(
+      (ev) => ev.type === "user_message" || ev.type === "assistant_message",
+    ).length,
+    toolResultCount: events.filter((ev) => ev.type === "tool_call_result").length,
+    summaryCount: events.filter((ev) => ev.type === "context_compacted").length,
+    lastSummary: summary || undefined,
+    lastCompactedAt: compaction?.createdAt,
+    lastSavedTokens:
+      beforeChars > afterChars ? Math.ceil((beforeChars - afterChars) / 4) : undefined,
+    systemSessionId:
+      typeof compactionPayload.systemSessionId === "string"
+        ? compactionPayload.systemSessionId
+        : undefined,
+    source: modelItem?.contextLimit ? "model" : "estimated",
+  };
+}
+
 export function ChatApp() {
   const router = useRouter();
   const [authed, setAuthed] = useState(false);
@@ -146,6 +206,8 @@ export function ChatApp() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [compactingContext, setCompactingContext] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [model, setModel] = useState("");
   const [reasoning, setReasoning] = useState<ComposerReasoningValue>(() => {
@@ -204,6 +266,15 @@ export function ChatApp() {
   const turns = useMemo(
     () => buildConversationTurns(events, { variantByMessage, branchByParent }),
     [events, variantByMessage, branchByParent],
+  );
+  const currentModelItem = useMemo(() => {
+    if (!models.length) return undefined;
+    if (!model) return models.find((m) => m.isDefault) ?? models[0];
+    return models.find((m) => m.alias === model) ?? models.find((m) => m.isDefault) ?? models[0];
+  }, [model, models]);
+  const contextWindow = useMemo(
+    () => buildContextWindowInfo(events, currentModelItem),
+    [events, currentModelItem],
   );
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
   const grouped = useMemo(() => groupSessions(sessions), [sessions]);
@@ -864,6 +935,25 @@ export function ChatApp() {
     }
   }
 
+  async function handleCompactContext() {
+    if (!agentId || !sessionId || runActive || compactingContext) return;
+    setCompactingContext(true);
+    try {
+      const result = await compactCloudSession(agentId, sessionId);
+      await loadSession(agentId, sessionId);
+      const saved = Math.max(0, result.beforeChars - result.afterChars);
+      toast.success(
+        saved > 0
+          ? `已压缩上下文，约释放 ${Math.round(saved / 4).toLocaleString("zh-CN")} tokens`
+          : "已压缩上下文",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCompactingContext(false);
+    }
+  }
+
   async function handleModelChange(value: string | null) {
     if (!agentId) return;
     const next = !value || value === DEFAULT_MODEL ? "" : value;
@@ -1368,6 +1458,11 @@ export function ChatApp() {
             reasoning={reasoning}
             reasoningItems={reasoningItems}
             onReasoningChange={handleReasoningChange}
+            contextWindow={contextWindow}
+            contextWindowOpen={contextOpen}
+            compactingContext={compactingContext}
+            onContextWindowOpenChange={setContextOpen}
+            onCompactContext={() => void handleCompactContext()}
           />
         </div>
 

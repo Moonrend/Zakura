@@ -41,6 +41,7 @@ import {
 } from "../memory-runtime.js";
 import {
   approxMessagesChars,
+  buildCompactionDigest,
   buildChainMessages,
   parseAttachments,
   COMPACT_KEEP_RECENT,
@@ -64,6 +65,15 @@ import {
   type AgentLoopHooks,
   type LoopToolOutcome,
 } from "./loop.js";
+
+export type SessionCompactionResult = {
+  summary: string;
+  beforeChars: number;
+  afterChars: number;
+  droppedMessages: number;
+  keptMessages: number;
+  systemSessionId?: string;
+};
 
 /** Agent.configJson → cloud 配置（宽容解析） */
 export function agentCloudConfig(agent: Agent): CloudAgentConfig {
@@ -253,6 +263,230 @@ export class CloudAgentRuntime {
     await appendRunLog(this.store, sessionId, runId, level, message, data);
   }
 
+  private compactionCallMessages(input: {
+    tenantId: string;
+    cloud: CloudAgentConfig;
+    messages: ModelChatMessage[];
+    previousSummary?: string;
+  }): ModelChatMessage[] {
+    const digest = buildCompactionDigest(input.messages);
+    const previous = input.previousSummary?.trim();
+    const prompt = previous
+      ? `已有摘要：\n${previous}\n\n把已有摘要与以下新增对话合并为一份中文上下文摘要。保留：用户目标、关键事实与数据、已完成/未完成事项、重要决定、仍需沿用的约束。800 字以内，直接输出摘要正文。`
+      : "把以下对话记录压缩成中文上下文摘要。保留：用户目标、关键事实与数据、已完成/未完成事项、重要决定、仍需沿用的约束。800 字以内，直接输出摘要正文。";
+    return [
+      { role: "system", content: prompt },
+      { role: "user", content: digest },
+    ];
+  }
+
+  private async summarizeMessages(input: {
+    tenantId: string;
+    cloud: CloudAgentConfig;
+    messages: ModelChatMessage[];
+    previousSummary?: string;
+    audit?: {
+      agent: Agent;
+      parentSessionId: string;
+      parentTitle: string;
+    };
+  }): Promise<{ summary: string; systemSessionId?: string }> {
+    const messages = this.compactionCallMessages(input);
+    const route = {
+      capability: "chat" as const,
+      ...(input.cloud.model ? { alias: input.cloud.model } : {}),
+    };
+    let audit:
+      | {
+          sessionId: string;
+          runId: string;
+          messageId: string;
+        }
+      | undefined;
+
+    if (input.audit) {
+      const systemSession = await this.store.createSession({
+        tenantId: input.tenantId,
+        agentId: input.audit.agent.id,
+        title: `上下文压缩：${input.audit.parentTitle.slice(0, 32)}${
+          input.audit.parentTitle.length > 32 ? "…" : ""
+        }`,
+        kind: "system",
+        origin: {
+          source: "system",
+          parentSessionId: input.audit.parentSessionId,
+          callerAgentId: input.audit.agent.id,
+          callerAgentName: input.audit.agent.name,
+        },
+      });
+      const run = await this.store.createRun(systemSession.id);
+      await this.store.markRunStarted(run.id);
+      audit = { sessionId: systemSession.id, runId: run.id, messageId: newId() };
+      await this.store.appendEvent({
+        sessionId: audit.sessionId,
+        type: "user_message",
+        runId: audit.runId,
+        payload: {
+          messageId: audit.messageId,
+          content: JSON.stringify([input.tenantId, messages, route], null, 2),
+          parentRunId: null,
+        },
+      });
+      await this.store.appendEvent({
+        sessionId: audit.sessionId,
+        type: "run_start",
+        runId: audit.runId,
+        payload: { runId: audit.runId, replyToMessageId: audit.messageId },
+      });
+    }
+
+    try {
+      const sum = await this.deps.modelRouter.chat(input.tenantId, messages, route);
+      const summary = (sum.content ?? "").trim();
+      if (audit) {
+        await this.store.appendEvent({
+          sessionId: audit.sessionId,
+          type: "assistant_message",
+          runId: audit.runId,
+          payload: { messageId: newId(), content: JSON.stringify(sum, null, 2) },
+        });
+        await this.store.appendEvent({
+          sessionId: audit.sessionId,
+          type: "run_end",
+          runId: audit.runId,
+          payload: { runId: audit.runId, status: "completed" },
+        });
+        await this.store.finishRun(audit.sessionId, audit.runId, "completed");
+      }
+      return { summary, systemSessionId: audit?.sessionId };
+    } catch (err) {
+      if (audit) {
+        const message = err instanceof Error ? err.message : String(err);
+        await failRun(this.store, audit.sessionId, audit.runId, message);
+      }
+      throw err;
+    }
+  }
+
+  async compactSession(input: {
+    tenantId: string;
+    agentId: string;
+    sessionId: string;
+  }): Promise<SessionCompactionResult> {
+    const session = await this.store.getSession(
+      input.tenantId,
+      input.agentId,
+      input.sessionId,
+    );
+    if (!session) throw new Error("会话不存在");
+    if (session.activeRunId) throw new Error("当前会话正在运行，请结束后再压缩");
+    const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const cloud = agentCloudConfig(agent);
+
+    const history = await this.store.listEvents(input.sessionId, { limit: 2000 });
+    const lastUser = [...history].reverse().find((e) => e.type === "user_message");
+    const targetMessageId = lastUser
+      ? (lastUser.payload as Record<string, unknown>).messageId
+      : null;
+    const targetId =
+      typeof targetMessageId === "string"
+        ? targetMessageId
+        : (() => {
+            throw new Error("会话中没有可压缩的消息");
+          })();
+
+    const lastCompaction = [...history]
+      .reverse()
+      .find((e) => e.type === "context_compacted");
+    const lastCompactionSeq = lastCompaction?.seq ?? 0;
+    const previousSummary =
+      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
+      "string"
+        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
+        : "";
+
+    const targetUserEvent = history.find(
+      (e) =>
+        e.type === "user_message" &&
+        (e.payload as Record<string, unknown>).messageId === targetMessageId,
+    );
+    const canUsePreviousSummary =
+      Boolean(previousSummary) && Boolean(targetUserEvent && targetUserEvent.seq > lastCompactionSeq);
+    const chainEvents = canUsePreviousSummary
+      ? history.filter((e) => e.seq > lastCompactionSeq)
+      : history;
+
+    const chainRes = buildChainMessages(
+      chainEvents.map((e) => ({
+        type: e.type,
+        runId: e.runId,
+        payload: e.payload as unknown as Record<string, unknown>,
+      })),
+      targetId,
+    );
+    const allMessages = chainRes.messages;
+    const beforeChars = approxMessagesChars(allMessages);
+    const newerEvents = history.filter((e) => e.seq > lastCompactionSeq);
+    const newerUserMessages = newerEvents.filter((e) => e.type === "user_message").length;
+    const newerAssistantMessages = newerEvents.filter(
+      (e) => e.type === "assistant_message",
+    ).length;
+    if (allMessages.length <= COMPACT_KEEP_RECENT && !previousSummary) {
+      throw new Error("当前会话还不需要压缩");
+    }
+    if (lastCompactionSeq > 0 && newerUserMessages + newerAssistantMessages < 2) {
+      throw new Error("上次压缩后新增内容太少");
+    }
+
+    const keep = allMessages.slice(-COMPACT_KEEP_RECENT);
+    const older = allMessages.slice(0, allMessages.length - keep.length);
+    if (older.length === 0 && !previousSummary) {
+      throw new Error("没有足够的旧消息可压缩");
+    }
+
+    const summarized = await this.summarizeMessages({
+      tenantId: input.tenantId,
+      cloud,
+      messages: older.length ? older : allMessages,
+      previousSummary: canUsePreviousSummary ? previousSummary : undefined,
+      audit: {
+        agent,
+        parentSessionId: input.sessionId,
+        parentTitle: session.title,
+      },
+    });
+    const summary = summarized.summary;
+    if (!summary) throw new Error("摘要为空，请稍后重试");
+
+    const keptChars = approxMessagesChars(keep);
+    const afterChars = keptChars + summary.length + 80;
+    const result: SessionCompactionResult = {
+      summary,
+      beforeChars,
+      afterChars,
+      droppedMessages: older.length,
+      keptMessages: keep.length,
+      systemSessionId: summarized.systemSessionId,
+    };
+    await this.store.appendEvent({
+      sessionId: input.sessionId,
+      type: "context_compacted",
+      runId: null,
+      payload: { ...result, source: "manual" },
+    });
+    await this.store.appendEvent({
+      sessionId: input.sessionId,
+      type: "context_sources",
+      runId: null,
+      payload: {
+        runId: "",
+        items: [{ kind: "summary", title: "对话压缩摘要", content: summary }],
+      },
+    });
+    return result;
+  }
+
   private async executeRun(input: {
     tenantId: string;
     agent: Agent;
@@ -276,9 +510,28 @@ export class CloudAgentRuntime {
     });
 
     const history = await this.store.listEvents(sessionId, { limit: 2000 });
+    const lastCompaction = [...history]
+      .reverse()
+      .find((e) => e.type === "context_compacted");
+    const lastCompactionSeq = lastCompaction?.seq ?? 0;
+    const compactedSummary =
+      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
+      "string"
+        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
+        : "";
+    const targetUserEvent = history.find(
+      (e) =>
+        e.type === "user_message" &&
+        (e.payload as Record<string, unknown>).messageId === input.targetMessageId,
+    );
+    const canUseCompactedSummary =
+      Boolean(compactedSummary) && Boolean(targetUserEvent && targetUserEvent.seq > lastCompactionSeq);
+    const chainEvents = canUseCompactedSummary
+      ? history.filter((e) => e.seq > lastCompactionSeq)
+      : history;
     // 沿分支链重建上下文：重新生成的旧变体与其他分支不进入模型输入
     const chainRes = buildChainMessages(
-      history.map((e) => ({
+      chainEvents.map((e) => ({
         type: e.type,
         runId: e.runId,
         payload: e.payload as unknown as Record<string, unknown>,
@@ -330,29 +583,38 @@ export class CloudAgentRuntime {
     }
 
     // —— 历史压缩：超长时把旧消息摘要进系统提示 ——
-    let historySummary = "";
+    let historySummary = canUseCompactedSummary ? compactedSummary : "";
+    if (historySummary) {
+      sourceItems.push({
+        kind: "summary",
+        title: "对话压缩摘要",
+        content: historySummary,
+      });
+    }
     if (approxMessagesChars(historyMsgs) > COMPACT_THRESHOLD_CHARS) {
       const keep = historyMsgs.slice(-COMPACT_KEEP_RECENT);
       const older = historyMsgs.slice(0, historyMsgs.length - keep.length);
       try {
-        const digest = older
-          .map((m) => `${m.role}: ${(m.content ?? "").slice(0, 600)}`)
-          .join("\n")
-          .slice(0, 30_000);
-        const sum = await this.deps.modelRouter.chat(
+        const currentSession = await this.store.getSession(tenantId, agent.id, sessionId);
+        const summarized = await this.summarizeMessages({
           tenantId,
-          [
-            {
-              role: "system",
-              content:
-                "把以下对话记录压缩成中文摘要，保留：用户目标、关键事实与数据、已完成/未完成事项、重要决定。500 字以内，直接输出摘要正文。",
-            },
-            { role: "user", content: digest },
-          ],
-          { capability: "chat", ...(cloud.model ? { alias: cloud.model } : {}) },
-        );
-        historySummary = (sum.content ?? "").trim();
+          cloud,
+          messages: older,
+          previousSummary: historySummary,
+          ...(currentSession
+            ? {
+                audit: {
+                  agent,
+                  parentSessionId: sessionId,
+                  parentTitle: currentSession.title,
+                },
+              }
+            : {}),
+        });
+        const beforeChars = approxMessagesChars(historyMsgs);
+        historySummary = summarized.summary;
         historyMsgs = keep;
+        const afterChars = approxMessagesChars(historyMsgs) + historySummary.length + 80;
         await this.log(sessionId, runId, "info", "历史过长，已压缩为摘要", {
           droppedMessages: older.length,
           summaryChars: historySummary.length,
@@ -362,6 +624,20 @@ export class CloudAgentRuntime {
             kind: "summary",
             title: "对话摘要",
             content: historySummary,
+          });
+          await this.store.appendEvent({
+            sessionId,
+            type: "context_compacted",
+            runId,
+            payload: {
+              summary: historySummary,
+              source: "auto",
+              beforeChars,
+              afterChars,
+              droppedMessages: older.length,
+              keptMessages: keep.length,
+              systemSessionId: summarized.systemSessionId,
+            },
           });
         }
       } catch (err) {

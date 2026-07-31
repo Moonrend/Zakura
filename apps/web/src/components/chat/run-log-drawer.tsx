@@ -29,6 +29,7 @@ const TYPE_LABEL: Record<string, string> = {
   run_log: "日志",
   memory_updated: "记忆更新",
   context_sources: "上下文来源",
+  context_compacted: "上下文压缩",
   session_update: "会话更新",
 };
 
@@ -64,6 +65,13 @@ function summarize(ev: CloudAgentEvent): string {
     case "context_sources": {
       const items = Array.isArray(p.items) ? p.items : [];
       return `${items.length} 条`;
+    }
+    case "context_compacted": {
+      const before = typeof p.beforeChars === "number" ? p.beforeChars : 0;
+      const after = typeof p.afterChars === "number" ? p.afterChars : 0;
+      const saved = Math.max(0, Math.round((before - after) / 4));
+      const source = p.source === "auto" ? "自动" : "手动";
+      return `${source}压缩 · 约释放 ${saved.toLocaleString("zh-CN")} tokens`;
     }
     case "session_update":
       return String(p.title ?? "");
