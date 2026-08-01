@@ -33,6 +33,10 @@ export type CloudSession = {
   kind: CloudAgentSessionKind;
   /** 来源链接：父会话/父 Run/调用方 Agent（非 chat 会话） */
   origin: CloudAgentSessionOrigin;
+  model: string | null;
+  modelRouteId: string | null;
+  reasoning: string | null;
+  draftText: string;
   lastSeq: number;
   activeRunId: string | null;
   createdAt: string;
@@ -910,6 +914,10 @@ export async function updateCloudSession(
     status?: "active" | "archived";
     /** 重新打类型标记 */
     kind?: CloudAgentSessionKind;
+    model?: string | null;
+    modelRouteId?: string | null;
+    reasoning?: string | null;
+    draftText?: string;
   },
 ) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {

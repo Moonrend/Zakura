@@ -27,6 +27,10 @@ function sessionDto(row: {
   status: string;
   kind: string;
   originJson: string;
+  model: string | null;
+  modelRouteId: string | null;
+  reasoning: string | null;
+  draftText: string;
   lastSeq: number;
   activeRunId: string | null;
   createdAt: Date;
@@ -45,6 +49,10 @@ function sessionDto(row: {
     status: row.status,
     kind: row.kind,
     origin,
+    model: row.model,
+    modelRouteId: row.modelRouteId,
+    reasoning: row.reasoning,
+    draftText: row.draftText,
     lastSeq: row.lastSeq,
     activeRunId: row.activeRunId,
     createdAt: row.createdAt.toISOString(),
@@ -251,6 +259,10 @@ export function registerCloudAgentRoutes(
       title?: string;
       status?: "active" | "archived";
       kind?: string;
+      model?: string | null;
+      modelRouteId?: string | null;
+      reasoning?: string | null;
+      draftText?: string;
     }>();
     const kind = body.kind !== undefined ? parseCloudAgentSessionKind(body.kind) : null;
     if (body.kind !== undefined && !kind) {
@@ -264,6 +276,10 @@ export function registerCloudAgentRoutes(
         ...(body.title !== undefined ? { title: body.title } : {}),
         ...(body.status !== undefined ? { status: body.status } : {}),
         ...(kind ? { kind } : {}),
+        ...(body.model !== undefined ? { model: body.model } : {}),
+        ...(body.modelRouteId !== undefined ? { modelRouteId: body.modelRouteId } : {}),
+        ...(body.reasoning !== undefined ? { reasoning: body.reasoning } : {}),
+        ...(body.draftText !== undefined ? { draftText: body.draftText } : {}),
       },
     );
     if (!updated) return c.json({ error: "Not found" }, 404);

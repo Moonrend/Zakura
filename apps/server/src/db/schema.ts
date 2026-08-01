@@ -1058,6 +1058,11 @@ export const cloudAgentSessions = pgTable(
     kind: text("kind").notNull().default("chat"),
     /** 来源链接（CloudAgentSessionOrigin）：父会话/父 Run/调用方 Agent */
     originJson: text("origin_json").notNull().default("{}"),
+    /** 输入框与模型选择等客户端会话状态；null 表示沿用 Agent 默认值 */
+    model: text("model"),
+    modelRouteId: text("model_route_id"),
+    reasoning: text("reasoning"),
+    draftText: text("draft_text").notNull().default(""),
     createdByUserId: text("created_by_user_id").references(() => users.id, {
       onDelete: "set null",
     }),

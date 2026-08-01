@@ -503,7 +503,14 @@ export class CloudAgentRuntime {
     const { tenantId, agent, sessionId, runId } = input;
     await this.store.markRunStarted(runId);
 
-    const cloud = agentCloudConfig(agent);
+    const sessionPreferences = await this.store.getSession(tenantId, agent.id, sessionId);
+    const cloud = {
+      ...agentCloudConfig(agent),
+      ...(sessionPreferences?.model ? { model: sessionPreferences.model } : {}),
+      ...(sessionPreferences?.model
+        ? { modelRouteId: sessionPreferences.modelRouteId ?? undefined }
+        : {}),
+    } satisfies CloudAgentConfig;
     const enableTools = cloud.enableTools !== false;
 
     await this.store.appendEvent({

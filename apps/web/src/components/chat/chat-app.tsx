@@ -100,6 +100,7 @@ import { RunLogDrawer } from "./run-log-drawer";
 const AGENT_KEY = "zakura_chat_agent";
 const DEFAULT_MODEL = "__default__";
 const REASONING_KEY = "zakura_chat_reasoning";
+const DRAFT_KEY_PREFIX = "zakura_chat_draft";
 const DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000;
 
 /** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
@@ -249,6 +250,10 @@ export function ChatApp() {
   const draftsRef = useRef<Map<string, string>>(new Map());
   const draftKeyRef = useRef<string>("__new__");
   const latestInputRef = useRef("");
+  const agentDefaultsRef = useRef<{ model: string; modelRouteId: string | null }>({
+    model: "",
+    modelRouteId: null,
+  });
   /** 预览 object URL 的真实来源，便于在状态更新之外安全释放 */
   const previewsRef = useRef<Record<string, string>>({});
   /** 跨 Agent 打开搜索结果：切换后应加载的目标会话 */
@@ -409,6 +414,24 @@ export function ChatApp() {
       const res = await getCloudSession(aid, sid, 0);
       setSessionId(sid);
       setEvents(res.events);
+      const sessionHasModel = Boolean(res.session.model);
+      setModel(sessionHasModel ? res.session.model! : agentDefaultsRef.current.model);
+      setModelRouteId(
+        sessionHasModel ? res.session.modelRouteId : agentDefaultsRef.current.modelRouteId,
+      );
+      if (res.session.reasoning) {
+        setReasoning(res.session.reasoning as ComposerReasoningValue);
+      } else {
+        const legacy = localStorage.getItem(REASONING_KEY);
+        setReasoning(
+          legacy === "none"
+            ? "off"
+            : legacy === "default" || legacy === "off" || (legacy && legacy.length <= 64)
+              ? (legacy as ComposerReasoningValue)
+              : "default",
+        );
+      }
+      draftsRef.current.set(sid, res.session.draftText ?? "");
       setVariantByMessage({});
       setBranchByParent({});
       const maxSeq = res.events.reduce((m, e) => Math.max(m, e.seq), 0);
@@ -450,6 +473,10 @@ export function ChatApp() {
         setSystemPrompt(cfg.cloud.systemPrompt ?? "");
         setModel(cfg.cloud.model ?? "");
         setModelRouteId(cfg.cloud.modelRouteId ?? null);
+        agentDefaultsRef.current = {
+          model: cfg.cloud.model ?? "",
+          modelRouteId: cfg.cloud.modelRouteId ?? null,
+        };
         setEnableTools(cfg.cloud.enableTools !== false);
         setAutoMemory(cfg.cloud.autoMemory !== false);
         setAutoTitle(cfg.cloud.autoTitle !== false);
@@ -594,6 +621,29 @@ export function ChatApp() {
     latestInputRef.current = input;
   }, [input]);
 
+  // 草稿即时落本地，随后同步到服务端，保证刷新和多设备打开都能恢复。
+  useEffect(() => {
+    if (!agentId) return;
+    const expectedKey = sessionId ?? "__new__";
+    // 会话刚切换但恢复 effect 尚未执行时，不能把旧会话的输入写到新 key。
+    if (draftKeyRef.current !== expectedKey) return;
+    const key = `${DRAFT_KEY_PREFIX}:${agentId}:${draftKeyRef.current}`;
+    try {
+      if (input) localStorage.setItem(key, input);
+      else localStorage.removeItem(key);
+    } catch {
+      // 存储空间不足时，服务端同步仍然继续。
+    }
+    // sessionId 变化时，恢复 effect 还需要先切换 draftKey，避免把旧输入短暂写进新会话。
+    if (!sessionId) return;
+    const timer = window.setTimeout(() => {
+      void updateCloudSession(agentId, sessionId, { draftText: input }).catch((err) => {
+        toast.error(err instanceof Error ? err.message : String(err));
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [agentId, input, sessionId]);
+
   // 切换会话时把当前草稿存起来，并恢复目标会话的草稿
   useEffect(() => {
     const nextKey = sessionId ?? "__new__";
@@ -602,10 +652,17 @@ export function ChatApp() {
     if (pending.trim()) draftsRef.current.set(draftKeyRef.current, pending);
     else draftsRef.current.delete(draftKeyRef.current);
     draftKeyRef.current = nextKey;
-    const restored = draftsRef.current.get(nextKey) ?? "";
+    let restored = draftsRef.current.get(nextKey) ?? "";
+    if (!restored && agentId) {
+      try {
+        restored = localStorage.getItem(`${DRAFT_KEY_PREFIX}:${agentId}:${nextKey}`) ?? "";
+      } catch {
+        // Ignore unavailable local storage.
+      }
+    }
     latestInputRef.current = restored;
     setInput(restored);
-  }, [sessionId]);
+  }, [agentId, sessionId]);
 
   // 卸载时释放尚未发送的图片预览地址
   useEffect(() => {
@@ -864,6 +921,12 @@ export function ChatApp() {
       if (!sid) {
         const created = await createCloudSession(agentId);
         setSessions((prev) => [created, ...prev]);
+        await updateCloudSession(agentId, created.id, {
+          model: model || null,
+          modelRouteId,
+          reasoning,
+          draftText: "",
+        });
         // 会话 key 提前对齐，避免草稿同步 effect 把已发送内容存回「新对话」
         draftKeyRef.current = created.id;
         setSessionId(created.id);
@@ -962,10 +1025,18 @@ export function ChatApp() {
     setModel(next);
     setModelRouteId(routeId);
     try {
-      await saveCloudConfig(agentId, {
-        model: next || null,
-        modelRouteId: routeId || null,
-      });
+      if (sessionId) {
+        await updateCloudSession(agentId, sessionId, {
+          model: next || null,
+          modelRouteId: routeId || null,
+        });
+      } else {
+        await saveCloudConfig(agentId, {
+          model: next || null,
+          modelRouteId: routeId || null,
+        });
+        agentDefaultsRef.current = { model: next, modelRouteId: routeId };
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -973,7 +1044,13 @@ export function ChatApp() {
 
   function handleReasoningChange(value: ComposerReasoningValue) {
     setReasoning(value);
-    localStorage.setItem(REASONING_KEY, value);
+    if (sessionId && agentId) {
+      void updateCloudSession(agentId, sessionId, { reasoning: value }).catch((err) => {
+        toast.error(err instanceof Error ? err.message : String(err));
+      });
+    } else {
+      localStorage.setItem(REASONING_KEY, value);
+    }
   }
 
   type ChatSettingsPatch = {
@@ -1050,9 +1127,13 @@ export function ChatApp() {
   useEffect(() => {
     if (!reasoningItems.some((item) => item.value === reasoning)) {
       setReasoning("default");
-      localStorage.setItem(REASONING_KEY, "default");
+      if (sessionId && agentId) {
+        void updateCloudSession(agentId, sessionId, { reasoning: "default" });
+      } else {
+        localStorage.setItem(REASONING_KEY, "default");
+      }
     }
-  }, [reasoning, reasoningItems]);
+  }, [agentId, reasoning, reasoningItems, sessionId]);
 
   if (!authed) {
     return (

@@ -240,6 +240,10 @@ export class CloudAgentSessionStore {
     kind?: CloudAgentSessionKind;
     /** 来源链接（父会话/父 Run/调用方 Agent），非 chat 会话应尽量填写 */
     origin?: CloudAgentSessionOrigin;
+    model?: string | null;
+    modelRouteId?: string | null;
+    reasoning?: string | null;
+    draftText?: string;
   }): Promise<CloudAgentSession> {
     const id = newId();
     const now = new Date();
@@ -251,6 +255,10 @@ export class CloudAgentSessionStore {
       status: "active",
       kind: input.kind ?? "chat",
       originJson: JSON.stringify(input.origin ?? {}),
+      model: input.model?.trim() || null,
+      modelRouteId: input.modelRouteId?.trim() || null,
+      reasoning: input.reasoning?.trim() || null,
+      draftText: input.draftText ?? "",
       createdByUserId: input.createdByUserId ?? null,
       lastSeq: 0,
       activeRunId: null,
@@ -307,17 +315,31 @@ export class CloudAgentSessionStore {
       status?: "active" | "archived";
       /** 重新打类型标记（如把一段 chat 归档为 system） */
       kind?: CloudAgentSessionKind;
+      model?: string | null;
+      modelRouteId?: string | null;
+      reasoning?: string | null;
+      draftText?: string;
     },
   ): Promise<CloudAgentSession | null> {
     const existing = await this.getSession(tenantId, agentId, sessionId);
     if (!existing) return null;
+    const hasSessionMetadataPatch =
+      patch.title !== undefined || patch.status !== undefined || patch.kind !== undefined;
     await this.db
       .update(cloudAgentSessions)
       .set({
         ...(patch.title !== undefined ? { title: patch.title.trim() || existing.title } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
         ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
-        updatedAt: new Date(),
+        ...(patch.model !== undefined ? { model: patch.model?.trim() || null } : {}),
+        ...(patch.modelRouteId !== undefined
+          ? { modelRouteId: patch.modelRouteId?.trim() || null }
+          : {}),
+        ...(patch.reasoning !== undefined
+          ? { reasoning: patch.reasoning?.trim() || null }
+          : {}),
+        ...(patch.draftText !== undefined ? { draftText: patch.draftText } : {}),
+        ...(hasSessionMetadataPatch ? { updatedAt: new Date() } : {}),
       })
       .where(eq(cloudAgentSessions.id, sessionId));
     return this.getSession(tenantId, agentId, sessionId);
