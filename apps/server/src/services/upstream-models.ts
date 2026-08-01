@@ -507,6 +507,27 @@ export class UpstreamModelsService {
               createdAt: now,
               updatedAt: now,
             })
+            // The existence check above is only an optimization. Two sync
+            // requests can still pass it at the same time, so let the
+            // database arbitrate on the unique key instead of surfacing a
+            // transient duplicate-key error to the caller.
+            .onConflictDoUpdate({
+              target: [
+                upstreamModels.tenantId,
+                upstreamModels.upstreamId,
+                upstreamModels.nativeModel,
+                upstreamModels.capability,
+              ],
+              set: {
+                canonicalModel: resolved.canonicalModel,
+                displayName: resolved.displayName,
+                metaJson: JSON.stringify(resolved.meta ?? {}),
+                status: "ready",
+                lastError: null,
+                syncedAt: now,
+                updatedAt: now,
+              },
+            })
             .returning();
           if (row) results.push(row);
           created += 1;
