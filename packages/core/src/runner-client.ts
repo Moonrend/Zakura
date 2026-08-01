@@ -147,7 +147,7 @@ export class RunnerClient {
   async execWorkspace(
     agentId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec`,
@@ -158,6 +158,7 @@ export class RunnerClient {
           command,
           workingDir: opts?.workingDir,
           env: opts?.env,
+          timeoutMs: opts?.timeoutMs,
         }),
       },
     );

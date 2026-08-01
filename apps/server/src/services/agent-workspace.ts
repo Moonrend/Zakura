@@ -1059,7 +1059,7 @@ export class AgentWorkspaceService {
   async execInWorkspace(
     agent: Agent,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ) {
     let workingDir = AGENT_WORKSPACE_ROOT;
     if (opts?.workingDir) {
@@ -1077,7 +1077,7 @@ export class AgentWorkspaceService {
 
     if (this.isRemoteAgent(agent)) {
       const { client } = await this.requireRunnerClient(agent);
-      return client.execWorkspace(agent.id, command, { workingDir, env });
+      return client.execWorkspace(agent.id, command, { workingDir, env, timeoutMs: opts?.timeoutMs });
     }
 
     const dockerId = await this.resolveDockerId(agent);
@@ -1099,6 +1099,7 @@ export class AgentWorkspaceService {
     return this.runtime.exec(dockerId, command, {
       workingDir,
       env,
+      timeoutMs: opts?.timeoutMs,
     });
   }
 }

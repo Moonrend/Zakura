@@ -345,7 +345,7 @@ export class RunnerDockerWorkspace {
   private async execRaw(
     dockerId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const container = this.docker.getContainer(dockerId);
     const exec = await container.exec({
@@ -358,9 +358,19 @@ export class RunnerDockerWorkspace {
     const stream = await exec.start({ hijack: true, stdin: false });
     const chunks: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
+      const timer = opts?.timeoutMs
+        ? setTimeout(() => {
+            stream.destroy(new Error(`容器命令执行超时（${opts.timeoutMs}ms）`));
+            reject(new Error(`容器命令执行超时（${opts.timeoutMs}ms）`));
+          }, opts.timeoutMs)
+        : null;
+      const finish = (fn: () => void) => {
+        if (timer) clearTimeout(timer);
+        fn();
+      };
       stream.on("data", (c: Buffer) => chunks.push(Buffer.from(c)));
-      stream.on("end", () => resolve());
-      stream.on("error", reject);
+      stream.on("end", () => finish(resolve));
+      stream.on("error", (err) => finish(() => reject(err)));
     });
     const demuxed = demux(Buffer.concat(chunks));
     const inspect = await exec.inspect();
@@ -374,7 +384,7 @@ export class RunnerDockerWorkspace {
   async exec(
     agentId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const existing = await this.findByAgent(agentId);
     if (!existing || existing.status !== "running") {

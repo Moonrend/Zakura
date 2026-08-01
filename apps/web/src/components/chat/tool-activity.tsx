@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -387,16 +388,23 @@ function FilePathButton({
 }) {
   if (!onOpenFile) return <span className="font-mono">{path}</span>;
   return (
-    <button
-      type="button"
+    <span
+      role="link"
+      tabIndex={0}
       className="font-mono underline decoration-border underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/50"
       onClick={(e: MouseEvent) => {
         e.stopPropagation();
         onOpenFile(path);
       }}
+      onKeyDown={(e: ReactKeyboardEvent<HTMLSpanElement>) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenFile(path);
+      }}
     >
       {path}
-    </button>
+    </span>
   );
 }
 

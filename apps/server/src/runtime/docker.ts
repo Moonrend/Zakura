@@ -297,7 +297,7 @@ export class DockerRuntime implements ContainerRuntime {
   async exec(
     containerId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const container = this.docker.getContainer(containerId);
     const exec = await container.exec({
@@ -311,9 +311,19 @@ export class DockerRuntime implements ContainerRuntime {
     const stream = await exec.start({ hijack: true, stdin: false });
     const chunks: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
+      const timer = opts?.timeoutMs
+        ? setTimeout(() => {
+            stream.destroy(new Error(`容器命令执行超时（${opts.timeoutMs}ms）`));
+            reject(new Error(`容器命令执行超时（${opts.timeoutMs}ms）`));
+          }, opts.timeoutMs)
+        : null;
+      const finish = (fn: () => void) => {
+        if (timer) clearTimeout(timer);
+        fn();
+      };
       stream.on("data", (c: Buffer) => chunks.push(c));
-      stream.on("end", () => resolve());
-      stream.on("error", reject);
+      stream.on("end", () => finish(resolve));
+      stream.on("error", (err) => finish(() => reject(err)));
     });
 
     const inspect = await exec.inspect();

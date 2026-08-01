@@ -43,7 +43,7 @@ export interface ContainerRuntime {
   exec(
     containerId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
   logs(containerId: string, tail?: number): Promise<string>;

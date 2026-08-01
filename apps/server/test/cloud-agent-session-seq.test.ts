@@ -113,4 +113,17 @@ describe("CloudAgentSessionStore.appendEvent concurrency", () => {
     const events = await store.listEvents(sessionId, { limit: 2000 });
     assert.equal(events.length, N);
   });
+
+  it("parallel createRun allows only one active run per session", async () => {
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, () => store.createRun(sessionId)),
+    );
+    const created = results.filter(
+      (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof store.createRun>>> =>
+        r.status === "fulfilled",
+    );
+    assert.equal(created.length, 1);
+    const session = await store.getSession(tenantId, agentId, sessionId);
+    assert.equal(session?.activeRunId, created[0]!.value.id);
+  });
 });

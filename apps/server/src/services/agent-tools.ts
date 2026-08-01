@@ -1096,9 +1096,18 @@ export async function callAgentNativeTool(
       case "shell_exec": {
         const command = unwrapShellCommand(String(args.command ?? ""));
         if (!command.trim()) return textResult("command is required", true);
-        const result = await workspace.execInWorkspace(agent, ["bash", "-lc", command], {
+        const timeoutSeconds =
+          typeof args.timeout === "number" && args.timeout > 0
+            ? Math.min(Math.ceil(args.timeout), 300)
+            : 300;
+        const result = await workspace.execInWorkspace(
+          agent,
+          ["timeout", "--signal=TERM", "--kill-after=5s", `${timeoutSeconds}s`, "bash", "-lc", command],
+          {
           workingDir: typeof args.working_dir === "string" ? args.working_dir : undefined,
-        });
+          timeoutMs: timeoutSeconds * 1000,
+          },
+        );
         return okJson(result);
       }
       case "browser_observe": {

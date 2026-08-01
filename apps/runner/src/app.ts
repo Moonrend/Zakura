@@ -163,12 +163,14 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       command?: string[];
       workingDir?: string;
       env?: Record<string, string>;
+      timeoutMs?: number;
     };
     if (!body.command?.length) return c.json({ error: "command is required" }, 400);
     try {
       const result = await dockerWs.exec(c.req.param("agentId"), body.command, {
         workingDir: body.workingDir,
         env: body.env,
+        timeoutMs: body.timeoutMs,
       });
       return c.json(result);
     } catch (err) {

@@ -2,7 +2,7 @@
  * Cloud Agent 持久会话存储 + 进程内 fan-out。
  * 事件先落库再广播，断线客户端按 afterSeq 续传即可追上。
  */
-import { and, asc, desc, eq, exists, gt, ilike, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import type {
   CloudAgentEvent,
   CloudAgentEventPayload,
@@ -401,17 +401,32 @@ export class CloudAgentSessionStore {
   async createRun(sessionId: string): Promise<CloudAgentRun> {
     const id = newId();
     const now = new Date();
-    await this.db.insert(cloudAgentRuns).values({
-      id,
-      sessionId,
-      status: "queued",
-      cancelRequested: false,
-      createdAt: now,
-    });
-    await this.db
+    // Claim the session before inserting the Run. The previous insert-then-update
+    // sequence allowed concurrent requests to all pass the activeRunId check.
+    const claimed = await this.db
       .update(cloudAgentSessions)
       .set({ activeRunId: id, updatedAt: now })
-      .where(eq(cloudAgentSessions.id, sessionId));
+      .where(and(eq(cloudAgentSessions.id, sessionId), isNull(cloudAgentSessions.activeRunId)))
+      .returning();
+    if (claimed.length === 0) {
+      throw new Error("当前会话已有进行中的 Run，请先等待或取消");
+    }
+
+    try {
+      await this.db.insert(cloudAgentRuns).values({
+        id,
+        sessionId,
+        status: "queued",
+        cancelRequested: false,
+        createdAt: now,
+      });
+    } catch (err) {
+      await this.db
+        .update(cloudAgentSessions)
+        .set({ activeRunId: null, updatedAt: new Date() })
+        .where(and(eq(cloudAgentSessions.id, sessionId), eq(cloudAgentSessions.activeRunId, id)));
+      throw err;
+    }
     const row = await this.db.query.cloudAgentRuns.findFirst({
       where: eq(cloudAgentRuns.id, id),
     });
@@ -511,6 +526,7 @@ export class CloudAgentSessionStore {
       );
     return stale.length;
   }
+
 
   async finishRun(
     sessionId: string,
