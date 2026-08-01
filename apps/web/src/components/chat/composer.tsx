@@ -198,7 +198,8 @@ export function Composer({
   onCancelUpload,
   models,
   model,
-  onModelChange,
+  modelRouteId,
+  onModelSelection,
   reasoning,
   reasoningItems,
   onReasoningChange,
@@ -228,7 +229,8 @@ export function Composer({
   onCancelUpload: (id: string) => void;
   models: ComposerModelItem[];
   model: string;
-  onModelChange: (value: string | null) => void;
+  modelRouteId?: string | null;
+  onModelSelection: (value: string | null, routeId: string | null) => void;
   reasoning: ComposerReasoningValue;
   reasoningItems: Array<{ value: ComposerReasoningValue; label: string }>;
   onReasoningChange: (value: ComposerReasoningValue) => void;
@@ -436,7 +438,8 @@ export function Composer({
           <ModelPicker
             items={models}
             value={model}
-            onValueChange={onModelChange}
+            routeId={modelRouteId}
+            onSelectionChange={onModelSelection}
             disabled={models.length === 0}
           />
 

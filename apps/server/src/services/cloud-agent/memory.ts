@@ -90,7 +90,14 @@ export async function extractAndSaveMemories(
         content: `用户：${input.userContent.slice(0, 3000)}\n\n助手：${input.assistantContent.slice(0, 2000)}`,
       },
     ],
-    { capability: "chat", ...(cloud.model ? { alias: cloud.model } : {}) },
+    {
+      capability: "chat",
+      ...(cloud.modelRouteId
+        ? { routeId: cloud.modelRouteId }
+        : cloud.model
+          ? { alias: cloud.model }
+          : {}),
+    },
   );
 
   const candidates = parseMemoryExtraction(res.content ?? "");

@@ -115,6 +115,7 @@ export function registerCloudAgentRoutes(
     const body = await c.req.json<{
       systemPrompt?: string;
       model?: string | null;
+      modelRouteId?: string | null;
       maxToolRounds?: number | null;
       /** 子代理最大嵌套深度（1-5）；null/0 恢复默认（2） */
       maxSubagentDepth?: number | null;
@@ -138,6 +139,10 @@ export function registerCloudAgentRoutes(
     if (body.model !== undefined) {
       if (body.model === null || body.model === "") delete next.model;
       else next.model = body.model;
+    }
+    if (body.modelRouteId !== undefined) {
+      if (body.modelRouteId === null || body.modelRouteId === "") delete next.modelRouteId;
+      else next.modelRouteId = body.modelRouteId;
     }
     if (body.maxToolRounds !== undefined) {
       if (body.maxToolRounds == null || body.maxToolRounds <= 0) delete next.maxToolRounds;

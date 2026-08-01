@@ -309,6 +309,8 @@ export type CloudAgentConfig = {
   systemPrompt?: string;
   /** 模型路由 alias / model 名；空则用租户默认 chat 路由 */
   model?: string;
+  /** 固定到某个模型路由；未设置时按 model alias 动态路由 */
+  modelRouteId?: string;
   /**
    * 可选：单次 Run 最大工具轮次。
    * 不设置则不限制，循环直到模型结束或用户取消。
@@ -342,6 +344,9 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   const out: CloudAgentConfig = {};
   if (typeof cloud.systemPrompt === "string") out.systemPrompt = cloud.systemPrompt;
   if (typeof cloud.model === "string" && cloud.model.trim()) out.model = cloud.model.trim();
+  if (typeof cloud.modelRouteId === "string" && cloud.modelRouteId.trim()) {
+    out.modelRouteId = cloud.modelRouteId.trim();
+  }
   if (typeof cloud.maxToolRounds === "number" && cloud.maxToolRounds > 0) {
     out.maxToolRounds = Math.floor(cloud.maxToolRounds);
   }

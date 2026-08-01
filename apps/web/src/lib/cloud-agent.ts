@@ -936,6 +936,7 @@ export async function searchCloudSessions(q: string, agentId?: string) {
 export type ChatModelOption = {
   alias: string;
   name: string;
+  providers: Array<{ id: string; name: string }>;
   upstream?: string;
   isDefault?: boolean;
   reasoning?: boolean;
@@ -965,6 +966,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
     const res = await api<{
       routes: Array<{
         alias?: string;
+        id?: string;
         name?: string;
         enabled?: boolean;
         isDefault?: boolean;
@@ -974,7 +976,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
           defaultReasonLevel?: string;
           contextLimit?: number;
         };
-        upstream?: { name?: string } | null;
+        upstream?: { id?: string; name?: string } | null;
       }>;
     }>(`/api/model-routes?capability=chat`);
     const byAlias = new Map<
@@ -983,6 +985,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
         alias: string;
         name: string;
         upstreams: string[];
+        providers: Array<{ id: string; name: string }>;
         isDefault: boolean;
         reasoningFlags: boolean[];
         levels: string[][];
@@ -999,6 +1002,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
           alias,
           name: r.name || alias,
           upstreams: [],
+          providers: [],
           isDefault: false,
           reasoningFlags: [],
           levels: [],
@@ -1007,6 +1011,9 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
       if (r.name && entry.name === alias) entry.name = r.name;
       if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
         entry.upstreams.push(r.upstream.name);
+      }
+      if (r.id && r.upstream?.name && !entry.providers.some((p) => p.id === r.id)) {
+        entry.providers.push({ id: r.id, name: r.upstream.name });
       }
       if (r.isDefault) entry.isDefault = true;
       if (typeof r.meta?.reasoning === "boolean") {
@@ -1028,6 +1035,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
       return {
         alias: entry.alias,
         name: entry.name,
+        providers: entry.providers,
         upstream: entry.upstreams.join(", ") || undefined,
         isDefault: entry.isDefault,
         reasoning:
@@ -1055,12 +1063,14 @@ export async function getCloudConfig(agentId: string) {
 export async function saveCloudConfig(
   agentId: string,
   cloud: Partial<
-    Omit<CloudAgentConfig, "maxToolRounds" | "model" | "maxSubagentDepth">
+    Omit<CloudAgentConfig, "maxToolRounds" | "model" | "modelRouteId" | "maxSubagentDepth">
   > & {
     /** null 表示清除限制 */
     maxToolRounds?: number | null;
     /** 空串/undefined 表示恢复默认路由 */
     model?: string | null;
+    /** 空串/undefined 表示动态路由 */
+    modelRouteId?: string | null;
     /** null/0 恢复默认嵌套深度（2） */
     maxSubagentDepth?: number | null;
   },

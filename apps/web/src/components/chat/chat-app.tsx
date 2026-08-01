@@ -210,6 +210,7 @@ export function ChatApp() {
   const [compactingContext, setCompactingContext] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [model, setModel] = useState("");
+  const [modelRouteId, setModelRouteId] = useState<string | null>(null);
   const [reasoning, setReasoning] = useState<ComposerReasoningValue>(() => {
     if (typeof window === "undefined") return "default";
     const saved = localStorage.getItem(REASONING_KEY);
@@ -448,6 +449,7 @@ export function ChatApp() {
         setHasChatRoute(cfg.hasChatRoute);
         setSystemPrompt(cfg.cloud.systemPrompt ?? "");
         setModel(cfg.cloud.model ?? "");
+        setModelRouteId(cfg.cloud.modelRouteId ?? null);
         setEnableTools(cfg.cloud.enableTools !== false);
         setAutoMemory(cfg.cloud.autoMemory !== false);
         setAutoTitle(cfg.cloud.autoTitle !== false);
@@ -954,12 +956,16 @@ export function ChatApp() {
     }
   }
 
-  async function handleModelChange(value: string | null) {
+  async function handleModelSelection(value: string | null, routeId: string | null) {
     if (!agentId) return;
     const next = !value || value === DEFAULT_MODEL ? "" : value;
     setModel(next);
+    setModelRouteId(routeId);
     try {
-      await saveCloudConfig(agentId, { model: next || undefined });
+      await saveCloudConfig(agentId, {
+        model: next || null,
+        modelRouteId: routeId || null,
+      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -1022,6 +1028,7 @@ export function ChatApp() {
         reasoning: m.reasoning,
         reasoningLevels: m.reasoningLevels,
         defaultReasonLevel: m.defaultReasonLevel,
+        providers: m.providers,
       })),
     ];
     // 配置里存着的模型可能已从模型列表里下线，仍要能显示当前选中项
@@ -1454,7 +1461,8 @@ export function ChatApp() {
             onCancelUpload={cancelUpload}
             models={modelItems}
             model={model || DEFAULT_MODEL}
-            onModelChange={(v) => void handleModelChange(v)}
+            modelRouteId={modelRouteId}
+            onModelSelection={(v, routeId) => void handleModelSelection(v, routeId)}
             reasoning={reasoning}
             reasoningItems={reasoningItems}
             onReasoningChange={handleReasoningChange}

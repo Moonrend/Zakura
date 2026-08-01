@@ -294,7 +294,11 @@ export class CloudAgentRuntime {
     const messages = this.compactionCallMessages(input);
     const route = {
       capability: "chat" as const,
-      ...(input.cloud.model ? { alias: input.cloud.model } : {}),
+      ...(input.cloud.modelRouteId
+        ? { routeId: input.cloud.modelRouteId }
+        : input.cloud.model
+          ? { alias: input.cloud.model }
+          : {}),
     };
     let audit:
       | {
@@ -1218,7 +1222,14 @@ export class CloudAgentRuntime {
               content: `用户：${input.userContent.slice(0, 800)}\n\n助手：${input.assistantContent.slice(0, 800)}`,
             },
           ],
-          { capability: "chat", ...(cloud.model ? { alias: cloud.model } : {}) },
+          {
+            capability: "chat",
+            ...(cloud.modelRouteId
+              ? { routeId: cloud.modelRouteId }
+              : cloud.model
+                ? { alias: cloud.model }
+                : {}),
+          },
         );
         const title = (res.content ?? "")
           .trim()

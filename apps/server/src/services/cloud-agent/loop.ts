@@ -257,7 +257,11 @@ async function streamModelRound(
         messages,
         {
           capability: "chat",
-          ...(cloud.model ? { alias: cloud.model } : {}),
+          ...(cloud.modelRouteId
+            ? { routeId: cloud.modelRouteId }
+            : cloud.model
+              ? { alias: cloud.model }
+              : {}),
         },
         definitions.length
           ? {
