@@ -30,6 +30,7 @@ import {
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { McpToolPermissionsPanel } from "@/components/mcp/tool-permissions-panel";
@@ -121,6 +122,7 @@ export default function McpServerDetailPage() {
 }
 
 function McpServerDetailInner() {
+  const { confirm: askConfirm } = useConfirmDialog();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -226,7 +228,7 @@ function McpServerDetailInner() {
   }
 
   async function removeInstance() {
-    if (!confirm("删除该 MCP 服务器？已绑定的 Agent 将无法再使用它。")) return;
+    if (!(await askConfirm({ title: "删除该 MCP 服务器？", description: "已绑定的 Agent 将无法再使用它。", confirmLabel: "删除服务器" }))) return;
     setActionBusy(true);
     try {
       await api(`/api/instances/${id}`, { method: "DELETE" });

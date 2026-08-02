@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import type { CloudAgentEvent, CloudAgentRunOptions } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -192,6 +193,7 @@ function buildContextWindowInfo(
 }
 
 export function ChatApp() {
+  const { confirm } = useConfirmDialog();
   const router = useRouter();
   const [authed, setAuthed] = useState(false);
   const [agents, setAgents] = useState<AgentListItem[]>([]);
@@ -712,7 +714,7 @@ export function ChatApp() {
 
   async function handleDeleteSession(sid: string) {
     if (!agentId) return;
-    if (!confirm("删除该对话？")) return;
+    if (!(await confirm({ title: "删除该对话？", confirmLabel: "删除" }))) return;
     try {
       await deleteCloudSession(agentId, sid);
       const next = sessions.filter((s) => s.id !== sid);

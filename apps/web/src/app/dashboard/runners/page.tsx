@@ -33,6 +33,7 @@ import { subscribePlatformEvents } from "@/lib/platform-events";
 import { RunnerInstallPanel } from "@/components/runner-install-panel";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +53,7 @@ import { cn } from "@/lib/utils";
 type AccessMode = "public" | "tailscale" | null;
 
 export default function RunnersPage() {
+  const { confirm } = useConfirmDialog();
   const [rows, setRows] = useState<RuntimeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -275,11 +277,7 @@ export default function RunnersPage() {
                           variant="ghost"
                           title="删除"
                           onClick={async () => {
-                            if (
-                              !confirm(
-                                `确定删除 Runner「${r.name}」？需无 Agent 绑定。`,
-                              )
-                            ) {
+                            if (!(await confirm({ title: `删除 Runner「${r.name}」？`, description: "需无 Agent 绑定。", confirmLabel: "删除" }))) {
                               return;
                             }
                             try {

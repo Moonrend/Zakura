@@ -405,7 +405,12 @@ export class UpstreamModelsService {
   async syncFromUpstream(
     tenantId: string,
     upstreamId: string,
-    opts?: { prune?: boolean; defaultCapability?: ModelCapability },
+    opts?: {
+      prune?: boolean;
+      defaultCapability?: ModelCapability;
+      /** When present, only these remote model ids remain enabled. */
+      modelIds?: string[];
+    },
   ) {
     const upstream = await this.upstreams.getRow(tenantId, upstreamId);
     if (!upstream) throw new Error("上游不存在");
@@ -423,13 +428,43 @@ export class UpstreamModelsService {
     }
 
     const now = new Date();
+    const selectedModelIds =
+      opts?.modelIds === undefined
+        ? undefined
+        : new Set(opts.modelIds.map((id) => id.trim()).filter(Boolean));
+    const remoteModels =
+      selectedModelIds === undefined
+        ? remote.models
+        : remote.models.filter((model) => selectedModelIds.has(model.id.trim()));
+
+    if (selectedModelIds !== undefined) {
+      const existingRows = await this.db
+        .select()
+        .from(upstreamModels)
+        .where(
+          and(
+            eq(upstreamModels.tenantId, tenantId),
+            eq(upstreamModels.upstreamId, upstreamId),
+          ),
+        );
+      const remoteIds = new Set(remote.models.map((model) => model.id.trim()));
+      const toDisable = existingRows.filter(
+        (row) => remoteIds.has(row.nativeModel) && !selectedModelIds.has(row.nativeModel),
+      );
+      if (toDisable.length > 0) {
+        await this.db
+          .update(upstreamModels)
+          .set({ enabled: false, updatedAt: now })
+          .where(inArray(upstreamModels.id, toDisable.map((row) => row.id)));
+      }
+    }
     let created = 0;
     let updated = 0;
     const touchedKeys = new Set<string>();
     const results: UpstreamModel[] = [];
     const unmatchedByNativeModel = new Map<string, UpstreamModelMatchFailure>();
 
-    for (const remoteModel of remote.models) {
+    for (const remoteModel of remoteModels) {
       const nativeModel = remoteModel.id.trim();
       if (!nativeModel) continue;
 
@@ -477,6 +512,7 @@ export class UpstreamModelsService {
               canonicalModel: resolved.canonicalModel,
               displayName: resolved.displayName || existing.displayName,
               metaJson: JSON.stringify(resolved.meta ?? {}),
+              enabled: selectedModelIds === undefined || selectedModelIds.has(nativeModel),
               status: "ready",
               lastError: null,
               syncedAt: now,
@@ -522,6 +558,7 @@ export class UpstreamModelsService {
                 canonicalModel: resolved.canonicalModel,
                 displayName: resolved.displayName,
                 metaJson: JSON.stringify(resolved.meta ?? {}),
+                enabled: selectedModelIds === undefined || selectedModelIds.has(nativeModel),
                 status: "ready",
                 lastError: null,
                 syncedAt: now,

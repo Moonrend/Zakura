@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { api, setSession } from "@/lib/api";
 import { fetchAgentProviders, saveAgentProviders } from "@/lib/agents";
 import { cn } from "@/lib/utils";
+import { BrandMark } from "@/components/brand-mark";
 
 const START_PROMPT = "请简要介绍你能为我做什么，以及现在已经具备哪些能力。";
 
@@ -165,7 +166,7 @@ export default function TenantOnboardingPage() {
   return (
     <div className="min-h-svh bg-background">
       <header className="mx-auto flex h-10 w-full max-w-5xl items-center justify-between px-5 sm:px-8">
-        <span className="text-sm font-semibold tracking-tight">Zakura</span>
+        <BrandMark iconClassName="size-6" />
         <ThemeToggle />
       </header>
 

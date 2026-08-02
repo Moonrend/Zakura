@@ -9,6 +9,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandMark } from "@/components/brand-mark";
 
 /** System setup — register the admin account (single-tenant by default). */
 export default function SetupPage() {
@@ -27,7 +28,7 @@ export default function SetupPage() {
       </div>
       <div className="w-full max-w-[360px] animate-in-page">
         <div className="mb-8 text-center">
-          <div className="text-xl font-semibold tracking-tight">Zakura</div>
+          <BrandMark className="justify-center" iconClassName="size-9" />
         </div>
 
         <form

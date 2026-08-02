@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { HeartPulse, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { HeartPulse, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -70,12 +71,6 @@ type Upstream = {
   meta?: ProtocolMeta;
 };
 
-type ModelMatchFailure = {
-  nativeModel: string;
-  displayName?: string;
-  canonicalModel: string;
-};
-
 const FALLBACK_PROTOCOLS: ProtocolMeta[] = MODEL_UPSTREAM_PROTOCOLS.map((protocol) => ({
   protocol,
   ...MODEL_UPSTREAM_PROTOCOL_META[protocol],
@@ -110,19 +105,13 @@ function toggleId(set: Set<string>, id: string, on: boolean): Set<string> {
   return next;
 }
 
-function formatUnmatchedModels(models?: ModelMatchFailure[]): string | null {
-  if (!models?.length) return null;
-  const names = models.map((m) => m.nativeModel).join("、");
-  return `以下模型匹配失败，需要手动选数据：${names}`;
-}
-
 export default function ModelUpstreamsPage() {
+  const { confirm } = useConfirmDialog();
   const [upstreams, setUpstreams] = useState<Upstream[]>([]);
   const [protocols, setProtocols] = useState<ProtocolMeta[]>(FALLBACK_PROTOCOLS);
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState<Upstream | null>(null);
   const [busy, setBusy] = useState(false);
-  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [selectedUpstreams, setSelectedUpstreams] = useState<Set<string>>(new Set());
 
   const [name, setName] = useState("");
@@ -276,7 +265,7 @@ export default function ModelUpstreamsPage() {
   async function removeSelectedUpstreams() {
     const ids = [...selectedUpstreams];
     if (ids.length === 0) return;
-    if (!confirm(`确认删除选中的 ${ids.length} 个上游？其下模型也会删除。`)) return;
+    if (!(await confirm({ title: `删除选中的 ${ids.length} 个上游？`, description: "其下模型也会删除。", confirmLabel: "删除上游" }))) return;
     try {
       await api("/api/model-upstreams/batch-delete", {
         method: "POST",
@@ -291,7 +280,7 @@ export default function ModelUpstreamsPage() {
   }
 
   async function removeOneUpstream(id: string) {
-    if (!confirm("删除上游将级联删除其下所有模型，确认？")) return;
+    if (!(await confirm({ title: "删除上游？", description: "将级联删除其下所有模型。", confirmLabel: "删除上游" }))) return;
     try {
       await api(`/api/model-upstreams/${id}`, { method: "DELETE" });
       toast.success("已删除");
@@ -299,36 +288,6 @@ export default function ModelUpstreamsPage() {
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function syncModels(id: string) {
-    setSyncingId(id);
-    try {
-      const res = await api<{
-        synced: number;
-        created: number;
-        updated: number;
-        message?: string;
-        unmatchedModels?: ModelMatchFailure[];
-      }>(`/api/model-upstreams/${id}/sync-models`, {
-        method: "POST",
-        json: {},
-      });
-      const unmatchedText = formatUnmatchedModels(res.unmatchedModels);
-      if (res.synced === 0) {
-        toast.message(res.message ?? "未同步到模型，可手填");
-      } else {
-        toast.success(
-          `已同步 ${res.synced} 条（新增 ${res.created}，更新 ${res.updated}）` +
-            (res.message ? ` · ${res.message}` : ""),
-        );
-      }
-      if (unmatchedText) toast.message(unmatchedText);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSyncingId(null);
     }
   }
 
@@ -432,15 +391,9 @@ export default function ModelUpstreamsPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    disabled={syncingId === u.id}
-                    onClick={() => void syncModels(u.id)}
+                    onClick={() => openEdit(u)}
                   >
-                    {syncingId === u.id ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="size-3.5" />
-                    )}
-                    同步
+                    获取模型
                   </Button>
                   <Button
                     variant="ghost"

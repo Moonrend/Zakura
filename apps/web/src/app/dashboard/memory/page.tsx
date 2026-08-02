@@ -15,6 +15,7 @@ import {
 } from "@/components/embedding-config-fields";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -79,6 +80,7 @@ const EMPTY_EMBEDDING: EmbeddingFormValue = {
 };
 
 export default function GlobalMemoryPage() {
+  const { confirm } = useConfirmDialog();
   const [data, setData] = useState<Payload | null>(null);
   const [kinds, setKinds] = useState<KindMeta[]>([]);
   const [open, setOpen] = useState(false);
@@ -230,7 +232,7 @@ export default function GlobalMemoryPage() {
   }
 
   async function remove(id: string) {
-    if (!confirm("删除此记忆 Provider？绑定到它的 Agent 需先更换。")) return;
+    if (!(await confirm({ title: "删除此记忆 Provider？", description: "绑定到它的 Agent 需先更换。", confirmLabel: "删除" }))) return;
     try {
       await api(`/api/memory-providers/${id}`, { method: "DELETE" });
       toast.success("已删除");

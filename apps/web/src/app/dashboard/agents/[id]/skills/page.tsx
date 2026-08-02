@@ -15,6 +15,7 @@ import { useAgentDetail } from "@/components/agent-detail-context";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -39,6 +40,7 @@ import { SkillStorePanel } from "@/components/skills/skill-store-panel";
 import { SkillMarkdown } from "@/components/skills/skill-markdown";
 
 export default function AgentSkillsPage() {
+  const { confirm } = useConfirmDialog();
   const { id, agent } = useAgentDetail();
   const [skills, setSkills] = useState<AgentSkillRecord[]>([]);
   const [unregistered, setUnregistered] = useState<string[]>([]);
@@ -83,7 +85,7 @@ export default function AgentSkillsPage() {
   }
 
   async function remove(skill: AgentSkillRecord) {
-    if (!confirm(`从 ${agent?.name ?? "该 Agent"} 卸载技能 ${skill.name}？工作区目录会一并删除。`)) {
+    if (!(await confirm({ title: `卸载技能 ${skill.name}？`, description: `将从 ${agent?.name ?? "该 Agent"} 卸载，并删除工作区目录。`, confirmLabel: "卸载" }))) {
       return;
     }
     setBusy(skill.name);

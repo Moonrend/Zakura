@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import {
   DropdownMenu,
@@ -129,6 +130,7 @@ export function FilePanel({
   overlay?: boolean;
   onClose: () => void;
 }) {
+  const { confirm } = useConfirmDialog();
   const { resolvedTheme } = useTheme();
   const [dirCache, setDirCache] = useState<Map<string, FsEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set(["/"]));
@@ -299,7 +301,7 @@ export function FilePanel({
   }
 
   async function handleDelete(entry: FsEntry) {
-    if (!confirm(`删除 ${entry.path}？`)) return;
+    if (!(await confirm({ title: `删除 ${entry.path}？`, confirmLabel: "删除" }))) return;
     try {
       await fsDelete(agentId, entry.path, entry.isDir);
       await loadDir(parentFsPath(entry.path), true);

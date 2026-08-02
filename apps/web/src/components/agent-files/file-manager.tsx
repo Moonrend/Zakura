@@ -19,6 +19,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -58,6 +59,7 @@ type Props = {
 type DialogMode = "mkdir" | "newFile" | "rename" | null;
 
 export function AgentFileManager({ agentId, canWrite = true }: Props) {
+  const { confirm } = useConfirmDialog();
   const [cwd, setCwd] = useState("/");
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -136,7 +138,7 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
       setCwd(entry.path);
       return;
     }
-    if (dirty && openPath && !confirm("当前文件未保存，放弃更改？")) return;
+    if (dirty && openPath && !(await confirm({ title: "当前文件未保存，放弃更改？", description: "切换文件将丢失尚未保存的修改。", confirmLabel: "放弃更改" }))) return;
 
     setOpenPath(entry.path);
     setDirty(false);
@@ -202,7 +204,7 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
 
   async function handleDelete(paths: string[]) {
     if (!canWrite || paths.length === 0) return;
-    if (!confirm(`删除 ${paths.length} 项？此操作不可恢复。`)) return;
+    if (!(await confirm({ title: `删除 ${paths.length} 项？`, description: "此操作不可恢复。", confirmLabel: "删除" }))) return;
     try {
       for (const p of paths) {
         await fsDelete(agentId, p, true);

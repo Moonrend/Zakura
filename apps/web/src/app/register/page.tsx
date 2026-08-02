@@ -10,6 +10,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandMark } from "@/components/brand-mark";
 
 /** SaaS-only public registration. Stripped from OSS builds. */
 export default function RegisterPage() {
@@ -38,7 +39,7 @@ export default function RegisterPage() {
           <ThemeToggle />
         </div>
         <div className="w-full max-w-[360px] text-center">
-          <div className="text-xl font-semibold tracking-tight">Zakura</div>
+          <BrandMark className="justify-center" iconClassName="size-9" />
           <p className="mt-2 text-sm text-muted-foreground">
             当前部署为开源单账户版，不支持自助注册。请使用管理员安装流程。
           </p>
@@ -66,7 +67,7 @@ export default function RegisterPage() {
       </div>
       <div className="w-full max-w-[360px] animate-in-page">
         <div className="mb-8 text-center">
-          <div className="text-xl font-semibold tracking-tight">Zakura</div>
+          <BrandMark className="justify-center" iconClassName="size-9" />
         </div>
         <form
           className="space-y-4"

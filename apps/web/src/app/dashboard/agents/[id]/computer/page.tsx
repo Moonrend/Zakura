@@ -33,6 +33,7 @@ import { useAgentDetail } from "@/components/agent-detail-context";
 import { AgentFileManager } from "@/components/agent-files/file-manager";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +59,7 @@ import { subscribePlatformEvents } from "@/lib/platform-events";
 const LOCAL_VALUE = "__local__";
 
 export default function AgentComputerPage() {
+  const { confirm } = useConfirmDialog();
   const { id, agent, refresh, patchAgent } = useAgentDetail();
   const [nodes, setNodes] = useState<RuntimeNode[]>([]);
   const [creating, setCreating] = useState(false);
@@ -200,7 +202,7 @@ export default function AgentComputerPage() {
   }
 
   async function deleteComputer() {
-    if (!confirm("删除电脑？将停止环境并关闭电脑能力。")) return;
+    if (!(await confirm({ title: "删除电脑？", description: "将停止环境并关闭电脑能力。", confirmLabel: "删除电脑" }))) return;
     setDeleting(true);
     try {
       try {

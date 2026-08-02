@@ -156,13 +156,16 @@ export function registerModelRouterRoutes(
     app.post("/api/model-upstreams/:id/sync-models", async (c) => {
       const session = c.get("session")!;
       const body = await c.req
-        .json<{ prune?: boolean }>()
-        .catch(() => ({}) as { prune?: boolean });
+        .json<{ prune?: boolean; modelIds?: string[] }>()
+        .catch(() => ({}) as { prune?: boolean; modelIds?: string[] });
       try {
         const result = await upstreamModels.syncFromUpstream(
           session.tenantId,
           c.req.param("id"),
-          { prune: body.prune === true },
+          {
+            prune: body.prune === true,
+            modelIds: Array.isArray(body.modelIds) ? body.modelIds : undefined,
+          },
         );
         router.invalidateCache(session.tenantId);
         return c.json(result);

@@ -1,12 +1,31 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   Select,
   SelectContent,
@@ -62,6 +81,19 @@ type SyncResult = {
   }>;
 };
 
+type RemoteModel = {
+  id: string;
+  name?: string;
+  ownedBy?: string;
+  capability?: string;
+};
+
+type ModelGroup = {
+  key: string;
+  label: string;
+  models: RemoteModel[];
+};
+
 function formatUnmatchedModels(models?: SyncResult["unmatchedModels"]): string | null {
   if (!models?.length) return null;
   return `以下模型匹配失败，需要手动选数据：${models
@@ -88,14 +120,60 @@ export function UpstreamModelSetup({
   const [nativeModel, setNativeModel] = useState("");
   const [canonicalModel, setCanonicalModel] = useState("");
   const [capability, setCapability] = useState("chat");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [remoteModels, setRemoteModels] = useState<RemoteModel[]>([]);
+  const [pickerSearch, setPickerSearch] = useState("");
+  const [selectedRemoteIds, setSelectedRemoteIds] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const visibleModels = useMemo(
-    () =>
-      variant === "onboarding"
-        ? models.filter((model) => model.capability === "chat" && model.enabled)
-        : models,
+    () => models.filter((model) => model.enabled && (variant === "manage" || model.capability === "chat")),
     [models, variant],
   );
+
+  const filteredRemoteModels = useMemo(() => {
+    const query = pickerSearch.trim().toLowerCase();
+    if (!query) return remoteModels;
+    return remoteModels.filter((model) =>
+      [model.id, model.name, model.ownedBy].filter(Boolean).some((value) =>
+        String(value).toLowerCase().includes(query),
+      ),
+    );
+  }, [pickerSearch, remoteModels]);
+
+  const modelGroups = useMemo<ModelGroup[]>(() => {
+    const groups = new Map<string, RemoteModel[]>();
+    for (const model of filteredRemoteModels) {
+      const key = model.ownedBy?.trim() || model.id.split("/")[0] || "其他模型";
+      groups.set(key, [...(groups.get(key) ?? []), model]);
+    }
+    return [...groups.entries()]
+      .map(([key, groupModels]) => ({ key, label: key, models: groupModels }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [filteredRemoteModels]);
+
+  // 组选择的作用域永远是当前搜索结果，而不是远程模型全集。
+  const visibleRemoteIds = useMemo(
+    () => new Set(filteredRemoteModels.map((model) => model.id)),
+    [filteredRemoteModels],
+  );
+  const selectedVisibleCount = filteredRemoteModels.filter((model) =>
+    selectedRemoteIds.has(model.id),
+  ).length;
+  const selectedRemoteCount = selectedRemoteIds.size;
+
+  function setSelectedInScope(scope: RemoteModel[], checked: boolean) {
+    setSelectedRemoteIds((current) => {
+      const next = new Set(current);
+      for (const model of scope) {
+        // 防止未来调用方传入过滤范围之外的模型。
+        if (!visibleRemoteIds.has(model.id)) continue;
+        if (checked) next.add(model.id);
+        else next.delete(model.id);
+      }
+      return next;
+    });
+  }
 
   const applyModels = useCallback((nextModels: UpstreamModelItem[]) => {
     setModels(nextModels);
@@ -126,39 +204,52 @@ export function UpstreamModelSetup({
     }
   }, [applyModels, upstreamId]);
 
-  const sync = useCallback(async () => {
-    // 解析优先于此前可能仍在进行的首次空列表请求。
-    ++modelRequestId.current;
+  const fetchRemoteModels = useCallback(async () => {
     setSyncing(true);
     setSyncMessage(null);
     try {
-      const result = await api<SyncResult>(
-        `/api/model-upstreams/${upstreamId}/sync-models`,
-        { method: "POST", json: {} },
+      const result = await api<{ models: RemoteModel[]; message?: string }>(
+        `/api/model-upstreams/${upstreamId}/models`,
       );
-      const unmatchedText = formatUnmatchedModels(result.unmatchedModels);
-      setSyncMessage(
-        result.synced > 0
-          ? [`已解析 ${result.synced} 个模型`, result.message, unmatchedText]
-              .filter(Boolean)
-              .join("；")
-          : result.message ?? "未能从上游读取模型列表",
+      setRemoteModels(result.models ?? []);
+      const existingIds = new Set(
+        models.filter((model) => model.enabled).map((model) => model.nativeModel),
       );
-      const syncedModels = result.models ?? [];
-      if (syncedModels.length > 0) applyModels(syncedModels);
-      const next = await load(syncedModels);
-      if (result.synced > 0 && variant === "manage") {
-        toast.success(`已同步 ${result.synced} 个模型`);
-      }
-      if (unmatchedText) toast.message(unmatchedText);
-      if (!next.some((model) => model.capability === "chat")) setManualOpen(true);
+      setSelectedRemoteIds(new Set((result.models ?? []).filter((model) => existingIds.has(model.id)).map((model) => model.id)));
+      setPickerSearch("");
+      setCollapsedGroups(new Set());
+      setPickerOpen(true);
+      if (result.message) setSyncMessage(result.message);
+      if ((result.models ?? []).length === 0) setManualOpen(true);
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : String(error));
       setManualOpen(true);
     } finally {
       setSyncing(false);
     }
-  }, [applyModels, load, upstreamId, variant]);
+  }, [models, upstreamId]);
+
+  async function confirmRemoteModels() {
+    setSaving(true);
+    try {
+      const result = await api<SyncResult>(`/api/model-upstreams/${upstreamId}/sync-models`, {
+        method: "POST",
+        json: { modelIds: [...selectedRemoteIds] },
+      });
+      const unmatchedText = formatUnmatchedModels(result.unmatchedModels);
+      setSyncMessage(
+        `已添加 ${selectedRemoteIds.size} 个模型` + (unmatchedText ? `；${unmatchedText}` : ""),
+      );
+      setPickerOpen(false);
+      await load();
+      if (unmatchedText) toast.message(unmatchedText);
+      toast.success(`已添加 ${selectedRemoteIds.size} 个模型`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   useEffect(() => {
     setSelectedId(null);
@@ -167,11 +258,11 @@ export function UpstreamModelSetup({
     const requestKey = `${upstreamId}:${syncKey}`;
     if (autoSync && lastAutoSyncKey.current !== requestKey) {
       lastAutoSyncKey.current = requestKey;
-      void sync();
+      void fetchRemoteModels();
       return;
     }
     void load();
-  }, [autoSync, load, sync, syncKey, upstreamId]);
+  }, [autoSync, fetchRemoteModels, load, syncKey, upstreamId]);
 
   async function addManualModel() {
     if (!nativeModel.trim()) {
@@ -229,7 +320,6 @@ export function UpstreamModelSetup({
   }
 
   async function removeModel(id: string) {
-    if (!confirm("确认移除该模型？")) return;
     try {
       await api(`/api/upstream-models/${id}`, { method: "DELETE" });
       if (selectedId === id) setSelectedId(null);
@@ -257,7 +347,7 @@ export function UpstreamModelSetup({
             size="sm"
             variant="outline"
             disabled={syncing || loading}
-            onClick={() => void sync()}
+            onClick={() => void fetchRemoteModels()}
           >
             <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
             {syncing ? "正在解析" : "重新解析"}
@@ -378,6 +468,137 @@ export function UpstreamModelSetup({
           {saving ? "正在保存…" : "使用所选模型"}
         </Button>
       ) : null}
+
+      <Sheet open={pickerOpen} onOpenChange={setPickerOpen}>
+        <SheetContent
+          side="right"
+          className="w-full gap-0 overflow-hidden p-0 sm:max-w-xl"
+        >
+          <SheetHeader className="border-b border-border bg-muted/20 pr-12">
+            <SheetTitle className="flex items-center gap-2">
+              选择要添加的模型
+              <Badge variant="secondary">{remoteModels.length.toLocaleString()} 个</Badge>
+            </SheetTitle>
+            <SheetDescription>
+              按提供商分组展示。已添加的模型会自动选中，确认后才会加入模型列表。
+            </SheetDescription>
+          </SheetHeader>
+
+          <div className="border-b border-border px-4 py-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={pickerSearch}
+                onChange={(event) => setPickerSearch(event.target.value)}
+                placeholder="搜索模型名或提供商…"
+                className="pl-9 pr-9"
+                autoFocus
+              />
+              {pickerSearch ? (
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  onClick={() => setPickerSearch("")}
+                  aria-label="清除搜索"
+                >
+                  <X className="size-3.5" />
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+              <span>显示 {filteredRemoteModels.length.toLocaleString()} 个模型</span>
+              <span className="font-medium text-foreground">
+                当前显示已选 {selectedVisibleCount.toLocaleString()} 个
+                {selectedVisibleCount !== selectedRemoteCount
+                  ? ` · 共已选 ${selectedRemoteCount.toLocaleString()} 个`
+                  : ""}
+              </span>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {modelGroups.length > 0 ? (
+              <div className="space-y-2">
+                {modelGroups.map((group) => {
+                  const collapsed = collapsedGroups.has(group.key);
+                  const selectedCount = group.models.filter((model) => selectedRemoteIds.has(model.id)).length;
+                  const allSelected = selectedCount === group.models.length;
+                  return (
+                    <section key={group.key} className="overflow-hidden rounded-xl border border-border/80 bg-card">
+                      <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2.5">
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                          onClick={() => setCollapsedGroups((current) => {
+                            const next = new Set(current);
+                            if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
+                            return next;
+                          })}
+                          aria-expanded={!collapsed}
+                        >
+                          {collapsed ? <ChevronRight className="size-4 text-muted-foreground" /> : <ChevronDown className="size-4 text-muted-foreground" />}
+                          <span className="truncate text-sm font-semibold">{group.label}</span>
+                          <span className="text-xs text-muted-foreground">{group.models.length}</span>
+                        </button>
+                        <Checkbox
+                          checked={allSelected}
+                          data-partial={selectedCount > 0 && !allSelected ? "true" : undefined}
+                          onCheckedChange={(checked) => setSelectedInScope(group.models, checked)}
+                          aria-label={`选择当前显示的 ${group.label} 模型${selectedCount > 0 && !allSelected ? "（部分已选）" : ""}`}
+                        />
+                        <span className="sr-only">选择整组</span>
+                      </div>
+                      {!collapsed ? (
+                        <div className="divide-y divide-border/60">
+                          {group.models.map((model) => {
+                            const checked = selectedRemoteIds.has(model.id);
+                            return (
+                              <label key={model.id} className={cn("flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40", checked && "bg-muted/25")}>
+                                <Checkbox
+                                  checked={checked}
+                                  onCheckedChange={(value) => setSelectedRemoteIds((current) => {
+                                    const next = new Set(current);
+                                    if (value) next.add(model.id); else next.delete(model.id);
+                                    return next;
+                                  })}
+                                  aria-label={`选择 ${model.name || model.id}`}
+                                />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-sm">{model.name || model.id}</span>
+                                  <code className="mt-0.5 block truncate text-[11px] text-muted-foreground">{model.id}</code>
+                                </span>
+                                {checked ? <Check className="size-4 shrink-0 text-foreground" /> : null}
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed px-4 py-10 text-center">
+                <p className="text-sm font-medium">没有匹配的模型</p>
+                <p className="mt-1 text-xs text-muted-foreground">换个关键词试试，或使用手动添加。</p>
+              </div>
+            )}
+          </div>
+
+          <SheetFooter className="border-t border-border bg-background sm:flex-row sm:items-center sm:justify-between">
+            <Button variant="ghost" onClick={() => setSelectedRemoteIds(new Set())} disabled={selectedRemoteCount === 0}>
+              清空选择
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setPickerOpen(false)}>取消</Button>
+              <Button disabled={saving} onClick={() => void confirmRemoteModels()}>
+                {saving ? <Loader2 className="animate-spin" /> : null}
+                确定添加{selectedRemoteCount > 0 ? `（${selectedRemoteCount}）` : ""}
+              </Button>
+            </div>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

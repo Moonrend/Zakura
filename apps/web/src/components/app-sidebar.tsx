@@ -63,6 +63,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { BrandMark } from "@/components/brand-mark";
 
 type IconComp = React.ComponentType<{ className?: string }>;
 
@@ -580,9 +581,10 @@ export function AppSidebar({
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader className="gap-1 border-b border-sidebar-border px-3 py-3">
         <div className="min-w-0 px-1 group-data-[collapsible=icon]:px-0">
-          <div className="truncate text-sm font-semibold tracking-tight group-data-[collapsible=icon]:text-center">
-            Zakura
-          </div>
+          <BrandMark
+            className="group-data-[collapsible=icon]:justify-center"
+            iconClassName="size-6"
+          />
           {multiTenant ? (
             <DropdownMenu>
               <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-muted-foreground hover:text-foreground group-data-[collapsible=icon]:hidden">

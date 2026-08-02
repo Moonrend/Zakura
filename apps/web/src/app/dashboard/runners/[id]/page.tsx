@@ -43,6 +43,7 @@ import {
   TableActions,
 } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -61,6 +62,7 @@ function hostInfoOf(node: RuntimeNode): RunnerHostInfo {
 }
 
 export default function RunnerDetailPage() {
+  const { confirm } = useConfirmDialog();
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const id = params.id;
@@ -526,7 +528,7 @@ export default function RunnerDetailPage() {
             variant="destructive"
             size="sm"
             onClick={async () => {
-              if (!confirm(`确定删除 Runner「${node.name}」？需无 Agent 绑定。`)) {
+              if (!(await confirm({ title: `删除 Runner「${node.name}」？`, description: "需无 Agent 绑定。", confirmLabel: "删除" }))) {
                 return;
               }
               try {

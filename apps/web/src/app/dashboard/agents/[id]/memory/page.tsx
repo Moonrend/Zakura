@@ -13,6 +13,7 @@ import {
   TableActions,
 } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -82,6 +83,7 @@ type MemoryMeta = {
 };
 
 export default function AgentMemoryPage() {
+  const { confirm } = useConfirmDialog();
   const { id, agent, refresh } = useAgentDetail();
   const [meta, setMeta] = useState<MemoryMeta | null>(null);
   const [providerId, setProviderId] = useState<string>("");
@@ -255,7 +257,7 @@ export default function AgentMemoryPage() {
   }
 
   async function clearAll() {
-    if (!confirm("清空本 Agent 全部记忆？")) return;
+    if (!(await confirm({ title: "清空本 Agent 全部记忆？", description: "此操作不可恢复。", confirmLabel: "清空记忆" }))) return;
     try {
       await api(`/api/agents/${id}/memory`, { method: "DELETE" });
       await load();

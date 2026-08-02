@@ -11,11 +11,13 @@ import {
 } from "@/lib/network";
 import { SettingsHeader, SettingsSection, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkActiveExposuresPage() {
+  const { confirm } = useConfirmDialog();
   const [rows, setRows] = useState<PortExposureDto[]>([]);
   const [busy, setBusy] = useState(false);
 
@@ -46,7 +48,7 @@ export default function NetworkActiveExposuresPage() {
   }
 
   async function onStopAll() {
-    if (!confirm("确认关闭全部活跃暴露？")) return;
+    if (!(await confirm({ title: "关闭全部活跃暴露？", confirmLabel: "全部关闭" }))) return;
     setBusy(true);
     try {
       const res = await stopAllExposures();

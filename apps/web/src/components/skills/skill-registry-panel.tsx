@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SkillMarkdown } from "@/components/skills/skill-markdown";
@@ -266,6 +267,7 @@ export function SkillRegistryPanel({
   loading: boolean;
   onChanged: () => void;
 }) {
+  const { confirm: askConfirm } = useConfirmDialog();
   const [detailId, setDetailId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
@@ -318,11 +320,11 @@ export function SkillRegistryPanel({
   }
 
   async function remove(skill: SkillRecord) {
-    if (
-      !confirm(
-        `删除技能 ${skill.name}？将从 ${skill.agentIds.length} 个 Agent 的工作区一并移除。`,
-      )
-    ) {
+    if (!(await askConfirm({
+      title: `删除技能 ${skill.name}？`,
+      description: `将从 ${skill.agentIds.length} 个 Agent 的工作区一并移除。`,
+      confirmLabel: "删除技能",
+    }))) {
       return;
     }
     setBusy(skill.id);

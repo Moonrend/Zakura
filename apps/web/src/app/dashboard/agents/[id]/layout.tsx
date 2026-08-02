@@ -24,11 +24,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 
 function AgentSettingsChrome({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { id, agent, list } = useAgentDetail();
+  const { confirm } = useConfirmDialog();
 
   const activeSeg =
     AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "chat";
@@ -37,8 +39,8 @@ function AgentSettingsChrome({ children }: { children: React.ReactNode }) {
 
   async function remove() {
     if (!agent) return;
-    if (!confirm(`删除 ${agent.name}？`)) return;
-    const purge = confirm("同时清除工作区数据？");
+    if (!(await confirm({ title: `删除 ${agent.name}？`, description: "删除后将无法恢复该 Agent。", confirmLabel: "删除" }))) return;
+    const purge = await confirm({ title: "同时清除工作区数据？", description: "选择确定将一并删除该 Agent 的工作区数据。", confirmLabel: "清除并删除" });
     try {
       await api(`/api/agents/${id}?purge=${purge ? "1" : "0"}`, { method: "DELETE" });
       router.replace("/dashboard/agents");

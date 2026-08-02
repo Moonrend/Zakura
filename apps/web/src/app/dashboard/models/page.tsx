@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ChevronDown, Loader2, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -176,6 +177,7 @@ export default function ModelRoutesPage() {
 }
 
 function ModelRoutesPageInner() {
+  const { confirm } = useConfirmDialog();
   const searchParams = useSearchParams();
   const [upstreams, setUpstreams] = useState<Upstream[]>([]);
   const [groups, setGroups] = useState<LogicalModel[]>([]);
@@ -406,7 +408,6 @@ function ModelRoutesPageInner() {
   }
 
   async function remove(id: string) {
-    if (!confirm("确认删除该上游模型记录？")) return;
     try {
       await api(`/api/upstream-models/${id}`, { method: "DELETE" });
       toast.success("已删除");
@@ -419,7 +420,11 @@ function ModelRoutesPageInner() {
   async function removeSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`确认删除选中的 ${ids.length} 条部署？`)) return;
+    if (!(await confirm({
+      title: `删除选中的 ${ids.length} 条部署？`,
+      description: "此操作不可恢复。",
+      confirmLabel: "删除",
+    }))) return;
     try {
       await api("/api/upstream-models/batch-delete", {
         method: "POST",
