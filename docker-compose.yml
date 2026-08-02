@@ -37,6 +37,7 @@ services:
       # 工作区 / Runner 默认镜像（可由环境覆盖）
       ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:debian}
       ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
+      ZAKURA_PLATFORM_SERVICE_ENDPOINT_MODE: ${ZAKURA_PLATFORM_SERVICE_ENDPOINT_MODE:-network}
       # 平台自托管 Headscale：数据面由 zakura-host-ts（host 网 + kernel TUN）加入本机网。
       # 控制面主机勿再跑个人 Tailscale 内核客户端，否则会与 host-ts 抢 TUN/100.x。
     volumes:

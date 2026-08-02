@@ -13,6 +13,7 @@ import {
   defaultServiceConfig,
   isPlatformServiceKey,
   listPlatformServiceMeta,
+  managedEndpointUrl,
   type PlatformServiceConfig,
 } from "../platform-services/catalog.js";
 import {
@@ -769,11 +770,20 @@ export class PlatformServiceManager {
         const isPrimary = def.containers.some((c) => c.role === role && c.primary);
         if (isPrimary) {
           const published = running.ports.find((p) => p.hostPort);
-          if (published?.hostPort) {
-            endpointUrl = `http://127.0.0.1:${published.hostPort}`;
+          const roleDef = def.containers.find((c) => c.role === role);
+          const endpoint = managedEndpointUrl(
+            this.config.platformServiceEndpointMode,
+            running.name,
+            roleDef?.containerPort ?? published?.containerPort ?? 0,
+            published?.hostPort,
+          );
+          if (endpoint) {
+            endpointUrl = endpoint;
             appendPlatformServiceLog(
               key,
-              `publish 127.0.0.1:${published.hostPort} -> ${published.containerPort}`,
+              this.config.platformServiceEndpointMode === "network"
+                ? `network ${endpoint}`
+                : `publish ${endpoint} -> ${published?.containerPort ?? "unknown"}`,
               { step: "docker", phase: "creating" },
             );
           }

@@ -4,6 +4,7 @@ import {
   PLATFORM_SERVICE_CATALOG,
   buildManagedSpecs,
   containerNameFor,
+  managedEndpointUrl,
   serviceKeyForFetchBackend,
   serviceKeyForSearchEngine,
 } from "../src/platform-services/catalog.js";
@@ -38,6 +39,18 @@ describe("platform services catalog", () => {
     assert.equal(specs[0]!.ports?.[0]?.hostPort, 19080);
     assert.equal(specs[0]!.ports?.[0]?.hostIp, "127.0.0.1");
     assert.equal(specs[0]!.labels?.["zakura.service"], "searxng");
+  });
+
+  it("uses container DNS when the server runs in Docker", () => {
+    assert.equal(
+      managedEndpointUrl("network", "zakura-ps-crawl4ai", 11235, 11235),
+      "http://zakura-ps-crawl4ai:11235",
+    );
+    assert.equal(
+      managedEndpointUrl("published", "zakura-ps-crawl4ai", 11235, 11235),
+      "http://127.0.0.1:11235",
+    );
+    assert.equal(managedEndpointUrl("published", "service", 80), null);
   });
 
   it("wires firecrawl full-stack env so harness skips Docker-in-Docker", () => {

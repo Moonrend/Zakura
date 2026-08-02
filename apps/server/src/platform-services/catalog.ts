@@ -23,6 +23,18 @@ export type PlatformServiceConfig = {
   apiKey?: string;
 };
 
+export function managedEndpointUrl(
+  mode: "published" | "network",
+  containerName: string,
+  containerPort: number,
+  hostPort?: number,
+): string | null {
+  if (mode === "network") return `http://${containerName}:${containerPort}`;
+  return typeof hostPort === "number" && hostPort > 0
+    ? `http://127.0.0.1:${hostPort}`
+    : null;
+}
+
 export type PlatformContainerRole = {
   role: string;
   /** Primary HTTP endpoint for product mapping */
