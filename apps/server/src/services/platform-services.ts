@@ -421,7 +421,7 @@ export class PlatformServiceManager {
       }
     });
 
-    return (await this.get(key))!;
+    return this.toPublic(row);
   }
 
   /**
@@ -533,7 +533,7 @@ export class PlatformServiceManager {
         checkedAt: Date.now(),
       });
     }
-    return (await this.get(key))!;
+    return this.toPublic(row);
   }
 
   async resolveManaged(key: PlatformServiceKey): Promise<{
