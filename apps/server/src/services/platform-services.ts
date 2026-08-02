@@ -62,6 +62,12 @@ export type PlatformServicePublic = {
   progress: PlatformServiceProgressSnapshot;
 };
 
+type LiveHealth = {
+  status: "healthy" | "unhealthy" | "unknown";
+  error: string | null;
+  checkedAt: number;
+};
+
 function parseMode(v: string): PlatformServiceMode {
   if ((PLATFORM_SERVICE_MODES as readonly string[]).includes(v)) {
     return v as PlatformServiceMode;
@@ -94,6 +100,8 @@ const PLATFORM_TENANT_LABEL = "platform";
 export class PlatformServiceManager {
   /** In-flight deploy/stop jobs (async, non-blocking API) */
   private readonly jobs = new Map<string, Promise<void>>();
+  /** Runtime-only health state; never persisted in platform_services. */
+  private readonly liveHealth = new Map<PlatformServiceKey, LiveHealth>();
 
   constructor(
     private readonly db: Db,
@@ -114,7 +122,6 @@ export class PlatformServiceManager {
         mode: "disabled",
         desiredState: "stopped",
         status: "stopped",
-        healthStatus: "unknown",
         configEnc: encryptJson(this.config.secret, defaultServiceConfig()),
         containersJson: "[]",
         createdAt: now,
@@ -131,12 +138,41 @@ export class PlatformServiceManager {
     }
   }
 
+  private managedEndpoint(
+    key: PlatformServiceKey,
+    row: PlatformService,
+    cfg: PlatformServiceConfig,
+  ): string | null {
+    const def = PLATFORM_SERVICE_CATALOG[key];
+    const primary = def.containers.find((container) => container.primary);
+    if (!primary?.containerPort) return row.endpointUrl;
+
+    const primaryRef = parseContainers(row.containersJson).find(
+      (container) => container.role === primary.role,
+    );
+    const containerName = primaryRef?.name ?? containerNameFor(key, primary.role);
+    const hostPort = cfg.hostPort ?? primary.defaultHostPort;
+    return managedEndpointUrl(
+      this.config.platformServiceEndpointMode,
+      containerName,
+      primary.containerPort,
+      hostPort,
+    );
+  }
+
   private toPublic(row: PlatformService): PlatformServicePublic {
     const def = PLATFORM_SERVICE_CATALOG[row.serviceKey as PlatformServiceKey];
     const cfg = this.readConfig(row);
     const primary = def?.containers.find((c) => c.primary);
     const progress = getPlatformServiceProgress(row.serviceKey);
     const mode = parseMode(row.mode);
+    const live = this.liveHealth.get(row.serviceKey as PlatformServiceKey);
+    const endpointUrl =
+      mode === "managed"
+        ? this.managedEndpoint(row.serviceKey as PlatformServiceKey, row, cfg)
+        : row.endpointUrl;
+    const healthStatus = live?.status ?? "unknown";
+    const lastError = live?.error ?? (row.status === "error" ? row.lastError : null);
     const base = {
       key: row.serviceKey as PlatformServiceKey,
       name: def?.name ?? row.serviceKey,
@@ -147,9 +183,9 @@ export class PlatformServiceManager {
         | "running"
         | "stopped",
       status: row.status,
-      healthStatus: row.healthStatus,
-      endpointUrl: row.endpointUrl,
-      lastError: row.lastError,
+      healthStatus,
+      endpointUrl,
+      lastError,
       containers: parseContainers(row.containersJson),
       config: {
         image: cfg.image,
@@ -165,10 +201,10 @@ export class PlatformServiceManager {
     const lifecycle = deriveLifecycle({
       mode,
       status: row.status,
-      healthStatus: row.healthStatus,
+      healthStatus,
       desiredState: row.desiredState,
-      lastError: row.lastError,
-      endpointUrl: row.endpointUrl,
+      lastError,
+      endpointUrl,
       progressRunning: progress.running,
       progressPhase: progress.phase,
       progressMessage: progress.message,
@@ -213,7 +249,13 @@ export class PlatformServiceManager {
 
   async list(): Promise<PlatformServicePublic[]> {
     await this.ensureRows();
-    const rows = await this.db.query.platformServices.findMany();
+    let rows = await this.db.query.platformServices.findMany();
+    await Promise.all(
+      rows
+        .filter((row) => row.desiredState === "running" && parseMode(row.mode) !== "disabled")
+        .map((row) => this.refreshHealth(row.serviceKey as PlatformServiceKey)),
+    );
+    rows = await this.db.query.platformServices.findMany();
     const byKey = new Map(rows.map((r) => [r.serviceKey, r]));
     return PLATFORM_SERVICE_KEYS.map((key) => {
       const row = byKey.get(key);
@@ -223,9 +265,15 @@ export class PlatformServiceManager {
 
   async get(key: PlatformServiceKey): Promise<PlatformServicePublic | null> {
     await this.ensureRows();
-    const row = await this.db.query.platformServices.findFirst({
+    let row = await this.db.query.platformServices.findFirst({
       where: eq(platformServices.serviceKey, key),
     });
+    if (row && row.desiredState === "running" && parseMode(row.mode) !== "disabled") {
+      await this.refreshHealth(key);
+      row = await this.db.query.platformServices.findFirst({
+        where: eq(platformServices.serviceKey, key),
+      });
+    }
     return row ? this.toPublic(row) : null;
   }
 
@@ -299,11 +347,12 @@ export class PlatformServiceManager {
         .where(eq(platformServices.serviceKey, key));
     }
 
-    return (await this.get(key))!;
+    return this.toPublic(row);
   }
 
   /** Enable managed mode + start deploy (async). */
   async deploy(key: PlatformServiceKey): Promise<PlatformServicePublic> {
+    this.liveHealth.delete(key);
     await this.db
       .update(platformServices)
       .set({
@@ -381,6 +430,7 @@ export class PlatformServiceManager {
    */
   async startAsync(key: PlatformServiceKey): Promise<PlatformServicePublic> {
     const row = await this.requireRow(key);
+    this.liveHealth.delete(key);
     const mode = parseMode(row.mode);
     if (mode === "external") {
       return this.connectExternal(key);
@@ -410,6 +460,7 @@ export class PlatformServiceManager {
   }
 
   async stop(key: PlatformServiceKey): Promise<PlatformServicePublic> {
+    this.liveHealth.delete(key);
     await this.db
       .update(platformServices)
       .set({ desiredState: "stopped", updatedAt: new Date() })
@@ -427,6 +478,7 @@ export class PlatformServiceManager {
   }
 
   async disable(key: PlatformServiceKey): Promise<PlatformServicePublic> {
+    this.liveHealth.delete(key);
     await this.db
       .update(platformServices)
       .set({
@@ -449,25 +501,15 @@ export class PlatformServiceManager {
     if (mode === "external") {
       endpoint = cfg.externalUrl?.replace(/\/$/, "") ?? null;
     } else if (mode === "managed") {
-      endpoint = row.endpointUrl;
+      endpoint = this.managedEndpoint(key, row, cfg);
     } else {
-      await this.db
-        .update(platformServices)
-        .set({ healthStatus: "unknown", updatedAt: new Date() })
-        .where(eq(platformServices.id, row.id));
-      return this.toPublic({ ...row, healthStatus: "unknown" });
+      this.liveHealth.set(key, { status: "unknown", error: null, checkedAt: Date.now() });
+      return this.toPublic(row);
     }
 
     if (!endpoint) {
-      await this.db
-        .update(platformServices)
-        .set({
-          healthStatus: "unhealthy",
-          lastError: "无 endpoint",
-          updatedAt: new Date(),
-        })
-        .where(eq(platformServices.id, row.id));
-      return (await this.get(key))!;
+      this.liveHealth.set(key, { status: "unhealthy", error: "无 endpoint", checkedAt: Date.now() });
+      return this.toPublic(row);
     }
 
     try {
@@ -479,25 +521,17 @@ export class PlatformServiceManager {
         headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : undefined,
       });
       const ok = res.status < 500;
-      await this.db
-        .update(platformServices)
-        .set({
-          healthStatus: ok ? "healthy" : "unhealthy",
-          lastError: ok ? null : `HTTP ${res.status}`,
-          endpointUrl: endpoint,
-          status: mode === "external" || row.status === "running" || ok ? "running" : row.status,
-          updatedAt: new Date(),
-        })
-        .where(eq(platformServices.id, row.id));
+      this.liveHealth.set(key, {
+        status: ok ? "healthy" : "unhealthy",
+        error: ok ? null : `HTTP ${res.status}`,
+        checkedAt: Date.now(),
+      });
     } catch (err) {
-      await this.db
-        .update(platformServices)
-        .set({
-          healthStatus: "unhealthy",
-          lastError: err instanceof Error ? err.message : String(err),
-          updatedAt: new Date(),
-        })
-        .where(eq(platformServices.id, row.id));
+      this.liveHealth.set(key, {
+        status: "unhealthy",
+        error: err instanceof Error ? err.message : String(err),
+        checkedAt: Date.now(),
+      });
     }
     return (await this.get(key))!;
   }
@@ -517,9 +551,10 @@ export class PlatformServiceManager {
     if (mode === "external") {
       endpoint = cfg.externalUrl?.replace(/\/$/, "") || null;
     } else {
-      endpoint = row.endpointUrl?.replace(/\/$/, "") || null;
-      if (row.status !== "running" && row.healthStatus !== "healthy") {
-        if (!endpoint || row.healthStatus === "unhealthy") return null;
+      endpoint = this.managedEndpoint(key, row, cfg)?.replace(/\/$/, "") || null;
+      const live = this.liveHealth.get(key);
+      if (row.status !== "running" && live?.status !== "healthy") {
+        if (!endpoint || live?.status === "unhealthy") return null;
       }
     }
     if (!endpoint) return null;
@@ -538,12 +573,7 @@ export class PlatformServiceManager {
     for (const row of rows) {
       const mode = parseMode(row.mode);
       if (mode === "external" && row.desiredState === "running") {
-        try {
-          await this.refreshHealth(row.serviceKey as PlatformServiceKey);
-          started += 1;
-        } catch {
-          failed += 1;
-        }
+        started += 1;
         continue;
       }
       if (mode === "managed" && row.desiredState === "running") {
@@ -796,7 +826,6 @@ export class PlatformServiceManager {
           status: "running",
           endpointUrl,
           containersJson: JSON.stringify(refs),
-          healthStatus: "unknown",
           lastError: null,
           updatedAt: new Date(),
         })
@@ -847,7 +876,6 @@ export class PlatformServiceManager {
         .set({
           status: "error",
           lastError: message,
-          healthStatus: "unhealthy",
           updatedAt: new Date(),
         })
         .where(eq(platformServices.serviceKey, key));
@@ -857,6 +885,7 @@ export class PlatformServiceManager {
   }
 
   private async stopInternal(key: PlatformServiceKey): Promise<void> {
+    this.liveHealth.delete(key);
     const row = await this.requireRow(key);
     await this.db
       .update(platformServices)
@@ -869,7 +898,6 @@ export class PlatformServiceManager {
       .update(platformServices)
       .set({
         status: "stopped",
-        healthStatus: "unknown",
         endpointUrl: parseMode(row.mode) === "external" ? row.endpointUrl : null,
         containersJson: "[]",
         lastError: null,

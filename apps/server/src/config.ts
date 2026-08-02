@@ -28,7 +28,7 @@ export interface AppConfig {
   /** Web console URL for OAuth authorize UI redirects */
   webPublicUrl: string;
   dockerNetwork: string;
-  /** Use container DNS for in-network servers, or published loopback ports. */
+  /** Use container DNS when the server itself runs inside Docker. */
   platformServiceEndpointMode: "published" | "network";
   /**
    * APT mirror base for workspace containers (no trailing slash).
@@ -79,6 +79,10 @@ function loadOrCreateSecret(dataDir: string): string {
   return secret;
 }
 
+function isRunningInContainer(): boolean {
+  return existsSync("/.dockerenv") || existsSync("/run/.containerenv");
+}
+
 export function loadConfig(): AppConfig {
   const dataDir = resolveDataDir();
   mkdirSync(dataDir, { recursive: true });
@@ -118,10 +122,7 @@ export function loadConfig(): AppConfig {
     publicBaseUrl,
     webPublicUrl: webPublicUrl.replace(/\/$/, ""),
     dockerNetwork: process.env.ZAKURA_DOCKER_NETWORK ?? "zakura",
-    platformServiceEndpointMode:
-      process.env.ZAKURA_PLATFORM_SERVICE_ENDPOINT_MODE === "network"
-        ? "network"
-        : "published",
+    platformServiceEndpointMode: isRunningInContainer() ? "network" : "published",
     aptMirror,
     migrationDir,
     runnerHeartbeatTimeoutSec: Number(process.env.ZAKURA_RUNNER_HEARTBEAT_TIMEOUT_SEC ?? 60),
