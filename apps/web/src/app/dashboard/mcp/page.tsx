@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { CloudDownload, Server, Store } from "lucide-react";
+import { CloudDownload, Store } from "lucide-react";
 import { api } from "@/lib/api";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import { SettingsHeader } from "@/components/settings-shell";
@@ -29,6 +29,7 @@ const MCP_PROVIDERS = new Set([
   "stdio-mcp",
   "openviking",
   "google-workspace",
+  "microsoft-365",
 ]);
 
 function providerLabel(id: string) {
@@ -41,6 +42,8 @@ function providerLabel(id: string) {
       return "OpenViking";
     case "google-workspace":
       return "Google Workspace";
+    case "microsoft-365":
+      return "Microsoft 365";
     default:
       return id;
   }
@@ -55,7 +58,11 @@ function needsUpstreamAuth(i: InstanceRow): boolean {
 
 /** 远程 HTTP MCP 无本地进程；status 表示平台侧启用，非容器生命周期 */
 function isRemoteMcp(providerId: string) {
-  return providerId === "generic-mcp" || providerId === "google-workspace";
+  return (
+    providerId === "generic-mcp" ||
+    providerId === "google-workspace" ||
+    providerId === "microsoft-365"
+  );
 }
 
 function statusVariant(
@@ -140,18 +147,11 @@ export default function McpServersPage() {
 
   return (
     <div className="space-y-5">
-      <SettingsHeader title="服务器" />
-
-      {loading ? (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-28 rounded-lg" />
-          ))}
-        </div>
-      ) : instances.length === 0 ? (
-        <div className="rounded-lg border border-dashed py-12 text-center">
-          <p className="mb-3 text-sm text-muted-foreground">暂无 MCP 服务器</p>
-          <div className="flex flex-wrap justify-center gap-2">
+      <SettingsHeader
+        title="MCP"
+        description="管理已安装的服务器，从官方或社区商店添加"
+        actions={
+          <div className="flex flex-wrap gap-2">
             <Button size="sm" nativeButton={false} render={<Link href="/dashboard/mcp/official" />}>
               <Store />
               官方商店
@@ -174,6 +174,19 @@ export default function McpServersPage() {
               导入
             </Button>
           </div>
+        }
+      />
+
+      {loading ? (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 rounded-lg" />
+          ))}
+        </div>
+      ) : instances.length === 0 ? (
+        <div className="rounded-lg border border-dashed py-12 text-center">
+          <p className="mb-1 text-sm text-muted-foreground">暂无 MCP 服务器</p>
+          <p className="text-xs text-muted-foreground">从上方商店安装，或导入已有配置</p>
         </div>
       ) : (
         <>
@@ -198,30 +211,25 @@ export default function McpServersPage() {
                 key={i.id}
                 href={`/dashboard/mcp/${i.id}`}
                 className={cn(
-                  "group flex flex-col gap-3 rounded-lg border border-border bg-card p-4",
-                  "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                  "group flex flex-col gap-2 rounded-lg border border-border bg-card p-4",
+                  "transition-colors hover:bg-muted/30",
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex items-start gap-2.5">
-                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                      <Server className="size-4" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="truncate text-sm font-medium group-hover:underline underline-offset-2">
+                        {i.name}
+                      </span>
+                      {authNeeded ? (
+                        <Badge variant="destructive" className="text-[10px]">
+                          需 OAuth
+                        </Badge>
+                      ) : null}
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="truncate text-sm font-medium group-hover:underline underline-offset-2">
-                          {i.name}
-                        </span>
-                        {authNeeded ? (
-                          <Badge variant="destructive" className="text-[10px]">
-                            需 OAuth
-                          </Badge>
-                        ) : null}
-                      </div>
-                      <code className="block truncate text-[10px] text-muted-foreground">
-                        {i.slug}
-                      </code>
-                    </div>
+                    <code className="block truncate text-[10px] text-muted-foreground">
+                      {i.slug}
+                    </code>
                   </div>
                   <Badge
                     variant={statusVariant(i.status, i.healthStatus)}

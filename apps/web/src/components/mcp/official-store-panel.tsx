@@ -1,10 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { KeyRound } from "lucide-react";
+import Link from "next/link";
 import { api } from "@/lib/api";
 import {
   CURATED_MCP_GROUPS,
@@ -33,7 +32,7 @@ function isInstalled(mcp: UnifiedMcpConfig, list: InstalledRow[]) {
   });
 }
 
-/** 官方推荐卡：每卡独立安装对话框 */
+/** 官方远程 MCP 卡：每卡独立安装对话框 */
 function OfficialInstallCard({
   mcp,
   installed,
@@ -60,8 +59,11 @@ function OfficialInstallCard({
           title: mcp.name,
           subtitle: mcp.mcpUrl,
           description: mcp.description,
+          brandId: mcp.oauth?.providerId ?? mcp.id,
+          mcpUrl: mcp.mcpUrl,
+          homepage: mcp.docsUrl,
           badges: [
-            { label: "官方", variant: "default" },
+            { label: "远程 MCP", variant: "default" },
             { label: tier.label, variant: tier.variant },
           ],
           repositoryUrl: mcp.repositoryUrl ?? mcp.docsUrl,
@@ -86,7 +88,7 @@ function OfficialInstallCard({
   );
 }
 
-/** 官方推荐 MCP 商店（与社区 Registry 商店分离） */
+/** 官方精选：仅远程 HTTP MCP（平台直连 API 见 /dashboard/connectors） */
 export function McpOfficialStorePanel() {
   const router = useRouter();
   const [installed, setInstalled] = useState<InstalledRow[]>([]);
@@ -99,8 +101,7 @@ export function McpOfficialStorePanel() {
           (i) =>
             i.providerId === "generic-mcp" ||
             i.providerId === "stdio-mcp" ||
-            i.providerId === "openviking" ||
-            i.providerId === "google-workspace",
+            i.providerId === "openviking",
         ),
       );
     } catch {
@@ -114,15 +115,13 @@ export function McpOfficialStorePanel() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <Link
-          href="/dashboard/settings/oauth-apps"
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-background px-3 text-xs font-medium hover:bg-muted/60"
-        >
-          <KeyRound className="size-3.5" />
-          OAuth 应用
+      <p className="text-xs text-muted-foreground">
+        远程 MCP 服务器。平台直连 Google / 飞书等 REST API 请去{" "}
+        <Link href="/dashboard/connectors" className="text-foreground hover:underline">
+          平台连接器
         </Link>
-      </div>
+        。
+      </p>
 
       {CURATED_MCP_GROUPS.map((group) => {
         const items = CURATED_OAUTH_MCPS.filter((m) => m.group === group.id);

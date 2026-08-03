@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -21,8 +21,8 @@ import {
   Server,
   Settings2,
   Shield,
+  SlidersHorizontal,
   Store,
-  Star,
   Wrench,
   HardDrive,
   Building2,
@@ -43,7 +43,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
@@ -52,6 +51,11 @@ import {
   SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -71,7 +75,6 @@ type SubNavItem = {
   href: string;
   label: string;
   icon: IconComp;
-  /** 自定义高亮；默认 pathname === href || startsWith(href/) */
   isActive?: (pathname: string) => boolean;
 };
 
@@ -80,9 +83,7 @@ type NavEntry = {
   href: string;
   label: string;
   icon: IconComp;
-  /** 父项高亮（含其子路由） */
   isActive?: (pathname: string) => boolean;
-  /** 有子项时自动渲染展开按钮 */
   children?: SubNavItem[];
 };
 
@@ -115,6 +116,74 @@ function mcpServerActive(pathname: string) {
   if (!pathname.startsWith("/dashboard/mcp/")) return false;
   const seg = pathname.slice("/dashboard/mcp/".length).split("/")[0];
   return seg !== "store" && seg !== "import" && seg !== "official";
+}
+
+function mcpStoreActive(pathname: string) {
+  return (
+    pathname === "/dashboard/mcp/store" ||
+    pathname.startsWith("/dashboard/mcp/store/") ||
+    pathname === "/dashboard/mcp/official" ||
+    pathname.startsWith("/dashboard/mcp/official/")
+  );
+}
+
+function serverSectionActive(pathname: string) {
+  return (
+    pathname.startsWith("/dashboard/runners") ||
+    pathname.startsWith("/dashboard/network") ||
+    pathname.startsWith("/dashboard/platform-services")
+  );
+}
+
+function advancedSectionActive(pathname: string) {
+  return (
+    pathname.startsWith("/dashboard/policies") ||
+    pathname.startsWith("/dashboard/keys")
+  );
+}
+
+function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
+  const children: SubNavItem[] = [
+    {
+      href: "/dashboard/runners",
+      label: "Runners",
+      icon: HardDrive,
+    },
+    {
+      href: "/dashboard/network",
+      label: "网络概览",
+      icon: Network,
+      isActive: (path) => path === "/dashboard/network",
+    },
+    {
+      href: "/dashboard/network/mesh",
+      label: "组网",
+      icon: Cable,
+    },
+    {
+      href: "/dashboard/network/exposure",
+      label: "端口暴露",
+      icon: Globe,
+    },
+    {
+      href: "/dashboard/network/active",
+      label: "活跃暴露",
+      icon: Activity,
+    },
+    {
+      href: "/dashboard/network/security",
+      label: "网络安全",
+      icon: Shield,
+    },
+  ];
+  if (showPlatformServices) {
+    children.push({
+      href: "/dashboard/platform-services",
+      label: "自托管服务",
+      icon: Container,
+    });
+  }
+  return children;
 }
 
 function NavFlyout({
@@ -180,16 +249,12 @@ function NavFlyout({
   );
 }
 
-function ExpandableNavItem({
+const ExpandableNavItem = memo(function ExpandableNavItem({
   entry,
   pathname,
-  expanded,
-  onToggle,
 }: {
   entry: NavEntry;
   pathname: string;
-  expanded: boolean;
-  onToggle: () => void;
 }) {
   const { state, isMobile } = useSidebar();
   const collapsed = state === "collapsed" && !isMobile;
@@ -200,101 +265,87 @@ function ExpandableNavItem({
     ? entry.isActive(pathname)
     : defaultActive(pathname, entry.href);
 
-  if (collapsed && hasChildren) {
+  const [open, setOpen] = useState(parentActive);
+  useEffect(() => {
+    if (parentActive) setOpen(true);
+  }, [parentActive]);
+
+  if (!hasChildren) {
     return (
       <SidebarMenuItem>
-        <NavFlyout entry={entry} pathname={pathname} parentActive={parentActive} />
+        <SidebarMenuButton
+          isActive={parentActive}
+          tooltip={entry.label}
+          render={<Link href={entry.href} />}
+        >
+          <Icon />
+          <span>{entry.label}</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    );
+  }
+
+  if (collapsed) {
+    return (
+      <SidebarMenuItem>
+        <NavFlyout
+          entry={entry}
+          pathname={pathname}
+          parentActive={parentActive}
+        />
       </SidebarMenuItem>
     );
   }
 
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton
-        isActive={parentActive}
-        tooltip={entry.label}
-        render={<Link href={entry.href} />}
+      <Collapsible
+        open={open}
+        onOpenChange={setOpen}
+        className="group/collapsible w-full"
       >
-        <Icon />
-        <span>{entry.label}</span>
-      </SidebarMenuButton>
-
-      {hasChildren ? (
-        <SidebarMenuAction
-          showOnHover={false}
-          aria-label={expanded ? `收起 ${entry.label}` : `展开 ${entry.label}`}
-          aria-expanded={expanded}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onToggle();
-          }}
+        <CollapsibleTrigger
+          render={
+            <SidebarMenuButton
+              isActive={parentActive}
+              tooltip={entry.label}
+            />
+          }
         >
+          <Icon />
+          <span>{entry.label}</span>
           <ChevronRight
             className={cn(
-              "transition-transform duration-200 ease-out-soft",
-              expanded && "rotate-90",
+              "ml-auto transition-transform duration-200 ease-out-soft",
+              "group-data-[open]/collapsible:rotate-90",
             )}
           />
-        </SidebarMenuAction>
-      ) : null}
-
-      {hasChildren && expanded ? (
-        <SidebarMenuSub>
-          {children.map((child) => {
-            const ChildIcon = child.icon;
-            const active = child.isActive
-              ? child.isActive(pathname)
-              : defaultActive(pathname, child.href);
-            return (
-              <SidebarMenuSubItem key={child.href}>
-                <SidebarMenuSubButton
-                  isActive={active}
-                  data-active={active || undefined}
-                  render={<Link href={child.href} />}
-                >
-                  <ChildIcon />
-                  <span>{child.label}</span>
-                </SidebarMenuSubButton>
-              </SidebarMenuSubItem>
-            );
-          })}
-        </SidebarMenuSub>
-      ) : null}
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenuSub>
+            {children.map((child) => {
+              const ChildIcon = child.icon;
+              const active = child.isActive
+                ? child.isActive(pathname)
+                : defaultActive(pathname, child.href);
+              return (
+                <SidebarMenuSubItem key={child.href}>
+                  <SidebarMenuSubButton
+                    isActive={active}
+                    render={<Link href={child.href} />}
+                  >
+                    <ChildIcon />
+                    <span>{child.label}</span>
+                  </SidebarMenuSubButton>
+                </SidebarMenuSubItem>
+              );
+            })}
+          </SidebarMenuSub>
+        </CollapsibleContent>
+      </Collapsible>
     </SidebarMenuItem>
   );
-}
-
-function useAutoExpand(keysInSection: string[]) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const sectionKey = keysInSection.slice().sort().join("|");
-
-  useEffect(() => {
-    if (!sectionKey) return;
-    const keys = sectionKey.split("|").filter(Boolean);
-    setExpanded((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const key of keys) {
-        if (!next[key]) {
-          next[key] = true;
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [sectionKey]);
-
-  function toggle(id: string) {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  function isOpen(id: string) {
-    return Boolean(expanded[id]);
-  }
-
-  return { isOpen, toggle };
-}
+});
 
 export function AppSidebar({
   tenant,
@@ -356,226 +407,183 @@ export function AppSidebar({
     }));
   }, [agentId]);
 
-  const agentNav: NavEntry = {
-    id: "agents",
-    href: "/dashboard/agents",
-    label: "Agents",
-    icon: Bot,
-    isActive: (path) =>
-      path === "/dashboard/agents" || path.startsWith("/dashboard/agents/"),
-    children: agentChildren,
-  };
+  const showPlatformServices = !multiTenant || isPlatformAdmin;
 
-  const platformNav: NavEntry[] = [
-    {
-      id: "chat",
-      href: "/chat",
-      label: "聊天",
-      icon: MessageSquare,
-      isActive: (path) => path === "/chat" || path.startsWith("/chat/"),
-    },
-    {
-      id: "web",
-      href: "/dashboard/web",
-      label: "网页",
-      icon: Globe,
+  const agentNav = useMemo<NavEntry>(
+    () => ({
+      id: "agents",
+      href: "/dashboard/agents",
+      label: "Agents",
+      icon: Bot,
       isActive: (path) =>
-        path === "/dashboard/web" || path.startsWith("/dashboard/web/"),
-    },
-    // Host infra: OSS admin always; SaaS only platform super-admin (not tenants)
-    ...(!multiTenant || isPlatformAdmin
-      ? [
+        path === "/dashboard/agents" || path.startsWith("/dashboard/agents/"),
+      children: agentChildren,
+    }),
+    [agentChildren],
+  );
+
+  const platformNav = useMemo<NavEntry[]>(() => {
+    const nav: NavEntry[] = [
+      {
+        id: "chat",
+        href: "/chat",
+        label: "聊天",
+        icon: MessageSquare,
+        isActive: (path) => path === "/chat" || path.startsWith("/chat/"),
+      },
+      {
+        id: "web",
+        href: "/dashboard/web",
+        label: "网页",
+        icon: Globe,
+        isActive: (path) =>
+          path === "/dashboard/web" || path.startsWith("/dashboard/web/"),
+      },
+      {
+        id: "server",
+        href: "/dashboard/runners",
+        label: "服务器",
+        icon: Server,
+        isActive: serverSectionActive,
+        children: buildServerChildren(showPlatformServices),
+      },
+      {
+        id: "memory",
+        href: "/dashboard/memory",
+        label: "记忆",
+        icon: Brain,
+      },
+      {
+        id: "skills",
+        href: "/dashboard/skills",
+        label: "技能",
+        icon: Sparkles,
+        isActive: (path) =>
+          path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
+      },
+      {
+        id: "models",
+        href: "/dashboard/models",
+        label: "模型路由",
+        icon: Cpu,
+        isActive: (path) =>
+          path === "/dashboard/models" || path.startsWith("/dashboard/models/"),
+        children: [
           {
-            id: "platform-services",
-            href: "/dashboard/platform-services",
-            label: "自托管服务",
-            icon: Container,
-            isActive: (path: string) =>
-              path === "/dashboard/platform-services" ||
-              path.startsWith("/dashboard/platform-services/"),
-          } satisfies NavEntry,
-        ]
-      : []),
-    {
-      id: "memory",
-      href: "/dashboard/memory",
-      label: "记忆",
-      icon: Brain,
-    },
-    {
-      id: "skills",
-      href: "/dashboard/skills",
-      label: "技能",
-      icon: Sparkles,
-      isActive: (path) =>
-        path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
-    },
-    {
-      id: "models",
-      href: "/dashboard/models",
-      label: "模型路由",
-      icon: Cpu,
-      isActive: (path) =>
-        path === "/dashboard/models" || path.startsWith("/dashboard/models/"),
-      children: [
-        {
-          href: "/dashboard/models",
-          label: "模型",
-          icon: Route,
-          isActive: (path) => path === "/dashboard/models",
-        },
-        {
-          href: "/dashboard/models/upstreams",
-          label: "上游",
-          icon: Server,
-        },
-      ],
-    },
-    {
-      id: "runners",
-      href: "/dashboard/runners",
-      label: "Runners",
-      icon: HardDrive,
-      isActive: (path) =>
-        path === "/dashboard/runners" || path.startsWith("/dashboard/runners/"),
-    },
-    {
-      id: "network",
-      href: "/dashboard/network",
-      label: "网络",
-      icon: Network,
-      isActive: (path) =>
-        path === "/dashboard/network" || path.startsWith("/dashboard/network/"),
-      children: [
-        {
-          href: "/dashboard/network",
-          label: "概览",
-          icon: Network,
-          isActive: (path) => path === "/dashboard/network",
-        },
-        {
-          href: "/dashboard/network/mesh",
-          label: "组网",
-          icon: Cable,
-        },
-        {
-          href: "/dashboard/network/exposure",
-          label: "端口暴露",
-          icon: Globe,
-        },
-        {
-          href: "/dashboard/network/active",
-          label: "活跃暴露",
-          icon: Activity,
-        },
-        {
-          href: "/dashboard/network/security",
-          label: "安全策略",
-          icon: Shield,
-        },
-      ],
-    },
-    {
-      id: "mcp",
-      href: "/dashboard/mcp",
-      label: "MCP",
-      icon: Cable,
-      isActive: (path) =>
-        path === "/dashboard/mcp" || path.startsWith("/dashboard/mcp/"),
-      children: [
-        {
-          href: "/dashboard/mcp",
-          label: "服务器",
-          icon: Server,
-          isActive: mcpServerActive,
-        },
-        {
-          href: "/dashboard/mcp/official",
-          label: "官方商店",
-          icon: Star,
-        },
-        {
-          href: "/dashboard/mcp/store",
-          label: "社区商店",
-          icon: Store,
-        },
-        {
-          href: "/dashboard/mcp/import",
-          label: "导入",
-          icon: CloudDownload,
-        },
-      ],
-    },    {
-      id: "tool-calls",
-      href: "/dashboard/tool-calls",
-      label: "调用追踪",
-      icon: Activity,
-    },
-    {
-      id: "policies",
-      href: "/dashboard/policies",
-      label: "策略",
-      icon: Shield,
-    },
-    {
-      id: "keys",
-      href: "/dashboard/keys",
-      label: "Keys",
-      icon: KeyRound,
-    },
-    {
-      id: "settings",
-      href: "/dashboard/settings/team",
-      label: "设置",
-      icon: Settings2,
-      children: [
-        {
-          href: "/dashboard/settings/team",
-          label: "团队",
-          icon: Building2,
-        },
-        {
-          href: "/dashboard/settings/oauth-apps",
-          label: "OAuth 应用",
-          icon: KeyRound,
-        },
-        // Multi-team switcher is SaaS-only. Members live in the team settings page.
-        ...(multiTenant
-          ? [
-              {
-                href: "/dashboard/settings/teams",
-                label: "所有团队",
-                icon: Building2,
-              } satisfies SubNavItem,
-            ]
-          : []),
-      ],
-    },
-  ];
+            href: "/dashboard/models",
+            label: "模型",
+            icon: Route,
+            isActive: (path) => path === "/dashboard/models",
+          },
+          {
+            href: "/dashboard/models/upstreams",
+            label: "上游",
+            icon: Server,
+          },
+        ],
+      },
+      {
+        id: "mcp",
+        href: "/dashboard/mcp",
+        label: "MCP",
+        icon: Cable,
+        isActive: (path) =>
+          path === "/dashboard/mcp" || path.startsWith("/dashboard/mcp/"),
+        children: [
+          {
+            href: "/dashboard/mcp",
+            label: "已安装",
+            icon: Server,
+            isActive: mcpServerActive,
+          },
+          {
+            href: "/dashboard/mcp/store",
+            label: "商店",
+            icon: Store,
+            isActive: mcpStoreActive,
+          },
+          {
+            href: "/dashboard/mcp/import",
+            label: "导入",
+            icon: CloudDownload,
+          },
+        ],
+      },
+      {
+        id: "connectors",
+        href: "/dashboard/connectors",
+        label: "平台连接器",
+        icon: Plug,
+        isActive: (path) =>
+          path === "/dashboard/connectors" ||
+          path.startsWith("/dashboard/connectors/"),
+      },
+      {
+        id: "tool-calls",
+        href: "/dashboard/tool-calls",
+        label: "调用追踪",
+        icon: Activity,
+      },
+      {
+        id: "advanced",
+        href: "/dashboard/policies",
+        label: "高级",
+        icon: SlidersHorizontal,
+        isActive: advancedSectionActive,
+        children: [
+          {
+            href: "/dashboard/policies",
+            label: "策略",
+            icon: Shield,
+          },
+          {
+            href: "/dashboard/keys",
+            label: "Keys",
+            icon: KeyRound,
+          },
+        ],
+      },
+      {
+        id: "settings",
+        href: "/dashboard/settings/team",
+        label: "设置",
+        icon: Settings2,
+        isActive: (path) => path.startsWith("/dashboard/settings/"),
+        children: [
+          {
+            href: "/dashboard/settings/team",
+            label: "团队",
+            icon: Building2,
+          },
+          {
+            href: "/dashboard/settings/oauth-clients",
+            label: "OAuth 客户端",
+            icon: KeyRound,
+          },
+          ...(multiTenant
+            ? [
+                {
+                  href: "/dashboard/settings/teams",
+                  label: "所有团队",
+                  icon: Building2,
+                } satisfies SubNavItem,
+              ]
+            : []),
+        ],
+      },
+    ];
 
-  if (multiTenant && isPlatformAdmin) {
-    platformNav.push({
-      id: "admin",
-      href: "/dashboard/admin",
-      label: "超管",
-      icon: ShieldCheck,
-    });
-  }
-
-  const autoExpandKeys = useMemo(() => {
-    const keys: string[] = [];
-    if (agentId && agentNav.children?.length) keys.push(agentNav.id);
-    for (const entry of platformNav) {
-      if (!entry.children?.length) continue;
-      const inSection = entry.isActive
-        ? entry.isActive(pathname)
-        : defaultActive(pathname, entry.href);
-      if (inSection) keys.push(entry.id);
+    if (multiTenant && isPlatformAdmin) {
+      nav.push({
+        id: "admin",
+        href: "/dashboard/admin",
+        label: "超管",
+        icon: ShieldCheck,
+      });
     }
-    return keys;
-  }, [pathname, agentId, agentNav.children?.length]);
 
-  const { isOpen, toggle } = useAutoExpand(autoExpandKeys);
+    return nav;
+  }, [multiTenant, isPlatformAdmin, showPlatformServices]);
 
   return (
     <Sidebar collapsible="icon" variant="inset">
@@ -625,12 +633,7 @@ export function AppSidebar({
           <SidebarGroupLabel>Agent</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              <ExpandableNavItem
-                entry={agentNav}
-                pathname={pathname}
-                expanded={isOpen(agentNav.id)}
-                onToggle={() => toggle(agentNav.id)}
-              />
+              <ExpandableNavItem entry={agentNav} pathname={pathname} />
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -646,8 +649,6 @@ export function AppSidebar({
                   key={entry.id}
                   entry={entry}
                   pathname={pathname}
-                  expanded={isOpen(entry.id)}
-                  onToggle={() => toggle(entry.id)}
                 />
               ))}
             </SidebarMenu>

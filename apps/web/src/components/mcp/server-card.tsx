@@ -1,6 +1,7 @@
 "use client";
 
 import { ExternalLink, Loader2, Star } from "lucide-react";
+import { BrandIcon } from "@/components/brand-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ProgressLinear } from "@/components/ui/progress-linear";
@@ -18,6 +19,13 @@ export type McpServerCardData = {
   stars?: number;
   repositoryUrl?: string;
   installed?: boolean;
+  /** 品牌图标：slug / curated id */
+  brandId?: string;
+  homepage?: string;
+  mcpUrl?: string;
+  accent?: string;
+  /** 仅当为真实 URL 时传入 */
+  iconUrl?: string;
 };
 
 type McpServerCardProps = {
@@ -84,8 +92,7 @@ export function McpServerCard({
       {installing ? (
         <div
           className={cn(
-            "absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-[inherit]",
-            "bg-card/55 backdrop-blur-md supports-backdrop-filter:bg-card/40",
+            "absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-[inherit] bg-card/90",
           )}
         >
           <Loader2 className="size-5 animate-spin text-foreground" />
@@ -101,13 +108,24 @@ export function McpServerCard({
       ) : null}
 
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{server.title}</div>
-          {server.subtitle ? (
-            <code className="block truncate text-[10px] text-muted-foreground">
-              {server.subtitle}
-            </code>
-          ) : null}
+        <div className="flex min-w-0 items-start gap-2.5">
+          <BrandIcon
+            brandId={server.brandId ?? server.id}
+            name={server.title}
+            accent={server.accent}
+            homepage={server.homepage}
+            mcpUrl={server.mcpUrl ?? server.subtitle}
+            iconUrl={server.iconUrl}
+            size="sm"
+          />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">{server.title}</div>
+            {server.subtitle ? (
+              <code className="block truncate text-[10px] text-muted-foreground">
+                {server.subtitle}
+              </code>
+            ) : null}
+          </div>
         </div>
         {server.version ? <Badge variant="outline">{server.version}</Badge> : null}
       </div>
