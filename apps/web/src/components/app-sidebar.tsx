@@ -510,13 +510,13 @@ export function AppSidebar({
         ],
       },
       {
-        id: "connections",
-        href: "/dashboard/connections",
+        id: "connectors",
+        href: "/dashboard/connectors",
         label: "平台连接器",
         icon: Plug,
         isActive: (path) =>
-          path === "/dashboard/connections" ||
-          path.startsWith("/dashboard/connections/"),
+          path === "/dashboard/connectors" ||
+          path.startsWith("/dashboard/connectors/"),
       },
       {
         id: "tool-calls",

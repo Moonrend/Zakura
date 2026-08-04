@@ -3496,7 +3496,7 @@ export async function createApiApp(deps: {
     const body = await c.req.json<{
       repository?: string;
       sourceUrl?: string;
-      format?: "auto" | "claude" | "codex" | "mcp";
+      format?: "auto" | "claude" | "codex";
       name?: string;
     }>();
     const input = (body.sourceUrl ?? body.repository ?? "").trim();

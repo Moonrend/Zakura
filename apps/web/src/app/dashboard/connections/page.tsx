@@ -34,7 +34,8 @@ function ConnectionsRedirectInner() {
       router.replace("/dashboard/mcp/store?tab=community");
       return;
     }
-    router.replace("/dashboard/mcp");
+    // 旧「统一连接中心」默认入口 → 平台连接器（MCP 请走 /dashboard/mcp）
+    router.replace("/dashboard/connectors");
   }, [router, searchParams]);
 
   return <Skeleton className="h-48 w-full rounded-lg" />;
