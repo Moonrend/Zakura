@@ -4,15 +4,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
-  Bot,
   Check,
-  ChevronDown,
   Download,
   ExternalLink,
   FileText,
   Loader2,
-  Users,
 } from "lucide-react";
+import {
+  AgentTargetPicker,
+  resolveAgentIds,
+  type AgentTargetValue,
+} from "@/components/agent-target-picker";
 import {
   Dialog,
   DialogContent,
@@ -22,7 +24,6 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SkillMarkdown } from "@/components/skills/skill-markdown";
 import { cn } from "@/lib/utils";
@@ -57,9 +58,10 @@ export function SkillInstallDialog({
   const [resolved, setResolved] = useState<SkillResolveResult | null>(null);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [activeSkill, setActiveSkill] = useState<string | null>(null);
-  const [targetAgents, setTargetAgents] = useState<string[]>([]);
-  const [allAgents, setAllAgents] = useState(true);
-  const [pickingAgents, setPickingAgents] = useState(false);
+  const [agentTarget, setAgentTarget] = useState<AgentTargetValue>({
+    all: true,
+    agentIds: [],
+  });
 
   const load = useCallback(async () => {
     if (!source.trim()) return;
@@ -81,9 +83,10 @@ export function SkillInstallDialog({
 
   useEffect(() => {
     if (!open) return;
-    setTargetAgents(defaultAgentIds ?? []);
-    setAllAgents(!defaultAgentIds?.length);
-    setPickingAgents(Boolean(defaultAgentIds?.length));
+    setAgentTarget({
+      all: !defaultAgentIds?.length,
+      agentIds: defaultAgentIds ?? [],
+    });
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, load]);
@@ -94,8 +97,13 @@ export function SkillInstallDialog({
   }, [resolved, activeSkill]);
 
   const multi = (resolved?.skills.length ?? 0) > 1;
-  const targetCount = allAgents ? agents.length : targetAgents.length;
-  const canInstall = !loading && !installing && selectedSkills.length > 0 && targetCount > 0;
+  const targetIds = resolveAgentIds(agentTarget, agents);
+  const targetCount = targetIds.length;
+  const canInstall =
+    !loading &&
+    !installing &&
+    selectedSkills.length > 0 &&
+    (agents.length === 0 || targetCount > 0);
   const bundled = active?.files.filter((f) => f.path !== "SKILL.md") ?? [];
 
   async function install() {
@@ -105,7 +113,7 @@ export function SkillInstallDialog({
       const res = await installSkill({
         source,
         names: selectedSkills,
-        ...(allAgents ? { all: true } : { agentIds: targetAgents }),
+        ...(agentTarget.all ? { all: true } : { agentIds: targetIds }),
       });
       const names = res.skills.map((s) => s.name);
       const failed = res.installs.filter((i) => i.status === "error");
@@ -115,7 +123,7 @@ export function SkillInstallDialog({
         });
       } else {
         toast.success(
-          `已安装 ${names.join("、")} 到 ${targetCount} 个 Agent`,
+          `已安装 ${names.join("、")} 到 ${agentTarget.all ? "全部" : targetCount} 个 Agent`,
           res.warnings.length ? { description: res.warnings[0] } : undefined,
         );
       }
@@ -131,13 +139,6 @@ export function SkillInstallDialog({
   function toggleSkill(name: string) {
     setSelectedSkills((prev) =>
       prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
-    );
-  }
-
-  function toggleAgent(id: string) {
-    setAllAgents(false);
-    setTargetAgents((prev) =>
-      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id],
     );
   }
 
@@ -300,77 +301,14 @@ export function SkillInstallDialog({
             </p>
           ) : null}
 
-          {pickingAgents ? (
-            <ScrollArea className="max-h-40 border-b border-border">
-              <div className="grid gap-1 p-2 sm:grid-cols-2 sm:p-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAllAgents(true);
-                    setTargetAgents([]);
-                  }}
-                  className={cn(
-                    "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors sm:col-span-2",
-                    allAgents
-                      ? "bg-primary/10 font-medium text-primary"
-                      : "hover:bg-muted/60",
-                  )}
-                >
-                  <Users className="size-3.5 shrink-0" />
-                  <span className="flex-1 text-left">所有 Agent（{agents.length}）</span>
-                  {allAgents ? <Check className="size-3.5 shrink-0" /> : null}
-                </button>
-                {agents.map((agent) => {
-                  const picked = !allAgents && targetAgents.includes(agent.id);
-                  return (
-                    <button
-                      key={agent.id}
-                      type="button"
-                      onClick={() => toggleAgent(agent.id)}
-                      className={cn(
-                        "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
-                        picked ? "bg-primary/10 text-primary" : "hover:bg-muted/60",
-                        allAgents && "opacity-50",
-                      )}
-                    >
-                      <Bot className="size-3.5 shrink-0" />
-                      <span className="flex-1 truncate text-left">{agent.name}</span>
-                      {picked ? <Check className="size-3.5 shrink-0" /> : null}
-                    </button>
-                  );
-                })}
-                {!agents.length ? (
-                  <p className="px-2 py-3 text-center text-[11px] text-muted-foreground sm:col-span-2">
-                    还没有 Agent
-                  </p>
-                ) : null}
-              </div>
-            </ScrollArea>
-          ) : null}
-
-          <div className="flex items-center gap-2 px-4 py-2.5 sm:px-5">
-            <button
-              type="button"
-              onClick={() => setPickingAgents((v) => !v)}
-              className="flex min-w-0 items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              {allAgents ? (
-                <Users className="size-3.5 shrink-0" />
-              ) : (
-                <Bot className="size-3.5 shrink-0" />
-              )}
-              <span className="truncate">
-                安装到 {allAgents ? `所有 Agent（${agents.length}）` : `${targetAgents.length} 个 Agent`}
-              </span>
-              <ChevronDown
-                className={cn(
-                  "size-3.5 shrink-0 transition-transform",
-                  pickingAgents && "rotate-180",
-                )}
-              />
-            </button>
-
-            <div className="ml-auto flex shrink-0 items-center gap-2">
+          <div className="space-y-3 px-4 py-3 sm:px-5">
+            <AgentTargetPicker
+              agents={agents}
+              value={agentTarget}
+              onChange={setAgentTarget}
+              disabled={installing}
+            />
+            <div className="flex items-center justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
                 取消
               </Button>

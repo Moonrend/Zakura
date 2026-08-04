@@ -6,8 +6,13 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
   ArrowLeft,
+  Container,
   HeartPulse,
   KeyRound,
+  Loader2,
+  RefreshCw,
+  Save,
+  ScrollText,
   Trash2,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -31,8 +36,11 @@ import { SettingsHeader } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { McpToolPermissionsPanel } from "@/components/mcp/tool-permissions-panel";
 import type { McpToolPermissionState } from "@/lib/mcp-config";
 
@@ -46,12 +54,325 @@ type InstanceDetail = {
   endpointUrl?: string | null;
   lastError?: string | null;
   config?: Record<string, unknown>;
+  containers?: Array<{
+    id: string;
+    name: string;
+    image: string;
+    status: string;
+    dockerId?: string | null;
+    portsJson: string;
+  }>;
   tools?: McpToolRow[];
   resources?: McpResourceRow[];
   prompts?: McpPromptRow[];
   resourceTemplates?: McpResourceTemplateRow[];
   toolPermissions?: McpToolPermissionState[];
 };
+
+type RuntimeContainer = {
+  id: string;
+  name: string;
+  image: string;
+  status: string;
+  ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+  mounts?: Array<{ source: string; target: string; mode?: string; type?: string }>;
+};
+
+const CONFIG_LABELS: Record<string, string> = {
+  mcpUrl: "MCP 地址",
+  headerName: "鉴权 Header",
+  apiKey: "Token / API Key",
+  command: "命令",
+  args: "参数",
+  env: "环境变量",
+  image: "容器镜像",
+  workingDir: "工作目录",
+  packageManager: "包类型",
+  oauthClientId: "客户端 ID / CIMD",
+  oauthClientSecret: "客户端 Secret",
+  oauthClientSource: "注册方式",
+  oauthClientMode: "客户端模式",
+  oauthAccessToken: "Access Token",
+  oauthRefreshToken: "Refresh Token",
+  oauthExpiresAt: "Token 过期时间",
+  oauthAuthorizationEndpoint: "授权地址",
+  oauthTokenEndpoint: "Token 地址",
+  oauthRegistrationEndpoint: "注册地址",
+  oauthRedirectUri: "回调地址",
+  oauthResourceMetadataUrl: "资源元数据地址",
+  oauthScopes: "Scopes",
+};
+
+const GENERIC_CONFIG_KEYS = [
+  "mcpUrl",
+  "headerName",
+  "apiKey",
+  "oauthClientId",
+  "oauthClientSecret",
+  "oauthClientSource",
+  "oauthClientMode",
+  "oauthAccessToken",
+  "oauthRefreshToken",
+  "oauthExpiresAt",
+  "oauthAuthorizationEndpoint",
+  "oauthTokenEndpoint",
+  "oauthRegistrationEndpoint",
+  "oauthRedirectUri",
+  "oauthResourceMetadataUrl",
+  "oauthScopes",
+];
+
+const STDIO_CONFIG_KEYS = ["command", "args", "env", "image", "workingDir", "packageManager"];
+
+function configKeys(instance: InstanceDetail) {
+  const base = instance.providerId === "generic-mcp" ? GENERIC_CONFIG_KEYS : [];
+  const runtime = instance.providerId === "stdio-mcp" ? STDIO_CONFIG_KEYS : [];
+  return [...new Set([...base, ...runtime, ...Object.keys(instance.config ?? {})])].filter(
+    (key) => key !== "authRequired",
+  );
+}
+
+function displayConfigValue(value: unknown) {
+  if (value == null) return "";
+  if (value === "***") return "";
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function isSecretConfigKey(key: string) {
+  return /secret|token|password|apikey|api_key/i.test(key);
+}
+
+function isJsonConfigKey(key: string, original?: unknown) {
+  return key === "args" || key === "env" ||
+    (original != null && typeof original === "object");
+}
+
+function isNumericConfigKey(key: string) {
+  return key === "oauthExpiresAt";
+}
+
+function ConfigField({
+  name,
+  value,
+  onChange,
+  original,
+}: {
+  name: string;
+  value: string;
+  onChange: (value: string) => void;
+  original: unknown;
+}) {
+  const secret = isSecretConfigKey(name);
+  const placeholder = secret && original === "***" ? "已保存" : undefined;
+  return (
+    <div className="grid gap-2 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-start">
+      <Label className="pt-2 text-xs">{CONFIG_LABELS[name] ?? name}</Label>
+      {isJsonConfigKey(name, original) ? (
+        <Textarea rows={3} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      ) : (
+        <Input
+          type={secret ? "password" : isNumericConfigKey(name) ? "number" : "text"}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          autoComplete="off"
+        />
+      )}
+    </div>
+  );
+}
+
+function RuntimePanel({
+  instance,
+}: {
+  instance: InstanceDetail;
+}) {
+  const fallback = (instance.containers ?? []).map((container) => ({
+    id: container.id,
+    runtime: {
+      id: container.dockerId ?? container.id,
+      name: container.name,
+      image: container.image,
+      status: container.status,
+      ports: [],
+    } as RuntimeContainer,
+  }));
+  const [items, setItems] = useState<Array<{ id: string; runtime: RuntimeContainer | null }>>(fallback);
+  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [logsBusy, setLogsBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await api<{ containers: Array<{ id: string; runtime: RuntimeContainer | null }> }>(
+        `/api/instances/${instance.id}/runtime`,
+        { cacheTtlMs: false },
+      );
+      setItems(result.containers);
+    } catch {
+      setItems(fallback);
+    } finally {
+      setLoading(false);
+    }
+  }, [instance.id]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function showLogs(id: string) {
+    setLogsBusy(id);
+    try {
+      const result = await api<{ logs: string }>(`/api/instances/${instance.id}/containers/${id}/logs`);
+      setLogs((current) => ({ ...current, [id]: result.logs }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLogsBusy(null);
+    }
+  }
+
+  if (loading) return <Skeleton className="h-24" />;
+  if (!items.length) return null;
+
+  return (
+    <section className="border-t border-border pt-6">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-medium">运行环境</h3>
+        <Button size="icon-sm" variant="ghost" onClick={() => void load()} aria-label="刷新运行环境">
+          <RefreshCw />
+        </Button>
+      </div>
+      <div className="divide-y divide-border border-y border-border">
+        {items.map(({ id, runtime }) => (
+          <div key={id} className="space-y-3 py-3">
+            <div className="flex items-start gap-3">
+              <Container className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1 text-xs">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium">{runtime?.name ?? id}</span>
+                  <Badge variant={runtime?.status === "running" ? "success" : "secondary"}>{runtime?.status ?? "未运行"}</Badge>
+                </div>
+                <code className="mt-1 block truncate text-[11px] text-muted-foreground">{runtime?.image ?? "—"}</code>
+              </div>
+              <Button size="sm" variant="ghost" disabled={!runtime || logsBusy === id} onClick={() => void showLogs(id)}>
+                {logsBusy === id ? <Loader2 className="animate-spin" /> : <ScrollText />}
+                日志
+              </Button>
+            </div>
+            {runtime?.mounts?.length ? (
+              <div className="ml-7 space-y-1 text-[11px] text-muted-foreground">
+                {runtime.mounts.map((mount) => (
+                  <div key={`${mount.source}:${mount.target}`} className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <code className="truncate" title={mount.source}>{mount.source}</code>
+                    <code className="truncate" title={mount.target}>{mount.target}{mount.mode ? ` · ${mount.mode}` : ""}</code>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {logs[id] ? <pre className="ml-7 max-h-56 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px] leading-4">{logs[id]}</pre> : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ConfigurationPanel({
+  instance,
+  onSaved,
+}: {
+  instance: InstanceDetail;
+  onSaved: () => Promise<void>;
+}) {
+  const [name, setName] = useState(instance.name);
+  const [draft, setDraft] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configKeys(instance).map((key) => [key, displayConfigValue(instance.config?.[key])])),
+  );
+  const [saving, setSaving] = useState(false);
+  const keys = configKeys(instance);
+  const config = instance.config ?? {};
+  const oauthKeys = keys.filter((key) => key.startsWith("oauth"));
+  const runtimeKeys = keys.filter((key) => STDIO_CONFIG_KEYS.includes(key));
+  const connectionKeys = keys.filter((key) => !oauthKeys.includes(key) && !runtimeKeys.includes(key));
+
+  useEffect(() => {
+    setName(instance.name);
+    setDraft(Object.fromEntries(configKeys(instance).map((key) => [key, displayConfigValue(instance.config?.[key])] )));
+  }, [instance]);
+
+  async function save(restart: boolean) {
+    setSaving(true);
+    try {
+      const patch: Record<string, unknown> = {};
+      for (const key of keys) {
+        const value = draft[key]?.trim() ?? "";
+        if (!value && !(key in config)) continue;
+        if (!value && isSecretConfigKey(key) && config[key] === "***") continue;
+        if (isJsonConfigKey(key, config[key]) && value) {
+          try {
+            patch[key] = JSON.parse(value);
+          } catch {
+            throw new Error(`${CONFIG_LABELS[key] ?? key} 不是有效 JSON`);
+          }
+        } else {
+          patch[key] = isNumericConfigKey(key) ? Number(value) : value;
+        }
+      }
+      await api(`/api/instances/${instance.id}`, { method: "PATCH", json: { name: name.trim(), config: patch } });
+      if (restart && instance.status === "running") {
+        await api(`/api/instances/${instance.id}/stop`, { method: "POST" });
+        await api(`/api/instances/${instance.id}/start`, { method: "POST" });
+      }
+      toast.success(restart ? "已保存并重启" : "已保存");
+      await onSaved();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-4">
+        <div className="grid gap-2 sm:grid-cols-[11rem_minmax(0,1fr)] sm:items-start">
+          <Label className="pt-2 text-xs">名称</Label>
+          <Input value={name} onChange={(event) => setName(event.target.value)} />
+        </div>
+        {connectionKeys.length ? (
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">连接</h3>
+            {connectionKeys.map((key) => <ConfigField key={key} name={key} value={draft[key] ?? ""} original={config[key]} onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))} />)}
+          </div>
+        ) : null}
+        {oauthKeys.length ? (
+          <div className="space-y-3 border-t border-border pt-5">
+            <h3 className="text-sm font-medium">OAuth 客户端</h3>
+            {oauthKeys.map((key) => <ConfigField key={key} name={key} value={draft[key] ?? ""} original={config[key]} onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))} />)}
+          </div>
+        ) : null}
+        {runtimeKeys.length ? (
+          <div className="space-y-3 border-t border-border pt-5">
+            <h3 className="text-sm font-medium">运行参数</h3>
+            {runtimeKeys.map((key) => <ConfigField key={key} name={key} value={draft[key] ?? ""} original={config[key]} onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))} />)}
+          </div>
+        ) : null}
+      </section>
+      <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
+        <Button size="sm" variant="outline" disabled={saving || !name.trim()} onClick={() => void save(false)}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />}
+          保存
+        </Button>
+        {instance.status === "running" ? (
+          <Button size="sm" disabled={saving || !name.trim()} onClick={() => void save(true)}>
+            <RefreshCw />应用并重启
+          </Button>
+        ) : null}
+      </div>
+      <RuntimePanel instance={instance} />
+    </div>
+  );
+}
 
 function providerLabel(id: string) {
   switch (id) {
@@ -134,7 +455,7 @@ function McpServerDetailInner() {
   const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthAutoTried, setOauthAutoTried] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
-  const [tab, setTab] = useState("tools");
+  const [tab, setTab] = useState("config");
   const oauthUnsubRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -452,10 +773,15 @@ function McpServerDetailInner() {
         }}
       >
         <TabsList variant="line" className="w-full justify-start overflow-x-auto">
+          <TabsTrigger value="config">配置</TabsTrigger>
           <TabsTrigger value="tools">工具 · {tools.length}</TabsTrigger>
           <TabsTrigger value="resources">资源 · {resources.length}</TabsTrigger>
           <TabsTrigger value="prompts">Prompts · {prompts.length}</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="config" className="mt-5">
+          <ConfigurationPanel instance={instance} onSaved={() => load()} />
+        </TabsContent>
 
         <TabsContent value="tools" className="mt-4">
           <McpToolsExplorer

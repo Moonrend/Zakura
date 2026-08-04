@@ -136,6 +136,7 @@ function toRecord(row: SkillRow, agentIds: string[], upstreamVersion?: string | 
       upstreamVersion && row.version && upstreamVersion !== row.version,
     ),
     upstreamVersion: upstreamVersion ?? null,
+    autoUpdate: row.builtin ? false : Boolean(row.autoUpdate),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -326,6 +327,9 @@ export class SkillsService {
     builtin: boolean,
   ): Promise<SkillRow> {
     const now = new Date();
+    const existing = await this.db.query.skills.findFirst({
+      where: and(eq(skills.tenantId, tenantId), eq(skills.name, pkg.name)),
+    });
     const values = {
       tenantId,
       name: pkg.name,
@@ -341,12 +345,11 @@ export class SkillsService {
       sizeBytes: pkg.sizeBytes,
       // 指回平台缓存，用于「上游有没有新版本」的判断
       repoKey: builtin ? null : repoKeyOf(pkg.source),
+      // 新装第三方默认开启自动更新；更新已有记录时不覆盖用户开关
+      ...(existing ? {} : { autoUpdate: !builtin }),
       updatedAt: now,
     };
 
-    const existing = await this.db.query.skills.findFirst({
-      where: and(eq(skills.tenantId, tenantId), eq(skills.name, pkg.name)),
-    });
     if (existing) {
       await this.db.update(skills).set(values).where(eq(skills.id, existing.id));
       return { ...existing, ...values, createdAt: existing.createdAt };
@@ -673,14 +676,8 @@ export class SkillsService {
       const tenantIds = await this.activeTenantIds(AUTO_UPDATE_TENANT_BATCH);
       for (const tenantId of tenantIds) {
         try {
-          // 内置技能始终跟随平台版本，不受自动更新开关影响：
-          // 它们是平台自身的一部分，与"要不要追第三方仓库的更新"是两件事。
-          // autoUpdateTenant 里已经包含这一步，所以开着的时候不重复跑。
-          if (await this.autoUpdateEnabled(tenantId)) {
-            await this.autoUpdateTenant(tenantId);
-          } else {
-            await this.backfillBuiltins(tenantId, { force: true });
-          }
+          // 内置始终同步；第三方只更新各自开启了 autoUpdate 的技能
+          await this.autoUpdateTenant(tenantId);
         } catch (err) {
           console.warn(
             `[skills] maintenance ${tenantId}:`,
@@ -740,15 +737,39 @@ export class SkillsService {
       });
   }
 
-  /** 默认开启：技能是操作手册，跟着上游走通常比停在旧版本更符合预期 */
+  /** @deprecated 自动更新已改为单技能开关；保留只为兼容旧 API */
   async autoUpdateEnabled(tenantId: string): Promise<boolean> {
     return (await this.readAutoUpdate(tenantId)).enabled;
   }
 
+  /** @deprecated 请用 setSkillAutoUpdate */
   async setAutoUpdate(tenantId: string, enabled: boolean): Promise<SkillAutoUpdateStatus> {
     const current = await this.readAutoUpdate(tenantId);
     await this.writeAutoUpdate(tenantId, { ...current, enabled });
+    // 兼容旧「全局开关」：批量改写该租户第三方技能的单项开关
+    await this.db
+      .update(skills)
+      .set({ autoUpdate: enabled, updatedAt: new Date() })
+      .where(and(eq(skills.tenantId, tenantId), eq(skills.builtin, false)));
     return this.autoUpdateStatus(tenantId);
+  }
+
+  async setSkillAutoUpdate(
+    tenantId: string,
+    idOrName: string,
+    enabled: boolean,
+  ): Promise<SkillRecord> {
+    const row = await this.findRow(tenantId, idOrName);
+    if (!row) throw new Error("技能不存在");
+    if (row.builtin) throw new Error("内置技能不支持自动更新开关");
+    await this.db
+      .update(skills)
+      .set({ autoUpdate: enabled, updatedAt: new Date() })
+      .where(eq(skills.id, row.id));
+    const records = await this.list(tenantId);
+    const found = records.find((r) => r.id === row.id);
+    if (!found) throw new Error("技能不存在");
+    return found;
   }
 
   async autoUpdateStatus(tenantId: string): Promise<SkillAutoUpdateStatus> {
@@ -756,8 +777,11 @@ export class SkillsService {
       this.readAutoUpdate(tenantId),
       this.list(tenantId),
     ]);
+    const thirdParty = registered.filter((s) => !s.builtin);
+    const autoOn = thirdParty.filter((s) => s.autoUpdate);
     return {
-      enabled: stored.enabled,
+      // enabled：是否还有至少一个第三方技能开着自动更新（兼容旧 UI）
+      enabled: autoOn.length > 0,
       intervalMs: REPO_REFRESH_INTERVAL_MS,
       lastRunAt: stored.lastRunAt,
       lastResult: stored.lastResult,
@@ -766,7 +790,7 @@ export class SkillsService {
   }
 
   /**
-   * 把该租户的技能追到最新：内置技能按内容哈希，外部技能按平台缓存里的仓库版本。
+   * 把该租户的技能追到最新：内置始终同步；第三方仅更新开启了 autoUpdate 的。
    *
    * 只处理"平台缓存已经确认上游有变化"的技能——不再逐个技能去打上游，
    * 一轮维护的网络开销就是刷新缓存那几个仓库，与租户数无关。
@@ -784,6 +808,7 @@ export class SkillsService {
     const records = await this.list(tenantId);
     for (const record of records) {
       if (record.builtin) continue;
+      if (!record.autoUpdate) continue;
       if (!record.updateAvailable) {
         summary.upToDate++;
         continue;
@@ -809,9 +834,10 @@ export class SkillsService {
   }
 
   /**
-   * 手动「立即检查更新」：先把该租户用到的仓库探一遍上游，再执行更新。
+   * 手动「立即检查更新」：先把该租户用到的仓库探一遍上游，再按单项开关执行更新。
    *
-   * 与后台维护的区别是不看开关、不等缓存 TTL——用户点了就该立刻看到结果。
+   * 与后台维护的区别是不等缓存 TTL——用户点了就立刻探上游；
+   * 仍只自动应用开启了 autoUpdate 的第三方技能（可在列表里手动点更新）。
    */
   async checkUpdatesNow(tenantId: string): Promise<SkillUpdateSummary> {
     const rows = await this.db

@@ -1,4 +1,4 @@
-import { and, eq, ne, notInArray } from "drizzle-orm";
+import { and, eq, ne, notInArray, or, isNull, lt } from "drizzle-orm";
 import {
   decryptJson,
   DecryptError,
@@ -6,7 +6,9 @@ import {
   globalRegistry,
   type InstanceHandle,
   type ProviderContext,
+  type RunnerClient,
 } from "@zakura/core";
+import { LOCAL_RUNTIME_NODE_ID } from "@zakura/shared";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "../config.js";
@@ -17,15 +19,56 @@ import {
   newId,
   tenants,
   type ComponentInstance,
+  type RuntimeNode,
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import { platformEvents } from "./platform-events.js";
+import { mcpAuthHeaders } from "../lib/mcp-http.js";
+import type { RuntimeNodeService } from "./runtime-nodes.js";
 
 /** 租户能力面板，不走 MCP 服务器自动启动 */
 const CAPABILITY_PROVIDER_IDS = ["web-search", "web-fetch"] as const;
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function isLocalRuntimeNodeId(id: string | null | undefined): boolean {
+  return !id || id === LOCAL_RUNTIME_NODE_ID || id === "local";
+}
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "0.0.0.0";
+}
+
+function advertiseHostFromNode(node: RuntimeNode): string | null {
+  let hi: Record<string, unknown> = {};
+  try {
+    hi = JSON.parse(node.hostInfoJson || "{}") as Record<string, unknown>;
+  } catch {
+    hi = {};
+  }
+  const primaryIp = typeof hi.primaryIp === "string" ? hi.primaryIp : null;
+  if (primaryIp && !isLoopbackHost(primaryIp)) return primaryIp;
+  const publicUrl = typeof hi.publicUrl === "string" ? hi.publicUrl : null;
+  if (publicUrl) {
+    try {
+      const h = new URL(publicUrl).hostname;
+      if (h && !isLoopbackHost(h)) return h;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (node.endpoint) {
+    try {
+      const h = new URL(node.endpoint).hostname;
+      if (h && !isLoopbackHost(h)) return h;
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
 }
 
 export class InstanceNotFoundError extends Error {
@@ -69,21 +112,97 @@ function ensureVolumeHostPath(hostPath: string, readOnly?: boolean): void {
   mkdirSync(hostPath, { recursive: true });
 }
 
+function mergeMaskedConfig(
+  current: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    const previous = next[key];
+    if (value === "***" && previous !== undefined) continue;
+    if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      previous && typeof previous === "object" && !Array.isArray(previous)
+    ) {
+      next[key] = mergeMaskedConfig(
+        previous as Record<string, unknown>,
+        value as Record<string, unknown>,
+      );
+      continue;
+    }
+    if (
+      value && typeof value === "object" && !Array.isArray(value) &&
+      typeof previous === "string"
+    ) {
+      try {
+        const previousJson = JSON.parse(previous) as unknown;
+        if (previousJson && typeof previousJson === "object" && !Array.isArray(previousJson)) {
+          next[key] = JSON.stringify(
+            mergeMaskedConfig(
+              previousJson as Record<string, unknown>,
+              value as Record<string, unknown>,
+            ),
+          );
+          continue;
+        }
+      } catch {
+        /* plain string */
+      }
+    }
+    if (typeof value === "string" && typeof previous === "string") {
+      try {
+        const nextJson = JSON.parse(value) as unknown;
+        const previousJson = JSON.parse(previous) as unknown;
+        if (
+          nextJson && typeof nextJson === "object" && !Array.isArray(nextJson) &&
+          previousJson && typeof previousJson === "object" && !Array.isArray(previousJson)
+        ) {
+          next[key] = JSON.stringify(
+            mergeMaskedConfig(
+              previousJson as Record<string, unknown>,
+              nextJson as Record<string, unknown>,
+            ),
+          );
+          continue;
+        }
+      } catch {
+        /* plain string */
+      }
+    }
+    next[key] = value;
+  }
+  return next;
+}
+
 export class Orchestrator {
+  private healthTimer: ReturnType<typeof setTimeout> | null = null;
+  private healthRunning = false;
+  private readonly healthConcurrency = 8;
+  private nodes: RuntimeNodeService | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly runtime: DockerRuntime,
     private readonly config: AppConfig,
   ) {}
 
-  private ctx(tenantId: string, instanceId: string): ProviderContext {
+  setRuntimeNodes(nodes: RuntimeNodeService): void {
+    this.nodes = nodes;
+  }
+
+  private ctx(
+    tenantId: string,
+    instanceId: string,
+    advertiseHost?: string | null,
+  ): ProviderContext {
+    const host = advertiseHost && !isLoopbackHost(advertiseHost) ? advertiseHost : "127.0.0.1";
     return {
       tenantId,
       instanceId,
       dataDir: this.config.dataDir,
       db: this.db,
       resolveEndpoint: (hostPort, path = "") =>
-        `http://127.0.0.1:${hostPort}${path.startsWith("/") || !path ? path : `/${path}`}`,
+        `http://${host}:${hostPort}${path.startsWith("/") || !path ? path : `/${path}`}`,
       logger: {
         info: (msg, meta) => console.log(`[orch] ${msg}`, meta ?? ""),
         warn: (msg, meta) => console.warn(`[orch] ${msg}`, meta ?? ""),
@@ -156,11 +275,16 @@ export class Orchestrator {
     name: string;
     slug: string;
     config: Record<string, unknown>;
+    runtimeNodeId?: string | null;
   }) {
     const plugin = globalRegistry.get(input.providerId);
     const normalized = plugin.validateConfig?.(input.config) ?? input.config;
     const configEnc = encryptJson(this.config.secret, normalized);
     const now = new Date();
+    const runtimeNodeId =
+      input.runtimeNodeId && !isLocalRuntimeNodeId(input.runtimeNodeId)
+        ? input.runtimeNodeId
+        : null;
 
     const [row] = await this.db
       .insert(componentInstances)
@@ -172,6 +296,7 @@ export class Orchestrator {
         slug: input.slug,
         configEnc,
         status: "stopped",
+        runtimeNodeId,
         createdAt: now,
         updatedAt: now,
       })
@@ -303,7 +428,24 @@ export class Orchestrator {
     try {
       const plugin = globalRegistry.get(instance.providerId);
       const config = decryptJson<Record<string, unknown>>(this.config.secret, instance.configEnc);
-      const ctx = this.ctx(instance.tenantId, instance.id);
+
+      const useRunner =
+        !isLocalRuntimeNodeId(instance.runtimeNodeId) && instance.providerId === "stdio-mcp";
+      let advertiseHost: string | null = null;
+      let runnerClient: RunnerClient | null = null;
+      let runnerNode: RuntimeNode | null = null;
+      if (useRunner) {
+        if (!this.nodes) throw new Error("RuntimeNodeService 未挂载，无法在 Runner 上启动");
+        const { client, node } = await this.nodes.requireRunnerClient(
+          tenantId,
+          instance.runtimeNodeId!,
+        );
+        runnerClient = client;
+        runnerNode = node;
+        advertiseHost = advertiseHostFromNode(node);
+      }
+
+      const ctx = this.ctx(instance.tenantId, instance.id, advertiseHost);
       const spec = await plugin.createRuntimeSpec(config, ctx);
 
       await this.db
@@ -337,84 +479,167 @@ export class Orchestrator {
         return handle;
       }
 
-      const ping = await this.runtime.ping();
-      if (!ping.ok) {
-        throw new Error(`Docker 不可用: ${ping.error}`);
-      }
-
-      await this.runtime.ensureNetwork(this.config.dockerNetwork);
-
       let endpointUrl = instance.endpointUrl ?? spec.endpointTemplate ?? null;
 
-      for (const containerSpec of spec.containers) {
-        const dataSubdir = join(this.config.dataDir, instance.providerId, instance.id);
-        mkdirSync(dataSubdir, { recursive: true });
+      if (runnerClient && runnerNode) {
+        // 远程 Runner：清空旧 managed_containers 记录后按 spec 启动
+        await this.db
+          .delete(managedContainers)
+          .where(
+            and(
+              eq(managedContainers.instanceId, instanceId),
+              eq(managedContainers.tenantId, tenantId),
+            ),
+          );
 
-        const volumes = (containerSpec.volumes ?? []).map((v) => {
-          if (v.hostPath) {
-            ensureVolumeHostPath(v.hostPath, v.readOnly);
-          }
-          return v;
-        });
+        for (const containerSpec of spec.containers) {
+          this.emitProgress(
+            instance,
+            "pull_image",
+            `在 Runner 上拉取镜像 ${containerSpec.image}`,
+          );
+          const volumes = (containerSpec.volumes ?? []).map((v) => {
+            // Runner 自管数据目录；本机绝对路径卷忽略 hostPath，让 Runner 用默认 /data
+            if (v.hostPath && (v.hostPath.includes("stdio-mcp") || v.hostPath.includes(instance.id))) {
+              return { containerPath: v.containerPath, readOnly: v.readOnly };
+            }
+            return v;
+          });
+          const name = `${tenant.slug}-${instance.slug}-${containerSpec.name}`.replace(
+            /[^a-zA-Z0-9_.-]+/g,
+            "-",
+          );
+          const running = await runnerClient.startInstance({
+            instanceId: instance.id,
+            tenantId: instance.tenantId,
+            name,
+            image: containerSpec.image,
+            env: containerSpec.env,
+            command: containerSpec.command,
+            ports: containerSpec.ports,
+            volumes: volumes.length
+              ? volumes.map((v) => ({
+                  hostPath: v.hostPath,
+                  volumeName: "volumeName" in v ? (v as { volumeName?: string }).volumeName : undefined,
+                  containerPath: v.containerPath,
+                  readOnly: v.readOnly,
+                }))
+              : undefined,
+            labels: {
+              ...(containerSpec.labels ?? {}),
+              "zakura.slug": instance.slug,
+            },
+            network: containerSpec.network,
+            workingDir: containerSpec.workingDir,
+          });
+          this.emitProgress(instance, "image_ready", `Runner 容器就绪：${running.name}`, "ok");
 
-        const name = this.runtime.buildSpecName(tenant.slug, instance.slug, containerSpec.name);
+          const now = new Date();
+          await this.db.insert(managedContainers).values({
+            id: newId(),
+            tenantId: instance.tenantId,
+            instanceId: instance.id,
+            dockerId: running.dockerId,
+            name: running.name,
+            image: running.image,
+            purpose: containerSpec.purpose ?? "component",
+            status: running.status,
+            labelsJson: JSON.stringify({}),
+            portsJson: JSON.stringify(running.ports),
+            envEnc: containerSpec.env
+              ? encryptJson(this.config.secret, containerSpec.env)
+              : null,
+            runtimeNodeId: runnerNode.id,
+            createdAt: now,
+            updatedAt: now,
+          });
 
-        const existing = await this.runtime.list({
-          tenantId: instance.tenantId,
-          instanceId: instance.id,
-        });
-        for (const ex of existing) {
-          if (ex.name === name) {
-            await this.runtime.remove(ex.id, true);
-            await this.db
-              .delete(managedContainers)
-              .where(eq(managedContainers.dockerId, ex.id));
+          if (containerSpec.name === spec.primaryContainer || spec.containers.length === 1) {
+            const published = running.ports.find((p) => p.hostPort);
+            if (published?.hostPort) {
+              endpointUrl = ctx.resolveEndpoint(published.hostPort);
+            }
           }
         }
+      } else {
+        const ping = await this.runtime.ping();
+        if (!ping.ok) {
+          throw new Error(`Docker 不可用: ${ping.error}`);
+        }
 
-        this.emitProgress(
-          instance,
-          "pull_image",
-          `拉取镜像 ${containerSpec.image}（首次可能需要几分钟）`,
-        );
-        await this.runtime.ensureImage(containerSpec.image);
-        this.emitProgress(instance, "image_ready", `镜像就绪：${containerSpec.image}`, "ok");
+        await this.runtime.ensureNetwork(this.config.dockerNetwork);
 
-        const running = await this.runtime.createAndStart({
-          tenantId: instance.tenantId,
-          instanceId: instance.id,
-          purpose: containerSpec.purpose ?? "component",
-          spec: {
-            ...containerSpec,
-            name,
-            volumes,
-            network: containerSpec.network ?? this.config.dockerNetwork,
-          },
-        });
+        for (const containerSpec of spec.containers) {
+          const dataSubdir = join(this.config.dataDir, instance.providerId, instance.id);
+          mkdirSync(dataSubdir, { recursive: true });
 
-        const now = new Date();
-        await this.db.insert(managedContainers).values({
-          id: newId(),
-          tenantId: instance.tenantId,
-          instanceId: instance.id,
-          dockerId: running.id,
-          name: running.name,
-          image: running.image,
-          purpose: containerSpec.purpose ?? "component",
-          status: running.status,
-          labelsJson: JSON.stringify(running.labels),
-          portsJson: JSON.stringify(running.ports),
-          envEnc: containerSpec.env
-            ? encryptJson(this.config.secret, containerSpec.env)
-            : null,
-          createdAt: now,
-          updatedAt: now,
-        });
+          const volumes = (containerSpec.volumes ?? []).map((v) => {
+            if (v.hostPath) {
+              ensureVolumeHostPath(v.hostPath, v.readOnly);
+            }
+            return v;
+          });
 
-        if (containerSpec.name === spec.primaryContainer || spec.containers.length === 1) {
-          const published = running.ports.find((p) => p.hostPort);
-          if (published?.hostPort) {
-            endpointUrl = ctx.resolveEndpoint(published.hostPort);
+          const name = this.runtime.buildSpecName(tenant.slug, instance.slug, containerSpec.name);
+
+          const existing = await this.runtime.list({
+            tenantId: instance.tenantId,
+            instanceId: instance.id,
+          });
+          for (const ex of existing) {
+            if (ex.name === name) {
+              await this.runtime.remove(ex.id, true);
+              await this.db
+                .delete(managedContainers)
+                .where(eq(managedContainers.dockerId, ex.id));
+            }
+          }
+
+          this.emitProgress(
+            instance,
+            "pull_image",
+            `拉取镜像 ${containerSpec.image}（首次可能需要几分钟）`,
+          );
+          await this.runtime.ensureImage(containerSpec.image);
+          this.emitProgress(instance, "image_ready", `镜像就绪：${containerSpec.image}`, "ok");
+
+          const running = await this.runtime.createAndStart({
+            tenantId: instance.tenantId,
+            instanceId: instance.id,
+            purpose: containerSpec.purpose ?? "component",
+            spec: {
+              ...containerSpec,
+              name,
+              volumes,
+              network: containerSpec.network ?? this.config.dockerNetwork,
+            },
+          });
+
+          const now = new Date();
+          await this.db.insert(managedContainers).values({
+            id: newId(),
+            tenantId: instance.tenantId,
+            instanceId: instance.id,
+            dockerId: running.id,
+            name: running.name,
+            image: running.image,
+            purpose: containerSpec.purpose ?? "component",
+            status: running.status,
+            labelsJson: JSON.stringify(running.labels),
+            portsJson: JSON.stringify(running.ports),
+            envEnc: containerSpec.env
+              ? encryptJson(this.config.secret, containerSpec.env)
+              : null,
+            runtimeNodeId: null,
+            createdAt: now,
+            updatedAt: now,
+          });
+
+          if (containerSpec.name === spec.primaryContainer || spec.containers.length === 1) {
+            const published = running.ports.find((p) => p.hostPort);
+            if (published?.hostPort) {
+              endpointUrl = ctx.resolveEndpoint(published.hostPort);
+            }
           }
         }
       }
@@ -463,18 +688,38 @@ export class Orchestrator {
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
 
-    for (const c of containers) {
-      if (!c.dockerId) continue;
+    const useRunner = !isLocalRuntimeNodeId(instance.runtimeNodeId);
+    if (useRunner && this.nodes) {
       try {
-        await this.runtime.stop(c.dockerId);
-        await this.runtime.remove(c.dockerId, true);
+        const { client } = await this.nodes.requireRunnerClient(
+          tenantId,
+          instance.runtimeNodeId!,
+          { allowOffline: true },
+        );
+        await client.stopInstance(instanceId, true);
       } catch (err) {
-        console.warn(`[orch] stop/remove ${c.name}:`, err);
+        console.warn(`[orch] runner stop ${instance.slug}:`, err);
       }
-      await this.db
-        .update(managedContainers)
-        .set({ status: "removed", dockerId: null, updatedAt: new Date() })
-        .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
+      for (const c of containers) {
+        await this.db
+          .update(managedContainers)
+          .set({ status: "removed", dockerId: null, updatedAt: new Date() })
+          .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
+      }
+    } else {
+      for (const c of containers) {
+        if (!c.dockerId) continue;
+        try {
+          await this.runtime.stop(c.dockerId);
+          await this.runtime.remove(c.dockerId, true);
+        } catch (err) {
+          console.warn(`[orch] stop/remove ${c.name}:`, err);
+        }
+        await this.db
+          .update(managedContainers)
+          .set({ status: "removed", dockerId: null, updatedAt: new Date() })
+          .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
+      }
     }
 
     await this.db
@@ -490,12 +735,39 @@ export class Orchestrator {
     const instance = await this.requireInstance(tenantId, instanceId);
     const handle = await this.toHandle(tenantId, instanceId);
     const plugin = globalRegistry.get(handle.providerId);
-    const result = await plugin.healthCheck(handle);
+    let result;
+    try {
+      result = await plugin.healthCheck(handle);
+    } catch (error) {
+      result = {
+        status: "unhealthy" as const,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    // Some older MCP servers only expose a plain HTTP/SSE endpoint. If their
+    // protocol handshake is no longer understood, still distinguish a live
+    // endpoint from an unreachable one instead of marking it dead immediately.
+    if (result.status === "unhealthy" && !result.details?.authRequired) {
+      const fallback = await this.fallbackEndpointHealth(handle).catch(() => null);
+      if (fallback) result = fallback;
+    }
+
+    const now = new Date();
+    const previousFailures = instance.healthFailureCount ?? 0;
+    const failures = result.status === "healthy" ? 0 : Math.min(previousFailures + 1, 10);
+    const nextHealthCheckAt = new Date(
+      now.getTime() + this.healthIntervalMs(handle, result.status, failures),
+    );
     await this.db
       .update(componentInstances)
       .set({
         healthStatus: result.status,
         lastError: result.status === "unhealthy" ? result.message ?? null : null,
+        lastHealthCheckAt: now,
+        nextHealthCheckAt,
+        healthFailureCount: failures,
+        healthClaimUntil: null,
         updatedAt: new Date(),
       })
       .where(
@@ -508,6 +780,143 @@ export class Orchestrator {
     return result;
   }
 
+  private healthIntervalMs(
+    handle: InstanceHandle,
+    status: "healthy" | "unhealthy" | "unknown",
+    failures: number,
+  ): number {
+    if (status === "healthy") {
+      const remote = handle.providerId === "generic-mcp" ||
+        String(handle.endpointUrl ?? "").startsWith("http");
+      return remote ? 10 * 60_000 : 5 * 60_000;
+    }
+    if (status === "unknown") return 60_000;
+    return Math.min(30 * 60_000, 30_000 * 2 ** Math.min(failures - 1, 6));
+  }
+
+  private async fallbackEndpointHealth(handle: InstanceHandle): Promise<{
+    status: "healthy" | "unhealthy";
+    message: string;
+    details?: Record<string, unknown>;
+  } | null> {
+    const cfg = handle.config;
+    const raw = typeof cfg.mcpUrl === "string"
+      ? cfg.mcpUrl
+      : typeof cfg.endpointUrl === "string"
+        ? cfg.endpointUrl
+        : handle.endpointUrl;
+    if (!raw || !/^https?:\/\//i.test(raw)) return null;
+    const headers = mcpAuthHeaders({
+      apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : undefined,
+      headerName: typeof cfg.headerName === "string" ? cfg.headerName : undefined,
+    });
+    if (typeof cfg.oauthAccessToken === "string" && cfg.oauthAccessToken.trim()) {
+      headers.Authorization = `Bearer ${cfg.oauthAccessToken.trim()}`;
+    }
+    let response = await fetch(raw, {
+      method: "HEAD",
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (response.status === 405 || response.status === 501) {
+      response = await fetch(raw, {
+        method: "GET",
+        headers: { ...headers, Accept: "text/event-stream, application/json, */*" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(8_000),
+      });
+    }
+    if (response.status === 401 || response.status === 403) {
+      return {
+        status: "unhealthy",
+        message: `AUTH_REQUIRED: HTTP ${response.status}`,
+        details: { authRequired: true, protocolFallback: true },
+      };
+    }
+    if (response.status >= 200 && response.status < 500) {
+      return {
+        status: "healthy",
+        message: `endpoint reachable (HTTP ${response.status})`,
+        details: { protocolFallback: true, statusCode: response.status },
+      };
+    }
+    return {
+      status: "unhealthy",
+      message: `endpoint returned HTTP ${response.status}`,
+      details: { protocolFallback: true, statusCode: response.status },
+    };
+  }
+
+  /** Start one process-local scheduler; DB claims make it safe across replicas. */
+  startHealthScheduler(opts: { pollMs?: number } = {}): void {
+    if (this.healthTimer) return;
+    const pollMs = Math.max(5_000, opts.pollMs ?? 15_000);
+    const tick = async () => {
+      if (this.healthRunning) return;
+      this.healthRunning = true;
+      try {
+        await this.runHealthBatch();
+      } catch (error) {
+        console.warn("[mcp-health] scheduler tick failed:", error);
+      } finally {
+        this.healthRunning = false;
+        this.healthTimer = setTimeout(() => void tick(), pollMs);
+        this.healthTimer.unref?.();
+      }
+    };
+    void tick();
+  }
+
+  stopHealthScheduler(): void {
+    if (this.healthTimer) clearTimeout(this.healthTimer);
+    this.healthTimer = null;
+  }
+
+  private async runHealthBatch(): Promise<void> {
+    const now = new Date();
+    const candidates = await this.db
+      .select({ id: componentInstances.id, tenantId: componentInstances.tenantId })
+      .from(componentInstances)
+      .where(and(
+        eq(componentInstances.status, "running"),
+        lt(componentInstances.nextHealthCheckAt, now),
+        or(isNull(componentInstances.healthClaimUntil), lt(componentInstances.healthClaimUntil, now)),
+      ))
+      .limit(this.healthConcurrency * 2);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(this.healthConcurrency, candidates.length) }, async () => {
+      while (cursor < candidates.length) {
+        const candidate = candidates[cursor++];
+        if (!candidate) return;
+        const claimUntil = new Date(Date.now() + 60_000);
+        const [claimed] = await this.db
+          .update(componentInstances)
+          .set({ healthClaimUntil: claimUntil, updatedAt: new Date() })
+          .where(and(
+            eq(componentInstances.id, candidate.id),
+            eq(componentInstances.tenantId, candidate.tenantId),
+            eq(componentInstances.status, "running"),
+            lt(componentInstances.nextHealthCheckAt, new Date()),
+            or(isNull(componentInstances.healthClaimUntil), lt(componentInstances.healthClaimUntil, new Date())),
+          ))
+          .returning();
+        if (!claimed) continue;
+        try {
+          await this.refreshHealth(candidate.tenantId, candidate.id);
+        } catch (error) {
+          console.warn(`[mcp-health] ${candidate.id} failed:`, error instanceof Error ? error.message : error);
+          await this.db.update(componentInstances).set({
+            healthClaimUntil: null,
+            nextHealthCheckAt: new Date(Date.now() + 60_000),
+            updatedAt: new Date(),
+          }).where(and(eq(componentInstances.id, candidate.id), eq(componentInstances.tenantId, candidate.tenantId)));
+        }
+      }
+    });
+    await Promise.all(workers);
+  }
+
   /** Merge/replace encrypted config for an existing instance */
   async updateInstanceConfig(
     tenantId: string,
@@ -518,7 +927,7 @@ export class Orchestrator {
     const instance = await this.requireInstance(tenantId, instanceId);
     const plugin = globalRegistry.get(instance.providerId);
     const current = decryptJson<Record<string, unknown>>(this.config.secret, instance.configEnc);
-    const merged = opts?.replace ? { ...patch } : { ...current, ...patch };
+    const merged = opts?.replace ? { ...patch } : mergeMaskedConfig(current, patch);
     const normalized = plugin.validateConfig?.(merged) ?? merged;
     await this.db
       .update(componentInstances)

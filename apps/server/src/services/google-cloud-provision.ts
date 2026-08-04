@@ -1,6 +1,9 @@
 import { createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import type { AppConfig } from "../config.js";
-import { mcpOauthRedirectUri } from "./mcp-oauth-apps.js";
+
+function mcpOauthRedirectUri(config: AppConfig): string {
+  return `${config.publicBaseUrl.replace(/\/$/, "")}/api/mcp/upstream-oauth/callback`;
+}
 
 /** Google Workspace 所需启用的 Cloud API（本地 REST，无需 *mcp.googleapis.com） */
 export const GOOGLE_WORKSPACE_MCP_SERVICES = [

@@ -11,6 +11,7 @@ import type { RunnerAuthConfig } from "./auth.js";
 import { requireRunnerAuth, tokenMatches, extractBearer } from "./auth.js";
 import { collectHostInfo, resolveEndpointPublicHost } from "./host-info.js";
 import { RunnerDockerWorkspace } from "./docker-workspace.js";
+import { RunnerDockerComponents } from "./docker-components.js";
 import { TunnelManager } from "./tunnel/manager.js";
 
 export type RunnerConfig = {
@@ -72,6 +73,7 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     );
   }
   const dockerWs = new RunnerDockerWorkspace(cfg.storageRoot, publicHost);
+  const dockerComponents = new RunnerDockerComponents(cfg.storageRoot, publicHost);
   const tunnels = new TunnelManager();
 
   app.get("/health", (c) => c.json({ ok: true, service: "zakura-runner" }));
@@ -187,6 +189,136 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, 500);
+    }
+  });
+
+  // --- Component / MCP instance lifecycle ---
+  app.post("/v1/instances/:instanceId/start", async (c) => {
+    const instanceId = c.req.param("instanceId");
+    type Body = {
+      tenantId?: string;
+      name?: string;
+      image?: string;
+      env?: Record<string, string>;
+      command?: string[];
+      args?: string[];
+      ports?: Array<{
+        containerPort: number;
+        hostPort?: number;
+        hostIp?: string;
+        protocol?: "tcp" | "udp";
+      }>;
+      volumes?: Array<{
+        hostPath?: string;
+        volumeName?: string;
+        containerPath: string;
+        readOnly?: boolean;
+      }>;
+      labels?: Record<string, string>;
+      network?: string;
+      workingDir?: string;
+    };
+    const body = (await c.req.json().catch(() => ({}))) as Body;
+    if (!body.tenantId?.trim() || !body.name?.trim() || !body.image?.trim()) {
+      return c.json({ error: "tenantId, name, and image are required" }, 400);
+    }
+    try {
+      const info = await dockerComponents.start({
+        instanceId,
+        tenantId: body.tenantId,
+        name: body.name,
+        image: body.image,
+        env: body.env,
+        command: body.command,
+        args: body.args,
+        ports: body.ports,
+        volumes: body.volumes,
+        labels: body.labels,
+        network: body.network,
+        workingDir: body.workingDir,
+      });
+      return c.json({ instance: info }, 201);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 403 ? 403 : 500);
+    }
+  });
+
+  app.post("/v1/instances/:instanceId/stop", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { remove?: boolean };
+    try {
+      await dockerComponents.stop(c.req.param("instanceId"), body.remove !== false);
+      return c.json({ ok: true });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.get("/v1/instances/:instanceId", async (c) => {
+    try {
+      const info = await dockerComponents.get(c.req.param("instanceId"));
+      if (!info) return c.json({ instance: null });
+      return c.json({ instance: info });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.post("/v1/instances/:instanceId/migration/export", async (c) => {
+    const instanceId = c.req.param("instanceId");
+    const body = await c.req
+      .json<{
+        sourceNodeId?: string;
+        excludePatterns?: string[];
+        includePatterns?: string[];
+      }>()
+      .catch(
+        () =>
+          ({} as {
+            sourceNodeId?: string;
+            excludePatterns?: string[];
+            includePatterns?: string[];
+          }),
+      );
+    try {
+      const result = await dockerComponents.exportData(instanceId, body);
+      const manifestB64 = Buffer.from(JSON.stringify(result.manifest), "utf8").toString(
+        "base64url",
+      );
+      return new Response(result.archive, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(result.archive.length),
+          "X-Archive-Sha256": result.archiveSha256,
+          "X-Migration-Manifest": manifestB64,
+        },
+      });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/v1/instances/:instanceId/migration/import", async (c) => {
+    const instanceId = c.req.param("instanceId");
+    const expectedSha = c.req.header("x-archive-sha256") ?? undefined;
+    const atomic = c.req.header("x-atomic") !== "0";
+    try {
+      const buf = Buffer.from(await c.req.arrayBuffer());
+      const result = await dockerComponents.importData(instanceId, buf, {
+        expectedSha256: expectedSha,
+        atomic,
+      });
+      return c.json({
+        ok: true as const,
+        fileCount: result.fileCount,
+        workspaceRoot: result.workspaceRoot,
+      });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
     }
   });
 

@@ -152,13 +152,30 @@ export function registerSkillRoutes(
     }
   });
 
-  /** 立即检查并更新（不看开关，用户点了就跑） */
+  /** 立即检查并更新（只更新各自开启了自动更新的第三方技能；内置始终同步） */
   app.post("/api/skills/check-updates", async (c) => {
     const session = c.get("session")!;
     try {
       const result = await skills.checkUpdatesNow(session.tenantId);
       const status = await skills.autoUpdateStatus(session.tenantId);
       return c.json({ result, status });
+    } catch (err) {
+      const e = errorResponse(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  /** 单技能自动更新开关 */
+  app.patch("/api/skills/:id/auto-update", async (c) => {
+    const session = c.get("session")!;
+    const body = (await c.req.json().catch(() => ({}))) as { enabled?: boolean };
+    if (typeof body.enabled !== "boolean") {
+      return c.json({ error: "enabled is required" }, 400);
+    }
+    try {
+      return c.json({
+        skill: await skills.setSkillAutoUpdate(session.tenantId, c.req.param("id"), body.enabled),
+      });
     } catch (err) {
       const e = errorResponse(err);
       return c.json(e.body, e.status);

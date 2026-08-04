@@ -166,6 +166,9 @@ function FeaturedMcpCard({
           title: mcp.name,
           description: mcp.description,
           subtitle: mcp.mcpUrl,
+          brandId: mcp.oauth?.providerId ?? mcp.id,
+          mcpUrl: mcp.mcpUrl,
+          homepage: mcp.docsUrl,
           badges: [{ label: tier.label, variant: tier.variant }],
           installed: installedLocal,
         }}

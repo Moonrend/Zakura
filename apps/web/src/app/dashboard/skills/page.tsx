@@ -17,6 +17,7 @@ export default function SkillsPage() {
   const [stores, setStores] = useState<SkillStoreMeta[]>([]);
   const [skills, setSkills] = useState<SkillRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("store");
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -46,9 +47,12 @@ export default function SkillsPage() {
 
   return (
     <div className="space-y-5">
-      <SettingsHeader title="技能" />
+      <SettingsHeader
+        title="技能"
+        description="浏览商店、管理已安装技能与自动更新；可在设置中添加 Claude / Codex 市场"
+      />
 
-      <Tabs defaultValue="store">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList variant="line" className="grid w-full grid-cols-3 sm:max-w-md">
           <TabsTrigger value="store">
             <Blocks className="size-4" />

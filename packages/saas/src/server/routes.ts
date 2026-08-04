@@ -451,6 +451,22 @@ export function registerSaasRoutes(
     });
   });
 
+  app.get("/api/admin/agent-defaults", async (c) => {
+    return c.json(await deps.agentDefaults?.get());
+  });
+
+  app.put("/api/admin/agent-defaults", async (c) => {
+    if (!deps.agentDefaults) return c.json({ error: "Agent defaults unavailable" }, 503);
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+    try {
+      const saved = await deps.agentDefaults.save(body);
+      await deps.agentDefaults.syncManaged();
+      return c.json(saved);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   app.patch("/api/admin/platform", async (c) => {
     return c.json(
       {
@@ -624,6 +640,15 @@ export function registerSaasRoutes(
         canUseLocalRunner: updated.canUseLocalRunner || updated.isPlatformAdmin,
       },
     });
+  });
+
+  app.post("/api/admin/users/:id/agent-defaults/apply", async (c) => {
+    if (!deps.agentDefaults) return c.json({ error: "Agent defaults unavailable" }, 503);
+    try {
+      return c.json(await deps.agentDefaults.enableForUser(c.req.param("id")));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   // ── Shared runners ────────────────────────────────────────────────────

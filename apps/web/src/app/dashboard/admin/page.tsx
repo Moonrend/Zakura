@@ -9,12 +9,14 @@ import { useMe } from "@/components/me-context";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { PlatformHeadscalePanel } from "@/components/platform-headscale-panel";
 import { PlatformSkillTokenPanel } from "@/components/skills/platform-skill-token-panel";
+import { PlatformConnectorProvisionPanel } from "@/components/connections/platform-connector-provision";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type Platform = {
@@ -75,6 +77,27 @@ type AdminRunner = {
   createdAt: string;
 };
 
+type AgentDefaults = {
+  webSearchEnabled: boolean;
+  webFetchEnabled: boolean;
+  searchEngine: string | null;
+  fetchBackend: string | null;
+  autoManagedServices: string[];
+};
+
+type ManagedService = {
+  key: string;
+  name: string;
+  description: string;
+  mode: string;
+  healthStatus: string;
+};
+
+type WebCatalog = {
+  webSearch: { engines: Array<{ id: string; name: string }> };
+  webFetch: { backends: Array<{ id: string; name: string }> };
+};
+
 /** SaaS-only — stripped from OSS builds. Requires ZAKURA_EDITION=saas. */
 export default function AdminPage() {
   const router = useRouter();
@@ -98,6 +121,10 @@ export default function AdminPage() {
   const [savingOauth, setSavingOauth] = useState(false);
   const [busyUserId, setBusyUserId] = useState<string | null>(null);
   const [busyRunnerId, setBusyRunnerId] = useState<string | null>(null);
+  const [agentDefaults, setAgentDefaults] = useState<AgentDefaults | null>(null);
+  const [savingAgentDefaults, setSavingAgentDefaults] = useState(false);
+  const [managedServices, setManagedServices] = useState<ManagedService[]>([]);
+  const [webCatalog, setWebCatalog] = useState<WebCatalog | null>(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -108,17 +135,23 @@ export default function AdminPage() {
         router.replace("/dashboard/agents");
         return;
       }
-      const [p, t, o, u, r] = await Promise.all([
+      const [p, t, o, u, r, defaults, managed, catalog] = await Promise.all([
         api<Platform>("/api/admin/platform"),
         api<{ tenants: AdminTenant[] }>("/api/admin/tenants"),
         api<ZerocatOauthConfig>("/api/admin/oauth/zerocat"),
         api<{ users: AdminUser[] }>("/api/admin/users"),
         api<{ runners: AdminRunner[] }>("/api/admin/runners"),
+        api<AgentDefaults>("/api/admin/agent-defaults"),
+        api<{ services: ManagedService[] }>("/api/platform-services"),
+        api<WebCatalog>("/api/capabilities"),
       ]);
       setPlatform(p);
       setTenants(t.tenants);
       setUsers(u.users);
       setRunners(r.runners);
+      setAgentDefaults(defaults);
+      setManagedServices(managed.services.filter((s) => s.mode !== "disabled"));
+      setWebCatalog(catalog);
       setOauth(o);
       setOauthDraft({
         enabled: o.enabled,
@@ -225,6 +258,38 @@ export default function AdminPage() {
     }
   }
 
+  async function saveAgentDefaults() {
+    if (!agentDefaults) return;
+    setSavingAgentDefaults(true);
+    try {
+      const saved = await api<AgentDefaults>("/api/admin/agent-defaults", {
+        method: "PUT",
+        json: agentDefaults,
+      });
+      setAgentDefaults(saved);
+      toast.success("Agent 默认配置已保存");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingAgentDefaults(false);
+    }
+  }
+
+  async function applyAgentDefaults(userId: string) {
+    setBusyUserId(userId);
+    try {
+      const result = await api<{ updated: number }>(
+        `/api/admin/users/${userId}/agent-defaults/apply`,
+        { method: "POST" },
+      );
+      toast.success(`已为该用户回溯启用 ${result.updated} 个 Agent`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyUserId(null);
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-5">
@@ -251,6 +316,85 @@ export default function AdminPage() {
       <PlatformHeadscalePanel />
 
       <PlatformSkillTokenPanel />
+
+      <PlatformConnectorProvisionPanel />
+
+      {agentDefaults ? (
+        <SettingsSection title="Agent 默认网页工具">
+          <p className="mb-4 text-sm text-muted-foreground">
+            新建 Agent 和未单独覆盖的 Agent 会跟随这里的设置。平台托管服务只对租户提供使用能力，连接地址和凭据不会下发。
+          </p>
+          <div className="space-y-3">
+            <SettingsField label="默认启用网页搜索">
+              <Switch checked={agentDefaults.webSearchEnabled} onCheckedChange={(v) => setAgentDefaults((d) => d && ({ ...d, webSearchEnabled: v }))} />
+            </SettingsField>
+            <SettingsField label="默认启用网页抓取">
+              <Switch checked={agentDefaults.webFetchEnabled} onCheckedChange={(v) => setAgentDefaults((d) => d && ({ ...d, webFetchEnabled: v }))} />
+            </SettingsField>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="platform-default-search">默认搜索引擎</Label>
+                <select
+                  id="platform-default-search"
+                  value={agentDefaults.searchEngine ?? ""}
+                  onChange={(e) => setAgentDefaults((d) => d && ({ ...d, searchEngine: e.target.value || null }))}
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="">跟随网页配置</option>
+                  {(webCatalog?.webSearch.engines ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="platform-default-fetch">默认抓取后端</Label>
+                <select
+                  id="platform-default-fetch"
+                  value={agentDefaults.fetchBackend ?? ""}
+                  onChange={(e) => setAgentDefaults((d) => d && ({ ...d, fetchBackend: e.target.value || null }))}
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="">跟随网页配置</option>
+                  {(webCatalog?.webFetch.backends ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </div>
+            </div>
+            {managedServices.length ? (
+              <div className="space-y-2 pt-2">
+                <Label>自动提供给租户的自托管服务</Label>
+                <p className="text-xs text-muted-foreground">
+                  勾选后会自动添加到所有租户的网页配置，并作为可用服务启用。
+                </p>
+                <div className="space-y-2">
+                  {managedServices.map((service) => (
+                    <label key={service.key} className="flex items-start gap-2 text-sm">
+                      <Checkbox
+                        checked={agentDefaults.autoManagedServices.includes(service.key)}
+                        onCheckedChange={(checked) =>
+                          setAgentDefaults((current) => {
+                            if (!current) return current;
+                            const values = new Set(current.autoManagedServices);
+                            if (checked) values.add(service.key);
+                            else values.delete(service.key);
+                            return { ...current, autoManagedServices: [...values] };
+                          })
+                        }
+                      />
+                      <span>
+                        <span className="block font-medium">{service.name}</span>
+                        <span className="block text-xs text-muted-foreground">{service.description}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="flex gap-2">
+              <Button onClick={() => void saveAgentDefaults()} disabled={savingAgentDefaults}>
+                {savingAgentDefaults ? "保存中…" : "保存默认配置"}
+              </Button>
+            </div>
+          </div>
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection title="登录 OAuth · ZeroCat">
         <p className="text-sm text-muted-foreground">
@@ -390,6 +534,7 @@ export default function AdminPage() {
               <TableHead>团队</TableHead>
               <TableHead>平台管理员</TableHead>
               <TableHead>Local Runner</TableHead>
+              <TableHead>网页默认</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -401,6 +546,16 @@ export default function AdminPage() {
                   {!u.hasPassword ? (
                     <span className="text-[11px] text-muted-foreground">OAuth</span>
                   ) : null}
+                </TableCell>
+                <TableCell>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busyUserId === u.id}
+                    onClick={() => void applyAgentDefaults(u.id)}
+                  >
+                    回溯启用
+                  </Button>
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {u.tenants.length

@@ -601,11 +601,7 @@ export default function WebPage() {
 
                 {editRow.slot.usePlatform ? (
                   <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                    使用自托管服务端点
-                    {editRow.platform?.endpointUrl
-                      ? `（${editRow.platform.endpointUrl}）`
-                      : ""}
-                    ，无需填写 Base URL。
+                    使用自托管服务端点，无需填写 Base URL。
                   </p>
                 ) : null}
 
@@ -834,7 +830,7 @@ function ServiceSection({
                   </div>
                   <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
                     {row.slot.usePlatform
-                      ? row.platform?.endpointUrl || "使用本机自托管端点"
+                      ? "使用平台托管端点"
                       : row.slot.baseUrl ||
                         (row.slot.hasApiKey ? "已配置 API Key" : "点击配置凭据")}
                   </p>

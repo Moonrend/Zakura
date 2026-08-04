@@ -1,0 +1,385 @@
+[
+  {
+    "slug": "google-workspace",
+    "name": "Google Workspace",
+    "description": "由平台直接调用 Google API，提供邮件、文件、日历、联系人和协作工具。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "G",
+    "accent": "#4285f4",
+    "homepage": "https://developers.google.com/workspace",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "平台内建连接器。reCloud 负责 OAuth、API 请求、工具定义和权限边界。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "google-workspace",
+        "name": "Google Workspace",
+        "description": "直接调用 Google Workspace REST API，不依赖外部 MCP 服务。",
+        "config": {
+          "providerId": "google-workspace",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://console.cloud.google.com/apis/credentials",
+          "authorizationEndpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+          "tokenEndpoint": "https://oauth2.googleapis.com/token",
+          "authorizeParams": { "access_type": "offline", "prompt": "consent" },
+          "pathHints": ["zakura://google-workspace/"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true, "placeholder": "*.apps.googleusercontent.com" },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "google-gmail", "name": "Gmail", "description": "搜索邮件、管理标签和草稿，并在授权后发送邮件。", "config": { "providerId": "google-workspace", "product": "gmail", "mcpUrl": "zakura://google-workspace/gmail", "scopes": "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send" } },
+      { "kind": "tool", "ref": "google-drive", "name": "Google Drive", "description": "搜索、读取和管理云端文件。", "config": { "providerId": "google-workspace", "product": "drive", "mcpUrl": "zakura://google-workspace/drive", "scopes": "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file" } },
+      { "kind": "tool", "ref": "google-calendar", "name": "Google Calendar", "description": "读取空闲时间并管理日程。", "config": { "providerId": "google-workspace", "product": "calendar", "mcpUrl": "zakura://google-workspace/calendar", "scopes": "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.events" } },
+      { "kind": "tool", "ref": "google-people", "name": "Google People", "description": "查找联系人和组织通讯录。", "config": { "providerId": "google-workspace", "product": "people", "mcpUrl": "zakura://google-workspace/people", "scopes": "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/contacts.readonly https://www.googleapis.com/auth/directory.readonly" } },
+      { "kind": "tool", "ref": "google-chat", "name": "Google Chat", "description": "读取空间与消息并发送回复。", "config": { "providerId": "google-workspace", "product": "chat", "mcpUrl": "zakura://google-workspace/chat", "scopes": "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/chat.spaces.readonly https://www.googleapis.com/auth/chat.memberships.readonly https://www.googleapis.com/auth/chat.messages.readonly https://www.googleapis.com/auth/chat.messages.create" } },
+      { "kind": "skill", "ref": "google-workspace", "name": "Google Workspace", "description": "跨 Gmail、Drive、Calendar、People 与 Chat 编排任务。", "config": { "source": "builtin:google-workspace" } }
+    ]
+  },
+  {
+    "slug": "microsoft-365",
+    "name": "Microsoft 365",
+    "description": "由平台直接调用 Microsoft Graph，提供 Outlook、文件、Teams 和组织目录工具。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "M",
+    "accent": "#5e5ce6",
+    "homepage": "https://learn.microsoft.com/graph/overview",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "平台内建连接器。reCloud 负责 Graph 请求、工具定义、OAuth 刷新和结果归一化。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "microsoft-365",
+        "name": "Microsoft 365",
+        "description": "直接调用 Microsoft Graph，不依赖外部 MCP 服务。",
+        "config": {
+          "providerId": "microsoft-365",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+          "authorizationEndpoint": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/authorize",
+          "tokenEndpoint": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token",
+          "pathHints": ["zakura://microsoft-365/"],
+          "fields": [
+            { "key": "clientId", "label": "Application (client) ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true },
+            { "key": "tenantId", "label": "Directory (tenant) ID", "type": "text", "required": false, "placeholder": "common" }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "microsoft-outlook", "name": "Outlook", "description": "搜索邮件、管理草稿、发送邮件和处理日历。", "config": { "providerId": "microsoft-365", "product": "outlook", "mcpUrl": "zakura://microsoft-365/outlook", "scopes": "openid profile offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite" } },
+      { "kind": "tool", "ref": "microsoft-files", "name": "OneDrive 与 SharePoint", "description": "搜索、读取和管理 Microsoft 365 文件。", "config": { "providerId": "microsoft-365", "product": "files", "mcpUrl": "zakura://microsoft-365/files", "scopes": "openid profile offline_access User.Read Files.ReadWrite.All Sites.Read.All" } },
+      { "kind": "tool", "ref": "microsoft-teams", "name": "Microsoft Teams", "description": "读取团队、频道和消息，并在授权后发送回复。", "config": { "providerId": "microsoft-365", "product": "teams", "mcpUrl": "zakura://microsoft-365/teams", "scopes": "openid profile offline_access User.Read Team.ReadBasic.All Channel.ReadBasic.All ChannelMessage.Read.All ChannelMessage.Send" } },
+      { "kind": "tool", "ref": "microsoft-directory", "name": "组织目录", "description": "查找用户、群组和组织身份。", "config": { "providerId": "microsoft-365", "product": "directory", "mcpUrl": "zakura://microsoft-365/directory", "scopes": "openid profile offline_access User.Read User.ReadBasic.All GroupMember.Read.All" } },
+      { "kind": "skill", "ref": "microsoft-365", "name": "Microsoft 365", "description": "安全地编排 Outlook、OneDrive、Teams 与 Graph 目录任务。", "config": { "source": "builtin:microsoft-365" } }
+    ]
+  },
+  {
+    "slug": "github",
+    "name": "GitHub",
+    "description": "由平台直接调用 GitHub REST API，提供仓库、Issues、Pull Request 与搜索工具；也可作为上游 MCP 的 OAuth 客户端预配。",
+    "publisher": "reCloud",
+    "category": "developer",
+    "icon": "GH",
+    "accent": "#24292f",
+    "homepage": "https://docs.github.com/en/rest",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "平台内建连接器，参考 open-connector GitHub provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "github",
+        "name": "GitHub",
+        "description": "直接调用 GitHub REST API；同时可为 api.githubcopilot.com 等上游 MCP 预配 OAuth 客户端。",
+        "config": {
+          "providerId": "github",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://github.com/settings/developers",
+          "authorizationEndpoint": "https://github.com/login/oauth/authorize",
+          "tokenEndpoint": "https://github.com/login/oauth/access_token",
+          "pathHints": ["zakura://github/"],
+          "hostPatterns": ["api.githubcopilot.com", "github.com", "*.github.com"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "github-repos", "name": "Repositories", "description": "浏览与管理仓库、分支与内容。", "config": { "providerId": "github", "product": "repos", "mcpUrl": "zakura://github/repos", "scopes": "repo read:user" } },
+      { "kind": "tool", "ref": "github-issues", "name": "Issues", "description": "搜索、创建与更新 Issues 及评论。", "config": { "providerId": "github", "product": "issues", "mcpUrl": "zakura://github/issues", "scopes": "repo" } },
+      { "kind": "tool", "ref": "github-pulls", "name": "Pull Requests", "description": "列出、创建与审阅 Pull Request。", "config": { "providerId": "github", "product": "pulls", "mcpUrl": "zakura://github/pulls", "scopes": "repo" } },
+      { "kind": "tool", "ref": "github-search", "name": "Search", "description": "跨仓库搜索代码、Issues 与用户。", "config": { "providerId": "github", "product": "search", "mcpUrl": "zakura://github/search", "scopes": "repo read:user" } },
+      { "kind": "skill", "ref": "github", "name": "GitHub", "description": "编排仓库、Issues 与 PR 工作流。", "config": { "source": "builtin:github" } }
+    ]
+  },
+  {
+    "slug": "slack",
+    "name": "Slack",
+    "description": "由平台直接调用 Slack Web API，提供频道、消息与用户目录工具；也可作为上游 MCP 的 OAuth 客户端预配。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "SL",
+    "accent": "#4a154b",
+    "homepage": "https://api.slack.com",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "平台内建连接器，参考 open-connector Slack provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "slack",
+        "name": "Slack",
+        "description": "直接调用 Slack Web API；同时可为 mcp.slack.com 上游 MCP 预配 OAuth 客户端。",
+        "config": {
+          "providerId": "slack",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://api.slack.com/apps",
+          "authorizationEndpoint": "https://slack.com/oauth/v2/authorize",
+          "tokenEndpoint": "https://slack.com/api/oauth.v2.access",
+          "pathHints": ["zakura://slack/"],
+          "hostPatterns": ["mcp.slack.com", "slack.com", "*.slack.com"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "slack-channels", "name": "Channels", "description": "列出与查找频道。", "config": { "providerId": "slack", "product": "channels", "mcpUrl": "zakura://slack/channels", "scopes": "channels:read groups:read" } },
+      { "kind": "tool", "ref": "slack-messages", "name": "Messages", "description": "读取历史并发送消息。", "config": { "providerId": "slack", "product": "messages", "mcpUrl": "zakura://slack/messages", "scopes": "channels:history groups:history chat:write" } },
+      { "kind": "tool", "ref": "slack-users", "name": "Users", "description": "查找工作区用户资料。", "config": { "providerId": "slack", "product": "users", "mcpUrl": "zakura://slack/users", "scopes": "users:read users:read.email" } },
+      { "kind": "skill", "ref": "slack", "name": "Slack", "description": "编排频道沟通与消息检索。", "config": { "source": "builtin:slack" } }
+    ]
+  },
+  {
+    "slug": "notion",
+    "name": "Notion",
+    "description": "由平台直接调用 Notion API，提供页面、数据库与用户目录工具。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "N",
+    "accent": "#111111",
+    "homepage": "https://developers.notion.com",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector Notion provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "notion",
+        "name": "Notion",
+        "description": "直接调用 Notion REST API；也可为 mcp.notion.com 预配 OAuth 客户端。",
+        "config": {
+          "providerId": "notion",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://www.notion.so/my-integrations",
+          "authorizationEndpoint": "https://api.notion.com/v1/oauth/authorize",
+          "tokenEndpoint": "https://api.notion.com/v1/oauth/token",
+          "authorizeParams": { "owner": "user" },
+          "pathHints": ["zakura://notion/"],
+          "hostPatterns": ["mcp.notion.com", "api.notion.com"],
+          "fields": [
+            { "key": "clientId", "label": "OAuth Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "OAuth Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "notion-pages", "name": "Pages", "description": "搜索、读取与创建页面，并追加内容块。", "config": { "providerId": "notion", "product": "pages", "mcpUrl": "zakura://notion/pages", "scopes": "" } },
+      { "kind": "tool", "ref": "notion-databases", "name": "Databases", "description": "读取与查询数据库。", "config": { "providerId": "notion", "product": "databases", "mcpUrl": "zakura://notion/databases", "scopes": "" } },
+      { "kind": "tool", "ref": "notion-users", "name": "Users", "description": "列出工作区用户。", "config": { "providerId": "notion", "product": "users", "mcpUrl": "zakura://notion/users", "scopes": "" } },
+      { "kind": "skill", "ref": "notion", "name": "Notion", "description": "编排 Notion 页面与数据库任务。", "config": { "source": "builtin:notion" } }
+    ]
+  },
+  {
+    "slug": "linear",
+    "name": "Linear",
+    "description": "由平台直接调用 Linear GraphQL API，提供 Issues、Projects 与 Teams 工具。",
+    "publisher": "reCloud",
+    "category": "developer",
+    "icon": "L",
+    "accent": "#5e6ad2",
+    "homepage": "https://linear.app/docs",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector Linear provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "linear",
+        "name": "Linear",
+        "description": "直接调用 Linear GraphQL；也可为 mcp.linear.app 预配 OAuth 客户端。",
+        "config": {
+          "providerId": "linear",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://linear.app/settings/api",
+          "authorizationEndpoint": "https://linear.app/oauth/authorize",
+          "tokenEndpoint": "https://api.linear.app/oauth/token",
+          "pathHints": ["zakura://linear/"],
+          "hostPatterns": ["mcp.linear.app", "api.linear.app", "linear.app"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "linear-issues", "name": "Issues", "description": "列出、创建 Issues 与评论。", "config": { "providerId": "linear", "product": "issues", "mcpUrl": "zakura://linear/issues", "scopes": "read,write,issues:create,comments:create" } },
+      { "kind": "tool", "ref": "linear-projects", "name": "Projects", "description": "浏览 Linear 项目。", "config": { "providerId": "linear", "product": "projects", "mcpUrl": "zakura://linear/projects", "scopes": "read" } },
+      { "kind": "tool", "ref": "linear-teams", "name": "Teams", "description": "列出团队与当前用户。", "config": { "providerId": "linear", "product": "teams", "mcpUrl": "zakura://linear/teams", "scopes": "read" } },
+      { "kind": "skill", "ref": "linear", "name": "Linear", "description": "编排 Linear 问题跟踪工作流。", "config": { "source": "builtin:linear" } }
+    ]
+  },
+  {
+    "slug": "feishu",
+    "name": "飞书",
+    "description": "由平台直接调用飞书 Open API，提供文档、多维表格与即时消息工具。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "飞",
+    "accent": "#3370ff",
+    "homepage": "https://open.feishu.cn",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector Feishu provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "feishu",
+        "name": "飞书",
+        "description": "直接调用飞书 Open API（user_access_token）。",
+        "config": {
+          "providerId": "feishu",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://open.feishu.cn/app",
+          "authorizationEndpoint": "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+          "tokenEndpoint": "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
+          "pathHints": ["zakura://feishu/"],
+          "hostPatterns": ["open.feishu.cn", "accounts.feishu.cn"],
+          "fields": [
+            { "key": "clientId", "label": "App ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "App Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "feishu-docs", "name": "文档", "description": "读取飞书文档与内容块。", "config": { "providerId": "feishu", "product": "docs", "mcpUrl": "zakura://feishu/docs", "scopes": "docx:document:readonly offline_access" } },
+      { "kind": "tool", "ref": "feishu-bitable", "name": "多维表格", "description": "列出表并检索记录。", "config": { "providerId": "feishu", "product": "bitable", "mcpUrl": "zakura://feishu/bitable", "scopes": "base:record:retrieve offline_access" } },
+      { "kind": "tool", "ref": "feishu-im", "name": "消息", "description": "列出会话并发送消息。", "config": { "providerId": "feishu", "product": "im", "mcpUrl": "zakura://feishu/im", "scopes": "im:chat:readonly im:message offline_access" } },
+      { "kind": "skill", "ref": "feishu", "name": "飞书", "description": "编排飞书文档、表格与消息任务。", "config": { "source": "builtin:feishu" } }
+    ]
+  },
+  {
+    "slug": "discord",
+    "name": "Discord",
+    "description": "由平台直接调用 Discord API，提供服务器与用户资料工具。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "D",
+    "accent": "#5865f2",
+    "homepage": "https://discord.com/developers/docs",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector Discord provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "discord",
+        "name": "Discord",
+        "description": "直接调用 Discord REST API（用户 OAuth）。",
+        "config": {
+          "providerId": "discord",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://discord.com/developers/applications",
+          "authorizationEndpoint": "https://discord.com/oauth2/authorize",
+          "tokenEndpoint": "https://discord.com/api/oauth2/token",
+          "pathHints": ["zakura://discord/"],
+          "hostPatterns": ["discord.com", "discordapp.com"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "discord-guilds", "name": "Guilds", "description": "列出与查看服务器。", "config": { "providerId": "discord", "product": "guilds", "mcpUrl": "zakura://discord/guilds", "scopes": "identify guilds" } },
+      { "kind": "tool", "ref": "discord-user", "name": "User", "description": "读取当前用户与连接账号。", "config": { "providerId": "discord", "product": "user", "mcpUrl": "zakura://discord/user", "scopes": "identify email connections" } },
+      { "kind": "skill", "ref": "discord", "name": "Discord", "description": "编排 Discord 服务器与用户查询。", "config": { "source": "builtin:discord" } }
+    ]
+  },
+  {
+    "slug": "gitlab",
+    "name": "GitLab",
+    "description": "由平台直接调用 GitLab REST API，提供项目与 Issues 工具。",
+    "publisher": "reCloud",
+    "category": "developer",
+    "icon": "GL",
+    "accent": "#fc6d26",
+    "homepage": "https://docs.gitlab.com/ee/api/",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector GitLab provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "gitlab",
+        "name": "GitLab",
+        "description": "直接调用 GitLab.com REST API。",
+        "config": {
+          "providerId": "gitlab",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://gitlab.com/-/user_settings/applications",
+          "authorizationEndpoint": "https://gitlab.com/oauth/authorize",
+          "tokenEndpoint": "https://gitlab.com/oauth/token",
+          "pathHints": ["zakura://gitlab/"],
+          "hostPatterns": ["gitlab.com"],
+          "fields": [
+            { "key": "clientId", "label": "Application ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "gitlab-projects", "name": "Projects", "description": "列出与查看项目。", "config": { "providerId": "gitlab", "product": "projects", "mcpUrl": "zakura://gitlab/projects", "scopes": "read_api read_user" } },
+      { "kind": "tool", "ref": "gitlab-issues", "name": "Issues", "description": "列出与创建项目 Issues。", "config": { "providerId": "gitlab", "product": "issues", "mcpUrl": "zakura://gitlab/issues", "scopes": "api" } },
+      { "kind": "skill", "ref": "gitlab", "name": "GitLab", "description": "编排 GitLab 项目与 Issue 工作流。", "config": { "source": "builtin:gitlab" } }
+    ]
+  },
+  {
+    "slug": "jira",
+    "name": "Jira",
+    "description": "由平台直接调用 Jira Cloud API，提供 Issues 与 Projects 工具。",
+    "publisher": "reCloud",
+    "category": "productivity",
+    "icon": "J",
+    "accent": "#0052cc",
+    "homepage": "https://developer.atlassian.com/cloud/jira/platform/",
+    "verified": true,
+    "featured": true,
+    "manifest": { "summary": "参考 open-connector Jira provider 的核心动作面。" },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "jira",
+        "name": "Jira",
+        "description": "直接调用 Jira Cloud REST API；也可为 mcp.atlassian.com 预配 OAuth 客户端。",
+        "config": {
+          "providerId": "jira",
+          "credentialKind": "oauth2_client",
+          "docsUrl": "https://developer.atlassian.com/console/myapps/",
+          "authorizationEndpoint": "https://auth.atlassian.com/authorize",
+          "tokenEndpoint": "https://auth.atlassian.com/oauth/token",
+          "authorizeParams": { "audience": "api.atlassian.com", "prompt": "consent" },
+          "pathHints": ["zakura://jira/"],
+          "hostPatterns": ["mcp.atlassian.com", "api.atlassian.com", "auth.atlassian.com"],
+          "fields": [
+            { "key": "clientId", "label": "Client ID", "type": "text", "required": true },
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
+          ]
+        }
+      },
+      { "kind": "tool", "ref": "jira-issues", "name": "Issues", "description": "用 JQL 搜索、创建 Issue 与评论。", "config": { "providerId": "jira", "product": "issues", "mcpUrl": "zakura://jira/issues", "scopes": "read:jira-work write:jira-work offline_access" } },
+      { "kind": "tool", "ref": "jira-projects", "name": "Projects", "description": "列出可访问的 Jira 项目。", "config": { "providerId": "jira", "product": "projects", "mcpUrl": "zakura://jira/projects", "scopes": "read:jira-work offline_access" } },
+      { "kind": "skill", "ref": "jira", "name": "Jira", "description": "编排 Jira 问题跟踪工作流。", "config": { "source": "builtin:jira" } }
+    ]
+  }
+]

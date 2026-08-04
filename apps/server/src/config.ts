@@ -52,18 +52,6 @@ export interface AppConfig {
   edition: ZakuraEdition;
   /** True when edition === "saas". */
   multiTenant: boolean;
-  /**
-   * 上游 MCP 无 DCR 时使用的预注册 OAuth App（如 GitHub Remote MCP）。
-   * 见 ZAKURA_GITHUB_OAUTH_CLIENT_ID / SECRET。
-   */
-  mcpOauthClients: {
-    githubClientId: string;
-    githubClientSecret: string;
-    githubScopes: string;
-    slackClientId: string;
-    slackClientSecret: string;
-    slackScopes: string;
-  };
 }
 
 function loadOrCreateSecret(dataDir: string): string {
@@ -131,14 +119,5 @@ export function loadConfig(): AppConfig {
       const edition = resolveEdition();
       return { edition, multiTenant: edition === "saas" } as const;
     })(),
-    mcpOauthClients: {
-      githubClientId: process.env.ZAKURA_GITHUB_OAUTH_CLIENT_ID ?? "",
-      githubClientSecret: process.env.ZAKURA_GITHUB_OAUTH_CLIENT_SECRET ?? "",
-      // 空则使用上游 PRM scopes_supported
-      githubScopes: process.env.ZAKURA_GITHUB_OAUTH_SCOPES ?? "",
-      slackClientId: process.env.ZAKURA_SLACK_OAUTH_CLIENT_ID ?? "",
-      slackClientSecret: process.env.ZAKURA_SLACK_OAUTH_CLIENT_SECRET ?? "",
-      slackScopes: process.env.ZAKURA_SLACK_OAUTH_SCOPES ?? "",
-    },
   };
 }

@@ -7,6 +7,7 @@ export interface RunningContainer {
   status: string;
   ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
   labels: Record<string, string>;
+  mounts?: Array<{ source: string; target: string; mode?: string; type?: string }>;
 }
 
 export interface CreateContainerOptions {

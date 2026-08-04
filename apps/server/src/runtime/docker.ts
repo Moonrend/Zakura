@@ -76,6 +76,12 @@ function toRunning(info: Docker.ContainerInspectInfo): RunningContainer {
     status: info.State?.Status ?? "unknown",
     ports,
     labels: info.Config?.Labels ?? {},
+    mounts: (info.Mounts ?? []).map((mount) => ({
+      source: mount.Source,
+      target: mount.Destination,
+      mode: mount.Mode,
+      type: mount.Type,
+    })),
   };
 }
 

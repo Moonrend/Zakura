@@ -1,0 +1,221 @@
+import { after, before, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { encryptJson } from "@zakura/core";
+import { eq } from "drizzle-orm";
+
+describe("integration catalog credentials", () => {
+  let dataDir: string;
+  let close: () => Promise<void>;
+  let catalog: import("../src/services/integration-catalog.js").IntegrationCatalogService;
+  let db: import("../src/db/client.js").Db;
+  const secret = "integration-catalog-test-secret";
+
+  before(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), "zakura-integration-catalog-"));
+    const databaseUrl = `pglite:${join(dataDir, "pglite")}`;
+    const { runMigrations } = await import("../src/db/migrate.js");
+    await runMigrations(databaseUrl);
+    const { createDb } = await import("../src/db/client.js");
+    const created = await createDb({ databaseUrl, dataDir });
+    db = created.db;
+    close = created.close;
+    const config = {
+      dataDir,
+      databaseUrl,
+      secret,
+    } as import("../src/config.js").AppConfig;
+    const { IntegrationCatalogService } = await import(
+      "../src/services/integration-catalog.js"
+    );
+    catalog = new IntegrationCatalogService(created.db, config);
+    await catalog.sync();
+  });
+
+  after(async () => {
+    await close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it("keeps external MCP outside the connector catalog", async () => {
+    assert.equal(await catalog.matchConnectorCapability("https://api.githubcopilot.com/mcp/"), null);
+    assert.equal(await catalog.matchConnectorCapability("https://gmailmcp.googleapis.com/mcp/v1"), null);
+    const packages = await catalog.list("tenant-catalog");
+    assert.deepEqual(
+      packages.map((item) => item.slug).sort(),
+      [
+        "discord",
+        "feishu",
+        "github",
+        "gitlab",
+        "google-workspace",
+        "jira",
+        "linear",
+        "microsoft-365",
+        "notion",
+        "slack",
+      ],
+    );
+    assert.equal(packages.some((item) => item.components.some((component) => component.kind === "mcp")), false);
+  });
+
+  it("resolves connector capabilities from catalog metadata", async () => {
+    const google = await catalog.matchConnectorCapability("zakura://google-workspace/gmail");
+    assert.equal(google?.connector.ref, "google-workspace");
+    assert.equal(google?.toolConfig.providerId, "google-workspace");
+    assert.deepEqual(google?.connectorConfig.authorizeParams, {
+      access_type: "offline",
+      prompt: "consent",
+    });
+
+    const microsoft = await catalog.matchConnectorCapability("zakura://microsoft-365/teams");
+    assert.equal(microsoft?.connector.ref, "microsoft-365");
+    assert.equal(microsoft?.toolConfig.product, "teams");
+
+    const github = await catalog.matchConnectorCapability("zakura://github/issues");
+    assert.equal(github?.connector.ref, "github");
+    assert.equal(github?.toolConfig.product, "issues");
+  });
+
+  it("prefers tenant credentials and never returns secret values in lists", async () => {
+    const connectors = await catalog.listConnectors("tenant-a");
+    const google = connectors.find((item) => item.ref === "google-workspace")!;
+
+    const saved = await catalog.saveCredentials("tenant-a", google.id, {
+      enabled: true,
+      values: { clientId: "tenant-id", clientSecret: "tenant-secret" },
+    });
+    assert.deepEqual(saved.configuredFields.sort(), ["clientId", "clientSecret"]);
+    assert.equal("values" in saved, false);
+
+    const resolved = await catalog.resolveCredentials("tenant-a", "google-workspace");
+    assert.equal(resolved?.source, "tenant");
+    assert.equal(resolved?.values.clientId, "tenant-id");
+    assert.equal(resolved?.values.clientSecret, "tenant-secret");
+  });
+
+  it("locks tenant credentials after platform provisioning", async () => {
+    const google = (await catalog.listConnectors("tenant-lock")).find(
+      (item) => item.ref === "google-workspace",
+    )!;
+    await catalog.saveCredentials("platform", google.id, {
+      enabled: true,
+      values: { clientId: "platform-id", clientSecret: "platform-secret" },
+    });
+
+    const listed = await catalog.listConnectors("tenant-lock");
+    const locked = listed.find((item) => item.ref === "google-workspace")!;
+    assert.equal(locked.lockedByPlatform, true);
+    assert.equal(locked.ready, true);
+    assert.equal(locked.credentialSource, "platform");
+
+    await assert.rejects(
+      () => catalog.saveCredentials("tenant-lock", google.id, {
+        enabled: true,
+        values: { clientId: "tenant-id", clientSecret: "tenant-secret" },
+      }),
+      /管理员已预配/,
+    );
+
+    const host = await catalog.resolveHostOauthClient(
+      "tenant-lock",
+      "https://api.githubcopilot.com/mcp/",
+    );
+    assert.equal(host, null);
+
+    const github = listed.find((item) => item.ref === "github")!;
+    await catalog.saveCredentials("platform", github.id, {
+      enabled: true,
+      values: { clientId: "gh-client", clientSecret: "gh-secret" },
+    });
+    const ghHost = await catalog.resolveHostOauthClient(
+      "tenant-lock",
+      "https://api.githubcopilot.com/mcp/",
+    );
+    assert.equal(ghHost?.clientId, "gh-client");
+    assert.equal(ghHost?.source, "platform");
+  });
+
+  it("rejects undeclared and missing required credential fields", async () => {
+    const google = (await catalog.listConnectors("tenant-b")).find(
+      (item) => item.ref === "google-workspace",
+    )!;
+    await assert.rejects(
+      () => catalog.saveCredentials("tenant-b", google.id, {
+        values: { arbitraryToken: "not-in-schema" },
+      }),
+      /未知凭据字段/,
+    );
+    await assert.rejects(
+      () => catalog.saveCredentials("tenant-b", google.id, {
+        enabled: true,
+        values: { clientId: "only-id" },
+      }),
+      /Client Secret/,
+    );
+  });
+
+  it("interpolates tenant-aware OAuth endpoints without platform conditionals", async () => {
+    const microsoft = (await catalog.listConnectors("tenant-ms")).find(
+      (item) => item.ref === "microsoft-365",
+    )!;
+    await catalog.saveCredentials("tenant-ms", microsoft.id, {
+      enabled: true,
+      values: { clientId: "ms-client", clientSecret: "ms-secret", tenantId: "contoso" },
+    });
+    const target = await catalog.resolveConnectorTarget("tenant-ms", "zakura://microsoft-365/files");
+    assert.equal(target?.providerId, "microsoft-365");
+    assert.equal(target?.product, "files");
+    assert.equal(target?.discovery.authorizationEndpoint, "https://login.microsoftonline.com/contoso/oauth2/v2.0/authorize");
+    assert.equal(target?.discovery.tokenEndpoint, "https://login.microsoftonline.com/contoso/oauth2/v2.0/token");
+    assert.equal(target?.client?.clientId, "ms-client");
+  });
+
+  it("reuses a connector instance and only marks a tool installed after OAuth", async () => {
+    const { componentInstances, newId, providerCatalog, tenants } = await import("../src/db/schema.js");
+    const now = new Date();
+    await db.insert(tenants).values({
+      id: "tenant-reuse",
+      slug: `connector-reuse-${newId().slice(0, 8)}`,
+      name: "Connector reuse",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(providerCatalog).values({
+      id: "google-workspace",
+      name: "Google Workspace",
+      category: "connector",
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoNothing();
+    const instanceId = newId();
+    await db.insert(componentInstances).values({
+      id: instanceId,
+      tenantId: "tenant-reuse",
+      providerId: "google-workspace",
+      name: "Gmail",
+      slug: "connector-google-workspace-gmail",
+      configEnc: encryptJson(secret, { product: "gmail", authRequired: true }),
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const before = await catalog.listConnectors("tenant-reuse");
+    const gmailBefore = before.flatMap((item) => item.capabilities).find((item) => item.ref === "google-gmail");
+    assert.equal(gmailBefore?.installed, false);
+    assert.equal(
+      (await catalog.resolveConnectorTarget("tenant-reuse", "zakura://google-workspace/gmail"))?.existingInstance?.id,
+      instanceId,
+    );
+
+    await db.update(componentInstances).set({
+      configEnc: encryptJson(secret, { product: "gmail", oauthAccessToken: "access-token" }),
+      updatedAt: new Date(),
+    }).where(eq(componentInstances.id, instanceId));
+    const after = await catalog.listConnectors("tenant-reuse");
+    const gmailAfter = after.flatMap((item) => item.capabilities).find((item) => item.ref === "google-gmail");
+    assert.equal(gmailAfter?.installed, true);
+  });
+});

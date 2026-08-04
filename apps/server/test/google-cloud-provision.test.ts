@@ -26,14 +26,6 @@ function fakeConfig(publicBaseUrl = "https://zakura.example"): AppConfig {
     migrationRetentionDays: 7,
     edition: "oss",
     multiTenant: false,
-    mcpOauthClients: {
-      githubClientId: "",
-      githubClientSecret: "",
-      githubScopes: "",
-      slackClientId: "",
-      slackClientSecret: "",
-      slackScopes: "",
-    },
   };
 }
 

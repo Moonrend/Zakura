@@ -45,6 +45,12 @@ import { SkillsService } from "./services/skills/index.js";
 import { PlatformServiceManager } from "./services/platform-services.js";
 import { PlatformServiceUsageService } from "./services/platform-service-usage.js";
 import { bindPlatformServiceRuntime } from "./platform-services/runtime-bind.js";
+import { IntegrationCatalogService } from "./services/integration-catalog.js";
+import { McpStoreService } from "./services/mcp-store.js";
+import { ConnectionCatalogService } from "./services/connection-catalog.js";
+import { InstanceMigrationService } from "./services/instance-migration.js";
+import { StoreCatalogService } from "./services/store-catalog.js";
+import { MarketSyncService } from "./services/market-sync.js";
 
 async function main() {
   const config = loadConfig();
@@ -58,6 +64,7 @@ async function main() {
     dataDir: config.dataDir,
   });
   bindProviderRuntime(db, config);
+  await new IntegrationCatalogService(db, config).sync();
   await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
   if (config.multiTenant) {
     await ensureSaasPlatformAdmin(db);
@@ -157,6 +164,7 @@ async function main() {
     .catch((err) => {
       console.warn("[mcp] auto-start on boot failed:", err);
     });
+  orchestrator.startHealthScheduler();
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
   );
@@ -178,6 +186,35 @@ async function main() {
     secret: config.secret,
   });
   gateway.setSkillsService(skillsService);
+
+  const integrationCatalog = new IntegrationCatalogService(db, config);
+  const mcpStore = new McpStoreService(db, config);
+  const storeCatalog = new StoreCatalogService(db);
+  const connectionCatalog = new ConnectionCatalogService(
+    db,
+    config,
+    mcpStore,
+    skillsService,
+    integrationCatalog,
+    orchestrator,
+    agentService,
+    storeCatalog,
+  );
+  const marketSync = new MarketSyncService(mcpStore, storeCatalog, skillsService);
+  marketSync.start();
+  orchestrator.setRuntimeNodes(runtimeNodes);
+  const instanceMigrations = new InstanceMigrationService(
+    db,
+    config,
+    runtimeNodes,
+    orchestrator,
+  );
+  gateway.setPlatformAssistantDeps({
+    connectionCatalog,
+    integrations: integrationCatalog,
+    runtimeNodes,
+    instanceMigrations,
+  });
 
   const app = new Hono();
   app.use(
@@ -230,6 +267,8 @@ async function main() {
       platformServices,
       platformServiceUsage,
       skills: skillsService,
+      connections: connectionCatalog,
+      instanceMigrations,
     }),
   );
 

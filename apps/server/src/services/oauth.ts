@@ -4,7 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { hashApiKey } from "@zakura/core";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -1126,21 +1126,54 @@ export class OauthService {
   }
 
   async listClients(tenantId: string) {
-    const rows = await this.db
+    const bound = await this.db
       .select()
       .from(oauthClients)
       .where(eq(oauthClients.tenantId, tenantId))
       .orderBy(asc(oauthClients.createdAt));
-    return rows.map((r) => ({
-      id: r.id,
-      clientId: r.clientId,
-      clientName: r.clientName,
-      tokenEndpointAuthMethod: r.tokenEndpointAuthMethod,
-      registrationType: r.registrationType,
-      redirectUris: this.parseRedirectUris(r),
-      scope: r.scope,
-      createdAt: r.createdAt,
-    }));
+
+    // CIMD / 未绑定行：通过本租户授权记录关联
+    const [fromRefresh, fromCodes] = await Promise.all([
+      this.db
+        .selectDistinct({ clientId: oauthRefreshTokens.clientId })
+        .from(oauthRefreshTokens)
+        .where(eq(oauthRefreshTokens.tenantId, tenantId)),
+      this.db
+        .selectDistinct({ clientId: oauthAuthCodes.clientId })
+        .from(oauthAuthCodes)
+        .where(eq(oauthAuthCodes.tenantId, tenantId)),
+    ]);
+    const usedIds = [
+      ...new Set([
+        ...fromRefresh.map((r) => r.clientId),
+        ...fromCodes.map((r) => r.clientId),
+      ]),
+    ].filter((id) => !bound.some((b) => b.clientId === id));
+
+    const related =
+      usedIds.length > 0
+        ? await this.db
+            .select()
+            .from(oauthClients)
+            .where(inArray(oauthClients.clientId, usedIds))
+            .orderBy(asc(oauthClients.createdAt))
+        : [];
+
+    const byId = new Map<string, (typeof bound)[number]>();
+    for (const row of [...bound, ...related]) byId.set(row.id, row);
+    return [...byId.values()]
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((r) => ({
+        id: r.id,
+        clientId: r.clientId,
+        clientName: r.clientName,
+        tokenEndpointAuthMethod: r.tokenEndpointAuthMethod,
+        registrationType: r.registrationType as "manual" | "dynamic" | "cimd",
+        redirectUris: this.parseRedirectUris(r),
+        scope: r.scope,
+        tenantBound: r.tenantId === tenantId,
+        createdAt: r.createdAt,
+      }));
   }
 }
 

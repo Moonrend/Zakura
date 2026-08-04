@@ -144,6 +144,160 @@ export class RunnerClient {
     if (!res.ok) throw new Error(await res.text());
   }
 
+  async startInstance(body: {
+    instanceId: string;
+    tenantId: string;
+    name: string;
+    image: string;
+    env?: Record<string, string>;
+    command?: string[];
+    args?: string[];
+    ports?: Array<{
+      containerPort: number;
+      hostPort?: number;
+      hostIp?: string;
+      protocol?: "tcp" | "udp";
+    }>;
+    volumes?: Array<{
+      hostPath?: string;
+      volumeName?: string;
+      containerPath: string;
+      readOnly?: boolean;
+    }>;
+    labels?: Record<string, string>;
+    network?: string;
+    workingDir?: string;
+  }): Promise<{
+    dockerId: string;
+    name: string;
+    image: string;
+    status: string;
+    ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+    dataHostPath: string;
+  }> {
+    const { instanceId, ...spec } = body;
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/start`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(spec),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = (await res.json()) as {
+      instance: {
+        dockerId: string;
+        name: string;
+        image: string;
+        status: string;
+        ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+        dataHostPath: string;
+      };
+    };
+    return data.instance;
+  }
+
+  async getInstance(instanceId: string): Promise<{
+    dockerId: string;
+    name: string;
+    image: string;
+    status: string;
+    ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+    dataHostPath: string;
+  } | null> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = (await res.json()) as {
+      instance: {
+        dockerId: string;
+        name: string;
+        image: string;
+        status: string;
+        ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+        dataHostPath: string;
+      } | null;
+    };
+    return data.instance;
+  }
+
+  async stopInstance(instanceId: string, remove = true): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/stop`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ remove }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+  }
+
+  async exportInstanceMigration(
+    instanceId: string,
+    body: {
+      sourceNodeId: string;
+      excludePatterns?: string[];
+      includePatterns?: string[];
+    },
+  ): Promise<{ archive: Buffer; manifest: MigrationManifest; archiveSha256: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/migration/export`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const sha = res.headers.get("x-archive-sha256") ?? "";
+    const manifestHeader = res.headers.get("x-migration-manifest");
+    const archive = Buffer.from(await res.arrayBuffer());
+    let manifest: MigrationManifest;
+    if (manifestHeader) {
+      manifest = JSON.parse(
+        Buffer.from(manifestHeader, "base64url").toString("utf8"),
+      ) as MigrationManifest;
+    } else {
+      manifest = {
+        version: 1,
+        agentId: instanceId,
+        exportedAt: new Date().toISOString(),
+        sourceNodeId: body.sourceNodeId,
+        compression: "gzip",
+        excludePatterns: body.excludePatterns ?? [],
+        files: [],
+        totalBytes: archive.length,
+        fileCount: 0,
+      };
+    }
+    return { archive, manifest, archiveSha256: sha };
+  }
+
+  async importInstanceMigration(
+    instanceId: string,
+    archive: Buffer,
+    opts?: { expectedSha256?: string; atomic?: boolean },
+  ): Promise<{ ok: true; fileCount: number; workspaceRoot: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/migration/import`,
+      {
+        method: "POST",
+        headers: this.headers({
+          "Content-Type": "application/octet-stream",
+          ...(opts?.expectedSha256 ? { "X-Archive-Sha256": opts.expectedSha256 } : {}),
+          ...(opts?.atomic === false ? { "X-Atomic": "0" } : {}),
+        }),
+        body: archive,
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { ok: true; fileCount: number; workspaceRoot: string };
+  }
+
   async execWorkspace(
     agentId: string,
     command: string[],

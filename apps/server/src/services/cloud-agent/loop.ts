@@ -49,6 +49,12 @@ export type AgentLoopHooks = {
     call: ModelToolCall,
     args: Record<string, unknown>,
   ) => Promise<LoopToolOutcome | undefined>;
+  /** 工具成功/失败后回调（插件 PostToolUse / PostToolUseFailure） */
+  afterToolCall?: (
+    call: ModelToolCall,
+    args: Record<string, unknown>,
+    outcome: { resultText: string; isError: boolean },
+  ) => Promise<void>;
   /** tool_call_start 的展示标题（缺省 = qualified 名） */
   toolTitle?: (modelName: string, qualified: string) => string | undefined;
 };
@@ -519,6 +525,15 @@ export async function runAgentLoop(
             : {}),
         },
       });
+
+      try {
+        await input.hooks?.afterToolCall?.(call, args, { resultText, isError });
+      } catch (err) {
+        console.warn(
+          `[agent-loop] afterToolCall hook failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
 
       messages.push({
         role: "tool",

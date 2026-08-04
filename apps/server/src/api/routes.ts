@@ -39,6 +39,7 @@ import {
   ensureCapabilityInstance,
   readInstanceConfig,
   saveCapabilityConfig,
+  syncPlatformManagedWebDefaults,
 } from "../services/capabilities.js";
 import {
   listSearchEngineMeta,
@@ -75,6 +76,7 @@ import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
 import { registerSkillRoutes } from "./skill-routes.js";
 import { registerNetworkRoutes } from "./network-routes.js";
+import { registerConnectionRoutes } from "./connection-routes.js";
 import { loadSaasServer } from "../saas-loader.js";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
 import type { MigrationService } from "../services/migration-service.js";
@@ -87,22 +89,16 @@ import type { NetworkAuditService } from "../services/network-audit.js";
 import type { PlatformServiceManager } from "../services/platform-services.js";
 import type { PlatformServiceUsageService } from "../services/platform-service-usage.js";
 import { registerPlatformServiceRoutes } from "./platform-service-routes.js";
-import { McpStoreService } from "../services/mcp-store.js";
+import { McpStoreService, isBuiltinMcpStoreId, type McpStoreSourceId } from "../services/mcp-store.js";
+import { IntegrationCatalogService } from "../services/integration-catalog.js";
 import {
   McpUpstreamOauthService,
   type UpstreamOauthDiscovery,
 } from "../services/mcp-upstream-oauth.js";
 import {
   buildByoOauthClient,
-  oauthAppIdForMcpUrl,
-  resolvePreRegisteredOauthClient,
 } from "../services/mcp-oauth-clients.js";
-import {
-  listMcpOauthAppsPublic,
-  patchMcpOauthApp,
-  type McpOauthAppId,
-  type McpOauthAppScope,
-} from "../services/mcp-oauth-apps.js";
+import { UpstreamOauthClientStore } from "../services/upstream-oauth-clients.js";
 import {
   buildGoogleProvisionGuide,
   googleOauthSetupChecklist,
@@ -110,13 +106,16 @@ import {
 } from "../services/google-cloud-provision.js";
 import { applyOauthTokensToConfig } from "../providers/generic-mcp.js";
 import {
-  googleWorkspaceBuiltinUrl,
-  googleWorkspaceOauthDiscovery,
-  isGoogleWorkspaceTarget,
   resolveGoogleWorkspaceProduct,
   resolveToolPermissionStates,
 } from "../providers/google-workspace/index.js";
 import { randomBytes } from "node:crypto";
+import {
+  AGENT_DEFAULTS_KEY,
+  enableWebForUserAgents,
+  getAgentWebDefaults,
+  saveAgentWebDefaults,
+} from "../services/agent-defaults.js";
 
 /** Short-lived upstream OAuth PKCE state (in-memory) */
 const upstreamOauthPending = new Map<
@@ -130,6 +129,8 @@ const upstreamOauthPending = new Map<
     codeVerifier: string;
     redirectUri: string;
     tokenEndpoint: string;
+    /** null = platform connector, do not send RFC 8707 MCP resource */
+    resource?: string | null;
     createdAt: number;
   }
 >();
@@ -141,6 +142,29 @@ function purgeUpstreamOauthPending() {
   }
 }
 
+function redactConfigValue(key: string, value: unknown): unknown {
+  if (/secret|token|password|apikey|api_key|refresh/i.test(key)) {
+    return value == null || value === "" ? value : "***";
+  }
+  if (key === "env" && typeof value === "string") {
+    try {
+      return JSON.stringify(redactConfigValue(key, JSON.parse(value)));
+    } catch {
+      return value;
+    }
+  }
+  if (Array.isArray(value)) return value.map((item) => redactConfigValue(key, item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        redactConfigValue(childKey, childValue),
+      ]),
+    );
+  }
+  return value;
+}
+
 /** Throttle live Docker inspect on GET /api/containers?sync=1 */
 const containerListSyncAt = new Map<string, number>();
 const CONTAINER_LIST_SYNC_TTL_MS = 15_000;
@@ -148,26 +172,43 @@ const CONTAINER_LIST_SYNC_TTL_MS = 15_000;
 /**
  * Client 获取顺序：
  * 1. 请求体 BYO（用户自备 OAuth Client ID/Secret）
- * 2. DCR（上游支持时）
- * 3. 租户自建 → 整站平台 → 环境变量
+ * 2. 连接器预配（管理员/团队配置的 OAuth Client，按 hostPatterns 匹配）
+ * 3. DCR（上游支持时）
+ * dcr / byo 成功后写入 upstream_oauth_clients 供设置页列出。
  */
 async function resolveUpstreamOauthClient(opts: {
   upstreamOauth: McpUpstreamOauthService;
-  config: AppConfig;
-  db: Db;
-  tenantId: string;
   discovery: UpstreamOauthDiscovery;
   mcpUrl: string;
   redirectUri: string;
   clientName?: string;
   /** 用户安装时直接提供的 OAuth 客户端（非 API Key） */
   byo?: { clientId?: string; clientSecret?: string; scopes?: string };
+  /** 平台/团队预配的连接器 OAuth 客户端 */
+  connectorClient?: {
+    clientId: string;
+    clientSecret?: string;
+    scopes?: string;
+  } | null;
+  /** 持久化 dcr/byo 记录 */
+  record?: {
+    store: UpstreamOauthClientStore;
+    tenantId: string;
+    instanceId?: string | null;
+  };
 }): Promise<{
   clientId: string;
   clientSecret?: string;
   scopeOverride?: string;
-  source: "dcr" | "byo" | "tenant" | "platform" | "env";
+  source: "dcr" | "byo" | "platform" | "tenant";
 } | null> {
+  let result: {
+    clientId: string;
+    clientSecret?: string;
+    scopeOverride?: string;
+    source: "dcr" | "byo" | "platform" | "tenant";
+  } | null = null;
+
   if (opts.byo?.clientId?.trim()) {
     const byo = buildByoOauthClient(opts.mcpUrl, {
       clientId: opts.byo.clientId,
@@ -175,52 +216,61 @@ async function resolveUpstreamOauthClient(opts: {
       scopes: opts.byo.scopes,
     });
     if (byo) {
-      return {
+      result = {
         clientId: byo.clientId,
         clientSecret: byo.clientSecret,
         scopeOverride: byo.scopes,
         source: "byo",
       };
     }
-  }
-
-  if (opts.discovery.registrationEndpoint) {
+  } else if (opts.connectorClient?.clientId?.trim()) {
+    result = {
+      clientId: opts.connectorClient.clientId.trim(),
+      clientSecret: opts.connectorClient.clientSecret?.trim() || undefined,
+      scopeOverride: opts.connectorClient.scopes?.trim() || undefined,
+      source: "platform",
+    };
+  } else if (opts.discovery.registrationEndpoint) {
     const registered = await opts.upstreamOauth.registerClient(opts.discovery, {
       clientName: opts.clientName,
       redirectUris: [opts.redirectUri],
     });
-    return {
+    result = {
       clientId: registered.clientId,
       clientSecret: registered.clientSecret,
       source: "dcr",
     };
   }
 
-  const pre = await resolvePreRegisteredOauthClient(
-    opts.mcpUrl,
-    opts.config,
-    opts.db,
-    opts.tenantId,
-  );
-  if (pre) {
-    return {
-      clientId: pre.clientId,
-      clientSecret: pre.clientSecret,
-      scopeOverride: pre.scopes,
-      source: pre.source,
-    };
+  if (
+    result &&
+    opts.record &&
+    (result.source === "dcr" || result.source === "byo")
+  ) {
+    try {
+      await opts.record.store.record({
+        tenantId: opts.record.tenantId,
+        mcpUrl: opts.mcpUrl,
+        clientId: result.clientId,
+        clientSecret: result.clientSecret,
+        clientName: opts.clientName,
+        source: result.source,
+        registrationEndpoint: opts.discovery.registrationEndpoint,
+        scope: result.scopeOverride,
+        instanceId: opts.record.instanceId,
+      });
+    } catch (err) {
+      console.warn(
+        "[oauth] persist upstream client failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
-  return null;
+
+  return result;
 }
 
-async function noDcrOauthError(
-  mcpUrl: string,
-  config: AppConfig,
-  db: Db,
-  tenantId: string,
-): Promise<string> {
-  const pre = await resolvePreRegisteredOauthClient(mcpUrl, config, db, tenantId);
-  if (pre) return "";
+function noDcrOauthError(mcpUrl: string): string {
   const host = (() => {
     try {
       return new URL(mcpUrl).hostname;
@@ -228,32 +278,18 @@ async function noDcrOauthError(
       return mcpUrl;
     }
   })();
-  if (host.includes("github")) {
-    return "GitHub Remote MCP 不支持动态注册。请填写你自己的 OAuth App Client ID/Secret，或在「设置 → OAuth 应用」保存后重试；也可改用 PAT。";
-  }
-  if (host.includes("googleapis.com") || host.includes("google")) {
-    return "Google Workspace MCP 不接受 API Key，必须使用 OAuth 2.0 Client ID/Secret。请在安装时填写自建客户端，或在「设置 → OAuth 应用」配置后重试。";
-  }
-  return "上游不支持动态客户端注册。请填写自备 OAuth Client ID/Secret，或在「设置 → OAuth 应用」配置。";
+  return `${host} 不支持动态客户端注册。请填写该 MCP 自己的 OAuth Client ID/Secret。`;
 }
 
 /** 租户管理员可管本租户；整站仅超管（OSS 下管理员可管整站） */
 function canManageMcpOauthApps(
   session: { role: string; userId: string; isPlatformAdmin?: boolean },
   config: AppConfig,
-  scope: McpOauthAppScope,
+  scope: "platform" | "tenant",
 ): boolean {
   if (scope === "tenant") return isSessionAdmin(session);
   if (config.multiTenant) return session.isPlatformAdmin === true;
   return isSessionAdmin(session);
-}
-
-function upstreamAuthorizeExtra(mcpUrl: string): Record<string, string> | undefined {
-  const appId = oauthAppIdForMcpUrl(mcpUrl);
-  if (appId === "google") {
-    return { access_type: "offline", prompt: "consent" };
-  }
-  return undefined;
 }
 
 export type AppVariables = {
@@ -340,6 +376,8 @@ export async function createApiApp(deps: {
   platformServices?: PlatformServiceManager;
   platformServiceUsage?: PlatformServiceUsageService;
   skills?: import("../services/skills/index.js").SkillsService;
+  connections?: import("../services/connection-catalog.js").ConnectionCatalogService;
+  instanceMigrations?: import("../services/instance-migration.js").InstanceMigrationService | null;
 }) {
   const {
     db,
@@ -368,9 +406,13 @@ export async function createApiApp(deps: {
     platformServices,
     platformServiceUsage,
     skills,
+    connections,
+    instanceMigrations,
   } = deps;
-  const mcpStore = new McpStoreService(config);
+  const mcpStore = new McpStoreService(db, config);
   const upstreamOauth = new McpUpstreamOauthService(config);
+  const upstreamOauthClients = new UpstreamOauthClientStore(db, config);
+  const integrationCatalog = new IntegrationCatalogService(db, config);
   const tenantService = new TenantService(db);
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -722,7 +764,16 @@ export async function createApiApp(deps: {
 
   app.get("/api/oauth/clients", async (c) => {
     const session = c.get("session")!;
-    return c.json(await oauth.listClients(session.tenantId));
+    const [inbound, outbound] = await Promise.all([
+      oauth.listClients(session.tenantId),
+      upstreamOauthClients.list(session.tenantId),
+    ]);
+    return c.json({
+      inbound,
+      outbound,
+      dcr: outbound.filter((r) => r.source === "dcr"),
+      byo: outbound.filter((r) => r.source === "byo"),
+    });
   });
 
   /** Preview OAuth authorize request for the web console UI */
@@ -877,6 +928,8 @@ export async function createApiApp(deps: {
             (s) => s.mode !== "disabled" && (s.healthStatus === "healthy" || s.status === "running"),
           )
         : [];
+    const platformAgentDefaults = await getAgentWebDefaults(db);
+    await syncPlatformManagedWebDefaults(db, orchestrator, config, session.tenantId, platformAgentDefaults, managed);
     return c.json({
       webSearch: {
         instance: {
@@ -910,8 +963,10 @@ export async function createApiApp(deps: {
         mode: s.mode,
         healthStatus: s.healthStatus,
         mapsTo: s.mapsTo,
-        endpointUrl: s.endpointUrl,
+        // SaaS users may select a managed service but never receive its host address.
+        ...(config.multiTenant ? {} : { endpointUrl: s.endpointUrl }),
       })),
+      agentDefaults: config.multiTenant ? undefined : platformAgentDefaults,
     });
   });
 
@@ -1268,16 +1323,14 @@ export async function createApiApp(deps: {
       decryptError = err instanceof Error ? err.message : String(err);
     }
 
-    const safeConfig: Record<string, unknown> = handle ? { ...handle.config } : {};
-    for (const key of Object.keys(safeConfig)) {
-      if (
-        /secret|token|password|apikey|api_key|refresh/i.test(key) &&
-        typeof safeConfig[key] === "string" &&
-        String(safeConfig[key]).length > 0
-      ) {
-        safeConfig[key] = "***";
-      }
-    }
+    const safeConfig: Record<string, unknown> = handle
+      ? Object.fromEntries(
+          Object.entries(handle.config).map(([key, value]) => [
+            key,
+            redactConfigValue(key, value),
+          ]),
+        )
+      : {};
     let tools: Awaited<ReturnType<typeof gateway.listToolsForTenant>> = [];
     let resources: Array<{
       uri: string;
@@ -1414,6 +1467,51 @@ export async function createApiApp(deps: {
       });
     }
     return c.json(await loadInstanceWithContainers(db, session.tenantId, id));
+  });
+
+  app.get("/api/instances/:id/runtime", async (c) => {
+    const session = c.get("session")!;
+    const id = c.req.param("id");
+    const instance = await db.query.componentInstances.findFirst({
+      where: and(eq(componentInstances.id, id), eq(componentInstances.tenantId, session.tenantId)),
+    });
+    if (!instance) return c.json({ error: "Not found" }, 404);
+    const rows = await db
+      .select()
+      .from(managedContainers)
+      .where(and(eq(managedContainers.instanceId, id), eq(managedContainers.tenantId, session.tenantId)));
+    let live: Awaited<ReturnType<DockerRuntime["list"]>> = [];
+    try {
+      live = await runtime.list({ tenantId: session.tenantId, instanceId: id });
+    } catch {
+      // Keep the persisted container state visible when Docker is unavailable.
+    }
+    const byDockerId = new Map(live.map((item) => [item.id, item]));
+    return c.json({
+      containers: rows.map((row) => ({
+        id: row.id,
+        runtime: row.dockerId ? byDockerId.get(row.dockerId) ?? null : null,
+      })),
+    });
+  });
+
+  app.get("/api/instances/:id/containers/:containerId/logs", async (c) => {
+    const session = c.get("session")!;
+    const row = await db.query.managedContainers.findFirst({
+      where: and(
+        eq(managedContainers.id, c.req.param("containerId")),
+        eq(managedContainers.instanceId, c.req.param("id")),
+        eq(managedContainers.tenantId, session.tenantId),
+      ),
+    });
+    if (!row) return c.json({ error: "Not found" }, 404);
+    if (!row.dockerId) return c.json({ logs: "" });
+    try {
+      const tail = Math.min(1000, Math.max(1, Number(c.req.query("tail") ?? 200)));
+      return c.json({ logs: await runtime.logs(row.dockerId, tail) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   app.get("/api/containers", async (c) => {
@@ -2346,6 +2444,8 @@ export async function createApiApp(deps: {
       })
       .catch((err) => console.warn("[cloud-agent] recover interrupted runs failed:", err));
     if (modelRouter) {
+      const { AgentHooksService } = await import("../services/agent-hooks.js");
+      const agentHooks = new AgentHooksService(agentService.workspace);
       const cloudRuntime = new CloudAgentRuntime({
         store: cloudStore,
         gateway,
@@ -2355,6 +2455,7 @@ export async function createApiApp(deps: {
         memoryProviders,
         workspaceFsProvider,
         skills,
+        agentHooks,
       });
       // MCP 客户端可经 re_spawn_subagent 在云端运行子代理
       gateway.setSubagentRunner({
@@ -2424,6 +2525,11 @@ export async function createApiApp(deps: {
         onTenantCreated: async (tenantId: string) => {
           await runtimeNodes?.ensureLocalNode(tenantId).catch(() => undefined);
           await networkSettings?.ensureTenantDefaults(tenantId).catch(() => undefined);
+          const defaults = await getAgentWebDefaults(db);
+          const services = platformServices
+            ? (await platformServices.list()).filter((s) => s.mode !== "disabled")
+            : [];
+          await syncPlatformManagedWebDefaults(db, orchestrator, config, tenantId, defaults, services);
         },
         runtimeNodes: runtimeNodes
           ? {
@@ -2435,6 +2541,29 @@ export async function createApiApp(deps: {
               ) => runtimeNodes.setShared(nodeId, isShared, actor),
             }
           : undefined,
+        agentDefaults: {
+          get: () => getAgentWebDefaults(db),
+          save: (value: Record<string, unknown>) => saveAgentWebDefaults(db, value),
+          enableForUser: (userId: string) => enableWebForUserAgents(db, orchestrator, userId),
+          syncManaged: async () => {
+            const defaults = await getAgentWebDefaults(db);
+            const serviceList = platformServices
+              ? (await platformServices.list()).filter((s) => s.mode !== "disabled")
+              : [];
+            const allTenants = await db.select({ id: tenants.id }).from(tenants);
+            for (const tenant of allTenants) {
+              await syncPlatformManagedWebDefaults(
+                db,
+                orchestrator,
+                config,
+                tenant.id,
+                defaults,
+                serviceList,
+              );
+            }
+            return { tenants: allTenants.length };
+          },
+        },
       });
     }
   }
@@ -2454,6 +2583,16 @@ export async function createApiApp(deps: {
   }
   if (skills) {
     registerSkillRoutes(app, { skills, agentService, multiTenant: config.multiTenant });
+  }
+  if (connections) {
+    const mcpStoreForConnections = new McpStoreService(db, config);
+    registerConnectionRoutes(app, {
+      config,
+      connections,
+      mcpStore: mcpStoreForConnections,
+      orchestrator,
+      instanceMigrations: instanceMigrations ?? null,
+    });
   }
   if (networkSettings && securityPolicy && exposures && networkAudit) {
     registerNetworkRoutes(app, {
@@ -2821,7 +2960,7 @@ export async function createApiApp(deps: {
     }
   });
 
-  /** One-click import: probe + create generic-mcp / google-workspace instance */
+  /** One-click import: external MCP, or a catalog-declared platform connector capability. */
   app.post("/api/mcp/import", async (c) => {
     const session = c.get("session")!;
     const body = await c.req.json<{
@@ -2840,15 +2979,20 @@ export async function createApiApp(deps: {
       oauthClientId?: string;
       oauthClientSecret?: string;
       oauthScopes?: string;
+      /** 复用平台连接器 OAuth 客户端（与 hostPatterns / connector.ref 对齐） */
+      oauthConnectorRef?: string;
     }>();
     if (!body.mcpUrl) return c.json({ error: "mcpUrl required" }, 400);
 
     const authMode = body.authMode ?? (body.apiKey?.trim() ? "apiKey" : "none");
 
     try {
-      const googleProduct = resolveGoogleWorkspaceProduct(body.mcpUrl);
+      const connectorTarget = await integrationCatalog.resolveConnectorTarget(
+        session.tenantId,
+        body.mcpUrl,
+      );
       const urlHost = (() => {
-        if (googleProduct) return googleProduct;
+        if (connectorTarget) return connectorTarget.product;
         try {
           return new URL(body.mcpUrl).hostname.replace(/\./g, "-");
         } catch {
@@ -2856,8 +3000,8 @@ export async function createApiApp(deps: {
         }
       })();
 
-      const name = body.name?.trim() || (googleProduct
-        ? `Google ${googleProduct[0]!.toUpperCase()}${googleProduct.slice(1)}`
+      const name = body.name?.trim() || (connectorTarget
+        ? connectorTarget.product
         : `MCP ${urlHost}`);
       const slug =
         body.slug?.trim() ||
@@ -2868,40 +3012,52 @@ export async function createApiApp(deps: {
           .slice(0, 32) ||
         `mcp-${Date.now().toString(36)}`;
 
-      // Google Workspace：本地 REST 工具，不走 *mcp.googleapis.com
-      if (googleProduct && authMode === "oauth") {
-        const mcpUrl = googleWorkspaceBuiltinUrl(googleProduct);
-        const instance = await orchestrator.createInstance({
+      // 平台连接器：平台自己调用第三方 API，不代理外部 MCP。
+      if (connectorTarget && authMode === "oauth") {
+        if (!connectorTarget.discovery.authorizationEndpoint || !connectorTarget.discovery.tokenEndpoint) {
+          throw new Error("连接器目录缺少 OAuth authorization_endpoint 或 token_endpoint");
+        }
+        const mcpUrl = connectorTarget.mcpUrl;
+        const connectorConfig = {
+          product: connectorTarget.product,
+          mcpUrl,
+          authRequired: true,
+          oauthTokenEndpoint: connectorTarget.discovery.tokenEndpoint,
+        };
+        const instance = connectorTarget.existingInstance ?? await orchestrator.createInstance({
           tenantId: session.tenantId,
-          providerId: "google-workspace",
+          providerId: connectorTarget.providerId,
           name,
-          slug,
-          config: {
-            product: googleProduct,
-            mcpUrl,
-            authRequired: true,
-            oauthTokenEndpoint: "https://oauth2.googleapis.com/token",
-          },
+          slug: connectorTarget.instanceSlug,
+          config: connectorConfig,
         });
+        if (connectorTarget.existingInstance) {
+          await orchestrator.updateInstanceConfig(
+            session.tenantId,
+            connectorTarget.existingInstance.id,
+            connectorConfig,
+          );
+        }
 
         purgeUpstreamOauthPending();
-        const discovery = googleWorkspaceOauthDiscovery(googleProduct);
+        const discovery = connectorTarget.discovery;
         const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
-        const client = await resolveUpstreamOauthClient({
-          upstreamOauth,
-          config,
-          db,
-          tenantId: session.tenantId,
-          discovery,
-          mcpUrl,
-          redirectUri,
-          clientName: name,
-          byo: {
-            clientId: body.oauthClientId,
-            clientSecret: body.oauthClientSecret,
-            scopes: body.oauthScopes,
-          },
-        });
+        const client = body.oauthClientId?.trim()
+          ? buildByoOauthClient(mcpUrl, {
+              clientId: body.oauthClientId,
+              clientSecret: body.oauthClientSecret,
+              scopes: body.oauthScopes,
+            })
+          : connectorTarget.client
+            ? {
+                providerId: connectorTarget.providerId,
+                connectorRef: connectorTarget.providerId,
+                clientId: connectorTarget.client.clientId,
+                clientSecret: connectorTarget.client.clientSecret,
+                scopes: connectorTarget.scopes,
+                source: connectorTarget.client.source,
+              }
+            : null;
         if (!client) {
           return c.json(
             {
@@ -2910,7 +3066,7 @@ export async function createApiApp(deps: {
               oauth: {
                 ok: false,
                 discovery,
-                error: await noDcrOauthError(mcpUrl, config, db, session.tenantId),
+                error: noDcrOauthError(mcpUrl),
                 needsByoClient: true,
                 needsPatFallback: false,
                 redirectUri,
@@ -2925,9 +3081,9 @@ export async function createApiApp(deps: {
           clientId: client.clientId,
           redirectUri,
           state,
-          scope: upstreamOauth.resolveScope(discovery, client.scopeOverride),
-          // 本地 Google REST：不传 MCP resource
-          extraParams: { access_type: "offline", prompt: "consent" },
+          scope: upstreamOauth.resolveScope(discovery, client.scopes),
+          // 平台连接器不是外部 MCP，不传 MCP resource。
+          extraParams: connectorTarget.authorizeParams,
         });
         upstreamOauthPending.set(state, {
           tenantId: session.tenantId,
@@ -2938,6 +3094,7 @@ export async function createApiApp(deps: {
           codeVerifier,
           redirectUri,
           tokenEndpoint: discovery.tokenEndpoint!,
+          resource: null,
           createdAt: Date.now(),
         });
 
@@ -2966,6 +3123,15 @@ export async function createApiApp(deps: {
 
       // OAuth 2.1: create instance marked authRequired, then return authorize URL
       if (authMode === "oauth") {
+        const discovery = await upstreamOauth.discover(mcpUrl);
+        const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
+        const hostClient = await integrationCatalog.resolveHostOauthClient(
+          session.tenantId,
+          mcpUrl,
+          { connectorRef: body.oauthConnectorRef },
+        );
+        const oauthConnectorRef =
+          hostClient?.connectorRef || body.oauthConnectorRef?.trim() || undefined;
         const instance = await orchestrator.createInstance({
           tenantId: session.tenantId,
           providerId: "generic-mcp",
@@ -2976,17 +3142,21 @@ export async function createApiApp(deps: {
             apiKey: "",
             headerName: "Authorization",
             authRequired: true,
+            ...(oauthConnectorRef ? { oauthConnectorRef } : {}),
+            ...(body.oauthClientId?.trim()
+              ? {
+                  oauthClientId: body.oauthClientId.trim(),
+                  ...(body.oauthClientSecret
+                    ? { oauthClientSecret: body.oauthClientSecret }
+                    : {}),
+                }
+              : {}),
           },
         });
 
         purgeUpstreamOauthPending();
-        const discovery = await upstreamOauth.discover(mcpUrl);
-        const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
         const client = await resolveUpstreamOauthClient({
           upstreamOauth,
-          config,
-          db,
-          tenantId: session.tenantId,
           discovery,
           mcpUrl,
           redirectUri,
@@ -2995,6 +3165,12 @@ export async function createApiApp(deps: {
             clientId: body.oauthClientId,
             clientSecret: body.oauthClientSecret,
             scopes: body.oauthScopes,
+          },
+          connectorClient: hostClient,
+          record: {
+            store: upstreamOauthClients,
+            tenantId: session.tenantId,
+            instanceId: instance.id,
           },
         });
         if (!client) {
@@ -3005,10 +3181,13 @@ export async function createApiApp(deps: {
               oauth: {
                 ok: false,
                 discovery,
-                error: await noDcrOauthError(mcpUrl, config, db, session.tenantId),
+                error: noDcrOauthError(mcpUrl),
                 needsByoClient: true,
                 needsPatFallback: /github/i.test(mcpUrl),
                 redirectUri,
+                sharedOauth: oauthConnectorRef
+                  ? { ready: false, connectorRef: oauthConnectorRef }
+                  : undefined,
               },
             },
             201,
@@ -3025,7 +3204,6 @@ export async function createApiApp(deps: {
           state,
           scope: upstreamOauth.resolveScope(discovery, client.scopeOverride),
           resource: discovery.resource ?? mcpUrl,
-          extraParams: upstreamAuthorizeExtra(mcpUrl),
         });
         upstreamOauthPending.set(state, {
           tenantId: session.tenantId,
@@ -3050,6 +3228,14 @@ export async function createApiApp(deps: {
               clientId: client.clientId,
               clientSource: client.source,
               discovery,
+              sharedOauth: hostClient
+                ? {
+                    ready: true,
+                    connectorRef: hostClient.connectorRef,
+                    connectorName: hostClient.connectorName,
+                    source: hostClient.source,
+                  }
+                : undefined,
             },
             started: false,
             tools: [],
@@ -3301,22 +3487,68 @@ export async function createApiApp(deps: {
 
   /** MCP Store — official registry + curated source links */
   app.get("/api/mcp/store/sources", async (c) => {
-    return c.json({ sources: mcpStore.listSources() });
+    const session = c.get("session")!;
+    return c.json({ sources: await mcpStore.listSources(session.tenantId) });
+  });
+
+  app.post("/api/mcp/store/sources", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{
+      repository?: string;
+      sourceUrl?: string;
+      format?: "auto" | "claude" | "codex" | "mcp";
+      name?: string;
+    }>();
+    const input = (body.sourceUrl ?? body.repository ?? "").trim();
+    if (!input) return c.json({ error: "repository or sourceUrl required" }, 400);
+    try {
+      const looksLikeJson =
+        /\.json(\?|$)/i.test(input) ||
+        input.includes("marketplace.json") ||
+        input.includes(".claude-plugin/") ||
+        input.includes(".codex-plugin/");
+      const source = looksLikeJson
+        ? await mcpStore.importSource(session.tenantId, {
+            sourceUrl: input,
+            format: body.format ?? "auto",
+            name: body.name,
+          })
+        : await mcpStore.importRepository(session.tenantId, input);
+      return c.json({ source }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/mcp/store/sources/:id", async (c) => {
+    const session = c.get("session")!;
+    const deleted = await mcpStore.deleteSource(session.tenantId, decodeURIComponent(c.req.param("id")));
+    return deleted ? c.json({ ok: true }) : c.json({ error: "Not found" }, 404);
   });
 
   app.post("/api/mcp/store/sync", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       force?: boolean;
       maxPages?: number;
-      stores?: Array<"github-mcp" | "official-registry" | "mcpservers-org" | "awesome-mcp">;
-      store?: "github-mcp" | "official-registry" | "mcpservers-org" | "awesome-mcp";
+      stores?: string[];
+      store?: string;
     };
     try {
-      const stores = body.stores?.length
+      const requested = body.stores?.length
         ? body.stores
         : body.store
           ? [body.store]
           : undefined;
+      const custom = requested?.filter((store) => store.startsWith("custom:")) ?? [];
+      const invalid = requested?.filter((store) => !store.startsWith("custom:") && !isBuiltinMcpStoreId(store)) ?? [];
+      if (invalid.length) return c.json({ error: `unknown store: ${invalid.join(", ")}` }, 400);
+      if (custom.length) {
+        const session = c.get("session")!;
+        const results = [];
+        for (const store of custom) results.push(await mcpStore.syncCustomSource(session.tenantId, store as McpStoreSourceId));
+        return c.json({ results });
+      }
+      const stores = requested?.filter(isBuiltinMcpStoreId);
       const result = await mcpStore.sync({
         force: body.force === true,
         maxPages: typeof body.maxPages === "number" ? body.maxPages : 25,
@@ -3329,31 +3561,21 @@ export async function createApiApp(deps: {
   });
 
   app.get("/api/mcp/store/search", async (c) => {
+    const session = c.get("session")!;
     const q = c.req.query("q") ?? "";
     const kind = (c.req.query("kind") as "http" | "stdio" | "all" | undefined) ?? "all";
-    const store =
-      (c.req.query("store") as
-        | "github-mcp"
-        | "official-registry"
-        | "mcpservers-org"
-        | "awesome-mcp"
-        | "all"
-        | undefined) ?? "github-mcp";
+    const store = (c.req.query("store") as McpStoreSourceId | "all" | undefined) ?? "github-mcp";
     const limit = Number(c.req.query("limit") ?? 40);
     const offset = Number(c.req.query("offset") ?? 0);
-    const result = await mcpStore.search({ q, kind, store, limit, offset });
+    const result = await mcpStore.search({ tenantId: session.tenantId, q, kind, store, limit, offset });
     return c.json(result);
   });
 
   app.get("/api/mcp/store/servers/:name", async (c) => {
+    const session = c.get("session")!;
     const name = decodeURIComponent(c.req.param("name"));
-    const store = c.req.query("store") as
-      | "github-mcp"
-      | "official-registry"
-      | "mcpservers-org"
-      | "awesome-mcp"
-      | undefined;
-    const server = await mcpStore.getServer(name, store);
+    const store = c.req.query("store") as McpStoreSourceId | undefined;
+    const server = await mcpStore.getServer(name, store, session.tenantId);
     if (!server) return c.json({ error: "Not found" }, 404);
     const preview = mcpStore.buildInstallPreview(server);
     return c.json({ ...server, preview });
@@ -3363,7 +3585,7 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const body = await c.req.json<{
       name: string;
-      store?: "github-mcp" | "official-registry" | "mcpservers-org" | "awesome-mcp";
+      store?: McpStoreSourceId;
       prefer?: "http" | "stdio";
       remoteUrl?: string;
       env?: Record<string, string>;
@@ -3374,7 +3596,7 @@ export async function createApiApp(deps: {
     }>();
     if (!body.name) return c.json({ error: "name required" }, 400);
     try {
-      const server = await mcpStore.getServer(body.name, body.store);
+      const server = await mcpStore.getServer(body.name, body.store, session.tenantId);
       if (!server) return c.json({ error: "server not found in registry" }, 404);
       const plan = mcpStore.buildInstallPlan(server, {
         prefer: body.prefer,
@@ -3517,9 +3739,11 @@ export async function createApiApp(deps: {
       scope?: string;
       oauthClientId?: string;
       oauthClientSecret?: string;
+      oauthConnectorRef?: string;
     }>();
 
     let mcpUrl = body.mcpUrl?.trim() ?? "";
+    let storedConfig: Record<string, unknown> = {};
     if (!mcpUrl && body.instanceId) {
       const existing = await db.query.componentInstances.findFirst({
         where: and(
@@ -3530,6 +3754,7 @@ export async function createApiApp(deps: {
       if (!existing) return c.json({ error: "instance not found" }, 404);
       try {
         const cfg = decryptJson<Record<string, unknown>>(config.secret, existing.configEnc);
+        storedConfig = cfg;
         mcpUrl =
           (typeof cfg.mcpUrl === "string" && cfg.mcpUrl) ||
           existing.endpointUrl ||
@@ -3550,36 +3775,73 @@ export async function createApiApp(deps: {
 
     try {
       purgeUpstreamOauthPending();
-      const googleProduct = resolveGoogleWorkspaceProduct(mcpUrl);
-      const discovery = googleProduct
-        ? googleWorkspaceOauthDiscovery(googleProduct)
-        : await upstreamOauth.discover(mcpUrl);
+      const connectorTarget = await integrationCatalog.resolveConnectorTarget(
+        session.tenantId,
+        mcpUrl,
+      );
+      const discovery = connectorTarget?.discovery ?? await upstreamOauth.discover(mcpUrl);
+      const oauthDiscovery = discovery as UpstreamOauthDiscovery;
       const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
-      const resolvedUrl = googleProduct
-        ? googleWorkspaceBuiltinUrl(googleProduct)
-        : mcpUrl;
-      const client = await resolveUpstreamOauthClient({
-        upstreamOauth,
-        config,
-        db,
-        tenantId: session.tenantId,
-        discovery,
-        mcpUrl: resolvedUrl,
-        redirectUri,
-        clientName: body.clientName,
-        byo: {
-          clientId: body.oauthClientId,
-          clientSecret: body.oauthClientSecret,
-          scopes: body.scope,
-        },
-      });
+      const resolvedUrl = connectorTarget?.mcpUrl ?? mcpUrl;
+      const oauthClientId =
+        body.oauthClientId?.trim() ||
+        (typeof storedConfig.oauthClientId === "string" ? storedConfig.oauthClientId.trim() : "");
+      const oauthClientSecret =
+        body.oauthClientSecret ??
+        (typeof storedConfig.oauthClientSecret === "string" && storedConfig.oauthClientSecret !== "***"
+          ? storedConfig.oauthClientSecret
+          : undefined);
+      const oauthConnectorRef =
+        body.oauthConnectorRef?.trim() ||
+        (typeof storedConfig.oauthConnectorRef === "string"
+          ? storedConfig.oauthConnectorRef.trim()
+          : undefined);
+      const client = connectorTarget
+        ? oauthClientId
+          ? buildByoOauthClient(resolvedUrl, {
+              clientId: oauthClientId,
+              clientSecret: oauthClientSecret,
+              scopes: body.scope,
+            })
+          : connectorTarget.client
+            ? {
+                providerId: connectorTarget.providerId,
+                connectorRef: connectorTarget.providerId,
+                clientId: connectorTarget.client.clientId,
+                clientSecret: connectorTarget.client.clientSecret,
+                scopes: connectorTarget.scopes,
+                source: connectorTarget.client.source,
+              }
+            : null
+        : await resolveUpstreamOauthClient({
+            upstreamOauth,
+            discovery,
+            mcpUrl: resolvedUrl,
+            redirectUri,
+            clientName: body.clientName,
+            byo: {
+              clientId: oauthClientId,
+              clientSecret: oauthClientSecret,
+              scopes: body.scope,
+            },
+            connectorClient: await integrationCatalog.resolveHostOauthClient(
+              session.tenantId,
+              resolvedUrl,
+              { connectorRef: oauthConnectorRef },
+            ),
+            record: {
+              store: upstreamOauthClients,
+              tenantId: session.tenantId,
+              instanceId: body.instanceId,
+            },
+          });
 
       if (!client) {
         return c.json(
           {
             ok: false,
             discovery,
-            error: await noDcrOauthError(resolvedUrl, config, db, session.tenantId),
+            error: noDcrOauthError(resolvedUrl),
             needsByoClient: true,
             needsPatFallback: /github/i.test(mcpUrl),
             redirectUri,
@@ -3592,17 +3854,40 @@ export async function createApiApp(deps: {
         return c.json({ error: "上游缺少 token_endpoint", discovery }, 400);
       }
 
+      if (body.instanceId) {
+        await orchestrator.updateInstanceConfig(session.tenantId, body.instanceId, {
+          oauthClientId: client.clientId,
+          ...(client.clientSecret ? { oauthClientSecret: client.clientSecret } : {}),
+          oauthClientSource: client.source,
+          oauthClientMode: isCimdClientId(client.clientId)
+            ? "cimd"
+            : client.source === "dcr"
+              ? "dynamic"
+              : "manual",
+          oauthRedirectUri: redirectUri,
+          oauthRegistrationEndpoint: oauthDiscovery.registrationEndpoint ?? "",
+          oauthAuthorizationEndpoint: oauthDiscovery.authorizationEndpoint ?? "",
+          oauthTokenEndpoint: oauthDiscovery.tokenEndpoint,
+          oauthResourceMetadataUrl: oauthDiscovery.resourceMetadataUrl ?? "",
+          oauthScopes: body.scope ?? oauthDiscovery.scopesSupported?.join(" ") ?? "",
+        });
+      }
+
       const state = randomBytes(16).toString("hex");
       const { url, codeVerifier } = upstreamOauth.buildAuthorizeUrl({
         discovery,
         clientId: client.clientId,
         redirectUri,
         state,
-        scope: upstreamOauth.resolveScope(discovery, body.scope ?? client.scopeOverride),
-        resource: googleProduct ? undefined : discovery.resource ?? mcpUrl,
-        extraParams: googleProduct
-          ? { access_type: "offline", prompt: "consent" }
-          : upstreamAuthorizeExtra(mcpUrl),
+        scope: upstreamOauth.resolveScope(discovery, body.scope ?? (
+          connectorTarget
+            ? ("scopes" in client ? client.scopes : undefined)
+            : ("scopeOverride" in client ? client.scopeOverride : undefined)
+        )),
+        resource: connectorTarget
+          ? undefined
+          : ("resource" in discovery ? discovery.resource : undefined) ?? mcpUrl,
+        extraParams: connectorTarget?.authorizeParams,
       });
 
       upstreamOauthPending.set(state, {
@@ -3614,6 +3899,7 @@ export async function createApiApp(deps: {
         codeVerifier,
         redirectUri,
         tokenEndpoint: discovery.tokenEndpoint,
+        resource: connectorTarget ? null : undefined,
         createdAt: Date.now(),
       });
 
@@ -3655,7 +3941,6 @@ export async function createApiApp(deps: {
         state,
         scope: upstreamOauth.resolveScope(discovery, body.scope),
         resource: discovery.resource ?? body.mcpUrl,
-        extraParams: upstreamAuthorizeExtra(body.mcpUrl),
       });
       upstreamOauthPending.set(state, {
         tenantId: session.tenantId,
@@ -3704,7 +3989,7 @@ export async function createApiApp(deps: {
         clientId: pending.clientId,
         clientSecret: pending.clientSecret,
         codeVerifier: pending.codeVerifier,
-        resource: isGoogleWorkspaceTarget(pending.mcpUrl) ? undefined : pending.mcpUrl,
+        resource: pending.resource === null ? undefined : pending.resource ?? pending.mcpUrl,
       });
 
       let instanceId = pending.instanceId;
@@ -3726,9 +4011,7 @@ export async function createApiApp(deps: {
           applyOauthTokensToConfig(current, tokens),
         );
       } else {
-        const googleProduct = resolveGoogleWorkspaceProduct(pending.mcpUrl);
         const host = (() => {
-          if (googleProduct) return googleProduct;
           try {
             return new URL(pending.mcpUrl).hostname.replace(/\./g, "-");
           } catch {
@@ -3737,19 +4020,11 @@ export async function createApiApp(deps: {
         })();
         const created = await orchestrator.createInstance({
           tenantId: pending.tenantId,
-          providerId: googleProduct ? "google-workspace" : "generic-mcp",
-          name: googleProduct
-            ? `Google ${googleProduct[0]!.toUpperCase()}${googleProduct.slice(1)}`
-            : `MCP ${host}`,
+          providerId: "generic-mcp",
+          name: `MCP ${host}`,
           slug: `mcp-${host}`.slice(0, 32),
           config: applyOauthTokensToConfig(
-            googleProduct
-              ? {
-                  product: googleProduct,
-                  mcpUrl: googleWorkspaceBuiltinUrl(googleProduct),
-                  oauthTokenEndpoint: "https://oauth2.googleapis.com/token",
-                }
-              : { mcpUrl: pending.mcpUrl, apiKey: "", headerName: "Authorization" },
+            { mcpUrl: pending.mcpUrl, apiKey: "", headerName: "Authorization" },
             tokens,
           ),
         });
@@ -3798,9 +4073,9 @@ export async function createApiApp(deps: {
       .select()
       .from(settings)
       .where(or(eq(settings.ownerKey, "platform"), eq(settings.ownerKey, session.tenantId)));
-    return c.json(
-      Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.value)])),
-    );
+    const result = Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.value)]));
+    if (config.multiTenant) delete result[AGENT_DEFAULTS_KEY];
+    return c.json(result);
   });
 
   /**
@@ -3812,59 +4087,71 @@ export async function createApiApp(deps: {
     return c.json({
       redirectUri: `${config.publicBaseUrl.replace(/\/$/, "")}/api/mcp/upstream-oauth/callback`,
       note:
-        "Google Workspace MCP 须使用 OAuth Client ID/Secret（不是 API Key）。将此 URI 填入你的 OAuth App。",
+        "部分外部 MCP 不支持动态客户端注册；将此 URI 填入对应 OAuth App。平台连接器凭据请在独立页面管理。",
     });
   });
 
-  app.get("/api/mcp/oauth-apps", async (c) => {
+  /** 平台连接器能力目录。外部 MCP 使用独立商店，不进入这里。 */
+  app.get("/api/integrations/packages", async (c) => {
     const session = c.get("session")!;
-    const scopeParam = (c.req.query("scope") ?? "tenant") as McpOauthAppScope;
-    const scope: McpOauthAppScope = scopeParam === "platform" ? "platform" : "tenant";
-    if (!canManageMcpOauthApps(session, config, scope)) {
+    return c.json({ packages: await integrationCatalog.list(session.tenantId) });
+  });
+
+  app.get("/api/integrations/packages/:slug", async (c) => {
+    const session = c.get("session")!;
+    const pkg = await integrationCatalog.get(session.tenantId, c.req.param("slug"));
+    if (!pkg) return c.json({ error: "Not found" }, 404);
+    return c.json({ package: pkg });
+  });
+
+  app.get("/api/connectors", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (scope === "platform" && !canManageMcpOauthApps(session, config, scope)) {
       return c.json({ error: "需要管理员权限" }, 403);
     }
-    const apps = await listMcpOauthAppsPublic(
-      db,
-      config,
-      scope,
-      scope === "tenant" ? session.tenantId : undefined,
-    );
+    if (scope === "tenant") await skills?.syncBuiltins(session.tenantId);
+    const scopeKey = scope === "platform" ? "platform" : session.tenantId;
     return c.json({
-      apps,
+      connectors: await integrationCatalog.listConnectors(scopeKey),
       scope,
       redirectUri: `${config.publicBaseUrl.replace(/\/$/, "")}/api/mcp/upstream-oauth/callback`,
-      note:
-        "GitHub / Google / Slack 等无 DCR 的上游需预注册 OAuth Client；Google Workspace 不支持 API Key。安装时可临时传入自备客户端。",
     });
   });
 
-  app.put("/api/mcp/oauth-apps/:id", async (c) => {
+  /** 远程 MCP 安装前探测：是否可复用已配置的连接器 OAuth 客户端 */
+  app.get("/api/connectors/shared-oauth", async (c) => {
     const session = c.get("session")!;
-    const scopeParam = (c.req.query("scope") ?? "tenant") as McpOauthAppScope;
-    const scope: McpOauthAppScope = scopeParam === "platform" ? "platform" : "tenant";
+    const mcpUrl = c.req.query("mcpUrl")?.trim() ?? "";
+    const connectorRef = c.req.query("connectorRef")?.trim() || undefined;
+    if (!mcpUrl && !connectorRef) {
+      return c.json({ error: "mcpUrl or connectorRef required" }, 400);
+    }
+    const peek = await integrationCatalog.peekSharedOauth(
+      session.tenantId,
+      mcpUrl,
+      connectorRef,
+    );
+    return c.json(peek);
+  });
+
+  app.put("/api/connectors/:id/credentials", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
     if (!canManageMcpOauthApps(session, config, scope)) {
       return c.json({ error: "需要管理员权限" }, 403);
-    }
-    const id = c.req.param("id") as McpOauthAppId;
-    if (id !== "github" && id !== "google" && id !== "slack") {
-      return c.json({ error: "未知应用" }, 404);
     }
     const body = await c.req.json<{
       enabled?: boolean;
-      clientId?: string;
-      clientSecret?: string;
-      scopes?: string;
+      values?: Record<string, unknown>;
     }>();
     try {
-      const app = await patchMcpOauthApp(
-        db,
-        config,
-        id,
+      const connector = await integrationCatalog.saveCredentials(
+        scope === "platform" ? "platform" : session.tenantId,
+        c.req.param("id"),
         body,
-        scope,
-        scope === "tenant" ? session.tenantId : undefined,
       );
-      return c.json({ app, scope });
+      return c.json({ connector, scope });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

@@ -138,6 +138,7 @@ export type ProviderCategory =
   | "web-fetch"
   | "memory"
   | "context"
+  | "connector"
   | "mcp"
   | "runtime"
   | "agent";
@@ -150,6 +151,7 @@ export const PROVIDER_CATEGORY_META: Record<
   "web-fetch": { name: "网页抓取", description: "读取网页正文，供 web_fetch 工具使用" },
   memory: { name: "记忆", description: "多 Provider 长期记忆（Built-in / 传统 / mem0 / OpenViking）" },
   context: { name: "上下文", description: "OpenViking 等上下文文件系统客户端" },
+  connector: { name: "平台连接器", description: "平台直接调用第三方 API 并提供工具、资源和技能" },
   mcp: { name: "MCP", description: "上游 MCP（HTTP / Stdio 容器）导入、商店与 OAuth" },
   runtime: { name: "运行时", description: "容器与工作区" },
   agent: { name: "Agent", description: "隔离的多 Agent 配置与工具空间" },
@@ -317,6 +319,15 @@ export const BUILTIN_PROVIDER_IDS = [
   "openviking",
   "generic-mcp",
   "google-workspace",
+  "microsoft-365",
+  "github",
+  "slack",
+  "notion",
+  "linear",
+  "feishu",
+  "discord",
+  "gitlab",
+  "jira",
 ] as const;
 export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number];
 
@@ -444,6 +455,57 @@ export type {
   StoreServerLike,
 } from "./mcp-config.js";
 
+export type {
+  ConnectionKind,
+  ConnectionSourceId,
+  ConnectionAuthMode,
+  ConnectionListing,
+  ConnectionCredentialField,
+  InstalledConnection,
+  ConnectionInstallRequest,
+  ConnectionInstallResult,
+  ConnectionSourceMeta,
+  ConnectionBindRequest,
+} from "./connections.js";
+
+export { CURATED_OAUTH_MCPS, CURATED_MCP_GROUPS } from "./curated-mcp.js";
+
+export {
+  AGENT_HOOK_EVENTS,
+  parseAgentHookPackages,
+  normalizeHooksByEvent,
+  parseHooksJson,
+  mergeHookPackages,
+  matcherHits,
+} from "./agent-hooks.js";
+export type {
+  AgentHookEvent,
+  AgentHookActionType,
+  AgentHookAction,
+  AgentHookMatcherGroup,
+  AgentHooksByEvent,
+  AgentHookPackage,
+} from "./agent-hooks.js";
+
+export type {
+  StoreComponentKind,
+  StorePackageKind,
+  StorePackageComponent,
+  StorePackageDetail,
+  StorePackageCard,
+  StorePackageSection,
+  StorePackageListResult,
+} from "./store-package.js";
+export {
+  BUILTIN_MARKETS,
+  getBuiltinMarket,
+  builtinPluginMarkets,
+} from "./markets.js";
+export type {
+  BuiltinMarket,
+  BuiltinMarketKind,
+  BuiltinMarketGroup,
+} from "./markets.js";
 export {
   DEFAULT_MCP_OAUTH_SCHEMES,
   inferToolAnnotations,

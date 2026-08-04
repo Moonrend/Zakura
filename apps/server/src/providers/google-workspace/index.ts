@@ -202,7 +202,7 @@ export function createGoogleWorkspaceProvider(): ProviderPlugin {
     description:
       "本地实现 Gmail / Drive / Calendar 工具（直接调用 Google REST API，不依赖 *mcp.googleapis.com）",
     version: "1.0.0",
-    category: "mcp",
+    category: "connector",
     capabilities: ["tools", "builtin"],
     configSchema,
 

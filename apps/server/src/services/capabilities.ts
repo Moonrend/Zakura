@@ -4,6 +4,7 @@ import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { componentInstances } from "../db/schema.js";
 import type { Orchestrator } from "./orchestrator.js";
+import type { AgentWebDefaults } from "./agent-defaults.js";
 
 /** First-class product capabilities (each has its own settings panel). */
 export type CapabilityKind = "web-search" | "web-fetch";
@@ -92,6 +93,7 @@ export async function ensureCapabilityInstance(
   );
 }
 
+
 export function readInstanceConfig<T extends Record<string, unknown>>(
   appConfig: AppConfig,
   instance: { configEnc: string },
@@ -130,4 +132,45 @@ export async function saveCapabilityConfig(
   return db.query.componentInstances.findFirst({
     where: and(eq(componentInstances.id, instance.id), eq(componentInstances.tenantId, tenantId)),
   });
+}
+
+/** Add and enable platform-managed web providers selected by the platform admin. */
+export async function syncPlatformManagedWebDefaults(
+  db: Db,
+  orchestrator: Orchestrator,
+  appConfig: AppConfig,
+  tenantId: string,
+  defaults: AgentWebDefaults,
+  managed: Array<{ key: string; mapsTo: { kind: string; id: string } }>,
+) {
+  const selected = new Set(defaults.autoManagedServices);
+  if (!selected.size) return;
+  const active = managed.filter((s) => selected.has(s.key));
+  if (!active.length) return;
+  for (const kind of ["web-search", "web-fetch"] as const) {
+    const instance = await ensureCapabilityInstance(db, orchestrator, tenantId, kind);
+    const current = readInstanceConfig<Record<string, any>>(appConfig, instance);
+    const mapKey = kind === "web-search" ? "engines" : "backends";
+    const enabledKey = kind === "web-search" ? "webSearchEnabled" : "webFetchEnabled";
+    if (!defaults[enabledKey]) continue;
+    const next: Record<string, any> = { ...current, [mapKey]: { ...(current[mapKey] ?? {}) } };
+    let changed = false;
+    for (const service of active.filter((s) => s.mapsTo.kind === (kind === "web-search" ? "search-engine" : "fetch-backend"))) {
+      const id = service.mapsTo.id;
+      const previous = next[mapKey][id] ?? {};
+      const slots = Array.isArray(previous.slots) ? [...previous.slots] : [];
+      if (!slots.some((slot: any) => slot?.usePlatform === true)) {
+        slots.push({ id: `platform:${service.key}`, label: "平台托管", usePlatform: true });
+        changed = true;
+      }
+      if (previous.enabled !== true) changed = true;
+      next[mapKey][id] = { ...previous, enabled: true, slots };
+      const defaultKey = kind === "web-search" ? "defaultEngine" : "defaultBackend";
+      if (!next[defaultKey]) {
+        next[defaultKey] = id;
+        changed = true;
+      }
+    }
+    if (changed) await saveCapabilityConfig(db, orchestrator, appConfig, tenantId, kind, next);
+  }
 }

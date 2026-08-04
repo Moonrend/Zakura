@@ -46,14 +46,15 @@ import type { AgentService } from "./agents.js";
 import {
   getAgentMcpMode,
   getAgentProviders,
-  isWebFetchEnabledForAgent,
-  isWebSearchEnabledForAgent,
+  isPlatformAssistant,
   isWorkspaceFsExposedViaMcp,
 } from "./agent-providers.js";
+import { effectiveAgentWebDefaults, getAgentWebDefaults } from "./agent-defaults.js";
 import { ensureCapabilityInstance } from "./capabilities.js";
 import type { MemoryStore } from "./memory-store.js";
 import type { MemoryProvidersService } from "./memory-providers.js";
 import type { Orchestrator } from "./orchestrator.js";
+import { callPlatformAssistantTool, isPlatformAssistantToolName, listPlatformAssistantTools } from "./platform-assistant-tools.js";
 import type { ToolCallStore } from "./tool-call-store.js";
 import { callSkillTool, isSkillToolName } from "./skills/tools.js";
 
@@ -297,6 +298,13 @@ export class McpGateway {
   private fileShareService: import("./file-shares.js").FileShareService | null = null;
   private subagentRunner: CloudSubagentRunner | null = null;
   private skillsService: import("./skills/service.js").SkillsService | null = null;
+  private connectionCatalog: import("./connection-catalog.js").ConnectionCatalogService | null =
+    null;
+  private integrationCatalog: import("./integration-catalog.js").IntegrationCatalogService | null =
+    null;
+  private runtimeNodes: import("./runtime-nodes.js").RuntimeNodeService | null = null;
+  private instanceMigrations: import("./platform-assistant-tools.js").InstanceMigrationPort | null =
+    null;
 
   constructor(
     private readonly db: Db,
@@ -351,6 +359,19 @@ export class McpGateway {
   /** 技能服务：re_list_skills / re_read_skill / re_search_skills / re_install_skill 的执行方 */
   setSkillsService(service: import("./skills/service.js").SkillsService): void {
     this.skillsService = service;
+  }
+
+  /** 平台助手 tools 依赖（ConnectionCatalog / 凭据 / Runner / 可选实例迁移） */
+  setPlatformAssistantDeps(deps: {
+    connectionCatalog?: import("./connection-catalog.js").ConnectionCatalogService | null;
+    integrations?: import("./integration-catalog.js").IntegrationCatalogService | null;
+    runtimeNodes?: import("./runtime-nodes.js").RuntimeNodeService | null;
+    instanceMigrations?: import("./platform-assistant-tools.js").InstanceMigrationPort | null;
+  }): void {
+    if ("connectionCatalog" in deps) this.connectionCatalog = deps.connectionCatalog ?? null;
+    if ("integrations" in deps) this.integrationCatalog = deps.integrations ?? null;
+    if ("runtimeNodes" in deps) this.runtimeNodes = deps.runtimeNodes ?? null;
+    if ("instanceMigrations" in deps) this.instanceMigrations = deps.instanceMigrations ?? null;
   }
 
   /**
@@ -568,8 +589,10 @@ export class McpGateway {
   async listToolsForAgent(agent: Agent): Promise<ResolvedTool[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
 
-    // 仅在 Agent 显式启用时才 ensure+start 能力实例（默认不启容器）
-    if (isWebSearchEnabledForAgent(agent)) {
+    const platformDefaults = await getAgentWebDefaults(this.db);
+    const effective = effectiveAgentWebDefaults(getAgentProviders(agent), platformDefaults);
+
+    if (effective.webSearchEnabled) {
       try {
         await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-search", {
           start: true,
@@ -578,7 +601,7 @@ export class McpGateway {
         console.warn(`[mcp] web-search capability:`, err);
       }
     }
-    if (isWebFetchEnabledForAgent(agent)) {
+    if (effective.webFetchEnabled) {
       try {
         await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-fetch", {
           start: true,
@@ -608,6 +631,16 @@ export class McpGateway {
         agentId: agent.id,
       }),
     );
+    if (isPlatformAssistant(agent)) {
+      for (const t of listPlatformAssistantTools()) {
+        tools.push(
+          this.enrichResolvedTool({
+            ...t,
+            agentId: agent.id,
+          }),
+        );
+      }
+    }
     if (this.subagentRunner) {
       tools.push(this.enrichResolvedTool(subagentToolDef(agent.id)));
     }
@@ -626,8 +659,8 @@ export class McpGateway {
       );
 
     for (const instance of capabilityInstances) {
-      if (instance.providerId === "web-search" && !isWebSearchEnabledForAgent(agent)) continue;
-      if (instance.providerId === "web-fetch" && !isWebFetchEnabledForAgent(agent)) continue;
+      if (instance.providerId === "web-search" && !effective.webSearchEnabled) continue;
+      if (instance.providerId === "web-fetch" && !effective.webFetchEnabled) continue;
       if (!globalRegistry.has(instance.providerId)) continue;
       const plugin = globalRegistry.get(instance.providerId);
       let handle: InstanceHandle;
@@ -960,6 +993,20 @@ export class McpGateway {
         where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
       });
       if (!agent) return textResult("Agent not found", true);
+      if (isPlatformAssistantToolName(tool.localName)) {
+        if (!isPlatformAssistant(agent)) {
+          return textResult("Platform assistant tools are not enabled for this agent", true);
+        }
+        return callPlatformAssistantTool(tool.localName, args, {
+          tenantId,
+          agentId: agent.id,
+          connectionCatalog: this.connectionCatalog,
+          integrations: this.integrationCatalog,
+          runtimeNodes: this.runtimeNodes,
+          orchestrator: this.orchestrator,
+          instanceMigrations: this.instanceMigrations,
+        });
+      }
       if (isSkillToolName(tool.localName)) {
         return callSkillTool(this.skillsService, agent, tool.localName, args);
       }
@@ -995,12 +1042,12 @@ export class McpGateway {
         where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
       });
       if (agentRow) {
-        const prefs = getAgentProviders(agentRow);
-        if (tool.providerId === "web-search" && typeof args.engine !== "string" && prefs.webSearch?.defaultEngine) {
-          callArgs = { ...args, engine: prefs.webSearch.defaultEngine };
+        const prefs = effectiveAgentWebDefaults(getAgentProviders(agentRow), await getAgentWebDefaults(this.db));
+        if (tool.providerId === "web-search" && typeof args.engine !== "string" && prefs.searchEngine) {
+          callArgs = { ...args, engine: prefs.searchEngine };
         }
-        if (tool.providerId === "web-fetch" && typeof args.backend !== "string" && prefs.webFetch?.defaultBackend) {
-          callArgs = { ...args, backend: prefs.webFetch.defaultBackend };
+        if (tool.providerId === "web-fetch" && typeof args.backend !== "string" && prefs.fetchBackend) {
+          callArgs = { ...args, backend: prefs.fetchBackend };
         }
       }
     }

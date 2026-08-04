@@ -204,6 +204,62 @@
       "when": 1785901000000,
       "tag": "0028_cloud_agent_session_preferences",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1785902000000,
+      "tag": "0029_agent_web_defaults",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785903000000,
+      "tag": "0030_integration_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1785904000000,
+      "tag": "0031_mcp_store_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785905000000,
+      "tag": "0032_mcp_health_scheduler",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785906000000,
+      "tag": "0033_instance_runtime_node",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785907000000,
+      "tag": "0034_store_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785908000000,
+      "tag": "0035_skill_auto_update",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1785909000000,
+      "tag": "0036_upstream_oauth_clients",
+      "breakpoints": true
     }
   ]
 }

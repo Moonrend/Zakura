@@ -31,6 +31,14 @@ export type AgentProvidersConfig = {
 
 export type AgentConfigBag = {
   providers?: AgentProvidersConfig;
+  /** 内部平台配置助手；也可写在 cloud.platformAssistant */
+  platformAssistant?: boolean;
+  /** 已安装的 hook 包（插件 hooks.json 合并结果） */
+  hooks?: unknown;
+  cloud?: {
+    platformAssistant?: boolean;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 };
 
@@ -48,7 +56,18 @@ export function getAgentProviders(agent: Agent | { configJson: string }): AgentP
   return parseAgentConfig(agent).providers ?? {};
 }
 
-/** Capability tools are opt-in — must be explicitly enabled per agent */
+/** 是否为内部平台配置助手（仅该 Agent 可见连接管理类 tools） */
+export function isPlatformAssistant(agent: Agent | { configJson: string }): boolean {
+  const cfg = parseAgentConfig(agent);
+  if (cfg.platformAssistant === true) return true;
+  const cloud = cfg.cloud;
+  if (cloud && typeof cloud === "object" && !Array.isArray(cloud) && cloud.platformAssistant === true) {
+    return true;
+  }
+  return false;
+}
+
+/** Legacy synchronous helpers. New agents inherit platform defaults in the gateway. */
 export function isWebSearchEnabledForAgent(agent: Agent): boolean {
   return getAgentProviders(agent).webSearch?.enabled === true;
 }

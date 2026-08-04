@@ -1,13 +1,14 @@
 "use client";
 
-import { SettingsHeader } from "@/components/settings-shell";
-import { McpOfficialStorePanel } from "@/components/mcp/official-store-panel";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Skeleton } from "@/components/ui/skeleton";
 
-export default function McpOfficialStorePage() {
-  return (
-    <div className="space-y-5">
-      <SettingsHeader title="官方商店" />
-      <McpOfficialStorePanel />
-    </div>
-  );
+/** 官方商店已并入 /dashboard/mcp/store */
+export default function McpOfficialStoreRedirect() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace("/dashboard/mcp/store");
+  }, [router]);
+  return <Skeleton className="h-48 w-full rounded-lg" />;
 }

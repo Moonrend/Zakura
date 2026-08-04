@@ -489,11 +489,90 @@ export const componentInstances = pgTable(
     endpointUrl: text("endpoint_url"),
     healthStatus: text("health_status").notNull().default("unknown"),
     lastError: text("last_error"),
+    lastHealthCheckAt: timestamp("last_health_check_at", { withTimezone: true }),
+    nextHealthCheckAt: timestamp("next_health_check_at", { withTimezone: true }).notNull().defaultNow(),
+    healthFailureCount: integer("health_failure_count").notNull().default(0),
+    healthClaimUntil: timestamp("health_claim_until", { withTimezone: true }),
+    /** null / local = 本机 Docker；否则跑在 Runner 节点上（stdio MCP） */
+    runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
+      onDelete: "set null",
+    }),
     ...timestamps,
   },
   (t) => [
     uniqueIndex("instances_tenant_slug").on(t.tenantId, t.slug),
     index("instances_tenant_provider").on(t.tenantId, t.providerId),
+    index("instances_health_due").on(t.status, t.nextHealthCheckAt),
+    index("instances_runtime_node").on(t.runtimeNodeId),
+  ],
+);
+
+/**
+ * 平台连接器目录。一个连接器可以发布 Tools、Resources、Prompts 与 Skill；外部 MCP 使用独立商店。
+ * manifestJson 只描述展示与安装元数据；凭据始终单独加密存储。
+ */
+export const integrationPackages = pgTable(
+  "integration_packages",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    publisher: text("publisher").notNull().default("Zakura"),
+    category: text("category").notNull().default("productivity"),
+    icon: text("icon").notNull().default(""),
+    accent: text("accent").notNull().default("#64748b"),
+    homepage: text("homepage"),
+    verified: boolean("verified").notNull().default(false),
+    featured: boolean("featured").notNull().default(false),
+    manifestJson: text("manifest_json").notNull().default("{}"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("integration_packages_slug").on(t.slug)],
+);
+
+/** 包内组件。ref 是该组件连接现有 MCP provider、内置 Skill 或未来运行时的稳定键。 */
+export const integrationComponents = pgTable(
+  "integration_components",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    packageId: text("package_id")
+      .notNull()
+      .references(() => integrationPackages.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    ref: text("ref").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    configJson: text("config_json").notNull().default("{}"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("integration_components_package_ref").on(t.packageId, t.kind, t.ref),
+    index("integration_components_kind_ref").on(t.kind, t.ref),
+  ],
+);
+
+/**
+ * 连接器凭据。scopeKey 为 tenantId 或 platform；所有字段整体加密，API 仅返回字段存在性。
+ * credentialKind 与字段 schema 来自 integration_components.configJson，不由业务代码枚举。
+ */
+export const connectorCredentials = pgTable(
+  "connector_credentials",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    scopeKey: text("scope_key").notNull(),
+    connectorId: text("connector_id")
+      .notNull()
+      .references(() => integrationComponents.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    credentialKind: text("credential_kind").notNull(),
+    configEnc: text("config_enc").notNull(),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("connector_credentials_scope_connector").on(t.scopeKey, t.connectorId),
+    index("connector_credentials_scope").on(t.scopeKey),
   ],
 );
 
@@ -782,6 +861,46 @@ export const oauthClients = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("oauth_clients_tenant").on(t.tenantId)],
+);
+
+/**
+ * 本平台作为客户端时，对上游 MCP/AS 的 OAuth 客户端记录：
+ * - dcr：向远程 registration_endpoint 动态注册
+ * - byo：用户自备 Client ID/Secret
+ */
+export const upstreamOauthClients = pgTable(
+  "upstream_oauth_clients",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** 上游 MCP URL（或规范化后的 resource） */
+    mcpUrl: text("mcp_url").notNull(),
+    /** 便于按 host 聚合 */
+    host: text("host").notNull(),
+    clientId: text("client_id").notNull(),
+    /** 加密 JSON：{ clientSecret?: string } */
+    secretEnc: text("secret_enc"),
+    clientName: text("client_name").notNull().default(""),
+    /** dcr | byo */
+    source: text("source").notNull(),
+    registrationEndpoint: text("registration_endpoint"),
+    scope: text("scope").notNull().default(""),
+    instanceId: text("instance_id").references(() => componentInstances.id, {
+      onDelete: "set null",
+    }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("upstream_oauth_clients_tenant_host_client").on(
+      t.tenantId,
+      t.host,
+      t.clientId,
+    ),
+    index("upstream_oauth_clients_tenant").on(t.tenantId),
+    index("upstream_oauth_clients_source").on(t.source),
+  ],
 );
 
 export const oauthAuthCodes = pgTable(
@@ -1145,12 +1264,39 @@ export const skills = pgTable(
     sizeBytes: integer("size_bytes").notNull().default(0),
     /** 指回 platform_skill_repos.repoKey，用于判断上游是否有新版本 */
     repoKey: text("repo_key"),
+    /** 是否跟随上游自动更新（仅第三方技能；内置始终跟随平台） */
+    autoUpdate: boolean("auto_update").notNull().default(true),
     ...timestamps,
   },
   (t) => [
     uniqueIndex("skills_tenant_name").on(t.tenantId, t.name),
     index("skills_tenant").on(t.tenantId),
     index("skills_repo_key").on(t.repoKey),
+  ],
+);
+
+/** Tenant-owned Codex / Claude plugin marketplaces that expose MCP servers. */
+export const mcpStoreSources = pgTable(
+  "mcp_store_sources",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    sourceUrl: text("source_url").notNull(),
+    /** auto | codex | claude */
+    format: text("format").notNull().default("auto"),
+    manifestJson: text("manifest_json").notNull().default("{}"),
+    serversJson: text("servers_json").notNull().default("[]"),
+    enabled: boolean("enabled").notNull().default(true),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("mcp_store_sources_tenant_url").on(t.tenantId, t.sourceUrl),
+    index("mcp_store_sources_tenant").on(t.tenantId),
   ],
 );
 
@@ -1278,6 +1424,9 @@ export const schema = {
   apiKeys,
   providerCatalog,
   componentInstances,
+  integrationPackages,
+  integrationComponents,
+  connectorCredentials,
   managedContainers,
   agentBindings,
   settings,
@@ -1289,6 +1438,7 @@ export const schema = {
   memoryEdges,
   toolCallLogs,
   oauthClients,
+  upstreamOauthClients,
   oauthAuthCodes,
   oauthRefreshTokens,
   networkIntegrations,
@@ -1300,6 +1450,7 @@ export const schema = {
   cloudAgentSessions,
   cloudAgentEvents,
   cloudAgentRuns,
+  mcpStoreSources,
   skills,
   agentSkills,
   platformSkillRepos,
@@ -1325,6 +1476,9 @@ export type AgentBinding = typeof agentBindings.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type ProviderCatalog = typeof providerCatalog.$inferSelect;
 export type ComponentInstance = typeof componentInstances.$inferSelect;
+export type IntegrationPackageRow = typeof integrationPackages.$inferSelect;
+export type IntegrationComponentRow = typeof integrationComponents.$inferSelect;
+export type ConnectorCredentialRow = typeof connectorCredentials.$inferSelect;
 export type ManagedContainer = typeof managedContainers.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
 export type PlatformService = typeof platformServices.$inferSelect;
@@ -1335,17 +1489,40 @@ export type Memory = typeof memories.$inferSelect;
 export type MemoryEdge = typeof memoryEdges.$inferSelect;
 export type ToolCallLog = typeof toolCallLogs.$inferSelect;
 export type OauthClient = typeof oauthClients.$inferSelect;
+export type UpstreamOauthClient = typeof upstreamOauthClients.$inferSelect;
 export type OauthAuthCode = typeof oauthAuthCodes.$inferSelect;
 export type OauthRefreshToken = typeof oauthRefreshTokens.$inferSelect;
 export type NetworkIntegration = typeof networkIntegrations.$inferSelect;
 export type TunnelProviderSetting = typeof tunnelProviderSettings.$inferSelect;
 export type NetworkSecurityPolicy = typeof networkSecurityPolicies.$inferSelect;
 export type FileShare = typeof fileShares.$inferSelect;
+/** 商店目录索引：名称/描述供模糊搜索（不含完整内容）。tenant_id 空 = 平台。 */
+export const storeCatalogEntries = pgTable(
+  "store_catalog_entries",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id"),
+    sourceId: text("source_id").notNull(),
+    kind: text("kind").notNull(),
+    ref: text("ref").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    metaJson: text("meta_json").notNull().default("{}"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("store_catalog_tenant").on(t.tenantId),
+    index("store_catalog_source").on(t.sourceId),
+    index("store_catalog_kind").on(t.kind),
+  ],
+);
+
 export type PortExposure = typeof portExposures.$inferSelect;
 export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
 export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;
 export type CloudAgentEventRow = typeof cloudAgentEvents.$inferSelect;
 export type CloudAgentRun = typeof cloudAgentRuns.$inferSelect;
+export type McpStoreSourceRow = typeof mcpStoreSources.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
 export type AgentSkillRow = typeof agentSkills.$inferSelect;
 export type PlatformSkillRepoRow = typeof platformSkillRepos.$inferSelect;

@@ -43,6 +43,7 @@ import {
   bindDefaultMcpsToAgent,
   ensureDefaultAgentMcps,
 } from "./default-mcps.js";
+import { effectiveAgentWebDefaults, getAgentWebDefaults } from "./agent-defaults.js";
 
 function slugify(input: string): string {
   return (
@@ -123,13 +124,11 @@ export class AgentService {
       if (i === 19) throw new Error(`Agent slug already exists: ${slug}`);
     }
 
-    // 默认 providers 为 opt-in（搜索/抓取关、MCP selected 空绑定）
+    // 搜索/抓取默认跟随平台设置；只有显式配置才写入 Agent 覆盖值。
     const defaultConfig =
       input.config ??
       ({
         providers: {
-          webSearch: { enabled: false },
-          webFetch: { enabled: false },
           mcp: { mode: "selected", instanceIds: [] },
         },
       } satisfies Record<string, unknown>);
@@ -468,6 +467,31 @@ export class AgentService {
     return { ok: true as const };
   }
 
+  /** 合并插件 hook 包到 agent.configJson.hooks */
+  async mergeHookPackage(
+    tenantId: string,
+    agentId: string,
+    pkg: import("@zakura/shared").AgentHookPackage,
+  ): Promise<Agent> {
+    const { mergeHookPackages, parseAgentHookPackages } = await import("@zakura/shared");
+    const agent = await this.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent not found");
+    let config: Record<string, unknown> = {};
+    try {
+      config = JSON.parse(agent.configJson) as Record<string, unknown>;
+    } catch {
+      config = {};
+    }
+    const existing = parseAgentHookPackages(config.hooks);
+    config.hooks = mergeHookPackages(existing, pkg);
+    const [updated] = await this.db
+      .update(agents)
+      .set({ configJson: JSON.stringify(config), updatedAt: new Date() })
+      .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
+      .returning();
+    return updated ?? agent;
+  }
+
   /** Replace MCP bindings when agent uses mode=selected */
   async setMcpBindings(tenantId: string, agentId: string, instanceIds: string[]) {
     const agent = await this.get(tenantId, agentId);
@@ -586,6 +610,7 @@ export class AgentService {
     );
     const searchCfg = readInstanceConfig<WebSearchConfig>(this.config, searchInst);
     const fetchCfg = readInstanceConfig<WebFetchConfig>(this.config, fetchInst);
+    const effective = effectiveAgentWebDefaults(prefs, await getAgentWebDefaults(this.db));
     const searchEnabled = enabledEngines(searchCfg);
     const fetchEnabled = enabledBackends(fetchCfg);
 
@@ -619,8 +644,8 @@ export class AgentService {
           .filter((e) => searchEnabled.includes(e.id))
           .map((e) => ({ id: e.id, name: e.name, description: e.description })),
         agent: {
-          enabled: prefs.webSearch?.enabled === true,
-          defaultEngine: prefs.webSearch?.defaultEngine ?? null,
+          enabled: effective.webSearchEnabled,
+          defaultEngine: effective.searchEngine,
         },
       },
       webFetch: {
@@ -631,8 +656,8 @@ export class AgentService {
           .filter((b) => fetchEnabled.includes(b.id))
           .map((b) => ({ id: b.id, name: b.name, description: b.description })),
         agent: {
-          enabled: prefs.webFetch?.enabled === true,
-          defaultBackend: prefs.webFetch?.defaultBackend ?? null,
+          enabled: effective.webFetchEnabled,
+          defaultBackend: effective.fetchBackend,
         },
       },
       mcp: {

@@ -258,6 +258,8 @@ export interface SkillRecord {
   updateAvailable?: boolean;
   /** 平台缓存里的上游版本（updateAvailable 时用于展示） */
   upstreamVersion?: string | null;
+  /** 是否跟随上游自动更新（第三方技能） */
+  autoUpdate?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Check, ChevronDown, KeyRound, Loader2, Package } from "lucide-react";
 import { api } from "@/lib/api";
+import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import {
   kindLabel,
   packageManagerLabel,
@@ -17,6 +18,11 @@ import {
   startUpstreamOauth,
   verifyUpstreamOauth,
 } from "@/lib/mcp-oauth";
+import {
+  AgentTargetPicker,
+  resolveAgentIds,
+  type AgentTargetValue,
+} from "@/components/agent-target-picker";
 import { ProgressLinear } from "@/components/ui/progress-linear";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,11 +53,15 @@ type McpInstallFlowProps = {
   className?: string;
   /** 隐藏本组件内进度条（由卡片顶栏承担） */
   hideProgress?: boolean;
+  /** 预加载的 Agent 列表；不传则自行拉取，默认绑定全部 */
+  agents?: AgentListItem[];
+  defaultAgentIds?: string[];
 };
 
 /**
  * 统一安装面板：支持 HTTP OAuth / API Key、商店安装、stdio（npm / pypi / oci）。
  * 安装状态完全内聚；进度动画由外层卡片顶栏展示。
+ * 默认绑定到全部 Agent，可在安装前改选。
  */
 export function McpInstallFlow({
   config: initial,
@@ -59,6 +69,8 @@ export function McpInstallFlow({
   onPhaseChange,
   className,
   hideProgress = false,
+  agents: agentsProp,
+  defaultAgentIds,
 }: McpInstallFlowProps) {
   const [config] = useState(initial);
   const [envValues, setEnvValues] = useState<Record<string, string>>(() => {
@@ -78,8 +90,23 @@ export function McpInstallFlow({
   );
   const [error, setError] = useState<string | null>(null);
   const [instanceId, setInstanceId] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentListItem[]>(agentsProp ?? []);
+  const [agentTarget, setAgentTarget] = useState<AgentTargetValue>(() => ({
+    all: !defaultAgentIds?.length,
+    agentIds: defaultAgentIds ?? [],
+  }));
+  const agentTargetRef = useRef(agentTarget);
+  agentTargetRef.current = agentTarget;
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
   const [showPat, setShowPat] = useState(false);
   const [pat, setPat] = useState("");
+  const [sharedOauth, setSharedOauth] = useState<{
+    ready: boolean;
+    connectorRef?: string | null;
+    connectorName?: string;
+    source?: string;
+  } | null>(null);
   const [showByo, setShowByo] = useState(
     () =>
       initial.oauth?.strategies?.includes("byo") === true ||
@@ -93,7 +120,36 @@ export function McpInstallFlow({
   const [redirectUri, setRedirectUri] = useState<string | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
 
+  const oauthConnectorRef =
+    sharedOauth?.connectorRef || config.oauth?.providerId || undefined;
+
+  function oauthClientPayload() {
+    return {
+      oauthClientId: byoClientId.trim() || undefined,
+      oauthClientSecret: byoClientSecret.trim() || undefined,
+      oauthConnectorRef,
+    };
+  }
+
   useEffect(() => () => unsubRef.current?.(), []);
+
+  useEffect(() => {
+    if (agentsProp) {
+      setAgents(agentsProp);
+      return;
+    }
+    let cancelled = false;
+    void fetchAgents()
+      .then((list) => {
+        if (!cancelled) setAgents(list);
+      })
+      .catch(() => {
+        /* 绑定失败时仍可完成安装 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentsProp]);
 
   useEffect(() => {
     if (config.kind !== "http" || config.auth !== "oauth") return;
@@ -105,6 +161,53 @@ export function McpInstallFlow({
         /* ignore */
       });
   }, [config.kind, config.auth]);
+
+  useEffect(() => {
+    if (config.kind !== "http" || config.auth !== "oauth") return;
+    const mcpUrl = config.mcpUrl?.trim() ?? "";
+    const connectorRef = config.oauth?.providerId?.trim() ?? "";
+    if (!mcpUrl && !connectorRef) return;
+    const qs = new URLSearchParams();
+    if (mcpUrl) qs.set("mcpUrl", mcpUrl);
+    if (connectorRef) qs.set("connectorRef", connectorRef);
+    let cancelled = false;
+    void api<{
+      ready: boolean;
+      connectorRef?: string | null;
+      connectorName?: string;
+      source?: string;
+    }>(`/api/connectors/shared-oauth?${qs.toString()}`)
+      .then((peek) => {
+        if (cancelled) return;
+        setSharedOauth(peek);
+        if (peek.ready) setShowByo(false);
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config.kind, config.auth, config.mcpUrl, config.oauth?.providerId]);
+
+  async function bindAgents(id: string) {
+    const ids = resolveAgentIds(agentTargetRef.current, agentsRef.current);
+    if (!ids.length) return;
+    await Promise.all(
+      ids.map((agentId) =>
+        api(`/api/agents/${agentId}/bindings`, {
+          method: "POST",
+          json: { instanceId: id },
+        }).catch(() => undefined),
+      ),
+    );
+  }
+
+  async function finishInstall(result: InstallResult) {
+    await bindAgents(result.instanceId);
+    setPhase("done");
+    onComplete?.(result);
+  }
 
   const busy = phase !== "idle" && phase !== "done" && phase !== "error";
   /** 安装期间的服务端实时进度（拉镜像/启动容器等，经平台事件推送） */
@@ -145,7 +248,7 @@ export function McpInstallFlow({
     if (phase !== "error") return null;
     if (isSlack) return "Slack 需预注册 App（不支持 DCR）";
     if (isFigma) return "若授权失败，可能需向 Figma 申请 waitlist";
-    if (isGoogle) return "需 OAuth 客户端，可先在「设置 → OAuth 应用」配置";
+    if (isGoogle) return "需 OAuth 客户端，可先在「设置 → OAuth 客户端」配置";
     if (config.oauth?.tier === "B" || config.oauth?.providerId === "github") {
       return "需预注册 OAuth App，或改用 PAT";
     }
@@ -189,10 +292,13 @@ export function McpInstallFlow({
       } catch {
         /* 可能已在运行 */
       }
+      await bindAgents(id);
       setPhase("done");
       toast.success("已授权并启动");
       onComplete?.({ instanceId: id, slug: config.name });
     },
+    // bindAgents 用 ref，故意不列入 deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [config.name, onComplete, setPhase],
   );
 
@@ -244,17 +350,13 @@ export function McpInstallFlow({
       setInstanceId(res.instance.id);
       const preparedTab = prepareOauthTab();
       try {
-        const { authorizeUrl } = await startUpstreamOauth(res.instance.id, {
-          oauthClientId: byoClientId.trim() || undefined,
-          oauthClientSecret: byoClientSecret.trim() || undefined,
-        });
+        const { authorizeUrl } = await startUpstreamOauth(res.instance.id, oauthClientPayload());
         beginOauthWait(res.instance.id, authorizeUrl, preparedTab);
         return;
       } catch (err) {
         if (preparedTab && !preparedTab.closed) preparedTab.close();
-        setPhase("done");
         toast.message("已安装，上游需要 OAuth 授权");
-        onComplete?.({
+        await finishInstall({
           instanceId: res.instance.id,
           slug: res.instance.slug,
           authRequired: true,
@@ -266,9 +368,8 @@ export function McpInstallFlow({
     if (!res.started && res.startError) {
       throw new Error(res.startError);
     }
-    setPhase("done");
     toast.success(`已安装并启动 ${res.instance.slug}`);
-    onComplete?.({ instanceId: res.instance.id, slug: res.instance.slug });
+    await finishInstall({ instanceId: res.instance.id, slug: res.instance.slug });
   }
 
   async function installStdioDirect() {
@@ -294,9 +395,8 @@ export function McpInstallFlow({
     if (!res.started && res.startError) {
       throw new Error(res.startError);
     }
-    setPhase("done");
     toast.success(`已安装并启动 ${res.instance.slug}`);
-    onComplete?.({ instanceId: res.instance.id, slug: res.instance.slug });
+    await finishInstall({ instanceId: res.instance.id, slug: res.instance.slug });
   }
 
   async function installOauth() {
@@ -322,8 +422,7 @@ export function McpInstallFlow({
           name: config.name,
           authMode: "oauth",
           start: false,
-          oauthClientId: byoClientId.trim() || undefined,
-          oauthClientSecret: byoClientSecret.trim() || undefined,
+          ...oauthClientPayload(),
         },
       });
       setInstanceId(res.instance.id);
@@ -337,7 +436,7 @@ export function McpInstallFlow({
       if (preparedTab && !preparedTab.closed) preparedTab.close();
       const msg =
         res.oauth?.error ||
-        "缺少 OAuth 客户端。请填写自备 Client ID/Secret，或在设置中保存。";
+        "缺少 OAuth 客户端。请填写自备 Client ID/Secret，或在「设置 → OAuth 客户端」保存。";
       setError(msg);
       setPhase("error");
       if (res.oauth?.needsByoClient) setShowByo(true);
@@ -371,8 +470,7 @@ export function McpInstallFlow({
       },
     });
     if (res.authRequired) {
-      setPhase("done");
-      onComplete?.({
+      await finishInstall({
         instanceId: res.instance.id,
         slug: res.instance.slug,
         authRequired: true,
@@ -382,9 +480,8 @@ export function McpInstallFlow({
     if (!res.started && res.startError) {
       throw new Error(res.startError);
     }
-    setPhase("done");
     toast.success("已接入并启动");
-    onComplete?.({ instanceId: res.instance.id, slug: res.instance.slug });
+    await finishInstall({ instanceId: res.instance.id, slug: res.instance.slug });
   }
 
   async function installWithPat() {
@@ -409,9 +506,8 @@ export function McpInstallFlow({
           start: true,
         },
       });
-      setPhase("done");
       toast.success("已接入并启动");
-      onComplete?.({ instanceId: res.instance.id, slug: res.instance.slug });
+      await finishInstall({ instanceId: res.instance.id, slug: res.instance.slug });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -451,10 +547,7 @@ export function McpInstallFlow({
     try {
       setError(null);
       const preparedTab = prepareOauthTab();
-      const { authorizeUrl } = await startUpstreamOauth(instanceId, {
-        oauthClientId: byoClientId.trim() || undefined,
-        oauthClientSecret: byoClientSecret.trim() || undefined,
-      });
+      const { authorizeUrl } = await startUpstreamOauth(instanceId, oauthClientPayload());
       beginOauthWait(instanceId, authorizeUrl, preparedTab);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -554,6 +647,15 @@ export function McpInstallFlow({
           </div>
         ) : null}
 
+        {needsOauthUi && sharedOauth?.ready && (phase === "idle" || phase === "error") ? (
+          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            将复用「{sharedOauth.connectorName || sharedOauth.connectorRef}」连接器已配置的
+            OAuth 客户端
+            {sharedOauth.source === "platform" ? "（整站预配）" : ""}
+            ，安装后只需完成用户授权。
+          </div>
+        ) : null}
+
         {needsOauthUi && (phase === "idle" || phase === "error") && (
           <div className="space-y-2 border-t border-border pt-3">
             <button
@@ -561,7 +663,11 @@ export function McpInstallFlow({
               className="flex w-full items-center justify-between text-left text-xs font-medium"
               onClick={() => setShowByo((v) => !v)}
             >
-              <span>自备 OAuth 客户端（推荐）</span>
+              <span>
+                {sharedOauth?.ready
+                  ? "改用自备 OAuth 客户端"
+                  : "自备 OAuth 客户端（推荐）"}
+              </span>
               <ChevronDown
                 className={cn("size-3.5 transition-transform", showByo && "rotate-180")}
               />
@@ -638,9 +744,25 @@ export function McpInstallFlow({
           </div>
         ) : null}
 
+        {phase === "idle" || phase === "error" ? (
+          <AgentTargetPicker
+            agents={agents}
+            value={agentTarget}
+            onChange={setAgentTarget}
+            disabled={busy}
+          />
+        ) : null}
+
         <div className="flex flex-wrap gap-2">
           {phase === "idle" || phase === "error" ? (
-            <Button disabled={busy} onClick={() => void startInstall()}>
+            <Button
+              disabled={
+                busy ||
+                (agents.length > 0 &&
+                  resolveAgentIds(agentTarget, agents).length === 0)
+              }
+              onClick={() => void startInstall()}
+            >
               {busy ? (
                 <Loader2 className="animate-spin" />
               ) : isStdio ? (

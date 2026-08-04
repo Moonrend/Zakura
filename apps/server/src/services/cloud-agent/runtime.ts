@@ -65,6 +65,10 @@ import {
   type AgentLoopHooks,
   type LoopToolOutcome,
 } from "./loop.js";
+import {
+  collectInjectText,
+  firstDeny,
+} from "../agent-hooks.js";
 
 export type SessionCompactionResult = {
   summary: string;
@@ -102,6 +106,8 @@ export type CloudAgentRuntimeDeps = {
   workspaceFsProvider?: WorkspaceFsProvider | null;
   /** 技能服务（可选；缺省时不注入技能摘要） */
   skills?: import("../skills/service.js").SkillsService | null;
+  /** Agent hooks（可选；缺省时不触发插件 hooks） */
+  agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
 };
 
 export class CloudAgentRuntime {
@@ -743,6 +749,37 @@ export class CloudAgentRuntime {
       ...historyMsgs,
     ];
 
+    // SessionStart / UserPromptSubmit hooks
+    const hooksSvc = this.deps.agentHooks;
+    if (hooksSvc) {
+      try {
+        if (input.isFirstTurn) {
+          const startResults = await hooksSvc.runEvent(agent, "SessionStart");
+          const inject = collectInjectText(startResults);
+          if (inject) {
+            messages.splice(1, 0, {
+              role: "system",
+              content: `# Hooks · SessionStart\n${inject}`,
+            });
+          }
+        }
+        const promptResults = await hooksSvc.runEvent(agent, "UserPromptSubmit", {
+          userPrompt: lastUserContent,
+        });
+        const promptInject = collectInjectText(promptResults);
+        if (promptInject) {
+          messages.push({
+            role: "system",
+            content: `# Hooks · UserPromptSubmit\n${promptInject}`,
+          });
+        }
+      } catch (err) {
+        await this.log(sessionId, runId, "warn", "hooks 执行失败", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // 图片附件：读工作区文件转 data URI（多模态输入）
     await this.resolveWorkspaceImages(agent, messages);
 
@@ -776,8 +813,28 @@ export class CloudAgentRuntime {
           parentRunId: runId,
           isCancelled: () => this.store.isCancelRequested(runId),
         }),
-        // 跨 Agent 委派：目标 Agent 名下创建 delegate 会话并运行
+        // 跨 Agent 委派 + 插件 PreToolUse
         interceptCall: async (call, args) => {
+          if (hooksSvc) {
+            const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
+              toolName: call.function.name,
+              toolArgs: args,
+            });
+            const denied = firstDeny(pre);
+            if (denied) {
+              return {
+                result: {
+                  content: [
+                    {
+                      type: "text",
+                      text: denied.reason ?? "PreToolUse hook denied this tool call",
+                    },
+                  ],
+                  isError: true,
+                },
+              };
+            }
+          }
           if (call.function.name !== DELEGATE_TOOL_NAME) return undefined;
           const res = await this.delegateToAgent(tenantId, agent, peerAgents, args, {
             isCancelled: () => this.store.isCancelRequested(runId),
@@ -792,6 +849,20 @@ export class CloudAgentRuntime {
             link: { sessionId: res.sessionId, agentId: res.agentId },
           };
         },
+        afterToolCall: hooksSvc
+          ? async (call, args, outcome) => {
+              await hooksSvc.runEvent(
+                agent,
+                outcome.isError ? "PostToolUseFailure" : "PostToolUse",
+                {
+                  toolName: call.function.name,
+                  toolArgs: args,
+                  toolResultText: outcome.resultText,
+                  isError: outcome.isError,
+                },
+              );
+            }
+          : undefined,
       },
     });
 

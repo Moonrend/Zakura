@@ -120,7 +120,11 @@ export function listenMcpOauthCallback(
 
 export async function startUpstreamOauth(
   instanceId: string,
-  byo?: { oauthClientId?: string; oauthClientSecret?: string },
+  byo?: {
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthConnectorRef?: string;
+  },
 ): Promise<{ authorizeUrl: string }> {
   const res = await api<{
     ok: boolean;

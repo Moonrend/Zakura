@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { ExternalLink, RefreshCw, Store } from "lucide-react";
+import { ExternalLink, Plus, RefreshCw, Store } from "lucide-react";
 import { api } from "@/lib/api";
 import {
   fromStorePreview,
@@ -17,10 +17,18 @@ import { McpInstallDialog } from "@/components/mcp/install-dialog";
 import type { McpInstallPhase } from "@/components/mcp/install-flow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 
-type StoreId = "github-mcp" | "official-registry" | "mcpservers-org" | "awesome-mcp";
+type StoreId = string;
 
 type StoreServer = StoreServerLike & {
   version: string;
@@ -197,6 +205,9 @@ export function McpStorePanel() {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [sources, setSources] = useState<Source[]>([]);
   const [storeCounts, setStoreCounts] = useState<Record<string, number>>({});
+  const [addOpen, setAddOpen] = useState(false);
+  const [repo, setRepo] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -248,7 +259,7 @@ export function McpStorePanel() {
       const ok = res.results.filter((r) => !r.error);
       const fail = res.results.filter((r) => r.error);
       toast.success(
-        `已同步 ${ok.map((r) => `${STORE_LABEL[r.storeId as StoreId] ?? r.storeId} ${r.count}`).join(" · ")}`,
+        `已同步 ${ok.map((r) => `${STORE_LABEL[r.storeId] ?? r.storeId} ${r.count}`).join(" · ")}`,
       );
       if (fail.length) {
         toast.error(fail.map((r) => `${r.storeId}: ${r.error}`).join("; "));
@@ -261,11 +272,37 @@ export function McpStorePanel() {
     }
   }
 
+  async function addSource() {
+    if (!repo.trim()) return;
+    setAdding(true);
+    try {
+      const res = await api<{ source: Source & { count?: number } }>(
+        "/api/mcp/store/sources",
+        { method: "POST", json: { repository: repo.trim() } },
+      );
+      toast.success(
+        `已添加 ${res.source.name}${res.source.count != null ? `（${res.source.count}）` : ""}`,
+      );
+      setAddOpen(false);
+      setRepo("");
+      setStore(res.source.id);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAdding(false);
+    }
+  }
+
   const activeSource = sources.find((s) => s.id === store);
 
   return (
     <div className="space-y-5">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+          <Plus />
+          添加源
+        </Button>
         <Button variant="outline" disabled={syncing} onClick={() => void sync(true)}>
           <RefreshCw className={syncing ? "animate-spin" : undefined} />
           {store === "all" ? "同步全部" : "同步当前商店"}
@@ -382,6 +419,31 @@ export function McpStorePanel() {
           暂无结果
         </div>
       ) : null}
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>添加 MCP 商店源</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label>GitHub 仓库或 marketplace.json URL</Label>
+            <Input
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder="owner/repo"
+              className="font-mono text-xs"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={!repo.trim() || adding} onClick={() => void addSource()}>
+              {adding ? "添加中…" : "添加"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -172,6 +172,12 @@ export type SaasHostDeps = {
     }>;
     mapPublic?: (node: unknown) => unknown;
   };
+  agentDefaults?: {
+    get: () => Promise<unknown>;
+    save: (value: Record<string, unknown>) => Promise<unknown>;
+    enableForUser: (userId: string) => Promise<unknown>;
+    syncManaged: () => Promise<unknown>;
+  };
 };
 
 export type SaasApp = Hono<{ Variables: { session?: SaasSession } }>;

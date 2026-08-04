@@ -593,6 +593,258 @@ const MEMORY_CURATION: BuiltinSkillDef = {
 `,
 };
 
+const GOOGLE_WORKSPACE: BuiltinSkillDef = {
+  name: "google-workspace",
+  title: "Google Workspace",
+  description:
+    "使用已连接的 Gmail、Drive、Calendar、People 和 Chat MCP 完成跨应用工作。当用户要求处理 Google 邮件、日历、云盘、联系人、会议安排或 Workspace 协作时使用。",
+  tags: ["Google", "邮件", "日历", "云盘", "协作"],
+  body: `# Google Workspace
+
+把 Google Workspace 看作一套相关的数据，而不是五个互不相干的工具。先确认用户目标和授权范围，再选择最少的 MCP 调用完成任务。
+
+## 能力选择
+
+- Gmail：检索邮件、阅读会话、管理草稿与发送。先搜索再读取，避免无边界遍历邮箱。
+- Drive：搜索文件、读取内容和管理文件。优先按名称、所有者、类型或更新时间缩小范围。
+- Calendar：检查日历与空闲时间、创建或更新事件。写入前明确时区、参与者和日期。
+- People：查找联系人和组织目录，用于消歧邮箱地址与人员身份。
+- Chat：查找空间和消息、发送协作消息。发送前确认目标空间和最终文案。
+
+## 工作流
+
+1. 调用可用工具列表确认当前 Agent 已绑定哪些 Google MCP；缺少能力时说明具体缺失项。
+2. 对读取任务先做窄范围搜索，再读取少量最相关结果；不要一次抓取整个邮箱或云盘。
+3. 跨应用任务先解析身份与时间。例如“把 Alice 邮件里的方案放到明天下午会议”应先定位联系人、邮件和时区，再检查日历冲突。
+4. 草稿、日历建议和待发送内容可以直接准备；发送邮件、发消息、创建或取消日程前展示关键字段并取得确认，除非用户已明确授权该具体动作。
+5. 返回实际结果与可追溯链接或 ID；某个连接器不可用时不要编造数据。
+
+## 数据边界
+
+只访问完成当前请求所需的最小范围。不要在回复中泄露 OAuth token、内部 header 或与任务无关的私人内容。多人同名时先消歧，不要猜收件人。
+`,
+};
+
+const MICROSOFT_365: BuiltinSkillDef = {
+  name: "microsoft-365",
+  title: "Microsoft 365",
+  description:
+    "使用已连接的 Outlook、OneDrive、SharePoint、Teams 与 Microsoft Graph 完成 Microsoft 365 工作。当用户提到微软邮箱、会议、文件、Teams、组织目录或 Entra 账号时使用。",
+  tags: ["Microsoft", "Outlook", "Teams", "OneDrive", "Graph"],
+  body: `# Microsoft 365
+
+通过 Microsoft Graph 组合 Outlook、文件、Teams 与组织目录能力。每一步使用最小权限和最窄查询，不把搜索结果当成已确认事实。
+
+## 能力选择
+
+- Outlook：邮件、草稿、日历和会议。所有时间都显式保留时区。
+- OneDrive / SharePoint：搜索与读取文件；同名文件要用站点、路径、所有者和修改时间消歧。
+- Teams：团队、频道、聊天与消息。发送或回复前确认目标会话。
+- Graph Directory：解析用户、群组与组织身份；不要仅凭显示名称执行写操作。
+
+## 工作流
+
+1. 先检查当前可用 MCP 与权限，明确是委托用户权限还是应用权限。
+2. 搜索时先限制资源、时间范围和人员，再读取详情；分页结果按相关性停止，不做无界扫描。
+3. 跨服务任务先解析稳定 ID。例如从邮件附件更新 Teams 讨论，应先确定消息、文件 driveItem 与频道 ID。
+4. 写操作前核对目标租户、账号、收件人、频道、日期和影响范围。用户明确要求的单次动作可直接执行；含糊或批量动作必须先确认。
+5. 汇报实际完成的动作、Graph/MCP 返回的资源链接或 ID，以及任何权限不足。
+
+## 安全
+
+不展示 access token、refresh token、Client Secret 或原始 Authorization header。遇到跨租户资源或权限拒绝时停止并说明需要的权限，不尝试绕过管理员策略。
+`,
+};
+
+const SLACK: BuiltinSkillDef = {
+  name: "slack",
+  title: "Slack",
+  description:
+    "使用已连接的 Slack 频道、消息与用户工具完成工作区沟通。当用户要求发消息、查频道历史或查找同事时使用。",
+  tags: ["Slack", "协作", "消息"],
+  body: `# Slack
+
+用最少的频道与消息调用完成沟通任务。发送前确认目标频道与最终文案。
+
+## 能力
+
+- Channels：列出与定位频道
+- Messages：读取历史、发送或回复
+- Users：按姓名或邮箱消歧成员
+
+## 工作流
+
+1. 先确认可用 Slack 工具与权限范围。
+2. 发送消息前展示频道与正文，除非用户已明确授权该动作。
+3. 不要泄露 token；遇到权限不足时说明缺少的 scope。
+`,
+};
+
+const GITHUB: BuiltinSkillDef = {
+  name: "github",
+  title: "GitHub",
+  description:
+    "使用已连接的 GitHub 仓库、Issues、PR 与搜索工具完成开发协作。当用户要求查仓库、开 Issue、审 PR 或搜代码时使用。",
+  tags: ["GitHub", "开发", "PR", "Issue"],
+  body: `# GitHub
+
+把仓库、Issue 与 Pull Request 当作关联工作面。先确认 owner/repo，再执行写操作。
+
+## 能力
+
+- Repositories：列出仓库、查看分支
+- Issues：搜索、创建、评论
+- Pull Requests：列出、创建、查看详情
+- Search：跨仓库搜索代码与 Issue
+
+## 工作流
+
+1. 先用搜索或 list 工具缩小范围，再读取详情。
+2. 创建 Issue/PR 前确认仓库、标题与目标分支。
+3. 不展示 OAuth token；权限不足时说明需要的 scope。
+`,
+};
+
+const NOTION: BuiltinSkillDef = {
+  name: "notion",
+  title: "Notion",
+  description:
+    "使用已连接的 Notion 页面、数据库与用户工具完成知识库工作。当用户要求搜索 Notion、读写页面或查询数据库时使用。",
+  tags: ["Notion", "知识库", "文档"],
+  body: `# Notion
+
+先搜索再读取，避免无边界遍历工作区。写操作前确认父页面/数据库与最终内容。
+
+## 能力
+
+- Pages：搜索、读取、创建页面，追加内容块
+- Databases：读取 schema 与查询记录
+- Users：列出工作区成员
+
+## 工作流
+
+1. 用 search 定位目标，再 get_page / query_database。
+2. 创建或追加内容前展示摘要并取得确认（除非用户已明确授权）。
+3. 不展示 OAuth token。
+`,
+};
+
+const LINEAR_SKILL: BuiltinSkillDef = {
+  name: "linear",
+  title: "Linear",
+  description:
+    "使用已连接的 Linear Issues、Projects 与 Teams 工具。当用户要求查 Issue、开单或看项目进度时使用。",
+  tags: ["Linear", "Issue", "项目管理"],
+  body: `# Linear
+
+先确认 teamId / issue id，再执行写操作。用 list_teams 消歧团队。
+
+## 能力
+
+- Issues：列表、详情、创建、评论
+- Projects：浏览项目
+- Teams：列出团队与当前用户
+
+## 工作流
+
+1. 创建 Issue 前确认 teamId、标题与优先级。
+2. 评论前确认目标 Issue。
+3. 不展示 token。
+`,
+};
+
+const FEISHU_SKILL: BuiltinSkillDef = {
+  name: "feishu",
+  title: "飞书",
+  description:
+    "使用已连接的飞书文档、多维表格与消息工具。当用户提到飞书文档、表格、群聊或发消息时使用。",
+  tags: ["飞书", "文档", "消息"],
+  body: `# 飞书
+
+用最少权限完成任务。发消息前确认会话与正文。
+
+## 能力
+
+- 文档：读取文档与内容块
+- 多维表格：列表与检索记录
+- 消息：列出会话、发送文本
+
+## 工作流
+
+1. 先用 get_current_user / list_chats 确认身份与目标。
+2. 写操作前确认 receive_id 与文案。
+3. 不展示 token。
+`,
+};
+
+const DISCORD_SKILL: BuiltinSkillDef = {
+  name: "discord",
+  title: "Discord",
+  description:
+    "使用已连接的 Discord 服务器与用户资料工具。当用户要求查看所在服务器或 Discord 账号信息时使用。",
+  tags: ["Discord", "社区"],
+  body: `# Discord
+
+用户 OAuth 可读取服务器列表与资料；发送频道消息通常需要 Bot Token，本连接器聚焦读取。
+
+## 能力
+
+- Guilds：列出/查看服务器
+- User：当前用户与连接账号
+
+## 工作流
+
+1. 先 list_guilds 再按需 get_guild。
+2. 不展示 token。
+`,
+};
+
+const GITLAB_SKILL: BuiltinSkillDef = {
+  name: "gitlab",
+  title: "GitLab",
+  description:
+    "使用已连接的 GitLab 项目与 Issues 工具。当用户要求查 GitLab 项目或开 Issue 时使用。",
+  tags: ["GitLab", "开发", "Issue"],
+  body: `# GitLab
+
+先定位 project_id（数字 id 或 path），再操作 Issues。
+
+## 能力
+
+- Projects：列出/查看项目
+- Issues：列出与创建
+
+## 工作流
+
+1. list_projects 缩小范围后再 create_issue。
+2. 写操作前确认标题与描述。
+3. 不展示 token。
+`,
+};
+
+const JIRA_SKILL: BuiltinSkillDef = {
+  name: "jira",
+  title: "Jira",
+  description:
+    "使用已连接的 Jira Issues 与 Projects 工具。当用户要求用 JQL 查单、开 Issue 或看项目时使用。",
+  tags: ["Jira", "Issue", "项目管理"],
+  body: `# Jira
+
+优先用窄 JQL 搜索。创建 Issue 前确认 project_key 与 issuetype。
+
+## 能力
+
+- Issues：JQL 搜索、详情、创建、评论
+- Projects：列出项目与当前用户
+
+## 工作流
+
+1. search_issues 定位，再 get_issue。
+2. 写操作前确认关键字段。
+3. 不展示 token。
+`,
+};
+
 export const BUILTIN_SKILLS: BuiltinSkillDef[] = [
   FIND_SKILLS,
   SKILL_CREATOR,
@@ -602,6 +854,16 @@ export const BUILTIN_SKILLS: BuiltinSkillDef[] = [
   DELIVER_ARTIFACTS,
   SUBAGENT_ORCHESTRATION,
   MEMORY_CURATION,
+  GOOGLE_WORKSPACE,
+  MICROSOFT_365,
+  GITHUB,
+  SLACK,
+  NOTION,
+  LINEAR_SKILL,
+  FEISHU_SKILL,
+  DISCORD_SKILL,
+  GITLAB_SKILL,
+  JIRA_SKILL,
 ];
 
 export function getBuiltinSkill(name: string): BuiltinSkillDef | undefined {

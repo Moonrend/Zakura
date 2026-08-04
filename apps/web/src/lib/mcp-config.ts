@@ -4,12 +4,13 @@
  */
 
 import {
+  CURATED_MCP_GROUPS,
+  CURATED_OAUTH_MCPS,
   DEFAULT_AGENT_AUTO_INSTALL_MCPS,
   MCP_OAUTH_TIER_META,
   pickPreferredInstallPreview,
   type McpAuthMode,
   type McpEnvHint,
-  type McpOauthContract,
   type StoreInstallPreview,
   type StoreServerLike,
   type UnifiedMcpConfig,
@@ -28,342 +29,12 @@ export type {
 } from "@zakura/shared";
 
 export {
+  CURATED_MCP_GROUPS,
+  CURATED_OAUTH_MCPS,
   DEFAULT_AGENT_AUTO_INSTALL_MCPS,
   pickPreferredInstallPreview,
   rankInstallPreview,
 } from "@zakura/shared";
-
-const TIER_A: McpOauthContract = {
-  tier: "A",
-  strategies: ["dcr"],
-};
-
-const TIER_B_PRE: McpOauthContract = {
-  tier: "B",
-  strategies: ["pre_registered", "byo"],
-};
-
-/** 官方推荐远程 HTTP MCP（独立「官方商店」页） */
-export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
-  // 无鉴权默认 MCP（新建 Agent 自动安装）
-  ...DEFAULT_AGENT_AUTO_INSTALL_MCPS,
-  {
-    id: "context7",
-    name: "Context7",
-    description: "为任意库拉取最新文档与代码示例（可选 API Key 提高限额）",
-    kind: "http",
-    auth: "none",
-    mcpUrl: "https://mcp.context7.com/mcp",
-    headerName: "CONTEXT7_API_KEY",
-    docsUrl: "https://context7.com/docs/resources/all-clients",
-    repositoryUrl: "https://github.com/upstash/context7",
-    tags: ["dev", "docs", "recommended", "no-auth"],
-    source: "curated",
-    icon: "C7",
-    group: "dev",
-  },
-  {
-    id: "notion",
-    name: "Notion",
-    description: "读写页面、数据库与评论",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.notion.com/mcp",
-    docsUrl: "https://developers.notion.com/docs/get-started-with-mcp",
-    tags: ["oauth", "productivity", "recommended"],
-    source: "curated",
-    icon: "N",
-    group: "productivity",
-    oauth: TIER_A,
-  },
-  {
-    id: "linear",
-    name: "Linear",
-    description: "Issues、Projects、Cycles",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.linear.app/mcp",
-    docsUrl: "https://linear.app/docs/mcp",
-    tags: ["oauth", "pm", "recommended"],
-    source: "curated",
-    icon: "L",
-    group: "productivity",
-    oauth: { ...TIER_A, allowPatFallback: true },
-  },
-  {
-    id: "atlassian",
-    name: "Atlassian",
-    description: "Jira / Confluence / Compass",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.atlassian.com/v1/mcp",
-    docsUrl: "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
-    repositoryUrl: "https://github.com/atlassian/atlassian-mcp-server",
-    tags: ["oauth", "productivity", "recommended"],
-    source: "curated",
-    icon: "AT",
-    group: "productivity",
-    oauth: { ...TIER_A, allowPatFallback: true },
-  },
-  {
-    id: "asana",
-    name: "Asana",
-    description: "任务与项目管理（需预注册 App）",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.asana.com/v2/mcp",
-    docsUrl: "https://developers.asana.com/docs/connecting-mcp-clients-to-asanas-v2-server",
-    tags: ["oauth", "pm", "recommended"],
-    source: "curated",
-    icon: "AS",
-    group: "productivity",
-    oauth: TIER_B_PRE,
-  },
-  {
-    id: "miro",
-    name: "Miro",
-    description: "读写白板",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.miro.com/",
-    docsUrl: "https://developers.miro.com/docs/miro-mcp",
-    tags: ["oauth", "productivity", "recommended"],
-    source: "curated",
-    icon: "MI",
-    group: "productivity",
-    oauth: TIER_A,
-  },
-  {
-    id: "slack",
-    name: "Slack",
-    description: "消息、频道与 Canvas（需预注册 App）",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.slack.com/mcp",
-    docsUrl: "https://docs.slack.dev/ai/slack-mcp-server",
-    tags: ["oauth", "productivity", "recommended"],
-    source: "curated",
-    icon: "SL",
-    group: "productivity",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "slack",
-    },
-  },
-  {
-    id: "figma",
-    name: "Figma",
-    description: "设计文件与评论",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.figma.com/mcp",
-    docsUrl: "https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/",
-    tags: ["oauth", "design", "recommended"],
-    source: "curated",
-    icon: "FG",
-    group: "productivity",
-    oauth: TIER_A,
-  },
-  {
-    id: "cloudflare",
-    name: "Cloudflare",
-    description: "Workers、KV、R2、DNS",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.cloudflare.com/mcp",
-    docsUrl: "https://developers.cloudflare.com/agents/model-context-protocol/",
-    tags: ["oauth", "infra", "recommended"],
-    source: "curated",
-    icon: "CF",
-    group: "infra",
-    oauth: TIER_A,
-  },
-  {
-    id: "vercel",
-    name: "Vercel",
-    description: "部署、项目与日志",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.vercel.com",
-    docsUrl: "https://vercel.com/docs/mcp",
-    tags: ["oauth", "deploy", "recommended"],
-    source: "curated",
-    icon: "▲",
-    group: "infra",
-    oauth: TIER_A,
-  },
-  {
-    id: "sentry",
-    name: "Sentry",
-    description: "Issues 与项目排查",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.sentry.dev/mcp",
-    docsUrl: "https://github.com/getsentry/sentry-mcp",
-    repositoryUrl: "https://github.com/getsentry/sentry-mcp",
-    tags: ["oauth", "infra", "recommended"],
-    source: "curated",
-    icon: "SE",
-    group: "infra",
-    oauth: { ...TIER_A, allowPatFallback: true },
-  },
-  {
-    id: "stripe",
-    name: "Stripe",
-    description: "账单与知识库",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.stripe.com",
-    docsUrl: "https://docs.stripe.com/mcp",
-    tags: ["oauth", "infra", "recommended"],
-    source: "curated",
-    icon: "$",
-    group: "infra",
-    oauth: { ...TIER_A, allowPatFallback: true },
-  },
-  {
-    id: "hubspot",
-    name: "HubSpot",
-    description: "CRM（需预注册 App）",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://mcp.hubspot.com",
-    docsUrl:
-      "https://developers.hubspot.com/docs/apps/developer-platform/build-apps/integrate-with-the-remote-hubspot-mcp-server",
-    tags: ["oauth", "crm", "recommended"],
-    source: "curated",
-    icon: "HS",
-    group: "productivity",
-    oauth: TIER_B_PRE,
-  },
-  {
-    id: "github",
-    name: "GitHub",
-    description: "仓库、Issues 与 PR",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "https://api.githubcopilot.com/mcp/",
-    docsUrl: "https://github.com/github/github-mcp-server",
-    repositoryUrl: "https://github.com/github/github-mcp-server",
-    tags: ["oauth", "dev", "recommended"],
-    source: "curated",
-    icon: "GH",
-    group: "dev",
-    oauth: {
-      ...TIER_B_PRE,
-      allowPatFallback: true,
-      providerId: "github",
-    },
-  },
-  {
-    id: "google-gmail",
-    name: "Gmail",
-    description: "邮件搜索、草稿与标签",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "zakura://google-workspace/gmail",
-    docsUrl: "https://developers.google.com/workspace/gmail/api/guides",
-    tags: ["oauth", "google", "recommended"],
-    source: "curated",
-    icon: "GM",
-    group: "google",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "google",
-    },
-  },
-  {
-    id: "google-drive",
-    name: "Google Drive",
-    description: "搜索与读写文件",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "zakura://google-workspace/drive",
-    docsUrl: "https://developers.google.com/drive/api/guides/about-sdk",
-    tags: ["oauth", "google", "recommended"],
-    source: "curated",
-    icon: "GD",
-    group: "google",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "google",
-    },
-  },
-  {
-    id: "google-calendar",
-    name: "Google Calendar",
-    description: "日程列表与创建",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "zakura://google-workspace/calendar",
-    docsUrl: "https://developers.google.com/calendar/api/guides/overview",
-    tags: ["oauth", "google", "recommended"],
-    source: "curated",
-    icon: "GC",
-    group: "google",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "google",
-    },
-  },
-  {
-    id: "google-people",
-    name: "Google People",
-    description: "联系人与通讯录",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "zakura://google-workspace/people",
-    docsUrl: "https://developers.google.com/people/api/guides/overview",
-    tags: ["oauth", "google", "recommended"],
-    source: "curated",
-    icon: "GP",
-    group: "google",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "google",
-    },
-  },
-  {
-    id: "google-chat",
-    name: "Google Chat",
-    description: "会话与消息",
-    kind: "http",
-    auth: "oauth",
-    mcpUrl: "zakura://google-workspace/chat",
-    docsUrl: "https://developers.google.com/workspace/chat/api/guides/quickstart/nodejs",
-    tags: ["oauth", "google", "recommended"],
-    source: "curated",
-    icon: "CH",
-    group: "google",
-    oauth: {
-      ...TIER_B_PRE,
-      providerId: "google",
-    },
-  },
-];
-
-export const CURATED_MCP_GROUPS: Array<{
-  id: NonNullable<UnifiedMcpConfig["group"]>;
-  title: string;
-}> = [
-  {
-    id: "google",
-    title: "Google Workspace",
-  },
-  {
-    id: "dev",
-    title: "开发协作",
-  },
-  {
-    id: "productivity",
-    title: "效率工具",
-  },
-  {
-    id: "infra",
-    title: "基础设施",
-  },
-];
-
 export function oauthTierBadge(config: UnifiedMcpConfig): {
   label: string;
   variant: "default" | "secondary" | "outline";
@@ -379,6 +50,17 @@ export function oauthTierBadge(config: UnifiedMcpConfig): {
     label: MCP_OAUTH_TIER_META[tier].short,
     variant: tier === "A" ? "default" : tier === "B" ? "secondary" : "outline",
   };
+}
+
+export function setupRequirementBadge(config: UnifiedMcpConfig): {
+  label: string;
+  variant: "default" | "secondary" | "outline";
+} {
+  if (config.auth === "none") return { label: "无需配置", variant: "outline" };
+  if (config.oauth?.tier === "C") return { label: "需自备凭证", variant: "outline" };
+  if (config.oauth?.tier === "B") return { label: "需预注册 App", variant: "secondary" };
+  if (config.auth === "oauth") return { label: "安装后授权", variant: "default" };
+  return { label: "需 API Key", variant: "secondary" };
 }
 
 export function slugifyMcpName(name: string): string {

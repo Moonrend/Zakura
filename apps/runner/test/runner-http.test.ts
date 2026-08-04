@@ -104,6 +104,40 @@ describe("Runner auth + FS + migration HTTP", () => {
     assert.ok(existsSync(join(root, "node_modules", "x", "index.js")));
   });
 
+  it("instance migration export/import restores data dir", async () => {
+    const instanceId = "inst_mig_1";
+    const root = join(storageRoot, "instances", instanceId, "data");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "state.json"), '{"ok":true}', "utf8");
+
+    const exp = await app.request(`/v1/instances/${instanceId}/migration/export`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ sourceNodeId: "src-node" }),
+    });
+    const archive = Buffer.from(await exp.arrayBuffer());
+    assert.equal(exp.status, 200, `export status ${exp.status}`);
+    const sha = exp.headers.get("x-archive-sha256");
+    assert.ok(sha);
+
+    const targetId = "inst_mig_target";
+    const imp = await app.request(`/v1/instances/${targetId}/migration/import`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/octet-stream",
+        "X-Archive-Sha256": sha!,
+      },
+      body: archive,
+    });
+    assert.equal(imp.status, 200, await imp.text());
+    const targetRoot = join(storageRoot, "instances", targetId, "data");
+    assert.equal(readFileSync(join(targetRoot, "state.json"), "utf8"), '{"ok":true}');
+  });
+
   after(() => {
     rmSync(storageRoot, { recursive: true, force: true });
   });

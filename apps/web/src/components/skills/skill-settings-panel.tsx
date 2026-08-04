@@ -7,16 +7,20 @@ import {
   Database,
   KeyRound,
   Loader2,
+  Plus,
   RefreshCw,
   RotateCw,
+  Store,
   Trash2,
   User,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   checkSkillUpdates,
@@ -39,6 +43,243 @@ const SCOPE_LABEL: Record<SkillTokenScope, string> = {
   platform: "整站默认",
   tenant: "本团队",
 };
+
+type StoreSource = {
+  id: string;
+  name: string;
+  description?: string;
+  format?: string;
+  url?: string;
+  removable?: boolean;
+};
+
+const QUICK_MARKETS = [
+  {
+    id: "claude-official",
+    label: "Claude 官方插件",
+    repository: "anthropics/claude-plugins-official",
+    format: "claude" as const,
+  },
+  {
+    id: "claude-kw",
+    label: "Knowledge Work",
+    repository: "anthropics/knowledge-work-plugins",
+    format: "claude" as const,
+  },
+  {
+    id: "openai-skills",
+    label: "OpenAI · Codex 技能",
+    repository: "openai/skills",
+    format: "codex" as const,
+  },
+];
+
+
+function PluginMarketsSection() {
+  const { confirm } = useConfirmDialog();
+  const [sources, setSources] = useState<StoreSource[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [repo, setRepo] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await api<{ sources: StoreSource[] }>("/api/mcp/store/sources");
+      // 只展示可移除的自定义源 + 带 claude/codex 格式的
+      setSources(
+        (res.sources ?? []).filter(
+          (s) =>
+            s.removable ||
+            s.format === "claude" ||
+            s.format === "codex" ||
+            s.id.startsWith("custom:"),
+        ),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function addMarket(input: string, format?: "claude" | "codex" | "auto") {
+    const value = input.trim();
+    if (!value) return;
+    setAdding(true);
+    try {
+      await api("/api/mcp/store/sources", {
+        method: "POST",
+        json: {
+          repository: value,
+          format: format ?? "auto",
+        },
+      });
+      toast.success("市场已添加");
+      setRepo("");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function syncSource(id: string) {
+    setBusyId(id);
+    try {
+      await api("/api/mcp/store/sync", {
+        method: "POST",
+        json: { store: id, force: true },
+      });
+      toast.success("已同步");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function removeSource(item: StoreSource) {
+    const ok = await confirm({
+      title: `删除市场 ${item.name}？`,
+      confirmLabel: "删除",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusyId(item.id);
+    try {
+      await api(`/api/mcp/store/sources/${encodeURIComponent(item.id)}`, {
+        method: "DELETE",
+      });
+      toast.success("已删除");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const knownRepos = new Set(
+    sources.map((s) => (s.url ?? s.name).toLowerCase()),
+  );
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Store className="size-4 text-muted-foreground" />
+        <h3 className="text-sm font-medium">插件市场</h3>
+        <span className="text-[11px] text-muted-foreground">
+          Claude / Codex 市场源，可手动添加
+        </span>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-border bg-card p-3.5">
+        <div className="flex flex-wrap gap-1.5">
+          {QUICK_MARKETS.map((m) => {
+            const already = [...knownRepos].some(
+              (u) => u.includes(m.repository.toLowerCase()),
+            );
+            return (
+              <Button
+                key={m.id}
+                size="xs"
+                variant="outline"
+                disabled={adding || already}
+                onClick={() => void addMarket(m.repository, m.format)}
+              >
+                <Plus className="size-3" />
+                {already ? `已添加 · ${m.label}` : m.label}
+              </Button>
+            );
+          })}
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <Input
+            value={repo}
+            onChange={(e) => setRepo(e.target.value)}
+            placeholder="owner/repo 或 marketplace.json URL"
+            className="font-mono text-xs"
+            disabled={adding}
+          />
+          <Button
+            disabled={!repo.trim() || adding}
+            onClick={() => void addMarket(repo)}
+          >
+            {adding ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+            添加
+          </Button>
+        </div>
+
+        {loading ? (
+          <p className="text-xs text-muted-foreground">加载中…</p>
+        ) : sources.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            尚未添加自定义市场。可一键加入 Claude / Codex 官方源。
+          </p>
+        ) : (
+          <div className="overflow-hidden rounded-lg border border-border">
+            {sources.map((item, i) => (
+              <div
+                key={item.id}
+                className={cn(
+                  "flex items-center gap-3 px-3 py-2.5",
+                  i > 0 && "border-t border-border",
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate text-sm font-medium">{item.name}</span>
+                    {item.format ? (
+                      <Badge variant="outline" className="text-[10px]">
+                        {item.format}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {item.description || item.url || item.id}
+                  </p>
+                </div>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  title="同步"
+                  disabled={busyId === item.id}
+                  onClick={() => void syncSource(item.id)}
+                >
+                  {busyId === item.id ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="size-4" />
+                  )}
+                </Button>
+                {item.removable || item.id.startsWith("custom:") ? (
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    title="删除"
+                    disabled={busyId === item.id}
+                    onClick={() => void removeSource(item)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function TokenRow({
   info,
@@ -257,6 +498,8 @@ export function SkillSettingsPanel() {
 
   return (
     <div className="space-y-6">
+      <PluginMarketsSection />
+
       <AutoUpdateSection status={autoUpdate} onChanged={load} />
 
       <section className="space-y-3">

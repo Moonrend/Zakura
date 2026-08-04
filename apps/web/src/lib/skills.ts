@@ -104,8 +104,21 @@ export async function fetchSkillAutoUpdate(): Promise<SkillAutoUpdateStatus> {
   return api("/api/skills/auto-update");
 }
 
+/** @deprecated 全局开关已废弃；请用 setSkillItemAutoUpdate */
 export async function setSkillAutoUpdate(enabled: boolean): Promise<SkillAutoUpdateStatus> {
   return api("/api/skills/auto-update", { method: "PUT", json: { enabled } });
+}
+
+/** 单个第三方技能的自动更新开关 */
+export async function setSkillItemAutoUpdate(
+  skillId: string,
+  enabled: boolean,
+): Promise<SkillRecord> {
+  const res = await api<{ skill: SkillRecord }>(`/api/skills/${encodeURIComponent(skillId)}/auto-update`, {
+    method: "PATCH",
+    json: { enabled },
+  });
+  return res.skill;
 }
 
 /** 立即探一遍上游并把有新版本的技能更新掉 */
