@@ -19,57 +19,27 @@ type InstanceRow = {
   name: string;
   slug: string;
   providerId: string;
+  provider?: { name?: string | null; category?: string | null } | null;
   status: string;
   healthStatus: string;
   lastError?: string | null;
 };
 
-const MCP_PROVIDERS = new Set([
-  "generic-mcp",
-  "stdio-mcp",
-  "openviking",
-  "google-workspace",
-  "microsoft-365",
-]);
-
-function providerLabel(id: string) {
-  switch (id) {
-    case "generic-mcp":
-      return "HTTP";
-    case "stdio-mcp":
-      return "Stdio";
-    case "openviking":
-      return "OpenViking";
-    case "google-workspace":
-      return "Google Workspace";
-    case "microsoft-365":
-      return "Microsoft 365";
-    default:
-      return id;
-  }
-}
-
-function needsUpstreamAuth(i: InstanceRow): boolean {
-  return (
-    !!i.lastError?.startsWith("AUTH_REQUIRED") ||
-    /missing required Authorization|401|unauthorized/i.test(i.lastError ?? "")
-  );
+function providerLabel(instance: InstanceRow) {
+  return instance.provider?.name || instance.providerId;
 }
 
 /** 远程 HTTP MCP 无本地进程；status 表示平台侧启用，非容器生命周期 */
-function isRemoteMcp(providerId: string) {
+function isRemoteMcp(instance: InstanceRow) {
   return (
-    providerId === "generic-mcp" ||
-    providerId === "google-workspace" ||
-    providerId === "microsoft-365"
+    instance.provider?.category === "mcp" &&
+    instance.providerId !== "stdio-mcp"
   );
 }
 
 function statusVariant(
   status: string,
-  healthStatus?: string,
 ): "default" | "secondary" | "success" | "warn" | "danger" {
-  if (status === "running" && healthStatus === "unhealthy") return "danger";
   if (status === "running") return "success";
   if (status === "starting" || status === "stopping") return "warn";
   if (status === "error" || status === "unhealthy") return "danger";
@@ -77,9 +47,8 @@ function statusVariant(
 }
 
 function statusLabel(i: InstanceRow): string {
-  if (isRemoteMcp(i.providerId)) {
+  if (isRemoteMcp(i)) {
     if (i.status === "running") {
-      if (i.healthStatus === "unhealthy") return "不可用";
       return "已启用";
     }
     if (i.status === "starting") return "启用中";
@@ -114,7 +83,11 @@ export default function McpServersPage() {
     if (!silent) setLoading(true);
     try {
       const inst = await api<InstanceRow[]>("/api/instances", { cacheTtlMs: false });
-      setInstances(inst.filter((i) => MCP_PROVIDERS.has(i.providerId)));
+      setInstances(
+        inst.filter(
+          (i) => i.provider?.category === "mcp",
+        ),
+      );
     } catch (err) {
       if (!silent) toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -203,7 +176,6 @@ export default function McpServersPage() {
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {filtered.map((i) => {
-            const authNeeded = needsUpstreamAuth(i);
             const errorText = formatError(i.lastError);
 
             return (
@@ -221,21 +193,16 @@ export default function McpServersPage() {
                       <span className="truncate text-sm font-medium group-hover:underline underline-offset-2">
                         {i.name}
                       </span>
-                      {authNeeded ? (
-                        <Badge variant="destructive" className="text-[10px]">
-                          需 OAuth
-                        </Badge>
-                      ) : null}
                     </div>
                     <code className="block truncate text-[10px] text-muted-foreground">
                       {i.slug}
                     </code>
                   </div>
                   <Badge
-                    variant={statusVariant(i.status, i.healthStatus)}
+                    variant={statusVariant(i.status)}
                     className="shrink-0"
                     title={
-                      isRemoteMcp(i.providerId)
+                      isRemoteMcp(i)
                         ? "远程 MCP 无本地进程；此状态表示是否已在平台启用"
                         : undefined
                     }
@@ -246,7 +213,7 @@ export default function McpServersPage() {
 
                 <div className="flex flex-wrap items-center gap-1.5">
                   <Badge variant="outline" className="text-[10px]">
-                    {providerLabel(i.providerId)}
+                    {providerLabel(i)}
                   </Badge>
                 </div>
 

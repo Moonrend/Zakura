@@ -182,7 +182,8 @@ export async function installSkill(body: {
   installs: AgentSkillRecord[];
   warnings: string[];
 }> {
-  return api("/api/skills/install", { method: "POST", json: body });
+  const target = body.all || body.agentIds?.length ? body : { ...body, all: true };
+  return api("/api/skills/install", { method: "POST", json: target });
 }
 
 export async function updateSkill(id: string): Promise<SkillRecord> {

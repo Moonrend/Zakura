@@ -3,36 +3,6 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
-/** slug / curated id / 常见别名 → 品牌主域名（用于拉取官方 favicon） */
-const BRAND_DOMAINS: Record<string, string> = {
-  github: "github.com",
-  slack: "slack.com",
-  notion: "notion.so",
-  linear: "linear.app",
-  feishu: "feishu.cn",
-  lark: "feishu.cn",
-  discord: "discord.com",
-  gitlab: "gitlab.com",
-  jira: "atlassian.com",
-  atlassian: "atlassian.com",
-  "google-workspace": "workspace.google.com",
-  google: "google.com",
-  gmail: "gmail.com",
-  "microsoft-365": "microsoft.com",
-  microsoft: "microsoft.com",
-  outlook: "outlook.com",
-  asana: "asana.com",
-  hubspot: "hubspot.com",
-  figma: "figma.com",
-  miro: "miro.com",
-  cloudflare: "cloudflare.com",
-  vercel: "vercel.com",
-  sentry: "sentry.io",
-  stripe: "stripe.com",
-  context7: "context7.com",
-  grep: "grep.app",
-};
-
 function domainFromHomepage(homepage?: string | null): string | null {
   if (!homepage) return null;
   try {
@@ -47,8 +17,6 @@ function resolveDomain(opts: {
   homepage?: string | null;
   mcpUrl?: string | null;
 }): string | null {
-  const id = (opts.brandId ?? "").trim().toLowerCase();
-  if (id && BRAND_DOMAINS[id]) return BRAND_DOMAINS[id];
   const fromHome = domainFromHomepage(opts.homepage);
   if (fromHome) return fromHome;
   if (opts.mcpUrl) {
@@ -59,7 +27,14 @@ function resolveDomain(opts: {
       /* ignore */
     }
   }
-  // 尝试把 id 当域名片段：foo-bar → foo.com 不可靠，放弃
+  const id = (opts.brandId ?? "").trim();
+  if (id.includes(".")) {
+    try {
+      return new URL(id.includes("://") ? id : `https://${id}`).hostname.replace(/^www\./, "");
+    } catch {
+      /* ignore */
+    }
+  }
   return null;
 }
 

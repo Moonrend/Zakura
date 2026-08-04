@@ -5,13 +5,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 
 export type ConnectorOauthField = {
   key: string;
   label: string;
-  type: "text" | "secret" | "url" | "textarea";
+  type: "text" | "secret" | "url" | "textarea" | "select" | "boolean";
   required?: boolean;
   placeholder?: string;
+  help?: string;
+  options?: Array<{ value: string; label: string }>;
+  defaultValue?: string;
 };
 
 export type ConnectorOauthFormProps = {
@@ -33,7 +37,7 @@ export type ConnectorOauthFormProps = {
   enableHint?: string;
 };
 
-/** 连接器 OAuth 客户端表单：插件页与超管预配共用 */
+/** 连接器配置表单：OAuth、静态令牌和自定义字段共用 */
 export function ConnectorOauthForm({
   title = "OAuth 客户端",
   description,
@@ -82,21 +86,67 @@ export function ConnectorOauthForm({
               {field.label}
               {field.required ? " *" : ""}
             </Label>
-            <Input
-              id={`cred-${field.key}`}
-              type={field.type === "secret" ? "password" : "text"}
-              value={draft[field.key] ?? ""}
-              onChange={(e) =>
-                onDraftChange({ ...draft, [field.key]: e.target.value })
-              }
-              placeholder={
-                configuredFields.includes(field.key)
-                  ? "已保存；留空保持原值"
-                  : field.placeholder
-              }
-              autoComplete="off"
-              disabled={!canManage}
-            />
+            {field.type === "boolean" ? (
+              <Switch
+                id={`cred-${field.key}`}
+                checked={draft[field.key] === "true"}
+                onCheckedChange={(checked) =>
+                  onDraftChange({ ...draft, [field.key]: String(checked) })
+                }
+                disabled={!canManage}
+              />
+            ) : field.type === "select" ? (
+              <select
+                id={`cred-${field.key}`}
+                value={draft[field.key] ?? field.defaultValue ?? ""}
+                onChange={(event) =>
+                  onDraftChange({ ...draft, [field.key]: event.target.value })
+                }
+                disabled={!canManage}
+                className="flex h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="">请选择</option>
+                {(field.options ?? []).map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            ) : field.type === "textarea" ? (
+              <Textarea
+                id={`cred-${field.key}`}
+                value={draft[field.key] ?? ""}
+                onChange={(event) =>
+                  onDraftChange({ ...draft, [field.key]: event.target.value })
+                }
+                placeholder={
+                  configuredFields.includes(field.key)
+                    ? "已保存；留空保持原值"
+                    : field.placeholder ?? field.defaultValue
+                }
+                autoComplete="off"
+                disabled={!canManage}
+              />
+            ) : (
+              <Input
+                id={`cred-${field.key}`}
+                type={field.type === "secret" ? "password" : "text"}
+                value={draft[field.key] ?? ""}
+                onChange={(event) =>
+                  onDraftChange({ ...draft, [field.key]: event.target.value })
+                }
+                placeholder={
+                  configuredFields.includes(field.key)
+                    ? "已保存；留空保持原值"
+                    : field.placeholder ?? field.defaultValue
+                }
+                autoComplete="off"
+                disabled={!canManage}
+              />
+            )}
+            {field.help ? (
+              <p className="text-[11px] leading-4 text-muted-foreground">{field.help}</p>
+            ) : null}
           </div>
         ))}
 

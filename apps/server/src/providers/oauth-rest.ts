@@ -1,5 +1,5 @@
 /**
- * 平台 OAuth REST 连接器共用底座：token 刷新、健康检查、工具分发。
+ * 平台 OAuth REST 连接器共用底座：token 刷新和工具分发。
  * 各厂商只声明 product / tools / HTTP 调用。
  */
 import type { InstanceHandle, ProviderPlugin } from "@zakura/core";
@@ -10,6 +10,7 @@ import { componentInstances } from "../db/schema.js";
 import type { AppConfig } from "../config.js";
 import { McpUpstreamOauthService } from "../services/mcp-upstream-oauth.js";
 import { applyOauthTokensToConfig } from "./generic-mcp.js";
+import { readInstanceToken } from "./credential-config.js";
 
 export type OauthRestCallTool = (
   product: string,
@@ -73,6 +74,7 @@ export function createOauthRestProvider(spec: OauthRestProviderSpec) {
       oauthClientId: { type: "string" },
       oauthClientSecret: { type: "string", format: "password" },
       oauthTokenEndpoint: { type: "string" },
+      apiToken: { type: "string", format: "password" },
       authRequired: { type: "boolean" },
     },
   };
@@ -110,7 +112,7 @@ export function createOauthRestProvider(spec: OauthRestProviderSpec) {
           .where(eq(componentInstances.id, handle.id));
       }
     }
-    const token = String(current.oauthAccessToken ?? "").trim();
+    const token = readInstanceToken(current);
     if (!token) throw new Error(`AUTH_REQUIRED: 请先完成 ${spec.name} OAuth 授权`);
     return token;
   }

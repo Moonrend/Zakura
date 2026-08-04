@@ -121,6 +121,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
     oauth: {
       ...TIER_B_PRE,
       providerId: "slack",
+      authNote: "Slack 需预注册 App（不支持 DCR）",
     },
   },
   {
@@ -135,7 +136,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
     source: "curated",
     icon: "FG",
     group: "productivity",
-    oauth: TIER_A,
+    oauth: { ...TIER_A, authNote: "若授权失败，可能需向 Figma 申请 waitlist" },
   },
   {
     id: "cloudflare",
@@ -226,6 +227,7 @@ export const CURATED_OAUTH_MCPS: UnifiedMcpConfig[] = [
       ...TIER_B_PRE,
       allowPatFallback: true,
       providerId: "github",
+      authNote: "需预注册 OAuth App，或改用 PAT",
     },
   },
 ];

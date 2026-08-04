@@ -2,11 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { BrandIcon } from "@/components/brand-icon";
+import {
+  ConnectorConfigSheet,
+  type ConnectorView,
+} from "@/components/connections/connector-config-sheet";
 import { SettingsHeader } from "@/components/settings-shell";
-import { Badge } from "@/components/ui/badge";
 import { SearchField } from "@/components/ui/search-field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
@@ -30,33 +34,42 @@ type IntegrationPackage = {
   }>;
 };
 
-type ConnectorRow = {
-  id: string;
-  ref: string;
-  name: string;
-  ready: boolean;
-  enabled: boolean;
-  lockedByPlatform?: boolean;
-  credentialSource?: "tenant" | "platform" | null;
-  package: { slug: string; name: string; icon?: string | null; accent?: string | null };
-};
+type ConnectorRow = ConnectorView;
+
+type ViewMode = "all" | "configured" | "unconfigured";
+
+function isConfigured(connector: ConnectorRow | undefined) {
+  return connector?.status === "ready" || connector?.status === "platform-provisioned";
+}
+
+function statusLabel(connector: ConnectorRow | undefined) {
+  if (connector?.status === "platform-provisioned") return "整站预配";
+  if (connector?.status === "ready") return "已配置";
+  if (connector?.status === "disabled") return "已停用";
+  return "待配置";
+}
 
 /** 连接器中心列表 */
 export default function ConnectorsHub() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [packages, setPackages] = useState<IntegrationPackage[]>([]);
   const [connectors, setConnectors] = useState<ConnectorRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [view, setView] = useState<ViewMode>("all");
+  const [redirectUri, setRedirectUri] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [pkgs, creds] = await Promise.all([
         api<{ packages: IntegrationPackage[] }>("/api/integrations/packages"),
-        api<{ connectors: ConnectorRow[] }>("/api/connectors?scope=tenant"),
+        api<{ connectors: ConnectorRow[]; redirectUri?: string }>("/api/connectors?scope=tenant"),
       ]);
       setPackages(pkgs.packages);
       setConnectors(creds.connectors);
+      setRedirectUri(creds.redirectUri ?? "");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -76,19 +89,47 @@ export default function ConnectorsHub() {
 
   const filtered = useMemo(() => {
     const value = q.trim().toLowerCase();
-    if (!value) return packages;
-    return packages.filter((pkg) =>
-      [pkg.name, pkg.description, pkg.category, pkg.slug]
-        .filter(Boolean)
-        .some((t) => String(t).toLowerCase().includes(value)),
-    );
-  }, [packages, q]);
+    const searched = value
+      ? packages.filter((pkg) =>
+          [pkg.name, pkg.description, pkg.category, pkg.slug]
+            .filter(Boolean)
+            .some((t) => String(t).toLowerCase().includes(value)),
+        )
+      : packages;
+    return searched.filter((pkg) => {
+      const connector = bySlug.get(pkg.slug);
+      return view === "all" || (view === "configured" ? isConfigured(connector) : !isConfigured(connector));
+    });
+  }, [packages, q, view, bySlug]);
+
+  const selectedSlug = searchParams.get("connector");
+  const selected = selectedSlug ? bySlug.get(selectedSlug) ?? null : null;
+
+  function openConnector(slug: string) {
+    router.push(`/dashboard/connectors?connector=${encodeURIComponent(slug)}`, { scroll: false });
+  }
+
+  function closeConnector(open: boolean) {
+    if (!open) router.push("/dashboard/connectors", { scroll: false });
+  }
+
+  const counts = useMemo(() => {
+    const configured = packages.filter((pkg) => isConfigured(bySlug.get(pkg.slug))).length;
+    return {
+      all: packages.length,
+      configured,
+      unconfigured: packages.length - configured,
+    };
+  }, [packages, bySlug]);
+
+  /* Keep package metadata in the list and the complete connector view in the sheet. */
+  const visiblePackages = filtered;
 
   return (
     <div className="space-y-6">
       <SettingsHeader
         title="平台连接器"
-        description="平台直连第三方 REST / GraphQL API。在详情页配置 OAuth，再安装工具并授权。"
+        description="管理平台提供的第三方连接，认证方式和配置字段由连接器目录声明。"
       />
 
       <p className="text-xs text-muted-foreground">
@@ -96,90 +137,85 @@ export default function ConnectorsHub() {
         <Link href="/dashboard/mcp/store" className="text-foreground hover:underline">
           MCP 商店
         </Link>
-        ；OAuth 客户端记录见{" "}
-        <Link
-          href="/dashboard/settings/oauth-clients"
-          className="text-foreground hover:underline"
-        >
-          设置
-        </Link>
-        。
+        ；命名认证档案可在管理员设置中统一预配。
       </p>
 
-      <SearchField value={q} onValueChange={setQ} placeholder="搜索连接器" />
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-1 border-b border-border">
+          {(["all", "configured", "unconfigured"] as const).map((key) => {
+            const label = key === "all" ? "全部" : key === "configured" ? "已配置" : "未配置";
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setView(key)}
+                className={`border-b-2 px-3 py-2 text-xs transition-colors ${
+                  view === key
+                    ? "border-foreground text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}{" "}
+                <span className="text-[10px] text-muted-foreground">{counts[key]}</span>
+              </button>
+            );
+          })}
+        </div>
+        <SearchField value={q} onValueChange={setQ} placeholder="搜索连接器" />
+      </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="divide-y divide-border border-y border-border">
         {loading
-          ? Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-40 rounded-lg" />
+          ? Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-20 rounded-none" />
             ))
-          : filtered.map((pkg) => {
+          : visiblePackages.map((pkg) => {
               const connector = bySlug.get(pkg.slug);
               const toolCount = pkg.componentCounts?.tool ?? 0;
               const skillCount = pkg.componentCounts?.skill ?? 0;
-              const installedTools = pkg.components.filter(
-                (c) => c.kind === "tool" && c.installed,
-              ).length;
-              const locked = !!connector?.lockedByPlatform;
-              const ready = !!connector?.ready;
+              const installedTools = connector?.capabilities.filter(
+                (capability) => capability.kind === "tool" && capability.installed,
+              ).length ?? 0;
               return (
-                <Link
+                <button
                   key={pkg.slug}
-                  href={`/dashboard/connectors/${encodeURIComponent(pkg.slug)}`}
-                  className="group flex flex-col rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/30"
+                  type="button"
+                  onClick={() => openConnector(pkg.slug)}
+                  className="group flex w-full items-center gap-3 px-1 py-4 text-left transition-colors hover:bg-muted/30 sm:px-2"
                 >
-                  <div className="flex items-start gap-3">
-                    <BrandIcon
-                      brandId={pkg.slug}
-                      name={pkg.name}
-                      accent={pkg.accent}
-                      homepage={pkg.homepage}
-                      size="md"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <h2 className="truncate text-sm font-medium">{pkg.name}</h2>
-                        {pkg.verified ? (
-                          <Badge variant="secondary" className="text-[10px]">
-                            官方
-                          </Badge>
-                        ) : null}
-                        {locked ? (
-                          <Badge variant="outline" className="text-[10px]">
-                            已预配
-                          </Badge>
-                        ) : ready ? (
-                          <Badge variant="secondary" className="text-[10px]">
-                            已配置
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className="text-[10px]">
-                            待配置
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                        {pkg.description}
-                      </p>
+                  <BrandIcon
+                    brandId={pkg.slug}
+                    name={pkg.name}
+                    accent={pkg.accent}
+                    homepage={pkg.homepage}
+                    size="md"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="truncate text-sm font-medium">{pkg.name}</h2>
+                      {pkg.verified ? (
+                        <span className="text-[10px] text-muted-foreground">已验证</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+                      {pkg.description}
+                    </p>
+                  </div>
+                  <div className="hidden shrink-0 text-right text-[11px] text-muted-foreground sm:block">
+                    <div>{statusLabel(connector)}</div>
+                    <div className="mt-1">
+                      {[toolCount ? `${toolCount} 功能` : null, skillCount ? `${skillCount} 技能` : null, installedTools ? `${installedTools} 已装` : null]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </div>
                   </div>
-                  <div className="mt-4 text-[11px] text-muted-foreground">
-                    <span>
-                      {[
-                        toolCount ? `${toolCount} 工具` : null,
-                        skillCount ? `${skillCount} 技能` : null,
-                        installedTools ? `${installedTools} 已装` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ") || "打开配置"}
-                    </span>
-                  </div>
-                </Link>
+                  <span className="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5">→</span>
+                </button>
               );
             })}
       </div>
 
-      {!loading && !filtered.length ? (
+      {!loading && !visiblePackages.length ? (
         <p className="border-y border-border py-12 text-center text-sm text-muted-foreground">
           没有匹配的连接器
         </p>
@@ -191,6 +227,14 @@ export default function ConnectorsHub() {
           加载中…
         </div>
       ) : null}
+
+      <ConnectorConfigSheet
+        connector={selected}
+        redirectUri={redirectUri}
+        open={!!selected}
+        onOpenChange={closeConnector}
+        onChanged={() => void load()}
+      />
     </div>
   );
 }

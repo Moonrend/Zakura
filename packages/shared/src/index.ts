@@ -312,25 +312,6 @@ export type PlatformServiceKey = (typeof PLATFORM_SERVICE_KEYS)[number];
 export const PLATFORM_SERVICE_MODES = ["disabled", "managed", "external"] as const;
 export type PlatformServiceMode = (typeof PLATFORM_SERVICE_MODES)[number];
 
-export const BUILTIN_PROVIDER_IDS = [
-  "web-search",
-  "web-fetch",
-  "mem0",
-  "openviking",
-  "generic-mcp",
-  "google-workspace",
-  "microsoft-365",
-  "github",
-  "slack",
-  "notion",
-  "linear",
-  "feishu",
-  "discord",
-  "gitlab",
-  "jira",
-] as const;
-export type BuiltinProviderId = (typeof BUILTIN_PROVIDER_IDS)[number];
-
 export interface SetupPayload {
   adminEmail: string;
   adminPassword: string;
@@ -469,6 +450,24 @@ export type {
 } from "./connections.js";
 
 export { CURATED_OAUTH_MCPS, CURATED_MCP_GROUPS } from "./curated-mcp.js";
+
+export {
+  CONNECTOR_AUTH_KINDS,
+  normalizeConnectorAuth,
+  authNeedsCredentials,
+  authNeedsUserGrant,
+  missingRequiredFields,
+  interpolateWithValues,
+} from "./connector-auth.js";
+export type {
+  ConnectorAuthKind,
+  ConnectorFieldType,
+  ConnectorFieldOption,
+  ConnectorField,
+  ConnectorAuthSpec,
+  ConnectorStatus,
+  ConnectorCredentialSource,
+} from "./connector-auth.js";
 
 export {
   AGENT_HOOK_EVENTS,

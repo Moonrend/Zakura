@@ -257,8 +257,6 @@ export class SkillsService {
 
   async list(tenantId: string): Promise<SkillRecord[]> {
     await this.syncBuiltins(tenantId);
-    // 存量 Agent 缺的内置技能后台补齐，不阻塞列表返回
-    void this.backfillBuiltins(tenantId);
     const rows = await this.db
       .select()
       .from(skills)
@@ -1306,8 +1304,6 @@ export class SkillsService {
   // —— Agent 视角 ——
 
   async listForAgent(tenantId: string, agentId: string): Promise<AgentSkillRecord[]> {
-    // 新 Agent / 新内置技能的补装在后台跑，首屏不等它
-    void this.backfillBuiltins(tenantId);
     const rows = await this.db
       .select()
       .from(agentSkills)

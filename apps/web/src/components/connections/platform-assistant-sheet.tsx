@@ -211,7 +211,7 @@ export function PlatformAssistantSheet() {
                 >
                   {items.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
-                      例如：帮我安装官方 MCP，或配置 Google 连接器凭据。
+                      例如：帮我安装官方 MCP，或配置某个连接器凭据。
                     </p>
                   ) : (
                     items.map((item) => {

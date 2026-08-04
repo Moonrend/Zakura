@@ -19,7 +19,7 @@
         "description": "直接调用 Google Workspace REST API，不依赖外部 MCP 服务。",
         "config": {
           "providerId": "google-workspace",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "google-workspace" },
           "docsUrl": "https://console.cloud.google.com/apis/credentials",
           "authorizationEndpoint": "https://accounts.google.com/o/oauth2/v2/auth",
           "tokenEndpoint": "https://oauth2.googleapis.com/token",
@@ -59,15 +59,20 @@
         "description": "直接调用 Microsoft Graph，不依赖外部 MCP 服务。",
         "config": {
           "providerId": "microsoft-365",
-          "credentialKind": "oauth2_client",
+          "auth": {
+            "kind": "oauth2",
+            "profile": "microsoft-365",
+            "settings": [
+              { "key": "tenantId", "label": "Directory (tenant) ID", "type": "text", "placeholder": "common" }
+            ]
+          },
           "docsUrl": "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
           "authorizationEndpoint": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/authorize",
           "tokenEndpoint": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token",
           "pathHints": ["zakura://microsoft-365/"],
           "fields": [
             { "key": "clientId", "label": "Application (client) ID", "type": "text", "required": true },
-            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true },
-            { "key": "tenantId", "label": "Directory (tenant) ID", "type": "text", "required": false, "placeholder": "common" }
+            { "key": "clientSecret", "label": "Client Secret", "type": "secret", "required": true }
           ]
         }
       },
@@ -98,7 +103,7 @@
         "description": "直接调用 GitHub REST API；同时可为 api.githubcopilot.com 等上游 MCP 预配 OAuth 客户端。",
         "config": {
           "providerId": "github",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "github" },
           "docsUrl": "https://github.com/settings/developers",
           "authorizationEndpoint": "https://github.com/login/oauth/authorize",
           "tokenEndpoint": "https://github.com/login/oauth/access_token",
@@ -137,7 +142,7 @@
         "description": "直接调用 Slack Web API；同时可为 mcp.slack.com 上游 MCP 预配 OAuth 客户端。",
         "config": {
           "providerId": "slack",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "slack" },
           "docsUrl": "https://api.slack.com/apps",
           "authorizationEndpoint": "https://slack.com/oauth/v2/authorize",
           "tokenEndpoint": "https://slack.com/api/oauth.v2.access",
@@ -175,7 +180,7 @@
         "description": "直接调用 Notion REST API；也可为 mcp.notion.com 预配 OAuth 客户端。",
         "config": {
           "providerId": "notion",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "notion" },
           "docsUrl": "https://www.notion.so/my-integrations",
           "authorizationEndpoint": "https://api.notion.com/v1/oauth/authorize",
           "tokenEndpoint": "https://api.notion.com/v1/oauth/token",
@@ -214,7 +219,7 @@
         "description": "直接调用 Linear GraphQL；也可为 mcp.linear.app 预配 OAuth 客户端。",
         "config": {
           "providerId": "linear",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "linear" },
           "docsUrl": "https://linear.app/settings/api",
           "authorizationEndpoint": "https://linear.app/oauth/authorize",
           "tokenEndpoint": "https://api.linear.app/oauth/token",
@@ -252,7 +257,7 @@
         "description": "直接调用飞书 Open API（user_access_token）。",
         "config": {
           "providerId": "feishu",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "feishu" },
           "docsUrl": "https://open.feishu.cn/app",
           "authorizationEndpoint": "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
           "tokenEndpoint": "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
@@ -290,7 +295,7 @@
         "description": "直接调用 Discord REST API（用户 OAuth）。",
         "config": {
           "providerId": "discord",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "discord" },
           "docsUrl": "https://discord.com/developers/applications",
           "authorizationEndpoint": "https://discord.com/oauth2/authorize",
           "tokenEndpoint": "https://discord.com/api/oauth2/token",
@@ -327,7 +332,7 @@
         "description": "直接调用 GitLab.com REST API。",
         "config": {
           "providerId": "gitlab",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "gitlab" },
           "docsUrl": "https://gitlab.com/-/user_settings/applications",
           "authorizationEndpoint": "https://gitlab.com/oauth/authorize",
           "tokenEndpoint": "https://gitlab.com/oauth/token",
@@ -339,8 +344,7 @@
           ]
         }
       },
-      { "kind": "tool", "ref": "gitlab-projects", "name": "Projects", "description": "列出与查看项目。", "config": { "providerId": "gitlab", "product": "projects", "mcpUrl": "zakura://gitlab/projects", "scopes": "read_api read_user" } },
-      { "kind": "tool", "ref": "gitlab-issues", "name": "Issues", "description": "列出与创建项目 Issues。", "config": { "providerId": "gitlab", "product": "issues", "mcpUrl": "zakura://gitlab/issues", "scopes": "api" } },
+      { "kind": "tool", "ref": "gitlab-projects-issues", "name": "Projects 与 Issues", "description": "统一管理项目与 Issues。", "config": { "providerId": "gitlab", "product": "projects-issues", "mcpUrl": "zakura://gitlab/projects-issues", "scopes": "api" } },
       { "kind": "skill", "ref": "gitlab", "name": "GitLab", "description": "编排 GitLab 项目与 Issue 工作流。", "config": { "source": "builtin:gitlab" } }
     ]
   },
@@ -364,7 +368,7 @@
         "description": "直接调用 Jira Cloud REST API；也可为 mcp.atlassian.com 预配 OAuth 客户端。",
         "config": {
           "providerId": "jira",
-          "credentialKind": "oauth2_client",
+          "auth": { "kind": "oauth2", "profile": "jira" },
           "docsUrl": "https://developer.atlassian.com/console/myapps/",
           "authorizationEndpoint": "https://auth.atlassian.com/authorize",
           "tokenEndpoint": "https://auth.atlassian.com/oauth/token",

@@ -116,7 +116,7 @@ export function McpOfficialStorePanel() {
   return (
     <div className="space-y-8">
       <p className="text-xs text-muted-foreground">
-        远程 MCP 服务器。平台直连 Google / 飞书等 REST API 请去{" "}
+        远程 MCP 服务器。平台直连第三方 REST API 请去{" "}
         <Link href="/dashboard/connectors" className="text-foreground hover:underline">
           平台连接器
         </Link>

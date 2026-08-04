@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SkillMarkdown } from "@/components/skills/skill-markdown";
 import { cn } from "@/lib/utils";
@@ -103,7 +104,8 @@ export function SkillInstallDialog({
     !loading &&
     !installing &&
     selectedSkills.length > 0 &&
-    (agents.length === 0 || targetCount > 0);
+    agents.length > 0 &&
+    targetCount > 0;
   const bundled = active?.files.filter((f) => f.path !== "SKILL.md") ?? [];
 
   async function install() {

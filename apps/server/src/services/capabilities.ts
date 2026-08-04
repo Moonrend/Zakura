@@ -125,8 +125,6 @@ export async function saveCapabilityConfig(
 
   if (instance.status !== "running") {
     await orchestrator.startInstance(tenantId, instance.id);
-  } else {
-    await orchestrator.refreshHealth(tenantId, instance.id);
   }
 
   return db.query.componentInstances.findFirst({

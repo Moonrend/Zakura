@@ -142,12 +142,19 @@ export function listPlatformAssistantTools(): AgentNativeToolDef[] {
     ),
     tool(
       "set_connector_credentials",
-      "Save platform connector credentials (schema-driven fields). Never echoes secret values back — only configured field names / ready state.",
+      "Save credentials for a named connector auth profile (schema-driven fields). Connectors reference profiles by name, so one profile can serve several connectors. Never echoes secret values back — only configured field names / enabled state.",
       {
         type: "object",
-        required: ["connector_id"],
+        required: ["profile"],
         properties: {
-          connector_id: { type: "string", description: "Connector id from catalog / connectors list" },
+          profile: {
+            type: "string",
+            description: "Auth profile key, e.g. the `auth.profile` of a connector from the connectors list",
+          },
+          connector_ref: {
+            type: "string",
+            description: "Alternative to `profile`: a connector ref whose profile should be configured",
+          },
           values: {
             type: "object",
             additionalProperties: { type: "string" },
@@ -280,26 +287,34 @@ export async function callPlatformAssistantTool(
         if (!ctx.integrations) {
           return textResult("IntegrationCatalogService 未挂载", true);
         }
-        const connectorId = str(args.connector_id);
-        if (!connectorId) return textResult("connector_id is required", true);
         const scope = str(args.scope) === "platform" ? "platform" : "tenant";
         const scopeKey = scope === "platform" ? "platform" : ctx.tenantId;
+        const connectorRef = str(args.connector_ref);
+        let profileKey = str(args.profile);
+        if (!profileKey && connectorRef) {
+          const connector = (await ctx.integrations.listConnectors(scopeKey)).find(
+            (item) => item.ref === connectorRef,
+          );
+          profileKey = connector?.auth.profile ?? "";
+        }
+        if (!profileKey) return textResult("profile or connector_ref is required", true);
         const values =
           args.values && typeof args.values === "object" && !Array.isArray(args.values)
             ? (args.values as Record<string, unknown>)
             : {};
-        const saved = await ctx.integrations.saveCredentials(scopeKey, connectorId, {
+        const saved = await ctx.integrations.saveProfile(scopeKey, profileKey, {
           enabled: typeof args.enabled === "boolean" ? args.enabled : true,
           values,
         });
         // 不回显 values / secrets
         return okJson({
           ok: true,
-          connector_id: saved.id,
-          name: saved.name,
-          enabled: saved.enabled,
-          ready: saved.ready,
-          configured_fields: saved.configuredFields,
+          profile: saved?.key ?? profileKey,
+          label: saved?.label,
+          kind: saved?.kind,
+          enabled: saved?.enabled ?? false,
+          configured_fields: saved?.configuredFields ?? [],
+          connector_refs: saved?.connectorRefs ?? [],
           scope,
         });
       }

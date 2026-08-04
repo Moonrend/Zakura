@@ -1,7 +1,7 @@
 import type { McpToolDef } from "@zakura/shared";
 import { createOauthRestProvider, int, restJson, str } from "../oauth-rest.js";
 
-const PRODUCTS = ["projects", "issues"] as const;
+const PRODUCTS = ["projects", "issues", "projects-issues"] as const;
 
 const toolDefs: Record<(typeof PRODUCTS)[number], McpToolDef[]> = {
   projects: [
@@ -10,6 +10,13 @@ const toolDefs: Record<(typeof PRODUCTS)[number], McpToolDef[]> = {
     { name: "get_current_user", description: "Get the authenticated GitLab user.", inputSchema: { type: "object", properties: {} } },
   ],
   issues: [
+    { name: "list_issues", description: "List project issues.", inputSchema: { type: "object", required: ["project_id"], properties: { project_id: { type: "string" }, state: { type: "string" }, per_page: { type: "integer" } } } },
+    { name: "create_issue", description: "Create a project issue.", inputSchema: { type: "object", required: ["project_id", "title"], properties: { project_id: { type: "string" }, title: { type: "string" }, description: { type: "string" } } } },
+  ],
+  "projects-issues": [
+    { name: "list_projects", description: "List GitLab projects.", inputSchema: { type: "object", properties: { search: { type: "string" }, per_page: { type: "integer" } } } },
+    { name: "get_project", description: "Get a project by id or path.", inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } } },
+    { name: "get_current_user", description: "Get the authenticated GitLab user.", inputSchema: { type: "object", properties: {} } },
     { name: "list_issues", description: "List project issues.", inputSchema: { type: "object", required: ["project_id"], properties: { project_id: { type: "string" }, state: { type: "string" }, per_page: { type: "integer" } } } },
     { name: "create_issue", description: "Create a project issue.", inputSchema: { type: "object", required: ["project_id", "title"], properties: { project_id: { type: "string" }, title: { type: "string" }, description: { type: "string" } } } },
   ],
@@ -34,7 +41,7 @@ const factory = createOauthRestProvider({
   },
   async callTool(product, name, token, args) {
     const perPage = int(args, "per_page", 20);
-    if (product === "projects") {
+    if (product === "projects" || product === "projects-issues") {
       if (name === "get_current_user") return gitlabFetch(token, "/user");
       if (name === "list_projects") {
         const qs = new URLSearchParams({ membership: "true" });
@@ -46,7 +53,7 @@ const factory = createOauthRestProvider({
         return gitlabFetch(token, `/projects/${encodeURIComponent(str(args, "id"))}`);
       }
     }
-    if (product === "issues") {
+    if (product === "issues" || product === "projects-issues") {
       const projectId = encodeURIComponent(str(args, "project_id"));
       if (name === "list_issues") {
         const qs = new URLSearchParams();

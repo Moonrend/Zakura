@@ -123,6 +123,7 @@ const upstreamOauthPending = new Map<
   {
     tenantId: string;
     instanceId?: string;
+    connectorRef?: string;
     mcpUrl: string;
     clientId: string;
     clientSecret?: string;
@@ -307,13 +308,18 @@ async function loadInstanceWithContainers(db: Db, tenantId: string, id: string) 
     where: and(eq(componentInstances.id, id), eq(componentInstances.tenantId, tenantId)),
   });
   if (!instance) return null;
-  const containers = await db
-    .select()
-    .from(managedContainers)
-    .where(
-      and(eq(managedContainers.instanceId, id), eq(managedContainers.tenantId, tenantId)),
-    );
-  return { ...instance, containers };
+  const [containers, provider] = await Promise.all([
+    db
+      .select()
+      .from(managedContainers)
+      .where(
+        and(eq(managedContainers.instanceId, id), eq(managedContainers.tenantId, tenantId)),
+      ),
+    db.query.providerCatalog.findFirst({
+      where: eq(providerCatalog.id, instance.providerId),
+    }),
+  ]);
+  return { ...instance, provider: provider ?? null, containers };
 }
 
 function instanceErrorStatus(err: unknown): 404 | 500 {
@@ -1147,18 +1153,19 @@ export async function createApiApp(deps: {
 
   app.get("/api/instances", async (c) => {
     const session = c.get("session")!;
-    const rows = await db
+    const allRows = await db
       .select()
       .from(componentInstances)
       .where(eq(componentInstances.tenantId, session.tenantId))
       .orderBy(desc(componentInstances.createdAt));
 
-    const providerIds = [...new Set(rows.map((r) => r.providerId))];
+    const providerIds = [...new Set(allRows.map((r) => r.providerId))];
     const providers =
       providerIds.length > 0
         ? await db.select().from(providerCatalog).where(inArray(providerCatalog.id, providerIds))
         : [];
     const providerMap = new Map(providers.map((p) => [p.id, p]));
+    const rows = allRows.filter((row) => providerMap.get(row.providerId)?.category !== "connector");
 
     const instanceIds = rows.map((r) => r.id);
     const containers =
@@ -1253,20 +1260,6 @@ export async function createApiApp(deps: {
     try {
       await orchestrator.stopInstance(session.tenantId, id);
       return c.json({ ok: true });
-    } catch (err) {
-      return c.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        instanceErrorStatus(err),
-      );
-    }
-  });
-
-  app.post("/api/instances/:id/health", async (c) => {
-    const session = c.get("session")!;
-    const id = c.req.param("id");
-    try {
-      const result = await orchestrator.refreshHealth(session.tenantId, id);
-      return c.json(result);
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },
@@ -1668,10 +1661,6 @@ export async function createApiApp(deps: {
           "[api] default MCP auto-install failed:",
           err instanceof Error ? err.message : err,
         );
-      }
-      // 推荐内置技能：写入新 Agent 工作区（失败不影响建 Agent）
-      if (skills) {
-        void skills.installRecommended(session.tenantId, result.agent.id);
       }
       return c.json(
         {
@@ -3993,6 +3982,12 @@ export async function createApiApp(deps: {
       });
 
       let instanceId = pending.instanceId;
+      if (pending.connectorRef) {
+        await integrationCatalog.saveConnectorAuthorization(pending.tenantId, pending.connectorRef, tokens);
+        return c.redirect(
+          `${config.webPublicUrl}/dashboard/connectors?connector=${encodeURIComponent(pending.connectorRef)}&oauth=1`,
+        );
+      }
       if (instanceId) {
         const existing = await db.query.componentInstances.findFirst({
           where: and(
@@ -4043,8 +4038,7 @@ export async function createApiApp(deps: {
     }
   });
 
-  // NOTE: after successful upstream OAuth the instance config already has tokens;
-  // refresh health so UI flips off AUTH_REQUIRED
+  // OAuth callback already persists tokens; no health probe is needed here.
   app.post("/api/mcp/upstream-oauth/verify", async (c) => {
     const session = c.get("session")!;
     const body = await c.req.json<{ instanceId: string }>();
@@ -4056,15 +4050,10 @@ export async function createApiApp(deps: {
       ),
     });
     if (!existing) return c.json({ error: "Not found" }, 404);
-    try {
-      const result = await orchestrator.refreshHealth(session.tenantId, body.instanceId);
-      return c.json({ ok: result.status === "healthy", health: result });
-    } catch (err) {
-      return c.json(
-        { ok: false, error: err instanceof Error ? err.message : String(err) },
-        400,
-      );
-    }
+    return c.json({
+      ok: true,
+      message: "OAuth 凭据已保存，连接状态将在实际调用时确定",
+    });
   });
 
   app.get("/api/settings", async (c) => {
@@ -4119,6 +4108,57 @@ export async function createApiApp(deps: {
     });
   });
 
+  app.get("/api/connectors/profiles", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (!canManageMcpOauthApps(session, config, scope)) {
+      return c.json({ error: "需要管理员权限" }, 403);
+    }
+    const scopeKey = scope === "platform" ? "platform" : session.tenantId;
+    return c.json({ profiles: await integrationCatalog.listProfiles(scopeKey), scope });
+  });
+
+  app.put("/api/connectors/profiles/:profileKey", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (!canManageMcpOauthApps(session, config, scope)) {
+      return c.json({ error: "需要管理员权限" }, 403);
+    }
+    const body = await c.req.json<{
+      enabled?: boolean;
+      kind?: "oauth2" | "oauth2_dynamic" | "token" | "custom" | "none";
+      label?: string;
+      values?: Record<string, unknown>;
+    }>();
+    try {
+      const profile = await integrationCatalog.saveProfile(
+        scope === "platform" ? "platform" : session.tenantId,
+        c.req.param("profileKey"),
+        body,
+      );
+      return c.json({ profile, scope });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/connectors/profiles/:profileKey", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (!canManageMcpOauthApps(session, config, scope)) {
+      return c.json({ error: "需要管理员权限" }, 403);
+    }
+    try {
+      await integrationCatalog.deleteProfile(
+        scope === "platform" ? "platform" : session.tenantId,
+        c.req.param("profileKey"),
+      );
+      return c.json({ ok: true, scope });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   /** 远程 MCP 安装前探测：是否可复用已配置的连接器 OAuth 客户端 */
   app.get("/api/connectors/shared-oauth", async (c) => {
     const session = c.get("session")!;
@@ -4135,6 +4175,59 @@ export async function createApiApp(deps: {
     return c.json(peek);
   });
 
+  /** 平台连接器直接授权：只保存连接器授权，不创建 MCP 实例。 */
+  app.post("/api/connectors/:ref/oauth/start", async (c) => {
+    const session = c.get("session")!;
+    const connectorRef = c.req.param("ref");
+    try {
+      const connector = (await integrationCatalog.listConnectors(session.tenantId)).find(
+        (item) => item.ref === connectorRef || item.id === connectorRef,
+      );
+      const capabilities =
+        connector?.capabilities.filter(
+          (item) => item.kind === "tool" && String(item.config.mcpUrl ?? "").startsWith("zakura://"),
+        ) ?? [];
+      const capability = capabilities[0];
+      const mcpUrl = String(capability?.config.mcpUrl ?? "");
+      if (!connector || !mcpUrl) {
+        return c.json({ error: "连接器没有可授权的功能" }, 400);
+      }
+      const target = await integrationCatalog.resolveConnectorTarget(session.tenantId, mcpUrl);
+      if (!target?.client || !target.discovery.authorizationEndpoint || !target.discovery.tokenEndpoint) {
+        return c.json({ error: "请先保存有效的 OAuth 客户端配置" }, 400);
+      }
+      purgeUpstreamOauthPending();
+      const redirectUri = `${config.publicBaseUrl}/api/mcp/upstream-oauth/callback`;
+      const state = randomBytes(16).toString("hex");
+      const scope = [...new Set(
+        capabilities.flatMap((item) => String(item.config.scopes ?? "").split(/\s+/).filter(Boolean)),
+      )].join(" ");
+      const { url, codeVerifier } = upstreamOauth.buildAuthorizeUrl({
+        discovery: target.discovery,
+        clientId: target.client.clientId,
+        redirectUri,
+        state,
+        scope: upstreamOauth.resolveScope(target.discovery, scope || target.scopes),
+        extraParams: target.authorizeParams,
+      });
+      upstreamOauthPending.set(state, {
+        tenantId: session.tenantId,
+        connectorRef: connector.ref,
+        mcpUrl: target.mcpUrl,
+        clientId: target.client.clientId,
+        clientSecret: target.client.clientSecret,
+        codeVerifier,
+        redirectUri,
+        tokenEndpoint: target.discovery.tokenEndpoint,
+        resource: null,
+        createdAt: Date.now(),
+      });
+      return c.json({ ok: true, authorizeUrl: url });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   app.put("/api/connectors/:id/credentials", async (c) => {
     const session = c.get("session")!;
     const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
@@ -4144,12 +4237,32 @@ export async function createApiApp(deps: {
     const body = await c.req.json<{
       enabled?: boolean;
       values?: Record<string, unknown>;
+      settings?: Record<string, unknown>;
     }>();
     try {
       const connector = await integrationCatalog.saveCredentials(
         scope === "platform" ? "platform" : session.tenantId,
         c.req.param("id"),
         body,
+      );
+      return c.json({ connector, scope });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.put("/api/connectors/:ref/settings", async (c) => {
+    const session = c.get("session")!;
+    const scope = c.req.query("scope") === "platform" ? "platform" : "tenant";
+    if (!canManageMcpOauthApps(session, config, scope)) {
+      return c.json({ error: "需要管理员权限" }, 403);
+    }
+    const body = await c.req.json<{ values?: Record<string, unknown> }>();
+    try {
+      const connector = await integrationCatalog.saveConnectorSettings(
+        scope === "platform" ? "platform" : session.tenantId,
+        c.req.param("ref"),
+        body.values ?? {},
       );
       return c.json({ connector, scope });
     } catch (err) {

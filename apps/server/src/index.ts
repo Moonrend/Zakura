@@ -164,7 +164,6 @@ async function main() {
     .catch((err) => {
       console.warn("[mcp] auto-start on boot failed:", err);
     });
-  orchestrator.startHealthScheduler();
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
   );

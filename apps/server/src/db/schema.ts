@@ -554,26 +554,42 @@ export const integrationComponents = pgTable(
 );
 
 /**
- * 连接器凭据。scopeKey 为 tenantId 或 platform；所有字段整体加密，API 仅返回字段存在性。
- * credentialKind 与字段 schema 来自 integration_components.configJson，不由业务代码枚举。
+ * 命名凭据档案。scopeKey 为 tenantId 或 platform，profileKey 是连接器声明的 auth.profile。
+ * 多个连接器引用同一个 profileKey 即共享一份客户端；管理员也可预配目录里尚不存在的名字。
+ * 值整体加密，API 仅返回字段存在性；kind 与字段 schema 来自目录声明，不由业务代码枚举。
  */
-export const connectorCredentials = pgTable(
-  "connector_credentials",
+export const connectorAuthProfiles = pgTable(
+  "connector_auth_profiles",
   {
     id: text("id").primaryKey().$defaultFn(newId),
     scopeKey: text("scope_key").notNull(),
-    connectorId: text("connector_id")
-      .notNull()
-      .references(() => integrationComponents.id, { onDelete: "cascade" }),
+    profileKey: text("profile_key").notNull(),
+    label: text("label").notNull().default(""),
+    kind: text("kind").notNull(),
     enabled: boolean("enabled").notNull().default(false),
-    credentialKind: text("credential_kind").notNull(),
     configEnc: text("config_enc").notNull(),
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("connector_credentials_scope_connector").on(t.scopeKey, t.connectorId),
-    index("connector_credentials_scope").on(t.scopeKey),
+    uniqueIndex("connector_auth_profiles_scope_profile").on(t.scopeKey, t.profileKey),
+    index("connector_auth_profiles_scope").on(t.scopeKey),
   ],
+);
+
+/**
+ * 连接器自身设置（如自建实例地址）。与档案分开存储：
+ * 这些值属于单个连接器，不应随共享客户端传播到其它连接器。
+ */
+export const connectorSettings = pgTable(
+  "connector_settings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    scopeKey: text("scope_key").notNull(),
+    connectorRef: text("connector_ref").notNull(),
+    configEnc: text("config_enc").notNull(),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("connector_settings_scope_ref").on(t.scopeKey, t.connectorRef)],
 );
 
 export const managedContainers = pgTable(
@@ -1426,7 +1442,8 @@ export const schema = {
   componentInstances,
   integrationPackages,
   integrationComponents,
-  connectorCredentials,
+  connectorAuthProfiles,
+  connectorSettings,
   managedContainers,
   agentBindings,
   settings,
@@ -1478,7 +1495,8 @@ export type ProviderCatalog = typeof providerCatalog.$inferSelect;
 export type ComponentInstance = typeof componentInstances.$inferSelect;
 export type IntegrationPackageRow = typeof integrationPackages.$inferSelect;
 export type IntegrationComponentRow = typeof integrationComponents.$inferSelect;
-export type ConnectorCredentialRow = typeof connectorCredentials.$inferSelect;
+export type ConnectorAuthProfileRow = typeof connectorAuthProfiles.$inferSelect;
+export type ConnectorSettingsRow = typeof connectorSettings.$inferSelect;
 export type ManagedContainer = typeof managedContainers.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
 export type PlatformService = typeof platformServices.$inferSelect;

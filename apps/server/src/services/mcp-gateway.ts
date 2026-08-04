@@ -57,9 +57,12 @@ import type { Orchestrator } from "./orchestrator.js";
 import { callPlatformAssistantTool, isPlatformAssistantToolName, listPlatformAssistantTools } from "./platform-assistant-tools.js";
 import type { ToolCallStore } from "./tool-call-store.js";
 import { callSkillTool, isSkillToolName } from "./skills/tools.js";
+import type { IntegrationCatalogService } from "./integration-catalog.js";
+import { applyConnectorCredentialsToConfig } from "../providers/credential-config.js";
 
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
+const DIRECT_CONNECTOR_PROVIDER_ID = "zakura-connector";
 
 const SKILL_INDEX_RESOURCE_URI = "skill://index.json";
 const SKILL_RESOURCE_PREFIX = "skill://";
@@ -133,6 +136,49 @@ export interface ResolvedResourceTemplate {
 
 function qualify(instanceSlug: string, toolName: string): string {
   return `${instanceSlug}__${toolName}`;
+}
+
+type DirectConnectorTarget = Awaited<
+  ReturnType<IntegrationCatalogService["listDirectConnectorTargets"]>
+>[number];
+
+function directConnectorHandle(
+  tenantId: string,
+  target: DirectConnectorTarget,
+): InstanceHandle {
+  const config: Record<string, unknown> = {
+    product: target.product,
+    mcpUrl: target.mcpUrl,
+    authRequired: false,
+    oauthTokenEndpoint: target.discovery.tokenEndpoint,
+    ...(target.client
+      ? {
+          oauthClientId: target.client.clientId,
+          ...(target.client.clientSecret
+            ? { oauthClientSecret: target.client.clientSecret }
+            : {}),
+        }
+      : {}),
+    ...(target.authorization ?? {}),
+    ...(target.credentials
+      ? applyConnectorCredentialsToConfig(
+          {},
+          target.auth,
+          target.credentials.values,
+          target.credentials.settings,
+        )
+      : {}),
+  };
+  return {
+    id: `connector:${target.connectorRef}:${target.capabilityRef}`,
+    tenantId,
+    providerId: target.providerId,
+    name: target.connectorName,
+    slug: target.instanceSlug,
+    config,
+    endpointUrl: null,
+    containers: {},
+  };
 }
 
 function encodeUriPath(path: string): string {
@@ -393,6 +439,12 @@ export class McpGateway {
 
     const candidates = all.filter((instance) => {
       if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) return false;
+      if (
+        globalRegistry.has(instance.providerId) &&
+        globalRegistry.get(instance.providerId).category === "connector"
+      ) {
+        return false;
+      }
       if (boundIds && !boundIds.has(instance.id)) return false;
       return true;
     });
@@ -417,6 +469,12 @@ export class McpGateway {
 
     const candidates = all.filter((instance) => {
       if (CAPABILITY_PROVIDER_IDS.has(instance.providerId)) return false;
+      if (
+        globalRegistry.has(instance.providerId) &&
+        globalRegistry.get(instance.providerId).category === "connector"
+      ) {
+        return false;
+      }
       if (allow && !allow.has(instance.id)) return false;
       return true;
     });
@@ -646,6 +704,63 @@ export class McpGateway {
     }
     const usedNames = new Set(tools.map((t) => t.qualifiedName));
 
+    // 平台连接器直接注入 Agent 工具：不创建实例、不读取 MCP 绑定、不走 MCP 生命周期。
+    if (this.integrationCatalog) {
+      let directTargets: DirectConnectorTarget[] = [];
+      try {
+        directTargets = await this.integrationCatalog.listDirectConnectorTargets(agent.tenantId);
+      } catch (err) {
+        console.warn(
+          "[connector] list direct tools:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      for (const target of directTargets) {
+        if (!globalRegistry.has(target.providerId)) continue;
+        const plugin = globalRegistry.get(target.providerId);
+        const handle = directConnectorHandle(agent.tenantId, target);
+        let listed: McpToolDef[] = [];
+        try {
+          listed = await plugin.listTools(handle);
+        } catch (err) {
+          console.warn(
+            `[connector] listTools ${target.connectorRef}/${target.capabilityRef}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          continue;
+        }
+        for (const t of listed) {
+          const name = withRePrefix(`${target.connectorRef}__${t.name}`);
+          if (usedNames.has(name)) continue;
+          usedNames.add(name);
+          tools.push(
+            this.enrichResolvedTool({
+              qualifiedName: name,
+              instanceId: null,
+              providerId: DIRECT_CONNECTOR_PROVIDER_ID,
+              localName: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              title: t.title,
+              outputSchema: t.outputSchema,
+              annotations: t.annotations,
+              securitySchemes: t.securitySchemes,
+              _meta: {
+                ...(t._meta ?? {}),
+                connectorRef: target.connectorRef,
+                capabilityRef: target.capabilityRef,
+                providerId: target.providerId,
+                product: target.product,
+              },
+              execution: t.execution,
+              agentScoped: true,
+              agentId: agent.id,
+            }),
+          );
+        }
+      }
+    }
+
     // 能力实例（搜索/抓取）仅在 Agent 显式开启且 running 时注入
     const capabilityInstances = await this.db
       .select()
@@ -843,7 +958,7 @@ export class McpGateway {
         }
         if (unreachable) {
           console.warn(
-            `[mcp] listTools ${instance.slug}: skipped (UNREACHABLE — 可点「健康检查」重试)`,
+            `[mcp] listTools ${instance.slug}: skipped (UNREACHABLE — 实际调用时会重试)`,
           );
           continue;
         }
@@ -987,6 +1102,43 @@ export class McpGateway {
         origin: { source: "mcp" },
       });
       return textResult(answer.text, false);
+    }
+    if (tool.providerId === DIRECT_CONNECTOR_PROVIDER_ID) {
+      if (!this.integrationCatalog) return textResult("连接器目录未挂载", true);
+      const meta = tool._meta ?? {};
+      const connectorRef =
+        typeof meta.connectorRef === "string" ? meta.connectorRef : undefined;
+      const capabilityRef =
+        typeof meta.capabilityRef === "string" ? meta.capabilityRef : undefined;
+      if (!connectorRef || !capabilityRef) {
+        return textResult("连接器工具缺少目标信息", true);
+      }
+      const target = (await this.integrationCatalog.listDirectConnectorTargets(tenantId)).find(
+        (item) => item.connectorRef === connectorRef && item.capabilityRef === capabilityRef,
+      );
+      if (!target || !globalRegistry.has(target.providerId)) {
+        return textResult("连接器未配置或授权已失效", true);
+      }
+      const handle = directConnectorHandle(tenantId, target);
+      const plugin = globalRegistry.get(target.providerId);
+      try {
+        return await plugin.callTool(handle, tool.localName, args);
+      } finally {
+        const accessToken = String(handle.config.oauthAccessToken ?? "").trim();
+        if (accessToken && target.authorization) {
+          await this.integrationCatalog
+            .saveConnectorAuthorization(tenantId, connectorRef, {
+              accessToken,
+              ...(typeof handle.config.oauthRefreshToken === "string"
+                ? { refreshToken: handle.config.oauthRefreshToken }
+                : {}),
+              ...(typeof handle.config.oauthExpiresAt === "number"
+                ? { expiresAt: handle.config.oauthExpiresAt }
+                : {}),
+            })
+            .catch(() => undefined);
+        }
+      }
     }
     if (tool.agentScoped && tool.agentId && this.agentService) {
       const agent = await this.db.query.agents.findFirst({

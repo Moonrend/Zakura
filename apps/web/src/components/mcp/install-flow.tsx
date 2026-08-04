@@ -110,10 +110,7 @@ export function McpInstallFlow({
   const [showByo, setShowByo] = useState(
     () =>
       initial.oauth?.strategies?.includes("byo") === true ||
-      initial.oauth?.tier === "B" ||
-      initial.oauth?.providerId === "google" ||
-      initial.oauth?.providerId === "github" ||
-      initial.oauth?.providerId === "slack",
+      initial.oauth?.tier === "B",
   );
   const [byoClientId, setByoClientId] = useState("");
   const [byoClientSecret, setByoClientSecret] = useState("");
@@ -233,33 +230,20 @@ export function McpInstallFlow({
   }, [busy, instanceId]);
   const isStdio = config.kind === "stdio";
   const allowPatFallback =
-    config.oauth?.allowPatFallback === true ||
-    config.id === "github" ||
-    /github/i.test(config.mcpUrl ?? "");
-  const isGoogle =
-    config.oauth?.providerId === "google" ||
-    /googleapis\.com|zakura:\/\/google-workspace/i.test(config.mcpUrl ?? "");
-  const isSlack =
-    config.oauth?.providerId === "slack" || /mcp\.slack\.com/i.test(config.mcpUrl ?? "");
-  const isFigma = /mcp\.figma\.com/i.test(config.mcpUrl ?? "");
+    config.oauth?.allowPatFallback === true;
 
   /** 仅错误态或特殊前置条件时显示；常态不重复卡片 description */
   const installHint = useMemo(() => {
     if (phase !== "error") return null;
-    if (isSlack) return "Slack 需预注册 App（不支持 DCR）";
-    if (isFigma) return "若授权失败，可能需向 Figma 申请 waitlist";
-    if (isGoogle) return "需 OAuth 客户端，可先在「设置 → OAuth 客户端」配置";
-    if (config.oauth?.tier === "B" || config.oauth?.providerId === "github") {
-      return "需预注册 OAuth App，或改用 PAT";
+    if (sharedOauth?.ready) return "连接器客户端已就绪，请检查上游授权范围或回调地址";
+    if (config.oauth?.tier === "B") {
+      return "需要预注册 OAuth 应用，或使用连接器提供的静态令牌方案";
     }
-    return null;
+    return "请检查认证配置、回调地址和上游授权范围";
   }, [
     phase,
     config.oauth?.tier,
-    config.oauth?.providerId,
-    isGoogle,
-    isSlack,
-    isFigma,
+    sharedOauth?.ready,
   ]);
 
   const pct = useMemo(() => {
@@ -686,7 +670,7 @@ export function McpInstallFlow({
                   <Label className="text-xs">Client ID</Label>
                   <Input
                     value={byoClientId}
-                    placeholder={isGoogle ? "*.apps.googleusercontent.com" : "Ov23…"}
+                    placeholder="OAuth Client ID"
                     onChange={(e) => setByoClientId(e.target.value)}
                     autoComplete="off"
                   />

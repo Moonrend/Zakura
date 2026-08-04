@@ -2,7 +2,7 @@
  * 统一连接目录：聚合平台集成、MCP 商店、技能商店与精选条目。
  * install 分发到现有 Orchestrator / Skills / IntegrationCatalog。
  */
-import { decryptJson } from "@zakura/core";
+import { decryptJson, globalRegistry } from "@zakura/core";
 import {
   BUILTIN_MARKETS,
   CURATED_OAUTH_MCPS,
@@ -36,20 +36,6 @@ const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
 function kindFromProvider(providerId: string, config: Record<string, unknown>): ConnectionKind {
   if (providerId === "stdio-mcp") return "mcp-stdio";
   if (providerId === "generic-mcp") return "mcp-http";
-  if (
-    providerId === "google-workspace" ||
-    providerId === "microsoft-365" ||
-    providerId === "github" ||
-    providerId === "slack" ||
-    providerId === "notion" ||
-    providerId === "linear" ||
-    providerId === "feishu" ||
-    providerId === "discord" ||
-    providerId === "gitlab" ||
-    providerId === "jira"
-  ) {
-    return "platform";
-  }
   if (typeof config.mcpUrl === "string" && String(config.mcpUrl).startsWith("zakura://")) {
     return "platform";
   }
@@ -369,6 +355,12 @@ export class ConnectionCatalogService {
     const out: InstalledConnection[] = [];
     for (const row of instances) {
       if (CAPABILITY_PROVIDER_IDS.has(row.providerId)) continue;
+      if (
+        globalRegistry.has(row.providerId) &&
+        globalRegistry.get(row.providerId).category === "connector"
+      ) {
+        continue;
+      }
       let config: Record<string, unknown> = {};
       try {
         config = decryptJson(this.appConfig.secret, row.configEnc);
@@ -747,33 +739,12 @@ export class ConnectionCatalogService {
       const mcpUrl = `zakura://${rest}`;
       const target = await this.integrations.resolveConnectorTarget(tenantId, mcpUrl);
       if (!target) throw new Error(`无法解析平台工具: ${mcpUrl}`);
-      const instance =
-        target.existingInstance ??
-        (await this.orchestrator.createInstance({
-          tenantId,
-          providerId: target.providerId,
-          name: req.name?.trim() || target.product,
-          slug: target.instanceSlug,
-          config: {
-            product: target.product,
-            mcpUrl: target.mcpUrl,
-            authRequired: true,
-            oauthTokenEndpoint: target.discovery.tokenEndpoint,
-          },
-          runtimeNodeId: null,
-        }));
-      if (req.agentIds?.length) {
-        for (const agentId of req.agentIds) {
-          await this.agents.bindInstance(tenantId, agentId, instance.id).catch(() => undefined);
-        }
-      }
       return {
-        id: `instance:${instance.id}`,
+        id: `connector:${target.connectorRef}`,
         kind: "platform",
-        name: instance.name,
-        status: instance.status,
-        authRequired: true,
-        instanceId: instance.id,
+        name: target.connectorName,
+        status: target.needsUserGrant && !target.authorization ? "auth_required" : "ready",
+        authRequired: target.needsUserGrant && !target.authorization,
         runtimeNodeId: null,
       };
     }
@@ -804,6 +775,7 @@ export class ConnectionCatalogService {
     connectionId: string,
     agentId: string,
   ): Promise<void> {
+    if (connectionId.startsWith("connector:")) return;
     if (connectionId.startsWith("instance:")) {
       const instanceId = connectionId.slice("instance:".length);
       await this.agents.bindInstance(tenantId, agentId, instanceId);
@@ -818,6 +790,7 @@ export class ConnectionCatalogService {
   }
 
   async remove(tenantId: string, connectionId: string): Promise<void> {
+    if (connectionId.startsWith("connector:")) return;
     if (connectionId.startsWith("instance:")) {
       const instanceId = connectionId.slice("instance:".length);
       const instance = await this.db.query.componentInstances.findFirst({

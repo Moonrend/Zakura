@@ -24,6 +24,11 @@ export type McpOauthContract = {
   providerId?: string;
   /** oauth-bridge 上游提供商标识（如 google） */
   bridgeProvider?: string;
+  /**
+   * 授权失败时展示给用户的厂商特定提示。
+   * 由目录条目声明，避免 UI 代码按厂商名分支。
+   */
+  authNote?: string;
 };
 
 export const MCP_OAUTH_TIER_META: Record<

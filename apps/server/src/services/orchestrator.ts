@@ -1,4 +1,4 @@
-import { and, eq, ne, notInArray, or, isNull, lt } from "drizzle-orm";
+import { and, eq, ne, notInArray } from "drizzle-orm";
 import {
   decryptJson,
   DecryptError,
@@ -23,7 +23,6 @@ import {
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import { platformEvents } from "./platform-events.js";
-import { mcpAuthHeaders } from "../lib/mcp-http.js";
 import type { RuntimeNodeService } from "./runtime-nodes.js";
 
 /** 租户能力面板，不走 MCP 服务器自动启动 */
@@ -175,9 +174,6 @@ function mergeMaskedConfig(
 }
 
 export class Orchestrator {
-  private healthTimer: ReturnType<typeof setTimeout> | null = null;
-  private healthRunning = false;
-  private readonly healthConcurrency = 8;
   private nodes: RuntimeNodeService | null = null;
 
   constructor(
@@ -729,192 +725,6 @@ export class Orchestrator {
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
     this.emitInstance(instance, "stopped");
-  }
-
-  async refreshHealth(tenantId: string, instanceId: string) {
-    const instance = await this.requireInstance(tenantId, instanceId);
-    const handle = await this.toHandle(tenantId, instanceId);
-    const plugin = globalRegistry.get(handle.providerId);
-    let result;
-    try {
-      result = await plugin.healthCheck(handle);
-    } catch (error) {
-      result = {
-        status: "unhealthy" as const,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-
-    // Some older MCP servers only expose a plain HTTP/SSE endpoint. If their
-    // protocol handshake is no longer understood, still distinguish a live
-    // endpoint from an unreachable one instead of marking it dead immediately.
-    if (result.status === "unhealthy" && !result.details?.authRequired) {
-      const fallback = await this.fallbackEndpointHealth(handle).catch(() => null);
-      if (fallback) result = fallback;
-    }
-
-    const now = new Date();
-    const previousFailures = instance.healthFailureCount ?? 0;
-    const failures = result.status === "healthy" ? 0 : Math.min(previousFailures + 1, 10);
-    const nextHealthCheckAt = new Date(
-      now.getTime() + this.healthIntervalMs(handle, result.status, failures),
-    );
-    await this.db
-      .update(componentInstances)
-      .set({
-        healthStatus: result.status,
-        lastError: result.status === "unhealthy" ? result.message ?? null : null,
-        lastHealthCheckAt: now,
-        nextHealthCheckAt,
-        healthFailureCount: failures,
-        healthClaimUntil: null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
-      );
-    // 健康状态变化才推送，避免噪声
-    if (instance.healthStatus !== result.status) {
-      this.emitInstance(instance, instance.status, `健康检查：${result.status}`);
-    }
-    return result;
-  }
-
-  private healthIntervalMs(
-    handle: InstanceHandle,
-    status: "healthy" | "unhealthy" | "unknown",
-    failures: number,
-  ): number {
-    if (status === "healthy") {
-      const remote = handle.providerId === "generic-mcp" ||
-        String(handle.endpointUrl ?? "").startsWith("http");
-      return remote ? 10 * 60_000 : 5 * 60_000;
-    }
-    if (status === "unknown") return 60_000;
-    return Math.min(30 * 60_000, 30_000 * 2 ** Math.min(failures - 1, 6));
-  }
-
-  private async fallbackEndpointHealth(handle: InstanceHandle): Promise<{
-    status: "healthy" | "unhealthy";
-    message: string;
-    details?: Record<string, unknown>;
-  } | null> {
-    const cfg = handle.config;
-    const raw = typeof cfg.mcpUrl === "string"
-      ? cfg.mcpUrl
-      : typeof cfg.endpointUrl === "string"
-        ? cfg.endpointUrl
-        : handle.endpointUrl;
-    if (!raw || !/^https?:\/\//i.test(raw)) return null;
-    const headers = mcpAuthHeaders({
-      apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : undefined,
-      headerName: typeof cfg.headerName === "string" ? cfg.headerName : undefined,
-    });
-    if (typeof cfg.oauthAccessToken === "string" && cfg.oauthAccessToken.trim()) {
-      headers.Authorization = `Bearer ${cfg.oauthAccessToken.trim()}`;
-    }
-    let response = await fetch(raw, {
-      method: "HEAD",
-      headers,
-      redirect: "manual",
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (response.status === 405 || response.status === 501) {
-      response = await fetch(raw, {
-        method: "GET",
-        headers: { ...headers, Accept: "text/event-stream, application/json, */*" },
-        redirect: "manual",
-        signal: AbortSignal.timeout(8_000),
-      });
-    }
-    if (response.status === 401 || response.status === 403) {
-      return {
-        status: "unhealthy",
-        message: `AUTH_REQUIRED: HTTP ${response.status}`,
-        details: { authRequired: true, protocolFallback: true },
-      };
-    }
-    if (response.status >= 200 && response.status < 500) {
-      return {
-        status: "healthy",
-        message: `endpoint reachable (HTTP ${response.status})`,
-        details: { protocolFallback: true, statusCode: response.status },
-      };
-    }
-    return {
-      status: "unhealthy",
-      message: `endpoint returned HTTP ${response.status}`,
-      details: { protocolFallback: true, statusCode: response.status },
-    };
-  }
-
-  /** Start one process-local scheduler; DB claims make it safe across replicas. */
-  startHealthScheduler(opts: { pollMs?: number } = {}): void {
-    if (this.healthTimer) return;
-    const pollMs = Math.max(5_000, opts.pollMs ?? 15_000);
-    const tick = async () => {
-      if (this.healthRunning) return;
-      this.healthRunning = true;
-      try {
-        await this.runHealthBatch();
-      } catch (error) {
-        console.warn("[mcp-health] scheduler tick failed:", error);
-      } finally {
-        this.healthRunning = false;
-        this.healthTimer = setTimeout(() => void tick(), pollMs);
-        this.healthTimer.unref?.();
-      }
-    };
-    void tick();
-  }
-
-  stopHealthScheduler(): void {
-    if (this.healthTimer) clearTimeout(this.healthTimer);
-    this.healthTimer = null;
-  }
-
-  private async runHealthBatch(): Promise<void> {
-    const now = new Date();
-    const candidates = await this.db
-      .select({ id: componentInstances.id, tenantId: componentInstances.tenantId })
-      .from(componentInstances)
-      .where(and(
-        eq(componentInstances.status, "running"),
-        lt(componentInstances.nextHealthCheckAt, now),
-        or(isNull(componentInstances.healthClaimUntil), lt(componentInstances.healthClaimUntil, now)),
-      ))
-      .limit(this.healthConcurrency * 2);
-    let cursor = 0;
-    const workers = Array.from({ length: Math.min(this.healthConcurrency, candidates.length) }, async () => {
-      while (cursor < candidates.length) {
-        const candidate = candidates[cursor++];
-        if (!candidate) return;
-        const claimUntil = new Date(Date.now() + 60_000);
-        const [claimed] = await this.db
-          .update(componentInstances)
-          .set({ healthClaimUntil: claimUntil, updatedAt: new Date() })
-          .where(and(
-            eq(componentInstances.id, candidate.id),
-            eq(componentInstances.tenantId, candidate.tenantId),
-            eq(componentInstances.status, "running"),
-            lt(componentInstances.nextHealthCheckAt, new Date()),
-            or(isNull(componentInstances.healthClaimUntil), lt(componentInstances.healthClaimUntil, new Date())),
-          ))
-          .returning();
-        if (!claimed) continue;
-        try {
-          await this.refreshHealth(candidate.tenantId, candidate.id);
-        } catch (error) {
-          console.warn(`[mcp-health] ${candidate.id} failed:`, error instanceof Error ? error.message : error);
-          await this.db.update(componentInstances).set({
-            healthClaimUntil: null,
-            nextHealthCheckAt: new Date(Date.now() + 60_000),
-            updatedAt: new Date(),
-          }).where(and(eq(componentInstances.id, candidate.id), eq(componentInstances.tenantId, candidate.tenantId)));
-        }
-      }
-    });
-    await Promise.all(workers);
   }
 
   /** Merge/replace encrypted config for an existing instance */

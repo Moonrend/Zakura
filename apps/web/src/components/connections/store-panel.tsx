@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
+import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import {
   addConnectionSource,
   connectionKindLabel,
@@ -49,7 +50,7 @@ import {
   type StorePackageCard,
   type StorePackageSection,
 } from "@/lib/connections";
-import { installSkill } from "@/lib/skills";
+import { SkillInstallDialog } from "@/components/skills/skill-install-dialog";
 
 function PackageCardGrid({
   items,
@@ -142,6 +143,8 @@ export function StorePanel({
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
   const [skillSource, setSkillSource] = useState("");
+  const [skillAgents, setSkillAgents] = useState<AgentListItem[]>([]);
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false);
 
   const activeSource = source || "all";
 
@@ -242,11 +245,10 @@ export function StorePanel({
     setAdding(true);
     try {
       const source = skillSource.trim().replace(/^npx\s+skills?\s+add\s+/i, "");
-      await installSkill({ source });
-      toast.success("技能已安装");
+      setSkillSource(source);
       setAddSkillOpen(false);
-      setSkillSource("");
-      await loadSearch();
+      setSkillAgents(await fetchAgents());
+      setSkillDialogOpen(true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -474,6 +476,14 @@ export function StorePanel({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <SkillInstallDialog
+        open={skillDialogOpen}
+        onOpenChange={setSkillDialogOpen}
+        source={skillSource}
+        agents={skillAgents}
+        onInstalled={() => void loadSearch()}
+      />
     </div>
   );
 }

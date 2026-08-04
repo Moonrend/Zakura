@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   Container,
-  HeartPulse,
   KeyRound,
   Loader2,
   RefreshCw,
@@ -49,6 +48,7 @@ type InstanceDetail = {
   name: string;
   slug: string;
   providerId: string;
+  provider?: { name?: string | null; category?: string | null } | null;
   status: string;
   healthStatus: string;
   endpointUrl?: string | null;
@@ -374,46 +374,45 @@ function ConfigurationPanel({
   );
 }
 
-function providerLabel(id: string) {
-  switch (id) {
-    case "generic-mcp":
-      return "HTTP";
-    case "stdio-mcp":
-      return "Stdio";
-    case "openviking":
-      return "OpenViking";
-    default:
-      return id;
-  }
+function providerLabel(instance: InstanceDetail) {
+  return instance.provider?.name || instance.providerId;
 }
 
 function needsUpstreamAuth(i: InstanceDetail): boolean {
+  const config = i.config ?? {};
+  const hasToken =
+    (typeof config.oauthAccessToken === "string" && config.oauthAccessToken.trim().length > 0) ||
+    (typeof config.apiToken === "string" && config.apiToken.trim().length > 0) ||
+    (typeof config.apiKey === "string" && config.apiKey.trim().length > 0);
+  if (hasToken) return false;
   return (
+    config.authRequired === true ||
     !!i.lastError?.startsWith("AUTH_REQUIRED") ||
     /missing required Authorization|401|unauthorized/i.test(i.lastError ?? "")
   );
 }
 
 /** 远程 HTTP MCP 无本地进程；status 表示平台侧启用 */
-function isRemoteMcp(providerId: string) {
-  return providerId === "generic-mcp" || providerId === "google-workspace";
+function isRemoteMcp(instance: InstanceDetail) {
+  return (
+    instance.provider?.category === "mcp" &&
+    instance.providerId !== "stdio-mcp"
+  );
 }
 
 function statusVariant(
   status: string,
-  healthStatus?: string,
 ): "default" | "secondary" | "success" | "warn" | "danger" {
-  if (status === "running" && healthStatus === "unhealthy") return "danger";
   if (status === "running") return "success";
   if (status === "starting" || status === "stopping") return "warn";
   if (status === "error" || status === "unhealthy") return "danger";
   return "secondary";
 }
 
-function statusLabel(status: string, providerId: string, healthStatus?: string): string {
-  if (isRemoteMcp(providerId)) {
+function statusLabel(instance: InstanceDetail): string {
+  const { status } = instance;
+  if (isRemoteMcp(instance)) {
     if (status === "running") {
-      if (healthStatus === "unhealthy") return "不可用";
       return "已启用";
     }
     if (status === "starting") return "启用中";
@@ -507,7 +506,6 @@ function McpServerDetailInner() {
 
   useEffect(() => {
     if (!autoOauth || oauthAutoTried || loading || !instance) return;
-    if (instance.providerId !== "generic-mcp") return;
     setOauthAutoTried(true);
     void startUpstreamOauth();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only auto-trigger once on oauth=1
@@ -517,7 +515,7 @@ function McpServerDetailInner() {
     setActionBusy(true);
     try {
       await api(`/api/instances/${id}/${action}`, { method: "POST" });
-      const remote = instance ? isRemoteMcp(instance.providerId) : false;
+      const remote = instance ? isRemoteMcp(instance) : false;
       toast.success(
         action === "start"
           ? remote
@@ -527,19 +525,6 @@ function McpServerDetailInner() {
             ? "已停用"
             : "已停止",
       );
-      await load();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setActionBusy(false);
-    }
-  }
-
-  async function refreshHealth() {
-    setActionBusy(true);
-    try {
-      await api(`/api/instances/${id}/health`, { method: "POST" });
-      toast.success("已重新检查");
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -671,16 +656,16 @@ function McpServerDetailInner() {
           <span className="inline-flex flex-wrap items-center gap-2">
             {instance.name}
             <code className="text-[11px] font-normal text-muted-foreground">{instance.slug}</code>
-            <Badge variant="outline">{providerLabel(instance.providerId)}</Badge>
+            <Badge variant="outline">{providerLabel(instance)}</Badge>
             <Badge
-              variant={statusVariant(instance.status, instance.healthStatus)}
+              variant={statusVariant(instance.status)}
               title={
-                isRemoteMcp(instance.providerId)
+                isRemoteMcp(instance)
                   ? "远程 MCP 无本地进程；此状态表示是否已在平台启用（使用时会自动启用）"
                   : undefined
               }
             >
-              {statusLabel(instance.status, instance.providerId, instance.healthStatus)}
+              {statusLabel(instance)}
             </Badge>
             {authNeeded ? <Badge variant="destructive">需 OAuth</Badge> : null}
           </span>
@@ -694,7 +679,7 @@ function McpServerDetailInner() {
                 disabled={actionBusy}
                 onClick={() => void startStop("stop")}
               >
-                {isRemoteMcp(instance.providerId) ? "停用" : "停止"}
+                {isRemoteMcp(instance) ? "停用" : "停止"}
               </Button>
             ) : (
               <Button
@@ -703,20 +688,10 @@ function McpServerDetailInner() {
                 disabled={actionBusy}
                 onClick={() => void startStop("start")}
               >
-                {isRemoteMcp(instance.providerId) ? "启用" : "启动"}
+                {isRemoteMcp(instance) ? "启用" : "启动"}
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={actionBusy}
-              onClick={() => void refreshHealth()}
-            >
-              <HeartPulse className="size-3.5" />
-              健康检查
-            </Button>
-            {instance.providerId === "generic-mcp" ||
-            instance.providerId === "google-workspace" ? (
+            {instance.provider?.category === "mcp" ? (
               <Button
                 size="sm"
                 variant={authNeeded ? "default" : "outline"}
@@ -739,12 +714,8 @@ function McpServerDetailInner() {
         }
       />
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3">
         <div className="rounded-lg border border-border bg-card p-3.5">
-          <div className="text-[11px] text-muted-foreground">健康状态</div>
-          <div className="mt-1 text-sm font-medium">{instance.healthStatus || "—"}</div>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-3.5 sm:col-span-2">
           <div className="text-[11px] text-muted-foreground">上游地址</div>
           <code className="mt-1 block break-all font-mono text-[11px]">
             {remoteUrl || "—"}
