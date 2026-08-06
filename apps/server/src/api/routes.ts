@@ -1006,6 +1006,11 @@ export async function createApiApp(deps: {
         : [];
     const platformAgentDefaults = await getAgentWebDefaults(db);
     await syncPlatformManagedWebDefaults(db, orchestrator, config, session.tenantId, platformAgentDefaults, managed);
+    // SaaS: only surface admin-selected platform defaults (shown as「Zakura 自动」).
+    // OSS: all healthy/running managed services remain available.
+    const exposedManaged = config.multiTenant
+      ? managed.filter((s) => platformAgentDefaults.autoManagedServices.includes(s.key))
+      : managed;
     return c.json({
       webSearch: {
         instance: {
@@ -1033,15 +1038,20 @@ export async function createApiApp(deps: {
           readInstanceConfig<WebFetchConfig>(config, fetchInst),
         ),
       },
-      platformServices: managed.map((s) => ({
+      platformServices: exposedManaged.map((s) => ({
         key: s.key,
         name: s.name,
         mode: s.mode,
         healthStatus: s.healthStatus,
         mapsTo: s.mapsTo,
-        // SaaS users may select a managed service but never receive its host address.
+        // SaaS tenants never receive host addresses or raw service names for managed endpoints.
         ...(config.multiTenant ? {} : { endpointUrl: s.endpointUrl }),
       })),
+      // multiTenant also gets which platform defaults are enabled (for「Zakura 自动」 UI).
+      platformDefaults: {
+        autoManagedServices: platformAgentDefaults.autoManagedServices,
+        multiTenant: config.multiTenant,
+      },
       agentDefaults: config.multiTenant ? undefined : platformAgentDefaults,
     });
   });

@@ -158,7 +158,7 @@ export async function syncPlatformManagedWebDefaults(
       const previous = next[mapKey][id] ?? {};
       const slots = Array.isArray(previous.slots) ? [...previous.slots] : [];
       if (!slots.some((slot: any) => slot?.usePlatform === true)) {
-        slots.push({ id: `platform:${service.key}`, label: "平台托管", usePlatform: true });
+        slots.push({ id: `platform:${service.key}`, label: "Zakura 自动", usePlatform: true });
         changed = true;
       }
       if (previous.enabled !== true) changed = true;

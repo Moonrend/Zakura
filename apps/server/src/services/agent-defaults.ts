@@ -1,6 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, newId, settings, tenantMemberships } from "../db/schema.js";
+import { PLATFORM_SERVICE_CATALOG } from "../platform-services/catalog.js";
+import type { PlatformServiceKey } from "@zakura/shared";
 import { ensureCapabilityInstance } from "./capabilities.js";
 import type { Orchestrator } from "./orchestrator.js";
 import { parseAgentConfig, type AgentConfigBag } from "./agent-providers.js";
@@ -12,6 +14,7 @@ export type AgentWebDefaults = {
   webFetchEnabled: boolean;
   searchEngine: string | null;
   fetchBackend: string | null;
+  /** Platform-hosted defaults (at most one search-engine + one fetch-backend). Shown as「Zakura 自动」. */
   autoManagedServices: string[];
 };
 
@@ -23,16 +26,30 @@ export const DEFAULT_AGENT_WEB_DEFAULTS: AgentWebDefaults = {
   autoManagedServices: [],
 };
 
+/** Keep at most one platform service per product kind (search / fetch). */
+function normalizeAutoManaged(keys: string[]): string[] {
+  let searchKey: string | undefined;
+  let fetchKey: string | undefined;
+  for (const key of keys) {
+    const def = PLATFORM_SERVICE_CATALOG[key as PlatformServiceKey];
+    if (!def) continue;
+    if (def.mapsTo.kind === "search-engine" && !searchKey) searchKey = key;
+    if (def.mapsTo.kind === "fetch-backend" && !fetchKey) fetchKey = key;
+  }
+  return [searchKey, fetchKey].filter((v): v is string => Boolean(v));
+}
+
 function normalize(value: unknown): AgentWebDefaults {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const rawAuto = Array.isArray(raw.autoManagedServices)
+    ? raw.autoManagedServices.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
   return {
     webSearchEnabled: raw.webSearchEnabled !== false,
     webFetchEnabled: raw.webFetchEnabled !== false,
     searchEngine: typeof raw.searchEngine === "string" && raw.searchEngine ? raw.searchEngine : null,
     fetchBackend: typeof raw.fetchBackend === "string" && raw.fetchBackend ? raw.fetchBackend : null,
-    autoManagedServices: Array.isArray(raw.autoManagedServices)
-      ? raw.autoManagedServices.filter((v): v is string => typeof v === "string" && v.length > 0)
-      : [],
+    autoManagedServices: normalizeAutoManaged(rawAuto),
   };
 }
 

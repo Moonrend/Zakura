@@ -35,6 +35,7 @@ import { enabledEngines, listSearchEngineMeta } from "../capabilities/web-search
 import { enabledBackends, listFetchBackendMeta } from "../capabilities/web-fetch/index.js";
 import type { WebSearchConfig } from "../capabilities/web-search/types.js";
 import type { WebFetchConfig } from "../capabilities/web-fetch/types.js";
+import { normalizeSlots } from "../capabilities/cred-slots.js";
 import {
   assertNodeBindAllowed,
   resolveAccessibleNode,
@@ -44,6 +45,20 @@ import {
   ensureDefaultAgentMcps,
 } from "./default-mcps.js";
 import { effectiveAgentWebDefaults, getAgentWebDefaults } from "./agent-defaults.js";
+
+const ZAKURA_AUTO_NAME = "Zakura 自动";
+
+/** Platform-only slots surface as「Zakura 自动」so tenants never see jina/firecrawl ids. */
+function displayNameForWebService(
+  metaName: string,
+  cfg: { enabled?: boolean; slots?: unknown[] } | undefined,
+): string {
+  const slots = normalizeSlots(cfg as any);
+  if (slots.length > 0 && slots.every((s) => s.usePlatform)) {
+    return ZAKURA_AUTO_NAME;
+  }
+  return metaName;
+}
 
 function slugify(input: string): string {
   return (
@@ -634,15 +649,45 @@ export class AgentService {
         bound: bound.has(i.id),
       }));
 
+    const searchEngines = listSearchEngineMeta()
+      .filter((e) => searchEnabled.includes(e.id))
+      .map((e) => {
+        const name = displayNameForWebService(e.name, searchCfg.engines?.[e.id]);
+        return {
+          id: e.id,
+          name,
+          description:
+            name === ZAKURA_AUTO_NAME ? "使用平台托管，无需配置" : e.description,
+        };
+      });
+    const fetchBackends = listFetchBackendMeta()
+      .filter((b) => fetchEnabled.includes(b.id))
+      .map((b) => {
+        const name = displayNameForWebService(b.name, fetchCfg.backends?.[b.id]);
+        return {
+          id: b.id,
+          name,
+          description:
+            name === ZAKURA_AUTO_NAME ? "使用平台托管，无需配置" : b.description,
+        };
+      });
+
+    const tenantDefaultEngine = searchCfg.defaultEngine ?? null;
+    const tenantDefaultBackend = fetchCfg.defaultBackend ?? null;
+
     return {
       providers: prefs,
       webSearch: {
         instanceId: searchInst.id,
         status: searchInst.status,
-        tenantDefaultEngine: searchCfg.defaultEngine ?? null,
-        engines: listSearchEngineMeta()
-          .filter((e) => searchEnabled.includes(e.id))
-          .map((e) => ({ id: e.id, name: e.name, description: e.description })),
+        tenantDefaultEngine,
+        /** Display label for tenant default (never raw id). */
+        tenantDefaultEngineName: tenantDefaultEngine
+          ? (searchEngines.find((e) => e.id === tenantDefaultEngine)?.name ??
+            listSearchEngineMeta().find((e) => e.id === tenantDefaultEngine)?.name ??
+            tenantDefaultEngine)
+          : null,
+        engines: searchEngines,
         agent: {
           enabled: effective.webSearchEnabled,
           defaultEngine: effective.searchEngine,
@@ -651,10 +696,13 @@ export class AgentService {
       webFetch: {
         instanceId: fetchInst.id,
         status: fetchInst.status,
-        tenantDefaultBackend: fetchCfg.defaultBackend ?? null,
-        backends: listFetchBackendMeta()
-          .filter((b) => fetchEnabled.includes(b.id))
-          .map((b) => ({ id: b.id, name: b.name, description: b.description })),
+        tenantDefaultBackend,
+        tenantDefaultBackendName: tenantDefaultBackend
+          ? (fetchBackends.find((b) => b.id === tenantDefaultBackend)?.name ??
+            listFetchBackendMeta().find((b) => b.id === tenantDefaultBackend)?.name ??
+            tenantDefaultBackend)
+          : null,
+        backends: fetchBackends,
         agent: {
           enabled: effective.webFetchEnabled,
           defaultBackend: effective.fetchBackend,

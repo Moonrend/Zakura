@@ -6,8 +6,8 @@ import {
   ExternalLink,
   Plus,
   Save,
-  Server,
   Trash2,
+  Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
@@ -103,6 +103,11 @@ type ManagedHint = {
   endpointUrl?: string | null;
 };
 
+type PlatformDefaults = {
+  autoManagedServices: string[];
+  multiTenant: boolean;
+};
+
 type FlatRow = {
   kind: "search" | "fetch";
   serviceId: string;
@@ -111,6 +116,19 @@ type FlatRow = {
   meta: EngineMeta | BackendMeta;
   platform?: ManagedHint;
 };
+
+type PickerItem =
+  | {
+      type: "zakura-auto";
+      kind: "search" | "fetch";
+      serviceId: string;
+      platform: ManagedHint;
+    }
+  | {
+      type: "provider";
+      kind: "search" | "fetch";
+      meta: EngineMeta | BackendMeta;
+    };
 
 /* ── helpers ───────────────────────────────────────────── */
 
@@ -126,6 +144,26 @@ function managedFor(
   return managed.find((m) => m.mapsTo.kind === kind && m.mapsTo.id === id);
 }
 
+const ZAKURA_AUTO_NAME = "Zakura 自动";
+
+function platformLabel(slot: SlotPublic) {
+  if (!slot.usePlatform) return null;
+  return slot.label?.trim() || ZAKURA_AUTO_NAME;
+}
+
+/** Platform-only credential slots surface as「Zakura 自动」, never jina/firecrawl names. */
+function isZakuraAutoOnly(slots: SlotPublic[] | undefined): boolean {
+  const list = slots ?? [];
+  return list.length > 0 && list.every((s) => s.usePlatform);
+}
+
+function serviceDisplayName(
+  metaName: string,
+  slots: SlotPublic[] | undefined,
+): string {
+  return isZakuraAutoOnly(slots) ? ZAKURA_AUTO_NAME : metaName;
+}
+
 /* ── page ──────────────────────────────────────────────── */
 
 export default function WebPage() {
@@ -134,6 +172,7 @@ export default function WebPage() {
   const [searchConfig, setSearchConfig] = useState<SearchConfig>({ engines: {} });
   const [fetchConfig, setFetchConfig] = useState<FetchConfig>({ backends: {} });
   const [managed, setManaged] = useState<ManagedHint[]>([]);
+  const [platformDefaults, setPlatformDefaults] = useState<PlatformDefaults | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -141,12 +180,15 @@ export default function WebPage() {
   const [pickerKind, setPickerKind] = useState<"search" | "fetch">("search");
   const [editRow, setEditRow] = useState<FlatRow | null>(null);
 
+  const multiTenant = platformDefaults?.multiTenant === true;
+
   const load = useCallback(async () => {
     try {
       const res = await api<{
         webSearch: { engines: EngineMeta[]; config: SearchConfig };
         webFetch: { backends: BackendMeta[]; config: FetchConfig };
         platformServices?: ManagedHint[];
+        platformDefaults?: PlatformDefaults;
       }>("/api/capabilities");
       setEngines(res.webSearch.engines);
       setBackends(res.webFetch.backends);
@@ -159,6 +201,7 @@ export default function WebPage() {
         backends: res.webFetch.config.backends ?? {},
       });
       setManaged(res.platformServices ?? []);
+      setPlatformDefaults(res.platformDefaults ?? null);
       setLoaded(true);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -179,7 +222,7 @@ export default function WebPage() {
         rows.push({
           kind: "search",
           serviceId: meta.id,
-          serviceName: meta.name,
+          serviceName: slot.usePlatform ? ZAKURA_AUTO_NAME : meta.name,
           slot,
           meta,
           platform: plat,
@@ -199,7 +242,7 @@ export default function WebPage() {
         rows.push({
           kind: "fetch",
           serviceId: meta.id,
-          serviceName: meta.name,
+          serviceName: slot.usePlatform ? ZAKURA_AUTO_NAME : meta.name,
           slot,
           meta,
           platform: plat,
@@ -233,7 +276,7 @@ export default function WebPage() {
   function addSlot(
     kind: "search" | "fetch",
     serviceId: string,
-    opts: { usePlatform?: boolean },
+    opts: { usePlatform?: boolean; openEditor?: boolean; label?: string },
   ) {
     const meta =
       kind === "search"
@@ -243,7 +286,7 @@ export default function WebPage() {
 
     const slot: SlotPublic = {
       id: newId(),
-      label: opts.usePlatform ? "平台托管" : undefined,
+      label: opts.usePlatform ? opts.label ?? "Zakura 自动" : undefined,
       usePlatform: opts.usePlatform || undefined,
       hasApiKey: false,
       apiKey: "",
@@ -280,12 +323,12 @@ export default function WebPage() {
     }
 
     setPickerOpen(false);
-    // open editor for non-platform free engines that need keys
-    if (!opts.usePlatform && (meta.requiresApiKey || meta.requiresBaseUrl)) {
+
+    if (opts.openEditor !== false) {
       setEditRow({
         kind,
         serviceId,
-        serviceName: meta.name,
+        serviceName: opts.usePlatform ? "Zakura 自动" : meta.name,
         slot,
         meta,
         platform: managedFor(
@@ -295,7 +338,9 @@ export default function WebPage() {
         ),
       });
     } else {
-      toast.success(`已添加 ${meta.name}${opts.usePlatform ? "（平台）" : ""}`);
+      toast.success(
+        opts.usePlatform ? "已添加 Zakura 自动" : `已添加 ${meta.name}`,
+      );
     }
   }
 
@@ -380,7 +425,6 @@ export default function WebPage() {
   async function saveAll() {
     setSaving(true);
     try {
-      // Send slots as-is; empty apiKey means keep previous on server
       await Promise.all([
         api("/api/capabilities/web-search", {
           method: "PUT",
@@ -400,33 +444,42 @@ export default function WebPage() {
     }
   }
 
-  /* catalog for picker: platform first */
-  const pickerCatalog = useMemo(() => {
-    if (pickerKind === "search") {
-      const list = engines.map((e) => {
-        const plat = managedFor(managed, "search-engine", e.id);
-        return { meta: e, platform: plat, kind: "search" as const };
-      });
-      list.sort((a, b) => {
-        const ap = a.platform ? 0 : 1;
-        const bp = b.platform ? 0 : 1;
-        if (ap !== bp) return ap - bp;
-        return a.meta.name.localeCompare(b.meta.name, "zh");
-      });
-      return list;
-    }
-    const list = backends.map((b) => {
-      const plat = managedFor(managed, "fetch-backend", b.id);
-      return { meta: b, platform: plat, kind: "fetch" as const };
-    });
-    list.sort((a, b) => {
-      const ap = a.platform ? 0 : 1;
-      const bp = b.platform ? 0 : 1;
-      if (ap !== bp) return ap - bp;
-      return a.meta.name.localeCompare(b.meta.name, "zh");
-    });
-    return list;
+  /** Picker catalog:「Zakura 自动」(platform defaults) + regular providers; no action buttons. */
+  const pickerCatalog = useMemo((): PickerItem[] => {
+    const mapKind = pickerKind === "search" ? "search-engine" : "fetch-backend";
+    // SaaS: API already filters to admin-selected defaults (at most one per kind).
+    // OSS: expose each running managed service as Zakura 自动 when multiple exist.
+    const platformForKind = managed.filter((m) => m.mapsTo.kind === mapKind);
+    const items: PickerItem[] = platformForKind.map((platform) => ({
+      type: "zakura-auto" as const,
+      kind: pickerKind,
+      serviceId: platform.mapsTo.id,
+      platform,
+    }));
+
+    const list =
+      pickerKind === "search"
+        ? engines.map((meta) => ({ type: "provider" as const, kind: "search" as const, meta }))
+        : backends.map((meta) => ({ type: "provider" as const, kind: "fetch" as const, meta }));
+
+    list.sort((a, b) => a.meta.name.localeCompare(b.meta.name, "zh"));
+    items.push(...list);
+    return items;
   }, [pickerKind, engines, backends, managed]);
+
+  function onPickItem(item: PickerItem) {
+    if (item.type === "zakura-auto") {
+      // Add platform slot and open a short confirmation dialog (no keys needed).
+      addSlot(item.kind, item.serviceId, {
+        usePlatform: true,
+        openEditor: true,
+        label: "Zakura 自动",
+      });
+      return;
+    }
+    // Always open the detail dialog so users see description + API key link.
+    addSlot(item.kind, item.meta.id, { usePlatform: false, openEditor: true });
+  }
 
   return (
     <div className="space-y-5">
@@ -449,10 +502,16 @@ export default function WebPage() {
             title="搜索"
             defaultLabel="默认引擎"
             defaultValue={searchConfig.defaultEngine ?? searchEnabledIds[0] ?? ""}
-            defaultItems={searchEnabledIds.map((id) => ({
-              value: id,
-              label: engines.find((e) => e.id === id)?.name ?? id,
-            }))}
+            defaultItems={searchEnabledIds.map((id) => {
+              const metaName = engines.find((e) => e.id === id)?.name ?? id;
+              return {
+                value: id,
+                label: serviceDisplayName(
+                  metaName,
+                  searchConfig.engines[id]?.slots,
+                ),
+              };
+            })}
             onDefaultChange={(v) =>
               setSearchConfig((c) => ({ ...c, defaultEngine: v }))
             }
@@ -466,10 +525,16 @@ export default function WebPage() {
             title="抓取"
             defaultLabel="默认后端"
             defaultValue={fetchConfig.defaultBackend ?? fetchEnabledIds[0] ?? ""}
-            defaultItems={fetchEnabledIds.map((id) => ({
-              value: id,
-              label: backends.find((b) => b.id === id)?.name ?? id,
-            }))}
+            defaultItems={fetchEnabledIds.map((id) => {
+              const metaName = backends.find((b) => b.id === id)?.name ?? id;
+              return {
+                value: id,
+                label: serviceDisplayName(
+                  metaName,
+                  fetchConfig.backends[id]?.slots,
+                ),
+              };
+            })}
             onDefaultChange={(v) =>
               setFetchConfig((c) => ({ ...c, defaultBackend: v }))
             }
@@ -481,224 +546,235 @@ export default function WebPage() {
         </>
       )}
 
-      {/* ── Add service picker ── */}
+      {/* ── Add service picker (click row → detail dialog; no action buttons) ── */}
       <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>
-              添加{pickerKind === "search" ? "搜索" : "抓取"}服务
+              添加{pickerKind === "search" ? "搜索" : "抓取"}提供商
             </DialogTitle>
-            <DialogDescription>
-              平台已托管的排在最前。可重复添加同一服务以实现多 Key 轮询。
-            </DialogDescription>
+            <DialogDescription>选择一项以继续</DialogDescription>
           </DialogHeader>
           <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-1">
-            {pickerCatalog.map(({ meta, platform }) => (
-              <div
-                key={meta.id}
-                className="rounded-lg border border-border px-3 py-2.5"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-sm font-medium">{meta.name}</span>
-                      {platform ? (
-                        <Badge variant="secondary" className="text-[10px]">
-                          <Server className="mr-0.5 size-2.5" />
-                          平台
-                          {platform.healthStatus === "healthy" ? " · 健康" : ""}
-                        </Badge>
-                      ) : null}
-                      {meta.requiresApiKey ? (
-                        <Badge variant="outline" className="text-[10px]">
-                          API Key
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground line-clamp-2">
-                      {meta.description}
-                    </p>
-                    <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
-                      {meta.apiKeyUrl ? (
-                        <a
-                          href={meta.apiKeyUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-0.5 text-primary hover:underline"
-                        >
-                          获取 API Key
-                          <ExternalLink className="size-2.5" />
-                        </a>
-                      ) : null}
-                      {meta.docsUrl ? (
-                        <a
-                          href={meta.docsUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-0.5 text-muted-foreground hover:underline"
-                        >
-                          文档
-                          <ExternalLink className="size-2.5" />
-                        </a>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {platform ? (
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        addSlot(pickerKind, meta.id, { usePlatform: true })
-                      }
-                    >
-                      使用平台托管
-                    </Button>
-                  ) : null}
-                  <Button
-                    size="sm"
-                    variant={platform ? "outline" : "default"}
-                    onClick={() =>
-                      addSlot(pickerKind, meta.id, { usePlatform: false })
-                    }
+            {pickerCatalog.map((item) => {
+              if (item.type === "zakura-auto") {
+                const multiAuto =
+                  pickerCatalog.filter((i) => i.type === "zakura-auto").length > 1;
+                return (
+                  <button
+                    key={`zakura-auto:${item.platform.key}`}
+                    type="button"
+                    onClick={() => onPickItem(item)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-lg border border-border px-3 py-2.5 text-left",
+                      "transition-colors hover:bg-muted/50",
+                    )}
                   >
-                    {platform ? "添加自有配置" : "添加"}
-                  </Button>
-                </div>
-              </div>
-            ))}
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Zap className="size-4" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">
+                        {multiAuto && !multiTenant
+                          ? `Zakura 自动 · ${item.platform.name}`
+                          : "Zakura 自动"}
+                      </span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        使用平台托管，无需配置
+                      </span>
+                    </span>
+                  </button>
+                );
+              }
+              return (
+                <button
+                  key={item.meta.id}
+                  type="button"
+                  onClick={() => onPickItem(item)}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5 text-left",
+                    "transition-colors hover:bg-muted/50",
+                  )}
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{item.meta.name}</span>
+                    {item.meta.requiresApiKey ? (
+                      <span className="block text-[11px] text-muted-foreground">需 API Key</span>
+                    ) : item.meta.requiresBaseUrl ? (
+                      <span className="block text-[11px] text-muted-foreground">需自建端点</span>
+                    ) : (
+                      <span className="block text-[11px] text-muted-foreground">点击配置</span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* ── Edit slot ── */}
+      {/* ── Edit / configure slot ── */}
       <Dialog open={Boolean(editRow)} onOpenChange={(o) => !o && setEditRow(null)}>
         <DialogContent className="sm:max-w-md">
           {editRow ? (
             <>
               <DialogHeader>
                 <DialogTitle>
-                  {editRow.serviceName}
-                  {editRow.slot.label ? ` · ${editRow.slot.label}` : ""}
+                  {editRow.slot.usePlatform
+                    ? "Zakura 自动"
+                    : editRow.serviceName}
+                  {!editRow.slot.usePlatform && editRow.slot.label
+                    ? ` · ${editRow.slot.label}`
+                    : ""}
                 </DialogTitle>
                 <DialogDescription>
-                  凭据仅保存在当前团队配置中，不会跨团队共享。
+                  {editRow.slot.usePlatform
+                    ? "Zakura"
+                    : editRow.meta.description}
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">备注（可选）</Label>
-                  <Input
-                    value={editRow.slot.label ?? ""}
-                    placeholder="如：主账号 / 备用"
-                    onChange={(e) =>
-                      patchSlot(editRow.kind, editRow.serviceId, editRow.slot.id, {
-                        label: e.target.value,
-                      })
-                    }
-                  />
-                </div>
+                {!editRow.slot.usePlatform ? (
+                  <div className="flex flex-wrap gap-3 text-[12px]">
+                    {editRow.meta.apiKeyUrl ? (
+                      <a
+                        href={editRow.meta.apiKeyUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-primary hover:underline"
+                      >
+                        获取 API Key
+                        <ExternalLink className="size-3" />
+                      </a>
+                    ) : null}
+                    {editRow.meta.docsUrl ? (
+                      <a
+                        href={editRow.meta.docsUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-muted-foreground hover:underline"
+                      >
+                        文档
+                        <ExternalLink className="size-3" />
+                      </a>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 {editRow.slot.usePlatform ? (
                   <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                    使用自托管服务端点，无需填写 Base URL。
+                    我们希望为您提供优质的体验。
                   </p>
-                ) : null}
-
-                {(editRow.meta.requiresApiKey ||
-                  editRow.slot.hasApiKey ||
-                  editRow.slot.apiKey !== undefined) && (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs">API Key</Label>
-                      {editRow.meta.apiKeyUrl ? (
-                        <a
-                          href={editRow.meta.apiKeyUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline"
-                        >
-                          获取
-                          <ExternalLink className="size-2.5" />
-                        </a>
-                      ) : null}
-                    </div>
-                    <Input
-                      type="password"
-                      autoComplete="off"
-                      value={editRow.slot.apiKey ?? ""}
-                      placeholder={
-                        editRow.slot.hasApiKey ? "•••• 留空不改" : "必填"
-                      }
-                      onChange={(e) =>
-                        patchSlot(
-                          editRow.kind,
-                          editRow.serviceId,
-                          editRow.slot.id,
-                          { apiKey: e.target.value },
-                        )
-                      }
-                    />
-                  </div>
-                )}
-
-                {!editRow.slot.usePlatform &&
-                (editRow.meta.requiresBaseUrl ||
-                  editRow.serviceId === "searxng" ||
-                  editRow.serviceId === "sogou" ||
-                  editRow.serviceId === "yandex" ||
-                  editRow.serviceId === "firecrawl" ||
-                  editRow.serviceId === "crawl4ai" ||
-                  editRow.serviceId === "jina-reader" ||
-                  editRow.serviceId === "cloudflare-markdown") ? (
-                  <div className="space-y-1">
-                    <Label className="text-xs">Base URL</Label>
-                    <Input
-                      className="font-mono text-xs"
-                      value={editRow.slot.baseUrl ?? ""}
-                      placeholder={
-                        editRow.serviceId === "jina-reader"
-                          ? "默认 https://r.jina.ai"
-                          : editRow.serviceId === "cloudflare-markdown"
-                            ? "默认 https://markdown.new"
-                            : "https://..."
-                      }
-                      onChange={(e) =>
-                        patchSlot(
-                          editRow.kind,
-                          editRow.serviceId,
-                          editRow.slot.id,
-                          { baseUrl: e.target.value },
-                        )
-                      }
-                    />
-                  </div>
-                ) : null}
-
-                {editRow.kind === "search" &&
-                  ((editRow.meta as EngineMeta).extraFields ?? []).map((f) => (
-                    <div key={f.key} className="space-y-1">
-                      <Label className="text-xs">{f.title}</Label>
+                ) : (
+                  <>
+                    <div className="space-y-1">
+                      <Label className="text-xs">备注（可选）</Label>
                       <Input
-                        type={f.secret ? "password" : "text"}
-                        value={editRow.slot.extra?.[f.key] ?? ""}
-                        placeholder={f.placeholder}
+                        value={editRow.slot.label ?? ""}
+                        placeholder="如：主账号 / 备用"
                         onChange={(e) =>
-                          patchSlot(
-                            editRow.kind,
-                            editRow.serviceId,
-                            editRow.slot.id,
-                            {
-                              extra: {
-                                ...(editRow.slot.extra ?? {}),
-                                [f.key]: e.target.value,
-                              },
-                            },
-                          )
+                          patchSlot(editRow.kind, editRow.serviceId, editRow.slot.id, {
+                            label: e.target.value,
+                          })
                         }
                       />
                     </div>
-                  ))}
+
+                    {(editRow.meta.requiresApiKey ||
+                      editRow.slot.hasApiKey ||
+                      editRow.slot.apiKey !== undefined) && (
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs">API Key</Label>
+                          {editRow.meta.apiKeyUrl ? (
+                            <a
+                              href={editRow.meta.apiKeyUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline"
+                            >
+                              获取
+                              <ExternalLink className="size-2.5" />
+                            </a>
+                          ) : null}
+                        </div>
+                        <Input
+                          type="password"
+                          autoComplete="off"
+                          value={editRow.slot.apiKey ?? ""}
+                          placeholder={
+                            editRow.slot.hasApiKey ? "•••• 留空不改" : "必填"
+                          }
+                          onChange={(e) =>
+                            patchSlot(
+                              editRow.kind,
+                              editRow.serviceId,
+                              editRow.slot.id,
+                              { apiKey: e.target.value },
+                            )
+                          }
+                        />
+                      </div>
+                    )}
+
+                    {editRow.meta.requiresBaseUrl ||
+                    editRow.serviceId === "searxng" ||
+                    editRow.serviceId === "sogou" ||
+                    editRow.serviceId === "yandex" ||
+                    editRow.serviceId === "firecrawl" ||
+                    editRow.serviceId === "crawl4ai" ||
+                    editRow.serviceId === "jina-reader" ||
+                    editRow.serviceId === "cloudflare-markdown" ? (
+                      <div className="space-y-1">
+                        <Label className="text-xs">Base URL</Label>
+                        <Input
+                          className="font-mono text-xs"
+                          value={editRow.slot.baseUrl ?? ""}
+                          placeholder={
+                            editRow.serviceId === "jina-reader"
+                              ? "默认 https://r.jina.ai"
+                              : editRow.serviceId === "cloudflare-markdown"
+                                ? "默认 https://markdown.new"
+                                : "https://..."
+                          }
+                          onChange={(e) =>
+                            patchSlot(
+                              editRow.kind,
+                              editRow.serviceId,
+                              editRow.slot.id,
+                              { baseUrl: e.target.value },
+                            )
+                          }
+                        />
+                      </div>
+                    ) : null}
+
+                    {editRow.kind === "search" &&
+                      ((editRow.meta as EngineMeta).extraFields ?? []).map((f) => (
+                        <div key={f.key} className="space-y-1">
+                          <Label className="text-xs">{f.title}</Label>
+                          <Input
+                            type={f.secret ? "password" : "text"}
+                            value={editRow.slot.extra?.[f.key] ?? ""}
+                            placeholder={f.placeholder}
+                            onChange={(e) =>
+                              patchSlot(
+                                editRow.kind,
+                                editRow.serviceId,
+                                editRow.slot.id,
+                                {
+                                  extra: {
+                                    ...(editRow.slot.extra ?? {}),
+                                    [f.key]: e.target.value,
+                                  },
+                                },
+                              )
+                            }
+                          />
+                        </div>
+                      ))}
+                  </>
+                )}
 
                 <div className="flex justify-end gap-2 pt-1">
                   <Button
@@ -741,7 +817,6 @@ function ServiceSection({
   onEdit: (row: FlatRow) => void;
   onRemove: (row: FlatRow) => void;
 }) {
-  // Count per service for "轮询" badge
   const counts = useMemo(() => {
     const m = new Map<string, number>();
     for (const r of rows) {
@@ -770,12 +845,20 @@ function ServiceSection({
             }}
             items={defaultItems}
           >
-            <SelectTrigger>
-              <SelectValue placeholder="选择默认" />
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="选择默认">
+                {(value) => {
+                  const v = Array.isArray(value) ? value[0] : value;
+                  if (v == null || v === "") return null;
+                  return (
+                    defaultItems.find((it) => it.value === v)?.label ?? String(v)
+                  );
+                }}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {defaultItems.map((it) => (
-                <SelectItem key={it.value} value={it.value}>
+                <SelectItem key={it.value} value={it.value} label={it.label}>
                   {it.label}
                 </SelectItem>
               ))}
@@ -800,6 +883,7 @@ function ServiceSection({
         <div className="divide-y rounded-lg border border-border bg-background">
           {rows.map((row) => {
             const multi = (counts.get(row.serviceId) ?? 0) > 1;
+            const platLabel = platformLabel(row.slot);
             return (
               <div
                 key={`${row.serviceId}:${row.slot.id}`}
@@ -812,9 +896,9 @@ function ServiceSection({
                 >
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-sm font-medium">{row.serviceName}</span>
-                    {row.slot.usePlatform ? (
+                    {platLabel ? (
                       <Badge variant="secondary" className="text-[10px]">
-                        平台托管
+                        {platLabel === "Zakura 自动" ? "平台" : platLabel}
                       </Badge>
                     ) : null}
                     {multi ? (
@@ -822,7 +906,7 @@ function ServiceSection({
                         轮询
                       </Badge>
                     ) : null}
-                    {row.slot.label ? (
+                    {!row.slot.usePlatform && row.slot.label ? (
                       <span className="text-[11px] text-muted-foreground">
                         {row.slot.label}
                       </span>
@@ -830,7 +914,7 @@ function ServiceSection({
                   </div>
                   <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
                     {row.slot.usePlatform
-                      ? "使用平台托管端点"
+                      ? "由 Zakura 托管"
                       : row.slot.baseUrl ||
                         (row.slot.hasApiKey ? "已配置 API Key" : "点击配置凭据")}
                   </p>

@@ -16,7 +16,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type Platform = {
@@ -91,6 +90,7 @@ type ManagedService = {
   description: string;
   mode: string;
   healthStatus: string;
+  mapsTo?: { kind: string; id: string };
 };
 
 type WebCatalog = {
@@ -341,7 +341,19 @@ export default function AdminPage() {
                   className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">跟随网页配置</option>
-                  {(webCatalog?.webSearch.engines ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  {(webCatalog?.webSearch.engines ?? []).map((item) => {
+                    const isAuto = managedServices.some(
+                      (s) =>
+                        s.mapsTo?.kind === "search-engine" &&
+                        s.mapsTo.id === item.id &&
+                        agentDefaults.autoManagedServices.includes(s.key),
+                    );
+                    return (
+                      <option key={item.id} value={item.id}>
+                        {isAuto ? "Zakura 自动" : item.name}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
               <div className="space-y-1.5">
@@ -353,40 +365,112 @@ export default function AdminPage() {
                   className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">跟随网页配置</option>
-                  {(webCatalog?.webFetch.backends ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  {(webCatalog?.webFetch.backends ?? []).map((item) => {
+                    const isAuto = managedServices.some(
+                      (s) =>
+                        s.mapsTo?.kind === "fetch-backend" &&
+                        s.mapsTo.id === item.id &&
+                        agentDefaults.autoManagedServices.includes(s.key),
+                    );
+                    return (
+                      <option key={item.id} value={item.id}>
+                        {isAuto ? "Zakura 自动" : item.name}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>
             {managedServices.length ? (
-              <div className="space-y-2 pt-2">
-                <Label>自动提供给租户的自托管服务</Label>
-                <p className="text-xs text-muted-foreground">
-                  勾选后会自动添加到所有租户的网页配置，并作为可用服务启用。
-                </p>
-                <div className="space-y-2">
-                  {managedServices.map((service) => (
-                    <label key={service.key} className="flex items-start gap-2 text-sm">
-                      <Checkbox
-                        checked={agentDefaults.autoManagedServices.includes(service.key)}
-                        onCheckedChange={(checked) =>
-                          setAgentDefaults((current) => {
-                            if (!current) return current;
-                            const values = new Set(current.autoManagedServices);
-                            if (checked) values.add(service.key);
-                            else values.delete(service.key);
-                            return { ...current, autoManagedServices: [...values] };
-                          })
-                        }
-                      />
-                      <span>
-                        <span className="block font-medium">{service.name}</span>
-                        <span className="block text-xs text-muted-foreground">{service.description}</span>
-                      </span>
-                    </label>
-                  ))}
+              <div className="space-y-3 pt-2">
+                <div>
+                  <Label>平台默认自托管服务（Zakura 自动）</Label>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    选中的服务会作为租户网页配置里的「Zakura 自动」选项；连接地址与凭据不会下发。每种能力最多选一个。
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="platform-auto-search">默认搜索（平台托管）</Label>
+                    <select
+                      id="platform-auto-search"
+                      value={
+                        agentDefaults.autoManagedServices.find((key) => {
+                          const svc = managedServices.find((s) => s.key === key);
+                          return svc?.mapsTo?.kind === "search-engine";
+                        }) ?? ""
+                      }
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setAgentDefaults((current) => {
+                          if (!current) return current;
+                          const withoutSearch = current.autoManagedServices.filter((key) => {
+                            const svc = managedServices.find((s) => s.key === key);
+                            return svc?.mapsTo?.kind !== "search-engine";
+                          });
+                          return {
+                            ...current,
+                            autoManagedServices: next ? [...withoutSearch, next] : withoutSearch,
+                          };
+                        });
+                      }}
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    >
+                      <option value="">不提供</option>
+                      {managedServices
+                        .filter((s) => s.mapsTo?.kind === "search-engine")
+                        .map((service) => (
+                          <option key={service.key} value={service.key}>
+                            {service.name}
+                            {service.healthStatus === "healthy" ? " · 健康" : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="platform-auto-fetch">默认抓取（平台托管）</Label>
+                    <select
+                      id="platform-auto-fetch"
+                      value={
+                        agentDefaults.autoManagedServices.find((key) => {
+                          const svc = managedServices.find((s) => s.key === key);
+                          return svc?.mapsTo?.kind === "fetch-backend";
+                        }) ?? ""
+                      }
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setAgentDefaults((current) => {
+                          if (!current) return current;
+                          const withoutFetch = current.autoManagedServices.filter((key) => {
+                            const svc = managedServices.find((s) => s.key === key);
+                            return svc?.mapsTo?.kind !== "fetch-backend";
+                          });
+                          return {
+                            ...current,
+                            autoManagedServices: next ? [...withoutFetch, next] : withoutFetch,
+                          };
+                        });
+                      }}
+                      className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    >
+                      <option value="">不提供</option>
+                      {managedServices
+                        .filter((s) => s.mapsTo?.kind === "fetch-backend")
+                        .map((service) => (
+                          <option key={service.key} value={service.key}>
+                            {service.name}
+                            {service.healthStatus === "healthy" ? " · 健康" : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <p className="pt-1 text-xs text-muted-foreground">
+                尚未启用任何平台自托管服务。请先在「自托管服务」中部署或接入，再在此设为平台默认。
+              </p>
+            )}
             <div className="flex gap-2">
               <Button onClick={() => void saveAgentDefaults()} disabled={savingAgentDefaults}>
                 {savingAgentDefaults ? "保存中…" : "保存默认配置"}

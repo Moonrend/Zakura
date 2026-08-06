@@ -116,6 +116,34 @@ export default function AgentWebPage() {
   const engines = opts.webSearch.engines;
   const backends = opts.webFetch.backends;
 
+  const searchDefaultLabel =
+    opts.webSearch.tenantDefaultEngineName ??
+    engines.find((e) => e.id === opts.webSearch.tenantDefaultEngine)?.name ??
+    null;
+  const fetchDefaultLabel =
+    opts.webFetch.tenantDefaultBackendName ??
+    backends.find((b) => b.id === opts.webFetch.tenantDefaultBackend)?.name ??
+    null;
+
+  const searchItems = [
+    {
+      value: TENANT_DEFAULT,
+      label: searchDefaultLabel
+        ? `跟随全局（${searchDefaultLabel}）`
+        : "跟随全局",
+    },
+    ...engines.map((e) => ({ value: e.id, label: e.name })),
+  ];
+  const fetchItems = [
+    {
+      value: TENANT_DEFAULT,
+      label: fetchDefaultLabel
+        ? `跟随全局（${fetchDefaultLabel}）`
+        : "跟随全局",
+    },
+    ...backends.map((b) => ({ value: b.id, label: b.name })),
+  ];
+
   return (
     <div className="space-y-5">
       <SettingsHeader
@@ -145,29 +173,23 @@ export default function AgentWebPage() {
               if (v != null) update("searchEngine", v);
             }}
             disabled={!engines.length}
-            items={[
-              {
-                value: TENANT_DEFAULT,
-                label: opts.webSearch.tenantDefaultEngine
-                  ? `跟随全局（${opts.webSearch.tenantDefaultEngine}）`
-                  : "跟随全局",
-              },
-              ...engines.map((e) => ({ value: e.id, label: e.name })),
-            ]}
+            items={searchItems}
           >
-            <SelectTrigger>
-              <SelectValue placeholder="选择引擎" />
+            <SelectTrigger className="w-full max-w-sm">
+              <SelectValue placeholder="选择引擎">
+                {(value) => {
+                  const v = Array.isArray(value) ? value[0] : value;
+                  if (v == null || v === "") return null;
+                  return (
+                    searchItems.find((it) => it.value === v)?.label ?? String(v)
+                  );
+                }}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={TENANT_DEFAULT}>
-                跟随全局
-                {opts.webSearch.tenantDefaultEngine
-                  ? `（${opts.webSearch.tenantDefaultEngine}）`
-                  : ""}
-              </SelectItem>
-              {engines.map((e) => (
-                <SelectItem key={e.id} value={e.id}>
-                  {e.name}
+              {searchItems.map((it) => (
+                <SelectItem key={it.value} value={it.value} label={it.label}>
+                  {it.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -205,29 +227,23 @@ export default function AgentWebPage() {
               if (v != null) update("fetchBackend", v);
             }}
             disabled={!backends.length}
-            items={[
-              {
-                value: TENANT_DEFAULT,
-                label: opts.webFetch.tenantDefaultBackend
-                  ? `跟随全局（${opts.webFetch.tenantDefaultBackend}）`
-                  : "跟随全局",
-              },
-              ...backends.map((b) => ({ value: b.id, label: b.name })),
-            ]}
+            items={fetchItems}
           >
-            <SelectTrigger>
-              <SelectValue placeholder="选择后端" />
+            <SelectTrigger className="w-full max-w-sm">
+              <SelectValue placeholder="选择后端">
+                {(value) => {
+                  const v = Array.isArray(value) ? value[0] : value;
+                  if (v == null || v === "") return null;
+                  return (
+                    fetchItems.find((it) => it.value === v)?.label ?? String(v)
+                  );
+                }}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={TENANT_DEFAULT}>
-                跟随全局
-                {opts.webFetch.tenantDefaultBackend
-                  ? `（${opts.webFetch.tenantDefaultBackend}）`
-                  : ""}
-              </SelectItem>
-              {backends.map((b) => (
-                <SelectItem key={b.id} value={b.id}>
-                  {b.name}
+              {fetchItems.map((it) => (
+                <SelectItem key={it.value} value={it.value} label={it.label}>
+                  {it.label}
                 </SelectItem>
               ))}
             </SelectContent>

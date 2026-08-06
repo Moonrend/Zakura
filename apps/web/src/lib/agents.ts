@@ -89,6 +89,8 @@ export type AgentProviderOptions = {
     instanceId: string;
     status: string;
     tenantDefaultEngine: string | null;
+    /** Display name for tenant default (e.g.「Zakura 自动」), never raw backend id. */
+    tenantDefaultEngineName?: string | null;
     engines: Array<{ id: string; name: string; description: string }>;
     agent: { enabled: boolean; defaultEngine: string | null };
   };
@@ -96,6 +98,7 @@ export type AgentProviderOptions = {
     instanceId: string;
     status: string;
     tenantDefaultBackend: string | null;
+    tenantDefaultBackendName?: string | null;
     backends: Array<{ id: string; name: string; description: string }>;
     agent: { enabled: boolean; defaultBackend: string | null };
   };
