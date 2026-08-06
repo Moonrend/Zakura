@@ -252,6 +252,41 @@ describe("buildChainMessages", () => {
   it("throws when target message is missing", () => {
     assert.throws(() => buildChainMessages([], "nope"));
   });
+
+  it("chains OpenAI Gateway events that lack runId / run_start", () => {
+    const events = [
+      {
+        type: "user_message",
+        runId: null,
+        payload: { messageId: "m1", content: "gateway 问1" },
+      },
+      {
+        type: "assistant_message",
+        runId: null,
+        payload: { messageId: "a1", content: "gateway 答1" },
+      },
+      {
+        type: "user_message",
+        runId: null,
+        payload: { messageId: "m2", content: "gateway 问2" },
+      },
+      {
+        type: "assistant_message",
+        runId: null,
+        payload: { messageId: "a2", content: "gateway 答2" },
+      },
+    ];
+    const res = buildChainMessages(events, "m2");
+    assert.equal(res.turns, 2);
+    assert.deepEqual(
+      res.messages.map((m) => [m.role, m.content]),
+      [
+        ["user", "gateway 问1"],
+        ["assistant", "gateway 答1"],
+        ["user", "gateway 问2"],
+      ],
+    );
+  });
 });
 
 describe("context compaction", () => {

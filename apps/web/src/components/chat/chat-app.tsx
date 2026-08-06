@@ -13,6 +13,7 @@ import {
   ExternalLink,
   FileClock,
   FolderOpen,
+  GitFork,
   LayoutDashboard,
   ListFilter,
   MoreHorizontal,
@@ -66,6 +67,7 @@ import {
   compactCloudSession,
   createCloudSession,
   deleteCloudSession,
+  forkCloudSession,
   getCloudConfig,
   getCloudSession,
   listChatModels,
@@ -84,6 +86,7 @@ import {
   type CloudSession,
 } from "@/lib/cloud-agent";
 import { formatSize, fsUploadWithProgress } from "@/lib/agent-fs";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { ChatMessages } from "./chat-messages";
@@ -272,6 +275,7 @@ export function ChatApp() {
   const isMobile = useIsMobile();
   const agent = agents.find((a) => a.id === agentId) ?? null;
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
+  const isGatewaySession = activeSession?.origin.channel === "openai-gateway";
   const runActive = Boolean(activeSession?.activeRunId);
   const turns = useMemo(
     () => buildConversationTurns(events, { variantByMessage, branchByParent }),
@@ -610,6 +614,21 @@ export function ChatApp() {
     };
   }, [agentId, sessionId, mergeEvent]);
 
+  // —— 平台事件：其它会话新建/更新（含 Gateway）同步侧栏 ——
+  useEffect(() => {
+    if (!agentId || !authed) return;
+    return subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "cloud_session_changed") return;
+        if (ev.agentId !== agentId) return;
+        void refreshSessions();
+      },
+      () => {
+        void refreshSessions();
+      },
+    );
+  }, [agentId, authed, refreshSessions]);
+
   // 新内容到达时跟随到底部（用户已向上翻阅时不打扰）
   useEffect(() => {
     syncScroll("smooth");
@@ -748,6 +767,20 @@ export function ChatApp() {
           seqRef.current = 0;
         }
       }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleForkSession(sid: string) {
+    if (!agentId) return;
+    try {
+      const result = await forkCloudSession(agentId, sid);
+      const forked = result.session;
+      if (!forked) throw new Error("Fork 会话创建成功，但无法读取新会话");
+      setSessions((prev) => [forked, ...prev.filter((s) => s.id !== forked.id)]);
+      await loadSession(agentId, forked.id);
+      toast.success("已从该会话 Fork，新会话不会修改原会话");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -907,6 +940,10 @@ export function ChatApp() {
 
   async function handleSend() {
     if (!agentId || sending || runActive) return;
+    if (isGatewaySession) {
+      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
+      return;
+    }
     const content = input.trim();
     if (!content && attachments.length === 0) return;
     const sentAttachments = attachments;
@@ -960,6 +997,10 @@ export function ChatApp() {
 
   async function handleRegenerate(messageId: string) {
     if (!agentId || !sessionId || runActive) return;
+    if (isGatewaySession) {
+      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
+      return;
+    }
     try {
       await regenerateCloudRun(agentId, sessionId, messageId, runOptions);
       setVariantByMessage((prev) => {
@@ -975,6 +1016,10 @@ export function ChatApp() {
 
   async function handleEditSend(parentKey: string, content: string) {
     if (!agentId || !sessionId || runActive || !content.trim()) return;
+    if (isGatewaySession) {
+      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
+      return;
+    }
     try {
       await sendCloudMessage(
         agentId,
@@ -1391,6 +1436,11 @@ export function ChatApp() {
                                   {SESSION_KIND_LABELS[s.kind] ?? s.kind}
                                 </span>
                               ) : null}
+                              {s.origin.channel === "openai-gateway" ? (
+                                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                                  Gateway
+                                </span>
+                              ) : null}
                               {s.activeRunId ? (
                                 <span
                                   aria-label="运行中"
@@ -1411,6 +1461,12 @@ export function ChatApp() {
                                 <MoreHorizontal className="h-3.5 w-3.5" />
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="start" className="min-w-28">
+                                {s.origin.channel === "openai-gateway" ? (
+                                  <DropdownMenuItem onClick={() => void handleForkSession(s.id)}>
+                                    <GitFork />
+                                    Fork 后续聊
+                                  </DropdownMenuItem>
+                                ) : null}
                                 <DropdownMenuItem
                                   onClick={() => {
                                     setRenamingId(s.id);
@@ -1563,7 +1619,7 @@ export function ChatApp() {
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
             textareaRef={composerRef}
-            routeReady={hasChatRoute}
+            routeReady={hasChatRoute && !isGatewaySession}
             sending={sending}
             runActive={runActive}
             attachments={attachments}

@@ -77,12 +77,14 @@ import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
 import { RemoteChannelRuntime, REMOTE_PLATFORMS } from "../services/remote-channel-runtime.js";
+import { OpenAiGatewayService } from "../services/openai-gateway.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
 import { registerSkillRoutes } from "./skill-routes.js";
 import { registerNetworkRoutes } from "./network-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
+import { registerOpenAiGatewayRoutes } from "./openai-gateway-routes.js";
 import { loadSaasServer } from "../saas-loader.js";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
 import type { MigrationService } from "../services/migration-service.js";
@@ -432,6 +434,7 @@ export async function createApiApp(deps: {
   let remoteIngress: RemoteAgentIngress | null = null;
   let remoteRuntime: RemoteChannelRuntime | null = null;
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
+  let cloudSessionStore: CloudAgentSessionStore | null = null;
   const automation = new AgentAutomationService(db);
 
   // Request timing: log any /api call > 300ms (or all when ZAKURA_HTTP_TIMING=1)
@@ -2507,6 +2510,7 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = new CloudAgentSessionStore(db);
+    cloudSessionStore = cloudStore;
     remoteIngress = new RemoteAgentIngress(
       db,
       agentService,
@@ -2603,6 +2607,24 @@ export async function createApiApp(deps: {
       // 自动化 CRUD 仍可配置；触发会失败直至模型路由可用
       registerAutomationRoutes(app, { agentService, automation });
     }
+  }
+
+  if (modelRouter) {
+    const openAiGateway = new OpenAiGatewayService({
+      agentService,
+      gateway,
+      modelRouter,
+      store: cloudSessionStore ?? new CloudAgentSessionStore(db),
+      memoryStore,
+      memoryProviders,
+      skills,
+    });
+    registerOpenAiGatewayRoutes(app, {
+      db,
+      agentService,
+      gateway: openAiGateway,
+      upstreamModels,
+    });
   }
 
   function remoteBindingView(binding: Awaited<ReturnType<RemoteAgentIngress["getBinding"]>>) {
@@ -3048,7 +3070,26 @@ export async function createApiApp(deps: {
 
   app.post("/api/api-keys", async (c) => {
     const session = c.get("session")!;
-    const body = await c.req.json<{ name: string; agentId?: string | null }>();
+    const body = await c.req.json<{
+      name: string;
+      agentId?: string | null;
+      scopes?: unknown;
+      expiresAt?: unknown;
+    }>();
+    const scopes = Array.isArray(body.scopes)
+      ? body.scopes.filter(
+          (scope): scope is string => typeof scope === "string" && scope.trim().length > 0,
+        )
+      : undefined;
+    let expiresAt: Date | null | undefined;
+    if (body.expiresAt !== undefined && body.expiresAt !== null && body.expiresAt !== "") {
+      expiresAt = new Date(String(body.expiresAt));
+      if (!Number.isFinite(expiresAt.getTime())) {
+        return c.json({ error: "expiresAt 无效" }, 400);
+      }
+    } else if (body.expiresAt === null || body.expiresAt === "") {
+      expiresAt = null;
+    }
     if (body.agentId) {
       const agent = await agentService.get(session.tenantId, body.agentId);
       if (!agent) return c.json({ error: "agent not found" }, 400);
@@ -3056,6 +3097,7 @@ export async function createApiApp(deps: {
         session.tenantId,
         agent.id,
         body.name,
+        { ...(scopes ? { scopes } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) },
       );
       return c.json(key, 201);
     }
@@ -3069,6 +3111,8 @@ export async function createApiApp(deps: {
         name: body.name || "default",
         keyHash: key.hash,
         keyPrefix: key.prefix,
+        ...(scopes ? { scopes: JSON.stringify(scopes) } : {}),
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
         createdAt: now,
       })
       .returning();
@@ -3082,6 +3126,16 @@ export async function createApiApp(deps: {
       updatedAt: now,
     });
     return c.json({ ...row, rawKey: key.raw }, 201);
+  });
+
+  app.delete("/api/api-keys/:id", async (c) => {
+    const session = c.get("session")!;
+    const row = await db.query.apiKeys.findFirst({
+      where: and(eq(apiKeys.id, c.req.param("id")), eq(apiKeys.tenantId, session.tenantId)),
+    });
+    if (!row) return c.json({ error: "API Key not found" }, 404);
+    await db.delete(apiKeys).where(eq(apiKeys.id, row.id));
+    return c.json({ ok: true });
   });
 
   app.get("/api/mcp/tools", async (c) => {

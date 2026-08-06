@@ -52,7 +52,14 @@ export type PlatformEvent =
       snapshot: PlatformServiceProgressSnapshot;
     }
   | { type: "runner_node"; ts: number; nodeId: string }
-  | { type: "agent_fs_changed"; ts: number; agentId: string; path: string };
+  | { type: "agent_fs_changed"; ts: number; agentId: string; path: string }
+  | {
+      type: "cloud_session_changed";
+      ts: number;
+      agentId: string;
+      sessionId: string;
+      reason?: "created" | "updated";
+    };
 
 type Subscriber = {
   onEvent: (ev: PlatformEvent) => void;

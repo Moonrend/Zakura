@@ -112,7 +112,13 @@ async function chat(
   if (options?.tools?.length) body.tools = options.tools;
   if (options?.toolChoice) body.tool_choice = options.toolChoice;
   applyReasoningOptions(route.upstream.protocol, body, route.options, route.meta);
-  if (options?.extensions) Object.assign(body, options.extensions);
+  if (options?.extensions) {
+    const extensions = { ...options.extensions };
+    // 非流式请求带 stream_options 会被部分上游 400
+    delete extensions.stream_options;
+    delete extensions.streamOptions;
+    Object.assign(body, extensions);
+  }
 
   const res = await httpJson<{
     id?: string;

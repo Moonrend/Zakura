@@ -729,7 +729,12 @@ export class AgentService {
     return rows.map((r) => r.instanceId);
   }
 
-  async createAgentApiKey(tenantId: string, agentId: string, name?: string) {
+  async createAgentApiKey(
+    tenantId: string,
+    agentId: string,
+    name?: string,
+    opts?: { scopes?: string[]; expiresAt?: Date | null },
+  ) {
     const agent = await this.get(tenantId, agentId);
     if (!agent) throw new Error("Agent not found");
     const key = generateApiKey();
@@ -743,6 +748,8 @@ export class AgentService {
         name: name?.trim() || `agent:${agent.slug}`,
         keyHash: key.hash,
         keyPrefix: key.prefix,
+        ...(opts?.scopes ? { scopes: JSON.stringify(opts.scopes) } : {}),
+        ...(opts?.expiresAt !== undefined ? { expiresAt: opts.expiresAt } : {}),
         createdAt: now,
       })
       .returning();

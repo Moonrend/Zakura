@@ -518,6 +518,30 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       if (typeof p.content === "string") currentAssistant.content = p.content;
       currentAssistant.final = true;
       flushAssistant();
+      // 旧 Gateway / 交还客户端：assistant_message 自带 toolCalls，无 tool_call_start
+      const embedded = Array.isArray(p.toolCalls) ? p.toolCalls : [];
+      for (const raw of embedded) {
+        if (!raw || typeof raw !== "object") continue;
+        const tc = raw as {
+          id?: unknown;
+          function?: { name?: unknown; arguments?: unknown };
+        };
+        const id = typeof tc.id === "string" ? tc.id : "";
+        if (!id || toolMap.has(id)) continue;
+        const name =
+          typeof tc.function?.name === "string" ? tc.function.name : "tool";
+        const args =
+          typeof tc.function?.arguments === "string" ? tc.function.arguments : undefined;
+        const call: TimelineToolCall = {
+          toolCallId: id,
+          name,
+          status: "running",
+          ...(args ? { arguments: args } : {}),
+        };
+        toolMap.set(id, call);
+        toolRunIds.set(id, ev.runId);
+        items.push({ kind: "tool", id, call, seq: ev.seq });
+      }
       continue;
     }
     if (ev.type === "tool_call_start") {
@@ -543,7 +567,20 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     }
     if (ev.type === "tool_call_result") {
       const id = typeof p.toolCallId === "string" ? p.toolCallId : "";
-      const call = toolMap.get(id);
+      let call = toolMap.get(id);
+      // 旧 Gateway 只写 result、无 start：合成工具卡片，避免结果被丢弃
+      if (!call && id) {
+        flushReasoning();
+        flushAssistant();
+        call = {
+          toolCallId: id,
+          name: typeof p.name === "string" ? p.name : "tool",
+          status: "done",
+        };
+        toolMap.set(id, call);
+        toolRunIds.set(id, ev.runId);
+        items.push({ kind: "tool", id, call, seq: ev.seq });
+      }
       if (call) {
         call.status = "done";
         call.isError = p.isError === true;
@@ -721,6 +758,21 @@ export function buildConversationTurns(
       lastRunId = rid;
       continue;
     }
+    // Gateway 等无 Run 的事件流：assistant_message.runId 为空，合成一条 run 挂到上一用户消息
+    if (ev.type === "assistant_message" && !ev.runId) {
+      const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
+      const rid = `orphan:${mid}`;
+      if (lastUserMessageId) {
+        const list = runsByReply.get(lastUserMessageId) ?? [];
+        if (!list.includes(rid)) list.push(rid);
+        runsByReply.set(lastUserMessageId, list);
+      }
+      lastRunId = rid;
+      const list = eventsByRun.get(rid) ?? [];
+      list.push(ev);
+      eventsByRun.set(rid, list);
+      continue;
+    }
     if (
       ev.runId &&
       (ev.type === "assistant_delta" ||
@@ -819,6 +871,13 @@ export async function listCloudSessions(
   );
 }
 
+export async function listGatewaySessions(agentId: string) {
+  return api<{ sessions: CloudSession[] }>(
+    `/api/agents/${agentId}/gateway/sessions`,
+    { cacheTtlMs: false },
+  );
+}
+
 export async function createCloudSession(agentId: string, title?: string) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions`, {
     method: "POST",
@@ -831,6 +890,20 @@ export async function getCloudSession(agentId: string, sessionId: string, afterS
     `/api/agents/${agentId}/cloud/sessions/${sessionId}?afterSeq=${afterSeq}`,
     { cacheTtlMs: false },
   );
+}
+
+export async function forkCloudSession(agentId: string, sessionId: string, title?: string) {
+  return api<{
+    sessionId: string;
+    title: string;
+    sourceSessionId: string;
+    summaryChars: number;
+    mode: "summary";
+    session: CloudSession | null;
+  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/fork`, {
+    method: "POST",
+    json: title ? { title } : {},
+  });
 }
 
 export async function deleteCloudSession(agentId: string, sessionId: string) {

@@ -1,0 +1,893 @@
+import type {
+  ModelChatContentPart,
+  ModelChatInvokeOptions,
+  ModelChatMessage,
+  ModelChatResult,
+  ModelToolCall,
+  ModelToolChoice,
+  ModelToolDefinition,
+} from "@zakura/shared";
+import { newId, type Agent } from "../db/schema.js";
+import type { AgentService } from "./agents.js";
+import { agentCloudConfig } from "./cloud-agent/runtime.js";
+import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
+import { eventsToMessages } from "./cloud-agent/messages.js";
+import { buildSystemPrompt } from "./cloud-agent/prompts.js";
+import {
+  mcpResultToText,
+  parseToolArgs,
+  toolsToDefinitions,
+} from "./cloud-agent/tools.js";
+import type { McpGateway } from "./mcp-gateway.js";
+import { buildMemoryContext, resolveAgentMemory } from "./memory-runtime.js";
+import type { MemoryProvidersService } from "./memory-providers.js";
+import type { MemoryStore } from "./memory-store.js";
+import type { ModelRouterService } from "./model-router.js";
+import { buildOpenAIChatCompletion } from "../model-router/openai-response.js";
+import { parseRouteOptions } from "../model-router/types.js";
+import type { SkillsService } from "./skills/service.js";
+
+/** 无客户端 session 头时，只在最近空闲窗口内做 messages 归并 */
+const GATEWAY_MATCH_IDLE_MS = 2 * 60 * 60 * 1000;
+
+export type OpenAiGatewayBody = {
+  model?: unknown;
+  stream?: unknown;
+  messages?: unknown;
+  tools?: unknown;
+  tool_choice?: unknown;
+  toolChoice?: unknown;
+  temperature?: unknown;
+  max_tokens?: unknown;
+  max_completion_tokens?: unknown;
+  maxTokens?: unknown;
+  top_p?: unknown;
+  topP?: unknown;
+  stop?: unknown;
+  presence_penalty?: unknown;
+  presencePenalty?: unknown;
+  frequency_penalty?: unknown;
+  frequencyPenalty?: unknown;
+  seed?: unknown;
+  n?: unknown;
+  response_format?: unknown;
+  responseFormat?: unknown;
+  stream_options?: unknown;
+  streamOptions?: unknown;
+  logit_bias?: unknown;
+  logitBias?: unknown;
+  user?: unknown;
+  metadata?: unknown;
+  reasoning_effort?: unknown;
+  routeOptions?: unknown;
+  route_options?: unknown;
+  reasoning?: unknown;
+  extensions?: unknown;
+};
+
+export type OpenAiGatewayContext = {
+  agent: Agent;
+  sessionId: string;
+  runId: string;
+  model: string | undefined;
+  routeId: string | undefined;
+  messages: ModelChatMessage[];
+  invokeOptions: ModelChatInvokeOptions;
+  /** 模型工具名 → MCP qualifiedName；用于云端执行 */
+  toolNameMap: Map<string, string>;
+  /** 客户端已自带 Zakura MCP 工具定义时，工具执行交给客户端 */
+  usedZakuraMcp: boolean;
+};
+
+export type OpenAiGatewayPrepareOptions = {
+  clientSessionKey?: string | null;
+  apiKeyId?: string | null;
+};
+
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function parseContent(raw: unknown): {
+  content: string | null;
+  parts?: ModelChatContentPart[];
+} {
+  if (typeof raw === "string" || raw == null) {
+    return { content: typeof raw === "string" ? raw : null };
+  }
+  if (!Array.isArray(raw)) return { content: null };
+  const parts: ModelChatContentPart[] = [];
+  for (const item of raw) {
+    const part = asRecord(item);
+    if (part.type === "text" && typeof part.text === "string") {
+      parts.push({ type: "text", text: part.text });
+      continue;
+    }
+    if (part.type === "image_url") {
+      const image = asRecord(part.image_url ?? part.imageUrl);
+      if (typeof image.url === "string" && image.url.trim()) {
+        parts.push({ type: "image_url", imageUrl: { url: image.url } });
+      }
+    }
+  }
+  const text = parts
+    .filter((part): part is Extract<ModelChatContentPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  return { content: text || null, ...(parts.length ? { parts } : {}) };
+}
+
+function parseToolCalls(raw: unknown): ModelToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls: ModelToolCall[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const fn = asRecord(record.function);
+    if (typeof fn.name !== "string" || !fn.name.trim()) continue;
+    calls.push({
+      id: typeof record.id === "string" && record.id ? record.id : `call_${calls.length}`,
+      type: "function",
+      function: {
+        name: fn.name,
+        arguments:
+          typeof fn.arguments === "string"
+            ? fn.arguments
+            : JSON.stringify(fn.arguments ?? {}),
+      },
+    });
+  }
+  return calls.length ? calls : undefined;
+}
+
+function parseMessages(raw: unknown): ModelChatMessage[] {
+  if (!Array.isArray(raw)) throw new Error("messages 必须是数组");
+  const messages: ModelChatMessage[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const role =
+      record.role === "system" ||
+      record.role === "user" ||
+      record.role === "assistant" ||
+      record.role === "tool"
+        ? record.role
+        : null;
+    if (!role) throw new Error("messages 中存在无效 role");
+    const parsed = parseContent(record.content);
+    messages.push({
+      role,
+      content: parsed.content,
+      ...(parsed.parts ? { parts: parsed.parts } : {}),
+      ...(typeof record.name === "string" ? { name: record.name } : {}),
+      ...(typeof record.tool_call_id === "string"
+        ? { toolCallId: record.tool_call_id }
+        : typeof record.toolCallId === "string"
+          ? { toolCallId: record.toolCallId }
+          : {}),
+      ...(parseToolCalls(record.tool_calls ?? record.toolCalls)
+        ? { toolCalls: parseToolCalls(record.tool_calls ?? record.toolCalls) }
+        : {}),
+    });
+  }
+  if (messages.length === 0) throw new Error("messages 不能为空");
+  return messages;
+}
+
+function parseTools(raw: unknown): ModelToolDefinition[] {
+  if (!Array.isArray(raw)) return [];
+  const tools: ModelToolDefinition[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const fn = asRecord(record.function);
+    if (record.type !== "function" || typeof fn.name !== "string" || !fn.name.trim()) continue;
+    tools.push({
+      type: "function",
+      function: {
+        name: fn.name.trim().slice(0, 64),
+        ...(typeof fn.description === "string" ? { description: fn.description } : {}),
+        parameters:
+          fn.parameters && typeof fn.parameters === "object" && !Array.isArray(fn.parameters)
+            ? (fn.parameters as Record<string, unknown>)
+            : { type: "object", properties: {} },
+        ...(typeof fn.strict === "boolean" ? { strict: fn.strict } : {}),
+      },
+    });
+  }
+  return tools;
+}
+
+function parseToolChoice(raw: unknown): ModelToolChoice | undefined {
+  if (raw === "auto" || raw === "none" || raw === "required") return raw;
+  const record = asRecord(raw);
+  const fn = asRecord(record.function);
+  if (record.type === "function" && typeof fn.name === "string" && fn.name.trim()) {
+    return { type: "function", function: { name: fn.name.trim() } };
+  }
+  return undefined;
+}
+
+function parseGatewayExtensions(body: OpenAiGatewayBody): Record<string, unknown> {
+  const extensions = { ...asRecord(body.extensions) };
+  const aliases: Array<[string, unknown, string]> = [
+    ["top_p", body.top_p ?? body.topP, "top_p"],
+    ["stop", body.stop, "stop"],
+    ["presence_penalty", body.presence_penalty ?? body.presencePenalty, "presence_penalty"],
+    ["frequency_penalty", body.frequency_penalty ?? body.frequencyPenalty, "frequency_penalty"],
+    ["seed", body.seed, "seed"],
+    ["logit_bias", body.logit_bias ?? body.logitBias, "logit_bias"],
+    ["user", body.user, "user"],
+    ["response_format", body.response_format ?? body.responseFormat, "response_format"],
+    // stream_options 只对 stream=true 合法；Gateway 内部常走非流式 chat，绝不能透传
+  ];
+  for (const [, value, key] of aliases) {
+    if (value !== undefined) extensions[key] = value;
+  }
+  // 显式丢掉客户端带来的 stream_options，避免上游 400
+  delete extensions.stream_options;
+  delete extensions.streamOptions;
+  if (typeof body.reasoning_effort === "string" && body.reasoning_effort.trim()) {
+    const reasoning = asRecord(body.reasoning);
+    extensions.reasoning = {
+      ...reasoning,
+      effort: body.reasoning_effort.trim(),
+    };
+  }
+  return extensions;
+}
+
+function lastUserContent(messages: ModelChatMessage[]): string {
+  const message = [...messages].reverse().find((item) => item.role === "user");
+  return message?.content?.trim() || "";
+}
+
+function normalizeUserText(content: string | null | undefined): string {
+  return (content ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** 只取 user 文本序列做会话指纹：忽略 assistant 差异（工具调用/空回复会导致全文前缀对不上） */
+export function userContentFingerprint(messages: ModelChatMessage[]): string[] {
+  const out: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const text = normalizeUserText(message.content);
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+/** 两边 user 序列的公共前缀长度 */
+export function userFingerprintPrefixLen(a: string[], b: string[]): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i += 1;
+  return i;
+}
+
+/**
+ * 判断客户端 messages 是否应归并到已有会话。
+ * - 只比 user 内容，避免 assistant/tool 回显不一致导致合不上
+ * - 支持「客户端历史更长」（续聊）和「客户端更短」（重试/只发最新一句）
+ */
+export function scoreGatewayMessageMatch(
+  storedUsers: string[],
+  clientUsers: string[],
+): number {
+  if (storedUsers.length === 0 || clientUsers.length === 0) return 0;
+  const prefix = userFingerprintPrefixLen(storedUsers, clientUsers);
+  if (prefix === 0) return 0;
+  // 必须从首条 user 对齐；公共前缀越长越好；完全互相为前缀再加分
+  let score = prefix * 100;
+  if (prefix === storedUsers.length || prefix === clientUsers.length) score += 10;
+  if (storedUsers[storedUsers.length - 1] === clientUsers[clientUsers.length - 1]) {
+    score += 1;
+  }
+  return score;
+}
+
+function cleanSessionKey(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  return value ? value.slice(0, 200) : null;
+}
+
+/** 从 Claude Code metadata.user_id 抽出 session id（兼容 JSON / legacy 字符串格式） */
+export function extractClaudeCodeSessionId(userId: unknown): string | null {
+  if (typeof userId !== "string" || !userId.trim()) return null;
+  const raw = userId.trim();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const record = asRecord(parsed);
+    const fromJson = cleanSessionKey(record.session_id ?? record.sessionId);
+    if (fromJson) return fromJson;
+  } catch {
+    /* not JSON */
+  }
+  const legacy = /_session_(.+)$/.exec(raw);
+  return cleanSessionKey(legacy?.[1] ?? null);
+}
+
+/**
+ * 读取通用客户端已经会发的会话标识，不发明 Zakura 专用协议。
+ * 优先级对齐常见网关（Claude Code → Codex → 通用 X-Session-Id → body.metadata）。
+ */
+export function resolveClientSessionKey(
+  headers: Headers | { get(name: string): string | undefined },
+  body: OpenAiGatewayBody,
+): string | null {
+  const headerNames = [
+    "x-claude-code-session-id",
+    "session-id",
+    "session_id",
+    "thread-id",
+    "thread_id",
+    "x-session-id",
+    "x-client-session-id",
+  ];
+  for (const name of headerNames) {
+    const value = cleanSessionKey(headers.get(name));
+    if (value) return value;
+  }
+
+  const metadata = asRecord(body.metadata);
+  const fromMeta = cleanSessionKey(metadata.session_id ?? metadata.sessionId);
+  if (fromMeta) return fromMeta;
+
+  const fromClaude = extractClaudeCodeSessionId(metadata.user_id ?? metadata.userId);
+  if (fromClaude) return fromClaude;
+
+  return null;
+}
+
+export function resolveGatewayModel(raw: unknown, fallback?: string): string | undefined {
+  return typeof raw === "string" && raw.trim() ? raw.trim() : fallback?.trim() || undefined;
+}
+
+export function mergeTools(
+  serverTools: ModelToolDefinition[],
+  clientTools: ModelToolDefinition[],
+): { tools: ModelToolDefinition[]; usedZakuraMcp: boolean } {
+  const serverNames = new Set(serverTools.map((tool) => tool.function.name));
+  const usedZakuraMcp = clientTools.some((tool) => serverNames.has(tool.function.name));
+  if (usedZakuraMcp) return { tools: clientTools, usedZakuraMcp };
+
+  const clientNames = new Set(clientTools.map((tool) => tool.function.name));
+  return {
+    tools: [
+      ...serverTools.filter((tool) => !clientNames.has(tool.function.name)),
+      ...clientTools,
+    ],
+    usedZakuraMcp,
+  };
+}
+
+export class OpenAiGatewayService {
+  constructor(
+    private readonly deps: {
+      agentService: AgentService;
+      gateway: McpGateway;
+      modelRouter: ModelRouterService;
+      store: CloudAgentSessionStore;
+      memoryStore?: MemoryStore;
+      memoryProviders?: MemoryProvidersService;
+      skills?: SkillsService;
+    },
+  ) {}
+
+  async prepare(
+    tenantId: string,
+    agentId: string,
+    body: OpenAiGatewayBody,
+    opts?: OpenAiGatewayPrepareOptions,
+  ): Promise<OpenAiGatewayContext> {
+    const agent = await this.deps.agentService.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const cloud = agentCloudConfig(agent);
+    const messages = parseMessages(body.messages);
+    const clientTools = parseTools(body.tools);
+    const listed =
+      cloud.enableTools === false
+        ? { definitions: [] as ModelToolDefinition[], nameMap: new Map<string, string>() }
+        : toolsToDefinitions(await this.deps.gateway.listToolsForAgent(agent));
+    const merged = mergeTools(listed.definitions, clientTools);
+    // 合并后仍保留服务端工具名映射，供云端执行
+    const toolNameMap = listed.nameMap;
+
+    let memoryContext = "";
+    if (
+      agent.enableMemory &&
+      cloud.autoMemory !== false &&
+      this.deps.memoryProviders
+    ) {
+      try {
+        const resolved = await resolveAgentMemory(this.deps.memoryProviders, agent);
+        if (resolved) {
+          memoryContext = (
+            await buildMemoryContext(
+              this.deps.memoryStore ?? null,
+              resolved,
+              agent,
+              lastUserContent(messages) || undefined,
+            )
+          ).text;
+        }
+      } catch (err) {
+        console.warn("[openai-gateway] memory context failed:", err);
+      }
+    }
+    const skills = this.deps.skills
+      ? await this.deps.skills.promptSummary(tenantId, agent.id)
+      : "";
+    const systemPrompt = buildSystemPrompt(agent, cloud, {
+      memoryContext: memoryContext || undefined,
+      skills: skills || undefined,
+    });
+    const clientModel = resolveGatewayModel(body.model);
+    const model = clientModel ?? resolveGatewayModel(undefined, cloud.model);
+    const routeOptions = parseRouteOptions({
+      ...asRecord(body.routeOptions ?? body.route_options),
+      ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
+      ...(typeof body.max_tokens === "number" ? { maxTokens: body.max_tokens } : {}),
+      ...(typeof body.max_completion_tokens === "number"
+        ? { maxTokens: body.max_completion_tokens }
+        : {}),
+      ...(typeof body.maxTokens === "number" ? { maxTokens: body.maxTokens } : {}),
+      reasoning: body.reasoning ?? asRecord(body.routeOptions ?? body.route_options).reasoning,
+    });
+    if (body.n !== undefined && body.n !== 1) {
+      throw new Error("Gateway 目前只支持 n=1");
+    }
+    const extensions = parseGatewayExtensions(body);
+    const invokeOptions: ModelChatInvokeOptions = {
+      ...(merged.tools.length ? { tools: merged.tools } : {}),
+      ...(parseToolChoice(body.tool_choice ?? body.toolChoice)
+        ? { toolChoice: parseToolChoice(body.tool_choice ?? body.toolChoice) }
+        : {}),
+      ...(Object.keys(routeOptions).length ? { routeOptions } : {}),
+      ...(Object.keys(extensions).length ? { extensions } : {}),
+    };
+
+    const session = await this.getOrCreateSession({
+      tenantId,
+      agent,
+      clientSessionKey: opts?.clientSessionKey,
+      apiKeyId: opts?.apiKeyId,
+      model,
+      clientMessages: messages,
+    });
+    const messageId = newId();
+    const runId = newId();
+    const parentRunId = await this.inferParentRunId(session.id);
+    const userContent = lastUserContent(messages);
+    const storedPlain = await this.loadPlainMessages(session.id);
+    const lastStored = storedPlain[storedPlain.length - 1];
+    // 同一 user 已落库、助手尚未写出（重试）时不要重复追加
+    const skipUserAppend =
+      Boolean(userContent) &&
+      lastStored?.role === "user" &&
+      (lastStored.content ?? "") === userContent;
+    let replyToMessageId = messageId;
+    if (skipUserAppend) {
+      replyToMessageId = (await this.lastUserMessageId(session.id)) ?? messageId;
+    } else {
+      await this.deps.store.appendEvent({
+        sessionId: session.id,
+        type: "user_message",
+        runId,
+        payload: {
+          messageId,
+          content: userContent,
+          parentRunId,
+        },
+      });
+    }
+    await this.deps.store.appendEvent({
+      sessionId: session.id,
+      type: "run_start",
+      runId,
+      payload: { runId, replyToMessageId },
+    });
+
+    return {
+      agent,
+      sessionId: session.id,
+      runId,
+      model,
+      routeId: clientModel ? undefined : cloud.modelRouteId?.trim() || undefined,
+      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      invokeOptions,
+      toolNameMap,
+      usedZakuraMcp: merged.usedZakuraMcp,
+    };
+  }
+
+  async invoke(
+    tenantId: string,
+    context: OpenAiGatewayContext,
+    callbacks?: {
+      onDelta?: (text: string) => void;
+      onReasoningDelta?: (text: string) => void;
+      signal?: AbortSignal;
+    },
+  ): Promise<ModelChatResult> {
+    try {
+      const messages = [...context.messages];
+      // 默认无上限；仅当 Agent 显式配置 maxToolRounds 时才截断
+      const maxRounds = agentCloudConfig(context.agent).maxToolRounds;
+      let result: ModelChatResult | null = null;
+      let lastText = "";
+
+      for (let round = 0; maxRounds == null || round < maxRounds; round += 1) {
+        if (callbacks?.signal?.aborted) {
+          const err = new Error("Aborted");
+          err.name = "AbortError";
+          throw err;
+        }
+
+        const routeQuery = {
+          capability: "chat" as const,
+          ...(context.routeId ? { routeId: context.routeId } : {}),
+          ...(context.model ? { alias: context.model } : {}),
+        };
+
+        // 与 Agent loop 对齐：流式 delta 落库，工具写 start/args/result，UI 才能渲染工具卡片
+        const messageId = newId();
+        let deltaChain = Promise.resolve();
+        const persistDelta = (text: string) => {
+          deltaChain = deltaChain.then(async () => {
+            await this.deps.store.appendEvent({
+              sessionId: context.sessionId,
+              type: "assistant_delta",
+              runId: context.runId,
+              payload: { messageId, delta: text },
+            });
+          });
+        };
+
+        // 客户端要求流式时，每一轮都 chatStream 推送文本；云端工具轮不把 tool_calls 回给客户端
+        result = callbacks
+          ? await this.deps.modelRouter.chatStream(
+              tenantId,
+              messages,
+              routeQuery,
+              context.invokeOptions,
+              {
+                onDelta: (text) => {
+                  callbacks.onDelta?.(text);
+                  persistDelta(text);
+                },
+                onReasoningDelta: callbacks.onReasoningDelta,
+                signal: callbacks.signal,
+              },
+            )
+          : await this.deps.modelRouter.chat(
+              tenantId,
+              messages,
+              routeQuery,
+              context.invokeOptions,
+            );
+        await deltaChain;
+        if (!callbacks && result.content) persistDelta(result.content);
+        await deltaChain;
+
+        if (result.content) lastText = result.content;
+
+        const toolCalls = result.toolCalls ?? [];
+        if (toolCalls.length === 0) {
+          // 本轮无工具：写出最终 assistant_message（与 loop 同 messageId）
+          await this.deps.store.appendEvent({
+            sessionId: context.sessionId,
+            type: "assistant_message",
+            runId: context.runId,
+            payload: { messageId, content: result.content ?? "" },
+          });
+          break;
+        }
+
+        // 客户端已通过 MCP 自带 Zakura 工具：原样返回 tool_calls
+        if (context.usedZakuraMcp) break;
+
+        const hasServerTool = toolCalls.some((call) =>
+          context.toolNameMap.has(call.function.name),
+        );
+        // 全是客户端本地工具：交还给客户端
+        if (!hasServerTool) break;
+
+        messages.push({
+          role: "assistant",
+          content: result.content || null,
+          toolCalls,
+        });
+
+        for (const call of toolCalls) {
+          await this.deps.store.appendEvent({
+            sessionId: context.sessionId,
+            type: "tool_call_start",
+            runId: context.runId,
+            payload: {
+              toolCallId: call.id,
+              name: call.function.name,
+              title: call.function.name,
+            },
+          });
+          await this.deps.store.appendEvent({
+            sessionId: context.sessionId,
+            type: "tool_call_args",
+            runId: context.runId,
+            payload: {
+              toolCallId: call.id,
+              arguments: call.function.arguments,
+            },
+          });
+        }
+
+        for (const call of toolCalls) {
+          const qualified = context.toolNameMap.get(call.function.name);
+          let resultText: string;
+          let isError = false;
+          const started = Date.now();
+          if (!qualified) {
+            resultText = `工具 ${call.function.name} 需在客户端执行，云端无法调用`;
+            isError = true;
+          } else {
+            try {
+              const raw = await this.deps.gateway.callTool(
+                tenantId,
+                qualified,
+                parseToolArgs(call.function.arguments),
+                { agentId: context.agent.id },
+              );
+              const parsed = mcpResultToText(raw);
+              resultText = parsed.text;
+              isError = parsed.isError;
+            } catch (err) {
+              resultText = err instanceof Error ? err.message : String(err);
+              isError = true;
+            }
+          }
+          await this.deps.store.appendEvent({
+            sessionId: context.sessionId,
+            type: "tool_call_result",
+            runId: context.runId,
+            payload: {
+              toolCallId: call.id,
+              name: call.function.name,
+              isError,
+              resultText,
+              durationMs: Date.now() - started,
+            },
+          });
+          messages.push({
+            role: "tool",
+            content: resultText,
+            toolCallId: call.id,
+            name: call.function.name,
+          });
+        }
+        result = null;
+      }
+
+      // 仅在显式配置了上限且仍未得到最终回答时软收尾
+      if (!result) {
+        const note =
+          maxRounds != null
+            ? `已达到最大工具轮次（${maxRounds}），请继续发送消息以接着处理。`
+            : "工具循环已结束，但未得到最终回答。";
+        const content = lastText ? `${lastText}\n\n${note}` : note;
+        if (callbacks?.onDelta) callbacks.onDelta(lastText ? `\n\n${note}` : note);
+        const openai = buildOpenAIChatCompletion({
+          model: context.model ?? "zakura",
+          content,
+          finishReason: "stop",
+        });
+        result = {
+          content,
+          model: context.model ?? openai.model,
+          finishReason: "stop",
+          openai,
+        };
+      }
+
+      // 工具轮已在循环内写出 assistant_message；仅「交还客户端 tool_calls」或软收尾时再补一条
+      const needsFinalAssistant =
+        Boolean(result.toolCalls?.length) ||
+        !(await this.hasAssistantMessageForRun(context.sessionId, context.runId));
+      if (needsFinalAssistant) {
+        await this.deps.store.appendEvent({
+          sessionId: context.sessionId,
+          type: "assistant_message",
+          runId: context.runId,
+          payload: {
+            messageId: newId(),
+            content: result.content ?? "",
+            ...(result.toolCalls?.length ? { toolCalls: result.toolCalls } : {}),
+          },
+        });
+      }
+      await this.deps.store.appendEvent({
+        sessionId: context.sessionId,
+        type: "run_end",
+        runId: context.runId,
+        payload: { runId: context.runId, status: "completed" },
+      });
+      const routeId =
+        "routeId" in result && typeof result.routeId === "string" ? result.routeId : null;
+      await this.deps.store.updateSession(tenantId, context.agent.id, context.sessionId, {
+        model: result.model || context.model || null,
+        modelRouteId: routeId,
+      });
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        await this.deps.store.appendEvent({
+          sessionId: context.sessionId,
+          type: "run_error",
+          runId: context.runId,
+          payload: { runId: context.runId, message },
+        });
+        await this.deps.store.appendEvent({
+          sessionId: context.sessionId,
+          type: "run_end",
+          runId: context.runId,
+          payload: { runId: context.runId, status: "failed" },
+        });
+      } catch {
+        /* 收尾失败不掩盖原始错误 */
+      }
+      throw err;
+    }
+  }
+
+  /** 本 Run 是否已有最终 assistant_message（无工具轮在循环内已写出） */
+  private async hasAssistantMessageForRun(sessionId: string, runId: string): Promise<boolean> {
+    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
+    return events.some((ev) => ev.runId === runId && ev.type === "assistant_message");
+  }
+
+  /** 从上一条助手消息推断 parentRunId；旧 Gateway 无 runId 时用 orphan: 对齐 UI 合成规则 */
+  private async inferParentRunId(sessionId: string): Promise<string | null> {
+    const events = await this.deps.store.listEvents(sessionId, { limit: 200 });
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]!;
+      if (ev.runId) return ev.runId;
+      if (ev.type === "assistant_message") {
+        const payload = ev.payload as Record<string, unknown>;
+        const mid = typeof payload.messageId === "string" ? payload.messageId : ev.id;
+        return `orphan:${mid}`;
+      }
+    }
+    return null;
+  }
+
+  private async loadPlainMessages(sessionId: string): Promise<ModelChatMessage[]> {
+    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
+    return eventsToMessages(
+      events.map((ev) => ({
+        type: ev.type,
+        runId: ev.runId,
+        payload: ev.payload as Record<string, unknown>,
+      })),
+    );
+  }
+
+  private async lastUserMessageId(sessionId: string): Promise<string | null> {
+    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]!;
+      if (ev.type !== "user_message") continue;
+      const payload = ev.payload as Record<string, unknown>;
+      if (typeof payload.messageId === "string") return payload.messageId;
+      return ev.id;
+    }
+    return null;
+  }
+
+  private async getOrCreateSession(input: {
+    tenantId: string;
+    agent: Agent;
+    clientSessionKey?: string | null;
+    apiKeyId?: string | null;
+    model: string | undefined;
+    clientMessages: ModelChatMessage[];
+  }) {
+    const key = cleanSessionKey(input.clientSessionKey);
+    const apiKeyId = cleanSessionKey(input.apiKeyId);
+
+    if (key) {
+      const byId = await this.deps.store.getSession(input.tenantId, input.agent.id, key);
+      if (byId && this.isGatewayOrigin(byId.originJson)) return byId;
+
+      const byClientKey = await this.findGatewaySession(
+        input.tenantId,
+        input.agent.id,
+        (origin) => origin.clientSessionKey === key,
+      );
+      if (byClientKey) return byClientKey;
+
+      return this.deps.store.createSession({
+        tenantId: input.tenantId,
+        agentId: input.agent.id,
+        title: "OpenAI Gateway",
+        createdByUserId: null,
+        origin: {
+          source: "api",
+          channel: "openai-gateway",
+          clientSessionKey: key,
+          ...(apiKeyId ? { apiKeyId } : {}),
+        },
+        model: input.model ?? null,
+      });
+    }
+
+    // 无客户端 session：按 user 消息指纹在空闲窗口内归并（不按 API Key 硬粘）
+    const clientUsers = userContentFingerprint(input.clientMessages);
+    if (clientUsers.length > 0) {
+      const recent = await this.deps.store.listGatewaySessions(
+        input.tenantId,
+        input.agent.id,
+        { limit: 30 },
+      );
+      let best: (typeof recent)[number] | null = null;
+      let bestScore = 0;
+      for (const session of recent) {
+        const updated = +new Date(session.updatedAt);
+        if (!Number.isFinite(updated) || Date.now() - updated > GATEWAY_MATCH_IDLE_MS) {
+          continue;
+        }
+        const storedUsers = userContentFingerprint(await this.loadPlainMessages(session.id));
+        const score = scoreGatewayMessageMatch(storedUsers, clientUsers);
+        if (score > bestScore) {
+          bestScore = score;
+          best = session;
+        }
+      }
+      if (best) return best;
+    }
+
+    return this.deps.store.createSession({
+      tenantId: input.tenantId,
+      agentId: input.agent.id,
+      title: "OpenAI Gateway",
+      createdByUserId: null,
+      origin: {
+        source: "api",
+        channel: "openai-gateway",
+        ...(apiKeyId ? { apiKeyId } : {}),
+      },
+      model: input.model ?? null,
+    });
+  }
+
+  private isGatewayOrigin(originJson: string | null | undefined): boolean {
+    try {
+      const origin = JSON.parse(originJson || "{}") as Record<string, unknown>;
+      return origin.channel === "openai-gateway";
+    } catch {
+      return false;
+    }
+  }
+
+  private async findGatewaySession(
+    tenantId: string,
+    agentId: string,
+    match: (
+      origin: Record<string, unknown>,
+      session: { id: string; updatedAt: string | Date; originJson: string },
+    ) => boolean,
+  ) {
+    const recent = await this.deps.store.listGatewaySessions(tenantId, agentId, {
+      limit: 50,
+    });
+    for (const session of recent) {
+      try {
+        const origin = JSON.parse(session.originJson || "{}") as Record<string, unknown>;
+        if (origin.channel !== "openai-gateway") continue;
+        if (match(origin, session)) return session;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+}

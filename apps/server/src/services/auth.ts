@@ -172,6 +172,15 @@ export async function authenticateApiKey(
   return { apiKey, tenant };
 }
 
+export function hasApiKeyScope(apiKey: { scopes: string }, required: string): boolean {
+  try {
+    const scopes = JSON.parse(apiKey.scopes);
+    return Array.isArray(scopes) && scopes.some((scope) => scope === "*" || scope === required);
+  } catch {
+    return false;
+  }
+}
+
 export function extractBearer(header: string | undefined): string | null {
   if (!header) return null;
   const m = header.match(/^Bearer\s+(.+)$/i);

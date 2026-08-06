@@ -19,8 +19,18 @@ import {
   type CloudAgentRun,
   type CloudAgentSession,
 } from "../db/schema.js";
+import { platformEvents } from "./platform-events.js";
 
 type SessionListener = (event: CloudAgentEvent) => void;
+
+/** 会改变侧栏会话列表（标题/顺序/活跃态）的事件 */
+const SIDEBAR_TOUCH_TYPES = new Set<CloudAgentEventType>([
+  "user_message",
+  "assistant_message",
+  "run_end",
+  "run_error",
+  "session_update",
+]);
 
 function parsePayload(raw: string): CloudAgentEventPayload {
   try {
@@ -267,6 +277,12 @@ export class CloudAgentSessionStore {
     });
     const row = await this.getSession(input.tenantId, input.agentId, id);
     if (!row) throw new Error("创建会话失败");
+    platformEvents.publish(input.tenantId, {
+      type: "cloud_session_changed",
+      agentId: input.agentId,
+      sessionId: id,
+      reason: "created",
+    });
     return row;
   }
 
@@ -289,6 +305,26 @@ export class CloudAgentSessionStore {
       .orderBy(desc(cloudAgentSessions.updatedAt))
       .limit(limit);
     return rows;
+  }
+
+  async listGatewaySessions(
+    tenantId: string,
+    agentId: string,
+    opts?: { limit?: number; includeArchived?: boolean },
+  ): Promise<CloudAgentSession[]> {
+    const limit = Math.min(Math.max(opts?.limit ?? 50, 1), 200);
+    const cond = and(
+      eq(cloudAgentSessions.tenantId, tenantId),
+      eq(cloudAgentSessions.agentId, agentId),
+      ilike(cloudAgentSessions.originJson, '%"channel":"openai-gateway"%'),
+      ...(opts?.includeArchived ? [] : [eq(cloudAgentSessions.status, "active")]),
+    );
+    return this.db
+      .select()
+      .from(cloudAgentSessions)
+      .where(cond)
+      .orderBy(desc(cloudAgentSessions.updatedAt))
+      .limit(limit);
   }
 
   async getSession(
@@ -342,6 +378,14 @@ export class CloudAgentSessionStore {
         ...(hasSessionMetadataPatch ? { updatedAt: new Date() } : {}),
       })
       .where(eq(cloudAgentSessions.id, sessionId));
+    if (hasSessionMetadataPatch) {
+      platformEvents.publish(tenantId, {
+        type: "cloud_session_changed",
+        agentId,
+        sessionId,
+        reason: "updated",
+      });
+    }
     return this.getSession(tenantId, agentId, sessionId);
   }
 
@@ -350,6 +394,12 @@ export class CloudAgentSessionStore {
     if (!existing) return false;
     await this.db.delete(cloudAgentSessions).where(eq(cloudAgentSessions.id, sessionId));
     this.listeners.delete(sessionId);
+    platformEvents.publish(tenantId, {
+      type: "cloud_session_changed",
+      agentId,
+      sessionId,
+      reason: "updated",
+    });
     return true;
   }
 
@@ -389,18 +439,30 @@ export class CloudAgentSessionStore {
         createdAt: now,
       });
       return {
-        id: eventId,
-        sessionId: input.sessionId,
-        seq,
-        type: input.type,
-        runId: input.runId ?? null,
-        payload: input.payload,
-        createdAt: now.toISOString(),
-      } satisfies CloudAgentEvent;
+        event: {
+          id: eventId,
+          sessionId: input.sessionId,
+          seq,
+          type: input.type,
+          runId: input.runId ?? null,
+          payload: input.payload,
+          createdAt: now.toISOString(),
+        } satisfies CloudAgentEvent,
+        tenantId: allocated.tenantId,
+        agentId: allocated.agentId,
+      };
     });
 
-    this.emit(event);
-    return event;
+    this.emit(event.event);
+    if (SIDEBAR_TOUCH_TYPES.has(input.type)) {
+      platformEvents.publish(event.tenantId, {
+        type: "cloud_session_changed",
+        agentId: event.agentId,
+        sessionId: input.sessionId,
+        reason: "updated",
+      });
+    }
+    return event.event;
   }
 
   async listEvents(

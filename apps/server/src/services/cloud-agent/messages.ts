@@ -196,6 +196,16 @@ export function buildChainMessages(
       failedRuns.add(ev.runId);
       continue;
     }
+    // Gateway 等无 Run 的事件流：合成 run，让线性 user/assistant 能串成链
+    if (ev.type === "assistant_message" && !ev.runId) {
+      const mid = typeof p.messageId === "string" ? p.messageId : null;
+      if (!mid || !lastUserMessageId) continue;
+      const rid = `orphan:${mid}`;
+      runReplyTo.set(rid, lastUserMessageId);
+      lastRunId = rid;
+      runEvents.set(rid, [ev]);
+      continue;
+    }
     if (
       ev.runId &&
       (ev.type === "assistant_delta" ||
@@ -317,6 +327,27 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
       if (typeof p.messageId === "string" && rolledBack.has(p.messageId)) continue;
       if (!pendingAssistant) pendingAssistant = { content: "", toolCalls: [] };
       if (typeof p.content === "string") pendingAssistant.content = p.content;
+      // 旧 Gateway 把 toolCalls 写在 assistant_message 上，无 start/args
+      if (Array.isArray(p.toolCalls)) {
+        for (const raw of p.toolCalls) {
+          if (!raw || typeof raw !== "object") continue;
+          const tc = raw as {
+            id?: unknown;
+            function?: { name?: unknown; arguments?: unknown };
+          };
+          const id = typeof tc.id === "string" ? tc.id : "";
+          if (!id || pendingAssistant.toolCalls.some((c) => c.id === id)) continue;
+          const name = typeof tc.function?.name === "string" ? tc.function.name : "tool";
+          const args =
+            typeof tc.function?.arguments === "string" ? tc.function.arguments : "{}";
+          pendingAssistant.toolCalls.push({
+            id,
+            type: "function",
+            function: { name, arguments: args },
+          });
+          toolNames.set(id, name);
+        }
+      }
       flushAssistant();
       continue;
     }

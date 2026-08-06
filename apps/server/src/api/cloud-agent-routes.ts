@@ -100,6 +100,21 @@ export function registerCloudAgentRoutes(
     return agentService.get(tenantId, agentId);
   }
 
+  async function isOpenAiGatewaySession(
+    tenantId: string,
+    agentId: string,
+    sessionId: string,
+  ): Promise<boolean> {
+    const row = await store.getSession(tenantId, agentId, sessionId);
+    if (!row) return false;
+    try {
+      return parseCloudAgentSessionOrigin(JSON.parse(row.originJson || "{}")).channel ===
+        "openai-gateway";
+    } catch {
+      return false;
+    }
+  }
+
   app.get("/api/agents/:id/cloud/config", async (c) => {
     const session = c.get("session")!;
     const agent = await requireAgent(session.tenantId, c.req.param("id"));
@@ -212,6 +227,17 @@ export function registerCloudAgentRoutes(
     return c.json({ sessions: rows.map(sessionDto) });
   });
 
+  app.get("/api/agents/:id/gateway/sessions", async (c) => {
+    const session = c.get("session")!;
+    const agentId = c.req.param("id");
+    const agent = await requireAgent(session.tenantId, agentId);
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const rows = await store.listGatewaySessions(session.tenantId, agentId, {
+      includeArchived: c.req.query("all") === "1",
+    });
+    return c.json({ sessions: rows.map(sessionDto) });
+  });
+
   app.post("/api/agents/:id/cloud/sessions", async (c) => {
     const session = c.get("session")!;
     const agentId = c.req.param("id");
@@ -304,6 +330,18 @@ export function registerCloudAgentRoutes(
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
+    const sourceSession = await store.getSession(
+      session.tenantId,
+      c.req.param("id"),
+      c.req.param("sid"),
+    );
+    if (!sourceSession) return c.json({ error: "Not found" }, 404);
+    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+      return c.json(
+        { error: "OpenAI Gateway 会话只能 fork 后在 Chat 中继续，原会话不会被修改" },
+        403,
+      );
+    }
     const body = await c.req.json<{
       content?: string;
       parentRunId?: string | null;
@@ -337,6 +375,9 @@ export function registerCloudAgentRoutes(
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
+    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+      return c.json({ error: "OpenAI Gateway 会话只能 fork 后继续" }, 403);
+    }
     const body = await c.req
       .json<{ messageId?: string; options?: unknown }>()
       .catch(() => ({}) as { messageId?: string; options?: unknown });
@@ -363,6 +404,9 @@ export function registerCloudAgentRoutes(
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
+    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+      return c.json({ error: "OpenAI Gateway 会话只能 fork 后继续" }, 403);
+    }
     const body = await c.req
       .json<{ options?: unknown }>()
       .catch(() => ({}) as { options?: unknown });
@@ -397,6 +441,9 @@ export function registerCloudAgentRoutes(
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
+    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+      return c.json({ error: "OpenAI Gateway 会话只能 fork，不能修改原会话" }, 403);
+    }
     try {
       const result = await runtime.compactSession({
         tenantId: session.tenantId,

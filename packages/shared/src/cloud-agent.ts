@@ -4,6 +4,7 @@
  * - 客户端按 seq 断点续传，多设备共享同一事件流
  * - Run 可取消，工具调用作为一等事件展示
  */
+import type { ModelToolCall } from "./model-router.js";
 
 export const CLOUD_AGENT_EVENT_TYPES = [
   "user_message",
@@ -70,6 +71,12 @@ export function parseCloudAgentSessionKind(raw: unknown): CloudAgentSessionKind 
 export type CloudAgentSessionOrigin = {
   /** 触发来源：agent_loop / mcp / api / system / remote */
   source?: "agent_loop" | "mcp" | "api" | "system" | "remote";
+  /** API 接入通道，例如 OpenAI 兼容中间件 */
+  channel?: string;
+  /** 外部客户端会话关联键（Claude Code / Codex 等自带的 session id） */
+  clientSessionKey?: string;
+  /** 创建该 Gateway 会话的 API Key id（无客户端 session 时用于粘会话） */
+  apiKeyId?: string;
   /** 父会话（同租户；委派场景下属于调用方 Agent） */
   parentSessionId?: string;
   parentRunId?: string;
@@ -101,6 +108,9 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
     out.source = o.source;
   }
   for (const key of [
+    "channel",
+    "clientSessionKey",
+    "apiKeyId",
     "parentSessionId",
     "parentRunId",
     "parentToolCallId",
@@ -170,6 +180,8 @@ export type CloudAgentReasoningDeltaPayload = {
 export type CloudAgentAssistantMessagePayload = {
   messageId: string;
   content: string;
+  /** 外部代理返回的客户端工具调用；服务端不会执行 */
+  toolCalls?: ModelToolCall[];
 };
 
 /**

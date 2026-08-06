@@ -41,7 +41,15 @@ export type PlatformEvent =
       snapshot: PlatformServiceProgressSnapshot;
     }
   | { type: "runner_node"; ts: number; nodeId: string }
-  | { type: "agent_fs_changed"; ts: number; agentId: string; path: string };
+  | { type: "agent_fs_changed"; ts: number; agentId: string; path: string }
+  | {
+      /** Cloud Agent / Gateway 会话列表变化（新建或有实质消息） */
+      type: "cloud_session_changed";
+      ts: number;
+      agentId: string;
+      sessionId: string;
+      reason?: "created" | "updated";
+    };
 
 type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "agent_progress" }>, "ts">
@@ -49,7 +57,8 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "mcp_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "platform_service_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "runner_node" }>, "ts">
-  | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">;
+  | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">;
 
 type Listener = (event: PlatformEvent) => void;
 
