@@ -68,8 +68,8 @@ export function parseCloudAgentSessionKind(raw: unknown): CloudAgentSessionKind 
  * 支持从子代理/委派会话回溯到父会话与触发它的工具调用。
  */
 export type CloudAgentSessionOrigin = {
-  /** 触发来源：agent_loop（主循环工具调用）/ mcp（外部 MCP 客户端）/ api（REST 创建）/ system */
-  source?: "agent_loop" | "mcp" | "api" | "system";
+  /** 触发来源：agent_loop / mcp / api / system / remote */
+  source?: "agent_loop" | "mcp" | "api" | "system" | "remote";
   /** 父会话（同租户；委派场景下属于调用方 Agent） */
   parentSessionId?: string;
   parentRunId?: string;
@@ -80,6 +80,11 @@ export type CloudAgentSessionOrigin = {
   callerAgentName?: string;
   /** 子代理嵌套深度：1=主循环直接派生，2=子代理再派生，… */
   depth?: number;
+  /** 远程连接平台及其稳定外部标识 */
+  platform?: string;
+  connectionId?: string;
+  externalThreadKey?: string;
+  externalUserKey?: string;
 };
 
 export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOrigin {
@@ -90,7 +95,8 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
     o.source === "agent_loop" ||
     o.source === "mcp" ||
     o.source === "api" ||
-    o.source === "system"
+    o.source === "system" ||
+    o.source === "remote"
   ) {
     out.source = o.source;
   }
@@ -100,6 +106,10 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
     "parentToolCallId",
     "callerAgentId",
     "callerAgentName",
+    "platform",
+    "connectionId",
+    "externalThreadKey",
+    "externalUserKey",
   ] as const) {
     const v = o[key];
     if (typeof v === "string" && v) out[key] = v.slice(0, 200);

@@ -99,7 +99,6 @@ import { FilePanel } from "./file-panel";
 import { RunLogDrawer } from "./run-log-drawer";
 
 const AGENT_KEY = "zakura_chat_agent";
-const DEFAULT_MODEL = "__default__";
 const REASONING_KEY = "zakura_chat_reasoning";
 const DRAFT_KEY_PREFIX = "zakura_chat_draft";
 const DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000;
@@ -1022,22 +1021,21 @@ export function ChatApp() {
   }
 
   async function handleModelSelection(value: string | null, routeId: string | null) {
-    if (!agentId) return;
-    const next = !value || value === DEFAULT_MODEL ? "" : value;
-    setModel(next);
+    if (!agentId || !value) return;
+    setModel(value);
     setModelRouteId(routeId);
     try {
       if (sessionId) {
         await updateCloudSession(agentId, sessionId, {
-          model: next || null,
+          model: value,
           modelRouteId: routeId || null,
         });
       } else {
         await saveCloudConfig(agentId, {
-          model: next || null,
+          model: value,
           modelRouteId: routeId || null,
         });
-        agentDefaultsRef.current = { model: next, modelRouteId: routeId };
+        agentDefaultsRef.current = { model: value, modelRouteId: routeId };
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -1089,27 +1087,16 @@ export function ChatApp() {
   } = useAutoSave(persistChatSettings, { debounceMs: 550 });
 
   const modelItems = useMemo<ComposerModelItem[]>(() => {
-    const defaultModel = models.find((m) => m.isDefault) ?? null;
-    const items: ComposerModelItem[] = [
-      {
-        value: DEFAULT_MODEL,
-        label: "默认模型",
-        keywords: ["default", "默认"],
-        reasoning: defaultModel?.reasoning,
-        reasoningLevels: defaultModel?.reasoningLevels,
-        defaultReasonLevel: defaultModel?.defaultReasonLevel,
-      },
-      ...models.map((m) => ({
-        value: m.alias,
-        label: m.name,
-        hint: m.upstream,
-        keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
-        reasoning: m.reasoning,
-        reasoningLevels: m.reasoningLevels,
-        defaultReasonLevel: m.defaultReasonLevel,
-        providers: m.providers,
-      })),
-    ];
+    const items: ComposerModelItem[] = models.map((m) => ({
+      value: m.alias,
+      label: m.name,
+      hint: m.upstream,
+      keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
+      reasoning: m.reasoning,
+      reasoningLevels: m.reasoningLevels,
+      defaultReasonLevel: m.defaultReasonLevel,
+      providers: m.providers,
+    }));
     // 配置里存着的模型可能已从模型列表里下线，仍要能显示当前选中项
     if (model && !models.some((m) => m.alias === model)) {
       items.push({ value: model, label: model });
@@ -1117,9 +1104,15 @@ export function ChatApp() {
     return items;
   }, [models, model]);
 
+  /** 空 model 时展示团队默认（或列表首项），不引入「默认模型」哨兵项 */
+  const displayModel = useMemo(() => {
+    if (model) return model;
+    return models.find((m) => m.isDefault)?.alias ?? models[0]?.alias ?? "";
+  }, [model, models]);
+
   const selectedModelItem = useMemo(
-    () => modelItems.find((item) => item.value === (model || DEFAULT_MODEL)) ?? null,
-    [modelItems, model],
+    () => modelItems.find((item) => item.value === displayModel) ?? null,
+    [modelItems, displayModel],
   );
   const reasoningItems = useMemo(
     () => reasoningItemsFromLevels(selectedModelItem?.reasoningLevels),
@@ -1543,7 +1536,7 @@ export function ChatApp() {
             onRemoveAttachment={removeAttachment}
             onCancelUpload={cancelUpload}
             models={modelItems}
-            model={model || DEFAULT_MODEL}
+            model={displayModel}
             modelRouteId={modelRouteId}
             onModelSelection={(v, routeId) => void handleModelSelection(v, routeId)}
             reasoning={reasoning}
@@ -1673,7 +1666,7 @@ export function ChatApp() {
                   className="mt-2 w-full"
                   nativeButton={false}
                   render={
-                    <Link href={`/dashboard/agents/${agentId}/general`} />
+                    <Link href={`/dashboard/agents/${agentId}/overview`} />
                   }
                 >
                   全部设置

@@ -4,21 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Bot, Brain, HardDrive, Loader2, Plus } from "lucide-react";
+import { Bot, Loader2, Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import {
   fetchAgents,
-  getWorkspaceStatus,
-  needsContainer,
-  statusVariant,
-  workspaceStatusLabel,
   type AgentListItem,
 } from "@/lib/agents";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -160,64 +155,35 @@ export default function AgentsListPage() {
             <NoSearchResult query={q} />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {filtered.map((a) => {
-            const ws = getWorkspaceStatus(a);
-            const hasComputer = needsContainer(a);
-            const caps = [
-              hasComputer ? "电脑" : null,
-              a.enableMemory ? "记忆" : null,
-            ].filter(Boolean) as string[];
-
-            return (
+              {filtered.map((a) => (
               <Link
                 key={a.id}
-                href={`/dashboard/agents/${a.id}/general`}
+                href={`/dashboard/agents/${a.id}/overview`}
                 className={cn(
                   "group flex flex-col gap-3 rounded-lg border border-border bg-card p-4",
                   "transition-colors hover:border-foreground/20 hover:bg-muted/30",
                 )}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex items-start gap-2.5">
-                    <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-                      <Bot className="size-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium group-hover:underline underline-offset-2">
-                        {a.name}
-                      </div>
-                      <code className="block truncate text-[10px] text-muted-foreground">
-                        {a.slug}
-                      </code>
-                    </div>
+                <div className="flex min-w-0 items-start gap-2.5">
+                  <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                    <Bot className="size-4" />
                   </div>
-                  {hasComputer ? (
-                    <Badge variant={statusVariant(ws)} className="shrink-0">
-                      {workspaceStatusLabel(ws)}
-                    </Badge>
-                  ) : null}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {hasComputer ? (
-                    <Badge variant="outline" className="gap-1 text-[10px]">
-                      <HardDrive className="size-3" />
-                      电脑
-                    </Badge>
-                  ) : null}
-                  {a.enableMemory ? (
-                    <Badge variant="outline" className="gap-1 text-[10px]">
-                      <Brain className="size-3" />
-                      记忆
-                    </Badge>
-                  ) : null}
-                  {caps.length === 0 ? (
-                    <span className="text-[11px] text-muted-foreground">无扩展能力</span>
-                  ) : null}
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium group-hover:underline underline-offset-2">
+                      {a.name}
+                    </div>
+                    <code className="block truncate text-[10px] text-muted-foreground">
+                      {a.slug}
+                    </code>
+                    {a.description ? (
+                      <p className="mt-1.5 line-clamp-2 text-[11px] text-muted-foreground">
+                        {a.description}
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
               </Link>
-            );
-              })}
+              ))}
             </div>
           )}
         </>
@@ -258,10 +224,10 @@ export default function AgentsListPage() {
                     setOpen(false);
                     const nextId = createdId;
                     resetCreate();
-                    router.push(`/dashboard/agents/${nextId}/general`);
+                    router.push(`/dashboard/agents/${nextId}/overview`);
                   }}
                 >
-                  进入设置
+                  进入概况
                 </Button>
               </DialogFooter>
             </div>

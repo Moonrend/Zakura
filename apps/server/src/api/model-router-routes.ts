@@ -97,8 +97,12 @@ export function registerModelRouterRoutes(
     const body = await c.req.json<{ name?: string; config?: Record<string, unknown> }>();
     try {
       const updated = await upstreams.update(session.tenantId, c.req.param("id"), body);
+      const modelCheck = await upstreamModels?.reconcileAfterUpstreamSave(
+        session.tenantId,
+        c.req.param("id"),
+      );
       router.invalidateCache(session.tenantId);
-      return c.json(updated);
+      return c.json({ ...updated, modelCheck });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -200,7 +204,6 @@ export function registerModelRouterRoutes(
         displayName?: string;
         capability?: string;
         weight?: number;
-        enabled?: boolean;
         isDefault?: boolean;
         options?: Record<string, unknown>;
         meta?: Record<string, unknown>;
@@ -221,7 +224,6 @@ export function registerModelRouterRoutes(
           displayName: body.displayName,
           capability: body.capability,
           weight: body.weight,
-          enabled: body.enabled,
           isDefault: body.isDefault,
           options: body.options,
           meta: body.meta,
@@ -240,7 +242,6 @@ export function registerModelRouterRoutes(
         canonicalModel?: string;
         displayName?: string | null;
         weight?: number;
-        enabled?: boolean;
         isDefault?: boolean;
         capability?: string;
         options?: Record<string, unknown>;
@@ -316,7 +317,6 @@ export function registerModelRouterRoutes(
         weight: m.weight,
         isDefault: m.isDefault,
         status: m.status,
-        enabled: m.enabled,
         meta: m.meta,
         upstream: m.upstream,
       }));
@@ -431,7 +431,6 @@ export function registerModelRouterRoutes(
       weight?: number;
       isDefault?: boolean;
       upstreamId?: string;
-      enabled?: boolean;
       canonicalModel?: string;
       nativeModel?: string;
       displayName?: string | null;
@@ -453,7 +452,6 @@ export function registerModelRouterRoutes(
                   ? body.name
                   : undefined,
             weight: body.weight,
-            enabled: body.enabled,
             isDefault: body.isDefault,
             capability:
               body.capability && isModelCapability(body.capability)

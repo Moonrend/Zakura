@@ -262,7 +262,6 @@ export const upstreamModels = pgTable(
     displayName: text("display_name"),
     capability: text("capability").notNull(),
     weight: text("weight").notNull().default("100"),
-    enabled: boolean("enabled").notNull().default(true),
     isDefault: boolean("is_default").notNull().default(false),
     optionsJson: text("options_json").notNull().default("{}"),
     metaJson: text("meta_json").notNull().default("{}"),
@@ -592,6 +591,26 @@ export const connectorSettings = pgTable(
   (t) => [uniqueIndex("connector_settings_scope_ref").on(t.scopeKey, t.connectorRef)],
 );
 
+/** 租户邮箱连接器实例；同一 provider 可配置多个账号并分别绑定 Agent。 */
+export const emailConnectorInstances = pgTable(
+  "email_connector_instances",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    product: text("product").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    configEnc: text("config_enc").notNull(),
+    ...timestamps,
+  },
+  (t) => [
+    index("email_connector_instances_tenant").on(t.tenantId),
+    index("email_connector_instances_tenant_product").on(t.tenantId, t.product),
+  ],
+);
+
 export const managedContainers = pgTable(
   "managed_containers",
   {
@@ -645,6 +664,82 @@ export const agentBindings = pgTable(
     uniqueIndex("agent_bindings_unique").on(t.agentId, t.instanceId),
     index("agent_bindings_agent").on(t.agentId),
     index("agent_bindings_tenant").on(t.tenantId),
+  ],
+);
+
+/** 外部聊天平台到 Agent 的入站绑定；凭据仍存于 connector_auth_profiles。 */
+export const agentChannelBindings = pgTable(
+  "agent_channel_bindings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    platform: text("platform").notNull(),
+    /** Catalog template key (e.g. remote-slack); credentials live on this row, not shared profiles. */
+    profileKey: text("profile_key").notNull(),
+    label: text("label").notNull().default(""),
+    enabled: boolean("enabled").notNull().default(false),
+    settingsJson: text("settings_json").notNull().default("{}"),
+    /** Per-instance encrypted credentials; independent for each binding. */
+    configEnc: text("config_enc").notNull().default(""),
+    ...timestamps,
+  },
+  (t) => [
+    index("agent_channel_bindings_tenant").on(t.tenantId),
+    index("agent_channel_bindings_agent").on(t.agentId),
+    index("agent_channel_bindings_platform").on(t.platform),
+    index("agent_channel_bindings_tenant_platform").on(t.tenantId, t.platform),
+  ],
+);
+
+/** 外部平台线程与 CloudAgent session 的稳定映射。 */
+export const agentChannelThreads = pgTable(
+  "agent_channel_threads",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    bindingId: text("binding_id")
+      .notNull()
+      .references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+    externalThreadKey: text("external_thread_key").notNull(),
+    externalUserKey: text("external_user_key"),
+    lastEventId: text("last_event_id"),
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agent_channel_threads_binding_thread").on(t.bindingId, t.externalThreadKey),
+    index("agent_channel_threads_tenant").on(t.tenantId),
+    index("agent_channel_threads_session").on(t.sessionId),
+  ],
+);
+
+/** 外部 webhook 去重记录，避免重试创建重复 Agent run。 */
+export const agentChannelEvents = pgTable(
+  "agent_channel_events",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    bindingId: text("binding_id")
+      .notNull()
+      .references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+    externalEventId: text("external_event_id").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_channel_events_binding_event").on(t.bindingId, t.externalEventId),
+    index("agent_channel_events_received").on(t.receivedAt),
   ],
 );
 
@@ -1444,8 +1539,12 @@ export const schema = {
   integrationComponents,
   connectorAuthProfiles,
   connectorSettings,
+  emailConnectorInstances,
   managedContainers,
   agentBindings,
+  agentChannelBindings,
+  agentChannelThreads,
+  agentChannelEvents,
   settings,
   platformServices,
   platformServiceQuotas,
@@ -1490,8 +1589,12 @@ export type RuntimeNode = typeof runtimeNodes.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
 export type WorkspaceMigration = typeof workspaceMigrations.$inferSelect;
 export type AgentBinding = typeof agentBindings.$inferSelect;
+export type AgentChannelBinding = typeof agentChannelBindings.$inferSelect;
+export type AgentChannelThread = typeof agentChannelThreads.$inferSelect;
+export type AgentChannelEvent = typeof agentChannelEvents.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type ProviderCatalog = typeof providerCatalog.$inferSelect;
+export type EmailConnectorInstance = typeof emailConnectorInstances.$inferSelect;
 export type ComponentInstance = typeof componentInstances.$inferSelect;
 export type IntegrationPackageRow = typeof integrationPackages.$inferSelect;
 export type IntegrationComponentRow = typeof integrationComponents.$inferSelect;

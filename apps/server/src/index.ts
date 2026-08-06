@@ -64,7 +64,10 @@ async function main() {
     dataDir: config.dataDir,
   });
   bindProviderRuntime(db, config);
-  await new IntegrationCatalogService(db, config).sync();
+  const integrationCatalogBootstrap = new IntegrationCatalogService(db, config);
+  await integrationCatalogBootstrap.sync();
+  await integrationCatalogBootstrap.migrateLegacyEmailProfiles();
+  await integrationCatalogBootstrap.migrateConfiguredEmailProfiles();
   await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
   if (config.multiTenant) {
     await ensureSaasPlatformAdmin(db);

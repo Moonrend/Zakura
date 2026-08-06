@@ -165,6 +165,29 @@ export class ConnectorAuthService {
     };
   }
 
+  /** Internal runtime values, such as an auto-generated webhook secret. */
+  async mergeProfileValues(
+    scopeKey: string,
+    profileKey: string,
+    values: Record<string, unknown>,
+  ): Promise<void> {
+    const row = await this.db.query.connectorAuthProfiles.findFirst({
+      where: and(
+        eq(connectorAuthProfiles.scopeKey, scopeKey),
+        eq(connectorAuthProfiles.profileKey, profileKey),
+      ),
+    });
+    if (!row) throw new Error("凭据档案不存在");
+    const current = decrypt(this.appConfig.secret, row.configEnc);
+    await this.db
+      .update(connectorAuthProfiles)
+      .set({
+        configEnc: encryptJson(this.appConfig.secret, { ...current, ...values }),
+        updatedAt: new Date(),
+      })
+      .where(eq(connectorAuthProfiles.id, row.id));
+  }
+
   /** 哪些档案被整站预配并启用（团队侧据此锁定） */
   async platformProvisionedKeys(profileKeys: string[]): Promise<Set<string>> {
     if (!profileKeys.length) return new Set();

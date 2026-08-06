@@ -42,7 +42,6 @@ export type UpstreamModelItem = {
   canonicalModel: string;
   displayName?: string | null;
   capability: string;
-  enabled: boolean;
   isDefault?: boolean;
 };
 
@@ -110,6 +109,7 @@ export function UpstreamModelSetup({
 }: Props) {
   const lastAutoSyncKey = useRef<string | null>(null);
   const modelRequestId = useRef(0);
+  const modelsRef = useRef<UpstreamModelItem[]>([]);
   const [models, setModels] = useState<UpstreamModelItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -127,7 +127,7 @@ export function UpstreamModelSetup({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const visibleModels = useMemo(
-    () => models.filter((model) => model.enabled && (variant === "manage" || model.capability === "chat")),
+    () => models.filter((model) => variant === "manage" || model.capability === "chat"),
     [models, variant],
   );
 
@@ -176,11 +176,13 @@ export function UpstreamModelSetup({
   }
 
   const applyModels = useCallback((nextModels: UpstreamModelItem[]) => {
+    modelsRef.current = nextModels;
     setModels(nextModels);
     const preferred =
       nextModels.find((model) => model.capability === "chat" && model.isDefault) ??
-      nextModels.find((model) => model.capability === "chat" && model.enabled);
+      nextModels.find((model) => model.capability === "chat");
     if (preferred) setSelectedId((current) => current ?? preferred.id);
+    else setSelectedId(null);
   }, []);
 
   const load = useCallback(async (fallbackModels: UpstreamModelItem[] = []) => {
@@ -213,7 +215,7 @@ export function UpstreamModelSetup({
       );
       setRemoteModels(result.models ?? []);
       const existingIds = new Set(
-        models.filter((model) => model.enabled).map((model) => model.nativeModel),
+        modelsRef.current.map((model) => model.nativeModel),
       );
       setSelectedRemoteIds(new Set((result.models ?? []).filter((model) => existingIds.has(model.id)).map((model) => model.id)));
       setPickerSearch("");
@@ -227,7 +229,7 @@ export function UpstreamModelSetup({
     } finally {
       setSyncing(false);
     }
-  }, [models, upstreamId]);
+  }, [upstreamId]);
 
   async function confirmRemoteModels() {
     setSaving(true);

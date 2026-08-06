@@ -4,15 +4,23 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { ChevronDown, Loader2, Plus, RefreshCw, Star, Trash2 } from "lucide-react";
+import { ChevronDown, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  listModelsByCapability,
+  type ChatModelOption,
+  type ModelCapabilityFilter,
+} from "@/lib/cloud-agent";
+import {
+  ModelRouteSelector,
+  type ModelRouteSelectorItem,
+} from "@/components/models/model-route-selector";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -55,7 +63,6 @@ type Deployment = {
   displayName?: string | null;
   capability: string;
   weight: number;
-  enabled: boolean;
   isDefault: boolean;
   status: string;
   options?: {
@@ -91,6 +98,23 @@ const CAPABILITY_LABEL: Record<string, string> = {
   rerank: "重排序",
   image: "生图",
 };
+
+const DEFAULT_CAPABILITIES: ModelCapabilityFilter[] = [
+  "chat",
+  "embedding",
+  "rerank",
+  "image",
+];
+
+function toSelectorItems(models: ChatModelOption[]): ModelRouteSelectorItem[] {
+  return models.map((m) => ({
+    value: m.alias,
+    label: m.name,
+    hint: m.upstream,
+    keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
+    providers: m.providers,
+  }));
+}
 
 type FlatRow = Deployment & {
   groupDisplayName: string;
@@ -198,10 +222,13 @@ function ModelRoutesPageInner() {
   const [displayName, setDisplayName] = useState("");
   const [capability, setCapability] = useState("chat");
   const [weight, setWeight] = useState("100");
-  const [isDefault, setIsDefault] = useState(false);
   const [reasoningPreset, setReasoningPreset] = useState<ReasoningPreset>("default");
   const [reasoningBudget, setReasoningBudget] = useState("");
   const [metaJson, setMetaJson] = useState("{}");
+  const [defaultModels, setDefaultModels] = useState<
+    Partial<Record<ModelCapabilityFilter, ChatModelOption[]>>
+  >({});
+  const [defaultsLoading, setDefaultsLoading] = useState(false);
 
   const capabilityItems = useMemo(
     () =>
@@ -246,6 +273,23 @@ function ModelRoutesPageInner() {
     }
   }, [formReasoningPresets, reasoningPreset]);
 
+  const loadDefaults = useCallback(async () => {
+    setDefaultsLoading(true);
+    try {
+      const entries = await Promise.all(
+        DEFAULT_CAPABILITIES.map(async (capability) => {
+          const models = await listModelsByCapability(capability);
+          return [capability, models] as const;
+        }),
+      );
+      setDefaultModels(Object.fromEntries(entries));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDefaultsLoading(false);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const [upRes, modelRes] = await Promise.all([
@@ -260,10 +304,11 @@ function ModelRoutesPageInner() {
       setGroups(modelRes.models);
       setSelected(new Set());
       if (modelRes.capabilities?.length) setCapabilities(modelRes.capabilities);
+      void loadDefaults();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
-  }, [capFilter]);
+  }, [capFilter, loadDefaults]);
 
   useEffect(() => {
     void load();
@@ -302,7 +347,6 @@ function ModelRoutesPageInner() {
     setDisplayName("");
     setCapability(capFilter !== "all" ? capFilter : "chat");
     setWeight("100");
-    setIsDefault(false);
     setReasoningPreset("default");
     setReasoningBudget("");
     setMetaJson("{}");
@@ -318,7 +362,6 @@ function ModelRoutesPageInner() {
     setDisplayName(d.displayName ?? "");
     setCapability(d.capability);
     setWeight(String(d.weight));
-    setIsDefault(d.isDefault);
     setReasoningPreset(
       d.options?.reasoning
         ? d.options.reasoning.enabled === false
@@ -375,7 +418,6 @@ function ModelRoutesPageInner() {
             displayName: displayName.trim() || null,
             capability,
             weight: Number(weight) || 100,
-            isDefault,
             options,
             meta: parsedMeta,
           },
@@ -391,7 +433,6 @@ function ModelRoutesPageInner() {
             displayName: displayName.trim() || undefined,
             capability,
             weight: Number(weight) || 100,
-            isDefault,
             options,
             meta: parsedMeta,
           },
@@ -437,25 +478,32 @@ function ModelRoutesPageInner() {
     }
   }
 
-  async function setDefault(d: Deployment) {
+  async function setCapabilityDefault(
+    capability: ModelCapabilityFilter,
+    alias: string | null,
+    routeId: string | null,
+  ) {
+    if (!alias) return;
+    const models = defaultModels[capability] ?? [];
+    const item = models.find((m) => m.alias === alias);
+    if (!item) {
+      toast.error("未找到该模型");
+      return;
+    }
+    const targetId =
+      routeId ||
+      item.providers[0]?.id ||
+      null;
+    if (!targetId) {
+      toast.error("该模型没有可用部署");
+      return;
+    }
     try {
-      await api(`/api/upstream-models/${d.id}`, {
+      await api(`/api/upstream-models/${targetId}`, {
         method: "PATCH",
         json: { isDefault: true },
       });
-      toast.success(`已将 ${d.canonicalModel} 设为默认`);
-      await load();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function toggleEnabled(d: Deployment) {
-    try {
-      await api(`/api/upstream-models/${d.id}`, {
-        method: "PATCH",
-        json: { enabled: !d.enabled },
-      });
+      toast.success(`已将 ${item.name} 设为${CAPABILITY_LABEL[capability] ?? capability}默认`);
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -506,6 +554,46 @@ function ModelRoutesPageInner() {
         </Link>
         页点击「同步模型」拉取。
       </p>
+
+      <div className="space-y-3 rounded-lg border border-border p-4">
+        <div>
+          <p className="text-sm font-medium">团队默认模型</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            未指定模型时按能力使用下方选择；多上游可选「自动」动态路由。
+          </p>
+        </div>
+        {defaultsLoading && Object.keys(defaultModels).length === 0 ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" />
+            加载默认模型…
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {DEFAULT_CAPABILITIES.map((capability) => {
+              const models = defaultModels[capability] ?? [];
+              const selected = models.find((m) => m.isDefault) ?? null;
+              return (
+                <div key={capability} className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    {CAPABILITY_LABEL[capability] ?? capability}
+                  </Label>
+                  <ModelRouteSelector
+                    items={toSelectorItems(models)}
+                    value={selected?.alias ?? null}
+                    routeId={selected?.defaultRouteId ?? null}
+                    onSelectionChange={(alias, routeId) =>
+                      void setCapabilityDefault(capability, alias, routeId)
+                    }
+                    disabled={models.length === 0}
+                    placeholder={models.length === 0 ? "暂无模型" : "选择默认模型"}
+                    className="h-9 max-w-none w-full justify-between rounded-md border border-input bg-transparent px-3 font-normal text-foreground"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <Label className="text-xs text-muted-foreground">能力</Label>
@@ -558,13 +646,12 @@ function ModelRoutesPageInner() {
               <TableHead>上游</TableHead>
               <TableHead>原始名</TableHead>
               <TableHead className="w-16">权重</TableHead>
-              <TableHead className="w-16">启用</TableHead>
               <TableHead className="w-28" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((d) => (
-              <TableRow key={d.id} className={!d.enabled ? "opacity-50" : undefined}>
+              <TableRow key={d.id}>
                 <TableCell>
                   <Checkbox
                     checked={selected.has(d.id)}
@@ -580,16 +667,10 @@ function ModelRoutesPageInner() {
                   />
                 </TableCell>
                 <TableCell className="min-w-0 max-w-[14rem]">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-sm font-medium">
+                  <div className="min-w-0">
+                    <span className="block truncate text-sm font-medium">
                       {d.groupDisplayName}
                     </span>
-                    {d.isDefault ? (
-                      <Badge variant="secondary" className="shrink-0 gap-0.5 text-[10px]">
-                        <Star className="size-2.5" />
-                        默认
-                      </Badge>
-                    ) : null}
                   </div>
                   <code className="block truncate text-[10px] text-muted-foreground">
                     {d.canonicalModel}
@@ -608,23 +689,7 @@ function ModelRoutesPageInner() {
                 </TableCell>
                 <TableCell className="text-sm tabular-nums">{d.weight}</TableCell>
                 <TableCell>
-                  <Switch
-                    checked={d.enabled}
-                    onCheckedChange={() => void toggleEnabled(d)}
-                  />
-                </TableCell>
-                <TableCell>
                   <TableActions>
-                    {!d.isDefault ? (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title="设为默认"
-                        onClick={() => void setDefault(d)}
-                      >
-                        <Star className="size-3.5" />
-                      </Button>
-                    ) : null}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -746,10 +811,6 @@ function ModelRoutesPageInner() {
                   value={weight}
                   onChange={(e) => setWeight(e.target.value)}
                 />
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch checked={isDefault} onCheckedChange={setIsDefault} />
-                <Label>设为该能力默认模型</Label>
               </div>
               <div className="space-y-2 rounded-md border border-border p-3">
                 <div>

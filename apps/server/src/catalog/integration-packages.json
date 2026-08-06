@@ -385,5 +385,502 @@
       { "kind": "tool", "ref": "jira-projects", "name": "Projects", "description": "列出可访问的 Jira 项目。", "config": { "providerId": "jira", "product": "projects", "mcpUrl": "zakura://jira/projects", "scopes": "read:jira-work offline_access" } },
       { "kind": "skill", "ref": "jira", "name": "Jira", "description": "编排 Jira 问题跟踪工作流。", "config": { "source": "builtin:jira" } }
     ]
+  },
+  {
+    "slug": "email",
+    "name": "邮箱",
+    "description": "平台连接器：SMTP、Mailgun、Resend API、Amail、Bettermail。为 Agent 提供发信/收件工具；消息会话平台请使用 Chat SDK（Resend Email 等）。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "@",
+    "accent": "#0f766e",
+    "homepage": "https://amail.wuyuan.dev/",
+    "verified": false,
+    "featured": true,
+    "manifest": {
+      "summary": "在连接器中心配置邮箱凭据与工具。Amail 发信、Bettermail 收件；可选入站触发 Agent（需白名单）。Agent「平台」页仅接入 Chat SDK 消息通道。"
+    },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "email-smtp",
+        "name": "SMTP",
+        "description": "通过 SMTP 发送邮件；可与其它邮箱 provider 同时启用。",
+        "config": {
+          "providerId": "email",
+          "auth": {
+            "kind": "custom",
+            "profile": "email-smtp",
+            "profileLabel": "SMTP 邮箱凭据",
+            "docsUrl": "https://nodemailer.com/smtp/",
+            "fields": [
+              { "key": "smtpHost", "label": "SMTP 主机", "type": "text", "required": true, "placeholder": "smtp.example.com" },
+              { "key": "smtpPort", "label": "SMTP 端口", "type": "text", "defaultValue": "465" },
+              { "key": "smtpSecure", "label": "SMTP 使用 TLS", "type": "boolean" },
+              { "key": "smtpUser", "label": "SMTP 用户名", "type": "text", "required": true },
+              { "key": "smtpPassword", "label": "SMTP 密码", "type": "secret", "required": true }
+            ],
+            "settings": [
+              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
+              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
+              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
+              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
+              { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
+            ]
+          },
+          "pathHints": ["zakura://email/"]
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "email-mailgun",
+        "name": "Mailgun",
+        "description": "通过 Mailgun API 发送邮件；可与其它邮箱 provider 同时启用。",
+        "config": {
+          "providerId": "email",
+          "auth": {
+            "kind": "custom",
+            "profile": "email-mailgun",
+            "profileLabel": "Mailgun 邮箱凭据",
+            "docsUrl": "https://documentation.mailgun.com/docs/mailgun/api-reference/",
+            "fields": [
+              { "key": "apiToken", "label": "Mailgun API Key", "type": "secret", "required": true },
+              { "key": "mailgunDomain", "label": "Mailgun 域名", "type": "text", "required": true, "placeholder": "mg.example.com" },
+              { "key": "mailgunRegion", "label": "Mailgun 区域", "type": "text", "defaultValue": "api" }
+            ],
+            "settings": [
+              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
+              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
+              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
+              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
+              { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
+            ]
+          },
+          "pathHints": ["zakura://email/"]
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "email-resendapi",
+        "name": "Resend API",
+        "description": "通过 Resend API 发送邮件；可与其它邮箱 provider 同时启用。",
+        "config": {
+          "providerId": "email",
+          "auth": {
+            "kind": "custom",
+            "profile": "email-resendapi",
+            "profileLabel": "Resend 邮箱凭据",
+            "docsUrl": "https://resend.com/docs/api-reference/emails/send-email",
+            "fields": [
+              { "key": "apiToken", "label": "Resend API Key", "type": "secret", "required": true }
+            ],
+            "settings": [
+              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
+              { "key": "baseUrl", "label": "Resend API 地址", "type": "url" },
+              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
+              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
+              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
+              { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
+            ]
+          },
+          "pathHints": ["zakura://email/"]
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "email-amail",
+        "name": "Amail",
+        "description": "通过 Amail 发送并列出已发送邮件；可与其它邮箱 provider 同时启用。",
+        "config": {
+          "providerId": "email",
+          "auth": {
+            "kind": "custom",
+            "profile": "email-amail",
+            "profileLabel": "Amail 邮箱凭据",
+            "docsUrl": "https://amail.wuyuan.dev/",
+            "fields": [
+              { "key": "apiToken", "label": "Amail API Key", "type": "secret", "required": true },
+              { "key": "providerId", "label": "Amail Provider ID", "type": "text" }
+            ],
+            "settings": [
+              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
+              { "key": "baseUrl", "label": "Amail 服务地址", "type": "url" },
+              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
+              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
+              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
+              { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
+            ]
+          },
+          "pathHints": ["zakura://email/"]
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "email-bettermail",
+        "name": "Bettermail",
+        "description": "从 Bettermail 收件箱读取邮件；可与其它邮箱 provider 同时启用。",
+        "config": {
+          "providerId": "email",
+          "auth": {
+            "kind": "custom",
+            "profile": "email-bettermail",
+            "profileLabel": "Bettermail 邮箱凭据",
+            "docsUrl": "https://bettermail.dev/",
+            "fields": [
+              { "key": "apiToken", "label": "Bettermail API Token", "type": "secret" }
+            ],
+            "settings": [
+              { "key": "baseUrl", "label": "Bettermail 服务地址", "type": "url", "required": true },
+              { "key": "mailbox", "label": "收件邮箱", "type": "text", "required": true },
+              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
+              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
+              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
+              { "key": "pollIntervalSeconds", "label": "收件轮询间隔（秒）", "type": "text", "defaultValue": "30" }
+            ]
+          },
+          "pathHints": ["zakura://email/"]
+        }
+      },
+      {
+        "kind": "tool",
+        "ref": "email-smtp",
+        "name": "SMTP 发信",
+        "description": "通过 SMTP 发送邮件。",
+        "config": { "providerId": "email", "product": "smtp", "connectorRef": "email-smtp", "mcpUrl": "zakura://email/smtp", "scopes": "" }
+      },
+      {
+        "kind": "tool",
+        "ref": "email-mailgun",
+        "name": "Mailgun 发信",
+        "description": "通过 Mailgun API 发送邮件。",
+        "config": { "providerId": "email", "product": "mailgun", "connectorRef": "email-mailgun", "mcpUrl": "zakura://email/mailgun", "scopes": "" }
+      },
+      {
+        "kind": "tool",
+        "ref": "email-resendapi",
+        "name": "Resend API 发信",
+        "description": "通过 Resend API 发送邮件。",
+        "config": { "providerId": "email", "product": "resendapi", "connectorRef": "email-resendapi", "mcpUrl": "zakura://email/resendapi", "scopes": "" }
+      },
+      {
+        "kind": "tool",
+        "ref": "email-amail",
+        "name": "Amail 发信",
+        "description": "通过 Amail API 发送并列出已发送邮件。",
+        "config": { "providerId": "email", "product": "amail", "connectorRef": "email-amail", "mcpUrl": "zakura://email/amail", "scopes": "" }
+      },
+      {
+        "kind": "tool",
+        "ref": "email-bettermail",
+        "name": "Bettermail 收件",
+        "description": "从 Bettermail 收件箱读取邮件；读取后邮件会按 Bettermail API 语义被消费。",
+        "config": { "providerId": "email", "product": "bettermail", "connectorRef": "email-bettermail", "mcpUrl": "zakura://email/bettermail", "scopes": "" }
+      }
+    ]
+  },
+  {
+    "slug": "agent-remote",
+    "name": "远程 Agent",
+    "description": "Chat SDK 消息平台：Slack、Telegram、Discord、Resend Email 等。在 Agent「平台」页绑定，无需额外邮箱连接器。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "↔",
+    "accent": "#0f766e",
+    "homepage": "https://chat-sdk.dev/docs",
+    "verified": false,
+    "featured": true,
+    "manifest": {
+      "summary": "Chat SDK 入站：斜杠指令（/help /new /stop…）+ 默认用户验证；👀 确认 + post/edit 流式回复；Agent 可用 chat_* 工具发进度/私信/反应。"
+    },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "remote-slack",
+        "name": "Slack",
+        "description": "接入 Slack 私聊、提及和已订阅线程。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-slack",
+            "profileLabel": "Slack 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/slack",
+            "fields": [
+              { "key": "botToken", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "signingSecret", "label": "Signing Secret", "type": "secret", "required": true },
+              { "key": "appToken", "label": "App Token（Socket Mode 可选）", "type": "secret" },
+              { "key": "userName", "label": "机器人名称", "type": "text" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-teams",
+        "name": "Microsoft Teams",
+        "description": "接入 Teams 私聊与团队消息。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-teams",
+            "profileLabel": "Teams 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/teams",
+            "fields": [
+              { "key": "appId", "label": "Microsoft App ID", "type": "text", "required": true },
+              { "key": "appPassword", "label": "Microsoft App Password", "type": "secret", "required": true },
+              { "key": "appTenantId", "label": "Tenant ID", "type": "text" },
+              { "key": "appType", "label": "App Type", "type": "select", "options": [{ "value": "MultiTenant", "label": "MultiTenant" }, { "value": "SingleTenant", "label": "SingleTenant" }] }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-gchat",
+        "name": "Google Chat",
+        "description": "接入 Google Chat Space 与私聊。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-gchat",
+            "profileLabel": "Google Chat 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/gchat",
+            "fields": [
+              { "key": "credentials", "label": "Service Account JSON", "type": "textarea", "required": true },
+              { "key": "projectId", "label": "Google Cloud Project ID", "type": "text" },
+              { "key": "webhookSecret", "label": "Webhook Secret", "type": "secret" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-discord",
+        "name": "Discord",
+        "description": "接入 Discord 私聊、提及和线程。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-discord",
+            "profileLabel": "Discord 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/discord",
+            "fields": [
+              { "key": "botToken", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "applicationId", "label": "Application ID", "type": "text" },
+              { "key": "publicKey", "label": "Public Key", "type": "text" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-telegram",
+        "name": "Telegram",
+        "description": "接入 Telegram Bot 私聊与群组提及。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-telegram",
+            "profileLabel": "Telegram 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/telegram",
+            "fields": [
+              { "key": "botToken", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "secretToken", "label": "Webhook Secret Token", "type": "secret" },
+              { "key": "mode", "label": "接收模式", "type": "select", "defaultValue": "webhook", "options": [{ "value": "webhook", "label": "Webhook（推荐）" }, { "value": "polling", "label": "轮询" }, { "value": "auto", "label": "自动" }] }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-github",
+        "name": "GitHub",
+        "description": "接入 Issue 与 Pull Request 评论线程。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-github",
+            "profileLabel": "GitHub 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/github",
+            "fields": [
+              { "key": "token", "label": "Personal Access Token", "type": "secret" },
+              { "key": "appId", "label": "GitHub App ID", "type": "text" },
+              { "key": "installationId", "label": "Installation ID", "type": "text" },
+              { "key": "privateKey", "label": "Private Key", "type": "textarea" },
+              { "key": "webhookSecret", "label": "Webhook Secret", "type": "secret" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-linear",
+        "name": "Linear",
+        "description": "接入 Linear Issue 评论与 Agent session。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-linear",
+            "profileLabel": "Linear 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/linear",
+            "fields": [
+              { "key": "apiKey", "label": "API Key", "type": "secret" },
+              { "key": "clientId", "label": "OAuth Client ID", "type": "text" },
+              { "key": "clientSecret", "label": "OAuth Client Secret", "type": "secret" },
+              { "key": "webhookSecret", "label": "Webhook Secret", "type": "secret" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-whatsapp",
+        "name": "WhatsApp",
+        "description": "接入 WhatsApp Business 消息。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-whatsapp",
+            "profileLabel": "WhatsApp 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/whatsapp",
+            "fields": [
+              { "key": "accessToken", "label": "Access Token", "type": "secret", "required": true },
+              { "key": "phoneNumberId", "label": "Phone Number ID", "type": "text", "required": true },
+              { "key": "appSecret", "label": "App Secret", "type": "secret", "required": true },
+              { "key": "verifyToken", "label": "Verify Token", "type": "secret", "required": true }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-twilio",
+        "name": "Twilio",
+        "description": "接入 Twilio SMS/MMS 消息。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-twilio",
+            "profileLabel": "Twilio 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/twilio",
+            "fields": [
+              { "key": "accountSid", "label": "Account SID", "type": "text", "required": true },
+              { "key": "authToken", "label": "Auth Token", "type": "secret", "required": true },
+              { "key": "phoneNumber", "label": "发送号码", "type": "text", "required": true }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-messenger",
+        "name": "Messenger",
+        "description": "接入 Facebook Messenger。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-messenger",
+            "profileLabel": "Messenger 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/official/messenger",
+            "fields": [
+              { "key": "pageAccessToken", "label": "Page Access Token", "type": "secret", "required": true },
+              { "key": "appSecret", "label": "App Secret", "type": "secret", "required": true },
+              { "key": "verifyToken", "label": "Verify Token", "type": "secret", "required": true }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-resend",
+        "name": "Resend Email",
+        "description": "通过 Resend Chat SDK Adapter 接收邮件并在同一线程回复。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-resend",
+            "profileLabel": "Resend Chat SDK",
+            "docsUrl": "https://resend.com/docs/chat-sdk",
+            "fields": [
+              { "key": "apiKey", "label": "Resend API Key", "type": "secret", "required": true },
+              { "key": "webhookSecret", "label": "Webhook Signing Secret", "type": "secret", "required": true },
+              { "key": "fromAddress", "label": "发件地址", "type": "text", "required": true },
+              { "key": "fromName", "label": "发件人名称", "type": "text" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-webex",
+        "name": "Webex",
+        "description": "通过 Chat SDK 接入 Webex Space 消息。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-webex",
+            "profileLabel": "Webex 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/community/webex",
+            "fields": [
+              { "key": "botToken", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "webhookSecret", "label": "Webhook Secret", "type": "secret" },
+              { "key": "baseUrl", "label": "API 地址", "type": "url" },
+              { "key": "userName", "label": "机器人名称", "type": "text" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-mattermost",
+        "name": "Mattermost",
+        "description": "通过 Chat SDK 接入 Mattermost 频道和线程。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-mattermost",
+            "profileLabel": "Mattermost 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/community/mattermost",
+            "fields": [
+              { "key": "baseUrl", "label": "Mattermost 地址", "type": "url", "required": true },
+              { "key": "botToken", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "callbackUrl", "label": "Callback URL", "type": "url" }
+            ]
+          }
+        }
+      },
+      {
+        "kind": "connector",
+        "ref": "remote-weixin",
+        "name": "微信 Weixin",
+        "description": "通过 Chat SDK Weixin Adapter 接收一对一消息。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-weixin",
+            "profileLabel": "微信 Weixin 远程 Agent",
+            "docsUrl": "https://chat-sdk.dev/adapters/community/weixin",
+            "fields": [
+              { "key": "accountId", "label": "Account ID", "type": "text", "required": true },
+              { "key": "token", "label": "Bot Token", "type": "secret", "required": true },
+              { "key": "baseUrl", "label": "API 地址", "type": "url" }
+            ]
+          }
+        }
+      }
+    ]
   }
 ]

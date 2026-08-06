@@ -7,12 +7,10 @@ import { api } from "@/lib/api";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  ModelRouteSelector,
+  type ModelRouteSelectorItem,
+} from "@/components/models/model-route-selector";
+import { listModelsByCapability, type ChatModelOption } from "@/lib/cloud-agent";
 import { cn } from "@/lib/utils";
 
 export type EmbeddingRoute = {
@@ -28,52 +26,58 @@ export type EmbeddingRoute = {
 /** Built-in 向量只走模型路由，不再手填 baseUrl / model */
 export type EmbeddingFormValue = {
   enabled: boolean;
-  /** 选中的上游模型 id；`__default__` 表示租户默认 embedding */
-  routeId: string;
+  /** 逻辑模型 alias；空表示沿用团队默认 */
+  model: string;
+  /** 固定上游部署；null 表示该 alias 下自动路由 */
+  routeId: string | null;
 };
-
-const DEFAULT_ROUTE = "__default__";
 
 export function embeddingFromConfig(
   emb: Record<string, unknown>,
-  routes: EmbeddingRoute[],
+  models: ChatModelOption[],
 ): EmbeddingFormValue {
   const routeId = typeof emb.routeId === "string" ? emb.routeId.trim() : "";
   const routeSlug = typeof emb.routeSlug === "string" ? emb.routeSlug.trim() : "";
-  const matchedBySlug = routeSlug
-    ? routes.find((r) => r.slug === routeSlug)
-    : undefined;
 
-  let resolvedRouteId = DEFAULT_ROUTE;
-  if (routeId && routes.some((r) => r.id === routeId)) {
-    resolvedRouteId = routeId;
-  } else if (matchedBySlug) {
-    resolvedRouteId = matchedBySlug.id;
-  } else if (routeId) {
-    // 配置里仍有 routeId，但列表尚未加载完时先保留
-    resolvedRouteId = routeId;
-  } else if (routes.find((r) => r.isDefault)) {
-    resolvedRouteId = routes.find((r) => r.isDefault)!.id;
+  if (routeId) {
+    const matched = models.find((m) => m.providers.some((p) => p.id === routeId));
+    return {
+      enabled: emb.enabled === true,
+      model: matched?.alias ?? routeSlug,
+      routeId,
+    };
   }
 
+  if (routeSlug) {
+    return {
+      enabled: emb.enabled === true,
+      model: routeSlug,
+      routeId: null,
+    };
+  }
+
+  const fallback = models.find((m) => m.isDefault) ?? models[0];
   return {
     enabled: emb.enabled === true,
-    routeId: resolvedRouteId,
+    model: fallback?.alias ?? "",
+    routeId: fallback?.defaultRouteId ?? null,
   };
 }
 
 export function embeddingToConfig(value: EmbeddingFormValue): Record<string, unknown> {
   const base: Record<string, unknown> = { enabled: value.enabled };
   if (!value.enabled) return base;
-  if (value.routeId && value.routeId !== DEFAULT_ROUTE) {
+  if (value.routeId) {
     base.routeId = value.routeId;
+  } else if (value.model) {
+    base.routeSlug = value.model;
   }
   return base;
 }
 
 export function embeddingSummary(
   config: Record<string, unknown>,
-  routes: EmbeddingRoute[],
+  models: ChatModelOption[],
 ): string | null {
   const emb =
     config.embedding && typeof config.embedding === "object"
@@ -83,61 +87,56 @@ export function embeddingSummary(
 
   const routeId = typeof emb.routeId === "string" ? emb.routeId : "";
   const routeSlug = typeof emb.routeSlug === "string" ? emb.routeSlug : "";
-  const route =
-    routes.find((r) => r.id === routeId) ??
-    routes.find((r) => r.slug === routeSlug);
+  const byRoute = routeId
+    ? models.find((m) => m.providers.some((p) => p.id === routeId))
+    : undefined;
+  const byAlias = routeSlug ? models.find((m) => m.alias === routeSlug) : undefined;
+  const model = byRoute ?? byAlias ?? models.find((m) => m.isDefault);
 
-  if (route) return `向量 · ${route.name}`;
-  if (!routeId && !routeSlug) return "向量 · 默认模型";
+  if (model) return `向量 · ${model.name}`;
+  if (!routeId && !routeSlug) return "向量 · 团队默认";
   return "向量 · 已选模型";
 }
 
 type Props = {
   value: EmbeddingFormValue;
   onChange: (next: EmbeddingFormValue) => void;
-  routes: EmbeddingRoute[];
-  routesLoading?: boolean;
-  onReloadRoutes?: () => void;
+  models: ChatModelOption[];
+  modelsLoading?: boolean;
+  onReloadModels?: () => void;
   className?: string;
 };
 
 export function EmbeddingConfigFields({
   value,
   onChange,
-  routes,
-  routesLoading = false,
-  onReloadRoutes,
+  models,
+  modelsLoading = false,
+  onReloadModels,
   className,
 }: Props) {
   const patch = (p: Partial<EmbeddingFormValue>) => onChange({ ...value, ...p });
-  const hasRoutes = routes.length > 0;
+  const hasModels = models.length > 0;
 
-  const routeItems = useMemo(
-    () => [
-      {
-        value: DEFAULT_ROUTE,
-        label: `团队默认（${routes.find((r) => r.isDefault)?.name ?? "按权重自动选择"}）`,
-      },
-      ...routes.map((r) => ({
-        value: r.id,
-        label: `${r.name}${r.isDefault ? " · 默认" : ""} · ${r.model}`,
+  const items = useMemo<ModelRouteSelectorItem[]>(
+    () =>
+      models.map((m) => ({
+        value: m.alias,
+        label: m.name,
+        hint: m.upstream,
+        keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
+        providers: m.providers,
       })),
-    ],
-    [routes],
+    [models],
   );
 
-  const selectedRoute = useMemo(() => {
-    if (value.routeId === DEFAULT_ROUTE) {
-      return routes.find((r) => r.isDefault) ?? routes[0] ?? null;
-    }
-    return routes.find((r) => r.id === value.routeId) ?? null;
-  }, [routes, value.routeId]);
+  const displayModel =
+    value.model || models.find((m) => m.isDefault)?.alias || models[0]?.alias || "";
 
-  const selectValue =
-    value.routeId &&
-    (value.routeId === DEFAULT_ROUTE || routes.some((r) => r.id === value.routeId))
-      ? value.routeId
-      : DEFAULT_ROUTE;
+  const selected = models.find((m) => m.alias === displayModel) ?? null;
+  const selectedProvider = value.routeId
+    ? selected?.providers.find((p) => p.id === value.routeId)
+    : undefined;
 
   return (
     <div className={cn("space-y-3 rounded-lg border border-border p-3", className)}>
@@ -156,12 +155,12 @@ export function EmbeddingConfigFields({
 
       {value.enabled ? (
         <div className="space-y-2">
-          {routesLoading ? (
+          {modelsLoading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
               加载 embedding 模型…
             </div>
-          ) : !hasRoutes ? (
+          ) : !hasModels ? (
             <div className="rounded-md bg-muted/50 px-3 py-2 text-sm">
               <p className="text-muted-foreground">
                 尚未配置 embedding 模型。请先在上游中同步或添加向量模型。
@@ -176,46 +175,36 @@ export function EmbeddingConfigFields({
             </div>
           ) : (
             <>
-              <div>
+              <div className="space-y-1.5">
                 <Label>Embedding 模型</Label>
-                <Select
-                  value={selectValue}
-                  onValueChange={(v) => {
-                    if (v) patch({ routeId: v });
+                <ModelRouteSelector
+                  items={items}
+                  value={displayModel}
+                  routeId={value.routeId}
+                  onSelectionChange={(alias, routeId) => {
+                    if (!alias) return;
+                    patch({ model: alias, routeId });
                   }}
-                  items={routeItems}
-                >
-                  <SelectTrigger className="mt-1 w-full">
-                    <SelectValue placeholder="选择已有模型" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {routeItems.map((item) => (
-                      <SelectItem key={item.value} value={item.value}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  className="h-9 max-w-none w-full justify-between rounded-md border border-input bg-transparent px-3 font-normal text-foreground"
+                  placeholder="选择模型"
+                />
               </div>
 
-              {selectedRoute ? (
+              {selected ? (
                 <div className="rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                   <div>
                     调用名{" "}
-                    <span className="font-mono text-foreground">{selectedRoute.model}</span>
+                    <span className="font-mono text-foreground">{selected.alias}</span>
                   </div>
-                  {selectedRoute.upstream?.name ? (
+                  {selectedProvider ? (
                     <div>
                       上游{" "}
-                      <span className="text-foreground">{selectedRoute.upstream.name}</span>
+                      <span className="text-foreground">{selectedProvider.name}</span>
                     </div>
-                  ) : null}
-                  {selectedRoute.options?.dimensions ? (
+                  ) : selected.upstream ? (
                     <div>
-                      维度{" "}
-                      <span className="text-foreground">
-                        {selectedRoute.options.dimensions}
-                      </span>
+                      路由{" "}
+                      <span className="text-foreground">自动 · {selected.upstream}</span>
                     </div>
                   ) : null}
                 </div>
@@ -223,11 +212,11 @@ export function EmbeddingConfigFields({
 
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>API Key 与端点由上游统一管理，无需手填</span>
-                {onReloadRoutes ? (
+                {onReloadModels ? (
                   <button
                     type="button"
                     className="underline-offset-2 hover:underline"
-                    onClick={() => onReloadRoutes()}
+                    onClick={() => onReloadModels()}
                   >
                     刷新列表
                   </button>
@@ -241,19 +230,16 @@ export function EmbeddingConfigFields({
   );
 }
 
-export function useEmbeddingRoutes() {
-  const [routes, setRoutes] = useState<EmbeddingRoute[]>([]);
+export function useEmbeddingModels() {
+  const [models, setModels] = useState<ChatModelOption[]>([]);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api<{ routes: EmbeddingRoute[] }>(
-        "/api/model-routes?capability=embedding",
-      );
-      setRoutes(res.routes ?? []);
+      setModels(await listModelsByCapability("embedding"));
     } catch {
-      setRoutes([]);
+      setModels([]);
     } finally {
       setLoading(false);
     }
@@ -263,22 +249,46 @@ export function useEmbeddingRoutes() {
     void load();
   }, [load]);
 
-  return { routes, loading, reload: load };
+  return { models, loading, reload: load };
+}
+
+/** @deprecated 使用 useEmbeddingModels */
+export function useEmbeddingRoutes() {
+  const { models, loading, reload } = useEmbeddingModels();
+  const routes = useMemo<EmbeddingRoute[]>(
+    () =>
+      models.flatMap((m) =>
+        m.providers.map((p) => ({
+          id: p.id,
+          name: m.name,
+          slug: m.alias,
+          model: m.alias,
+          isDefault: Boolean(m.isDefault && (!m.defaultRouteId || m.defaultRouteId === p.id)),
+          upstream: { name: p.name },
+        })),
+      ),
+    [models],
+  );
+  return { routes, loading, reload };
 }
 
 export function validateEmbeddingForm(
   value: EmbeddingFormValue,
-  routes: EmbeddingRoute[],
+  models: ChatModelOption[],
 ): string | null {
   if (!value.enabled) return null;
-  if (routes.length === 0) {
+  if (models.length === 0) {
     return "暂无 embedding 模型，请先在上游配置并同步向量模型";
   }
-  if (value.routeId === DEFAULT_ROUTE) return null;
-  if (!value.routeId || !routes.some((r) => r.id === value.routeId)) {
+  if (!value.model) return "请选择 embedding 模型";
+  if (!models.some((m) => m.alias === value.model)) {
+    return "请选择已有的 embedding 模型";
+  }
+  if (value.routeId && !models.some((m) => m.providers.some((p) => p.id === value.routeId))) {
     return "请选择已有的 embedding 模型";
   }
   return null;
 }
 
-export { DEFAULT_ROUTE };
+/** @deprecated 已移除哨兵值 */
+export const DEFAULT_ROUTE = "";

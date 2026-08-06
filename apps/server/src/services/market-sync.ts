@@ -106,7 +106,8 @@ export class MarketSyncService {
     const repos = await this.skills.listRepos();
     for (const repo of repos) {
       if (!repo.skillCount) continue;
-      // 不把 SKILL.md 正文写入索引；仅名称描述
+      // 不把 SKILL.md 正文写入索引；仅名称描述。
+      // tenantId 用平台哨兵：只读商店目录、不写 skills 表（syncBuiltins 会跳过）。
       const page = await this.skills.search("__platform__", {
         query: "",
         store: "curated",

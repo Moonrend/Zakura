@@ -81,7 +81,6 @@ export class RouteResolver {
         eq(upstreamModels.tenantId, tenantId),
         eq(upstreamModels.capability, capability),
         eq(upstreamModels.isDefault, true),
-        eq(upstreamModels.enabled, true),
       ),
     });
     if (um) return um.canonicalModel;
@@ -112,7 +111,6 @@ export class RouteResolver {
         optionsJson: upstreamModels.optionsJson,
         metaJson: upstreamModels.metaJson,
         isDefault: upstreamModels.isDefault,
-        enabled: upstreamModels.enabled,
         upstreamId: modelUpstreams.id,
         protocol: modelUpstreams.protocol,
         configJson: modelUpstreams.configJson,
@@ -123,7 +121,6 @@ export class RouteResolver {
         and(
           eq(upstreamModels.tenantId, tenantId),
           eq(upstreamModels.capability, capability),
-          eq(upstreamModels.enabled, true),
         ),
       )
       .orderBy(asc(upstreamModels.createdAt));
@@ -175,7 +172,6 @@ export class RouteResolver {
         weight: upstreamModels.weight,
         optionsJson: upstreamModels.optionsJson,
         metaJson: upstreamModels.metaJson,
-        enabled: upstreamModels.enabled,
         upstreamId: modelUpstreams.id,
         protocol: modelUpstreams.protocol,
         configJson: modelUpstreams.configJson,
@@ -191,7 +187,7 @@ export class RouteResolver {
       )
       .limit(1);
     const row = rows[0];
-    if (!row || !row.enabled) return null;
+    if (!row) return null;
     return rowToResolvedRoute({
       routeId: row.id,
       routeSlug: row.canonicalModel,

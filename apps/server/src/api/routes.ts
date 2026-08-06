@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { generateApiKey, globalRegistry, decryptJson, encryptJson } from "@zakura/core";
 import type { AppConfig } from "../config.js";
@@ -71,6 +71,10 @@ import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
 import { platformEvents } from "../services/platform-events.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
+import { EmailInboundService } from "../services/email-inbound.js";
+import { ConnectorAuthService } from "../services/connector-auth.js";
+import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
+import { RemoteChannelRuntime, REMOTE_PLATFORMS } from "../services/remote-channel-runtime.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
@@ -419,8 +423,13 @@ export async function createApiApp(deps: {
   const upstreamOauth = new McpUpstreamOauthService(config);
   const upstreamOauthClients = new UpstreamOauthClientStore(db, config);
   const integrationCatalog = new IntegrationCatalogService(db, config);
+  const connectorAuth = new ConnectorAuthService(db, config);
   const tenantService = new TenantService(db);
   const app = new Hono<{ Variables: AppVariables }>();
+  let emailInbound: EmailInboundService | null = null;
+  let remoteIngress: RemoteAgentIngress | null = null;
+  let remoteRuntime: RemoteChannelRuntime | null = null;
+  let cloudAgentRuntime: CloudAgentRuntime | null = null;
 
   // Request timing: log any /api call > 300ms (or all when ZAKURA_HTTP_TIMING=1)
   app.use("/api/*", async (c, next) => {
@@ -445,6 +454,8 @@ export async function createApiApp(deps: {
       "/api/mcp/upstream-oauth/callback",
       "/api/runtime-nodes/register",
     ]);
+    const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
+    const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
     if (config.edition === "saas") {
       publicPaths.add("/api/auth/register");
       publicPaths.add("/api/auth/oauth/zerocat");
@@ -459,7 +470,13 @@ export async function createApiApp(deps: {
     const isFileSharePublic = /^\/api\/files\/shared\/[^/]+$/.test(path);
 
     // probe/import require auth — intentional
-    if (publicPaths.has(path) || isInvitePublic || isFileSharePublic) {
+    if (
+      publicPaths.has(path) ||
+      isInvitePublic ||
+      isFileSharePublic ||
+      isEmailInbound ||
+      isRemoteWebhook
+    ) {
       // Optional session for invite accept
       if (isInvitePublic) {
         const auth = c.req.header("authorization");
@@ -521,6 +538,59 @@ export async function createApiApp(deps: {
   });
 
   app.get("/api/health", (c) => c.json({ status: "ok", service: "zakura" }));
+
+  const handleEmailInbound = async (c: Context<{ Variables: AppVariables }>) => {
+    if (!emailInbound) return c.json({ error: "邮箱入站服务未启用" }, 503);
+    const tenantId = c.req.param("tenantId");
+    if (!tenantId) return c.json({ error: "tenantId required" }, 400);
+    const supplied = c.req.header("x-email-inbound-secret") ?? "";
+    const rawConnectorId = c.req.param("connectorId")?.trim() || "";
+    // Accept platform connector refs (email-amail) or legacy instance ids.
+    const connectorRef = rawConnectorId
+      ? rawConnectorId.startsWith("email-")
+        ? rawConnectorId
+        : `email-instance-${rawConnectorId}`
+      : undefined;
+    if (!(await emailInbound.verifyWebhookSecret(tenantId, supplied, connectorRef))) {
+      return c.json({ error: "Invalid inbound secret" }, 401);
+    }
+
+    const contentType = c.req.header("content-type") ?? "";
+    let body: Record<string, unknown> = {};
+    if (contentType.includes("application/json")) {
+      body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+    } else {
+      const form = await c.req.parseBody().catch(() => ({}));
+      body = Object.fromEntries(
+        Object.entries(form).map(([key, value]) => [key, Array.isArray(value) ? value[0] : value]),
+      );
+    }
+    const nested =
+      body.data && typeof body.data === "object" && !Array.isArray(body.data)
+        ? (body.data as Record<string, unknown>)
+        : body;
+    const value = (...keys: string[]) =>
+      keys.map((key) => nested[key] ?? body[key]).find((item) => typeof item === "string") as
+        | string
+        | undefined;
+    const accepted = await emailInbound.handleWebhook(
+      tenantId,
+      {
+        id: value("id", "messageId"),
+        receivedAt: value("receivedAt", "date"),
+        from: value("from", "sender"),
+        to: value("to", "recipient"),
+        subject: value("subject"),
+        text: value("text", "body-plain"),
+        html: value("html", "body-html"),
+      },
+      supplied,
+      connectorRef,
+    );
+    return c.json({ ok: true, accepted });
+  };
+  app.post("/api/email/inbound/:tenantId", handleEmailInbound);
+  app.post("/api/email/inbound/:tenantId/:connectorId", handleEmailInbound);
 
   if (platformServices && platformServiceUsage) {
     registerPlatformServiceRoutes(app as never, {
@@ -2424,6 +2494,20 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = new CloudAgentSessionStore(db);
+    remoteIngress = new RemoteAgentIngress(
+      db,
+      agentService,
+      cloudStore,
+      {
+        startTurn: async (input) => {
+          if (!cloudAgentRuntime) {
+            throw new Error("模型路由未启用，请先配置 chat 上游");
+          }
+          return cloudAgentRuntime.startTurn(input);
+        },
+      },
+      config,
+    );
     // 进程重启会丢掉内存中的 agent loop：把 DB 里仍标记运行中的 Run 收尾，
     // 否则这些会话在 UI 上会永远显示「进行中」且无法发送新消息
     void cloudStore
@@ -2435,6 +2519,12 @@ export async function createApiApp(deps: {
     if (modelRouter) {
       const { AgentHooksService } = await import("../services/agent-hooks.js");
       const agentHooks = new AgentHooksService(agentService.workspace);
+      remoteRuntime = new RemoteChannelRuntime(
+        config,
+        connectorAuth,
+        remoteIngress!,
+        cloudStore,
+      );
       const cloudRuntime = new CloudAgentRuntime({
         store: cloudStore,
         gateway,
@@ -2445,7 +2535,19 @@ export async function createApiApp(deps: {
         workspaceFsProvider,
         skills,
         agentHooks,
+        remoteChannels: remoteRuntime.sessions,
       });
+      cloudAgentRuntime = cloudRuntime;
+      void db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .then((rows) => Promise.all(rows.map((row) => remoteRuntime?.startTenant(row.id))))
+        .catch((error) => {
+          console.warn(
+            "[remote-agent] failed to start persisted bindings:",
+            error instanceof Error ? error.message : error,
+          );
+        });
       // MCP 客户端可经 re_spawn_subagent 在云端运行子代理
       gateway.setSubagentRunner({
         run: (tenantId, agent, args, opts) =>
@@ -2457,7 +2559,17 @@ export async function createApiApp(deps: {
         runtime: cloudRuntime,
         modelRouter,
       });
-    } else {
+      emailInbound = new EmailInboundService(
+        db,
+        integrationCatalog,
+        agentService,
+        cloudStore,
+        cloudRuntime,
+        remoteIngress!,
+      );
+      emailInbound.start();
+    }
+    if (!modelRouter) {
       // 无模型路由：注册只读会话 API，发消息时返回明确错误
       registerCloudAgentRoutes(app, {
         agentService,
@@ -2471,6 +2583,244 @@ export async function createApiApp(deps: {
       });
     }
   }
+
+  function remoteBindingView(binding: Awaited<ReturnType<RemoteAgentIngress["getBinding"]>>) {
+    return remoteIngress ? remoteIngress.toBindingView(binding) : null;
+  }
+
+  app.get("/api/email-connectors", async (c) => {
+    const session = c.get("session")!;
+    return c.json({ connectors: await integrationCatalog.emailInstances.list(session.tenantId) });
+  });
+
+  app.post("/api/email-connectors", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    try {
+      const body = await c.req.json<{
+        name?: string;
+        product?: string;
+        config?: Record<string, unknown>;
+        enabled?: boolean;
+      }>();
+      const connector = await integrationCatalog.emailInstances.create(session.tenantId, body);
+      return c.json({ connector }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.patch("/api/email-connectors/:id", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    try {
+      const body = await c.req.json<{
+        name?: string;
+        config?: Record<string, unknown>;
+        enabled?: boolean;
+      }>();
+      const connector = await integrationCatalog.emailInstances.update(
+        session.tenantId,
+        c.req.param("id"),
+        body,
+      );
+      return c.json({ connector });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/email-connectors/:id", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    const id = c.req.param("id");
+    const removed = await integrationCatalog.emailInstances.remove(session.tenantId, id);
+    if (!removed) return c.json({ error: "邮箱连接不存在" }, 404);
+    if (remoteIngress) {
+      const binding = (
+        await remoteIngress.listBindings(session.tenantId, "email")
+      ).find((item) => item.profileKey === `email-instance-${id}`);
+      if (binding) await remoteIngress.deleteBinding(session.tenantId, binding.id);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/remote-channels", async (c) => {
+    const session = c.get("session")!;
+    const platform = c.req.query("platform")?.trim() || undefined;
+    const bindings = remoteIngress
+      ? await remoteIngress.listBindings(session.tenantId, platform)
+      : [];
+    return c.json({
+      platforms: REMOTE_PLATFORMS,
+      initialized: Boolean(remoteIngress),
+      webhookBaseUrl: `${config.publicBaseUrl.replace(/\/$/, "")}/api/remote-channels/${session.tenantId}`,
+      emailWebhookUrl: `${config.publicBaseUrl.replace(/\/$/, "")}/api/email/inbound/${session.tenantId}`,
+      bindings: bindings.map((binding) => remoteBindingView(binding)),
+    });
+  });
+
+  app.post("/api/remote-channels", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
+    const body = await c.req.json<{
+      agentId?: string;
+      platform?: string;
+      profileKey?: string;
+      label?: string;
+      enabled?: boolean;
+      settings?: Record<string, unknown>;
+      credentials?: Record<string, unknown>;
+      credentialsEnabled?: boolean;
+    }>();
+    if (!body.agentId || !body.platform) {
+      return c.json({ error: "agentId、platform 必填" }, 400);
+    }
+    if (!(REMOTE_PLATFORMS as readonly string[]).includes(body.platform)) {
+      return c.json({ error: "不支持的远程平台" }, 400);
+    }
+    try {
+      const binding = await remoteIngress.saveBinding(session.tenantId, {
+        agentId: body.agentId,
+        platform: body.platform,
+        profileKey: body.profileKey ?? `remote-${body.platform}`,
+        label: body.label,
+        enabled: body.enabled,
+        settings: body.settings,
+        credentials: body.credentials,
+        credentialsEnabled: body.credentialsEnabled,
+      });
+      if (binding.enabled) await remoteRuntime?.startBinding(session.tenantId, binding.id);
+      return c.json({ binding: remoteBindingView(binding) }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.patch("/api/remote-channels/:id", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
+    const body = await c.req.json<{
+      agentId?: string;
+      platform?: string;
+      profileKey?: string;
+      label?: string;
+      enabled?: boolean;
+      settings?: Record<string, unknown>;
+      credentials?: Record<string, unknown>;
+      credentialsEnabled?: boolean;
+    }>();
+    const current = await remoteIngress.getBinding(session.tenantId, c.req.param("id"));
+    if (!current) return c.json({ error: "远程连接不存在" }, 404);
+    try {
+      if (body.platform && !(REMOTE_PLATFORMS as readonly string[]).includes(body.platform)) {
+        return c.json({ error: "不支持的远程平台" }, 400);
+      }
+      let settings = body.settings;
+      if (settings === undefined) {
+        try {
+          settings = JSON.parse(current.settingsJson) as Record<string, unknown>;
+        } catch {
+          settings = {};
+        }
+      }
+      const binding = await remoteIngress.saveBinding(session.tenantId, {
+        id: current.id,
+        agentId: body.agentId ?? current.agentId,
+        platform: body.platform ?? current.platform,
+        profileKey: body.profileKey ?? current.profileKey,
+        label: body.label ?? current.label,
+        enabled: body.enabled ?? current.enabled,
+        settings,
+        credentials: body.credentials,
+        credentialsEnabled: body.credentialsEnabled,
+      });
+      await remoteRuntime?.invalidate(current.id);
+      if (binding.enabled) await remoteRuntime?.startBinding(session.tenantId, binding.id);
+      return c.json({ binding: remoteBindingView(binding) });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/remote-channels/:id", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
+    const id = c.req.param("id");
+    await remoteRuntime?.invalidate(id);
+    return c.json({ ok: await remoteIngress.deleteBinding(session.tenantId, id) });
+  });
+
+  app.post("/api/remote-channels/:id/access/approve", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
+    const body = await c.req.json<{ userKey?: string }>();
+    if (!body.userKey?.trim()) return c.json({ error: "userKey 必填" }, 400);
+    try {
+      const result = await remoteIngress.approveUser(
+        session.tenantId,
+        c.req.param("id"),
+        body.userKey,
+      );
+      const binding = await remoteIngress.getBinding(session.tenantId, c.req.param("id"));
+      return c.json({ ok: result.ok, binding: remoteBindingView(binding), settings: result.settings });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/remote-channels/:id/access/deny", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageMcpOauthApps(session, config, "tenant")) {
+      return c.json({ error: "需要租户管理员权限" }, 403);
+    }
+    if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
+    const body = await c.req.json<{ userKey?: string }>();
+    if (!body.userKey?.trim()) return c.json({ error: "userKey 必填" }, 400);
+    try {
+      const result = await remoteIngress.denyUser(
+        session.tenantId,
+        c.req.param("id"),
+        body.userKey,
+      );
+      const binding = await remoteIngress.getBinding(session.tenantId, c.req.param("id"));
+      return c.json({ ok: result.ok, binding: remoteBindingView(binding), settings: result.settings });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.all("/api/remote-channels/:tenantId/:bindingId/webhook", async (c) => {
+    if (!remoteRuntime) return c.json({ error: "远程 Agent 通路未启用" }, 503);
+    try {
+      return await remoteRuntime.handleWebhook(
+        c.req.param("tenantId"),
+        c.req.param("bindingId"),
+        c.req.raw,
+      );
+    } catch (err) {
+      console.warn("[remote-agent] webhook failed:", err);
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
 
   registerTenantRoutes(app, {
     db,
@@ -4245,6 +4595,38 @@ export async function createApiApp(deps: {
         c.req.param("id"),
         body,
       );
+      // Email inbound is configured on platform connectors (Amail/Bettermail/…),
+      // not on Agent Chat SDK platforms. Bind only the connector just saved.
+      if (scope === "tenant" && connector?.ref.startsWith("email-") && remoteIngress) {
+        const target = (await integrationCatalog.listDirectConnectorTargets(session.tenantId)).find(
+          (item) => item.connectorRef === connector.ref,
+        );
+        const targetSettings = target?.credentials?.settings ?? {};
+        const inboundAgentId =
+          typeof targetSettings.inboundAgentId === "string"
+            ? targetSettings.inboundAgentId.trim()
+            : "";
+        const inboundEnabled =
+          targetSettings.inboundEnabled === true ||
+          String(targetSettings.inboundEnabled ?? "").toLowerCase() === "true";
+        if (target && inboundAgentId && inboundEnabled) {
+          await remoteIngress.ensureBinding(session.tenantId, {
+            agentId: inboundAgentId,
+            platform: "email",
+            profileKey:
+              typeof (target.auth as { profile?: unknown }).profile === "string"
+                ? (target.auth as { profile: string }).profile
+                : connector.ref,
+            label: connector.name || "邮箱 Agent",
+            settings: {
+              allowedEmails: String(targetSettings.allowedEmails ?? "")
+                .split(/[\s,;\n]+/)
+                .map((item) => item.trim())
+                .filter(Boolean),
+            },
+          });
+        }
+      }
       return c.json({ connector, scope });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

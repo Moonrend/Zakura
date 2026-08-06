@@ -195,12 +195,13 @@ export async function fetchAgentProgress(id: string) {
 }
 
 export const AGENT_SUBNAV = [
-  { href: "general", label: "设置" },
+  { href: "overview", label: "概况" },
+  { href: "settings", label: "设置" },
   { href: "computer", label: "电脑" },
   { href: "web", label: "网页" },
   { href: "memory", label: "记忆" },
   { href: "skills", label: "技能" },
   { href: "mcp", label: "MCP" },
-  { href: "connect", label: "接入" },
+  { href: "platforms", label: "消息平台" },
   { href: "tool-calls", label: "调用记录" },
 ] as const;

@@ -941,12 +941,16 @@ export async function searchCloudSessions(q: string, agentId?: string) {
   });
 }
 
+export type ModelCapabilityFilter = "chat" | "embedding" | "rerank" | "image";
+
 export type ChatModelOption = {
   alias: string;
   name: string;
   providers: Array<{ id: string; name: string }>;
   upstream?: string;
   isDefault?: boolean;
+  /** 设为默认的具体上游部署 id（自动路由时为 undefined） */
+  defaultRouteId?: string;
   reasoning?: boolean;
   reasoningLevels?: string[];
   defaultReasonLevel?: string;
@@ -968,15 +972,16 @@ function intersectStringSets(values: string[][]): string[] | undefined {
   return [...acc].map((v) => display.get(v) ?? v);
 }
 
-/** 可用 chat 模型（模型路由 alias 去重） */
-export async function listChatModels(): Promise<ChatModelOption[]> {
+/** 按能力列出可用模型（alias 去重，多上游聚合为 providers） */
+export async function listModelsByCapability(
+  capability: ModelCapabilityFilter = "chat",
+): Promise<ChatModelOption[]> {
   try {
     const res = await api<{
       routes: Array<{
         alias?: string;
         id?: string;
         name?: string;
-        enabled?: boolean;
         isDefault?: boolean;
         meta?: {
           reasoning?: boolean;
@@ -986,7 +991,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
         };
         upstream?: { id?: string; name?: string } | null;
       }>;
-    }>(`/api/model-routes?capability=chat`);
+    }>(`/api/model-routes?capability=${encodeURIComponent(capability)}`);
     const byAlias = new Map<
       string,
       {
@@ -995,6 +1000,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
         upstreams: string[];
         providers: Array<{ id: string; name: string }>;
         isDefault: boolean;
+        defaultRouteId?: string;
         reasoningFlags: boolean[];
         levels: string[][];
         defaultReasonLevel?: string;
@@ -1003,7 +1009,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
     >();
     for (const r of res.routes ?? []) {
       const alias = r.alias?.trim();
-      if (!alias || r.enabled === false) continue;
+      if (!alias) continue;
       const entry =
         byAlias.get(alias) ??
         {
@@ -1020,10 +1026,14 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
       if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
         entry.upstreams.push(r.upstream.name);
       }
-      if (r.id && r.upstream?.name && !entry.providers.some((p) => p.id === r.id)) {
-        entry.providers.push({ id: r.id, name: r.upstream.name });
+      const providerName = r.upstream?.name || r.name || alias;
+      if (r.id && !entry.providers.some((p) => p.id === r.id)) {
+        entry.providers.push({ id: r.id, name: providerName });
       }
-      if (r.isDefault) entry.isDefault = true;
+      if (r.isDefault) {
+        entry.isDefault = true;
+        if (r.id) entry.defaultRouteId = r.id;
+      }
       if (typeof r.meta?.reasoning === "boolean") {
         entry.reasoningFlags.push(r.meta.reasoning);
       }
@@ -1040,12 +1050,21 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
     }
     return [...byAlias.values()].map((entry) => {
       const reasoningLevels = intersectStringSets(entry.levels);
+      // 仅一个部署被标默认、且同 alias 还有其它部署时，视为锁定该上游；
+      // 若只有一个部署或未区分，defaultRouteId 留空表示自动。
+      const defaultRouteId =
+        entry.isDefault &&
+        entry.defaultRouteId &&
+        entry.providers.length > 1
+          ? entry.defaultRouteId
+          : undefined;
       return {
         alias: entry.alias,
         name: entry.name,
         providers: entry.providers,
         upstream: entry.upstreams.join(", ") || undefined,
         isDefault: entry.isDefault,
+        defaultRouteId,
         reasoning:
           entry.reasoningFlags.length > 0
             ? entry.reasoningFlags.every(Boolean)
@@ -1060,6 +1079,11 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
   } catch {
     return [];
   }
+}
+
+/** 可用 chat 模型（模型路由 alias 去重） */
+export async function listChatModels(): Promise<ChatModelOption[]> {
+  return listModelsByCapability("chat");
 }
 
 export async function getCloudConfig(agentId: string) {

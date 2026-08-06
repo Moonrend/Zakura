@@ -22,6 +22,8 @@ import { createFeishuProvider, injectFeishuRuntime } from "./feishu/index.js";
 import { createDiscordProvider, injectDiscordRuntime } from "./discord/index.js";
 import { createGitlabProvider, injectGitlabRuntime } from "./gitlab/index.js";
 import { createJiraProvider, injectJiraRuntime } from "./jira/index.js";
+import { createEmailProvider } from "./email/index.js";
+import { createRemoteAgentProvider } from "./remote-agent.js";
 
 export function registerBuiltinProviders(): void {
   const providers = [
@@ -40,6 +42,8 @@ export function registerBuiltinProviders(): void {
     createDiscordProvider,
     createGitlabProvider,
     createJiraProvider,
+    createEmailProvider,
+      createRemoteAgentProvider,
   ];
   for (const factory of providers) {
     const id = factory().id;
@@ -93,4 +97,6 @@ export {
   injectGitlabRuntime,
   createJiraProvider,
   injectJiraRuntime,
+  createEmailProvider,
+  createRemoteAgentProvider,
 };

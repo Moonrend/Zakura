@@ -82,8 +82,12 @@ export default function ConnectorsHub() {
   }, [load]);
 
   const bySlug = useMemo(() => {
-    const map = new Map<string, ConnectorRow>();
-    for (const c of connectors) map.set(c.package.slug, c);
+    const map = new Map<string, ConnectorRow[]>();
+    for (const c of connectors) {
+      const current = map.get(c.package.slug) ?? [];
+      current.push(c);
+      map.set(c.package.slug, current);
+    }
     return map;
   }, [connectors]);
 
@@ -97,15 +101,29 @@ export default function ConnectorsHub() {
         )
       : packages;
     return searched.filter((pkg) => {
-      const connector = bySlug.get(pkg.slug);
-      return view === "all" || (view === "configured" ? isConfigured(connector) : !isConfigured(connector));
+      if (pkg.slug === "agent-remote") return false;
+      const packageConnectors = bySlug.get(pkg.slug) ?? [];
+      return (
+        view === "all" ||
+        (view === "configured"
+          ? packageConnectors.some((connector) => isConfigured(connector))
+          : !packageConnectors.some((connector) => isConfigured(connector)))
+      );
     });
   }, [packages, q, view, bySlug]);
 
   const selectedSlug = searchParams.get("connector");
-  const selected = selectedSlug ? bySlug.get(selectedSlug) ?? null : null;
+  const selected = selectedSlug ? bySlug.get(selectedSlug) ?? [] : [];
+
+  useEffect(() => {
+    if (selectedSlug === "agent-remote") router.replace("/dashboard/agents");
+  }, [router, selectedSlug]);
 
   function openConnector(slug: string) {
+    if (slug === "agent-remote") {
+      router.push("/dashboard/agents");
+      return;
+    }
     router.push(`/dashboard/connectors?connector=${encodeURIComponent(slug)}`, { scroll: false });
   }
 
@@ -114,11 +132,14 @@ export default function ConnectorsHub() {
   }
 
   const counts = useMemo(() => {
-    const configured = packages.filter((pkg) => isConfigured(bySlug.get(pkg.slug))).length;
+    const visible = packages.filter((pkg) => pkg.slug !== "agent-remote");
+    const configured = visible.filter((pkg) =>
+      (bySlug.get(pkg.slug) ?? []).some((connector) => isConfigured(connector)),
+    ).length;
     return {
-      all: packages.length,
+      all: visible.length,
       configured,
-      unconfigured: packages.length - configured,
+      unconfigured: visible.length - configured,
     };
   }, [packages, bySlug]);
 
@@ -170,12 +191,13 @@ export default function ConnectorsHub() {
               <Skeleton key={i} className="h-20 rounded-none" />
             ))
           : visiblePackages.map((pkg) => {
-              const connector = bySlug.get(pkg.slug);
+              const packageConnectors = bySlug.get(pkg.slug) ?? [];
+              const connector = packageConnectors.find((item) => item.ready) ?? packageConnectors[0];
               const toolCount = pkg.componentCounts?.tool ?? 0;
               const skillCount = pkg.componentCounts?.skill ?? 0;
-              const installedTools = connector?.capabilities.filter(
+              const installedTools = packageConnectors.flatMap((item) => item.capabilities).filter(
                 (capability) => capability.kind === "tool" && capability.installed,
-              ).length ?? 0;
+              ).length;
               return (
                 <button
                   key={pkg.slug}
@@ -229,9 +251,9 @@ export default function ConnectorsHub() {
       ) : null}
 
       <ConnectorConfigSheet
-        connector={selected}
+        connectors={selected}
         redirectUri={redirectUri}
-        open={!!selected}
+        open={selected.length > 0}
         onOpenChange={closeConnector}
         onChanged={() => void load()}
       />

@@ -7,7 +7,7 @@ export default function AgentIndexRedirect() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   useEffect(() => {
-    router.replace(`/dashboard/agents/${params.id}/general`);
+    router.replace(`/dashboard/agents/${params.id}/overview`);
   }, [params.id, router]);
   return null;
 }

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  ArrowLeft,
   Bot,
   Brain,
   Cable,
@@ -13,6 +14,7 @@ import {
   Cpu,
   Globe,
   KeyRound,
+  LayoutDashboard,
   LogOut,
   MessageSquare,
   Monitor,
@@ -32,7 +34,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
-import { AGENT_SUBNAV } from "@/lib/agents";
+import { AGENT_SUBNAV, fetchAgents, type AgentListItem } from "@/lib/agents";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
   Sidebar,
@@ -48,7 +50,6 @@ import {
   SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
-  SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
 import {
@@ -68,6 +69,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { BrandMark } from "@/components/brand-mark";
+import { Skeleton } from "@/components/ui/skeleton";
 
 type IconComp = React.ComponentType<{ className?: string }>;
 
@@ -88,13 +90,14 @@ type NavEntry = {
 };
 
 const AGENT_ICONS: Record<string, IconComp> = {
-  general: Settings2,
+  overview: LayoutDashboard,
+  settings: Settings2,
   computer: Monitor,
   web: Globe,
   memory: Brain,
   skills: Sparkles,
   mcp: Cable,
-  connect: Plug,
+  platforms: MessageSquare,
   "tool-calls": Wrench,
 };
 
@@ -146,7 +149,7 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
   const children: SubNavItem[] = [
     {
       href: "/dashboard/runners",
-      label: "Runners",
+      label: "设备",
       icon: HardDrive,
     },
     {
@@ -220,7 +223,7 @@ function NavFlyout({
           <DropdownMenuLabel>{entry.label}</DropdownMenuLabel>
           <DropdownMenuItem render={<Link href={entry.href} />}>
             <Icon />
-            <span>{entry.label === "Agents" ? "全部 Agents" : "概览"}</span>
+            <span>概览</span>
           </DropdownMenuItem>
         </DropdownMenuGroup>
         {children.length > 0 ? <DropdownMenuSeparator /> : null}
@@ -347,18 +350,38 @@ const ExpandableNavItem = memo(function ExpandableNavItem({
   );
 });
 
-export function AppSidebar({
+function SidebarUserFooter() {
+  const router = useRouter();
+
+  return (
+    <SidebarFooter className="border-t border-sidebar-border">
+      <div className="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
+        <ThemeToggle />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="flex-1 justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
+          onClick={() => {
+            setSession(null);
+            router.replace("/login");
+          }}
+        >
+          <LogOut />
+          <span className="group-data-[collapsible=icon]:hidden">退出</span>
+        </Button>
+      </div>
+    </SidebarFooter>
+  );
+}
+
+function TenantHeader({
   tenant,
-  multiTenant = false,
-  isPlatformAdmin = false,
+  multiTenant,
 }: {
   tenant: string;
-  multiTenant?: boolean;
-  isPlatformAdmin?: boolean;
+  multiTenant: boolean;
 }) {
-  const pathname = usePathname();
   const router = useRouter();
-  const agentId = parseAgentId(pathname);
   const [tenantList, setTenantList] = useState<
     Array<{ tenant: { id: string; name: string }; role: string }>
   >([]);
@@ -395,41 +418,239 @@ export function AppSidebar({
     }
   }
 
-  const agentChildren = useMemo<SubNavItem[]>(() => {
-    if (!agentId) return [];
-    return AGENT_SUBNAV.map((item) => ({
-      href: `/dashboard/agents/${agentId}/${item.href}`,
-      label: item.label,
-      icon: AGENT_ICONS[item.href] ?? Settings2,
-      isActive: (path: string) =>
-        path === `/dashboard/agents/${agentId}/${item.href}` ||
-        path.endsWith(`/${item.href}`),
-    }));
+  return (
+    <div className="min-w-0 px-1 group-data-[collapsible=icon]:px-0">
+      <BrandMark
+        className="group-data-[collapsible=icon]:justify-center"
+        iconClassName="size-6"
+      />
+      {multiTenant ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-muted-foreground hover:text-foreground group-data-[collapsible=icon]:hidden">
+            <span className="truncate">{tenant || "—"}</span>
+            <ChevronRight className="size-3 shrink-0 rotate-90 opacity-60" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>切换团队</DropdownMenuLabel>
+              {tenantList.map((item) => (
+                <DropdownMenuItem
+                  key={item.tenant.id}
+                  onClick={() => void switchTenant(item.tenant.id)}
+                >
+                  <span className="truncate">{item.tenant.name}</span>
+                  {item.tenant.id === currentTenantId ? (
+                    <span className="ml-auto text-[10px] text-muted-foreground">当前</span>
+                  ) : null}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => router.push("/dashboard/settings/teams")}>
+              管理团队…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : (
+        <div className="truncate text-[11px] text-muted-foreground group-data-[collapsible=icon]:hidden">
+          {tenant || "—"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Agent 配置独立侧边栏：顶栏返回 + 配置子导航 */
+function AgentConfigSidebar({
+  agentId,
+  pathname,
+}: {
+  agentId: string;
+  pathname: string;
+}) {
+  const router = useRouter();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const [agents, setAgents] = useState<AgentListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const rows = await fetchAgents();
+        if (!cancelled) setAgents(rows);
+      } catch {
+        if (!cancelled) setAgents([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [agentId]);
 
-  const showPlatformServices = !multiTenant || isPlatformAdmin;
+  const current = agents.find((a) => a.id === agentId);
+  const activeSeg =
+    AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "overview";
 
-  const agentNav = useMemo<NavEntry>(
-    () => ({
-      id: "agents",
-      href: "/dashboard/agents",
-      label: "Agents",
-      icon: Bot,
-      isActive: (path) =>
-        path === "/dashboard/agents" || path.startsWith("/dashboard/agents/"),
-      children: agentChildren,
-    }),
-    [agentChildren],
+  const navItems = useMemo(
+    () =>
+      AGENT_SUBNAV.map((item) => ({
+        href: `/dashboard/agents/${agentId}/${item.href}`,
+        label: item.label,
+        icon: AGENT_ICONS[item.href] ?? Settings2,
+        seg: item.href,
+      })),
+    [agentId],
   );
+
+  function closeMobile() {
+    if (isMobile) setOpenMobile(false);
+  }
+
+  return (
+    <>
+      <SidebarHeader className="gap-2 border-b border-sidebar-border px-3 py-3">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="返回 Agents"
+              render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+            >
+              <ArrowLeft />
+              <span>返回</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+
+        <div className="min-w-0 px-1 group-data-[collapsible=icon]:hidden">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Agent 配置
+          </div>
+          {loading && !current ? (
+            <Skeleton className="mt-1 h-5 w-28" />
+          ) : agents.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-sm font-medium hover:text-foreground">
+                <Bot className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{current?.name ?? "Agent"}</span>
+                <ChevronRight className="size-3 shrink-0 rotate-90 opacity-60" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>切换 Agent</DropdownMenuLabel>
+                  {agents.map((a) => (
+                    <DropdownMenuItem
+                      key={a.id}
+                      onClick={() => {
+                        router.push(`/dashboard/agents/${a.id}/${activeSeg}`);
+                        closeMobile();
+                      }}
+                    >
+                      <span className="truncate">{a.name}</span>
+                      {a.id === agentId ? (
+                        <span className="ml-auto text-[10px] text-muted-foreground">当前</span>
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+                >
+                  全部 Agents…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium">
+              <Bot className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{current?.name ?? "Agent"}</span>
+            </div>
+          )}
+        </div>
+      </SidebarHeader>
+
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupLabel>配置</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const active =
+                  pathname === item.href || pathname.endsWith(`/${item.seg}`);
+                return (
+                  <SidebarMenuItem key={item.seg}>
+                    <SidebarMenuButton
+                      isActive={active}
+                      tooltip={item.label}
+                      render={<Link href={item.href} onClick={closeMobile} />}
+                    >
+                      <Icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+
+      <SidebarUserFooter />
+    </>
+  );
+}
+
+function PlatformSidebar({
+  tenant,
+  multiTenant,
+  isPlatformAdmin,
+  pathname,
+}: {
+  tenant: string;
+  multiTenant: boolean;
+  isPlatformAdmin: boolean;
+  pathname: string;
+}) {
+  const showPlatformServices = !multiTenant || isPlatformAdmin;
 
   const platformNav = useMemo<NavEntry[]>(() => {
     const nav: NavEntry[] = [
+      {
+        id: "agents",
+        href: "/dashboard/agents",
+        label: "Agents",
+        icon: Bot,
+        isActive: (path) =>
+          path === "/dashboard/agents" || path.startsWith("/dashboard/agents/"),
+      },
       {
         id: "chat",
         href: "/chat",
         label: "聊天",
         icon: MessageSquare,
         isActive: (path) => path === "/chat" || path.startsWith("/chat/"),
+      },
+      {
+        id: "connectors",
+        href: "/dashboard/connectors",
+        label: "连接器",
+        icon: Plug,
+        isActive: (path) =>
+          path === "/dashboard/connectors" ||
+          path.startsWith("/dashboard/connectors/"),
+      },
+      {
+        id: "skills",
+        href: "/dashboard/skills",
+        label: "技能",
+        icon: Sparkles,
+        isActive: (path) =>
+          path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
       },
       {
         id: "web",
@@ -452,35 +673,6 @@ export function AppSidebar({
         href: "/dashboard/memory",
         label: "记忆",
         icon: Brain,
-      },
-      {
-        id: "skills",
-        href: "/dashboard/skills",
-        label: "技能",
-        icon: Sparkles,
-        isActive: (path) =>
-          path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
-      },
-      {
-        id: "models",
-        href: "/dashboard/models",
-        label: "模型路由",
-        icon: Cpu,
-        isActive: (path) =>
-          path === "/dashboard/models" || path.startsWith("/dashboard/models/"),
-        children: [
-          {
-            href: "/dashboard/models",
-            label: "模型",
-            icon: Route,
-            isActive: (path) => path === "/dashboard/models",
-          },
-          {
-            href: "/dashboard/models/upstreams",
-            label: "上游",
-            icon: Server,
-          },
-        ],
       },
       {
         id: "mcp",
@@ -510,18 +702,30 @@ export function AppSidebar({
         ],
       },
       {
-        id: "connectors",
-        href: "/dashboard/connectors",
-        label: "平台连接器",
-        icon: Plug,
+        id: "models",
+        href: "/dashboard/models",
+        label: "模型",
+        icon: Cpu,
         isActive: (path) =>
-          path === "/dashboard/connectors" ||
-          path.startsWith("/dashboard/connectors/"),
+          path === "/dashboard/models" || path.startsWith("/dashboard/models/"),
+        children: [
+          {
+            href: "/dashboard/models",
+            label: "模型",
+            icon: Route,
+            isActive: (path) => path === "/dashboard/models",
+          },
+          {
+            href: "/dashboard/models/upstreams",
+            label: "上游",
+            icon: Server,
+          },
+        ],
       },
       {
         id: "tool-calls",
         href: "/dashboard/tool-calls",
-        label: "调用追踪",
+        label: "分析",
         icon: Activity,
       },
       {
@@ -541,6 +745,11 @@ export function AppSidebar({
             label: "Keys",
             icon: KeyRound,
           },
+          {
+            href: "/dashboard/settings/oauth-clients",
+            label: "OAuth 客户端",
+            icon: KeyRound,
+          },
         ],
       },
       {
@@ -554,11 +763,6 @@ export function AppSidebar({
             href: "/dashboard/settings/team",
             label: "团队",
             icon: Building2,
-          },
-          {
-            href: "/dashboard/settings/oauth-clients",
-            label: "OAuth 客户端",
-            icon: KeyRound,
           },
           ...(multiTenant
             ? [
@@ -577,7 +781,7 @@ export function AppSidebar({
       nav.push({
         id: "admin",
         href: "/dashboard/admin",
-        label: "超管",
+        label: "Admin",
         icon: ShieldCheck,
       });
     }
@@ -586,60 +790,12 @@ export function AppSidebar({
   }, [multiTenant, isPlatformAdmin, showPlatformServices]);
 
   return (
-    <Sidebar collapsible="icon" variant="inset">
+    <>
       <SidebarHeader className="gap-1 border-b border-sidebar-border px-3 py-3">
-        <div className="min-w-0 px-1 group-data-[collapsible=icon]:px-0">
-          <BrandMark
-            className="group-data-[collapsible=icon]:justify-center"
-            iconClassName="size-6"
-          />
-          {multiTenant ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-muted-foreground hover:text-foreground group-data-[collapsible=icon]:hidden">
-                <span className="truncate">{tenant || "—"}</span>
-                <ChevronRight className="size-3 shrink-0 rotate-90 opacity-60" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel>切换团队</DropdownMenuLabel>
-                  {tenantList.map((item) => (
-                    <DropdownMenuItem
-                      key={item.tenant.id}
-                      onClick={() => void switchTenant(item.tenant.id)}
-                    >
-                      <span className="truncate">{item.tenant.name}</span>
-                      {item.tenant.id === currentTenantId ? (
-                        <span className="ml-auto text-[10px] text-muted-foreground">当前</span>
-                      ) : null}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => router.push("/dashboard/settings/teams")}>
-                  管理团队…
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <div className="truncate text-[11px] text-muted-foreground group-data-[collapsible=icon]:hidden">
-              {tenant || "—"}
-            </div>
-          )}
-        </div>
+        <TenantHeader tenant={tenant} multiTenant={multiTenant} />
       </SidebarHeader>
 
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Agent</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              <ExpandableNavItem entry={agentNav} pathname={pathname} />
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarSeparator />
-
         <SidebarGroup>
           <SidebarGroupLabel>平台</SidebarGroupLabel>
           <SidebarGroupContent>
@@ -656,23 +812,35 @@ export function AppSidebar({
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-sidebar-border">
-        <div className="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
-          <ThemeToggle />
-          <Button
-            variant="ghost"
-            size="sm"
-            className="flex-1 justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
-            onClick={() => {
-              setSession(null);
-              router.replace("/login");
-            }}
-          >
-            <LogOut />
-            <span className="group-data-[collapsible=icon]:hidden">退出</span>
-          </Button>
-        </div>
-      </SidebarFooter>
+      <SidebarUserFooter />
+    </>
+  );
+}
+
+export function AppSidebar({
+  tenant,
+  multiTenant = false,
+  isPlatformAdmin = false,
+}: {
+  tenant: string;
+  multiTenant?: boolean;
+  isPlatformAdmin?: boolean;
+}) {
+  const pathname = usePathname();
+  const agentId = parseAgentId(pathname);
+
+  return (
+    <Sidebar collapsible="icon" variant="inset">
+      {agentId ? (
+        <AgentConfigSidebar agentId={agentId} pathname={pathname} />
+      ) : (
+        <PlatformSidebar
+          tenant={tenant}
+          multiTenant={multiTenant}
+          isPlatformAdmin={isPlatformAdmin}
+          pathname={pathname}
+        />
+      )}
     </Sidebar>
   );
 }

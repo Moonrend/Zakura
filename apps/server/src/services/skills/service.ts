@@ -79,6 +79,17 @@ export function skillWorkspacePath(name: string): string {
 /** 同一租户多久才重新扫一遍"哪些 Agent 少装了内置技能" */
 const BUILTIN_BACKFILL_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * 平台级目录/配额用的哨兵 ID，不是 tenants 表里的真实行。
+ * market-sync 等会拿它调 skills.search 只为拿商店列表；绝不能往 skills 表写这个 tenant_id
+ * （有 FK → tenants.id，会一直 insert 失败并刷屏）。
+ */
+const PLATFORM_TENANT_SENTINEL = "__platform__";
+
+function isRealTenantId(tenantId: string): boolean {
+  return Boolean(tenantId) && tenantId !== PLATFORM_TENANT_SENTINEL;
+}
+
 /** 自动更新：settings 表里的键（ownerKey = tenantId） */
 const AUTO_UPDATE_KEY = "skills.autoUpdate";
 /** 自动更新一轮最多处理多少个租户，避免大站一次性扫全表 */
@@ -188,6 +199,8 @@ export class SkillsService {
   private readonly tokens: SkillTokenStore;
   /** 已同步过内置技能的租户，避免每次请求重复写库 */
   private readonly builtinSynced = new Set<string>();
+  /** 同一租户并发 syncBuiltins 合并为一次 */
+  private readonly builtinSyncInflight = new Map<string, Promise<void>>();
   /** 上次给全部 Agent 补装内置技能的时间 */
   private readonly builtinBackfilled = new Map<string, number>();
   /** 正在抓取的仓库，防止同一仓库被并发重复拉 */
@@ -231,7 +244,23 @@ export class SkillsService {
    * 一次比较同时覆盖 SKILL.md 与捆绑资源的改动。
    */
   async syncBuiltins(tenantId: string, force = false): Promise<void> {
+    // 平台哨兵不是真实租户：skills.tenant_id 有 FK，写库必失败
+    if (!isRealTenantId(tenantId)) return;
     if (!force && this.builtinSynced.has(tenantId)) return;
+    const inflight = this.builtinSyncInflight.get(tenantId);
+    if (inflight && !force) return inflight;
+
+    const run = this.doSyncBuiltins(tenantId)
+      .finally(() => {
+        if (this.builtinSyncInflight.get(tenantId) === run) {
+          this.builtinSyncInflight.delete(tenantId);
+        }
+      });
+    this.builtinSyncInflight.set(tenantId, run);
+    return run;
+  }
+
+  private async doSyncBuiltins(tenantId: string): Promise<void> {
     try {
       const existing = await this.db
         .select()
@@ -257,6 +286,7 @@ export class SkillsService {
 
   async list(tenantId: string): Promise<SkillRecord[]> {
     await this.syncBuiltins(tenantId);
+    if (!isRealTenantId(tenantId)) return [];
     const rows = await this.db
       .select()
       .from(skills)
@@ -324,10 +354,10 @@ export class SkillsService {
     pkg: SkillPackage,
     builtin: boolean,
   ): Promise<SkillRow> {
+    if (!isRealTenantId(tenantId)) {
+      throw new Error(`skills.upsert: invalid tenantId ${tenantId}`);
+    }
     const now = new Date();
-    const existing = await this.db.query.skills.findFirst({
-      where: and(eq(skills.tenantId, tenantId), eq(skills.name, pkg.name)),
-    });
     const values = {
       tenantId,
       name: pkg.name,
@@ -343,19 +373,36 @@ export class SkillsService {
       sizeBytes: pkg.sizeBytes,
       // 指回平台缓存，用于「上游有没有新版本」的判断
       repoKey: builtin ? null : repoKeyOf(pkg.source),
-      // 新装第三方默认开启自动更新；更新已有记录时不覆盖用户开关
-      ...(existing ? {} : { autoUpdate: !builtin }),
+      // 新装第三方默认开启自动更新；冲突更新时不覆盖用户开关
+      autoUpdate: !builtin,
       updatedAt: now,
     };
 
-    if (existing) {
-      await this.db.update(skills).set(values).where(eq(skills.id, existing.id));
-      return { ...existing, ...values, createdAt: existing.createdAt };
-    }
-    const id = newId();
-    const row = { id, ...values, createdAt: now };
-    await this.db.insert(skills).values(row);
-    return row as SkillRow;
+    // 原子 upsert：并发 syncBuiltins 时 select-then-insert 会撞 skills_tenant_name
+    const [row] = await this.db
+      .insert(skills)
+      .values({ id: newId(), ...values, createdAt: now })
+      .onConflictDoUpdate({
+        target: [skills.tenantId, skills.name],
+        set: {
+          title: values.title,
+          description: values.description,
+          version: values.version,
+          builtin: values.builtin,
+          sourceJson: values.sourceJson,
+          homepage: values.homepage,
+          license: values.license,
+          filesJson: values.filesJson,
+          fileCount: values.fileCount,
+          sizeBytes: values.sizeBytes,
+          repoKey: values.repoKey,
+          updatedAt: now,
+          // 有意不碰 autoUpdate / createdAt / id
+        },
+      })
+      .returning();
+    if (!row) throw new Error(`skills.upsert failed: ${pkg.name}`);
+    return row;
   }
 
   // —— 解析与预览 ——

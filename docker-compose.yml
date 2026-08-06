@@ -28,8 +28,8 @@ services:
       # 默认内嵌 PGlite；云端改为 postgresql://zakura:zakura@postgres:5432/zakura
       DATABASE_URL: ${DATABASE_URL:-pglite:/data/pglite}
       ZAKURA_DATA_DIR: /data
-      ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://preview.moonrend.com}
-      ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://preview.moonrend.com}
+      ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://zakura-local-api.190823.xyz}
+      ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://zakura-local.190823.xyz}
       HOST: 0.0.0.0
       PORT: 8787
       # 部署形态：oss（默认单租户）| saas（多租户 / 自助注册，镜像内需含 @zakura/saas）

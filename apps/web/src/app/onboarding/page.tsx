@@ -85,10 +85,10 @@ export default function TenantOnboardingPage() {
           upstreams: [] as ModelUpstream[],
           protocols: [] as ProtocolMeta[],
         })),
-        api<{ routes: Array<{ enabled?: boolean; upstream?: ModelUpstream | null }> }>(
+        api<{ routes: Array<{ upstream?: ModelUpstream | null }> }>(
           "/api/model-routes?capability=chat",
         ).catch(() => ({
-          routes: [] as Array<{ enabled?: boolean; upstream?: ModelUpstream | null }>,
+          routes: [] as Array<{ upstream?: ModelUpstream | null }>,
         })),
       ]);
 
@@ -99,7 +99,7 @@ export default function TenantOnboardingPage() {
 
       setAgent(boot.agent);
       setProtocols(upstreams.protocols ?? []);
-      const chatRoute = routes.routes.find((route) => route.enabled !== false);
+      const chatRoute = routes.routes[0];
       setHasChatModel(Boolean(chatRoute));
       setConfiguredUpstream(chatRoute?.upstream ?? null);
     } catch (err) {

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ZakuraEdition } from "@zakura/shared";
 
 const require = createRequire(import.meta.url);
@@ -73,6 +73,14 @@ export function resolveEdition(): ZakuraEdition {
   return "saas";
 }
 
+/** Absolute filesystem paths must be file:// URLs for ESM import() on Windows. */
+function toImportSpecifier(spec: string): string {
+  if (/^[a-zA-Z]:[\\/]/.test(spec) || spec.startsWith("\\\\") || spec.startsWith("/")) {
+    return pathToFileURL(spec).href;
+  }
+  return spec;
+}
+
 /** Dynamic import via indirection so stripped OSS trees still typecheck. */
 export async function loadSaasServer(): Promise<SaasServerModule | null> {
   if (resolveEdition() !== "saas") return null;
@@ -91,7 +99,7 @@ export async function loadSaasServer(): Promise<SaasServerModule | null> {
   let lastErr: unknown;
   for (const spec of candidates) {
     try {
-      return await dynamicImport(spec);
+      return await dynamicImport(toImportSpecifier(spec));
     } catch (err) {
       lastErr = err;
     }

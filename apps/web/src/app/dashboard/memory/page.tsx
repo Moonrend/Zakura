@@ -9,7 +9,7 @@ import {
   embeddingFromConfig,
   embeddingSummary,
   embeddingToConfig,
-  useEmbeddingRoutes,
+  useEmbeddingModels,
   validateEmbeddingForm,
   type EmbeddingFormValue,
 } from "@/components/embedding-config-fields";
@@ -76,7 +76,8 @@ const KIND_ITEMS = [
 
 const EMPTY_EMBEDDING: EmbeddingFormValue = {
   enabled: false,
-  routeId: "__default__",
+  model: "",
+  routeId: null,
 };
 
 export default function GlobalMemoryPage() {
@@ -96,8 +97,8 @@ export default function GlobalMemoryPage() {
   const [headerName, setHeaderName] = useState("Authorization");
   const [busy, setBusy] = useState(false);
 
-  const { routes: embeddingRoutes, loading: routesLoading, reload: reloadRoutes } =
-    useEmbeddingRoutes();
+  const { models: embeddingModels, loading: modelsLoading, reload: reloadModels } =
+    useEmbeddingModels();
 
   const load = useCallback(async () => {
     try {
@@ -133,7 +134,7 @@ export default function GlobalMemoryPage() {
       p?.config.embedding && typeof p.config.embedding === "object"
         ? (p.config.embedding as Record<string, unknown>)
         : {};
-    setEmbedding(embeddingFromConfig(emb, embeddingRoutes));
+    setEmbedding(embeddingFromConfig(emb, embeddingModels));
     setBaseUrl(String(p?.config.baseUrl ?? ""));
     setApiKey(String(p?.config.apiKey ?? ""));
     setHeaderName(String(p?.config.headerName ?? "Authorization"));
@@ -141,10 +142,12 @@ export default function GlobalMemoryPage() {
 
   function openCreate() {
     resetForm(null);
-    if (embeddingRoutes.length > 0) {
+    if (embeddingModels.length > 0) {
+      const preferred = embeddingModels.find((m) => m.isDefault) ?? embeddingModels[0];
       setEmbedding({
         enabled: false,
-        routeId: embeddingRoutes.find((r) => r.isDefault)?.id ?? "__default__",
+        model: preferred?.alias ?? "",
+        routeId: preferred?.defaultRouteId ?? null,
       });
     }
     setOpen(true);
@@ -161,8 +164,8 @@ export default function GlobalMemoryPage() {
       edit.config.embedding && typeof edit.config.embedding === "object"
         ? (edit.config.embedding as Record<string, unknown>)
         : {};
-    setEmbedding(embeddingFromConfig(emb, embeddingRoutes));
-  }, [open, edit, kind, embeddingRoutes]);
+    setEmbedding(embeddingFromConfig(emb, embeddingModels));
+  }, [open, edit, kind, embeddingModels]);
 
   function buildConfig(): Record<string, unknown> {
     if (kind === "builtin") {
@@ -188,7 +191,7 @@ export default function GlobalMemoryPage() {
       return;
     }
     if (kind === "builtin" && embedding.enabled) {
-      const embErr = validateEmbeddingForm(embedding, embeddingRoutes);
+      const embErr = validateEmbeddingForm(embedding, embeddingModels);
       if (embErr) {
         toast.error(embErr);
         return;
@@ -307,7 +310,7 @@ export default function GlobalMemoryPage() {
                   );
                   const meta = kindMeta.get(p.kind);
                   const embLabel =
-                    p.kind === "builtin" ? embeddingSummary(p.config, embeddingRoutes) : null;
+                    p.kind === "builtin" ? embeddingSummary(p.config, embeddingModels) : null;
                   return (
                     <TableRow key={p.id}>
                       <TableCell>
@@ -417,9 +420,9 @@ export default function GlobalMemoryPage() {
               <EmbeddingConfigFields
                 value={embedding}
                 onChange={setEmbedding}
-                routes={embeddingRoutes}
-                routesLoading={routesLoading}
-                onReloadRoutes={() => void reloadRoutes()}
+                models={embeddingModels}
+                modelsLoading={modelsLoading}
+                onReloadModels={() => void reloadModels()}
               />
             )}
             {kind === "traditional" && (

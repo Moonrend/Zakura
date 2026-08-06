@@ -69,6 +69,12 @@ import {
   collectInjectText,
   firstDeny,
 } from "../agent-hooks.js";
+import {
+  callRemoteChannelTool,
+  isRemoteChannelToolName,
+  listRemoteChannelToolDefinitions,
+  remoteChannelPromptBlock,
+} from "../remote-channel-tools.js";
 
 export type SessionCompactionResult = {
   summary: string;
@@ -108,6 +114,8 @@ export type CloudAgentRuntimeDeps = {
   skills?: import("../skills/service.js").SkillsService | null;
   /** Agent hooks（可选；缺省时不触发插件 hooks） */
   agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
+  /** 远程 Chat SDK 通道工具（可选；远程会话注入 chat_* 发帖/回帖工具） */
+  remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
 };
 
 export class CloudAgentRuntime {
@@ -513,9 +521,11 @@ export class CloudAgentRuntime {
     const cloud = {
       ...agentCloudConfig(agent),
       ...(sessionPreferences?.model ? { model: sessionPreferences.model } : {}),
-      ...(sessionPreferences?.model
-        ? { modelRouteId: sessionPreferences.modelRouteId ?? undefined }
-        : {}),
+      ...(sessionPreferences?.modelRouteId
+        ? { modelRouteId: sessionPreferences.modelRouteId }
+        : sessionPreferences?.model
+          ? { modelRouteId: undefined }
+          : {}),
     } satisfies CloudAgentConfig;
     const enableTools = cloud.enableTools !== false;
 
@@ -679,16 +689,25 @@ export class CloudAgentRuntime {
       }
     }
 
-    // —— 工具面：MCP + 原生 + 跨 Agent 委派 ——
+    // —— 工具面：MCP + 原生 + 跨 Agent 委派 + 远程通道 ——
     let definitions: ModelToolDefinition[] = [];
     let nameMap = new Map<string, string>();
     let peerAgents: Agent[] = [];
     let peerAgentsDesc = "";
+    const remoteHandle = this.deps.remoteChannels?.get(sessionId) ?? undefined;
     if (enableTools) {
       const tools = await this.deps.gateway.listToolsForAgent(agent);
       const mapped = toolsToDefinitions(tools);
       definitions = mapped.definitions;
       nameMap = mapped.nameMap;
+
+      if (remoteHandle) {
+        for (const def of listRemoteChannelToolDefinitions(remoteHandle)) {
+          if (definitions.some((d) => d.function.name === def.function.name)) continue;
+          definitions.push(def);
+          nameMap.set(def.function.name, def.function.name);
+        }
+      }
 
       try {
         peerAgents = (await this.deps.agentService.list(tenantId)).filter(
@@ -743,6 +762,7 @@ export class CloudAgentRuntime {
       peerAgents: peerAgentsDesc || undefined,
       subagents: hasSubagent,
       skills: skillsSummary || undefined,
+      remoteChannel: remoteHandle ? remoteChannelPromptBlock(remoteHandle) : undefined,
     });
     const messages: ModelChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -802,8 +822,18 @@ export class CloudAgentRuntime {
       ...(input.options ? { options: input.options } : {}),
       ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
       hooks: {
-        toolTitle: (modelName) =>
-          modelName === DELEGATE_TOOL_NAME ? "委派 Agent" : undefined,
+        toolTitle: (modelName) => {
+          if (modelName === DELEGATE_TOOL_NAME) return "委派 Agent";
+          if (isRemoteChannelToolName(modelName)) {
+            if (modelName === "chat_post_message") return "发帖/回帖";
+            if (modelName === "chat_post_channel_message") return "频道发帖";
+            if (modelName === "chat_send_direct_message") return "发私信";
+            if (modelName === "chat_add_reaction") return "添加反应";
+            if (modelName === "chat_start_typing") return "正在输入";
+            return "远程通道";
+          }
+          return undefined;
+        },
         preResolveCalls: this.spawnSubagentsHook({
           tenantId,
           agent,
@@ -813,7 +843,7 @@ export class CloudAgentRuntime {
           parentRunId: runId,
           isCancelled: () => this.store.isCancelRequested(runId),
         }),
-        // 跨 Agent 委派 + 插件 PreToolUse
+        // 远程通道 / 跨 Agent 委派 + 插件 PreToolUse
         interceptCall: async (call, args) => {
           if (hooksSvc) {
             const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
@@ -834,6 +864,18 @@ export class CloudAgentRuntime {
                 },
               };
             }
+          }
+          if (isRemoteChannelToolName(call.function.name)) {
+            const handle = this.deps.remoteChannels?.get(sessionId);
+            if (!handle) {
+              return {
+                result: {
+                  content: [{ type: "text", text: "远程通道会话未绑定，无法发帖" }],
+                  isError: true,
+                },
+              };
+            }
+            return { result: await callRemoteChannelTool(handle, call.function.name, args) };
           }
           if (call.function.name !== DELEGATE_TOOL_NAME) return undefined;
           const res = await this.delegateToAgent(tenantId, agent, peerAgents, args, {

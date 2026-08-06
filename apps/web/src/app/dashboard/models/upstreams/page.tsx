@@ -111,6 +111,7 @@ export default function ModelUpstreamsPage() {
   const [protocols, setProtocols] = useState<ProtocolMeta[]>(FALLBACK_PROTOCOLS);
   const [open, setOpen] = useState(false);
   const [edit, setEdit] = useState<Upstream | null>(null);
+  const [syncKey, setSyncKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [selectedUpstreams, setSelectedUpstreams] = useState<Set<string>>(new Set());
 
@@ -238,11 +239,29 @@ export default function ModelUpstreamsPage() {
     try {
       const config = buildConfig();
       if (edit) {
-        await api(`/api/model-upstreams/${edit.id}`, {
+        const result = await api<
+          Upstream & {
+            modelCheck?: {
+              status: "healthy" | "empty" | "unhealthy" | "skipped";
+              liveModels: number;
+              removed: number;
+              message?: string;
+            };
+          }
+        >(`/api/model-upstreams/${edit.id}`, {
           method: "PATCH",
           json: { name: name.trim(), config },
         });
         toast.success("上游已更新");
+        setSyncKey((value) => value + 1);
+        const modelCheck = result.modelCheck;
+        if (modelCheck?.status === "unhealthy") {
+          toast.error(`上游检查失败：${modelCheck.message ?? "无法获取模型列表"}`);
+        } else if (modelCheck?.status === "empty") {
+          toast.warning("上游当前没有返回可用模型，旧模型已移除");
+        } else if (modelCheck && modelCheck.removed > 0) {
+          toast.message(modelCheck.message ?? "已移除不再提供的模型");
+        }
         await load();
         const refreshed = await api<Upstream>(`/api/model-upstreams/${edit.id}`);
         resetForm(refreshed);
@@ -586,7 +605,7 @@ export default function ModelUpstreamsPage() {
 
             {edit ? (
               <div className="space-y-3 border-t border-border pt-4">
-                <UpstreamModelSetup upstreamId={edit.id} />
+                <UpstreamModelSetup upstreamId={edit.id} syncKey={syncKey} />
               </div>
             ) : null}
           </div>

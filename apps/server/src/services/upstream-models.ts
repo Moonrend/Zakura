@@ -60,7 +60,6 @@ export function serializeUpstreamModel(
     displayName: row.displayName,
     capability: row.capability as ModelCapability,
     weight: parseWeight(row.weight),
-    enabled: row.enabled,
     isDefault: row.isDefault,
     options: parseRouteOptions(parseJsonRecord(row.optionsJson)),
     meta,
@@ -87,7 +86,6 @@ export type UpstreamModelInput = {
   displayName?: string;
   capability: ModelCapability;
   weight?: number;
-  enabled?: boolean;
   isDefault?: boolean;
   options?: ModelRouteOptions;
   meta?: Record<string, unknown>;
@@ -117,7 +115,7 @@ export class UpstreamModelsService {
 
   async list(
     tenantId: string,
-    opts?: { capability?: ModelCapability; upstreamId?: string; enabledOnly?: boolean },
+    opts?: { capability?: ModelCapability; upstreamId?: string },
   ) {
     const conditions = [eq(upstreamModels.tenantId, tenantId)];
     if (opts?.capability) {
@@ -126,10 +124,6 @@ export class UpstreamModelsService {
     if (opts?.upstreamId) {
       conditions.push(eq(upstreamModels.upstreamId, opts.upstreamId));
     }
-    if (opts?.enabledOnly) {
-      conditions.push(eq(upstreamModels.enabled, true));
-    }
-
     const rows = await this.db
       .select({
         model: upstreamModels,
@@ -246,7 +240,6 @@ export class UpstreamModelsService {
         displayName: input.displayName?.trim() || resolved.displayName,
         capability,
         weight: String(input.weight && input.weight > 0 ? Math.floor(input.weight) : 100),
-        enabled: input.enabled !== false,
         isDefault: input.isDefault === true,
         optionsJson: JSON.stringify(input.options ?? {}),
         metaJson: JSON.stringify(input.meta ?? resolved.meta ?? {}),
@@ -275,7 +268,6 @@ export class UpstreamModelsService {
       canonicalModel?: string;
       displayName?: string | null;
       weight?: number;
-      enabled?: boolean;
       isDefault?: boolean;
       capability?: ModelCapability;
       options?: ModelRouteOptions;
@@ -331,7 +323,6 @@ export class UpstreamModelsService {
           patch.weight != null && patch.weight > 0
             ? String(Math.floor(patch.weight))
             : existing.weight,
-        enabled: patch.enabled ?? existing.enabled,
         isDefault,
         optionsJson:
           patch.options != null
@@ -400,6 +391,90 @@ export class UpstreamModelsService {
   }
 
   /**
+   * 保存上游配置后，只校验并回收已不存在的模型，不自动新增模型。
+   * 模型存在即表示可用；网络错误不会误删已有模型。
+   */
+  async reconcileAfterUpstreamSave(tenantId: string, upstreamId: string) {
+    const upstream = await this.upstreams.getRow(tenantId, upstreamId);
+    if (!upstream) throw new Error("上游不存在");
+
+    // Anthropic 没有官方模型列表接口，手填模型必须保留。
+    if (upstream.protocol === "anthropic") {
+      return {
+        status: "skipped" as const,
+        liveModels: 0,
+        removed: 0,
+        message: "该协议没有官方模型列表，保留手填模型",
+      };
+    }
+
+    let remote: Awaited<ReturnType<ModelUpstreamsService["listRemoteModels"]>>;
+    try {
+      remote = await this.upstreams.listRemoteModels(tenantId, upstreamId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.db
+        .update(modelUpstreams)
+        .set({ status: "error", lastError: message, updatedAt: new Date() })
+        .where(and(eq(modelUpstreams.id, upstreamId), eq(modelUpstreams.tenantId, tenantId)));
+      return { status: "unhealthy" as const, liveModels: 0, removed: 0, message };
+    }
+
+    const existing = await this.db
+      .select({
+        id: upstreamModels.id,
+        nativeModel: upstreamModels.nativeModel,
+      })
+      .from(upstreamModels)
+      .where(
+        and(
+          eq(upstreamModels.tenantId, tenantId),
+          eq(upstreamModels.upstreamId, upstreamId),
+        ),
+      );
+    const liveIds = new Set(remote.models.map((model) => model.id.trim()).filter(Boolean));
+    const staleIds = existing
+      .filter((model) => !liveIds.has(model.nativeModel.trim()))
+      .map((model) => model.id);
+    const now = new Date();
+    const message =
+      remote.models.length > 0
+        ? staleIds.length > 0
+          ? `已移除 ${staleIds.length} 个上游不再提供的模型`
+          : "上游模型检查通过"
+        : remote.message ?? "上游未返回可用模型";
+
+    if (staleIds.length > 0) {
+      await this.db
+        .delete(upstreamModels)
+        .where(
+          and(
+            eq(upstreamModels.tenantId, tenantId),
+            eq(upstreamModels.upstreamId, upstreamId),
+            inArray(upstreamModels.id, staleIds),
+          ),
+        );
+      this.onMutate?.(tenantId);
+    }
+
+    await this.db
+      .update(modelUpstreams)
+      .set({
+        status: remote.models.length > 0 ? "ready" : "empty",
+        lastError: remote.models.length > 0 ? null : message,
+        updatedAt: now,
+      })
+      .where(and(eq(modelUpstreams.id, upstreamId), eq(modelUpstreams.tenantId, tenantId)));
+
+    return {
+      status: remote.models.length > 0 ? ("healthy" as const) : ("empty" as const),
+      liveModels: remote.models.length,
+      removed: staleIds.length,
+      message,
+    };
+  }
+
+  /**
    * 从上游拉取模型并写入库存；用元数据匹配规范名与能力。
    */
   async syncFromUpstream(
@@ -408,7 +483,7 @@ export class UpstreamModelsService {
     opts?: {
       prune?: boolean;
       defaultCapability?: ModelCapability;
-      /** When present, only these remote model ids remain enabled. */
+    /** When present, only these remote model ids remain stored. */
       modelIds?: string[];
     },
   ) {
@@ -417,11 +492,33 @@ export class UpstreamModelsService {
 
     const remote = await this.upstreams.listRemoteModels(tenantId, upstreamId);
     if (remote.models.length === 0) {
+      let pruned = 0;
+      if (upstream.protocol !== "anthropic") {
+        const existing = await this.db
+          .select({ id: upstreamModels.id })
+          .from(upstreamModels)
+          .where(
+            and(
+              eq(upstreamModels.tenantId, tenantId),
+              eq(upstreamModels.upstreamId, upstreamId),
+            ),
+          );
+        if (existing.length > 0) {
+          await this.db.delete(upstreamModels).where(
+            and(
+              eq(upstreamModels.tenantId, tenantId),
+              eq(upstreamModels.upstreamId, upstreamId),
+            ),
+          );
+          this.onMutate?.(tenantId);
+          pruned = existing.length;
+        }
+      }
       return {
         synced: 0,
         created: 0,
         updated: 0,
-        pruned: 0,
+        pruned,
         message: remote.message ?? "上游未返回模型列表，请手填模型",
         models: [] as ReturnType<typeof serializeUpstreamModel>[],
       };
@@ -437,6 +534,7 @@ export class UpstreamModelsService {
         ? remote.models
         : remote.models.filter((model) => selectedModelIds.has(model.id.trim()));
 
+    let removedBeforeSync = 0;
     if (selectedModelIds !== undefined) {
       const existingRows = await this.db
         .select()
@@ -447,15 +545,14 @@ export class UpstreamModelsService {
             eq(upstreamModels.upstreamId, upstreamId),
           ),
         );
-      const remoteIds = new Set(remote.models.map((model) => model.id.trim()));
-      const toDisable = existingRows.filter(
-        (row) => remoteIds.has(row.nativeModel) && !selectedModelIds.has(row.nativeModel),
+      const toRemove = existingRows.filter(
+        (row) => !selectedModelIds.has(row.nativeModel.trim()),
       );
-      if (toDisable.length > 0) {
-        await this.db
-          .update(upstreamModels)
-          .set({ enabled: false, updatedAt: now })
-          .where(inArray(upstreamModels.id, toDisable.map((row) => row.id)));
+      if (toRemove.length > 0) {
+        await this.db.delete(upstreamModels).where(
+          inArray(upstreamModels.id, toRemove.map((row) => row.id)),
+        );
+        removedBeforeSync = toRemove.length;
       }
     }
     let created = 0;
@@ -512,7 +609,6 @@ export class UpstreamModelsService {
               canonicalModel: resolved.canonicalModel,
               displayName: resolved.displayName || existing.displayName,
               metaJson: JSON.stringify(resolved.meta ?? {}),
-              enabled: selectedModelIds === undefined || selectedModelIds.has(nativeModel),
               status: "ready",
               lastError: null,
               syncedAt: now,
@@ -534,7 +630,6 @@ export class UpstreamModelsService {
               displayName: resolved.displayName,
               capability,
               weight: "100",
-              enabled: true,
               isDefault: false,
               optionsJson: "{}",
               metaJson: JSON.stringify(resolved.meta ?? {}),
@@ -558,7 +653,6 @@ export class UpstreamModelsService {
                 canonicalModel: resolved.canonicalModel,
                 displayName: resolved.displayName,
                 metaJson: JSON.stringify(resolved.meta ?? {}),
-                enabled: selectedModelIds === undefined || selectedModelIds.has(nativeModel),
                 status: "ready",
                 lastError: null,
                 syncedAt: now,
@@ -572,8 +666,8 @@ export class UpstreamModelsService {
       }
     }
 
-    let pruned = 0;
-    if (opts?.prune) {
+    let pruned = removedBeforeSync;
+    if (opts?.prune || selectedModelIds === undefined) {
       const existingRows = await this.db
         .select()
         .from(upstreamModels)

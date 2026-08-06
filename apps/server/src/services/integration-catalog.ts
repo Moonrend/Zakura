@@ -15,6 +15,7 @@ import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
   componentInstances,
+  connectorAuthProfiles,
   agentSkills,
   integrationComponents,
   integrationPackages,
@@ -26,6 +27,7 @@ import {
   PLATFORM_SCOPE,
   type DeclaredAuthProfile,
 } from "./connector-auth.js";
+import { EmailConnectorInstanceService } from "./email-connector-instances.js";
 
 export type IntegrationComponentKind = "connector" | "skill" | "tool" | "resource" | "prompt";
 
@@ -58,12 +60,14 @@ function fallbacksFromFields(fields: ConnectorField[]): Record<string, string> {
 
 export class IntegrationCatalogService {
   readonly auth: ConnectorAuthService;
+  readonly emailInstances: EmailConnectorInstanceService;
 
   constructor(
     private readonly db: Db,
     private readonly appConfig: AppConfig,
   ) {
     this.auth = new ConnectorAuthService(db, appConfig);
+    this.emailInstances = new EmailConnectorInstanceService(db, appConfig);
   }
 
   async sync(): Promise<void> {
@@ -153,6 +157,108 @@ export class IntegrationCatalogService {
             },
           });
       }
+    }
+  }
+
+  /**
+   * The original email connector stored one provider profile under `email`.
+   * Move that profile to the matching provider-specific connector once.
+   */
+  async migrateLegacyEmailProfiles(): Promise<void> {
+    const legacyRows = await this.db
+      .select()
+      .from(connectorAuthProfiles)
+      .where(eq(connectorAuthProfiles.profileKey, "email"));
+    if (!legacyRows.length) return;
+
+    const declared = await this.declaredProfiles();
+    const declaredByKey = new Map(declared.map((item) => [item.key, item]));
+    for (const row of legacyRows) {
+      const values = (() => {
+        try {
+          return decryptJson<Record<string, unknown>>(this.appConfig.secret, row.configEnc);
+        } catch {
+          return {};
+        }
+      })();
+      const rawProvider = String(values.provider ?? "").trim().toLowerCase();
+      const provider =
+        rawProvider ||
+        (String(values.smtpHost ?? "").trim() ? "smtp" : "") ||
+        (String(values.mailgunDomain ?? "").trim() ? "mailgun" : "") ||
+        (String(values.baseUrl ?? "").trim() && String(values.mailbox ?? "").trim()
+          ? "bettermail"
+          : "") ||
+        (String(values.apiToken ?? "").trim() ? "amail" : "");
+      if (!["smtp", "mailgun", "resendapi", "amail", "bettermail"].includes(provider)) continue;
+
+      const profileKey = `email-${provider}`;
+      const declaredProfile = declaredByKey.get(profileKey);
+      if (!declaredProfile) continue;
+      const existing = await this.db.query.connectorAuthProfiles.findFirst({
+        where: and(
+          eq(connectorAuthProfiles.scopeKey, row.scopeKey),
+          eq(connectorAuthProfiles.profileKey, profileKey),
+        ),
+      });
+      if (!existing) {
+        await this.auth.saveProfile(row.scopeKey, profileKey, {
+          enabled: row.enabled,
+          kind: "custom",
+          values,
+        }, declaredProfile);
+      }
+
+      const legacySettings = await this.auth.getSettings(row.scopeKey, "email");
+      if (Object.keys(legacySettings).length) {
+        const targetSettings = await this.auth.getSettings(row.scopeKey, `email-${provider}`);
+        if (!Object.keys(targetSettings).length) {
+          const allowed = new Set(declaredProfile.fields.map((field) => field.key));
+          const settings = Object.fromEntries(
+            Object.entries(legacySettings).filter(([key]) => allowed.has(key)),
+          );
+          if (Object.keys(settings).length) {
+            await this.auth.saveSettings(
+              row.scopeKey,
+              `email-${provider}`,
+              settings,
+              declaredProfile.fields.map((field) => ({ ...field, required: false })),
+            );
+          }
+        }
+      }
+      if (row.scopeKey !== PLATFORM_SCOPE) {
+        await this.emailInstances.migrateLegacy(
+          row.scopeKey,
+          profileKey,
+          { ...values, ...legacySettings, product: provider },
+          row.enabled,
+        );
+      }
+    }
+  }
+
+  async migrateConfiguredEmailProfiles(): Promise<void> {
+    const rows = await this.db.select().from(connectorAuthProfiles);
+    for (const row of rows) {
+      if (row.scopeKey === PLATFORM_SCOPE || !/^email-(smtp|mailgun|resendapi|amail|bettermail)$/.test(row.profileKey)) {
+        continue;
+      }
+      const values = (() => {
+        try {
+          return decryptJson<Record<string, unknown>>(this.appConfig.secret, row.configEnc);
+        } catch {
+          return {};
+        }
+      })();
+      const product = row.profileKey.slice("email-".length);
+      const settings = await this.auth.getSettings(row.scopeKey, row.profileKey);
+      await this.emailInstances.migrateLegacy(
+        row.scopeKey,
+        row.profileKey,
+        { ...values, ...settings, product },
+        row.enabled,
+      );
     }
   }
 
@@ -403,7 +509,11 @@ export class IntegrationCatalogService {
         docsUrl: auth.docsUrl,
         hasTools,
         capabilities: packageComponents
-          .filter((item) => item.packageId === pkg.id && item.kind !== "connector")
+          .filter((item) => {
+            if (item.packageId !== pkg.id || item.kind === "connector") return false;
+            const itemConfig = parseJson<ComponentConfig>(item.configJson, {});
+            return !itemConfig.connectorRef || itemConfig.connectorRef === component.ref;
+          })
           .map((item) => {
             const itemConfig = parseJson<ComponentConfig>(item.configJson, {});
             return {
@@ -424,7 +534,9 @@ export class IntegrationCatalogService {
       };
     });
 
-    return scopeKey === PLATFORM_SCOPE ? items : items.filter((item) => item.hasTools);
+    return scopeKey === PLATFORM_SCOPE
+      ? items
+      : items.filter((item) => item.hasTools || item.package.slug === "agent-remote");
   }
 
   async saveConnectorSettings(
@@ -542,12 +654,20 @@ export class IntegrationCatalogService {
     for (const tool of tools) {
       const config = parseJson<ComponentConfig>(tool.configJson, {});
       if (String(config.mcpUrl ?? "").toLowerCase() !== normalized) continue;
-      const connector = await this.db.query.integrationComponents.findFirst({
-        where: and(
-          eq(integrationComponents.packageId, tool.packageId),
-          eq(integrationComponents.kind, "connector"),
-        ),
-      });
+      const connector = config.connectorRef
+        ? await this.db.query.integrationComponents.findFirst({
+            where: and(
+              eq(integrationComponents.packageId, tool.packageId),
+              eq(integrationComponents.kind, "connector"),
+              eq(integrationComponents.ref, String(config.connectorRef)),
+            ),
+          })
+        : await this.db.query.integrationComponents.findFirst({
+            where: and(
+              eq(integrationComponents.packageId, tool.packageId),
+              eq(integrationComponents.kind, "connector"),
+            ),
+          });
       if (!connector) return null;
       const connectorConfig = parseJson<ComponentConfig>(connector.configJson, {});
       return {
@@ -561,7 +681,16 @@ export class IntegrationCatalogService {
     return null;
   }
 
-  async resolveConnectorTarget(tenantId: string, target: string) {
+  async resolveConnectorTarget(
+    tenantId: string,
+    target: string,
+    opts?: {
+      credentials?: {
+        values: Record<string, unknown>;
+        settings?: Record<string, unknown>;
+      };
+    },
+  ) {
     const matched = await this.matchConnectorCapability(target);
     if (!matched) return null;
     const providerId = String(matched.toolConfig.providerId ?? "").trim();
@@ -570,9 +699,12 @@ export class IntegrationCatalogService {
     if (!providerId || !product || !mcpUrl) return null;
 
     const auth = matched.auth;
-    const resolved = await this.auth.resolveProfile(tenantId, auth.profile);
-    const values = resolved?.values ?? {};
-    const settings = await this.auth.getSettings(tenantId, matched.connector.ref);
+    const resolved = opts?.credentials
+      ? null
+      : await this.auth.resolveProfile(tenantId, auth.profile);
+    const values = opts?.credentials?.values ?? resolved?.values ?? {};
+    const settings =
+      opts?.credentials?.settings ?? (await this.auth.getSettings(tenantId, matched.connector.ref));
     const fallbacks = {
       ...fallbacksFromFields(auth.settings),
       ...fallbacksFromFields(auth.fields),
@@ -676,6 +808,26 @@ export class IntegrationCatalogService {
         if (target.needsUserGrant && !target.authorization) continue;
         targets.push(target);
       }
+    }
+    for (const instance of await this.emailInstances.getTargetConfig(tenantId)) {
+      const product = String(instance.config.product ?? "").trim();
+      if (!product) continue;
+      const base = await this.resolveConnectorTarget(
+        tenantId,
+        `zakura://email/${product}`,
+        { credentials: { values: instance.config } },
+      );
+      if (!base) continue;
+      const connectorRef = `email-instance-${instance.row.id}`;
+      targets.push({
+        ...base,
+        connectorRef,
+        connectorName: instance.row.name,
+        instanceSlug: connectorRef,
+        auth: { ...base.auth, profile: connectorRef },
+        credentials: { values: {}, settings: instance.config },
+        existingInstance: null,
+      });
     }
     return targets.filter(
       (target): target is NonNullable<typeof target> => target !== null,

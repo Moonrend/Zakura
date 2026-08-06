@@ -18,6 +18,8 @@ export function buildSystemPrompt(
     subagents?: boolean;
     /** 已启用技能的「名称 + 路径 + 描述」清单 */
     skills?: string;
+    /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_* 工具发帖 */
+    remoteChannel?: string;
   },
 ): string {
   const providers = getAgentProviders(agent);
@@ -29,10 +31,14 @@ export function buildSystemPrompt(
     "# 工作方式",
     "- 遵循「理解目标 → 收集上下文 → 行动 → 验证 → 汇报」的循环。",
     "- 需要外部信息或执行操作时调用工具，不要假装已执行、不要凭空编造事实。",
-    "- 简单问题直接回答，不必为回答本身调用工具。",
+    extra?.remoteChannel
+      ? "- 本会话在远程消息通道中：最终文本答复会自动流式发到外部线程；过程进度用 chat_post_message。不要把同一最终答复既写文本又工具重发。"
+      : "- 简单问题直接回答，不必为回答本身调用工具。",
     "- 工具失败时先阅读错误信息再调整重试；同一方法连续失败两次应换思路或向用户说明。",
     "- 多步任务先用一两句话说明计划再执行；执行过程中的关键发现要在最终回复中体现。",
-    "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",
+    extra?.remoteChannel
+      ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
+      : "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",
     "",
     "# 能力",
     `- Computer / FS / Shell: ${agent.enableComputer ? "已启用" : "未启用"}`,
@@ -71,6 +77,9 @@ export function buildSystemPrompt(
       "- 当前任务命中某个技能的适用场景时，先用 re_read_skill 读取其 SKILL.md，再按它说的做；不要凭印象猜内容。",
       "- 用户需要某项能力而现有技能都不覆盖时，可用 re_search_skills 搜索、re_install_skill 安装（安装会写入用户工作区，事先说明你要装什么）。",
     );
+  }
+  if (extra?.remoteChannel) {
+    lines.push("", extra.remoteChannel);
   }
   lines.push(
     "",

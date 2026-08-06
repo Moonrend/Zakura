@@ -25,13 +25,16 @@ import {
 import { cn } from "@/lib/utils";
 import type { CloudAgentAttachment } from "@/lib/cloud-agent";
 import { formatSize } from "@/lib/agent-fs";
-import { ModelPicker, type ModelPickerItem } from "./model-picker";
+import {
+  ModelRouteSelector,
+  type ModelRouteSelectorItem,
+} from "@/components/models/model-route-selector";
 import { ContextWindowButton, type ContextWindowInfo } from "./context-window";
 
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
 
-export type ComposerModelItem = ModelPickerItem;
+export type ComposerModelItem = ModelRouteSelectorItem;
 
 export type ComposerReasoningValue = "default" | "off" | (string & {});
 
@@ -435,12 +438,13 @@ export function Composer({
             <TooltipContent>{attachHint}</TooltipContent>
           </Tooltip>
 
-          <ModelPicker
+          <ModelRouteSelector
             items={models}
             value={model}
             routeId={modelRouteId}
             onSelectionChange={onModelSelection}
             disabled={models.length === 0}
+            side="top"
           />
 
           <Select

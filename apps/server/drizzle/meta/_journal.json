@@ -267,6 +267,34 @@
       "when": 1785910000000,
       "tag": "0037_connector_auth_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785911000000,
+      "tag": "0038_agent_remote_channels",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1785912000000,
+      "tag": "0039_email_connector_instances",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1785913000000,
+      "tag": "0040_remove_upstream_model_enabled",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1785914000000,
+      "tag": "0041_agent_channel_binding_credentials",
+      "breakpoints": true
     }
   ]
 }

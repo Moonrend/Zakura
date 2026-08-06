@@ -83,13 +83,13 @@ function authLabel(kind: ConnectorView["auth"]["kind"]) {
 }
 
 export function ConnectorConfigSheet({
-  connector,
+  connectors,
   redirectUri,
   open,
   onOpenChange,
   onChanged,
 }: {
-  connector: ConnectorView | null;
+  connectors: ConnectorView[];
   redirectUri: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -104,6 +104,20 @@ export function ConnectorConfigSheet({
   const [agents, setAgents] = useState<AgentListItem[]>([]);
   const [skillSource, setSkillSource] = useState("");
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
+  const [activeRef, setActiveRef] = useState("");
+  const [emailWebhookUrl, setEmailWebhookUrl] = useState("");
+
+  const connector = useMemo(
+    () => connectors.find((item) => item.ref === activeRef) ?? connectors[0] ?? null,
+    [activeRef, connectors],
+  );
+
+  useEffect(() => {
+    setActiveRef(connectors[0]?.ref ?? "");
+    setDraft({});
+    setSettingsDraft({});
+    setEmailWebhookUrl("");
+  }, [connectors]);
 
   useEffect(() => {
     setDraft({});
@@ -122,6 +136,38 @@ export function ConnectorConfigSheet({
   const canManage = !!connector && !connector.lockedByPlatform;
   const fields = connector?.auth.fields ?? [];
   const settings = connector?.auth.settings ?? [];
+  const displayFields = useMemo(
+    () =>
+      fields.map((field) =>
+        field.key === "inboundAgentId"
+          ? {
+              ...field,
+              type: "select" as const,
+              options: agents.map((agent) => ({
+                value: agent.id,
+                label: `${agent.name}（${agent.slug}）`,
+              })),
+            }
+          : field,
+      ),
+    [agents, fields],
+  );
+  const displaySettings = useMemo(
+    () =>
+      settings.map((field) =>
+        field.key === "inboundAgentId"
+          ? {
+              ...field,
+              type: "select" as const,
+              options: agents.map((agent) => ({
+                value: agent.id,
+                label: `${agent.name}（${agent.slug}）`,
+              })),
+            }
+          : field,
+      ),
+    [agents, settings],
+  );
   const directAvailable =
     !!connector &&
     connector.ready &&
@@ -131,11 +177,18 @@ export function ConnectorConfigSheet({
       : connector.authorized === true);
 
   useEffect(() => {
-    if (!open || !skills.length) return;
+    if (!open || (!skills.length && !connector?.ref.startsWith("email-"))) return;
     void fetchAgents()
       .then(setAgents)
       .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
-  }, [open, skills.length]);
+  }, [connector?.ref, open, skills.length]);
+
+  useEffect(() => {
+    if (!open || !connector?.ref.startsWith("email-")) return;
+    void api<{ emailWebhookUrl?: string }>("/api/remote-channels")
+      .then((result) => setEmailWebhookUrl(result.emailWebhookUrl ?? ""))
+      .catch(() => setEmailWebhookUrl(""));
+  }, [connector?.ref, open]);
 
   async function save() {
     if (!connector) return;
@@ -214,6 +267,22 @@ export function ConnectorConfigSheet({
                   <Badge variant="outline">档案：{connector.profile.label}</Badge>
                 ) : null}
               </div>
+              {connectors.length > 1 ? (
+                <label className="mt-4 block space-y-1.5">
+                  <span className="text-xs text-muted-foreground">邮箱服务类型</span>
+                  <select
+                    value={connector.ref}
+                    onChange={(event) => setActiveRef(event.target.value)}
+                    className="h-9 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm"
+                  >
+                    {connectors.map((item) => (
+                      <option key={item.ref} value={item.ref}>
+                        {item.name}{item.ready ? " · 已配置" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </SheetHeader>
 
             <div className="space-y-7 px-5 py-5">
@@ -236,7 +305,7 @@ export function ConnectorConfigSheet({
                         ? "凭据由命名档案管理，配置一次即可供引用该档案的连接器使用。"
                         : "填写连接器声明的认证字段，保存后即可使用对应能力。"
                     }
-                    fields={fields}
+                    fields={displayFields}
                     configuredFields={connector.configuredFields}
                     draft={draft}
                     onDraftChange={setDraft}
@@ -281,7 +350,7 @@ export function ConnectorConfigSheet({
                   <h2 className="mb-3 text-sm font-medium">连接器设置</h2>
                   <ConnectorOauthForm
                     title="实例设置"
-                    fields={settings}
+                    fields={displaySettings}
                     configuredFields={connector.configuredSettings ?? []}
                     draft={settingsDraft}
                     onDraftChange={setSettingsDraft}
@@ -291,6 +360,19 @@ export function ConnectorConfigSheet({
                     saving={saving}
                     onSave={() => void save()}
                   />
+                </section>
+              ) : null}
+
+              {connector.ref.startsWith("email-") && emailWebhookUrl ? (
+                <section className="rounded-lg border border-dashed border-border p-3">
+                  <h2 className="text-sm font-medium">入站 Webhook</h2>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    在下方启用「收到邮件时触发 Agent」并配置白名单与密钥后使用。
+                    邮箱工具连接器在此配置；Agent 消息平台（Chat SDK）请到 Agent → 平台。
+                  </p>
+                  <code className="mt-2 block break-all text-xs text-muted-foreground">
+                    {`${emailWebhookUrl.replace(/\/$/, "")}/${connector.ref}`}
+                  </code>
                 </section>
               ) : null}
 
