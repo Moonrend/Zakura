@@ -34,6 +34,34 @@ describe("parseCloudAgentConfig", () => {
     assert.equal(def.autoTitle, undefined);
   });
 
+  it("reads compact budget flags", () => {
+    const cfg = parseCloudAgentConfig({
+      cloud: {
+        autoCompact: false,
+        compactThresholdChars: 20_000,
+        compactKeepRecent: 8,
+        maxToolResultChars: 4_000,
+      },
+    });
+    assert.equal(cfg.autoCompact, false);
+    assert.equal(cfg.compactThresholdChars, 20_000);
+    assert.equal(cfg.compactKeepRecent, 8);
+    assert.equal(cfg.maxToolResultChars, 4_000);
+  });
+
+  it("ignores invalid compact thresholds", () => {
+    const cfg = parseCloudAgentConfig({
+      cloud: {
+        compactThresholdChars: 100,
+        compactKeepRecent: 1,
+        maxToolResultChars: 10,
+      },
+    });
+    assert.equal(cfg.compactThresholdChars, undefined);
+    assert.equal(cfg.compactKeepRecent, undefined);
+    assert.equal(cfg.maxToolResultChars, undefined);
+  });
+
   it("returns empty on invalid", () => {
     assert.deepEqual(parseCloudAgentConfig(null), {});
     assert.deepEqual(parseCloudAgentConfig("x"), {});

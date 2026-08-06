@@ -67,10 +67,12 @@ import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
+import { registerAutomationRoutes } from "./automation-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
 import { platformEvents } from "../services/platform-events.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
+import { AgentAutomationService } from "../services/agent-automation.js";
 import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
@@ -430,6 +432,7 @@ export async function createApiApp(deps: {
   let remoteIngress: RemoteAgentIngress | null = null;
   let remoteRuntime: RemoteChannelRuntime | null = null;
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
+  const automation = new AgentAutomationService(db);
 
   // Request timing: log any /api call > 300ms (or all when ZAKURA_HTTP_TIMING=1)
   app.use("/api/*", async (c, next) => {
@@ -2546,8 +2549,13 @@ export async function createApiApp(deps: {
         skills,
         agentHooks,
         remoteChannels: remoteRuntime.sessions,
+        automation,
       });
       cloudAgentRuntime = cloudRuntime;
+      automation.setRunner({
+        startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
+      });
+      automation.start();
       void db
         .select({ id: tenants.id })
         .from(tenants)
@@ -2569,6 +2577,7 @@ export async function createApiApp(deps: {
         runtime: cloudRuntime,
         modelRouter,
       });
+      registerAutomationRoutes(app, { agentService, automation });
       emailInbound = new EmailInboundService(
         db,
         integrationCatalog,
@@ -2591,6 +2600,8 @@ export async function createApiApp(deps: {
         },
         modelRouter,
       });
+      // 自动化 CRUD 仍可配置；触发会失败直至模型路由可用
+      registerAutomationRoutes(app, { agentService, automation });
     }
   }
 

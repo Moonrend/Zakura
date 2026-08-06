@@ -20,7 +20,7 @@ import type { McpGateway } from "../mcp-gateway.js";
 import type { ModelRouterService } from "../model-router.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import { isAbortError } from "../../model-router/http.js";
-import { compactToolResultsInPlace } from "./messages.js";
+import { compactToolResultsInPlace, type CompactBudget } from "./messages.js";
 import { mcpResultToText, parseToolArgs } from "./tools.js";
 
 /** 取消标记轮询间隔：取消后最长这么久就会掐断上游流 */
@@ -78,6 +78,8 @@ export type AgentLoopInput = {
   maxRoundsNote?: (maxRounds: number, lastText: string) => string;
   /** 额外取消信号（父 Run 取消传导给子会话）；引擎始终还会检查本 Run 的取消标记 */
   isCancelled?: () => Promise<boolean>;
+  /** 循环内工具结果压缩预算（缺省用平台默认） */
+  compactBudget?: Partial<CompactBudget>;
   hooks?: AgentLoopHooks;
 };
 
@@ -543,8 +545,8 @@ export async function runAgentLoop(
       });
     }
 
-    // 循环内上下文过大：就地压缩较旧的工具结果
-    const compacted = compactToolResultsInPlace(messages);
+    // 循环内上下文过大：分级就地压缩较旧的工具结果
+    const compacted = compactToolResultsInPlace(messages, input.compactBudget);
     if (compacted > 0) {
       await appendRunLog(store, sessionId, runId, "info", "循环内压缩旧工具结果", {
         compacted,

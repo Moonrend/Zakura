@@ -31,8 +31,30 @@ export {
   buildUserMessage,
   eventsToMessages,
   parseAttachments,
+  compactToolResultsInPlace,
+  prepareHistoryForModel,
+  buildCompactionDigest,
+  buildSessionReuseDigest,
+  resolveCompactBudget,
+  COMPACT_THRESHOLD_CHARS,
+  COMPACT_KEEP_RECENT,
   type StoredEvent,
+  type CompactBudget,
 } from "./cloud-agent/messages.js";
+export {
+  callSessionTool,
+  isSessionToolName,
+  listSessionToolDefinitions,
+  LIST_SESSIONS_TOOL,
+  SEARCH_SESSIONS_TOOL,
+  GET_MESSAGES_TOOL,
+  IMPORT_SESSION_TOOL,
+} from "./cloud-agent/session-tools.js";
+export {
+  callAutomationTool,
+  isAutomationToolName,
+  listAutomationToolDefinitions,
+} from "./cloud-agent/automation-tools.js";
 export { buildSubagentPrompt, buildSystemPrompt } from "./cloud-agent/prompts.js";
 export {
   DELEGATE_TOOL_NAME,

@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildChainMessages,
+  buildCompactionDigest,
+  buildSessionReuseDigest,
   buildUserMessage,
   CloudAgentRuntime,
+  compactToolResultsInPlace,
   eventsToMessages,
   parseAttachments,
   parseMemoryExtraction,
+  prepareHistoryForModel,
 } from "../src/services/cloud-agent-runtime.js";
+import type { ModelChatMessage } from "@zakura/shared";
 import {
   absorbChatStreamChunk,
   chatStreamStateToResult,
@@ -246,6 +251,97 @@ describe("buildChainMessages", () => {
 
   it("throws when target message is missing", () => {
     assert.throws(() => buildChainMessages([], "nope"));
+  });
+});
+
+describe("context compaction", () => {
+  it("caps oversized tool results before model prep", () => {
+    const big = "x".repeat(20_000);
+    const messages: ModelChatMessage[] = [
+      { role: "user", content: "查一下" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "re_shell_exec", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", content: big, toolCallId: "c1", name: "re_shell_exec" },
+    ];
+    const n = prepareHistoryForModel(messages, { maxToolResultChars: 2_000 });
+    assert.ok(n >= 1);
+    assert.ok((messages[2]!.content?.length ?? 0) <= 2_200);
+    assert.match(messages[2]!.content ?? "", /工具结果截断|截断/);
+  });
+
+  it("tier-compresses many large tool results when over budget", () => {
+    const messages: ModelChatMessage[] = [{ role: "user", content: "start" }];
+    for (let i = 0; i < 30; i += 1) {
+      messages.push({
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: `c${i}`,
+            type: "function",
+            function: { name: "t", arguments: "{}" },
+          },
+        ],
+      });
+      messages.push({
+        role: "tool",
+        content: "y".repeat(3_000),
+        toolCallId: `c${i}`,
+        name: "t",
+      });
+    }
+    const before = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+    compactToolResultsInPlace(messages, {
+      thresholdChars: 8_000,
+      inLoopChars: 8_000,
+      maxToolResultChars: 12_000,
+    });
+    const after = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+    assert.ok(after < before);
+  });
+
+  it("buildCompactionDigest prefers structured roles", () => {
+    const digest = buildCompactionDigest([
+      { role: "user", content: "部署生产环境" },
+      {
+        role: "assistant",
+        content: "先检查配置",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "re_fs_read", arguments: '{"path":"a.yml"}' },
+          },
+        ],
+      },
+      { role: "tool", content: "port: 8080", toolCallId: "c1", name: "re_fs_read" },
+    ]);
+    assert.match(digest, /用户/);
+    assert.match(digest, /助手/);
+    assert.match(digest, /re_fs_read|工具/);
+  });
+
+  it("buildSessionReuseDigest splits recent vs older", () => {
+    const messages: ModelChatMessage[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      messages.push({ role: "user", content: `q${i}` });
+      messages.push({ role: "assistant", content: `a${i}` });
+    }
+    const { digest, recent, olderCount } = buildSessionReuseDigest(messages, {
+      keepRecent: 6,
+    });
+    assert.equal(recent.length, 6);
+    assert.equal(olderCount, 34);
+    assert.ok(digest.length > 0);
   });
 });
 

@@ -287,6 +287,85 @@ export function listAgentNativeTools(
         },
       }),
       tool(
+        "fs_grep",
+        [
+          "Search file contents in the agent workspace (ripgrep).",
+          "Prefer this over shell_exec + rg for code lookup: structured hits, path jail, size caps.",
+          "Returns path, line, and matching text. Binary / huge files are skipped by rg.",
+        ].join(" "),
+        {
+          type: "object",
+          required: ["pattern"],
+          properties: {
+            pattern: { type: "string", description: "Regex or fixed string to search" },
+            path: {
+              type: "string",
+              description: "Subdirectory or file relative to workspace root (default .)",
+            },
+            glob: {
+              type: "string",
+              description: "Optional glob filter, e.g. *.ts or **/*.{ts,tsx}",
+            },
+            case_insensitive: { type: "boolean", default: false },
+            fixed_string: {
+              type: "boolean",
+              default: false,
+              description: "Treat pattern as literal string (-F)",
+            },
+            max_matches: {
+              type: "integer",
+              minimum: 1,
+              maximum: 200,
+              default: 50,
+              description: "Cap on returned matches",
+            },
+          },
+        },
+        { annotations: { readOnlyHint: true, openWorldHint: false, idempotentHint: true } },
+      ),
+      tool(
+        "apply_patch",
+        [
+          "Apply multiple exact-substring edits in one call (batch fs_edit).",
+          "Each patch requires a unique old_text occurrence in that file.",
+          "Stops on first failure unless continue_on_error=true.",
+          "Prefer for multi-file or multi-hunk refactors over many fs_edit rounds.",
+        ].join(" "),
+        {
+          type: "object",
+          required: ["patches"],
+          properties: {
+            patches: {
+              type: "array",
+              minItems: 1,
+              maxItems: 40,
+              items: {
+                type: "object",
+                required: ["path", "old_text", "new_text"],
+                properties: {
+                  path: { type: "string" },
+                  old_text: { type: "string" },
+                  new_text: { type: "string" },
+                },
+              },
+            },
+            continue_on_error: {
+              type: "boolean",
+              default: false,
+              description: "If true, apply remaining patches after a failure",
+            },
+          },
+        },
+        {
+          annotations: {
+            readOnlyHint: false,
+            destructiveHint: true,
+            openWorldHint: false,
+            idempotentHint: false,
+          },
+        },
+      ),
+      tool(
         "get_file_url",
         [
           "Create a temporary public HTTPS URL for a workspace file so you can share it with the user or external systems.",
@@ -384,6 +463,13 @@ export function listAgentNativeTools(
             working_dir: {
               type: "string",
               description: `Optional cwd relative to ${AGENT_WORKSPACE_ROOT} or absolute under it`,
+            },
+            timeout: {
+              type: "integer",
+              minimum: 1,
+              maximum: 300,
+              default: 300,
+              description: "Seconds before the command is terminated (default 300)",
             },
           },
         },
@@ -962,6 +1048,7 @@ export async function callAgentNativeTool(
     if (
       !isComputerEnvEnabled(agent) &&
       (name.startsWith("fs_") ||
+        name === "apply_patch" ||
         name === "shell_exec" ||
         name.startsWith("computer_") ||
         name === "desktop_info" ||
@@ -1092,6 +1179,123 @@ export async function callAgentNativeTool(
         notifyFsChanged(String(args.from));
         notifyFsChanged(String(args.to));
         return okJson(res);
+      }
+      case "fs_grep": {
+        const pattern = String(args.pattern ?? "");
+        if (!pattern.trim()) return textResult("pattern is required", true);
+        const maxMatches =
+          typeof args.max_matches === "number"
+            ? Math.min(Math.max(Math.floor(args.max_matches), 1), 200)
+            : 50;
+        const searchPath =
+          typeof args.path === "string" && args.path.trim() ? args.path.trim() : ".";
+        const flags = [
+          "rg",
+          "--line-number",
+          "--no-heading",
+          "--color",
+          "never",
+          "--max-columns",
+          "240",
+          "--max-columns-preview",
+          ...(args.case_insensitive ? ["-i"] : []),
+          ...(args.fixed_string ? ["-F"] : []),
+          ...(typeof args.glob === "string" && args.glob.trim()
+            ? ["--glob", args.glob.trim()]
+            : []),
+          "--",
+          pattern,
+          searchPath,
+        ];
+        // escape for bash -lc single-quoted argv is painful; pass via env + python-free bash array
+        const quoted = flags
+          .map((p) => `'${String(p).replace(/'/g, `'\\''`)}'`)
+          .join(" ");
+        const command = `${quoted} 2>/dev/null | head -n ${maxMatches * 2}`;
+        try {
+          const result = await workspace.execInWorkspace(
+            agent,
+            ["bash", "-lc", command],
+            { timeoutMs: 30_000 },
+          );
+          const stdout = result.stdout ?? "";
+          // rg: 0=matches, 1=no match, ≥2=error
+          if (result.exitCode >= 2 && !stdout.trim()) {
+            return textResult(result.stderr?.trim() || "rg failed", true);
+          }
+          const matches: Array<{ path: string; line: number; text: string }> = [];
+          for (const raw of stdout.split(/\r?\n/)) {
+            if (!raw.trim()) continue;
+            const m = raw.match(/^([^:]+):(\d+):(.*)$/);
+            if (!m) continue;
+            matches.push({
+              path: m[1]!,
+              line: Number(m[2]),
+              text: m[3] ?? "",
+            });
+            if (matches.length >= maxMatches) break;
+          }
+          return okJson({
+            pattern,
+            path: searchPath,
+            match_count: matches.length,
+            truncated: matches.length >= maxMatches,
+            matches,
+            note:
+              matches.length === 0
+                ? "No matches (or path outside workspace / binary-only)."
+                : undefined,
+          });
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err), true);
+        }
+      }
+      case "apply_patch": {
+        const rawPatches = Array.isArray(args.patches) ? args.patches : [];
+        if (rawPatches.length === 0) return textResult("patches is required", true);
+        const continueOnError = Boolean(args.continue_on_error);
+        const fs = await getFs();
+        const results: Array<{
+          path: string;
+          ok: boolean;
+          error?: string;
+        }> = [];
+        const touched = new Set<string>();
+        for (const item of rawPatches.slice(0, 40)) {
+          if (!item || typeof item !== "object") {
+            results.push({ path: "?", ok: false, error: "invalid patch entry" });
+            if (!continueOnError) break;
+            continue;
+          }
+          const p = item as Record<string, unknown>;
+          const path = String(p.path ?? "");
+          const oldText = String(p.old_text ?? "");
+          const newText = String(p.new_text ?? "");
+          if (!path || !oldText) {
+            results.push({ path: path || "?", ok: false, error: "path and old_text required" });
+            if (!continueOnError) break;
+            continue;
+          }
+          try {
+            await fs.edit(path, oldText, newText);
+            results.push({ path, ok: true });
+            touched.add(path);
+          } catch (err) {
+            results.push({
+              path,
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            if (!continueOnError) break;
+          }
+        }
+        for (const path of touched) notifyFsChanged(path);
+        const okCount = results.filter((r) => r.ok).length;
+        return okJson({
+          applied: okCount,
+          failed: results.length - okCount,
+          results,
+        });
       }
       case "shell_exec": {
         const command = unwrapShellCommand(String(args.command ?? ""));

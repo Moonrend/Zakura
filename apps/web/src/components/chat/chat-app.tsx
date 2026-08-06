@@ -96,6 +96,7 @@ import {
 } from "./composer";
 import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
+import { AutomationPanel } from "./automation-panel";
 import { RunLogDrawer } from "./run-log-drawer";
 
 const AGENT_KEY = "zakura_chat_agent";
@@ -206,6 +207,8 @@ export function ChatApp() {
   const [sending, setSending] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  /** 侧栏：对话列表 | 定时任务 */
+  const [sidebarMode, setSidebarMode] = useState<"chats" | "tasks">("chats");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
@@ -1197,6 +1200,32 @@ export function ChatApp() {
           </DropdownMenu>
         </div>
 
+        {/* 侧栏分区：对话 | 任务 */}
+        <div className="flex items-center gap-0.5 px-2 pt-1">
+          {(
+            [
+              { id: "chats" as const, label: "对话" },
+              { id: "tasks" as const, label: "任务" },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setSidebarMode(tab.id)}
+              className={cn(
+                "flex-1 rounded-md px-2 py-1.5 text-sm transition-colors",
+                sidebarMode === tab.id
+                  ? "bg-muted font-medium text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {sidebarMode === "chats" ? (
+        <>
         {/* 新对话 + 搜索 */}
         <div className="flex flex-col gap-1 p-2">
           <button
@@ -1416,6 +1445,20 @@ export function ChatApp() {
             </div>
           )}
         </ScrollArea>
+        </>
+        ) : (
+          <AutomationPanel
+            agentId={agentId}
+            className="min-h-0 flex-1"
+            onOpenSession={(sid) => {
+              if (!agentId) return;
+              setSidebarMode("chats");
+              setKindFilter("system");
+              void loadSession(agentId, sid);
+              closeNavOnMobile();
+            }}
+          />
+        )}
 
         {/* 底部 */}
         <div className="border-t border-border/50 p-2">

@@ -1638,6 +1638,110 @@ export const storeCatalogEntries = pgTable(
   ],
 );
 
+/**
+ * Agent 定时任务：按 cron / @every 模式触发云端对话。
+ * next_run_at 由调度器推进；due 行被 claim 后立即写入下次时间，避免双发。
+ */
+export const agentSchedules = pgTable(
+  "agent_schedules",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    /**
+     * 触发表达式：
+     * - 5 段 cron：`分 时 日 月 周`（UTC 或 timezone）
+     * - `@hourly` / `@daily` / `@weekly`
+     * - `@every_30m` / `@every_2h`
+     */
+    pattern: text("pattern").notNull(),
+    /** 触发时注入的用户消息（任务指令） */
+    prompt: text("prompt").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** null = 不限次 */
+    maxRuns: integer("max_runs"),
+    runCount: integer("run_count").notNull().default(0),
+    /** IANA 时区；空则 UTC */
+    timezone: text("timezone").notNull().default("UTC"),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastStatus: text("last_status"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    index("agent_schedules_agent").on(t.agentId, t.enabled),
+    index("agent_schedules_due").on(t.enabled, t.nextRunAt),
+    index("agent_schedules_tenant").on(t.tenantId),
+  ],
+);
+
+/** 每 Agent 一条心跳配置：周期自唤醒 */
+export const agentHeartbeats = pgTable(
+  "agent_heartbeats",
+  {
+    agentId: text("agent_id")
+      .primaryKey()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    /** 间隔分钟，最小 5 */
+    intervalMinutes: integer("interval_minutes").notNull().default(60),
+    /** 可选自定义心跳提示；空则用平台默认 */
+    prompt: text("prompt").notNull().default(""),
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastStatus: text("last_status"),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (t) => [
+    index("agent_heartbeats_due").on(t.enabled, t.nextRunAt),
+    index("agent_heartbeats_tenant").on(t.tenantId),
+  ],
+);
+
+/** 定时/心跳触发审计日志 */
+export const agentAutomationRuns = pgTable(
+  "agent_automation_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** schedule | heartbeat */
+    kind: text("kind").notNull(),
+    scheduleId: text("schedule_id").references(() => agentSchedules.id, {
+      onDelete: "set null",
+    }),
+    sessionId: text("session_id"),
+    cloudRunId: text("cloud_run_id"),
+    /** queued | running | completed | failed | skipped */
+    status: text("status").notNull().default("queued"),
+    prompt: text("prompt").notNull().default(""),
+    resultText: text("result_text"),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_automation_runs_agent").on(t.agentId, t.createdAt),
+    index("agent_automation_runs_schedule").on(t.scheduleId, t.createdAt),
+  ],
+);
+
 export type PortExposure = typeof portExposures.$inferSelect;
 export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
 export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;
@@ -1648,3 +1752,6 @@ export type SkillRow = typeof skills.$inferSelect;
 export type AgentSkillRow = typeof agentSkills.$inferSelect;
 export type PlatformSkillRepoRow = typeof platformSkillRepos.$inferSelect;
 export type SkillSourceTokenRow = typeof skillSourceTokens.$inferSelect;
+export type AgentSchedule = typeof agentSchedules.$inferSelect;
+export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
+export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;

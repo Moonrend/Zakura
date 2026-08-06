@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  AlarmClock,
   Brain,
   Cable,
   Globe,
@@ -27,6 +28,7 @@ const QUICK_LINKS = [
   { href: "skills", label: "技能", icon: Sparkles, hint: "Skill 包" },
   { href: "mcp", label: "MCP", icon: Cable, hint: "工具绑定" },
   { href: "platforms", label: "消息平台", icon: MessageSquare, hint: "外部渠道" },
+  { href: "automation", label: "自动化", icon: AlarmClock, hint: "定时与周期" },
   { href: "tool-calls", label: "调用记录", icon: Wrench, hint: "工具轨迹" },
 ] as const;
 

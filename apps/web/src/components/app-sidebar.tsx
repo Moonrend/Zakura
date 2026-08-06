@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  AlarmClock,
   ArrowLeft,
   Bot,
   Brain,
@@ -98,6 +99,7 @@ const AGENT_ICONS: Record<string, IconComp> = {
   skills: Sparkles,
   mcp: Cable,
   platforms: MessageSquare,
+  automation: AlarmClock,
   "tool-calls": Wrench,
 };
 

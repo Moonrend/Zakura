@@ -43,9 +43,11 @@ import {
   approxMessagesChars,
   buildCompactionDigest,
   buildChainMessages,
+  buildSessionReuseDigest,
   parseAttachments,
-  COMPACT_KEEP_RECENT,
-  COMPACT_THRESHOLD_CHARS,
+  prepareHistoryForModel,
+  resolveCompactBudget,
+  type CompactBudget,
   WORKSPACE_IMAGE_PREFIX,
   guessImageMime,
 } from "./messages.js";
@@ -75,6 +77,17 @@ import {
   listRemoteChannelToolDefinitions,
   remoteChannelPromptBlock,
 } from "../remote-channel-tools.js";
+import {
+  callSessionTool,
+  isSessionToolName,
+  listSessionToolDefinitions,
+} from "./session-tools.js";
+import {
+  callAutomationTool,
+  isAutomationToolName,
+  listAutomationToolDefinitions,
+} from "./automation-tools.js";
+import type { AgentAutomationService } from "../agent-automation.js";
 
 export type SessionCompactionResult = {
   summary: string;
@@ -85,6 +98,14 @@ export type SessionCompactionResult = {
   systemSessionId?: string;
 };
 
+export type SessionForkResult = {
+  sessionId: string;
+  title: string;
+  sourceSessionId: string;
+  summaryChars: number;
+  mode: "summary";
+};
+
 /** Agent.configJson → cloud 配置（宽容解析） */
 export function agentCloudConfig(agent: Agent): CloudAgentConfig {
   try {
@@ -92,6 +113,14 @@ export function agentCloudConfig(agent: Agent): CloudAgentConfig {
   } catch {
     return {};
   }
+}
+
+function compactBudgetFromCloud(cloud: CloudAgentConfig): CompactBudget {
+  return resolveCompactBudget({
+    thresholdChars: cloud.compactThresholdChars,
+    keepRecent: cloud.compactKeepRecent,
+    maxToolResultChars: cloud.maxToolResultChars,
+  });
 }
 
 /**
@@ -116,6 +145,8 @@ export type CloudAgentRuntimeDeps = {
   agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
   /** 远程 Chat SDK 通道工具（可选；远程会话注入 chat_* 发帖/回帖工具） */
   remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
+  /** 定时 / 心跳自动化（可选；主 chat 注入 schedule/heartbeat 工具） */
+  automation?: AgentAutomationService | null;
 };
 
 export class CloudAgentRuntime {
@@ -131,6 +162,48 @@ export class CloudAgentRuntime {
       modelRouter: this.deps.modelRouter,
       gateway: this.deps.gateway,
     };
+  }
+
+  /**
+   * 定时任务 / 心跳触发：新建 system 会话并异步 startTurn。
+   * 返回后 Run 在后台继续，调用方可记录 sessionId/runId。
+   */
+  async startAutomationTurn(input: {
+    tenantId: string;
+    agentId: string;
+    prompt: string;
+    title: string;
+    kind: "schedule" | "heartbeat";
+    scheduleId?: string;
+    scheduleName?: string;
+  }): Promise<{ sessionId: string; runId: string }> {
+    const prompt = input.prompt.trim();
+    if (!prompt) throw new Error("automation prompt is empty");
+    const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
+    if (!agent) throw new Error("Agent 不存在");
+
+    const session = await this.store.createSession({
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      title: input.title.slice(0, 80) || (input.kind === "heartbeat" ? "心跳" : "定时任务"),
+      kind: "system",
+      origin: {
+        source: "system",
+        callerAgentId: agent.id,
+        callerAgentName: agent.name,
+        platform: input.kind,
+        ...(input.scheduleId ? { connectionId: input.scheduleId } : {}),
+        ...(input.scheduleName ? { externalThreadKey: input.scheduleName } : {}),
+      },
+    });
+
+    const { runId } = await this.startTurn({
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      sessionId: session.id,
+      content: prompt,
+    });
+    return { sessionId: session.id, runId };
   }
 
   async startTurn(input: {
@@ -444,20 +517,22 @@ export class CloudAgentRuntime {
       targetId,
     );
     const allMessages = chainRes.messages;
+    const budget = compactBudgetFromCloud(cloud);
+    prepareHistoryForModel(allMessages, budget);
     const beforeChars = approxMessagesChars(allMessages);
     const newerEvents = history.filter((e) => e.seq > lastCompactionSeq);
     const newerUserMessages = newerEvents.filter((e) => e.type === "user_message").length;
     const newerAssistantMessages = newerEvents.filter(
       (e) => e.type === "assistant_message",
     ).length;
-    if (allMessages.length <= COMPACT_KEEP_RECENT && !previousSummary) {
+    if (allMessages.length <= budget.keepRecent && !previousSummary) {
       throw new Error("当前会话还不需要压缩");
     }
     if (lastCompactionSeq > 0 && newerUserMessages + newerAssistantMessages < 2) {
       throw new Error("上次压缩后新增内容太少");
     }
 
-    const keep = allMessages.slice(-COMPACT_KEEP_RECENT);
+    const keep = allMessages.slice(-budget.keepRecent);
     const older = allMessages.slice(0, allMessages.length - keep.length);
     if (older.length === 0 && !previousSummary) {
       throw new Error("没有足够的旧消息可压缩");
@@ -503,6 +578,161 @@ export class CloudAgentRuntime {
       },
     });
     return result;
+  }
+
+  /**
+   * 从已有会话派生新会话：写入压缩摘要作为「早前对话」上下文，
+   * 用户在新会话发首条消息即可续聊。原始会话事件不改动。
+   */
+  async forkSession(input: {
+    tenantId: string;
+    agentId: string;
+    sourceSessionId: string;
+    title?: string;
+    createdByUserId?: string | null;
+  }): Promise<SessionForkResult> {
+    const source = await this.store.getSession(
+      input.tenantId,
+      input.agentId,
+      input.sourceSessionId,
+    );
+    if (!source) throw new Error("源会话不存在");
+    const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const cloud = agentCloudConfig(agent);
+    const budget = compactBudgetFromCloud(cloud);
+
+    const history = await this.store.listEvents(input.sourceSessionId, { limit: 2000 });
+    const lastUser = [...history].reverse().find((e) => e.type === "user_message");
+    const targetMessageId = lastUser
+      ? (lastUser.payload as Record<string, unknown>).messageId
+      : null;
+
+    let messages =
+      typeof targetMessageId === "string"
+        ? (() => {
+            try {
+              return buildChainMessages(
+                history.map((e) => ({
+                  type: e.type,
+                  runId: e.runId,
+                  payload: e.payload as unknown as Record<string, unknown>,
+                })),
+                targetMessageId,
+              ).messages;
+            } catch {
+              return [];
+            }
+          })()
+        : [];
+
+    if (messages.length === 0) {
+      messages = [];
+    }
+    prepareHistoryForModel(messages, budget);
+
+    const lastCompaction = [...history]
+      .reverse()
+      .find((e) => e.type === "context_compacted");
+    const previousSummary =
+      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
+      "string"
+        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
+        : "";
+
+    let summary = previousSummary;
+    if (messages.length > budget.keepRecent || !summary) {
+      const { digest, olderCount } = buildSessionReuseDigest(messages, {
+        keepRecent: budget.keepRecent,
+      });
+      if (olderCount > 0 || messages.length > 0) {
+        try {
+          if (messages.length > 4) {
+            const keep = messages.slice(-budget.keepRecent);
+            const older = messages.slice(0, Math.max(0, messages.length - keep.length));
+            const summarized = await this.summarizeMessages({
+              tenantId: input.tenantId,
+              cloud,
+              messages: older.length ? older : messages,
+              previousSummary: previousSummary || undefined,
+              audit: {
+                agent,
+                parentSessionId: input.sourceSessionId,
+                parentTitle: source.title,
+              },
+            });
+            if (summarized.summary) summary = summarized.summary;
+          }
+        } catch {
+          /* fall back to digest */
+        }
+        if (!summary) {
+          summary = previousSummary
+            ? `${previousSummary}\n\n${digest}`.slice(0, 8_000)
+            : digest.slice(0, 8_000) || "（源会话几乎为空）";
+        }
+      }
+    }
+    if (!summary.trim()) summary = `从会话「${source.title}」继续。`;
+
+    const title =
+      input.title?.trim() ||
+      `续：${source.title}`.slice(0, 80);
+
+    const created = await this.store.createSession({
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      title,
+      createdByUserId: input.createdByUserId ?? null,
+      kind: "chat",
+      origin: {
+        source: "api",
+        parentSessionId: input.sourceSessionId,
+        callerAgentId: agent.id,
+        callerAgentName: agent.name,
+      },
+      model: source.model,
+      modelRouteId: source.modelRouteId,
+      reasoning: source.reasoning,
+    });
+
+    await this.store.appendEvent({
+      sessionId: created.id,
+      type: "context_compacted",
+      runId: null,
+      payload: {
+        summary,
+        source: "fork",
+        beforeChars: approxMessagesChars(messages),
+        afterChars: summary.length + 80,
+        droppedMessages: messages.length,
+        keptMessages: 0,
+        forkedFromSessionId: input.sourceSessionId,
+      },
+    });
+    await this.store.appendEvent({
+      sessionId: created.id,
+      type: "context_sources",
+      runId: null,
+      payload: {
+        runId: "",
+        items: [
+          {
+            kind: "summary",
+            title: `续自：${source.title}`,
+            content: summary,
+          },
+        ],
+      },
+    });
+
+    return {
+      sessionId: created.id,
+      title: created.title,
+      sourceSessionId: input.sourceSessionId,
+      summaryChars: summary.length,
+      mode: "summary",
+    };
   }
 
   private async executeRun(input: {
@@ -567,6 +797,14 @@ export class CloudAgentRuntime {
     );
     let historyMsgs = chainRes.messages;
     const lastUserContent = chainRes.userContent;
+    const budget = compactBudgetFromCloud(cloud);
+    // 进入模型前：先封顶/分级压缩过长工具结果（不丢 user/assistant 结论）
+    const preCompacted = prepareHistoryForModel(historyMsgs, budget);
+    if (preCompacted > 0) {
+      await this.log(sessionId, runId, "info", "历史工具结果已按预算压缩", {
+        compacted: preCompacted,
+      });
+    }
 
     // —— 自动记忆召回 ——
     const autoMemoryOn =
@@ -618,8 +856,9 @@ export class CloudAgentRuntime {
         content: historySummary,
       });
     }
-    if (approxMessagesChars(historyMsgs) > COMPACT_THRESHOLD_CHARS) {
-      const keep = historyMsgs.slice(-COMPACT_KEEP_RECENT);
+    const autoCompactOn = cloud.autoCompact !== false;
+    if (autoCompactOn && approxMessagesChars(historyMsgs) > budget.thresholdChars) {
+      const keep = historyMsgs.slice(-budget.keepRecent);
       const older = historyMsgs.slice(0, historyMsgs.length - keep.length);
       try {
         const currentSession = await this.store.getSession(tenantId, agent.id, sessionId);
@@ -668,12 +907,22 @@ export class CloudAgentRuntime {
           });
         }
       } catch (err) {
-        // 摘要失败：硬截断，保底继续
-        historyMsgs = historyMsgs.slice(-COMPACT_KEEP_RECENT * 2);
+        // 摘要失败：硬截断 + 再压工具结果，保底继续
+        historyMsgs = historyMsgs.slice(-budget.keepRecent * 2);
+        prepareHistoryForModel(historyMsgs, {
+          ...budget,
+          maxToolResultChars: Math.min(budget.maxToolResultChars, 2_000),
+        });
         await this.log(sessionId, runId, "warn", "历史摘要失败，改为截断", {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    } else if (!autoCompactOn && approxMessagesChars(historyMsgs) > budget.thresholdChars) {
+      historyMsgs = historyMsgs.slice(-budget.keepRecent * 2);
+      prepareHistoryForModel(historyMsgs, budget);
+      await this.log(sessionId, runId, "info", "autoCompact 已关闭，历史已截断", {
+        kept: historyMsgs.length,
+      });
     }
 
     if (sourceItems.length > 0) {
@@ -706,6 +955,22 @@ export class CloudAgentRuntime {
           if (definitions.some((d) => d.function.name === def.function.name)) continue;
           definitions.push(def);
           nameMap.set(def.function.name, def.function.name);
+        }
+      }
+
+      // 对话复用 + 自动化管理（仅主 chat，避免子代理噪声）
+      if ((sessionPreferences?.kind ?? "chat") === "chat") {
+        for (const def of listSessionToolDefinitions()) {
+          if (definitions.some((d) => d.function.name === def.function.name)) continue;
+          definitions.push(def);
+          nameMap.set(def.function.name, def.function.name);
+        }
+        if (this.deps.automation) {
+          for (const def of listAutomationToolDefinitions()) {
+            if (definitions.some((d) => d.function.name === def.function.name)) continue;
+            definitions.push(def);
+            nameMap.set(def.function.name, def.function.name);
+          }
         }
       }
 
@@ -819,11 +1084,24 @@ export class CloudAgentRuntime {
       messages,
       definitions,
       nameMap,
+      compactBudget: budget,
       ...(input.options ? { options: input.options } : {}),
       ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
       hooks: {
         toolTitle: (modelName) => {
           if (modelName === DELEGATE_TOOL_NAME) return "委派 Agent";
+          if (isSessionToolName(modelName)) {
+            if (modelName === "list_chat_sessions") return "列出会话";
+            if (modelName === "search_chat_sessions") return "搜索会话";
+            if (modelName === "get_chat_messages") return "读取会话";
+            if (modelName === "import_session_context") return "导入会话上下文";
+            return "会话工具";
+          }
+          if (isAutomationToolName(modelName)) {
+            if (modelName.includes("heartbeat")) return "心跳";
+            if (modelName.includes("schedule")) return "定时任务";
+            return "自动化";
+          }
           if (isRemoteChannelToolName(modelName)) {
             if (modelName === "chat_post_message") return "发帖/回帖";
             if (modelName === "chat_post_channel_message") return "频道发帖";
@@ -843,7 +1121,7 @@ export class CloudAgentRuntime {
           parentRunId: runId,
           isCancelled: () => this.store.isCancelRequested(runId),
         }),
-        // 远程通道 / 跨 Agent 委派 + 插件 PreToolUse
+        // 远程通道 / 跨 Agent 委派 / 会话复用 + 插件 PreToolUse
         interceptCall: async (call, args) => {
           if (hooksSvc) {
             const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
@@ -864,6 +1142,43 @@ export class CloudAgentRuntime {
                 },
               };
             }
+          }
+          if (isSessionToolName(call.function.name)) {
+            const out = await callSessionTool(
+              this.store,
+              agent,
+              call.function.name,
+              args,
+              sessionId,
+            );
+            return {
+              result: {
+                content: [{ type: "text", text: out.text }],
+                isError: out.isError === true,
+              },
+            };
+          }
+          if (isAutomationToolName(call.function.name)) {
+            if (!this.deps.automation) {
+              return {
+                result: {
+                  content: [{ type: "text", text: "自动化服务未启用" }],
+                  isError: true,
+                },
+              };
+            }
+            const out = await callAutomationTool(
+              this.deps.automation,
+              agent,
+              call.function.name,
+              args,
+            );
+            return {
+              result: {
+                content: [{ type: "text", text: out.text }],
+                isError: out.isError === true,
+              },
+            };
           }
           if (isRemoteChannelToolName(call.function.name)) {
             const handle = this.deps.remoteChannels?.get(sessionId);

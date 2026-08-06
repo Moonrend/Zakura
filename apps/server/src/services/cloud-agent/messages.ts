@@ -16,6 +16,54 @@ export const COMPACT_THRESHOLD_CHARS = 60_000;
 export const COMPACT_KEEP_RECENT = 12;
 /** 循环内消息总量超过该值时就地压缩旧工具结果 */
 export const INLOOP_COMPACT_CHARS = 90_000;
+/** 单条工具结果默认上限（进入模型前） */
+export const MAX_TOOL_RESULT_CHARS = 12_000;
+/** 工具参数摘要上限（摘要 digest 用） */
+export const SUMMARY_ARG_CHARS = 400;
+
+export type CompactBudget = {
+  thresholdChars: number;
+  keepRecent: number;
+  inLoopChars: number;
+  maxToolResultChars: number;
+};
+
+export const DEFAULT_COMPACT_BUDGET: CompactBudget = {
+  thresholdChars: COMPACT_THRESHOLD_CHARS,
+  keepRecent: COMPACT_KEEP_RECENT,
+  inLoopChars: INLOOP_COMPACT_CHARS,
+  maxToolResultChars: MAX_TOOL_RESULT_CHARS,
+};
+
+/** 从 CloudAgentConfig / 调用方覆盖解析压缩预算 */
+export function resolveCompactBudget(overrides?: Partial<CompactBudget> | null): CompactBudget {
+  const o = overrides ?? {};
+  return {
+    thresholdChars:
+      typeof o.thresholdChars === "number" && o.thresholdChars >= 8_000
+        ? Math.floor(o.thresholdChars)
+        : DEFAULT_COMPACT_BUDGET.thresholdChars,
+    keepRecent:
+      typeof o.keepRecent === "number" && o.keepRecent >= 4
+        ? Math.min(Math.floor(o.keepRecent), 48)
+        : DEFAULT_COMPACT_BUDGET.keepRecent,
+    inLoopChars:
+      typeof o.inLoopChars === "number" && o.inLoopChars >= 12_000
+        ? Math.floor(o.inLoopChars)
+        : DEFAULT_COMPACT_BUDGET.inLoopChars,
+    maxToolResultChars:
+      typeof o.maxToolResultChars === "number" && o.maxToolResultChars >= 1_000
+        ? Math.min(Math.floor(o.maxToolResultChars), 80_000)
+        : DEFAULT_COMPACT_BUDGET.maxToolResultChars,
+  };
+}
+
+function shrinkText(text: string, keep: number, label: string): string {
+  if (text.length <= keep) return text;
+  const head = Math.max(200, Math.floor(keep * 0.7));
+  const tail = Math.max(80, keep - head - 40);
+  return `${text.slice(0, head)}\n…(${label}，原 ${text.length} 字)\n${text.slice(-tail)}`;
+}
 
 export type StoredEvent = {
   type: string;
@@ -361,33 +409,117 @@ export function messageTextForSummary(message: ModelChatMessage, limit = 600): s
   if (message.toolCalls?.length) {
     for (const call of message.toolCalls) {
       chunks.push(
-        `tool_call ${call.function.name}: ${call.function.arguments.slice(0, limit)}`,
+        `tool_call ${call.function.name}: ${call.function.arguments.slice(0, SUMMARY_ARG_CHARS)}`,
       );
     }
+  }
+  if (message.role === "tool" && message.name) {
+    return `[${message.name}] ${chunks.join("\n")}`.slice(0, limit);
   }
   return chunks.join("\n").slice(0, limit);
 }
 
+/**
+ * 结构化对话摘要素材：优先保留 user/assistant 结论，工具结果只留短摘。
+ */
 export function buildCompactionDigest(messages: ModelChatMessage[]): string {
-  return messages
-    .map((m) => `${m.role}: ${messageTextForSummary(m)}`)
-    .join("\n")
-    .slice(0, 30_000);
+  const lines: string[] = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i]!;
+    if (m.role === "user") {
+      lines.push(`## 用户\n${messageTextForSummary(m, 1_200)}`);
+      continue;
+    }
+    if (m.role === "assistant") {
+      const tools = m.toolCalls?.map((c) => c.function.name).join(", ");
+      const body = messageTextForSummary(m, 900);
+      lines.push(tools ? `## 助手（调用: ${tools}）\n${body}` : `## 助手\n${body}`);
+      continue;
+    }
+    if (m.role === "tool") {
+      lines.push(`### 工具 ${m.name ?? "?"}\n${messageTextForSummary(m, 280)}`);
+    }
+  }
+  return lines.join("\n\n").slice(0, 30_000);
 }
 
 /**
- * 循环内上下文超预算时就地压缩较旧的工具结果，返回压缩条数。
- * 只截断 tool 消息正文，不动 user/assistant 内容。
+ * 进入模型前：封顶单条工具结果，并在超预算时分级压缩旧工具输出。
+ * 就地修改 messages，返回被改动的条数。
+ *
+ * 分级策略：
+ * 1) 所有 tool 内容 > maxToolResultChars → 头尾保留截断
+ * 2) 总量 > inLoopChars → 从旧到新把 tool 压到 ~400 字
+ * 3) 仍超 threshold → 再压到 ~150 字，并截短 assistant 里过长的 tool 参数
  */
-export function compactToolResultsInPlace(messages: ModelChatMessage[]): number {
-  if (approxMessagesChars(messages) <= INLOOP_COMPACT_CHARS) return 0;
+export function compactToolResultsInPlace(
+  messages: ModelChatMessage[],
+  budget?: Partial<CompactBudget> | null,
+): number {
+  const b = resolveCompactBudget(budget);
   let compacted = 0;
+
   for (const m of messages) {
-    if (approxMessagesChars(messages) <= COMPACT_THRESHOLD_CHARS) break;
-    if (m.role === "tool" && m.content && m.content.length > 500) {
-      m.content = `${m.content.slice(0, 400)}\n…(旧工具结果已压缩)`;
+    if (m.role === "tool" && m.content && m.content.length > b.maxToolResultChars) {
+      m.content = shrinkText(m.content, b.maxToolResultChars, "工具结果截断");
       compacted += 1;
     }
   }
+
+  if (approxMessagesChars(messages) <= b.inLoopChars) return compacted;
+
+  for (const m of messages) {
+    if (approxMessagesChars(messages) <= b.thresholdChars) break;
+    if (m.role === "tool" && m.content && m.content.length > 500) {
+      m.content = shrinkText(m.content, 400, "旧工具结果已压缩");
+      compacted += 1;
+    }
+  }
+
+  if (approxMessagesChars(messages) <= b.thresholdChars) return compacted;
+
+  for (const m of messages) {
+    if (approxMessagesChars(messages) <= b.thresholdChars) break;
+    if (m.role === "tool" && m.content && m.content.length > 160) {
+      m.content = shrinkText(m.content, 150, "深度压缩");
+      compacted += 1;
+    }
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      for (const c of m.toolCalls) {
+        if (c.function.arguments.length > 800) {
+          c.function.arguments = shrinkText(c.function.arguments, 600, "参数压缩");
+          compacted += 1;
+        }
+      }
+    }
+  }
+
   return compacted;
+}
+
+/**
+ * 历史进入模型前的预处理：先做工具结果预算控制。
+ * 返回压缩条数，便于日志。
+ */
+export function prepareHistoryForModel(
+  messages: ModelChatMessage[],
+  budget?: Partial<CompactBudget> | null,
+): number {
+  return compactToolResultsInPlace(messages, budget);
+}
+
+/**
+ * 将消息链压缩为可供「续聊 / 复用」的纯文本摘要素材（不调用 LLM）。
+ * 长会话可先 digest 再交给 summarizeMessages。
+ */
+export function buildSessionReuseDigest(
+  messages: ModelChatMessage[],
+  opts?: { maxChars?: number; keepRecent?: number },
+): { digest: string; recent: ModelChatMessage[]; olderCount: number } {
+  const keepRecent = opts?.keepRecent ?? COMPACT_KEEP_RECENT;
+  const maxChars = opts?.maxChars ?? 24_000;
+  const recent = messages.slice(-keepRecent);
+  const older = messages.slice(0, Math.max(0, messages.length - recent.length));
+  const digest = buildCompactionDigest(older.length ? older : messages).slice(0, maxChars);
+  return { digest, recent, olderCount: older.length };
 }

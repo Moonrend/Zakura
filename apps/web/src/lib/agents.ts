@@ -206,5 +206,6 @@ export const AGENT_SUBNAV = [
   { href: "skills", label: "技能" },
   { href: "mcp", label: "MCP" },
   { href: "platforms", label: "消息平台" },
+  { href: "automation", label: "自动化" },
   { href: "tool-calls", label: "调用记录" },
 ] as const;

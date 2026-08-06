@@ -269,13 +269,16 @@ export type CloudAgentContextSourcesPayload = {
 /** 会话历史压缩摘要。旧事件仍保留在库中，后续上下文优先使用最新摘要。 */
 export type CloudAgentContextCompactedPayload = {
   summary: string;
-  source: "manual" | "auto";
+  /** manual=用户触发；auto=Run 前自动；fork=从其它会话派生 */
+  source: "manual" | "auto" | "fork";
   beforeChars: number;
   afterChars: number;
   droppedMessages: number;
   keptMessages: number;
   /** 手动压缩时记录内部 system 会话，便于审计压缩过程。 */
   systemSessionId?: string;
+  /** fork 时源会话 id */
+  forkedFromSessionId?: string;
 };
 
 /** 会话元数据变更（如自动标题），供多端实时同步 */
@@ -338,6 +341,17 @@ export type CloudAgentConfig = {
   autoMemory?: boolean;
   /** 首轮结束后由模型自动生成会话标题（默认 true） */
   autoTitle?: boolean;
+  /**
+   * 历史超长时自动 LLM 摘要压缩（默认 true）。
+   * 关闭后仅做工具结果就地截断，不调用模型生成摘要。
+   */
+  autoCompact?: boolean;
+  /** 触发摘要压缩的历史字符阈值（默认 60000，最小 8000） */
+  compactThresholdChars?: number;
+  /** 压缩后保留的最近消息条数（默认 12，范围 4–48） */
+  compactKeepRecent?: number;
+  /** 单条工具结果进入模型前的字符上限（默认 12000） */
+  maxToolResultChars?: number;
 };
 
 export type CloudAgentRunOptions = {
@@ -366,5 +380,15 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.enableTools === "boolean") out.enableTools = cloud.enableTools;
   if (typeof cloud.autoMemory === "boolean") out.autoMemory = cloud.autoMemory;
   if (typeof cloud.autoTitle === "boolean") out.autoTitle = cloud.autoTitle;
+  if (typeof cloud.autoCompact === "boolean") out.autoCompact = cloud.autoCompact;
+  if (typeof cloud.compactThresholdChars === "number" && cloud.compactThresholdChars >= 8_000) {
+    out.compactThresholdChars = Math.floor(cloud.compactThresholdChars);
+  }
+  if (typeof cloud.compactKeepRecent === "number" && cloud.compactKeepRecent >= 4) {
+    out.compactKeepRecent = Math.min(Math.floor(cloud.compactKeepRecent), 48);
+  }
+  if (typeof cloud.maxToolResultChars === "number" && cloud.maxToolResultChars >= 1_000) {
+    out.maxToolResultChars = Math.min(Math.floor(cloud.maxToolResultChars), 80_000);
+  }
   return out;
 }

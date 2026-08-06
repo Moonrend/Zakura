@@ -89,6 +89,7 @@ export function registerCloudAgentRoutes(
     runtime: {
       startTurn: CloudAgentRuntime["startTurn"];
       compactSession?: CloudAgentRuntime["compactSession"];
+      forkSession?: CloudAgentRuntime["forkSession"];
     };
     modelRouter?: ModelRouterService;
   },
@@ -403,6 +404,43 @@ export function registerCloudAgentRoutes(
         sessionId: c.req.param("sid"),
       });
       return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /**
+   * 从已有会话派生新会话：写入摘要作为早前上下文，便于「续聊」而不污染原会话。
+   * Body: { title?: string }
+   */
+  app.post("/api/agents/:id/cloud/sessions/:sid/fork", async (c) => {
+    if (!modelRouter || !runtime.forkSession) {
+      return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
+    }
+    const session = c.get("session")!;
+    const agentId = c.req.param("id");
+    const sid = c.req.param("sid");
+    const row = await store.getSession(session.tenantId, agentId, sid);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    const body = await c.req
+      .json<{ title?: string }>()
+      .catch(() => ({}) as { title?: string });
+    try {
+      const result = await runtime.forkSession({
+        tenantId: session.tenantId,
+        agentId,
+        sourceSessionId: sid,
+        title: body.title,
+        createdByUserId: session.userId === "api-key" ? null : session.userId,
+      });
+      const created = await store.getSession(session.tenantId, agentId, result.sessionId);
+      return c.json(
+        {
+          ...result,
+          session: created ? sessionDto(created) : null,
+        },
+        201,
+      );
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
