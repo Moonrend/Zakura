@@ -57,7 +57,7 @@ export default function LoginPage() {
         <ThemeToggle />
       </div>
       <div className="w-full max-w-[360px] animate-in-page">
-        <div className="mb-8 text-center">
+        <div className="mb-10 text-center">
           <BrandMark className="justify-center" iconClassName="size-9" />
         </div>
         {!platformReady ? (

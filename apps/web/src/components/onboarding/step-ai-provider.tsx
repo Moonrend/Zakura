@@ -137,10 +137,7 @@ export function StepAiProvider({
         返回选择
       </Button>
 
-      <SettingsHeader
-        title="配置云端 Agent"
-        description="连接 AI 提供商并选择默认对话模型。连接信息之后仍可修改。"
-      />
+      <SettingsHeader title="配置云端 Agent" description="连接提供商并选择默认模型" />
 
       <div className="rounded-lg border border-border/80 bg-card">
         <div className="p-4 sm:p-5">

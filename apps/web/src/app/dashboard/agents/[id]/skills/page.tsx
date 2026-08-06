@@ -138,7 +138,7 @@ export default function AgentSkillsPage() {
       />
 
       {browsing ? (
-        <div className="rounded-xl border border-border bg-card/40 p-3 sm:p-4">
+        <div className="animate-in-page rounded-lg border border-border bg-card p-3 sm:p-4">
           <SkillStorePanel
             agents={agents}
             defaultAgentIds={[id]}
@@ -151,10 +151,10 @@ export default function AgentSkillsPage() {
       ) : null}
 
       {unregistered.length ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted/40 p-3">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/40 p-3">
           <FolderPlus className="size-4 shrink-0 text-muted-foreground" />
           <span className="w-full text-xs text-muted-foreground sm:w-auto">
-            工作区里发现未登记的技能目录：
+            未登记的技能目录
           </span>
           {unregistered.map((name) => (
             <Button
@@ -178,12 +178,12 @@ export default function AgentSkillsPage() {
           ))}
         </div>
       ) : !skills.length ? (
-        <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
+        <div className="rounded-lg border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
           <Sparkles className="mx-auto mb-2 size-5 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">这个 Agent 还没有安装技能</p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-border">
+        <div className="overflow-hidden rounded-lg border border-border">
           {skills.map((skill, index) => (
             <div
               key={skill.id}

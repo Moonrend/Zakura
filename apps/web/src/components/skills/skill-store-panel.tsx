@@ -283,7 +283,7 @@ export function SkillStorePanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-border bg-card p-3 sm:p-4">
+      <div className="rounded-lg border border-border bg-card p-3 sm:p-4">
         <div className="mb-2 flex items-center gap-2">
           <Terminal className="size-4 shrink-0 text-muted-foreground" />
           <span className="text-sm font-medium">从命令或链接安装</span>
@@ -388,7 +388,7 @@ export function SkillStorePanel({
         <button
           type="button"
           onClick={() => openInstall(page.direct!.installSpec)}
-          className="flex w-full items-center gap-2.5 rounded-xl border border-foreground/20 bg-muted/40 p-3 text-left transition-colors hover:bg-muted"
+          className="flex w-full items-center gap-2.5 rounded-lg border border-border bg-muted/40 p-3 text-left surface-interactive hover:border-foreground/15"
         >
           <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1">
@@ -407,7 +407,7 @@ export function SkillStorePanel({
           ))}
         </div>
       ) : !shown ? (
-        <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
+        <div className="rounded-lg border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
           <p className="text-sm text-muted-foreground">
             {page.error
               ? `${meta?.name ?? store} 暂不可用`

@@ -222,7 +222,6 @@ export default function TeamSettingsPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="团队设置"
-        description="管理当前团队的资料、成员与团队生命周期。"
         actions={me.multiTenant ? (
           <Button size="sm" variant="outline" nativeButton={false} render={<Link href="/dashboard/settings/teams" />}>
             <Users className="size-3.5" />所有团队
@@ -230,7 +229,7 @@ export default function TeamSettingsPage() {
         ) : null}
       />
 
-      <SettingsSection title="团队资料" description="团队名称会显示在导航、邀请和授权页面中。">
+      <SettingsSection title="团队资料">
         <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(220px,.7fr)]">
           <div className="space-y-1.5">
             <Label htmlFor="team-name">团队名称</Label>
@@ -306,20 +305,27 @@ export default function TeamSettingsPage() {
       ) : (
         <SettingsSection
           title="成员"
-          description={canManage ? "团队成员与邀请管理在 SaaS 多团队模式下可用。" : "只有团队管理员可以查看和管理成员。"}
         >
           <p className="text-sm text-muted-foreground">
-            {canManage ? "当前部署由本地管理员账号管理，无需单独邀请团队成员。" : `你当前是${roleLabels[team.role]}，如需调整成员请联系团队管理员。`}
+            {canManage
+              ? "当前部署无需单独邀请成员。"
+              : `你是${roleLabels[team.role]}，请联系管理员调整成员。`}
           </p>
         </SettingsSection>
       )}
 
-      <SettingsSection title="危险操作" description="删除后，团队内的 Agent、配置和数据将永久删除。" className="border-destructive/35">
+      <SettingsSection title="危险操作" className="border-destructive/35">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium">删除这个团队</div>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {team.isDefault ? "默认团队不能删除。" : teamCount <= 1 ? "你必须至少保留一个团队。" : team.role !== "owner" ? "只有团队所有者可以删除团队。" : "此操作无法撤销，删除后将自动切换到其他团队。"}
+              {team.isDefault
+                ? "默认团队不能删除。"
+                : teamCount <= 1
+                  ? "至少保留一个团队。"
+                  : team.role !== "owner"
+                    ? "仅所有者可删除。"
+                    : "不可撤销；删除后切换到其他团队。"}
             </p>
           </div>
           <Button size="sm" variant="destructive" disabled={!canDelete} onClick={() => { setDeleteConfirm(""); setDeleteOpen(true); }}>

@@ -181,7 +181,7 @@ function PluginMarketsSection() {
         </span>
       </div>
 
-      <div className="space-y-3 rounded-xl border border-border bg-card p-3.5">
+      <div className="space-y-3 rounded-lg border border-border bg-card p-3.5">
         <div className="flex flex-wrap gap-1.5">
           {QUICK_MARKETS.map((m) => {
             const already = [...knownRepos].some(
@@ -389,7 +389,7 @@ function AutoUpdateSection({
           </Badge>
         ) : null}
       </div>
-      <div className="space-y-2.5 rounded-xl border border-border bg-card p-3.5">
+      <div className="space-y-2.5 rounded-lg border border-border bg-card p-3.5">
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium">自动更新第三方技能</p>
@@ -520,7 +520,7 @@ export function SkillSettingsPanel() {
           </p>
         )}
 
-        <div className="space-y-2.5 rounded-xl border border-border bg-card p-3.5">
+        <div className="space-y-2.5 rounded-lg border border-border bg-card p-3.5">
           <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">GitHub Token</Label>
@@ -566,7 +566,7 @@ export function SkillSettingsPanel() {
         </div>
 
         {cache?.repos.length ? (
-          <div className="overflow-hidden rounded-xl border border-border">
+          <div className="overflow-hidden rounded-lg border border-border">
             {cache.repos.map((repo, i) => (
               <div
                 key={repo.repoKey}

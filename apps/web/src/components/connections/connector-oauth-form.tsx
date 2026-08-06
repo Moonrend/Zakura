@@ -57,7 +57,7 @@ export function ConnectorOauthForm({
   enableHint,
 }: ConnectorOauthFormProps) {
   return (
-    <section className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <section className="space-y-5 rounded-lg border border-border bg-card p-5">
       <header>
         <h2 className="text-sm font-medium">{title}</h2>
         {description ? (

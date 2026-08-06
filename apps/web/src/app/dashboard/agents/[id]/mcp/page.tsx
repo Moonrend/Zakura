@@ -286,7 +286,7 @@ export default function AgentMcpPage() {
           </SettingsSection>
 
           {instances.length === 0 ? (
-            <div className="rounded-xl border border-dashed py-12 text-center">
+            <div className="rounded-lg border border-dashed py-12 text-center">
               <p className="mb-3 text-sm text-muted-foreground">暂无 MCP 实例</p>
               <div className="flex flex-wrap justify-center gap-2">
                 <Button
@@ -309,7 +309,7 @@ export default function AgentMcpPage() {
               </div>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-xl border border-border/80 bg-card">
+            <div className="overflow-hidden rounded-lg border border-border bg-card">
               <Table>
                 <TableHeader>
                   <TableRow>

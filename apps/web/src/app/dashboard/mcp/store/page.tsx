@@ -30,10 +30,7 @@ function McpStorePageInner() {
 
   return (
     <div className="space-y-5">
-      <SettingsHeader
-        title="MCP 商店"
-        description="浏览并安装远程 MCP 服务器。"
-      />
+      <SettingsHeader title="MCP 商店" />
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList variant="line" className="w-full justify-start sm:max-w-md">
           <TabsTrigger value="official">官方远程 MCP</TabsTrigger>

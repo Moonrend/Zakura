@@ -87,10 +87,7 @@ export function StepMcpSetup({ busy, onBack, onContinue, onInstalled }: Props) {
         <ArrowLeft />
         返回选择
       </Button>
-      <SettingsHeader
-        title="添加 MCP 能力"
-        description="按需添加上游工具，然后将 Agent 接入其他代理工具。"
-      />
+      <SettingsHeader title="添加 MCP 能力" />
 
       <Tabs defaultValue="featured">
         <TabsList variant="line" className="grid w-full max-w-sm grid-cols-2">
@@ -116,7 +113,6 @@ export function StepMcpSetup({ busy, onBack, onContinue, onInstalled }: Props) {
           <div>
             <div className="mb-4">
               <p className="text-sm font-medium">添加上游 MCP</p>
-              <p className="mt-1 text-xs text-muted-foreground">支持远程 URL、JSON 配置，以及 npm / PyPI 包。</p>
             </div>
             <McpImportPanel
               embedded

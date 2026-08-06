@@ -423,7 +423,6 @@ export function ConnectorConfigSheet({
                 <section>
                   <div className="mb-3">
                     <h2 className="text-sm font-medium">Agent 技能</h2>
-                    <p className="mt-1 text-xs text-muted-foreground">可选的编排能力。</p>
                   </div>
                   <div className="divide-y divide-border border-y border-border">
                     {skills.map((skill) => (

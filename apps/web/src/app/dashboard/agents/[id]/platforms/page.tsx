@@ -23,15 +23,13 @@ export default function AgentPlatformsPage() {
         title="消息平台"
         description={
           <>
-            通过 Chat SDK 添加消息连接器；每个实例凭据独立，同一平台可添加多个。邮箱工具（Amail /
-            Bettermail）请到{" "}
+            实例凭据独立 · 邮箱见{" "}
             <a
               href="/dashboard/connectors"
               className="underline underline-offset-2 hover:text-foreground"
             >
               连接器
             </a>
-            。
           </>
         }
       />

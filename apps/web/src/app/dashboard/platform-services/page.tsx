@@ -268,7 +268,7 @@ export default function PlatformServicesPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="自托管服务"
-        description="本机 Docker 单例。部署后在「网页」中添加为搜索/抓取后端。"
+        description="本机 Docker · 部署后在「网页」中选用"
         actions={
           <Button size="sm" variant="outline" onClick={() => void load()}>
             <RefreshCw className="size-3.5" />

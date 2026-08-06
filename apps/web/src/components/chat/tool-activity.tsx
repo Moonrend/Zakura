@@ -144,9 +144,7 @@ function Block({
   return (
     <div className="min-w-0">
       {label ? (
-        <div className="pb-1 text-[10.5px] font-medium tracking-wide text-muted-foreground/70 uppercase">
-          {label}
-        </div>
+        <div className="pb-1 text-[11px] text-muted-foreground">{label}</div>
       ) : null}
       <pre
         className={cn(
@@ -195,7 +193,7 @@ function MarkdownDocBlock({ doc }: { doc: MarkdownDoc }) {
   const domain = doc.url ? hostOf(doc.url) : "";
   const heading = doc.title || domain;
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-muted/15">
+    <div className="overflow-hidden rounded-lg border border-border/60 bg-muted/15">
       {heading ? (
         <div className="flex items-center gap-2 border-b border-border/50 px-2.5 py-1.5">
           {domain ? (

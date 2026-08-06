@@ -109,8 +109,8 @@ export function WebSourceChip({
       style={{ animationDelay: `${Math.min(index, 9) * 26}ms` }}
       className={cn(
         "animate-rise inline-flex max-w-[16rem] items-center gap-1.5 rounded-full border border-border/60 bg-background py-[3px] pr-2.5 pl-[3px] text-[11.5px] text-muted-foreground",
-        "transition-[background-color,border-color,color,transform] duration-200 ease-fluid",
-        "hover:-translate-y-px hover:border-border hover:bg-muted/60 hover:text-foreground",
+        "transition-[background-color,border-color,color] duration-150 ease-out-soft",
+        "hover:border-border hover:bg-muted/60 hover:text-foreground",
         className,
       )}
     >

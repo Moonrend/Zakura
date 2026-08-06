@@ -277,7 +277,7 @@ export function SkillInstallDialog({
 
                 {bundled.length ? (
                   <div className="mt-6 border-t border-border pt-3">
-                    <p className="mb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                    <p className="mb-1.5 text-[11px] text-muted-foreground">
                       捆绑文件（{bundled.length}）
                     </p>
                     <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">

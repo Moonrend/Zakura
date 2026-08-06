@@ -416,7 +416,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
               onClick={() => openBinding(binding)}
               className={cn(
                 "group flex flex-col gap-2 rounded-lg border border-border bg-card p-4 text-left",
-                "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                "surface-interactive hover:border-foreground/15",
               )}
             >
               <div className="flex items-start justify-between gap-2">
@@ -448,9 +448,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
               <DialogHeader>
                 <DialogTitle>添加连接器</DialogTitle>
               </DialogHeader>
-              <p className="text-xs text-muted-foreground">
-                选择平台类型后将创建<strong>独立实例</strong>，凭据仅属于该实例，与其它连接器互不影响。
-              </p>
+              <p className="text-xs text-muted-foreground">每个实例凭据独立</p>
               {remotePlatforms.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   未找到 Chat SDK 平台连接器。请确认「远程 Agent」集成包已同步。
@@ -468,7 +466,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
                         onClick={() => choosePlatform(platform)}
                         className={cn(
                           "rounded-lg border border-border px-3 py-3 text-left",
-                          "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                          "surface-interactive hover:border-foreground/15",
                         )}
                       >
                         <span className="block text-sm font-medium">{label}</span>
@@ -658,7 +656,7 @@ function BindingSettings({
   const selectedModelValue = model.trim() ? model : FOLLOW_DEFAULT;
 
   return (
-    <section className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <section className="space-y-5 rounded-lg border border-border bg-card p-5">
       <h2 className="text-sm font-medium">消息</h2>
 
       <div className="space-y-1.5">

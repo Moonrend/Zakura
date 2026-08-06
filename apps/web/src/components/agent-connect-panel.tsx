@@ -241,7 +241,7 @@ export function AgentConnectPanel({
         {showAdvanced ? (
           <div className="animate-in fade-in slide-in-from-top-1 mt-3 space-y-5 border-l border-border pl-4 duration-200">
             <div className="space-y-2">
-              <p className="text-xs text-muted-foreground">按接入端支持的配置结构选择：</p>
+              <p className="text-xs text-muted-foreground">配置格式</p>
               <Select value={format} onValueChange={(value) => value && setFormat(value as FormatId)} items={FORMATS}>
                 <SelectTrigger className="w-full sm:w-56" aria-label="配置格式">
                   <SelectValue />

@@ -148,17 +148,13 @@ export default function ConnectorsHub() {
 
   return (
     <div className="space-y-6">
-      <SettingsHeader
-        title="平台连接器"
-        description="管理平台提供的第三方连接，认证方式和配置字段由连接器目录声明。"
-      />
+      <SettingsHeader title="平台连接器" />
 
       <p className="text-xs text-muted-foreground">
-        厂商托管 MCP 端点请去{" "}
-        <Link href="/dashboard/mcp/store" className="text-foreground hover:underline">
+        厂商托管 MCP 见{" "}
+        <Link href="/dashboard/mcp/store" className="text-foreground underline-offset-4 hover:underline">
           MCP 商店
         </Link>
-        ；命名认证档案可在管理员设置中统一预配。
       </p>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -203,7 +199,7 @@ export default function ConnectorsHub() {
                   key={pkg.slug}
                   type="button"
                   onClick={() => openConnector(pkg.slug)}
-                  className="group flex w-full items-center gap-3 px-1 py-4 text-left transition-colors hover:bg-muted/30 sm:px-2"
+                  className="group flex w-full items-center gap-3 rounded-lg px-1 py-4 text-left surface-interactive sm:px-2"
                 >
                   <BrandIcon
                     brandId={pkg.slug}
@@ -231,7 +227,7 @@ export default function ConnectorsHub() {
                         .join(" · ")}
                     </div>
                   </div>
-                  <span className="shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5">→</span>
+                  <span className="shrink-0 text-muted-foreground transition-opacity duration-150 group-hover:text-foreground">→</span>
                 </button>
               );
             })}

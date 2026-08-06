@@ -91,21 +91,14 @@ export default function OauthClientsPage() {
 
   return (
     <div className="space-y-8">
-      <SettingsHeader
-        title="OAuth 客户端"
-        description="外部工具接入本平台，以及本平台连接远程 MCP 时产生的客户端记录。"
-      />
+      <SettingsHeader title="OAuth 客户端" />
 
       <SettingsSection title="接入客户端（CIMD / DCR）">
-        <p className="mb-3 text-xs text-muted-foreground">
-          Cursor、VS Code 等通过动态注册（DCR）或 Client ID Metadata（CIMD）接入本平台 MCP
-          时产生的客户端记录。
-        </p>
         {loading ? (
           <Skeleton className="h-32 w-full rounded-lg" />
         ) : inboundSorted.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-            尚无接入客户端。当外部工具完成 OAuth 授权后会出现在这里。
+            暂无接入客户端
           </p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-border">
@@ -151,14 +144,11 @@ export default function OauthClientsPage() {
       </SettingsSection>
 
       <SettingsSection title="上游动态注册（DCR）">
-        <p className="mb-3 text-xs text-muted-foreground">
-          安装远程 MCP 时，本平台作为客户端向对方授权服务器动态注册产生的记录。
-        </p>
         {loading ? (
           <Skeleton className="h-24 w-full rounded-lg" />
         ) : dcr.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-            尚无上游 DCR 记录。支持动态注册的远程 MCP 在首次授权时会写入。
+            暂无上游 DCR 记录
           </p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-border">
@@ -202,14 +192,11 @@ export default function OauthClientsPage() {
       </SettingsSection>
 
       <SettingsSection title="用户配置（BYO）">
-        <p className="mb-3 text-xs text-muted-foreground">
-          安装或授权时填写的自备 OAuth Client ID / Secret，按上游 host 去重保存。
-        </p>
         {loading ? (
           <Skeleton className="h-24 w-full rounded-lg" />
         ) : byo.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
-            尚无用户自备客户端。在 MCP 安装流中填写 Client ID 后会出现在这里。
+            暂无自备客户端
           </p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-border">

@@ -47,10 +47,7 @@ export default function SkillsPage() {
 
   return (
     <div className="space-y-5">
-      <SettingsHeader
-        title="技能"
-        description="浏览商店、管理已安装技能与自动更新；可在设置中添加 Claude / Codex 市场"
-      />
+      <SettingsHeader title="技能" />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList variant="line" className="grid w-full grid-cols-3 sm:max-w-md">

@@ -526,7 +526,7 @@ export function UpstreamModelSetup({
                   const selectedCount = group.models.filter((model) => selectedRemoteIds.has(model.id)).length;
                   const allSelected = selectedCount === group.models.length;
                   return (
-                    <section key={group.key} className="overflow-hidden rounded-xl border border-border/80 bg-card">
+                    <section key={group.key} className="overflow-hidden rounded-lg border border-border/80 bg-card">
                       <div className="flex items-center gap-2 border-b border-border/70 px-3 py-2.5">
                         <button
                           type="button"
@@ -580,7 +580,7 @@ export function UpstreamModelSetup({
                 })}
               </div>
             ) : (
-              <div className="rounded-xl border border-dashed px-4 py-10 text-center">
+              <div className="rounded-lg border border-dashed px-4 py-10 text-center">
                 <p className="text-sm font-medium">没有匹配的模型</p>
                 <p className="mt-1 text-xs text-muted-foreground">换个关键词试试，或使用手动添加。</p>
               </div>

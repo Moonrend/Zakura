@@ -147,21 +147,21 @@ export default function AgentsListPage() {
             <SearchField
               value={q}
               onValueChange={setQ}
-              placeholder="搜索 Agent（名称、slug、描述）"
+              placeholder="搜索名称、slug 或描述"
               className="max-w-sm"
             />
           ) : null}
           {filtered.length === 0 ? (
             <NoSearchResult query={q} />
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="stagger-children grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {filtered.map((a) => (
               <Link
                 key={a.id}
                 href={`/dashboard/agents/${a.id}/overview`}
                 className={cn(
                   "group flex flex-col gap-3 rounded-lg border border-border bg-card p-4",
-                  "transition-colors hover:border-foreground/20 hover:bg-muted/30",
+                  "surface-interactive hover:border-foreground/15",
                 )}
               >
                 <div className="flex min-w-0 items-start gap-2.5">

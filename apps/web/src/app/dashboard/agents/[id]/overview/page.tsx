@@ -12,7 +12,6 @@ import {
   Sparkles,
   Wrench,
   ArrowUpRight,
-  Bot,
 } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { AgentConnectPanel } from "@/components/agent-connect-panel";
@@ -37,108 +36,62 @@ export default function AgentOverviewPage() {
   if (loading || !agent) {
     return (
       <div className="space-y-8">
-        <div className="space-y-4 pt-4">
-          <Skeleton className="h-4 w-20" />
-          <Skeleton className="h-14 w-72 max-w-full" />
-          <Skeleton className="h-5 w-96 max-w-full" />
+        <div className="space-y-3 pt-1">
+          <Skeleton className="h-3.5 w-24" />
+          <Skeleton className="h-9 w-56 max-w-full" />
+          <Skeleton className="h-4 w-80 max-w-full" />
+          <div className="flex gap-2 pt-1">
+            <Skeleton className="h-8 w-24 rounded-lg" />
+            <Skeleton className="h-8 w-24 rounded-lg" />
+          </div>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 rounded-lg" />
           ))}
         </div>
-        <Skeleton className="h-72 w-full rounded-xl" />
+        <Skeleton className="h-64 w-full rounded-lg" />
       </div>
     );
   }
 
   return (
-    <div className="space-y-10">
-      {/* Hero */}
-      <section className="relative overflow-hidden rounded-2xl border border-border/70 bg-card/40 px-5 py-8 sm:px-8 sm:py-10">
-        {/* Diffuse glow blobs */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -left-16 -top-20 size-72 rounded-full bg-primary/20 blur-3xl dark:bg-primary/15"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute -right-10 top-0 size-64 rounded-full bg-sky-500/15 blur-3xl dark:bg-sky-400/10"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute bottom-0 left-1/3 size-56 rounded-full bg-violet-500/10 blur-3xl"
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-primary/[0.07] via-transparent to-transparent"
-        />
-
-        <div className="relative space-y-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-background/60 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground backdrop-blur-sm">
-              <Bot className="size-3" />
-              Agent
-            </span>
-            <code className="rounded-md bg-muted/60 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
-              {agent.slug}
-            </code>
-          </div>
-
-          <div className="relative">
-            {/* Soft text glow layer */}
-            <h1
-              aria-hidden
-              className="pointer-events-none absolute inset-0 select-none font-heading text-4xl font-semibold tracking-tight text-primary/40 blur-xl sm:text-5xl md:text-6xl"
-            >
-              {agent.name}
-            </h1>
-            <h1 className="relative font-heading text-4xl font-semibold tracking-tight text-foreground sm:text-5xl md:text-6xl">
-              <span className="bg-gradient-to-br from-foreground via-foreground to-foreground/70 bg-clip-text">
-                {agent.name}
-              </span>
-            </h1>
-          </div>
-
+    <div className="space-y-8">
+      <header className="space-y-4">
+        <div className="space-y-1.5">
+          <code className="text-[11px] text-muted-foreground">{agent.slug}</code>
+          <h1 className="font-heading text-2xl font-semibold tracking-tight sm:text-3xl">
+            {agent.name}
+          </h1>
           {agent.description ? (
-            <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground sm:text-base">
+            <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
               {agent.description}
             </p>
-          ) : (
-            <p className="max-w-2xl text-sm text-muted-foreground/80">
-              尚未添加描述。可在设置中完善 Agent 信息。
-            </p>
-          )}
-
-          <div className="flex flex-wrap gap-2 pt-1">
-            <Button
-              nativeButton={false}
-              render={<Link href={`/chat?agent=${id}`} />}
-            >
-              <MessageSquare className="size-4" />
-              开始对话
-            </Button>
-            <Button
-              variant="outline"
-              nativeButton={false}
-              render={<Link href={`/dashboard/agents/${id}/settings`} />}
-            >
-              <Settings2 className="size-4" />
-              高级设置
-            </Button>
-          </div>
+          ) : null}
         </div>
-      </section>
 
-      {/* Quick nav */}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            nativeButton={false}
+            render={<Link href={`/chat?agent=${id}`} />}
+          >
+            <MessageSquare className="size-4" />
+            开始对话
+          </Button>
+          <Button
+            variant="outline"
+            nativeButton={false}
+            render={<Link href={`/dashboard/agents/${id}/settings`} />}
+          >
+            <Settings2 className="size-4" />
+            设置
+          </Button>
+        </div>
+      </header>
+
       <section className="space-y-3">
-        <div className="flex items-end justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-medium tracking-tight">配置入口</h2>
-            <p className="text-xs text-muted-foreground">快速跳转到各能力模块</p>
-          </div>
-        </div>
-        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+        <h2 className="text-sm font-medium">模块</h2>
+        <div className="stagger-children grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           {QUICK_LINKS.map((item) => {
             const Icon = item.icon;
             return (
@@ -146,18 +99,17 @@ export default function AgentOverviewPage() {
                 key={item.href}
                 href={`/dashboard/agents/${id}/${item.href}`}
                 className={cn(
-                  "group flex items-start gap-3 rounded-xl border border-border/80 bg-card p-3.5",
-                  "shadow-[var(--shadow-soft)] transition-[border-color,background-color,transform] duration-200 ease-out-soft",
-                  "hover:border-foreground/20 hover:bg-muted/30",
+                  "group flex items-start gap-3 rounded-lg border border-border bg-card p-3",
+                  "surface-interactive hover:border-foreground/15",
                 )}
               >
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors duration-150 group-hover:text-foreground">
                   <Icon className="size-4" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1 text-sm font-medium">
                     {item.label}
-                    <ArrowUpRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
+                    <ArrowUpRight className="size-3.5 opacity-0 transition-opacity duration-150 group-hover:opacity-50" />
                   </div>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">{item.hint}</p>
                 </div>
@@ -167,20 +119,12 @@ export default function AgentOverviewPage() {
         </div>
       </section>
 
-      {/* Access / API key / MCP */}
       <section id="access" className="scroll-mt-24 space-y-3">
-        <div className="flex flex-wrap items-end justify-between gap-2">
-          <div>
-            <h2 className="flex items-center gap-2 text-sm font-medium tracking-tight">
-              <Plug className="size-4 text-muted-foreground" />
-              接入与凭据
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              MCP 地址、访问 Key，以及客户端配置片段
-            </p>
-          </div>
-        </div>
-        <div className="rounded-xl border border-border/80 bg-card p-4 shadow-[var(--shadow-soft)] sm:p-5">
+        <h2 className="flex items-center gap-2 text-sm font-medium">
+          <Plug className="size-4 text-muted-foreground" />
+          接入与凭据
+        </h2>
+        <div className="rounded-lg border border-border bg-card p-4 sm:p-5">
           <AgentConnectPanel
             agentId={id}
             agentSlug={agent.slug}

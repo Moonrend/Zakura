@@ -351,7 +351,7 @@ export function SkillRegistryPanel({
 
   if (!skills.length) {
     return (
-      <div className="rounded-xl border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
+      <div className="rounded-lg border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
         <p className="text-sm text-muted-foreground">还没有安装任何技能</p>
       </div>
     );
@@ -381,7 +381,7 @@ export function SkillRegistryPanel({
         ) : null}
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-border">
+      <div className="overflow-hidden rounded-lg border border-border">
         {visible.map((skill, index) => (
           <div
             key={skill.id}

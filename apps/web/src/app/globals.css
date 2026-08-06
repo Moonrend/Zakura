@@ -311,12 +311,15 @@
       background-color var(--duration-fast) var(--ease-out-soft),
       color var(--duration-fast) var(--ease-out-soft),
       border-color var(--duration-fast) var(--ease-out-soft),
-      box-shadow var(--duration-fast) var(--ease-out-soft),
-      transform var(--duration-fast) var(--ease-out-soft);
+      box-shadow var(--duration-fast) var(--ease-out-soft);
   }
 
   .surface-interactive:hover {
-    @apply bg-accent/70;
+    background-color: color-mix(in oklch, var(--accent) 70%, transparent);
+  }
+
+  .surface-interactive:active {
+    background-color: color-mix(in oklch, var(--accent) 85%, transparent);
   }
 
   .surface-elevated {

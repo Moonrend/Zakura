@@ -485,7 +485,7 @@ export default function WebPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="网页"
-        description="按团队隔离的搜索 / 抓取配置。同一服务可添加多个凭据，调用时轮询。"
+        description="搜索与抓取；多凭据时轮询调用"
         actions={
           <Button size="sm" disabled={saving || !loaded} onClick={() => void saveAll()}>
             <Save className="size-3.5" />

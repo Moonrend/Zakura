@@ -131,7 +131,7 @@ export function SettingsSection({
     <section
       id={id}
       className={cn(
-        "scroll-mt-20 space-y-3 rounded-xl border border-border/80 bg-card p-4 shadow-[var(--shadow-soft)] transition-[border-color,box-shadow] duration-200 ease-out-soft",
+        "scroll-mt-20 space-y-3 rounded-lg border border-border bg-card p-4 transition-[border-color,background-color,box-shadow] duration-150 ease-out-soft",
         className,
       )}
     >
@@ -139,7 +139,7 @@ export function SettingsSection({
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0 space-y-0.5">
             {title ? (
-              <div className="text-sm font-medium tracking-tight">{title}</div>
+              <div className="text-sm font-medium">{title}</div>
             ) : null}
             {description ? (
               <p className="text-xs text-muted-foreground">{description}</p>

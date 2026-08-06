@@ -122,7 +122,6 @@ export default function McpServersPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="MCP"
-        description="管理已安装的服务器，从官方或社区商店添加"
         actions={
           <div className="flex flex-wrap gap-2">
             <Button size="sm" nativeButton={false} render={<Link href="/dashboard/mcp/official" />}>
@@ -158,8 +157,7 @@ export default function McpServersPage() {
         </div>
       ) : instances.length === 0 ? (
         <div className="rounded-lg border border-dashed py-12 text-center">
-          <p className="mb-1 text-sm text-muted-foreground">暂无 MCP 服务器</p>
-          <p className="text-xs text-muted-foreground">从上方商店安装，或导入已有配置</p>
+          <p className="text-sm text-muted-foreground">暂无 MCP 服务器</p>
         </div>
       ) : (
         <>
@@ -174,7 +172,7 @@ export default function McpServersPage() {
           {filtered.length === 0 ? (
             <NoSearchResult query={q} />
           ) : (
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="stagger-children grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {filtered.map((i) => {
             const errorText = formatError(i.lastError);
 
@@ -184,7 +182,7 @@ export default function McpServersPage() {
                 href={`/dashboard/mcp/${i.id}`}
                 className={cn(
                   "group flex flex-col gap-2 rounded-lg border border-border bg-card p-4",
-                  "transition-colors hover:bg-muted/30",
+                  "surface-interactive hover:border-foreground/15",
                 )}
               >
                 <div className="flex items-start justify-between gap-2">

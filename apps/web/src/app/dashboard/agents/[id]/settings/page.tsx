@@ -316,9 +316,9 @@ export default function AgentSettingsPage() {
         <div className="grid gap-5 md:grid-cols-[9rem_1fr]">
           <Skeleton className="hidden h-48 md:block" />
           <div className="space-y-4">
-            <Skeleton className="h-36 w-full rounded-xl" />
-            <Skeleton className="h-48 w-full rounded-xl" />
-            <Skeleton className="h-40 w-full rounded-xl" />
+            <Skeleton className="h-36 w-full rounded-lg" />
+            <Skeleton className="h-48 w-full rounded-lg" />
+            <Skeleton className="h-40 w-full rounded-lg" />
           </div>
         </div>
       </div>
@@ -329,7 +329,6 @@ export default function AgentSettingsPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="设置"
-        description="名称、能力开关、对话行为与危险操作"
         actions={<SettingsSaveIndicator status={status} error={error} />}
       />
 
@@ -560,14 +559,13 @@ export default function AgentSettingsPage() {
           <SettingsSection
             id="settings-danger"
             title="危险区"
-            description="不可逆操作，请谨慎。"
             className="border-destructive/30"
           >
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 space-y-0.5">
                 <div className="text-sm font-medium">删除此 Agent</div>
                 <p className="text-xs text-muted-foreground">
-                  将移除配置与绑定；可选择是否同时清除工作区数据。
+                  移除配置与绑定；可同时清除工作区。
                 </p>
               </div>
               <Button

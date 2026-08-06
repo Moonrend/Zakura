@@ -215,7 +215,7 @@ export function PlatformConnectorProvisionPanel() {
                     <div className="border-t border-border py-4">
                       <ConnectorOauthForm
                         title={`${profile.label} · 整站配置`}
-                        description="保存后，引用此档案的所有连接器都将使用这套认证信息。"
+                        description="引用此档案的连接器共用这套认证。"
                         fields={profile.fields}
                         configuredFields={profile.configuredFields}
                         draft={draft}

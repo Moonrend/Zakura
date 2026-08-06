@@ -30,7 +30,7 @@ export function SkillCard({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group flex w-full flex-col gap-2 rounded-xl border border-border bg-card p-3.5 text-left transition-colors hover:border-foreground/25 hover:bg-muted/30 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none sm:p-4",
+        "group flex w-full flex-col gap-2 rounded-lg border border-border bg-card p-3.5 text-left surface-interactive hover:border-foreground/15 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none sm:p-4",
         className,
       )}
     >
@@ -107,7 +107,7 @@ export function SkillCard({
 
 export function SkillCardSkeleton() {
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3.5 sm:p-4">
+    <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3.5 sm:p-4">
       <div className="flex items-center gap-2.5">
         <div className="size-8 shrink-0 animate-pulse rounded-lg bg-muted" />
         <div className="flex-1 space-y-1.5">
