@@ -533,6 +533,33 @@ function turnMemoryItems(items: TimelineItem[]): TimelineMemoryItem[] {
   return out;
 }
 
+const EMPTY_WELCOMES = [
+  "有什么可以帮忙的？",
+  "今天想聊点什么？",
+  "我在，直接说就行。",
+  "准备好了，你说。",
+  "有什么想做的？",
+  "需要我帮什么忙？",
+  "从哪儿开始？",
+  "说说你的想法。",
+  "随时可以开始。",
+  "想问什么都可以。",
+  "我听着，你说。",
+  "有什么新鲜事？",
+  "今天做什么？",
+  "把问题丢过来就行。",
+  "在呢，怎么了？",
+  "有事尽管开口。",
+  "准备好听你讲了。",
+  "聊聊看？",
+  "先从哪一步来？",
+  "有什么安排？",
+];
+
+function pickEmptyWelcome() {
+  return EMPTY_WELCOMES[Math.floor(Math.random() * EMPTY_WELCOMES.length)]!;
+}
+
 export function ChatMessages({
   turns,
   runActive,
@@ -562,6 +589,11 @@ export function ChatMessages({
     messageId: string;
     items: CloudAgentContextSourceItem[];
   } | null>(null);
+  const [welcome, setWelcome] = useState(EMPTY_WELCOMES[0]!);
+
+  useEffect(() => {
+    if (turns.length === 0) setWelcome(pickEmptyWelcome());
+  }, [turns.length]);
 
   const sourcesOpen = sourcesFor != null;
   const activeSources = useMemo(() => sourcesFor?.items ?? [], [sourcesFor]);
@@ -569,14 +601,9 @@ export function ChatMessages({
   if (turns.length === 0) {
     return (
       <div className="mt-auto flex flex-col items-center px-6 pb-10">
-        <p className="animate-rise text-[1.65rem] font-medium tracking-[-0.03em] text-foreground/88">
-          {agentName ? "有什么可以帮忙的？" : "开始对话"}
+        <p className="animate-rise max-w-lg text-center text-[1.65rem] font-medium leading-snug tracking-[-0.03em] text-foreground/88">
+          {agentName ? welcome : "开始对话"}
         </p>
-        {agentName ? (
-          <p className="animate-rise mt-2 text-sm text-muted-foreground/80 [animation-delay:60ms]">
-            向 {agentName} 提问，或粘贴一段内容开始
-          </p>
-        ) : null}
       </div>
     );
   }
