@@ -929,6 +929,72 @@ export class CloudAgentSessionStore {
     return event.event;
   }
 
+  /**
+   * 批量写入事件（Fork 拷贝用）：单事务按序分配 seq，跳过逐条锁开销。
+   * 调用方应保证 session 尚无事件（或自行处理 seq 衔接）。
+   */
+  async appendEventsBulk(
+    sessionId: string,
+    events: Array<{
+      type: CloudAgentEventType;
+      runId?: string | null;
+      payload: CloudAgentEventPayload;
+    }>,
+  ): Promise<number> {
+    if (events.length === 0) return 0;
+    const now = new Date();
+    const rows = events.map((ev, i) => ({
+      id: newId(),
+      sessionId,
+      seq: i + 1,
+      type: ev.type,
+      runId: ev.runId ?? null,
+      payloadJson: JSON.stringify(ev.payload),
+      createdAt: now,
+    }));
+
+    const session = await this.db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(cloudAgentSessions)
+        .set({ lastSeq: rows.length, updatedAt: now })
+        .where(eq(cloudAgentSessions.id, sessionId))
+        .returning();
+      if (!updated) throw new Error("会话不存在");
+      // 分块插入，避免超大会话参数上限
+      const chunk = 200;
+      for (let i = 0; i < rows.length; i += chunk) {
+        await tx.insert(cloudAgentEvents).values(rows.slice(i, i + chunk));
+      }
+      return updated;
+    });
+
+    this.rememberMeta(sessionId, {
+      tenantId: session.tenantId,
+      agentId: session.agentId,
+      lastSeq: rows.length,
+    });
+    if (isRedisEnabled()) {
+      // 播种 Redis seq，避免后续 append 从 0 冲突
+      void getRedis().then(async (redis) => {
+        if (!redis) return;
+        try {
+          await redis.set(REDIS_KEYS.seq(sessionId), String(rows.length), { NX: true });
+          const meta = this.sessionMeta.get(sessionId);
+          if (meta) meta.seqSeeded = true;
+        } catch {
+          /* ignore */
+        }
+      });
+    }
+    platformEvents.publish(session.tenantId, {
+      type: "cloud_session_changed",
+      agentId: session.agentId,
+      sessionId,
+      reason: "updated",
+    });
+    return rows.length;
+  }
+
   async listEvents(
     sessionId: string,
     opts?: { afterSeq?: number; limit?: number; skipFlush?: boolean },

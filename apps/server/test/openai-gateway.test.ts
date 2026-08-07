@@ -13,6 +13,7 @@ import {
   mergeTools,
   resolveClientSessionKey,
   resolveGatewayModel,
+  rewriteGatewayModel,
   scoreGatewayMessageMatch,
 } from "../src/services/openai-gateway.js";
 import { hasApiKeyScope } from "../src/services/auth.js";
@@ -80,6 +81,15 @@ describe("OpenAI gateway model selection", () => {
   it("uses the client model before the Agent fallback", () => {
     assert.equal(resolveGatewayModel("client-model", "agent-model"), "client-model");
     assert.equal(resolveGatewayModel("", "agent-model"), "agent-model");
+  });
+
+  it("rewrites client model names via gatewayModelMap in O(1)", () => {
+    const map = { "gpt-5.1-codex": "gpt-5.1", "o3-review": "gpt-4.1" };
+    assert.equal(rewriteGatewayModel("gpt-5.1-codex", map), "gpt-5.1");
+    assert.equal(rewriteGatewayModel("o3-review", map), "gpt-4.1");
+    assert.equal(rewriteGatewayModel("gpt-4.1", map), "gpt-4.1");
+    assert.equal(rewriteGatewayModel(undefined, map), undefined);
+    assert.equal(rewriteGatewayModel("gpt-5.1-codex", undefined), "gpt-5.1-codex");
   });
 });
 

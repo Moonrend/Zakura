@@ -354,6 +354,11 @@ export type CloudAgentConfig = {
   /** 首轮结束后由模型自动生成会话标题（默认 true） */
   autoTitle?: boolean;
   /**
+   * Gateway 模型名转发：客户端请求的 model → 实际路由 alias。
+   * O(1) 查找，未命中则原样使用。例：`{ "gpt-5.1-codex": "gpt-5.1" }`。
+   */
+  gatewayModelMap?: Record<string, string>;
+  /**
    * 历史超长时自动 LLM 摘要压缩（默认 true）。
    * 关闭后仅做工具结果就地截断，不调用模型生成摘要。
    */
@@ -392,6 +397,21 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.enableTools === "boolean") out.enableTools = cloud.enableTools;
   if (typeof cloud.autoMemory === "boolean") out.autoMemory = cloud.autoMemory;
   if (typeof cloud.autoTitle === "boolean") out.autoTitle = cloud.autoTitle;
+  if (
+    cloud.gatewayModelMap &&
+    typeof cloud.gatewayModelMap === "object" &&
+    !Array.isArray(cloud.gatewayModelMap)
+  ) {
+    const map: Record<string, string> = {};
+    for (const [rawFrom, rawTo] of Object.entries(
+      cloud.gatewayModelMap as Record<string, unknown>,
+    )) {
+      const from = rawFrom.trim();
+      const to = typeof rawTo === "string" ? rawTo.trim() : "";
+      if (from && to) map[from] = to;
+    }
+    if (Object.keys(map).length) out.gatewayModelMap = map;
+  }
   if (typeof cloud.autoCompact === "boolean") out.autoCompact = cloud.autoCompact;
   if (typeof cloud.compactThresholdChars === "number" && cloud.compactThresholdChars >= 8_000) {
     out.compactThresholdChars = Math.floor(cloud.compactThresholdChars);

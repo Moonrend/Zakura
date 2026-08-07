@@ -786,6 +786,18 @@ export function ChatApp() {
     }
   }
 
+  /** 锁定会话（Gateway）操作前自动 Fork，返回可写会话 id */
+  async function forkToWritableSession(sourceSid: string): Promise<string> {
+    if (!agentId) throw new Error("未选择 Agent");
+    const result = await forkCloudSession(agentId, sourceSid);
+    const forked = result.session;
+    if (!forked) throw new Error("Fork 成功，但无法读取新会话");
+    setSessions((prev) => [forked, ...prev.filter((s) => s.id !== forked.id)]);
+    await loadSession(agentId, forked.id);
+    toast.success("已自动 Fork，在新会话中继续");
+    return forked.id;
+  }
+
   async function commitRename() {
     const sid = renamingId;
     const title = renameValue.trim();
@@ -940,10 +952,6 @@ export function ChatApp() {
 
   async function handleSend() {
     if (!agentId || sending || runActive) return;
-    if (isGatewaySession) {
-      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
-      return;
-    }
     const content = input.trim();
     if (!content && attachments.length === 0) return;
     const sentAttachments = attachments;
@@ -959,6 +967,9 @@ export function ChatApp() {
     setSending(true);
     try {
       let sid = sessionId;
+      if (isGatewaySession && sid) {
+        sid = await forkToWritableSession(sid);
+      }
       if (!sid) {
         const created = await createCloudSession(agentId);
         setSessions((prev) => [created, ...prev]);
@@ -997,12 +1008,12 @@ export function ChatApp() {
 
   async function handleRegenerate(messageId: string) {
     if (!agentId || !sessionId || runActive) return;
-    if (isGatewaySession) {
-      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
-      return;
-    }
     try {
-      await regenerateCloudRun(agentId, sessionId, messageId, runOptions);
+      let sid = sessionId;
+      if (isGatewaySession) {
+        sid = await forkToWritableSession(sessionId);
+      }
+      await regenerateCloudRun(agentId, sid, messageId, runOptions);
       setVariantByMessage((prev) => {
         const next = { ...prev };
         delete next[messageId];
@@ -1016,14 +1027,14 @@ export function ChatApp() {
 
   async function handleEditSend(parentKey: string, content: string) {
     if (!agentId || !sessionId || runActive || !content.trim()) return;
-    if (isGatewaySession) {
-      toast.error("OpenAI Gateway 会话只能 Fork 后继续");
-      return;
-    }
     try {
+      let sid = sessionId;
+      if (isGatewaySession) {
+        sid = await forkToWritableSession(sessionId);
+      }
       await sendCloudMessage(
         agentId,
-        sessionId,
+        sid,
         content.trim(),
         parentKey === "" ? null : parentKey,
         undefined,
@@ -1619,7 +1630,7 @@ export function ChatApp() {
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
             textareaRef={composerRef}
-            routeReady={hasChatRoute && !isGatewaySession}
+            routeReady={hasChatRoute}
             sending={sending}
             runActive={runActive}
             attachments={attachments}

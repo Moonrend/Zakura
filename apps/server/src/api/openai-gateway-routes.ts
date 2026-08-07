@@ -117,6 +117,19 @@ export function registerOpenAiGatewayRoutes(
         /* malformed Agent config is handled by the empty model list */
       }
     }
+    // 暴露转发源名称，便于 Codex 等客户端选到配置的别名
+    try {
+      const map = parseCloudAgentConfig(JSON.parse(agent.configJson || "{}")).gatewayModelMap;
+      if (map) {
+        for (const id of Object.keys(map)) {
+          if (!id || names.has(id)) continue;
+          names.add(id);
+          data.push({ id, object: "model", created: 0, owned_by: "zakura" });
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     return c.json({ object: "list", data });
   });
 

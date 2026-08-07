@@ -85,6 +85,8 @@ export type OpenAiGatewayContext = {
   toolNameMap: Map<string, string>;
   /** 客户端已自带 Zakura MCP 工具定义时，工具执行交给客户端 */
   usedZakuraMcp: boolean;
+  /** 会话首轮（用于临时标题 / 自动标题） */
+  isFirstTurn: boolean;
 };
 
 export type OpenAiGatewayPrepareOptions = {
@@ -351,6 +353,16 @@ export function resolveGatewayModel(raw: unknown, fallback?: string): string | u
   return typeof raw === "string" && raw.trim() ? raw.trim() : fallback?.trim() || undefined;
 }
 
+/** O(1) 模型名转发；map 未配置或未命中时原样返回。 */
+export function rewriteGatewayModel(
+  model: string | undefined,
+  map?: Record<string, string>,
+): string | undefined {
+  if (!model || !map) return model;
+  const rewritten = map[model];
+  return rewritten?.trim() || model;
+}
+
 export function mergeTools(
   serverTools: ModelToolDefinition[],
   clientTools: ModelToolDefinition[],
@@ -401,8 +413,11 @@ export class OpenAiGatewayService {
     const cloud = agentCloudConfig(agent);
     const messages = parseMessages(body.messages);
     const clientTools = parseTools(body.tools);
-    const clientModel = resolveGatewayModel(body.model);
-    const model = clientModel ?? resolveGatewayModel(undefined, cloud.model);
+    const clientModelRaw = resolveGatewayModel(body.model);
+    const clientModel = rewriteGatewayModel(clientModelRaw, cloud.gatewayModelMap);
+    const model =
+      clientModel ??
+      rewriteGatewayModel(resolveGatewayModel(undefined, cloud.model), cloud.gatewayModelMap);
     if (body.n !== undefined && body.n !== 1) {
       throw new Error("Gateway 目前只支持 n=1");
     }
@@ -513,6 +528,7 @@ export class OpenAiGatewayService {
       agentId: session.agentId,
       lastSeq: session.lastSeq,
     });
+    const isFirstTurn = session.lastSeq === 0;
     const messageId = newId();
     const runId = newId();
     // skipFlush：热路径不挡首字；parentRunId / 去重指纹读环即可
@@ -534,6 +550,12 @@ export class OpenAiGatewayService {
     void (async () => {
       try {
         if (!skipUserAppend) {
+          // 首轮临时标题，跑完后再由 autoTitle 润色
+          if (isFirstTurn && session.title === "OpenAI Gateway" && userContent) {
+            const title =
+              userContent.length > 40 ? `${userContent.slice(0, 40)}…` : userContent;
+            await this.deps.store.updateSession(tenantId, agent.id, session.id, { title });
+          }
           await this.deps.store.appendEvent({
             sessionId: session.id,
             type: "user_message",
@@ -573,6 +595,7 @@ export class OpenAiGatewayService {
       invokeOptions,
       toolNameMap,
       usedZakuraMcp: merged.usedZakuraMcp,
+      isFirstTurn,
     };
   }
 
@@ -799,6 +822,17 @@ export class OpenAiGatewayService {
         model: result.model || context.model || null,
         modelRouteId: routeId,
       });
+      // 不挡响应：首轮结束后后台生成标题
+      if (context.isFirstTurn) {
+        void this.maybeAutoTitle({
+          tenantId,
+          agent: context.agent,
+          sessionId: context.sessionId,
+          runId: context.runId,
+          userContent: lastUserContent(context.messages),
+          assistantContent: result.content ?? "",
+        });
+      }
       return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -826,6 +860,66 @@ export class OpenAiGatewayService {
   private async hasAssistantMessageForRun(sessionId: string, runId: string): Promise<boolean> {
     const events = await this.deps.store.listEvents(sessionId, { limit: 80 });
     return events.some((ev) => ev.runId === runId && ev.type === "assistant_message");
+  }
+
+  /** 首轮完成后后台生成标题；失败静默，不拖慢 Gateway 响应 */
+  private async maybeAutoTitle(input: {
+    tenantId: string;
+    agent: Agent;
+    sessionId: string;
+    runId: string;
+    userContent: string;
+    assistantContent: string;
+  }): Promise<void> {
+    const cloud = agentCloudConfig(input.agent);
+    if (cloud.autoTitle === false || !input.userContent.trim()) return;
+    try {
+      const res = await this.deps.modelRouter.chat(
+        input.tenantId,
+        [
+          {
+            role: "system",
+            content:
+              "为这段对话生成一个简短标题：中文优先、不超过 16 个字、不含引号和句号，直接输出标题本身。",
+          },
+          {
+            role: "user",
+            content: `用户：${input.userContent.slice(0, 800)}\n\n助手：${input.assistantContent.slice(0, 800)}`,
+          },
+        ],
+        {
+          capability: "chat",
+          ...(cloud.modelRouteId
+            ? { routeId: cloud.modelRouteId }
+            : cloud.model
+              ? { alias: cloud.model }
+              : {}),
+        },
+      );
+      const title = (res.content ?? "")
+        .trim()
+        .replace(/^["'「『]+|["'」』。]+$/g, "")
+        .split("\n")[0]
+        ?.slice(0, 24);
+      if (!title) return;
+      await this.deps.store.updateSession(
+        input.tenantId,
+        input.agent.id,
+        input.sessionId,
+        { title },
+      );
+      await this.deps.store.appendEvent({
+        sessionId: input.sessionId,
+        type: "session_update",
+        runId: input.runId,
+        payload: { title },
+      });
+    } catch (err) {
+      console.warn(
+        "[openai-gateway] autoTitle failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   /** 从上一条助手消息推断 parentRunId；旧 Gateway 无 runId 时用 orphan: 对齐 UI 合成规则 */

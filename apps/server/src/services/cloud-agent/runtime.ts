@@ -43,7 +43,6 @@ import {
   approxMessagesChars,
   buildCompactionDigest,
   buildChainMessages,
-  buildSessionReuseDigest,
   parseAttachments,
   prepareHistoryForModel,
   resolveCompactBudget,
@@ -102,9 +101,17 @@ export type SessionForkResult = {
   sessionId: string;
   title: string;
   sourceSessionId: string;
-  summaryChars: number;
-  mode: "summary";
+  /** 拷贝的事件条数（不含被跳过的 delta） */
+  copiedEvents: number;
+  mode: "copy";
 };
+
+/** Fork 时跳过流式碎片，只留终态事件，UI/模型上下文都够用且更快 */
+const FORK_SKIP_EVENT_TYPES = new Set<string>([
+  "assistant_delta",
+  "reasoning_delta",
+  "run_log",
+]);
 
 /** Agent.configJson → cloud 配置（宽容解析） */
 export function agentCloudConfig(agent: Agent): CloudAgentConfig {
@@ -653,81 +660,10 @@ export class CloudAgentRuntime {
     if (!source) throw new Error("源会话不存在");
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
     if (!agent) throw new Error("Agent 不存在");
-    const cloud = agentCloudConfig(agent);
-    const budget = compactBudgetFromCloud(cloud);
 
+    // 直接拷贝终态事件：保留 messageId/runId，UI 可见历史，编辑/重生可继续；无 LLM 摘要
     const history = await this.store.listEvents(input.sourceSessionId, { limit: 2000 });
-    const lastUser = [...history].reverse().find((e) => e.type === "user_message");
-    const targetMessageId = lastUser
-      ? (lastUser.payload as Record<string, unknown>).messageId
-      : null;
-
-    let messages =
-      typeof targetMessageId === "string"
-        ? (() => {
-            try {
-              return buildChainMessages(
-                history.map((e) => ({
-                  type: e.type,
-                  runId: e.runId,
-                  payload: e.payload as unknown as Record<string, unknown>,
-                })),
-                targetMessageId,
-              ).messages;
-            } catch {
-              return [];
-            }
-          })()
-        : [];
-
-    if (messages.length === 0) {
-      messages = [];
-    }
-    prepareHistoryForModel(messages, budget);
-
-    const lastCompaction = [...history]
-      .reverse()
-      .find((e) => e.type === "context_compacted");
-    const previousSummary =
-      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
-      "string"
-        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
-        : "";
-
-    let summary = previousSummary;
-    if (messages.length > budget.keepRecent || !summary) {
-      const { digest, olderCount } = buildSessionReuseDigest(messages, {
-        keepRecent: budget.keepRecent,
-      });
-      if (olderCount > 0 || messages.length > 0) {
-        try {
-          if (messages.length > 4) {
-            const keep = messages.slice(-budget.keepRecent);
-            const older = messages.slice(0, Math.max(0, messages.length - keep.length));
-            const summarized = await this.summarizeMessages({
-              tenantId: input.tenantId,
-              cloud,
-              messages: older.length ? older : messages,
-              previousSummary: previousSummary || undefined,
-              audit: {
-                agent,
-                parentSessionId: input.sourceSessionId,
-                parentTitle: source.title,
-              },
-            });
-            if (summarized.summary) summary = summarized.summary;
-          }
-        } catch {
-          /* fall back to digest */
-        }
-        if (!summary) {
-          summary = previousSummary
-            ? `${previousSummary}\n\n${digest}`.slice(0, 8_000)
-            : digest.slice(0, 8_000) || "（源会话几乎为空）";
-        }
-      }
-    }
-    if (!summary.trim()) summary = `从会话「${source.title}」继续。`;
+    const toCopy = history.filter((ev) => !FORK_SKIP_EVENT_TYPES.has(ev.type));
 
     const title =
       input.title?.trim() ||
@@ -750,42 +686,21 @@ export class CloudAgentRuntime {
       reasoning: source.reasoning,
     });
 
-    await this.store.appendEvent({
-      sessionId: created.id,
-      type: "context_compacted",
-      runId: null,
-      payload: {
-        summary,
-        source: "fork",
-        beforeChars: approxMessagesChars(messages),
-        afterChars: summary.length + 80,
-        droppedMessages: messages.length,
-        keptMessages: 0,
-        forkedFromSessionId: input.sourceSessionId,
-      },
-    });
-    await this.store.appendEvent({
-      sessionId: created.id,
-      type: "context_sources",
-      runId: null,
-      payload: {
-        runId: "",
-        items: [
-          {
-            kind: "summary",
-            title: `续自：${source.title}`,
-            content: summary,
-          },
-        ],
-      },
-    });
+    const copiedEvents = await this.store.appendEventsBulk(
+      created.id,
+      toCopy.map((ev) => ({
+        type: ev.type,
+        runId: ev.runId,
+        payload: ev.payload,
+      })),
+    );
 
     return {
       sessionId: created.id,
       title: created.title,
       sourceSessionId: input.sourceSessionId,
-      summaryChars: summary.length,
-      mode: "summary",
+      copiedEvents,
+      mode: "copy",
     };
   }
 

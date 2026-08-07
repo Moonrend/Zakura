@@ -146,6 +146,8 @@ export function registerCloudAgentRoutes(
       enableTools?: boolean;
       autoMemory?: boolean;
       autoTitle?: boolean;
+      /** Gateway 模型名转发；null/{} 清除 */
+      gatewayModelMap?: Record<string, string> | null;
     }>();
 
     let configJson: Record<string, unknown> = {};
@@ -182,6 +184,20 @@ export function registerCloudAgentRoutes(
     if (body.enableTools !== undefined) next.enableTools = body.enableTools;
     if (body.autoMemory !== undefined) next.autoMemory = body.autoMemory;
     if (body.autoTitle !== undefined) next.autoTitle = body.autoTitle;
+    if (body.gatewayModelMap !== undefined) {
+      if (body.gatewayModelMap == null) {
+        delete next.gatewayModelMap;
+      } else {
+        const map: Record<string, string> = {};
+        for (const [rawFrom, rawTo] of Object.entries(body.gatewayModelMap)) {
+          const from = rawFrom.trim();
+          const to = typeof rawTo === "string" ? rawTo.trim() : "";
+          if (from && to) map[from] = to;
+        }
+        if (Object.keys(map).length) next.gatewayModelMap = map;
+        else delete next.gatewayModelMap;
+      }
+    }
     configJson.cloud = next;
 
     await agentService.update(session.tenantId, agent.id, {

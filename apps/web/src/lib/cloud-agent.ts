@@ -897,8 +897,8 @@ export async function forkCloudSession(agentId: string, sessionId: string, title
     sessionId: string;
     title: string;
     sourceSessionId: string;
-    summaryChars: number;
-    mode: "summary";
+    copiedEvents: number;
+    mode: "copy";
     session: CloudSession | null;
   }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/fork`, {
     method: "POST",
@@ -1168,7 +1168,10 @@ export async function getCloudConfig(agentId: string) {
 export async function saveCloudConfig(
   agentId: string,
   cloud: Partial<
-    Omit<CloudAgentConfig, "maxToolRounds" | "model" | "modelRouteId" | "maxSubagentDepth">
+    Omit<
+      CloudAgentConfig,
+      "maxToolRounds" | "model" | "modelRouteId" | "maxSubagentDepth" | "gatewayModelMap"
+    >
   > & {
     /** null 表示清除限制 */
     maxToolRounds?: number | null;
@@ -1178,6 +1181,8 @@ export async function saveCloudConfig(
     modelRouteId?: string | null;
     /** null/0 恢复默认嵌套深度（2） */
     maxSubagentDepth?: number | null;
+    /** null/{} 清除 Gateway 模型转发 */
+    gatewayModelMap?: Record<string, string> | null;
   },
 ) {
   return api<{ cloud: CloudAgentConfig }>(`/api/agents/${agentId}/cloud/config`, {

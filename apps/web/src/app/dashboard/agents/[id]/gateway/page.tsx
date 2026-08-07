@@ -2,19 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { Check, Copy, ExternalLink, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import {
-  buildConversationTurns,
-  forkCloudSession,
-  getCloudSession,
-  listGatewaySessions,
-  subscribeCloudEvents,
+  getCloudConfig,
+  listChatModels,
+  saveCloudConfig,
+  type ChatModelOption,
 } from "@/lib/cloud-agent";
-import { subscribePlatformEvents } from "@/lib/platform-events";
-import { ChatMessages } from "@/components/chat/chat-messages";
+import {
+  ModelRouteSelector,
+  type ModelRouteSelectorItem,
+} from "@/components/models/model-route-selector";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -34,9 +35,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { SettingsHeader, SettingsSection, TableActions } from "@/components/settings-shell";
-import { cn } from "@/lib/utils";
+import { SettingsHeader, SettingsRow, SettingsSection, TableActions } from "@/components/settings-shell";
 
 /** Gateway Key 固定具备完整代理权限，不按 models/chat 拆分。 */
 const GATEWAY_SCOPES = ["gateway:models", "gateway:chat"] as const;
@@ -56,8 +57,7 @@ type ConnectMeta = {
   publicBaseUrl: string;
 };
 
-type GatewaySession = Awaited<ReturnType<typeof listGatewaySessions>>["sessions"][number];
-type GatewayEvent = Awaited<ReturnType<typeof getCloudSession>>["events"][number];
+type ModelMapRow = { id: string; from: string; to: string };
 
 function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleString() : "从未";
@@ -65,6 +65,25 @@ function formatDate(value: string | null) {
 
 function formatExpiry(value: string | null) {
   return value ? new Date(value).toLocaleString() : "永不过期";
+}
+
+function mapToRows(map: Record<string, string> | undefined): ModelMapRow[] {
+  if (!map) return [];
+  return Object.entries(map).map(([from, to], i) => ({
+    id: `${i}-${from}`,
+    from,
+    to,
+  }));
+}
+
+function rowsToMap(rows: ModelMapRow[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const row of rows) {
+    const from = row.from.trim();
+    const to = row.to.trim();
+    if (from && to) map[from] = to;
+  }
+  return map;
 }
 
 function CopyButton({
@@ -103,10 +122,6 @@ export default function AgentGatewayPage() {
   const { id } = useParams<{ id: string }>();
   const { agent, loading: agentLoading } = useAgentDetail();
   const [keys, setKeys] = useState<GatewayKey[]>([]);
-  const [sessions, setSessions] = useState<GatewaySession[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [selectedEvents, setSelectedEvents] = useState<GatewayEvent[]>([]);
-  const [sessionBusy, setSessionBusy] = useState(false);
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
@@ -114,82 +129,59 @@ export default function AgentGatewayPage() {
   const [expiry, setExpiry] = useState("never");
   const [rawKey, setRawKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const seqRef = useRef(0);
 
-  const refreshSessions = useCallback(async () => {
-    const sessionRows = await listGatewaySessions(id);
-    setSessions(sessionRows.sessions);
-    return sessionRows.sessions;
-  }, [id]);
+  const [model, setModel] = useState("");
+  const [modelRouteId, setModelRouteId] = useState<string | null>(null);
+  const [autoTitle, setAutoTitle] = useState(true);
+  const [mapRows, setMapRows] = useState<ModelMapRow[]>([]);
+  const mapRowsRef = useRef(mapRows);
+  mapRowsRef.current = mapRows;
+  const [chatModels, setChatModels] = useState<ChatModelOption[]>([]);
+  const [savingMap, setSavingMap] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [keyRows, meta] = await Promise.all([
+      const [keyRows, meta, cfg, models] = await Promise.all([
         api<GatewayKey[]>("/api/api-keys"),
         api<ConnectMeta>("/api/connect"),
+        getCloudConfig(id),
+        listChatModels(),
       ]);
       setKeys(keyRows.filter((key) => key.agentId === id));
       setPublicBaseUrl(meta.publicBaseUrl.replace(/\/$/, ""));
-      await refreshSessions();
+      setModel(cfg.cloud.model ?? "");
+      setModelRouteId(cfg.cloud.modelRouteId ?? null);
+      setAutoTitle(cfg.cloud.autoTitle !== false);
+      setMapRows(mapToRows(cfg.cloud.gatewayModelMap));
+      setChatModels(models);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [id, refreshSessions]);
+  }, [id]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // 列表实时：Gateway 新建/更新会话
-  useEffect(() => {
-    return subscribePlatformEvents(
-      (ev) => {
-        if (ev.type !== "cloud_session_changed") return;
-        if (ev.agentId !== id) return;
-        void refreshSessions().catch(() => undefined);
-      },
-      () => {
-        void refreshSessions().catch(() => undefined);
-      },
-    );
-  }, [id, refreshSessions]);
-
-  const mergeEvent = useCallback((ev: GatewayEvent) => {
-    setSelectedEvents((prev) => {
-      if (prev.some((e) => e.id === ev.id || e.seq === ev.seq)) return prev;
-      return [...prev, ev].sort((a, b) => a.seq - b.seq);
-    });
-    if (ev.seq > seqRef.current) seqRef.current = ev.seq;
-  }, []);
-
-  // 选中会话内容实时
-  useEffect(() => {
-    if (!selectedSessionId) return;
-    let unsub = subscribeCloudEvents(id, selectedSessionId, seqRef.current, {
-      onEvent: mergeEvent,
-      onError: (msg) => console.warn("[gateway sse]", msg),
-    });
-    const resub = () => {
-      unsub();
-      unsub = subscribeCloudEvents(id, selectedSessionId, seqRef.current, {
-        onEvent: mergeEvent,
-      });
-    };
-    const onVis = () => {
-      if (document.visibilityState === "visible") resub();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      unsub();
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [id, selectedSessionId, mergeEvent]);
-
   const gatewayBaseUrl = publicBaseUrl ? `${publicBaseUrl}/v1` : "/v1";
-  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
-  const turns = useMemo(() => buildConversationTurns(selectedEvents), [selectedEvents]);
+
+  const modelItems = useMemo<ModelRouteSelectorItem[]>(
+    () =>
+      chatModels.map((m) => ({
+        value: m.alias,
+        label: m.name || m.alias,
+        hint: m.providers.map((p) => p.name).join(" / ") || m.upstream,
+        providers: m.providers,
+        reasoning: m.reasoning,
+        reasoningLevels: m.reasoningLevels,
+        defaultReasonLevel: m.defaultReasonLevel,
+      })),
+    [chatModels],
+  );
+
+  const displayModel = model || chatModels.find((m) => m.isDefault)?.alias || "";
 
   function openCreate() {
     setRawKey(null);
@@ -236,28 +228,57 @@ export default function AgentGatewayPage() {
     }
   }
 
-  async function openSession(sessionId: string) {
-    setSelectedSessionId(sessionId);
-    setSessionBusy(true);
+  async function saveModelSelection(alias: string, routeId: string | null) {
+    setModel(alias);
+    setModelRouteId(routeId);
     try {
-      const result = await getCloudSession(id, sessionId);
-      setSelectedEvents(result.events);
-      seqRef.current = result.events.reduce((max, ev) => Math.max(max, ev.seq), 0);
+      await saveCloudConfig(id, { model: alias || null, modelRouteId: routeId });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSessionBusy(false);
     }
   }
 
-  async function forkSession(session: GatewaySession) {
+  async function saveAutoTitle(value: boolean) {
+    setAutoTitle(value);
     try {
-      const result = await forkCloudSession(id, session.id, `${session.title} · Fork`);
-      if (!result.session) throw new Error("Fork 成功，但无法读取新会话");
-      window.location.href = `/chat?agent=${id}&session=${result.session.id}`;
+      await saveCloudConfig(id, { autoTitle: value });
     } catch (err) {
+      setAutoTitle(!value);
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function persistModelMap(rows: ModelMapRow[]) {
+    setSavingMap(true);
+    try {
+      const map = rowsToMap(rows);
+      await saveCloudConfig(id, {
+        gatewayModelMap: Object.keys(map).length ? map : null,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+      await load();
+    } finally {
+      setSavingMap(false);
+    }
+  }
+
+  function addMapRow() {
+    setMapRows((prev) => [...prev, { id: `new-${Date.now()}`, from: "", to: "" }]);
+  }
+
+  function updateMapRow(rowId: string, patch: Partial<Pick<ModelMapRow, "from" | "to">>) {
+    setMapRows((prev) => prev.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+  }
+
+  function commitMapRows() {
+    void persistModelMap(mapRowsRef.current);
+  }
+
+  function removeMapRow(rowId: string) {
+    const next = mapRowsRef.current.filter((row) => row.id !== rowId);
+    setMapRows(next);
+    void persistModelMap(next);
   }
 
   if (agentLoading || loading) {
@@ -304,7 +325,7 @@ export default function AgentGatewayPage() {
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
             填 Base URL + Key 即可。Claude Code / Codex 等自带 session 头会按会话归并；
-            其它客户端按 user 消息历史对齐最近会话。云端工具在服务端执行，不会甩回本地。
+            其它客户端按 user 消息历史对齐最近会话。
           </p>
         </div>
       </SettingsSection>
@@ -370,79 +391,87 @@ export default function AgentGatewayPage() {
       </SettingsSection>
 
       <SettingsSection
-        title="Gateway 会话"
-        description="外部请求产生的会话只读；继续对话请 Fork 到 Chat。"
+        title="模型"
+        description="客户端未指定 model 时使用默认模型；转发表做 O(1) 名称替换，适合 Codex review 等别名。"
       >
-        {!sessions.length ? (
-          <p className="text-sm text-muted-foreground">暂无会话。</p>
-        ) : (
-          <div className="grid gap-3 lg:grid-cols-[minmax(14rem,0.36fr)_minmax(0,1fr)]">
-            <div className="divide-y divide-border overflow-hidden rounded-md border border-border">
-              {sessions.map((session) => {
-                const active = selectedSessionId === session.id;
-                return (
-                  <button
-                    key={session.id}
-                    type="button"
-                    className={cn(
-                      "block w-full px-3 py-2.5 text-left transition-colors hover:bg-muted/50",
-                      active && "bg-muted/60",
-                    )}
-                    onClick={() => void openSession(session.id)}
-                  >
-                    <span className="block truncate text-sm font-medium">{session.title}</span>
-                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                      {session.model || "未指定模型"} · {formatDate(session.updatedAt)}
-                    </span>
-                  </button>
-                );
-              })}
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-sm font-medium">默认模型</Label>
+            <ModelRouteSelector
+              items={modelItems}
+              value={displayModel}
+              routeId={modelRouteId}
+              onSelectionChange={(alias, routeId) => {
+                if (!alias) return;
+                void saveModelSelection(alias, routeId);
+              }}
+              disabled={chatModels.length === 0}
+              placeholder={chatModels.length === 0 ? "暂无模型" : "选择模型"}
+              className="h-9 max-w-none w-full justify-between rounded-md border border-input bg-transparent px-3 font-normal text-foreground"
+            />
+          </div>
+
+          <SettingsRow
+            label="自动标题"
+            description="Gateway 会话首轮结束后由后台生成标题，不拖慢响应。"
+            htmlFor="gateway-auto-title"
+          >
+            <Switch
+              id="gateway-auto-title"
+              checked={autoTitle}
+              onCheckedChange={(v) => void saveAutoTitle(Boolean(v))}
+            />
+          </SettingsRow>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">模型名转发</p>
+                <p className="text-xs text-muted-foreground">
+                  客户端请求名 → 实际路由名。例：gpt-5.1-codex → gpt-5.1
+                </p>
+              </div>
+              <Button size="sm" variant="outline" onClick={addMapRow} disabled={savingMap}>
+                <Plus className="size-3.5" />
+                添加
+              </Button>
             </div>
-            <div className="min-h-52 rounded-md border border-border p-3">
-              {sessionBusy ? (
-                <div className="space-y-3">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-14 w-full" />
-                  <Skeleton className="h-14 w-4/5" />
-                </div>
-              ) : selectedSession ? (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-sm font-medium">{selectedSession.title}</h3>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {selectedSession.model || "未指定模型"}
-                      </p>
-                    </div>
-                    <Button size="sm" variant="outline" onClick={() => void forkSession(selectedSession)}>
-                      <ExternalLink className="size-3.5" />
-                      Fork 到 Chat
+            {mapRows.length ? (
+              <div className="space-y-2">
+                {mapRows.map((row) => (
+                  <div key={row.id} className="flex items-center gap-2">
+                    <Input
+                      value={row.from}
+                      placeholder="客户端模型名"
+                      className="font-mono text-xs"
+                      onChange={(e) => updateMapRow(row.id, { from: e.target.value })}
+                      onBlur={commitMapRows}
+                    />
+                    <span className="shrink-0 text-xs text-muted-foreground">→</span>
+                    <Input
+                      value={row.to}
+                      placeholder="实际模型名"
+                      className="font-mono text-xs"
+                      onChange={(e) => updateMapRow(row.id, { to: e.target.value })}
+                      onBlur={commitMapRows}
+                    />
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      className="shrink-0 text-muted-foreground hover:text-destructive"
+                      title="删除"
+                      onClick={() => removeMapRow(row.id)}
+                    >
+                      <Trash2 className="size-3.5" />
                     </Button>
                   </div>
-                  <div className="max-h-[28rem] overflow-y-auto border-t border-border pt-1">
-                    {turns.length ? (
-                      <ChatMessages
-                        turns={turns}
-                        runActive={Boolean(selectedSession.activeRunId)}
-                        activeRunId={selectedSession.activeRunId}
-                        agentName={agent.name}
-                        canAct={false}
-                        onRegenerate={() => undefined}
-                        onEditSend={() => undefined}
-                        onSelectVariant={() => undefined}
-                        onSelectBranch={() => undefined}
-                      />
-                    ) : (
-                      <p className="px-3 py-4 text-sm text-muted-foreground">该会话暂无可展示消息。</p>
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">选择左侧会话查看内容。</p>
-              )}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">未配置转发，客户端 model 原样路由。</p>
+            )}
           </div>
-        )}
+        </div>
       </SettingsSection>
 
       <Dialog open={open} onOpenChange={setOpen}>
