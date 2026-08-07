@@ -1,4 +1,5 @@
 import type {
+  CloudAgentEvent,
   ModelChatContentPart,
   ModelChatInvokeOptions,
   ModelChatMessage,
@@ -11,7 +12,7 @@ import { newId, type Agent } from "../db/schema.js";
 import type { AgentService } from "./agents.js";
 import { agentCloudConfig } from "./cloud-agent/runtime.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
-import { eventsToMessages } from "./cloud-agent/messages.js";
+import { DeltaPublisher } from "./cloud-agent/loop.js";
 import { buildSystemPrompt } from "./cloud-agent/prompts.js";
 import {
   mcpResultToText,
@@ -26,9 +27,16 @@ import type { ModelRouterService } from "./model-router.js";
 import { buildOpenAIChatCompletion } from "../model-router/openai-response.js";
 import { parseRouteOptions } from "../model-router/types.js";
 import type { SkillsService } from "./skills/service.js";
+import { readGwClientSession, writeGwClientSession } from "./redis-store.js";
 
 /** 无客户端 session 头时，只在最近空闲窗口内做 messages 归并 */
 const GATEWAY_MATCH_IDLE_MS = 2 * 60 * 60 * 1000;
+/** 记忆召回（含 embedding）可拖到秒级；首字路径超时后空记忆开流 */
+const GATEWAY_MEMORY_BUDGET_MS = 80;
+
+function gatewayTimingEnabled(): boolean {
+  return process.env.ZAKURA_HTTP_TIMING === "1" || process.env.ZAKURA_GATEWAY_TIMING === "1";
+}
 
 export type OpenAiGatewayBody = {
   model?: unknown;
@@ -380,50 +388,106 @@ export class OpenAiGatewayService {
     body: OpenAiGatewayBody,
     opts?: OpenAiGatewayPrepareOptions,
   ): Promise<OpenAiGatewayContext> {
+    const t0 = performance.now();
+    const timing = gatewayTimingEnabled();
+    const marks: string[] = [];
+    const mark = (label: string) => {
+      if (timing) marks.push(`${label}=${(performance.now() - t0).toFixed(0)}`);
+    };
+
     const agent = await this.deps.agentService.get(tenantId, agentId);
     if (!agent) throw new Error("Agent 不存在");
+    mark("agent");
     const cloud = agentCloudConfig(agent);
     const messages = parseMessages(body.messages);
     const clientTools = parseTools(body.tools);
-    const listed =
+    const clientModel = resolveGatewayModel(body.model);
+    const model = clientModel ?? resolveGatewayModel(undefined, cloud.model);
+    if (body.n !== undefined && body.n !== 1) {
+      throw new Error("Gateway 目前只支持 n=1");
+    }
+
+    const toolsPromise =
       cloud.enableTools === false
-        ? { definitions: [] as ModelToolDefinition[], nameMap: new Map<string, string>() }
-        : toolsToDefinitions(await this.deps.gateway.listToolsForAgent(agent));
+        ? Promise.resolve({
+            definitions: [] as ModelToolDefinition[],
+            nameMap: new Map<string, string>(),
+          })
+        : this.deps.gateway.listToolsForAgent(agent).then((t) => toolsToDefinitions(t));
+
+    // ponytail: 记忆召回可拖到秒级；首字路径 80ms 超时后空记忆开流（对齐 cloud-agent runtime）
+    const memoryPromise = (async () => {
+      if (
+        !(
+          agent.enableMemory &&
+          cloud.autoMemory !== false &&
+          this.deps.memoryProviders
+        )
+      ) {
+        return "";
+      }
+      try {
+        const resolved = await resolveAgentMemory(this.deps.memoryProviders!, agent);
+        if (!resolved) return "";
+        return (
+          await buildMemoryContext(
+            this.deps.memoryStore ?? null,
+            resolved,
+            agent,
+            lastUserContent(messages) || undefined,
+          )
+        ).text;
+      } catch (err) {
+        console.warn("[openai-gateway] memory context failed:", err);
+        return "";
+      }
+    })();
+    const memoryWithBudget = Promise.race([
+      memoryPromise,
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve(""), GATEWAY_MEMORY_BUDGET_MS),
+      ),
+    ]);
+
+    const skillsPromise = this.deps.skills
+      ? this.deps.skills.promptSummary(tenantId, agent.id)
+      : Promise.resolve("");
+
+    // session / 路由预热 与 tools/memory/skills 互不依赖，并行抢时间
+    const sessionPromise = this.getOrCreateSession({
+      tenantId,
+      agent,
+      clientSessionKey: opts?.clientSessionKey,
+      apiKeyId: opts?.apiKeyId,
+      model,
+      clientMessages: messages,
+    });
+    const routeIdForWarm = clientModel ? undefined : cloud.modelRouteId?.trim() || undefined;
+    const routeWarmPromise = this.deps.modelRouter
+      .resolveRoute(tenantId, {
+        capability: "chat",
+        ...(routeIdForWarm ? { routeId: routeIdForWarm } : {}),
+        ...(model ? { alias: model } : {}),
+      })
+      .catch(() => null);
+
+    const [listed, memoryContext, skills, session] = await Promise.all([
+      toolsPromise,
+      memoryWithBudget,
+      skillsPromise,
+      sessionPromise,
+      routeWarmPromise,
+    ]);
+    mark("parallel");
+
     const merged = mergeTools(listed.definitions, clientTools);
     // 合并后仍保留服务端工具名映射，供云端执行
     const toolNameMap = listed.nameMap;
 
-    let memoryContext = "";
-    if (
-      agent.enableMemory &&
-      cloud.autoMemory !== false &&
-      this.deps.memoryProviders
-    ) {
-      try {
-        const resolved = await resolveAgentMemory(this.deps.memoryProviders, agent);
-        if (resolved) {
-          memoryContext = (
-            await buildMemoryContext(
-              this.deps.memoryStore ?? null,
-              resolved,
-              agent,
-              lastUserContent(messages) || undefined,
-            )
-          ).text;
-        }
-      } catch (err) {
-        console.warn("[openai-gateway] memory context failed:", err);
-      }
-    }
-    const skills = this.deps.skills
-      ? await this.deps.skills.promptSummary(tenantId, agent.id)
-      : "";
     const systemPrompt = buildSystemPrompt(agent, cloud, {
       memoryContext: memoryContext || undefined,
       skills: skills || undefined,
     });
-    const clientModel = resolveGatewayModel(body.model);
-    const model = clientModel ?? resolveGatewayModel(undefined, cloud.model);
     const routeOptions = parseRouteOptions({
       ...asRecord(body.routeOptions ?? body.route_options),
       ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
@@ -434,9 +498,6 @@ export class OpenAiGatewayService {
       ...(typeof body.maxTokens === "number" ? { maxTokens: body.maxTokens } : {}),
       reasoning: body.reasoning ?? asRecord(body.routeOptions ?? body.route_options).reasoning,
     });
-    if (body.n !== undefined && body.n !== 1) {
-      throw new Error("Gateway 目前只支持 n=1");
-    }
     const extensions = parseGatewayExtensions(body);
     const invokeOptions: ModelChatInvokeOptions = {
       ...(merged.tools.length ? { tools: merged.tools } : {}),
@@ -447,46 +508,60 @@ export class OpenAiGatewayService {
       ...(Object.keys(extensions).length ? { extensions } : {}),
     };
 
-    const session = await this.getOrCreateSession({
-      tenantId,
-      agent,
-      clientSessionKey: opts?.clientSessionKey,
-      apiKeyId: opts?.apiKeyId,
-      model,
-      clientMessages: messages,
+    await this.deps.store.warmSession(session.id, {
+      tenantId: session.tenantId,
+      agentId: session.agentId,
+      lastSeq: session.lastSeq,
     });
     const messageId = newId();
     const runId = newId();
-    const parentRunId = await this.inferParentRunId(session.id);
+    // skipFlush：热路径不挡首字；parentRunId / 去重指纹读环即可
+    const recentEvents = await this.deps.store.listEvents(session.id, {
+      limit: 40,
+      skipFlush: true,
+    });
+    const parentRunId = this.extractParentRunId(recentEvents);
+    const lastStoredUser = this.extractLastStoredUserContent(recentEvents);
     const userContent = lastUserContent(messages);
-    const storedPlain = await this.loadPlainMessages(session.id);
-    const lastStored = storedPlain[storedPlain.length - 1];
     // 同一 user 已落库、助手尚未写出（重试）时不要重复追加
     const skipUserAppend =
-      Boolean(userContent) &&
-      lastStored?.role === "user" &&
-      (lastStored.content ?? "") === userContent;
+      Boolean(userContent) && lastStoredUser !== null && lastStoredUser === userContent;
     let replyToMessageId = messageId;
     if (skipUserAppend) {
-      replyToMessageId = (await this.lastUserMessageId(session.id)) ?? messageId;
-    } else {
-      await this.deps.store.appendEvent({
-        sessionId: session.id,
-        type: "user_message",
-        runId,
-        payload: {
-          messageId,
-          content: userContent,
-          parentRunId,
-        },
-      });
+      replyToMessageId = this.extractLastUserMessageId(recentEvents) ?? messageId;
     }
-    await this.deps.store.appendEvent({
-      sessionId: session.id,
-      type: "run_start",
-      runId,
-      payload: { runId, replyToMessageId },
-    });
+    // 模型上下文来自请求体，不依赖这两条落库；串行写但不 await，让 invoke 立刻开流
+    void (async () => {
+      try {
+        if (!skipUserAppend) {
+          await this.deps.store.appendEvent({
+            sessionId: session.id,
+            type: "user_message",
+            runId,
+            payload: {
+              messageId,
+              content: userContent,
+              parentRunId,
+            },
+          });
+        }
+        await this.deps.store.appendEvent({
+          sessionId: session.id,
+          type: "run_start",
+          runId,
+          payload: { runId, replyToMessageId },
+        });
+      } catch (err) {
+        console.warn(
+          "[openai-gateway] session bookkeeping failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    })();
+    mark("session");
+    if (timing) {
+      console.warn(`[gateway] prepare ${marks.join(" ")} total=${(performance.now() - t0).toFixed(0)}ms`);
+    }
 
     return {
       agent,
@@ -530,19 +605,21 @@ export class OpenAiGatewayService {
           ...(context.model ? { alias: context.model } : {}),
         };
 
-        // 与 Agent loop 对齐：流式 delta 落库，工具写 start/args/result，UI 才能渲染工具卡片
+        // 与 Agent loop 对齐：DeltaPublisher 批落库；reasoning 也写事件供 Web UI 渲染
         const messageId = newId();
-        let deltaChain = Promise.resolve();
-        const persistDelta = (text: string) => {
-          deltaChain = deltaChain.then(async () => {
-            await this.deps.store.appendEvent({
-              sessionId: context.sessionId,
-              type: "assistant_delta",
-              runId: context.runId,
-              payload: { messageId, delta: text },
-            });
-          });
-        };
+        const publisher = new DeltaPublisher(
+          this.deps.store,
+          context.sessionId,
+          context.runId,
+          messageId,
+        );
+        const reasoningPublisher = new DeltaPublisher(
+          this.deps.store,
+          context.sessionId,
+          context.runId,
+          messageId,
+          "reasoning_delta",
+        );
 
         // 客户端要求流式时，每一轮都 chatStream 推送文本；云端工具轮不把 tool_calls 回给客户端
         result = callbacks
@@ -554,9 +631,12 @@ export class OpenAiGatewayService {
               {
                 onDelta: (text) => {
                   callbacks.onDelta?.(text);
-                  persistDelta(text);
+                  publisher.push(text);
                 },
-                onReasoningDelta: callbacks.onReasoningDelta,
+                onReasoningDelta: (text) => {
+                  callbacks.onReasoningDelta?.(text);
+                  reasoningPublisher.push(text);
+                },
                 signal: callbacks.signal,
               },
             )
@@ -566,9 +646,12 @@ export class OpenAiGatewayService {
               routeQuery,
               context.invokeOptions,
             );
-        await deltaChain;
-        if (!callbacks && result.content) persistDelta(result.content);
-        await deltaChain;
+        await publisher.drain();
+        await reasoningPublisher.drain();
+        if (!callbacks && result.content) {
+          publisher.push(result.content);
+          await publisher.drain();
+        }
 
         if (result.content) lastText = result.content;
 
@@ -741,13 +824,12 @@ export class OpenAiGatewayService {
 
   /** 本 Run 是否已有最终 assistant_message（无工具轮在循环内已写出） */
   private async hasAssistantMessageForRun(sessionId: string, runId: string): Promise<boolean> {
-    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
+    const events = await this.deps.store.listEvents(sessionId, { limit: 80 });
     return events.some((ev) => ev.runId === runId && ev.type === "assistant_message");
   }
 
   /** 从上一条助手消息推断 parentRunId；旧 Gateway 无 runId 时用 orphan: 对齐 UI 合成规则 */
-  private async inferParentRunId(sessionId: string): Promise<string | null> {
-    const events = await this.deps.store.listEvents(sessionId, { limit: 200 });
+  private extractParentRunId(events: CloudAgentEvent[]): string | null {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const ev = events[i]!;
       if (ev.runId) return ev.runId;
@@ -760,19 +842,32 @@ export class OpenAiGatewayService {
     return null;
   }
 
-  private async loadPlainMessages(sessionId: string): Promise<ModelChatMessage[]> {
-    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
-    return eventsToMessages(
-      events.map((ev) => ({
-        type: ev.type,
-        runId: ev.runId,
-        payload: ev.payload as Record<string, unknown>,
-      })),
-    );
+  /** 只取最近 user 文本指纹，避免为匹配会话拉全量历史 */
+  private async loadRecentUserFingerprint(sessionId: string): Promise<string[]> {
+    const events = await this.deps.store.listEvents(sessionId, {
+      limit: 60,
+      skipFlush: true,
+    });
+    const users: string[] = [];
+    for (const ev of events) {
+      if (ev.type !== "user_message") continue;
+      const content = (ev.payload as Record<string, unknown>).content;
+      if (typeof content === "string" && content.trim()) users.push(content.trim());
+    }
+    return users;
   }
 
-  private async lastUserMessageId(sessionId: string): Promise<string | null> {
-    const events = await this.deps.store.listEvents(sessionId, { limit: 2000 });
+  private extractLastStoredUserContent(events: CloudAgentEvent[]): string | null {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const ev = events[i]!;
+      if (ev.type !== "user_message") continue;
+      const content = (ev.payload as Record<string, unknown>).content;
+      return typeof content === "string" ? content : "";
+    }
+    return null;
+  }
+
+  private extractLastUserMessageId(events: CloudAgentEvent[]): string | null {
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const ev = events[i]!;
       if (ev.type !== "user_message") continue;
@@ -795,17 +890,33 @@ export class OpenAiGatewayService {
     const apiKeyId = cleanSessionKey(input.apiKeyId);
 
     if (key) {
+      const cachedId = await readGwClientSession(input.agent.id, key);
+      if (cachedId) {
+        const cached = await this.deps.store.getSession(
+          input.tenantId,
+          input.agent.id,
+          cachedId,
+        );
+        if (cached && this.isGatewayOrigin(cached.originJson)) return cached;
+      }
+
       const byId = await this.deps.store.getSession(input.tenantId, input.agent.id, key);
-      if (byId && this.isGatewayOrigin(byId.originJson)) return byId;
+      if (byId && this.isGatewayOrigin(byId.originJson)) {
+        void writeGwClientSession(input.agent.id, key, byId.id);
+        return byId;
+      }
 
       const byClientKey = await this.findGatewaySession(
         input.tenantId,
         input.agent.id,
         (origin) => origin.clientSessionKey === key,
       );
-      if (byClientKey) return byClientKey;
+      if (byClientKey) {
+        void writeGwClientSession(input.agent.id, key, byClientKey.id);
+        return byClientKey;
+      }
 
-      return this.deps.store.createSession({
+      const created = await this.deps.store.createSession({
         tenantId: input.tenantId,
         agentId: input.agent.id,
         title: "OpenAI Gateway",
@@ -818,28 +929,32 @@ export class OpenAiGatewayService {
         },
         model: input.model ?? null,
       });
+      void writeGwClientSession(input.agent.id, key, created.id);
+      return created;
     }
 
-    // 无客户端 session：按 user 消息指纹在空闲窗口内归并（不按 API Key 硬粘）
+    // ponytail: 无 client session 时最多比对最近 3 个空闲会话的近期 user 指纹（不再 30×2000）
     const clientUsers = userContentFingerprint(input.clientMessages);
     if (clientUsers.length > 0) {
       const recent = await this.deps.store.listGatewaySessions(
         input.tenantId,
         input.agent.id,
-        { limit: 30 },
+        { limit: 3 },
+      );
+      const candidates = recent.filter((session) => {
+        const updated = +new Date(session.updatedAt);
+        return Number.isFinite(updated) && Date.now() - updated <= GATEWAY_MATCH_IDLE_MS;
+      });
+      const fingerprints = await Promise.all(
+        candidates.map((session) => this.loadRecentUserFingerprint(session.id)),
       );
       let best: (typeof recent)[number] | null = null;
       let bestScore = 0;
-      for (const session of recent) {
-        const updated = +new Date(session.updatedAt);
-        if (!Number.isFinite(updated) || Date.now() - updated > GATEWAY_MATCH_IDLE_MS) {
-          continue;
-        }
-        const storedUsers = userContentFingerprint(await this.loadPlainMessages(session.id));
-        const score = scoreGatewayMessageMatch(storedUsers, clientUsers);
+      for (let i = 0; i < candidates.length; i += 1) {
+        const score = scoreGatewayMessageMatch(fingerprints[i]!, clientUsers);
         if (score > bestScore) {
           bestScore = score;
-          best = session;
+          best = candidates[i]!;
         }
       }
       if (best) return best;

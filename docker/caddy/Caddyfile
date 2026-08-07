@@ -39,8 +39,25 @@ zakura-local.190823.xyz {
 	}
 
 	# 前端使用同源 /api；这里转发到独立 API 服务。
+	# flush_interval -1：SSE 禁缓冲（见 docs/deployment.md）
 	handle /api/* {
-		reverse_proxy zakura:8787
+		reverse_proxy zakura:8787 {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	handle /v1/* {
+		reverse_proxy zakura:8787 {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
 	}
 
 	handle {

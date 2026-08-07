@@ -367,6 +367,60 @@ export class CloudAgentRuntime {
     ];
   }
 
+  /**
+   * 后台摘要：不阻塞当前 Run 首字。写好 context_compacted 供下一轮复用。
+   * ponytail: 本轮已硬截断；若要本轮就吃到摘要，需改回同步 summarize（会拖 TTFT）。
+   */
+  private async backgroundCompactHistory(input: {
+    tenantId: string;
+    agent: Agent;
+    sessionId: string;
+    runId: string;
+    cloud: CloudAgentConfig;
+    older: ModelChatMessage[];
+    keepCount: number;
+    beforeChars: number;
+    previousSummary: string;
+    parentTitle?: string;
+  }): Promise<void> {
+    try {
+      const summarized = await this.summarizeMessages({
+        tenantId: input.tenantId,
+        cloud: input.cloud,
+        messages: input.older,
+        previousSummary: input.previousSummary,
+        audit: {
+          agent: input.agent,
+          parentSessionId: input.sessionId,
+          parentTitle: input.parentTitle || "对话",
+        },
+      });
+      if (!summarized.summary) return;
+      const afterChars = input.keepCount * 80 + summarized.summary.length;
+      await this.store.appendEvent({
+        sessionId: input.sessionId,
+        type: "context_compacted",
+        runId: input.runId,
+        payload: {
+          summary: summarized.summary,
+          source: "auto",
+          beforeChars: input.beforeChars,
+          afterChars,
+          droppedMessages: input.older.length,
+          keptMessages: input.keepCount,
+          systemSessionId: summarized.systemSessionId,
+        },
+      });
+      void this.log(input.sessionId, input.runId, "info", "后台历史摘要已完成", {
+        summaryChars: summarized.summary.length,
+      });
+    } catch (err) {
+      void this.log(input.sessionId, input.runId, "warn", "后台历史摘要失败", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private async summarizeMessages(input: {
     tenantId: string;
     cloud: CloudAgentConfig;
@@ -748,6 +802,18 @@ export class CloudAgentRuntime {
     await this.store.markRunStarted(runId);
 
     const sessionPreferences = await this.store.getSession(tenantId, agent.id, sessionId);
+    // 预热 Redis seq + 元数据，避免首个 reasoning_delta 再查库
+    await this.store.warmSession(
+      sessionId,
+      sessionPreferences
+        ? {
+            tenantId: sessionPreferences.tenantId,
+            agentId: sessionPreferences.agentId,
+            lastSeq: sessionPreferences.lastSeq,
+          }
+        : undefined,
+    );
+
     const cloud = {
       ...agentCloudConfig(agent),
       ...(sessionPreferences?.model ? { model: sessionPreferences.model } : {}),
@@ -759,14 +825,18 @@ export class CloudAgentRuntime {
     } satisfies CloudAgentConfig;
     const enableTools = cloud.enableTools !== false;
 
-    await this.store.appendEvent({
+    // 尽早让 UI 进入 thinking，不等后面的准备
+    void this.store.appendEvent({
       sessionId,
       type: "run_status",
       runId,
       payload: { runId, status: "thinking" },
     });
 
-    const history = await this.store.listEvents(sessionId, { limit: 2000 });
+    const history = await this.store.listEvents(sessionId, {
+      limit: 200,
+      skipFlush: true,
+    });
     const lastCompaction = [...history]
       .reverse()
       .find((e) => e.type === "context_compacted");
@@ -801,54 +871,13 @@ export class CloudAgentRuntime {
     // 进入模型前：先封顶/分级压缩过长工具结果（不丢 user/assistant 结论）
     const preCompacted = prepareHistoryForModel(historyMsgs, budget);
     if (preCompacted > 0) {
-      await this.log(sessionId, runId, "info", "历史工具结果已按预算压缩", {
+      void this.log(sessionId, runId, "info", "历史工具结果已按预算压缩", {
         compacted: preCompacted,
       });
     }
 
-    // —— 自动记忆召回 ——
-    const autoMemoryOn =
-      agent.enableMemory &&
-      cloud.autoMemory !== false &&
-      Boolean(this.deps.memoryProviders);
-    let resolvedMemory: ResolvedMemory | null = null;
-    let memoryContext = "";
-    const sourceItems: CloudAgentContextSourceItem[] = [];
-    if (autoMemoryOn) {
-      try {
-        resolvedMemory = await resolveAgentMemory(this.deps.memoryProviders!, agent);
-        if (resolvedMemory) {
-          const ctx = await buildMemoryContext(
-            this.deps.memoryStore ?? null,
-            resolvedMemory,
-            agent,
-            lastUserContent || undefined,
-          );
-          memoryContext = ctx.text;
-          if (ctx.count > 0) {
-            await this.log(sessionId, runId, "info", `记忆召回 ${ctx.count} 条`, {
-              retrievalMode: ctx.retrievalMode,
-            });
-            for (const m of ctx.items) {
-              sourceItems.push({
-                kind: "memory",
-                title: m.layer ? `记忆 · ${m.layer}` : "记忆",
-                content: m.content,
-                ...(m.id ? { id: m.id } : {}),
-                ...(m.layer ? { layer: m.layer } : {}),
-              });
-            }
-          }
-        }
-      } catch (err) {
-        await this.log(sessionId, runId, "warn", "记忆召回失败", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // —— 历史压缩：超长时把旧消息摘要进系统提示 ——
     let historySummary = canUseCompactedSummary ? compactedSummary : "";
+    const sourceItems: CloudAgentContextSourceItem[] = [];
     if (historySummary) {
       sourceItems.push({
         kind: "summary",
@@ -856,95 +885,96 @@ export class CloudAgentRuntime {
         content: historySummary,
       });
     }
+
+    // ponytail: 超长历史硬截断开流，不在首字前再跑一轮摘要 LLM；后台补摘要给下一轮
     const autoCompactOn = cloud.autoCompact !== false;
-    if (autoCompactOn && approxMessagesChars(historyMsgs) > budget.thresholdChars) {
+    const overBudget = approxMessagesChars(historyMsgs) > budget.thresholdChars;
+    if (overBudget) {
       const keep = historyMsgs.slice(-budget.keepRecent);
       const older = historyMsgs.slice(0, historyMsgs.length - keep.length);
-      try {
-        const currentSession = await this.store.getSession(tenantId, agent.id, sessionId);
-        const summarized = await this.summarizeMessages({
+      const beforeChars = approxMessagesChars(historyMsgs);
+      historyMsgs = keep;
+      prepareHistoryForModel(historyMsgs, {
+        ...budget,
+        maxToolResultChars: Math.min(budget.maxToolResultChars, 2_000),
+      });
+      void this.log(sessionId, runId, "info", "历史过长，已硬截断以保障首字", {
+        droppedMessages: older.length,
+        kept: keep.length,
+        autoCompact: autoCompactOn,
+      });
+      if (autoCompactOn && older.length > 0) {
+        void this.backgroundCompactHistory({
           tenantId,
+          agent,
+          sessionId,
+          runId,
           cloud,
-          messages: older,
+          older,
+          keepCount: keep.length,
+          beforeChars,
           previousSummary: historySummary,
-          ...(currentSession
-            ? {
-                audit: {
-                  agent,
-                  parentSessionId: sessionId,
-                  parentTitle: currentSession.title,
-                },
-              }
-            : {}),
+          parentTitle: sessionPreferences?.title,
         });
-        const beforeChars = approxMessagesChars(historyMsgs);
-        historySummary = summarized.summary;
-        historyMsgs = keep;
-        const afterChars = approxMessagesChars(historyMsgs) + historySummary.length + 80;
-        await this.log(sessionId, runId, "info", "历史过长，已压缩为摘要", {
-          droppedMessages: older.length,
-          summaryChars: historySummary.length,
+      }
+    }
+
+    const remoteHandle = this.deps.remoteChannels?.get(sessionId) ?? undefined;
+    const sessionKind = sessionPreferences?.kind ?? "chat";
+
+    // —— 记忆 / 工具 / 技能 / hooks ——
+    // ponytail: 记忆召回（含 embedding）可拖到秒级，首字路径设 80ms 超时；未完成则空记忆开流
+    const autoMemoryOn =
+      agent.enableMemory &&
+      cloud.autoMemory !== false &&
+      Boolean(this.deps.memoryProviders);
+
+    const memoryPromise = (async (): Promise<{
+      text: string;
+      items: CloudAgentContextSourceItem[];
+      resolved: ResolvedMemory | null;
+    }> => {
+      if (!autoMemoryOn) return { text: "", items: [], resolved: null };
+      try {
+        const resolvedMemory = await resolveAgentMemory(this.deps.memoryProviders!, agent);
+        if (!resolvedMemory) return { text: "", items: [], resolved: null };
+        const ctx = await buildMemoryContext(
+          this.deps.memoryStore ?? null,
+          resolvedMemory,
+          agent,
+          lastUserContent || undefined,
+        );
+        if (ctx.count <= 0) return { text: "", items: [], resolved: resolvedMemory };
+        void this.log(sessionId, runId, "info", `记忆召回 ${ctx.count} 条`, {
+          retrievalMode: ctx.retrievalMode,
         });
-        if (historySummary) {
-          sourceItems.push({
-            kind: "summary",
-            title: "对话摘要",
-            content: historySummary,
-          });
-          await this.store.appendEvent({
-            sessionId,
-            type: "context_compacted",
-            runId,
-            payload: {
-              summary: historySummary,
-              source: "auto",
-              beforeChars,
-              afterChars,
-              droppedMessages: older.length,
-              keptMessages: keep.length,
-              systemSessionId: summarized.systemSessionId,
-            },
-          });
-        }
+        return {
+          text: ctx.text,
+          resolved: resolvedMemory,
+          items: ctx.items.map((m) => ({
+            kind: "memory" as const,
+            title: m.layer ? `记忆 · ${m.layer}` : "记忆",
+            content: m.content,
+            ...(m.id ? { id: m.id } : {}),
+            ...(m.layer ? { layer: m.layer } : {}),
+          })),
+        };
       } catch (err) {
-        // 摘要失败：硬截断 + 再压工具结果，保底继续
-        historyMsgs = historyMsgs.slice(-budget.keepRecent * 2);
-        prepareHistoryForModel(historyMsgs, {
-          ...budget,
-          maxToolResultChars: Math.min(budget.maxToolResultChars, 2_000),
-        });
-        await this.log(sessionId, runId, "warn", "历史摘要失败，改为截断", {
+        void this.log(sessionId, runId, "warn", "记忆召回失败", {
           error: err instanceof Error ? err.message : String(err),
         });
+        return { text: "", items: [], resolved: null };
       }
-    } else if (!autoCompactOn && approxMessagesChars(historyMsgs) > budget.thresholdChars) {
-      historyMsgs = historyMsgs.slice(-budget.keepRecent * 2);
-      prepareHistoryForModel(historyMsgs, budget);
-      await this.log(sessionId, runId, "info", "autoCompact 已关闭，历史已截断", {
-        kept: historyMsgs.length,
-      });
-    }
+    })();
 
-    if (sourceItems.length > 0) {
-      try {
-        await this.store.appendEvent({
-          sessionId,
-          type: "context_sources",
-          runId,
-          payload: { runId, items: sourceItems },
-        });
-      } catch (err) {
-        console.warn("[cloud-agent] context_sources publish failed:", err);
+    const toolsPromise = (async () => {
+      let definitions: ModelToolDefinition[] = [];
+      let nameMap = new Map<string, string>();
+      let peerAgents: Agent[] = [];
+      let peerAgentsDesc = "";
+      if (!enableTools) {
+        return { definitions, nameMap, peerAgents, peerAgentsDesc };
       }
-    }
-
-    // —— 工具面：MCP + 原生 + 跨 Agent 委派 + 远程通道 ——
-    let definitions: ModelToolDefinition[] = [];
-    let nameMap = new Map<string, string>();
-    let peerAgents: Agent[] = [];
-    let peerAgentsDesc = "";
-    const remoteHandle = this.deps.remoteChannels?.get(sessionId) ?? undefined;
-    if (enableTools) {
       const tools = await this.deps.gateway.listToolsForAgent(agent);
       const mapped = toolsToDefinitions(tools);
       definitions = mapped.definitions;
@@ -958,8 +988,7 @@ export class CloudAgentRuntime {
         }
       }
 
-      // 对话复用 + 自动化管理（仅主 chat，避免子代理噪声）
-      if ((sessionPreferences?.kind ?? "chat") === "chat") {
+      if (sessionKind === "chat") {
         for (const def of listSessionToolDefinitions()) {
           if (definitions.some((d) => d.function.name === def.function.name)) continue;
           definitions.push(def);
@@ -1013,36 +1042,23 @@ export class CloudAgentRuntime {
           },
         });
       }
-    }
+      return { definitions, nameMap, peerAgents, peerAgentsDesc };
+    })();
 
-    const hasSubagent = definitions.some(
-      (d) => d.function.name === SUBAGENT_TOOL_QUALIFIED,
-    );
-    const skillsSummary = this.deps.skills
-      ? await this.deps.skills.promptSummary(tenantId, agent.id)
-      : "";
-    const systemPrompt = buildSystemPrompt(agent, cloud, {
-      memoryContext: memoryContext || undefined,
-      historySummary: historySummary || undefined,
-      peerAgents: peerAgentsDesc || undefined,
-      subagents: hasSubagent,
-      skills: skillsSummary || undefined,
-      remoteChannel: remoteHandle ? remoteChannelPromptBlock(remoteHandle) : undefined,
-    });
-    const messages: ModelChatMessage[] = [
-      { role: "system", content: systemPrompt },
-      ...historyMsgs,
-    ];
+    const skillsPromise = this.deps.skills
+      ? this.deps.skills.promptSummary(tenantId, agent.id)
+      : Promise.resolve("");
 
-    // SessionStart / UserPromptSubmit hooks
-    const hooksSvc = this.deps.agentHooks;
-    if (hooksSvc) {
+    const hooksPromise = (async (): Promise<ModelChatMessage[]> => {
+      const hooksSvc = this.deps.agentHooks;
+      if (!hooksSvc) return [];
+      const extra: ModelChatMessage[] = [];
       try {
         if (input.isFirstTurn) {
           const startResults = await hooksSvc.runEvent(agent, "SessionStart");
           const inject = collectInjectText(startResults);
           if (inject) {
-            messages.splice(1, 0, {
+            extra.push({
               role: "system",
               content: `# Hooks · SessionStart\n${inject}`,
             });
@@ -1053,22 +1069,82 @@ export class CloudAgentRuntime {
         });
         const promptInject = collectInjectText(promptResults);
         if (promptInject) {
-          messages.push({
+          extra.push({
             role: "system",
             content: `# Hooks · UserPromptSubmit\n${promptInject}`,
           });
         }
       } catch (err) {
-        await this.log(sessionId, runId, "warn", "hooks 执行失败", {
+        void this.log(sessionId, runId, "warn", "hooks 执行失败", {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      return extra;
+    })();
+
+    const memoryWithBudget = Promise.race([
+      memoryPromise,
+      new Promise<{
+        text: string;
+        items: CloudAgentContextSourceItem[];
+        resolved: ResolvedMemory | null;
+      }>((resolve) =>
+        setTimeout(() => resolve({ text: "", items: [], resolved: null }), 80),
+      ),
+    ]);
+    const hooksWithBudget = Promise.race([
+      hooksPromise,
+      new Promise<ModelChatMessage[]>((resolve) => setTimeout(() => resolve([]), 100)),
+    ]);
+
+    const [memoryBag, toolsBag, skillsSummary, hookMsgs] = await Promise.all([
+      memoryWithBudget,
+      toolsPromise,
+      skillsPromise,
+      hooksWithBudget,
+    ]);
+
+    const memoryContext = memoryBag.text;
+    // postRun：若记忆超时未进 system，仍用完整召回结果写记忆
+    const resolvedMemoryPromise = memoryPromise.then((m) => m.resolved);
+    const resolvedMemory = memoryBag.resolved;
+    sourceItems.push(...memoryBag.items);
+    const { definitions, nameMap, peerAgents, peerAgentsDesc } = toolsBag;
+    const hooksSvc = this.deps.agentHooks;
+
+    if (sourceItems.length > 0) {
+      void this.store
+        .appendEvent({
+          sessionId,
+          type: "context_sources",
+          runId,
+          payload: { runId, items: sourceItems },
+        })
+        .catch((err) => console.warn("[cloud-agent] context_sources publish failed:", err));
     }
+
+    const hasSubagent = definitions.some(
+      (d) => d.function.name === SUBAGENT_TOOL_QUALIFIED,
+    );
+    const systemPrompt = buildSystemPrompt(agent, cloud, {
+      memoryContext: memoryContext || undefined,
+      historySummary: historySummary || undefined,
+      peerAgents: peerAgentsDesc || undefined,
+      subagents: hasSubagent,
+      skills: skillsSummary || undefined,
+      remoteChannel: remoteHandle ? remoteChannelPromptBlock(remoteHandle) : undefined,
+    });
+    const messages: ModelChatMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...hookMsgs.filter((m) => (m.content ?? "").includes("SessionStart")),
+      ...historyMsgs,
+      ...hookMsgs.filter((m) => (m.content ?? "").includes("UserPromptSubmit")),
+    ];
 
     // 图片附件：读工作区文件转 data URI（多模态输入）
     await this.resolveWorkspaceImages(agent, messages);
 
-    await this.log(sessionId, runId, "info", "Run 开始", {
+    void this.log(sessionId, runId, "info", "Run 开始", {
       model: cloud.model ?? "(默认路由)",
       tools: definitions.length,
       historyMessages: historyMsgs.length,
@@ -1226,17 +1302,21 @@ export class CloudAgentRuntime {
     if (result.status === "cancelled") return;
 
     // —— 运行后处理（不阻塞会话）：自动标题 + 自动记忆 ——
-    void this.postRun({
-      tenantId,
-      agent,
-      sessionId,
-      runId,
-      cloud,
-      isFirstTurn: input.isFirstTurn,
-      userContent: lastUserContent,
-      assistantContent: result.finalText,
-      resolvedMemory: autoMemoryOn ? resolvedMemory : null,
-    }).catch((err) => {
+    void (async () => {
+      const resolved =
+        autoMemoryOn ? ((await resolvedMemoryPromise) ?? resolvedMemory) : null;
+      await this.postRun({
+        tenantId,
+        agent,
+        sessionId,
+        runId,
+        cloud,
+        isFirstTurn: input.isFirstTurn,
+        userContent: lastUserContent,
+        assistantContent: result.finalText,
+        resolvedMemory: resolved,
+      });
+    })().catch((err) => {
       console.warn("[cloud-agent] post-run failed:", err);
     });
   }
@@ -1252,6 +1332,20 @@ export class CloudAgentRuntime {
     messages: ModelChatMessage[],
   ): Promise<void> {
     const provider = this.deps.workspaceFsProvider;
+    let need = false;
+    for (const m of messages) {
+      if (
+        m.parts?.some(
+          (p) =>
+            p.type === "image_url" && p.imageUrl.url.startsWith(WORKSPACE_IMAGE_PREFIX),
+        )
+      ) {
+        need = true;
+        break;
+      }
+    }
+    if (!need) return;
+
     let fs: WorkspaceFs | undefined;
 
     for (let i = messages.length - 1; i >= 0; i -= 1) {

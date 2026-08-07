@@ -1,6 +1,9 @@
 /**
- * Cloud Agent 持久会话存储 + 进程内 fan-out。
- * 事件先落库再广播，断线客户端按 afterSeq 续传即可追上。
+ * Cloud Agent 持久会话存储 + fan-out。
+ *
+ * Redis 默认强制开启（地址见 REDIS_URL，默认 redis://127.0.0.1:6379）：
+ * 序号走 INCR，实时 PUBLISH，高频 delta 先推送再异步批落库。
+ * 仅当 REDIS_URL=off 时回退为「每事件同步写库 + 进程内 fan-out」。
  */
 import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import type {
@@ -20,8 +23,42 @@ import {
   type CloudAgentSession,
 } from "../db/schema.js";
 import { platformEvents } from "./platform-events.js";
+import {
+  REDIS_KEYS,
+  createRedisSubscriber,
+  getRedis,
+  isRedisEnabled,
+  requireRedis,
+  type ZakuraRedis,
+} from "./redis.js";
+import {
+  enqueueEventRing,
+  readEventRing,
+  writeRunSnapshot,
+  writeSessionMeta,
+} from "./redis-store.js";
 
 type SessionListener = (event: CloudAgentEvent) => void;
+
+/** 高频增量：可异步落库；其余事件仍同步落库以保证工具/终态可读 */
+const ASYNC_EVENT_TYPES = new Set<CloudAgentEventType>([
+  "assistant_delta",
+  "reasoning_delta",
+]);
+
+type PendingRow = {
+  event: CloudAgentEvent;
+  tenantId: string;
+  agentId: string;
+};
+
+/** 区分本进程 PUBLISH，避免本地 emit + Redis 回环双推 */
+const INSTANCE_ID = newId();
+
+type RedisFanoutMessage = {
+  from: string;
+  event: CloudAgentEvent;
+};
 
 /** 会改变侧栏会话列表（标题/顺序/活跃态）的事件 */
 const SIDEBAR_TOUCH_TYPES = new Set<CloudAgentEventType>([
@@ -112,8 +149,112 @@ export class CloudAgentSessionStore {
   private readonly listeners = new Map<string, Set<SessionListener>>();
   /** pg_trgm 可用性（惰性探测；PGlite/无权限时回退 ILIKE） */
   private trgmReady: Promise<boolean> | null = null;
+  /** sessionId → 异步落库链（保序） */
+  private readonly persistChains = new Map<string, Promise<unknown>>();
+  private readonly flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Redis 订阅客户端（与命令客户端分离） */
+  private subClient: ZakuraRedis | null = null;
+  private subReady: Promise<ZakuraRedis | null> | null = null;
+  /** channel → refcount of local listeners using Redis fan-in */
+  private readonly remoteRef = new Map<string, { count: number; unsub: () => Promise<void> }>();
+  /** 会话元数据缓存：避免每个 delta 查库 */
+  private readonly sessionMeta = new Map<
+    string,
+    { tenantId: string; agentId: string; lastSeq: number; seqSeeded: boolean }
+  >();
 
   constructor(private readonly db: Db) {}
+
+  /** 供 Run 启动时预热：元数据 + Redis seq，避免首个 delta 踩 DB */
+  async warmSession(sessionId: string, hint?: { tenantId: string; agentId: string; lastSeq: number }) {
+    if (hint) {
+      this.sessionMeta.set(sessionId, {
+        tenantId: hint.tenantId,
+        agentId: hint.agentId,
+        lastSeq: hint.lastSeq,
+        seqSeeded: this.sessionMeta.get(sessionId)?.seqSeeded ?? false,
+      });
+    } else if (!this.sessionMeta.has(sessionId)) {
+      const row = await this.db.query.cloudAgentSessions.findFirst({
+        where: eq(cloudAgentSessions.id, sessionId),
+        columns: { tenantId: true, agentId: true, lastSeq: true, activeRunId: true, status: true },
+      });
+      if (row) {
+        this.sessionMeta.set(sessionId, {
+          tenantId: row.tenantId,
+          agentId: row.agentId,
+          lastSeq: row.lastSeq,
+          seqSeeded: false,
+        });
+        void writeSessionMeta(sessionId, {
+          tenantId: row.tenantId,
+          agentId: row.agentId,
+          lastSeq: row.lastSeq,
+          activeRunId: row.activeRunId,
+          status: row.status,
+        });
+      }
+    }
+    if (!isRedisEnabled()) return;
+    const meta = this.sessionMeta.get(sessionId);
+    if (!meta) return;
+    void writeSessionMeta(sessionId, {
+      tenantId: meta.tenantId,
+      agentId: meta.agentId,
+      lastSeq: meta.lastSeq,
+    });
+    if (meta.seqSeeded) return;
+    const redis = await requireRedis();
+    await redis.set(REDIS_KEYS.seq(sessionId), String(meta.lastSeq), { NX: true });
+    meta.seqSeeded = true;
+  }
+
+  private rememberMeta(
+    sessionId: string,
+    meta: { tenantId: string; agentId: string; lastSeq?: number },
+  ) {
+    const prev = this.sessionMeta.get(sessionId);
+    const next = {
+      tenantId: meta.tenantId,
+      agentId: meta.agentId,
+      lastSeq: meta.lastSeq ?? prev?.lastSeq ?? 0,
+      seqSeeded: prev?.seqSeeded ?? false,
+    };
+    this.sessionMeta.set(sessionId, next);
+    void writeSessionMeta(sessionId, {
+      tenantId: next.tenantId,
+      agentId: next.agentId,
+      lastSeq: next.lastSeq,
+    });
+  }
+
+  /** 事件对外可见后写入 Redis 环 + 刷新 meta（Memoh 式活状态） */
+  private mirrorEventToRedis(
+    redis: ZakuraRedis | null,
+    event: CloudAgentEvent,
+    meta: { tenantId: string; agentId: string },
+  ) {
+    if (redis) enqueueEventRing(redis, event.sessionId, event);
+    void writeSessionMeta(event.sessionId, {
+      tenantId: meta.tenantId,
+      agentId: meta.agentId,
+      lastSeq: event.seq,
+    });
+    if (event.runId && (event.type === "run_start" || event.type === "run_status" || event.type === "run_end")) {
+      const status =
+        event.type === "run_end"
+          ? String((event.payload as { status?: string }).status ?? "ended")
+          : event.type === "run_status"
+            ? String((event.payload as { status?: string }).status ?? "running")
+            : "running";
+      void writeRunSnapshot({
+        runId: event.runId,
+        sessionId: event.sessionId,
+        status,
+        updatedAt: event.createdAt,
+      });
+    }
+  }
 
   private ensureTrgm(): Promise<boolean> {
     if (!this.trgmReady) {
@@ -223,9 +364,13 @@ export class CloudAgentSessionStore {
       this.listeners.set(sessionId, set);
     }
     set.add(listener);
+    void this.ensureRedisSubscription(sessionId);
     return () => {
       set!.delete(listener);
-      if (set!.size === 0) this.listeners.delete(sessionId);
+      if (set!.size === 0) {
+        this.listeners.delete(sessionId);
+        void this.releaseRedisSubscription(sessionId);
+      }
     };
   }
 
@@ -238,6 +383,178 @@ export class CloudAgentSessionStore {
       } catch (err) {
         console.warn("[cloud-agent] listener error:", err);
       }
+    }
+  }
+
+  private async ensureSubClient(): Promise<ZakuraRedis | null> {
+    if (this.subClient?.isOpen) return this.subClient;
+    if (!this.subReady) {
+      this.subReady = createRedisSubscriber().then((c) => {
+        this.subClient = c;
+        return c;
+      });
+    }
+    return this.subReady;
+  }
+
+  private async ensureRedisSubscription(sessionId: string): Promise<void> {
+    const existing = this.remoteRef.get(sessionId);
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+    const sub = await this.ensureSubClient();
+    if (!sub) return;
+    const channel = REDIS_KEYS.channel(sessionId);
+    const onMessage = (message: string) => {
+      try {
+        const msg = JSON.parse(message) as RedisFanoutMessage;
+        if (msg.from === INSTANCE_ID) return;
+        this.emit(msg.event);
+      } catch (err) {
+        console.warn("[cloud-agent] redis message parse failed:", err);
+      }
+    };
+    await sub.subscribe(channel, onMessage);
+    this.remoteRef.set(sessionId, {
+      count: 1,
+      unsub: async () => {
+        try {
+          await sub.unsubscribe(channel);
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+  }
+
+  private async releaseRedisSubscription(sessionId: string): Promise<void> {
+    const entry = this.remoteRef.get(sessionId);
+    if (!entry) return;
+    entry.count -= 1;
+    if (entry.count > 0) return;
+    this.remoteRef.delete(sessionId);
+    await entry.unsub();
+  }
+
+  /** Redis INCR；seq 已在 warmSession 播种时跳过 exists/DB */
+  private async nextSeqRedis(redis: ZakuraRedis, sessionId: string): Promise<number> {
+    const key = REDIS_KEYS.seq(sessionId);
+    const meta = this.sessionMeta.get(sessionId);
+    if (!meta?.seqSeeded) {
+      const exists = await redis.exists(key);
+      if (!exists) {
+        const lastSeq =
+          meta?.lastSeq ??
+          (
+            await this.db.query.cloudAgentSessions.findFirst({
+              where: eq(cloudAgentSessions.id, sessionId),
+              columns: { lastSeq: true, tenantId: true, agentId: true },
+            })
+          )?.lastSeq;
+        if (lastSeq == null) throw new Error("会话不存在");
+        await redis.set(key, String(lastSeq), { NX: true });
+      }
+      if (meta) meta.seqSeeded = true;
+      else {
+        const row = await this.db.query.cloudAgentSessions.findFirst({
+          where: eq(cloudAgentSessions.id, sessionId),
+          columns: { tenantId: true, agentId: true, lastSeq: true },
+        });
+        if (!row) throw new Error("会话不存在");
+        this.sessionMeta.set(sessionId, {
+          tenantId: row.tenantId,
+          agentId: row.agentId,
+          lastSeq: row.lastSeq,
+          seqSeeded: true,
+        });
+      }
+    }
+    const seq = await redis.incr(key);
+    const m = this.sessionMeta.get(sessionId);
+    if (m) m.lastSeq = seq;
+    return seq;
+  }
+
+  private schedulePersistFlush(sessionId: string): void {
+    if (this.flushTimers.has(sessionId)) return;
+    this.flushTimers.set(
+      sessionId,
+      setTimeout(() => {
+        this.flushTimers.delete(sessionId);
+        void this.flushPending(sessionId);
+      }, 80),
+    );
+  }
+
+  /** 把 Redis pending 列表批写入 Postgres（保序；失败重试入队） */
+  async flushPending(sessionId: string): Promise<void> {
+    const prev = this.persistChains.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(async () => {
+        const redis = await getRedis();
+        if (!redis) return;
+        const key = REDIS_KEYS.pending(sessionId);
+        // 一次拿走当前全部 pending，避免与新 push 交错丢数据
+        const raw = await redis.lRange(key, 0, -1);
+        if (raw.length === 0) return;
+        await redis.lTrim(key, raw.length, -1);
+
+        const rows: PendingRow[] = [];
+        for (const s of raw) {
+          try {
+            rows.push(JSON.parse(s) as PendingRow);
+          } catch {
+            /* skip corrupt */
+          }
+        }
+        if (rows.length === 0) return;
+
+        try {
+          await this.db.transaction(async (tx) => {
+            await tx.insert(cloudAgentEvents).values(
+              rows.map(({ event }) => ({
+                id: event.id,
+                sessionId: event.sessionId,
+                seq: event.seq,
+                type: event.type,
+                runId: event.runId,
+                payloadJson: JSON.stringify(event.payload),
+                createdAt: new Date(event.createdAt),
+              })),
+            );
+            const maxSeq = Math.max(...rows.map((r) => r.event.seq));
+            const touchSidebar = rows.some((r) => SIDEBAR_TOUCH_TYPES.has(r.event.type));
+            await tx
+              .update(cloudAgentSessions)
+              .set({
+                lastSeq: sql`greatest(${cloudAgentSessions.lastSeq}, ${maxSeq})`,
+                ...(touchSidebar ? { updatedAt: new Date() } : {}),
+              })
+              .where(eq(cloudAgentSessions.id, sessionId));
+          });
+        } catch (err) {
+          console.warn("[cloud-agent] pending flush failed, re-queue:", err);
+          // ponytail: 整批重入队；升级路径可按条去重 / 死信
+          if (rows.length) {
+            await redis.rPush(
+              key,
+              rows.map((r) => JSON.stringify(r)),
+            );
+          }
+        }
+      });
+    this.persistChains.set(sessionId, next);
+    await next;
+  }
+
+  private async publishRedis(redis: ZakuraRedis, event: CloudAgentEvent): Promise<void> {
+    try {
+      const msg: RedisFanoutMessage = { from: INSTANCE_ID, event };
+      await redis.publish(REDIS_KEYS.channel(event.sessionId), JSON.stringify(msg));
+    } catch (err) {
+      console.warn("[cloud-agent] redis publish failed:", err);
     }
   }
 
@@ -277,6 +594,11 @@ export class CloudAgentSessionStore {
     });
     const row = await this.getSession(input.tenantId, input.agentId, id);
     if (!row) throw new Error("创建会话失败");
+    this.rememberMeta(id, {
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      lastSeq: 0,
+    });
     platformEvents.publish(input.tenantId, {
       type: "cloud_session_changed",
       agentId: input.agentId,
@@ -392,8 +714,24 @@ export class CloudAgentSessionStore {
   async deleteSession(tenantId: string, agentId: string, sessionId: string): Promise<boolean> {
     const existing = await this.getSession(tenantId, agentId, sessionId);
     if (!existing) return false;
+    await this.flushPending(sessionId);
     await this.db.delete(cloudAgentSessions).where(eq(cloudAgentSessions.id, sessionId));
     this.listeners.delete(sessionId);
+    this.sessionMeta.delete(sessionId);
+    void this.releaseRedisSubscription(sessionId);
+    const redis = await getRedis();
+    if (redis) {
+      try {
+        await redis.del([
+          REDIS_KEYS.seq(sessionId),
+          REDIS_KEYS.pending(sessionId),
+          REDIS_KEYS.events(sessionId),
+          REDIS_KEYS.meta(sessionId),
+        ]);
+      } catch {
+        /* ignore */
+      }
+    }
     platformEvents.publish(tenantId, {
       type: "cloud_session_changed",
       agentId,
@@ -405,10 +743,131 @@ export class CloudAgentSessionStore {
 
   /**
    * 追加事件并 fan-out。
-   * seq 通过 last_seq 原子 +1（UPDATE … RETURNING）分配，避免子代理并行
-   * 写同一会话（如多路 onProgress / run_log）时读到相同 lastSeq 撞唯一约束。
+   * Redis 开启（默认）：INCR 分配 seq；delta 先 PUBLISH 再异步批落库，其它类型同步落库。
+   * REDIS_URL=off：seq 经 last_seq 原子 +1，事务落库后再进程内广播。
    */
   async appendEvent(input: {
+    sessionId: string;
+    type: CloudAgentEventType;
+    runId?: string | null;
+    payload: CloudAgentEventPayload;
+  }): Promise<CloudAgentEvent> {
+    if (isRedisEnabled()) {
+      const redis = await requireRedis();
+      return this.appendEventRedis(redis, input);
+    }
+    return this.appendEventDb(input);
+  }
+
+  private async appendEventRedis(
+    redis: ZakuraRedis,
+    input: {
+      sessionId: string;
+      type: CloudAgentEventType;
+      runId?: string | null;
+      payload: CloudAgentEventPayload;
+    },
+  ): Promise<CloudAgentEvent> {
+    const asyncOk = ASYNC_EVENT_TYPES.has(input.type);
+    if (!asyncOk) {
+      // 终态/工具事件前先把 delta 刷进 DB，避免回放缺段
+      await this.flushPending(input.sessionId);
+    }
+
+    const eventId = newId();
+    const now = new Date();
+    const seq = await this.nextSeqRedis(redis, input.sessionId);
+    const event: CloudAgentEvent = {
+      id: eventId,
+      sessionId: input.sessionId,
+      seq,
+      type: input.type,
+      runId: input.runId ?? null,
+      payload: input.payload,
+      createdAt: now.toISOString(),
+    };
+
+    let meta = this.sessionMeta.get(input.sessionId);
+    if (!meta) {
+      const session = await this.db.query.cloudAgentSessions.findFirst({
+        where: eq(cloudAgentSessions.id, input.sessionId),
+        columns: { tenantId: true, agentId: true, lastSeq: true },
+      });
+      if (!session) throw new Error("会话不存在");
+      meta = {
+        tenantId: session.tenantId,
+        agentId: session.agentId,
+        lastSeq: seq,
+        seqSeeded: true,
+      };
+      this.sessionMeta.set(input.sessionId, meta);
+    } else {
+      meta.lastSeq = seq;
+    }
+
+    if (asyncOk) {
+      // 热路径：先本地 emit（同进程 SSE 立刻看到思考/正文），再异步 pending + pub/sub + 事件环
+      this.emit(event);
+      const pending: PendingRow = {
+        event,
+        tenantId: meta.tenantId,
+        agentId: meta.agentId,
+      };
+      void redis
+        .multi()
+        .rPush(REDIS_KEYS.pending(input.sessionId), JSON.stringify(pending))
+        .rPush(REDIS_KEYS.events(input.sessionId), JSON.stringify(event))
+        .lTrim(REDIS_KEYS.events(input.sessionId), -500, -1)
+        .expire(REDIS_KEYS.events(input.sessionId), 24 * 60 * 60)
+        .publish(
+          REDIS_KEYS.channel(input.sessionId),
+          JSON.stringify({ from: INSTANCE_ID, event } satisfies RedisFanoutMessage),
+        )
+        .exec()
+        .catch((err) => console.warn("[cloud-agent] redis delta fanout failed:", err));
+      void writeSessionMeta(input.sessionId, {
+        tenantId: meta.tenantId,
+        agentId: meta.agentId,
+        lastSeq: seq,
+      });
+      this.schedulePersistFlush(input.sessionId);
+      return event;
+    }
+
+    await this.db.transaction(async (tx) => {
+      await tx.insert(cloudAgentEvents).values({
+        id: eventId,
+        sessionId: input.sessionId,
+        seq,
+        type: input.type,
+        runId: input.runId ?? null,
+        payloadJson: JSON.stringify(input.payload),
+        createdAt: now,
+      });
+      await tx
+        .update(cloudAgentSessions)
+        .set({
+          lastSeq: sql`greatest(${cloudAgentSessions.lastSeq}, ${seq})`,
+          updatedAt: now,
+        })
+        .where(eq(cloudAgentSessions.id, input.sessionId));
+    });
+
+    this.emit(event);
+    this.mirrorEventToRedis(redis, event, meta);
+    void this.publishRedis(redis, event);
+    if (SIDEBAR_TOUCH_TYPES.has(input.type)) {
+      platformEvents.publish(meta.tenantId, {
+        type: "cloud_session_changed",
+        agentId: meta.agentId,
+        sessionId: input.sessionId,
+        reason: "updated",
+      });
+    }
+    return event;
+  }
+
+  private async appendEventDb(input: {
     sessionId: string;
     type: CloudAgentEventType;
     runId?: string | null;
@@ -454,6 +913,11 @@ export class CloudAgentSessionStore {
     });
 
     this.emit(event.event);
+    if (isRedisEnabled()) {
+      void getRedis().then((redis) => {
+        if (redis) this.mirrorEventToRedis(redis, event.event, event);
+      });
+    }
     if (SIDEBAR_TOUCH_TYPES.has(input.type)) {
       platformEvents.publish(event.tenantId, {
         type: "cloud_session_changed",
@@ -467,10 +931,43 @@ export class CloudAgentSessionStore {
 
   async listEvents(
     sessionId: string,
-    opts?: { afterSeq?: number; limit?: number },
+    opts?: { afterSeq?: number; limit?: number; skipFlush?: boolean },
   ): Promise<CloudAgentEvent[]> {
+    // 续传前尽量刷完本进程 pending（热路径可 skipFlush 以抢首字）
+    if (!opts?.skipFlush) await this.flushPending(sessionId);
+
     const afterSeq = opts?.afterSeq ?? 0;
     const limit = Math.min(Math.max(opts?.limit ?? 500, 1), 2000);
+
+    // 优先读 Redis 事件环（Memoh 式活状态）；空洞再回退 Postgres
+    const fromRing = await readEventRing(sessionId, { afterSeq, limit });
+    if (fromRing) {
+      const redis = await getRedis();
+      if (!redis) return fromRing;
+      // 合并尚未入库的 pending delta
+      try {
+        const raw = await redis.lRange(REDIS_KEYS.pending(sessionId), 0, -1);
+        if (raw.length === 0) return fromRing;
+        const seen = new Set(fromRing.map((e) => e.seq));
+        const merged = [...fromRing];
+        for (const s of raw) {
+          try {
+            const ev = (JSON.parse(s) as PendingRow).event;
+            if (ev.seq > afterSeq && !seen.has(ev.seq)) {
+              seen.add(ev.seq);
+              merged.push(ev);
+            }
+          } catch {
+            /* skip */
+          }
+        }
+        merged.sort((a, b) => a.seq - b.seq);
+        return merged.slice(0, limit);
+      } catch {
+        return fromRing;
+      }
+    }
+
     const rows = await this.db
       .select()
       .from(cloudAgentEvents)
@@ -479,7 +976,38 @@ export class CloudAgentSessionStore {
       )
       .orderBy(asc(cloudAgentEvents.seq))
       .limit(limit);
-    return rows.map(toEvent);
+    const fromDb = rows.map(toEvent);
+
+    const redis = await getRedis();
+    if (!redis) return fromDb;
+
+    let pending: CloudAgentEvent[] = [];
+    try {
+      const raw = await redis.lRange(REDIS_KEYS.pending(sessionId), 0, -1);
+      pending = raw
+        .map((s) => {
+          try {
+            return (JSON.parse(s) as PendingRow).event;
+          } catch {
+            return null;
+          }
+        })
+        .filter((e): e is CloudAgentEvent => !!e && e.seq > afterSeq);
+    } catch {
+      return fromDb;
+    }
+
+    if (pending.length === 0) return fromDb;
+
+    const seen = new Set(fromDb.map((e) => e.seq));
+    const merged = [...fromDb];
+    for (const e of pending) {
+      if (seen.has(e.seq)) continue;
+      seen.add(e.seq);
+      merged.push(e);
+    }
+    merged.sort((a, b) => a.seq - b.seq);
+    return merged.slice(0, limit);
   }
 
   async createRun(sessionId: string): Promise<CloudAgentRun> {
@@ -515,6 +1043,21 @@ export class CloudAgentSessionStore {
       where: eq(cloudAgentRuns.id, id),
     });
     if (!row) throw new Error("创建 Run 失败");
+    const meta = this.sessionMeta.get(sessionId);
+    if (meta) {
+      void writeSessionMeta(sessionId, {
+        tenantId: meta.tenantId,
+        agentId: meta.agentId,
+        lastSeq: meta.lastSeq,
+        activeRunId: id,
+      });
+    }
+    void writeRunSnapshot({
+      runId: id,
+      sessionId,
+      status: "queued",
+      updatedAt: now.toISOString(),
+    });
     return row;
   }
 
@@ -531,6 +1074,15 @@ export class CloudAgentSessionStore {
       .update(cloudAgentRuns)
       .set({ status: "running", startedAt: new Date() })
       .where(eq(cloudAgentRuns.id, runId));
+    const run = await this.getRun(runId);
+    if (run) {
+      void writeRunSnapshot({
+        runId,
+        sessionId: run.sessionId,
+        status: "running",
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
 
   async requestCancel(sessionId: string, runId?: string | null): Promise<boolean> {

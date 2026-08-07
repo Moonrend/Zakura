@@ -1,4 +1,15 @@
 import type { ModelUpstreamConfig, ModelUpstreamProtocol } from "@zakura/shared";
+import { Agent, setGlobalDispatcher } from "undici";
+
+/** 上游连接池：复用 TCP/TLS，避免每轮 DeepSeek 冷握手拖 TTFT */
+setGlobalDispatcher(
+  new Agent({
+    connections: 32,
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 120_000,
+    pipelining: 1,
+  }),
+);
 
 export function buildHeaders(
   cfg: ModelUpstreamConfig,

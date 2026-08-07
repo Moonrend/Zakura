@@ -121,8 +121,12 @@ export function registerOpenAiGatewayRoutes(
   });
 
   app.post("/v1/chat/completions", async (c) => {
+    const t0 = performance.now();
+    const timing =
+      process.env.ZAKURA_HTTP_TIMING === "1" || process.env.ZAKURA_GATEWAY_TIMING === "1";
     const auth = await authenticateGatewayRequest(c, deps.db);
     if ("response" in auth) return auth.response;
+    const tAuth = performance.now();
     let body: OpenAiGatewayBody;
     try {
       body = await c.req.json<OpenAiGatewayBody>();
@@ -147,12 +151,18 @@ export function registerOpenAiGatewayRoutes(
     } catch (err) {
       return openAiError(c, err instanceof Error ? err.message : String(err), 400);
     }
+    const tPrepare = performance.now();
     // 仅供控制台/排障观察；客户端无需读取或回传
     c.header("X-Zakura-Session-Id", context.sessionId);
 
     if (body.stream !== true) {
       try {
         const result = await deps.gateway.invoke(auth.keyed.tenant.id, context);
+        if (timing) {
+          console.warn(
+            `[gateway] sync auth=${(tAuth - t0).toFixed(0)}ms prepare=${(tPrepare - tAuth).toFixed(0)}ms invoke=${(performance.now() - tPrepare).toFixed(0)}ms total=${(performance.now() - t0).toFixed(0)}ms`,
+          );
+        }
         const completionId = `chatcmpl_${randomUUID()}`;
         return c.json({
           ...result.openai,
@@ -186,12 +196,21 @@ export function registerOpenAiGatewayRoutes(
       !Array.isArray(streamOptions) &&
       (streamOptions as Record<string, unknown>).include_usage === true;
     let sentRole = false;
+    let firstTokenLogged = false;
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
         const send = (payload: unknown) => controller.enqueue(encoder.encode(sse(payload)));
+        const noteFirstToken = () => {
+          if (!timing || firstTokenLogged) return;
+          firstTokenLogged = true;
+          console.warn(
+            `[gateway] ttft auth=${(tAuth - t0).toFixed(0)}ms prepare=${(tPrepare - tAuth).toFixed(0)}ms first_token=${(performance.now() - tPrepare).toFixed(0)}ms total=${(performance.now() - t0).toFixed(0)}ms`,
+          );
+        };
         try {
           const result = await deps.gateway.invoke(auth.keyed.tenant.id, context, {
             onDelta: (text) => {
+              noteFirstToken();
               send({
                 id: completionId,
                 object: "chat.completion.chunk",
@@ -208,6 +227,7 @@ export function registerOpenAiGatewayRoutes(
               sentRole = true;
             },
             onReasoningDelta: (text) => {
+              noteFirstToken();
               send({
                 id: completionId,
                 object: "chat.completion.chunk",

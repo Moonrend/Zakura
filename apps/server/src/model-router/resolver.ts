@@ -20,11 +20,15 @@ export type RouteResolveQuery = {
  */
 export class RouteResolver {
   private readonly chainCache = new TtlCache<ResolvedRoute[]>();
+  private readonly defaultAliasCache = new TtlCache<string>();
+  private readonly routeIdCache = new TtlCache<ResolvedRoute>();
 
   constructor(private readonly db: Db) {}
 
   invalidateTenant(tenantId: string): void {
     this.chainCache.invalidatePrefix(`${tenantId}:`);
+    this.defaultAliasCache.invalidatePrefix(`${tenantId}:`);
+    this.routeIdCache.invalidatePrefix(`${tenantId}:`);
   }
 
   async resolveChain(
@@ -32,27 +36,35 @@ export class RouteResolver {
     query: RouteResolveQuery,
   ): Promise<ResolvedRoute[]> {
     if (query.routeId) {
-      const one =
-        (await this.fetchUpstreamModelById(tenantId, query.routeId, query.capability)) ??
-        (await this.fetchLegacyRouteById(tenantId, query.routeId, query.capability));
+      const routeIdKey = `${tenantId}:route-id:${query.capability}:${query.routeId}`;
+      let one = this.routeIdCache.get(routeIdKey);
+      if (!one) {
+        one =
+          (await this.fetchUpstreamModelById(tenantId, query.routeId, query.capability)) ??
+          (await this.fetchLegacyRouteById(tenantId, query.routeId, query.capability)) ??
+          undefined;
+        if (one) this.routeIdCache.set(routeIdKey, one);
+      }
       return one ? [one] : [];
     }
     if (query.slug) {
-      // slug：先当 canonical / 再当旧 route slug
-      const byCanonical = await this.fetchUpstreamChain(
-        tenantId,
-        query.capability,
-        query.slug,
-      );
-      if (byCanonical.length > 0) {
-        return orderRoutesForStrategy(
-          byCanonical,
-          query.strategy ?? "weighted",
-          query.slug,
-        );
+      // slug：先当 canonical / 再当旧 route slug；结果走 chainCache
+      const slugCacheKey = `${tenantId}:chain:${query.capability}:slug:${query.slug}`;
+      let chain = this.chainCache.get(slugCacheKey);
+      if (!chain) {
+        chain = await this.fetchUpstreamChain(tenantId, query.capability, query.slug);
+        if (chain.length === 0) {
+          const one = await this.fetchLegacyBySlug(
+            tenantId,
+            query.slug,
+            query.capability,
+          );
+          chain = one ? [one] : [];
+        }
+        if (chain.length > 0) this.chainCache.set(slugCacheKey, chain);
       }
-      const one = await this.fetchLegacyBySlug(tenantId, query.slug, query.capability);
-      return one ? [one] : [];
+      if (chain.length === 0) return [];
+      return orderRoutesForStrategy(chain, query.strategy ?? "weighted", query.slug);
     }
 
     const strategy = query.strategy ?? "weighted";
@@ -66,10 +78,22 @@ export class RouteResolver {
       if (chain.length > 0) this.chainCache.set(cacheKey, chain);
     }
 
-    const defaultAlias = await this.findDefaultAlias(tenantId, query.capability);
-    const preferred = query.alias ?? defaultAlias;
+    const defaultAlias =
+      query.alias ?? (await this.findDefaultAliasCached(tenantId, query.capability));
 
-    return orderRoutesForStrategy(chain, strategy, preferred);
+    return orderRoutesForStrategy(chain, strategy, defaultAlias);
+  }
+
+  private async findDefaultAliasCached(
+    tenantId: string,
+    capability: ModelCapability,
+  ): Promise<string | undefined> {
+    const key = `${tenantId}:default:${capability}`;
+    const hit = this.defaultAliasCache.get(key);
+    if (hit !== undefined) return hit || undefined;
+    const alias = (await this.findDefaultAlias(tenantId, capability)) ?? "";
+    this.defaultAliasCache.set(key, alias);
+    return alias || undefined;
   }
 
   private async findDefaultAlias(

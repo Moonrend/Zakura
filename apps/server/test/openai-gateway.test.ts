@@ -142,7 +142,7 @@ describe("OpenAI gateway session continuation", () => {
     const service = new OpenAiGatewayService({
       agentService: { get: async () => agent } as unknown as AgentService,
       gateway: { listToolsForAgent: async () => [] } as unknown as McpGateway,
-      modelRouter: {} as ModelRouterService,
+      modelRouter: { resolveRoute: async () => null } as unknown as ModelRouterService,
       store: {
         getSession: async () => null,
         listGatewaySessions: async () => [
@@ -162,6 +162,7 @@ describe("OpenAI gateway session continuation", () => {
           return { id: "new" };
         },
         appendEvent: async () => ({}),
+        warmSession: async () => {},
         updateSession: async () => null,
       } as unknown as CloudAgentSessionStore,
     });
@@ -213,7 +214,7 @@ describe("OpenAI gateway session continuation", () => {
     const service = new OpenAiGatewayService({
       agentService: { get: async () => agent } as unknown as AgentService,
       gateway: { listToolsForAgent: async () => [] } as unknown as McpGateway,
-      modelRouter: {} as ModelRouterService,
+      modelRouter: { resolveRoute: async () => null } as unknown as ModelRouterService,
       store: {
         listGatewaySessions: async () => [
           {
@@ -229,6 +230,7 @@ describe("OpenAI gateway session continuation", () => {
         },
         getSession: async () => null,
         appendEvent: async () => ({}),
+        warmSession: async () => {},
         updateSession: async () => null,
       } as unknown as CloudAgentSessionStore,
     });
@@ -276,9 +278,11 @@ describe("OpenAI gateway proxy behavior", () => {
       listEvents: async () => [],
       listGatewaySessions: async () => [],
       appendEvent: async () => ({}),
+      warmSession: async () => {},
       updateSession: async () => null,
     } as unknown as CloudAgentSessionStore;
     const fakeRouter = {
+      resolveRoute: async () => null,
       chat: async (
         _tenantId: string,
         _messages: unknown,
@@ -352,6 +356,7 @@ describe("OpenAI gateway proxy behavior", () => {
         },
       } as unknown as McpGateway,
       modelRouter: {
+        resolveRoute: async () => null,
         chat: async (
           _tenantId: string,
           messages: Array<{ role: string; content?: string | null }>,
@@ -386,6 +391,7 @@ describe("OpenAI gateway proxy behavior", () => {
         listEvents: async () => [],
         listGatewaySessions: async () => [],
         appendEvent: async () => ({}),
+        warmSession: async () => {},
         updateSession: async () => null,
       } as unknown as CloudAgentSessionStore,
     });

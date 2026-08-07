@@ -28,6 +28,9 @@ import {
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
+import { REDIS_KEYS } from "./redis.js";
+import { redisGetJson, redisSetJson, REDIS_TTL } from "./redis-store.js";
+import { TtlCache } from "../model-router/cache.js";
 import { callAgentNativeTool, listAgentNativeTools } from "./agent-tools.js";
 import {
   AGENT_NATIVE_PROVIDER_ID,
@@ -351,6 +354,8 @@ export class McpGateway {
   private runtimeNodes: import("./runtime-nodes.js").RuntimeNodeService | null = null;
   private instanceMigrations: import("./platform-assistant-tools.js").InstanceMigrationPort | null =
     null;
+  /** 工具列表进程内短缓存：Redis 往返也要毫秒级，热路径优先本地命中 */
+  private readonly toolsMemCache = new TtlCache<ResolvedTool[]>(30_000);
 
   constructor(
     private readonly db: Db,
@@ -421,8 +426,8 @@ export class McpGateway {
   }
 
   /**
-   * 解析 Agent 应暴露的 MCP 实例，并对未运行的实例自动启动。
-   * 远程 HTTP MCP 无本地进程，status=stopped 只表示未启用；使用前应自动拉起。
+   * 解析 Agent 应暴露的 MCP 实例。
+   * 热路径只返回已 running 的实例；stopped 的后台拉起，绝不阻塞首字。
    */
   private async resolveAgentMcpInstances(agent: Agent): Promise<InstanceRow[]> {
     if (!this.agentService) return [];
@@ -449,10 +454,18 @@ export class McpGateway {
       return true;
     });
 
-    return this.ensureInstancesRunning(agent.tenantId, candidates);
+    const running = candidates.filter((i) => i.status === "running");
+    const stopped = candidates.filter((i) => i.status !== "running");
+    // ponytail: 不在 listTools 热路径 ensureStarted（可卡到 30s）；后台预热下一轮可用
+    if (stopped.length) {
+      void this.ensureInstancesRunning(agent.tenantId, stopped).catch((err) =>
+        console.warn("[mcp] background auto-start:", err),
+      );
+    }
+    return running;
   }
 
-  /** 租户策略下的 MCP 实例列表（自动启动） */
+  /** 租户策略下的 MCP 实例列表（热路径不启动） */
   private async resolveTenantMcpInstances(
     tenantId: string,
     allowedInstanceIds: string[] | null,
@@ -479,7 +492,14 @@ export class McpGateway {
       return true;
     });
 
-    return this.ensureInstancesRunning(tenantId, candidates);
+    const running = candidates.filter((i) => i.status === "running");
+    const stopped = candidates.filter((i) => i.status !== "running");
+    if (stopped.length) {
+      void this.ensureInstancesRunning(tenantId, stopped).catch((err) =>
+        console.warn("[mcp] background auto-start:", err),
+      );
+    }
+    return running;
   }
 
   private async ensureInstancesRunning(
@@ -647,31 +667,51 @@ export class McpGateway {
   async listToolsForAgent(agent: Agent): Promise<ResolvedTool[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
 
+    const memHit = this.toolsMemCache.get(agent.id);
+    if (memHit) return memHit;
+
+    const cacheKey = REDIS_KEYS.tools(agent.id);
+    const cached = await redisGetJson<ResolvedTool[]>(cacheKey);
+    if (cached) {
+      this.toolsMemCache.set(agent.id, cached);
+      return cached;
+    }
+
+    const tools = await this.listToolsForAgentUncached(agent);
+    this.toolsMemCache.set(agent.id, tools);
+    // 短 TTL：对齐 Memoh toolsCacheTTL，避免每轮 Run 重复枚举
+    void redisSetJson(cacheKey, tools, REDIS_TTL.tools);
+    return tools;
+  }
+
+  private async listToolsForAgentUncached(agent: Agent): Promise<ResolvedTool[]> {
     const platformDefaults = await getAgentWebDefaults(this.db);
     const effective = effectiveAgentWebDefaults(getAgentProviders(agent), platformDefaults);
 
-    if (effective.webSearchEnabled) {
-      try {
-        await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-search", {
-          start: true,
-        });
-      } catch (err) {
-        console.warn(`[mcp] web-search capability:`, err);
-      }
+    // ponytail: 热路径绝不 start 容器（ensureCapabilityInstance start:true 可卡 30s+）
+    // web-search/web-fetch 仅注入已 running 的实例；未启动的由后台任务拉起
+    if (effective.webSearchEnabled || effective.webFetchEnabled) {
+      void (async () => {
+        try {
+          if (effective.webSearchEnabled) {
+            await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-search", {
+              start: true,
+            });
+          }
+          if (effective.webFetchEnabled) {
+            await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-fetch", {
+              start: true,
+            });
+          }
+        } catch (err) {
+          console.warn(`[mcp] background capability start:`, err);
+        }
+      })();
     }
-    if (effective.webFetchEnabled) {
-      try {
-        await ensureCapabilityInstance(this.db, this.orchestrator, agent.tenantId, "web-fetch", {
-          start: true,
-        });
-      } catch (err) {
-        console.warn(`[mcp] web-fetch capability:`, err);
-      }
-    }
+
     let memoryKind: MemoryProviderKind | null = null;
     if (agent.enableMemory && this.memoryProviders) {
       try {
-        await this.memoryProviders.ensureDefault(agent.tenantId);
         const resolved = await this.memoryProviders.resolveForAgent(
           agent.tenantId,
           agent.memoryProviderId,
@@ -715,48 +755,52 @@ export class McpGateway {
           err instanceof Error ? err.message : String(err),
         );
       }
-      for (const target of directTargets) {
-        if (!globalRegistry.has(target.providerId)) continue;
-        const plugin = globalRegistry.get(target.providerId);
-        const handle = directConnectorHandle(agent.tenantId, target);
-        let listed: McpToolDef[] = [];
-        try {
-          listed = await plugin.listTools(handle);
-        } catch (err) {
-          console.warn(
-            `[connector] listTools ${target.connectorRef}/${target.capabilityRef}:`,
-            err instanceof Error ? err.message : String(err),
-          );
-          continue;
-        }
-        for (const t of listed) {
-          const name = withRePrefix(`${target.connectorRef}__${t.name}`);
-          if (usedNames.has(name)) continue;
-          usedNames.add(name);
-          tools.push(
-            this.enrichResolvedTool({
-              qualifiedName: name,
-              instanceId: null,
-              providerId: DIRECT_CONNECTOR_PROVIDER_ID,
-              localName: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-              title: t.title,
-              outputSchema: t.outputSchema,
-              annotations: t.annotations,
-              securitySchemes: t.securitySchemes,
-              _meta: {
-                ...(t._meta ?? {}),
-                connectorRef: target.connectorRef,
-                capabilityRef: target.capabilityRef,
-                providerId: target.providerId,
-                product: target.product,
-              },
-              execution: t.execution,
-              agentScoped: true,
-              agentId: agent.id,
-            }),
-          );
+      const connectorListed = await Promise.all(
+        directTargets.map(async (target) => {
+          if (!globalRegistry.has(target.providerId)) return [] as ResolvedTool[];
+          const plugin = globalRegistry.get(target.providerId);
+          const handle = directConnectorHandle(agent.tenantId, target);
+          try {
+            const listed = await plugin.listTools(handle);
+            return listed.map((t) => {
+              const name = withRePrefix(`${target.connectorRef}__${t.name}`);
+              return this.enrichResolvedTool({
+                qualifiedName: name,
+                instanceId: null,
+                providerId: DIRECT_CONNECTOR_PROVIDER_ID,
+                localName: t.name,
+                description: t.description,
+                inputSchema: t.inputSchema,
+                title: t.title,
+                outputSchema: t.outputSchema,
+                annotations: t.annotations,
+                securitySchemes: t.securitySchemes,
+                _meta: {
+                  ...(t._meta ?? {}),
+                  connectorRef: target.connectorRef,
+                  capabilityRef: target.capabilityRef,
+                  providerId: target.providerId,
+                  product: target.product,
+                },
+                execution: t.execution,
+                agentScoped: true,
+                agentId: agent.id,
+              });
+            });
+          } catch (err) {
+            console.warn(
+              `[connector] listTools ${target.connectorRef}/${target.capabilityRef}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+            return [] as ResolvedTool[];
+          }
+        }),
+      );
+      for (const batch of connectorListed) {
+        for (const t of batch) {
+          if (usedNames.has(t.qualifiedName)) continue;
+          usedNames.add(t.qualifiedName);
+          tools.push(t);
         }
       }
     }
@@ -773,114 +817,82 @@ export class McpGateway {
         ),
       );
 
-    for (const instance of capabilityInstances) {
-      if (instance.providerId === "web-search" && !effective.webSearchEnabled) continue;
-      if (instance.providerId === "web-fetch" && !effective.webFetchEnabled) continue;
-      if (!globalRegistry.has(instance.providerId)) continue;
-      const plugin = globalRegistry.get(instance.providerId);
-      let handle: InstanceHandle;
-      try {
-        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
-      } catch {
-        continue;
-      }
-      let listed: McpToolDef[] = [];
-      try {
-        listed = await plugin.listTools(handle);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
-        continue;
-      }
-      for (const t of listed) {
-        let name = withRePrefix(t.name);
-        if (usedNames.has(name)) {
-          name = withRePrefix(qualify(instance.slug, t.name));
-        }
-        if (usedNames.has(name)) continue;
-        usedNames.add(name);
-        tools.push(
-          this.enrichResolvedTool(
-            {
-              qualifiedName: name,
-              instanceId: instance.id,
-              providerId: instance.providerId,
-              localName: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-              title: t.title,
-              outputSchema: t.outputSchema,
-              annotations: t.annotations,
-              securitySchemes: t.securitySchemes,
-              _meta: t._meta,
-              execution: t.execution,
-              agentId: agent.id,
-            },
-            instance.slug,
-          ),
-        );
-      }
-    }
-
     const instances = await this.resolveAgentMcpInstances(agent);
+    const allInstances = [
+      ...capabilityInstances.filter((instance) => {
+        if (instance.providerId === "web-search" && !effective.webSearchEnabled) return false;
+        if (instance.providerId === "web-fetch" && !effective.webFetchEnabled) return false;
+        return true;
+      }),
+      ...instances,
+    ];
 
-    for (const instance of instances) {
-      if (!globalRegistry.has(instance.providerId)) continue;
-      const plugin = globalRegistry.get(instance.providerId);
-      let handle: InstanceHandle;
-      try {
-        handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
-      } catch {
-        continue;
-      }
-      let listed: McpToolDef[] = [];
-      try {
-        if (
-          handle.config.authRequired === true &&
-          !(
-            (typeof handle.config.oauthAccessToken === "string" &&
-              handle.config.oauthAccessToken.trim()) ||
-            (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
-          )
-        ) {
-          console.warn(
-            `[mcp] agent listTools ${instance.slug}: skipped (AUTH_REQUIRED)`,
-          );
-          continue;
+    const listedBatches = await Promise.all(
+      allInstances.map(async (instance) => {
+        if (!globalRegistry.has(instance.providerId)) return [] as ResolvedTool[];
+        const plugin = globalRegistry.get(instance.providerId);
+        let handle: InstanceHandle;
+        try {
+          handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
+        } catch {
+          return [] as ResolvedTool[];
         }
-        listed = await plugin.listTools(handle);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
-        continue;
-      }
-      for (const t of listed) {
-        let name = withRePrefix(t.name);
-        if (usedNames.has(name)) {
-          name = withRePrefix(qualify(instance.slug, t.name));
+        try {
+          if (
+            handle.config.authRequired === true &&
+            !(
+              (typeof handle.config.oauthAccessToken === "string" &&
+                handle.config.oauthAccessToken.trim()) ||
+              (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
+            )
+          ) {
+            console.warn(
+              `[mcp] agent listTools ${instance.slug}: skipped (AUTH_REQUIRED)`,
+            );
+            return [] as ResolvedTool[];
+          }
+          const listed = await plugin.listTools(handle);
+          return listed.map((t) => {
+            let name = withRePrefix(t.name);
+            // 冲突名在合并阶段再 qualify
+            return this.enrichResolvedTool(
+              {
+                qualifiedName: name,
+                instanceId: instance.id,
+                providerId: instance.providerId,
+                localName: t.name,
+                description: t.description,
+                inputSchema: t.inputSchema,
+                title: t.title,
+                outputSchema: t.outputSchema,
+                annotations: t.annotations,
+                securitySchemes: t.securitySchemes,
+                _meta: t._meta,
+                execution: t.execution,
+                agentId: agent.id,
+              },
+              instance.slug,
+            );
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
+          return [] as ResolvedTool[];
+        }
+      }),
+    );
+
+    for (const batch of listedBatches) {
+      for (const t of batch) {
+        let name = t.qualifiedName;
+        if (usedNames.has(name) && t.instanceId) {
+          const slug =
+            allInstances.find((i) => i.id === t.instanceId)?.slug ?? t.instanceId.slice(0, 8);
+          name = withRePrefix(qualify(slug, t.localName));
         }
         if (usedNames.has(name)) continue;
         usedNames.add(name);
-        tools.push(
-          this.enrichResolvedTool(
-            {
-              qualifiedName: name,
-              instanceId: instance.id,
-              providerId: instance.providerId,
-              localName: t.name,
-              description: t.description,
-              inputSchema: t.inputSchema,
-              title: t.title,
-              outputSchema: t.outputSchema,
-              annotations: t.annotations,
-              securitySchemes: t.securitySchemes,
-              _meta: t._meta,
-              execution: t.execution,
-              agentId: agent.id,
-            },
-            instance.slug,
-          ),
-        );
+        tools.push(name === t.qualifiedName ? t : { ...t, qualifiedName: name });
       }
     }
 

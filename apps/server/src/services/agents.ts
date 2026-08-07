@@ -45,8 +45,11 @@ import {
   ensureDefaultAgentMcps,
 } from "./default-mcps.js";
 import { effectiveAgentWebDefaults, getAgentWebDefaults } from "./agent-defaults.js";
+import { TtlCache } from "../model-router/cache.js";
 
 const ZAKURA_AUTO_NAME = "Zakura 自动";
+/** Agent 配置读多写少：热路径短 TTL 进程内缓存 */
+const AGENT_CACHE_TTL_MS = 30_000;
 
 /** Platform-only slots surface as「Zakura 自动」so tenants never see jina/firecrawl ids. */
 function displayNameForWebService(
@@ -74,6 +77,7 @@ export { isComputerEnvEnabled, needsContainer, normalizeCaps } from "./agent-cap
 
 export class AgentService {
   readonly workspace: AgentWorkspaceService;
+  private readonly agentCache = new TtlCache<Agent>(AGENT_CACHE_TTL_MS);
 
   constructor(
     private readonly db: Db,
@@ -82,6 +86,17 @@ export class AgentService {
     nodes?: import("./runtime-nodes.js").RuntimeNodeService,
   ) {
     this.workspace = new AgentWorkspaceService(db, runtime, config, nodes);
+  }
+
+  private rememberAgent(agent: Agent): Agent {
+    this.agentCache.set(`${agent.tenantId}:${agent.id}`, agent);
+    if (agent.slug) this.agentCache.set(`${agent.tenantId}:${agent.slug}`, agent);
+    return agent;
+  }
+
+  private forgetAgent(agent: Pick<Agent, "tenantId" | "id" | "slug">): void {
+    this.agentCache.invalidatePrefix(`${agent.tenantId}:${agent.id}`);
+    if (agent.slug) this.agentCache.invalidatePrefix(`${agent.tenantId}:${agent.slug}`);
   }
 
   async list(tenantId: string): Promise<Agent[]> {
@@ -93,15 +108,17 @@ export class AgentService {
   }
 
   async get(tenantId: string, idOrSlug: string): Promise<Agent | null> {
+    const hit = this.agentCache.get(`${tenantId}:${idOrSlug}`);
+    if (hit) return hit;
     const byId = await this.db.query.agents.findFirst({
       where: and(eq(agents.tenantId, tenantId), eq(agents.id, idOrSlug)),
     });
-    if (byId) return byId;
-    return (
+    if (byId) return this.rememberAgent(byId);
+    const bySlug =
       (await this.db.query.agents.findFirst({
         where: and(eq(agents.tenantId, tenantId), eq(agents.slug, idOrSlug)),
-      })) ?? null
-    );
+      })) ?? null;
+    return bySlug ? this.rememberAgent(bySlug) : null;
   }
 
   async create(
@@ -263,7 +280,7 @@ export class AgentService {
         })
         .where(eq(agents.id, agent.id))
         .returning();
-      agent = updated ?? agent;
+      agent = updated ? this.rememberAgent(updated) : agent;
     } else if (opts?.userId) {
       await assertNodeBindAllowed(this.db, this.config, {
         userId: opts.userId,
@@ -395,7 +412,7 @@ export class AgentService {
       }
     }
 
-    return result;
+    return this.rememberAgent(result);
   }
 
   async remove(tenantId: string, id: string, opts?: { purgeData?: boolean }) {
@@ -408,6 +425,7 @@ export class AgentService {
     }
 
     await this.db.delete(agents).where(eq(agents.id, agent.id));
+    this.forgetAgent(agent);
 
     if (opts?.purgeData) {
       try {
@@ -504,7 +522,7 @@ export class AgentService {
       .set({ configJson: JSON.stringify(config), updatedAt: new Date() })
       .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
       .returning();
-    return updated ?? agent;
+    return this.rememberAgent(updated ?? agent);
   }
 
   /** Replace MCP bindings when agent uses mode=selected */
@@ -565,7 +583,7 @@ export class AgentService {
       await this.setMcpBindings(tenantId, agentId, patch.mcp.instanceIds);
     }
 
-    return updated ?? agent;
+    return this.rememberAgent(updated ?? agent);
   }
 
   /** Ensure no-auth default MCPs (currently Grep) are installed, bound, and selected. */

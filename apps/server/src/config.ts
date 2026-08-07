@@ -5,6 +5,7 @@ import { generateSecret } from "@zakura/core";
 import type { ZakuraEdition } from "@zakura/shared";
 import { loadEnvFiles } from "./load-env.js";
 import { resolveEdition } from "./saas-loader.js";
+import { redisUrlFromEnv } from "./services/redis.js";
 
 // Load .env before reading process.env (tsx does not do this by itself)
 loadEnvFiles();
@@ -21,6 +22,8 @@ function resolveDataDir(): string {
 export interface AppConfig {
   dataDir: string;
   databaseUrl: string;
+  /** Redis 连接串；null 表示 REDIS_URL=off 显式关闭 */
+  redisUrl: string | null;
   secret: string;
   host: string;
   port: number;
@@ -104,6 +107,7 @@ export function loadConfig(): AppConfig {
   return {
     dataDir,
     databaseUrl,
+    redisUrl: redisUrlFromEnv(),
     secret: loadOrCreateSecret(dataDir),
     host,
     port,

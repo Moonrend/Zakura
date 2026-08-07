@@ -20,6 +20,7 @@ describe("CloudAgentSessionStore.appendEvent concurrency", () => {
   let sessionId: string;
 
   before(async () => {
+    process.env.REDIS_URL = "off";
     mkdirSync(SCRATCH, { recursive: true });
     dataDir = mkdtempSync(join(SCRATCH, "data-"));
     const pgliteDir = join(dataDir, "pglite");

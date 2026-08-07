@@ -321,11 +321,19 @@ async function main() {
   console.log(`  edition  : ${config.edition}${config.multiTenant ? " (multi-tenant)" : " (single-account)"}`);
   console.log(`  data dir : ${config.dataDir}`);
   console.log(`  database : ${config.databaseUrl} (${kind})`);
+  console.log(
+    `  redis    : ${config.redisUrl ? config.redisUrl.replace(/:[^:@/]+@/, ":***@") : "off"}`,
+  );
   console.log(`  Agent MCP: ${config.publicBaseUrl}/mcp/agents/{slug}`);
   console.log(`  Web UI   : ${config.webPublicUrl}`);
   console.log(`  Authorize: ${config.publicBaseUrl}/authorize → ${config.webPublicUrl}/console/oauth/authorize`);
   if (config.aptMirror) {
     console.log(`  APT mirror: ${config.aptMirror}`);
+  }
+
+  if (config.redisUrl) {
+    const { requireRedis } = await import("./services/redis.js");
+    await requireRedis();
   }
 
   serve({

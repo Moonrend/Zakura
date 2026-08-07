@@ -10,6 +10,12 @@
 #   docker compose --profile postgres up -d
 #   并将 zakura 的 DATABASE_URL 指到 postgres 服务
 #
+# 生产流式加速（默认强制 Redis，地址自配 REDIS_URL）：
+#   COMPOSE_PROFILES=postgres docker compose up -d
+#   REDIS_URL=redis://redis:6379
+# 本地无 Redis 时显式关闭：REDIS_URL=off
+# 详见 docs/deployment.md
+#
 # 可选组件：
 #   docker compose --profile components up -d
 
@@ -27,6 +33,8 @@ services:
     environment:
       # 默认内嵌 PGlite；云端改为 postgresql://zakura:zakura@postgres:5432/zakura
       DATABASE_URL: ${DATABASE_URL:-pglite:/data/pglite}
+      # Redis 默认强制；请在 env 配置地址（见 docs/deployment.md）
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       ZAKURA_DATA_DIR: /data
       ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://zakura-local-api.190823.xyz}
       ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://zakura-local.190823.xyz}
@@ -50,6 +58,9 @@ services:
       postgres:
         condition: service_healthy
         required: false
+      redis:
+        condition: service_healthy
+        required: true
     networks:
       - zakura
   caddy:
@@ -94,6 +105,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: zakura-redis
+    # 仅本机调试；容器间走 zakura 网络
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - zakura
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   searxng:
     profiles: ["components"]
     image: searxng/searxng:latest
@@ -124,6 +153,7 @@ volumes:
   zakura-data:
   openviking-data:
   postgres-data:
+  redis-data:
   caddy-data:
   caddy-config:
 

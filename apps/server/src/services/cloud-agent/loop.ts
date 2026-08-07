@@ -89,12 +89,14 @@ export type AgentLoopResult = {
   rounds: number;
 };
 
-/** 增量文本发布器：合并小 delta，串行落库，避免每 token 一次事务 */
+/** 增量文本发布器：首字节立即刷出，随后按帧合并，避免思考/正文卡在缓冲区 */
 export class DeltaPublisher {
   private buf = "";
   private chain: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private emittedAny = false;
+  /** 首包已刷出前为 true，保证 TTFT 不被批处理拖住 */
+  private firstPending = true;
 
   constructor(
     private readonly store: CloudAgentSessionStore,
@@ -115,10 +117,16 @@ export class DeltaPublisher {
     if (!text) return;
     this.emittedAny = true;
     this.buf += text;
-    if (this.buf.length >= 120) {
+    // 首字节立刻推 SSE；之后 ~1 帧合并，降低 Redis/DB 压力
+    if (this.firstPending) {
+      this.firstPending = false;
+      this.flush();
+      return;
+    }
+    if (this.buf.length >= 48) {
       this.flush();
     } else if (!this.timer) {
-      this.timer = setTimeout(() => this.flush(), 250);
+      this.timer = setTimeout(() => this.flush(), 16);
     }
   }
 
@@ -130,18 +138,19 @@ export class DeltaPublisher {
     const chunk = this.buf;
     this.buf = "";
     if (!chunk) return;
-    this.chain = this.chain
-      .then(() =>
-        this.store.appendEvent({
+    this.chain = Promise.all([
+      this.chain,
+      this.store
+        .appendEvent({
           sessionId: this.sessionId,
           type: this.eventType,
           runId: this.runId,
           payload: { messageId: this.messageId, delta: chunk },
+        })
+        .catch((err) => {
+          console.warn("[cloud-agent] delta publish failed:", err);
         }),
-      )
-      .catch((err) => {
-        console.warn("[cloud-agent] delta publish failed:", err);
-      });
+    ]);
   }
 
   async drain(): Promise<void> {
@@ -342,12 +351,15 @@ export async function runAgentLoop(
       return { status: "cancelled", finalText: lastText, rounds: round };
     }
 
-    await store.appendEvent({
-      sessionId,
-      type: "run_status",
-      runId,
-      payload: { runId, status: round === 0 ? "thinking" : "streaming" },
-    });
+    // round 0 的 thinking 已在 executeRun 发出；此处只推后续轮的 streaming，避免同步落库挡首字
+    if (round > 0) {
+      void store.appendEvent({
+        sessionId,
+        type: "run_status",
+        runId,
+        payload: { runId, status: "streaming" },
+      });
+    }
 
     const roundStarted = Date.now();
     let publisher: DeltaPublisher;

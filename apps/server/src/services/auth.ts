@@ -13,6 +13,8 @@ import {
   type TenantMembership,
   type User,
 } from "../db/schema.js";
+import { REDIS_KEYS } from "./redis.js";
+import { redisGetJson, redisSetJson, REDIS_TTL } from "./redis-store.js";
 
 export interface SessionPayload {
   userId: string;
@@ -156,20 +158,65 @@ export async function authenticateApiKey(
   rawKey: string,
 ): Promise<{ apiKey: ApiKey; tenant: Tenant } | null> {
   const keyHash = hashApiKey(rawKey);
+
+  // Redis 短缓存（跨实例）；进程内再挡一层
+  const mem = apiKeyAuthCache.get(keyHash);
+  if (mem && mem.expiresAt > Date.now()) {
+    touchApiKeyLastUsed(db, mem.apiKey.id);
+    return { apiKey: mem.apiKey, tenant: mem.tenant };
+  }
+
+  const fromRedis = await redisGetJson<{ apiKey: ApiKey; tenant: Tenant }>(
+    REDIS_KEYS.auth(keyHash),
+  );
+  if (fromRedis?.apiKey?.id && fromRedis?.tenant?.id) {
+    apiKeyAuthCache.set(keyHash, {
+      apiKey: fromRedis.apiKey,
+      tenant: fromRedis.tenant,
+      expiresAt: Date.now() + API_KEY_AUTH_TTL_MS,
+    });
+    touchApiKeyLastUsed(db, fromRedis.apiKey.id);
+    return { apiKey: fromRedis.apiKey, tenant: fromRedis.tenant };
+  }
+
   const apiKey = await db.query.apiKeys.findFirst({
     where: eq(apiKeys.keyHash, keyHash),
   });
   if (!apiKey) return null;
   if (apiKey.expiresAt && apiKey.expiresAt < new Date()) return null;
-  await db
-    .update(apiKeys)
-    .set({ lastUsedAt: new Date() })
-    .where(eq(apiKeys.id, apiKey.id));
+
   const tenant = await db.query.tenants.findFirst({
     where: eq(tenants.id, apiKey.tenantId),
   });
   if (!tenant) return null;
+
+  apiKeyAuthCache.set(keyHash, {
+    apiKey,
+    tenant,
+    expiresAt: Date.now() + API_KEY_AUTH_TTL_MS,
+  });
+  void redisSetJson(REDIS_KEYS.auth(keyHash), { apiKey, tenant }, REDIS_TTL.auth);
+  touchApiKeyLastUsed(db, apiKey.id);
   return { apiKey, tenant };
+}
+
+const API_KEY_AUTH_TTL_MS = 30_000;
+const apiKeyAuthCache = new Map<
+  string,
+  { apiKey: ApiKey; tenant: Tenant; expiresAt: number }
+>();
+const lastUsedThrottle = new Map<string, number>();
+
+function touchApiKeyLastUsed(db: Db, apiKeyId: string): void {
+  const now = Date.now();
+  const prev = lastUsedThrottle.get(apiKeyId) ?? 0;
+  if (now - prev < 60_000) return;
+  lastUsedThrottle.set(apiKeyId, now);
+  void db
+    .update(apiKeys)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(apiKeys.id, apiKeyId))
+    .catch(() => {});
 }
 
 export function hasApiKeyScope(apiKey: { scopes: string }, required: string): boolean {

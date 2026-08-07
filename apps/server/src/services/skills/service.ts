@@ -66,11 +66,15 @@ import {
   parseSkillSource,
   toSkillFrontmatter,
 } from "./source.js";
+import { TtlCache } from "../../model-router/cache.js";
 
 export { SkillSourceError };
 
 /** 工作区内技能根目录（带前导斜杠，WorkspaceFs 视其为工作区相对路径） */
 export const SKILLS_ROOT = `/${AGENT_SKILLS_DIR}`;
+
+/** promptSummary 热路径短缓存（装/卸/启停后失效） */
+const PROMPT_SUMMARY_TTL_MS = 30_000;
 
 export function skillWorkspacePath(name: string): string {
   return `${SKILLS_ROOT}/${name}`;
@@ -212,6 +216,7 @@ export class SkillsService {
   /** 租户轮转游标：租户数超过单轮批量时，下一轮从上次的位置接着走 */
   private maintenanceCursor = 0;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly promptSummaryCache = new TtlCache<string>(PROMPT_SUMMARY_TTL_MS);
 
   constructor(deps: SkillsServiceDeps) {
     this.db = deps.db;
@@ -1213,6 +1218,7 @@ export class SkillsService {
       path: root,
     });
 
+    this.forgetPromptSummary(agent.tenantId, agent.id);
     return this.recordInstall(agent, row, "installed", null);
   }
 
@@ -1367,17 +1373,27 @@ export class SkillsService {
 
   /** 启用中的技能摘要，注入系统提示（渐进式披露的第一层） */
   async promptSummary(tenantId: string, agentId: string): Promise<string> {
+    const cacheKey = `${tenantId}:${agentId}`;
+    const hit = this.promptSummaryCache.get(cacheKey);
+    if (hit !== undefined) return hit;
     try {
       const list = await this.listForAgent(tenantId, agentId);
       const active = list.filter((s) => s.enabled && s.status === "installed");
-      if (!active.length) return "";
-      return active
-        .map((s) => `- ${s.name}（${s.path}/${SKILL_MANIFEST_FILE}）：${s.description}`)
-        .join("\n");
+      const summary = !active.length
+        ? ""
+        : active
+            .map((s) => `- ${s.name}（${s.path}/${SKILL_MANIFEST_FILE}）：${s.description}`)
+            .join("\n");
+      this.promptSummaryCache.set(cacheKey, summary);
+      return summary;
     } catch (err) {
       console.warn("[skills] promptSummary:", err instanceof Error ? err.message : err);
       return "";
     }
+  }
+
+  private forgetPromptSummary(tenantId: string, agentId: string): void {
+    this.promptSummaryCache.invalidatePrefix(`${tenantId}:${agentId}`);
   }
 
   async setEnabled(
@@ -1398,6 +1414,7 @@ export class SkillsService {
       .update(agentSkills)
       .set({ enabled, updatedAt: new Date() })
       .where(eq(agentSkills.id, row.id));
+    this.forgetPromptSummary(tenantId, agentId);
     const skill = await this.db.query.skills.findFirst({ where: eq(skills.id, row.skillId) });
     return toAgentRecord({ ...row, enabled }, skill);
   }
@@ -1436,6 +1453,7 @@ export class SkillsService {
       }
     }
     await this.db.delete(agentSkills).where(eq(agentSkills.id, row.id));
+    this.forgetPromptSummary(tenantId, agentId);
     return true;
   }
 
