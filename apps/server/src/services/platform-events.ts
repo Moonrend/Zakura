@@ -59,6 +59,15 @@ export type PlatformEvent =
       platform: string;
       title: string;
       preview?: string;
+    }
+  | {
+      /** Agent 主动调用浏览器通知工具 */
+      type: "browser_notify";
+      ts: number;
+      agentId: string;
+      title: string;
+      body?: string;
+      url?: string;
     };
 
 type PlatformEventInput =
@@ -69,7 +78,8 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "runner_node" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">
-  | Omit<Extract<PlatformEvent, { type: "connector_inbound" }>, "ts">;
+  | Omit<Extract<PlatformEvent, { type: "connector_inbound" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "browser_notify" }>, "ts">;
 
 type Listener = (event: PlatformEvent) => void;
 

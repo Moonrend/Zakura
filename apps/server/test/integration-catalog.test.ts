@@ -44,6 +44,7 @@ describe("integration catalog credentials", () => {
     assert.deepEqual(
       packages.map((item) => item.slug).sort(),
       [
+        "browser-notifications",
         "discord",
         "feishu",
         "github",

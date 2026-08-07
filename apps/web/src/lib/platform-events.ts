@@ -68,6 +68,14 @@ export type PlatformEvent =
       platform: string;
       title: string;
       preview?: string;
+    }
+  | {
+      type: "browser_notify";
+      ts: number;
+      agentId: string;
+      title: string;
+      body?: string;
+      url?: string;
     };
 
 type Subscriber = {

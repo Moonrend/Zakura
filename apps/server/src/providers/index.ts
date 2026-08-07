@@ -24,6 +24,7 @@ import { createGitlabProvider, injectGitlabRuntime } from "./gitlab/index.js";
 import { createJiraProvider, injectJiraRuntime } from "./jira/index.js";
 import { createEmailProvider } from "./email/index.js";
 import { createRemoteAgentProvider } from "./remote-agent.js";
+import { createBrowserNotificationsProvider } from "./browser-notifications.js";
 
 export function registerBuiltinProviders(): void {
   const providers = [
@@ -43,7 +44,8 @@ export function registerBuiltinProviders(): void {
     createGitlabProvider,
     createJiraProvider,
     createEmailProvider,
-      createRemoteAgentProvider,
+    createRemoteAgentProvider,
+    createBrowserNotificationsProvider,
   ];
   for (const factory of providers) {
     const id = factory().id;
@@ -99,4 +101,5 @@ export {
   injectJiraRuntime,
   createEmailProvider,
   createRemoteAgentProvider,
+  createBrowserNotificationsProvider,
 };

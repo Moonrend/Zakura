@@ -579,6 +579,45 @@
     ]
   },
   {
+    "slug": "browser-notifications",
+    "name": "浏览器通知",
+    "description": "Agent 可向用户浏览器发送系统通知；入站消息也可在后台提醒。默认安装到全部 Agent。",
+    "publisher": "reCloud",
+    "category": "platform",
+    "icon": "🔔",
+    "accent": "#0f172a",
+    "verified": true,
+    "featured": true,
+    "manifest": {
+      "summary": "Agent 工具 notify：推送浏览器系统通知。用户需授权 Notification 权限。"
+    },
+    "components": [
+      {
+        "kind": "connector",
+        "ref": "browser-notifications",
+        "name": "浏览器通知",
+        "description": "默认安装到全部 Agent。授权即请求浏览器通知权限。",
+        "config": {
+          "providerId": "browser-notifications",
+          "auth": { "kind": "none", "profile": "browser-notifications" },
+          "pathHints": ["zakura://browser-notifications/"]
+        }
+      },
+      {
+        "kind": "tool",
+        "ref": "browser-notify",
+        "name": "通知",
+        "description": "向用户浏览器发送系统通知。",
+        "config": {
+          "providerId": "browser-notifications",
+          "product": "notify",
+          "mcpUrl": "zakura://browser-notifications/notify",
+          "scopes": ""
+        }
+      }
+    ]
+  },
+  {
     "slug": "agent-remote",
     "name": "远程 Agent",
     "description": "Chat SDK 消息平台：Slack、Telegram、Discord、Resend Email 等。在 Agent「平台」页绑定，无需额外邮箱连接器。",

@@ -562,6 +562,20 @@ export class IntegrationCatalogService {
       : items.filter((item) => item.hasTools || item.package.slug === "agent-remote");
   }
 
+  /** 浏览器通知：默认启用并安装到租户下全部 Agent */
+  async ensureBrowserNotificationsInstalled(tenantId: string) {
+    const agentRows = await this.db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.tenantId, tenantId));
+    if (!agentRows.length) return;
+    await this.auth.ensureInstallations(
+      tenantId,
+      "browser-notifications",
+      agentRows.map((row) => row.id),
+    );
+  }
+
   async saveConnectorSettings(
     scopeKey: string,
     connectorRef: string,

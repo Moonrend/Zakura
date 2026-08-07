@@ -1750,6 +1750,18 @@ export async function createApiApp(deps: {
           err instanceof Error ? err.message : err,
         );
       }
+      try {
+        await integrationCatalog.auth.ensureInstallations(
+          session.tenantId,
+          "browser-notifications",
+          [result.agent.id],
+        );
+      } catch (err) {
+        console.warn(
+          "[api] browser-notifications auto-install failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
       return c.json(
         {
           ...agentService.serialize(result.agent),
@@ -4540,7 +4552,15 @@ export async function createApiApp(deps: {
     if (scope === "platform" && !canManageMcpOauthApps(session, config, scope)) {
       return c.json({ error: "需要管理员权限" }, 403);
     }
-    if (scope === "tenant") await skills?.syncBuiltins(session.tenantId);
+    if (scope === "tenant") {
+      await skills?.syncBuiltins(session.tenantId);
+      await integrationCatalog.ensureBrowserNotificationsInstalled(session.tenantId).catch((err) => {
+        console.warn(
+          "[api] browser-notifications ensure failed:",
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
     const scopeKey = scope === "platform" ? "platform" : session.tenantId;
     return c.json({
       connectors: await integrationCatalog.listConnectors(scopeKey),

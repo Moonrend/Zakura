@@ -26,6 +26,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
+import {
+  BROWSER_NOTIFICATIONS_REF,
+  connectorNotificationsEnabled,
+  notificationPermission,
+  requestNotificationPermissionNow,
+  setConnectorNotificationsEnabled,
+} from "@/lib/browser-notifications";
 import { cn } from "@/lib/utils";
 
 type ConnectorCapability = {
@@ -139,6 +146,11 @@ export function ConnectorConfigSheet({
   const [activeRef, setActiveRef] = useState("");
   const [emailWebhookUrl, setEmailWebhookUrl] = useState("");
   const [credOpen, setCredOpen] = useState(false);
+  const [browserPerm, setBrowserPerm] = useState<
+    NotificationPermission | "unsupported"
+  >("default");
+  const [browserPref, setBrowserPref] = useState(true);
+  const [browserAuthorizing, setBrowserAuthorizing] = useState(false);
 
   const connector = useMemo(
     () => connectors.find((item) => item.ref === activeRef) ?? connectors[0] ?? null,
@@ -216,6 +228,18 @@ export function ConnectorConfigSheet({
   );
 
   useEffect(() => {
+    if (!open || connector?.ref !== BROWSER_NOTIFICATIONS_REF) return;
+    setBrowserPerm(notificationPermission());
+    setBrowserPref(connectorNotificationsEnabled());
+    const sync = () => {
+      setBrowserPerm(notificationPermission());
+      setBrowserPref(connectorNotificationsEnabled());
+    };
+    window.addEventListener("zakura_notification_pref_changed", sync);
+    return () => window.removeEventListener("zakura_notification_pref_changed", sync);
+  }, [connector?.ref, open]);
+
+  useEffect(() => {
     if (!open) return;
     void fetchAgents()
       .then(setAgents)
@@ -251,6 +275,40 @@ export function ConnectorConfigSheet({
       setSaving(false);
     }
   }
+
+  async function authorizeBrowserNotifications() {
+    setBrowserAuthorizing(true);
+    try {
+      setConnectorNotificationsEnabled(true);
+      const perm = await requestNotificationPermissionNow();
+      setBrowserPerm(perm);
+      setBrowserPref(true);
+      window.dispatchEvent(new Event("zakura_notification_pref_changed"));
+      if (perm === "granted") {
+        toast.success("浏览器通知已开启");
+      } else if (perm === "denied") {
+        setConnectorNotificationsEnabled(false);
+        setBrowserPref(false);
+        toast.error("浏览器已拒绝通知权限，请在站点设置中手动开启");
+      } else if (perm === "unsupported") {
+        toast.error("当前浏览器不支持通知");
+      } else {
+        toast.message("请在浏览器弹窗中允许通知");
+      }
+    } finally {
+      setBrowserAuthorizing(false);
+    }
+  }
+
+  async function disableBrowserNotifications() {
+    setConnectorNotificationsEnabled(false);
+    setBrowserPref(false);
+    window.dispatchEvent(new Event("zakura_notification_pref_changed"));
+    toast.success("已关闭浏览器通知");
+  }
+
+  const isBrowserNotifications = connector?.ref === BROWSER_NOTIFICATIONS_REF;
+  const browserAuthorized = browserPref && browserPerm === "granted";
 
   async function enableOnAgents() {
     if (!connector) return;
@@ -334,7 +392,13 @@ export function ConnectorConfigSheet({
               </div>
               <div className="flex flex-wrap gap-1.5">
                 <Badge variant="outline">{authLabel(connector.auth.kind)}</Badge>
-                {connector.lockedByPlatform ? (
+                {isBrowserNotifications ? (
+                  browserAuthorized ? (
+                    <Badge variant="secondary">已授权</Badge>
+                  ) : (
+                    <Badge variant="outline">待授权</Badge>
+                  )
+                ) : connector.lockedByPlatform ? (
                   <Badge variant="secondary">整站已预配</Badge>
                 ) : connector.ready ? (
                   <Badge variant="secondary">凭据已配置</Badge>
@@ -364,6 +428,77 @@ export function ConnectorConfigSheet({
             </SheetHeader>
 
             <div className="space-y-6 px-5 py-5">
+              {isBrowserNotifications ? (
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-sm font-medium">浏览器通知授权</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      默认安装到全部 Agent。授权后 Agent 可调用通知工具，入站消息也可在后台提醒。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {browserAuthorized ? (
+                      <Badge variant="secondary">已授权</Badge>
+                    ) : browserPerm === "denied" ? (
+                      <Badge variant="outline">已拒绝</Badge>
+                    ) : (
+                      <Badge variant="outline">待授权</Badge>
+                    )}
+                    <span className="text-xs text-muted-foreground">
+                      {browserPerm === "granted"
+                        ? "系统权限已允许"
+                        : browserPerm === "denied"
+                          ? "系统权限已拒绝，需在浏览器站点设置中改回"
+                          : browserPerm === "unsupported"
+                            ? "当前浏览器不支持"
+                            : "尚未请求系统权限"}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={browserAuthorizing || browserPerm === "unsupported"}
+                      onClick={() => void authorizeBrowserNotifications()}
+                    >
+                      {browserAuthorizing ? <Loader2 className="animate-spin" /> : null}
+                      {browserAuthorized ? "重新授权" : "授权开启通知"}
+                    </Button>
+                    {browserPref ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void disableBrowserNotifications()}
+                      >
+                        关闭通知
+                      </Button>
+                    ) : null}
+                  </div>
+                  {installations.length ? (
+                    <div className="divide-y divide-border border-y border-border">
+                      {installations.map((row) => {
+                        const agentName =
+                          row.agentName ??
+                          agents.find((agent) => agent.id === row.agentId)?.name ??
+                          row.agentId;
+                        return (
+                          <div
+                            key={row.id}
+                            className="flex items-center justify-between gap-3 py-3"
+                          >
+                            <span className="text-sm font-medium">{agentName}</span>
+                            <Badge variant="secondary">已安装</Badge>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      正在同步到全部 Agent…
+                    </p>
+                  )}
+                </section>
+              ) : (
+                <>
               {connector.lockedByPlatform ? (
                 <div className="flex items-start gap-2 text-xs text-muted-foreground">
                   <ShieldCheck className="mt-0.5 size-4 shrink-0" />
@@ -595,6 +730,8 @@ export function ConnectorConfigSheet({
                   <ExternalLink className="size-3" />
                 </a>
               ) : null}
+                </>
+              )}
             </div>
           </>
         ) : null}

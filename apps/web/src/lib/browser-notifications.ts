@@ -1,8 +1,10 @@
 /**
- * 连接器浏览器通知：偏好默认开启；权限请求走 idle，不挡首屏。
+ * 浏览器通知连接器：偏好默认开启；权限需用户手势授权。
  */
 
 const PREF_KEY = "zakura_connector_notifications";
+
+export const BROWSER_NOTIFICATIONS_REF = "browser-notifications";
 
 export function connectorNotificationsEnabled(): boolean {
   if (typeof window === "undefined") return true;
@@ -21,32 +23,7 @@ export function notificationPermission(): NotificationPermission | "unsupported"
   return Notification.permission;
 }
 
-/** 不 await、不挡渲染；仅在 preference 开且 permission=default 时请求一次。 */
-export function requestNotificationPermissionIdle(): void {
-  if (typeof window === "undefined") return;
-  if (!connectorNotificationsEnabled()) return;
-  if (typeof Notification === "undefined") return;
-  if (Notification.permission !== "default") return;
-
-  const run = () => {
-    if (!connectorNotificationsEnabled()) return;
-    if (Notification.permission !== "default") return;
-    void Notification.requestPermission().catch(() => undefined);
-  };
-
-  const ric = (
-    window as Window & {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-    }
-  ).requestIdleCallback;
-  if (typeof ric === "function") {
-    ric(run, { timeout: 4000 });
-  } else {
-    window.setTimeout(run, 1500);
-  }
-}
-
-/** 用户手势路径：打开开关时立刻请求。 */
+/** 用户手势路径：立刻请求权限。 */
 export function requestNotificationPermissionNow(): Promise<NotificationPermission | "unsupported"> {
   if (typeof window === "undefined" || typeof Notification === "undefined") {
     return Promise.resolve("unsupported");
@@ -73,7 +50,6 @@ export function showConnectorNotification(input: {
     const n = new Notification(input.title, {
       body: input.body?.slice(0, 180) || undefined,
       tag: input.tag,
-      renotify: Boolean(input.tag),
     });
     if (input.onClickUrl) {
       n.onclick = () => {

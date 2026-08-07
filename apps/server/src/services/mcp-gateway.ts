@@ -154,6 +154,7 @@ function directConnectorHandle(
     mcpUrl: target.mcpUrl,
     authRequired: false,
     oauthTokenEndpoint: target.discovery.tokenEndpoint,
+    ...(target.agentId ? { agentId: target.agentId } : {}),
     ...(target.client
       ? {
           oauthClientId: target.client.clientId,
