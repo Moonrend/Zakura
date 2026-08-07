@@ -13,12 +13,13 @@ const markstreamDist = path.join(
   "node_modules/markstream-react/dist",
 );
 const emptyModule = path.join(__dirname, "src/lib/empty-module.js");
-/** 未安装的可选 peer → 空模块，避免 Next 编译失败 */
+/**
+ * 未安装的可选 peer → 空模块，避免 Next 编译失败。
+ * 已安装的 peer（如 katex）不要放这里，否则公式/高亮会被静默 stub 掉。
+ */
 const optionalPeerAliases = {
   "@terrastruct/d2": emptyModule,
   "@antv/infographic": emptyModule,
-  katex: emptyModule,
-  "katex/contrib/mhchem": emptyModule,
   mermaid: emptyModule,
   "stream-monaco": emptyModule,
   "stream-markdown": emptyModule,
@@ -32,7 +33,7 @@ const markstreamAliases = {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["markstream-react"],
+  transpilePackages: ["markstream-react", "katex"],
   turbopack: {
     resolveAlias: {
       "markstream-react": path.join(markstreamDist, "index.js"),
@@ -40,8 +41,6 @@ const nextConfig = {
       "markstream-react/server": path.join(markstreamDist, "server.js"),
       "@terrastruct/d2": "./src/lib/empty-module.js",
       "@antv/infographic": "./src/lib/empty-module.js",
-      katex: "./src/lib/empty-module.js",
-      "katex/contrib/mhchem": "./src/lib/empty-module.js",
       mermaid: "./src/lib/empty-module.js",
       "stream-monaco": "./src/lib/empty-module.js",
       "stream-markdown": "./src/lib/empty-module.js",
@@ -52,9 +51,9 @@ const nextConfig = {
       ...config.resolve.alias,
       ...markstreamAliases,
     };
-    // 动态 import / 深层子路径有时绕过 resolve.alias，再用替换兜底
+    // 动态 import / 深层子路径有时绕过 resolve.alias，再用替换兜底（仅未安装 peer）
     const optionalPeerPattern =
-      /^(?:@terrastruct\/d2|@antv\/infographic|katex(?:\/.*)?|mermaid|stream-monaco|stream-markdown)$/;
+      /^(?:@terrastruct\/d2|@antv\/infographic|mermaid|stream-monaco|stream-markdown)$/;
     config.plugins.push(
       new webpack.NormalModuleReplacementPlugin(optionalPeerPattern, emptyModule),
     );

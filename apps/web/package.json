@@ -23,6 +23,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "fuse.js": "^7.5.0",
+    "katex": "^0.18.1",
     "lucide-react": "^1.24.0",
     "markstream-react": "^0.0.55",
     "next": "^15.3.3",
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.2",
+    "@types/katex": "^0.16.8",
     "@types/node": "^22.15.30",
     "@types/react": "^19.1.6",
     "@types/react-dom": "^19.1.5",

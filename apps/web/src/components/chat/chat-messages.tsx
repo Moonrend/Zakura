@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import MarkdownRender from "markstream-react";
 import {
   BookmarkCheck,
   Check,
@@ -36,6 +35,7 @@ import type {
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
 import { Disclosure } from "@/components/ui/disclosure";
+import { ChatMarkdown } from "@/components/markdown/chat-markdown";
 import { ToolActivity } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 
@@ -183,9 +183,6 @@ const STATUS_LABEL: Record<string, string> = {
   tool: "使用工具…",
 };
 
-const MD_CLASS =
-  "max-w-full min-w-0 break-words text-[15px] leading-7 [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted/50 [&_pre]:p-3 [&_pre]:text-[13px] [&_code]:font-mono [&_code]:text-[0.88em] [&_p]:my-2.5 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-0.5 [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-[15px] [&_a]:underline [&_a]:underline-offset-2 [&_table]:my-2 [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground";
-
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   if (!text) return null;
@@ -329,11 +326,9 @@ function ReasoningBlock({
       <Disclosure open={open} className="w-full" innerClassName="w-full">
         <div
           id={`reasoning-${id}`}
-          className="mt-1 border-l-2 border-border/70 pl-3 text-[13px] leading-6 text-muted-foreground"
+          className="mt-1 border-l-2 border-border/60 pl-3.5"
         >
-          <div className={cn(MD_CLASS, "text-[13px] leading-6 text-muted-foreground")}>
-            <MarkdownRender content={content} final={!active} fade={false} />
-          </div>
+          <ChatMarkdown content={content} final={!active} fade={false} variant="muted" />
         </div>
       </Disclosure>
     </div>
@@ -375,7 +370,7 @@ function AnswerToolbar({
   if (!hasLeft && !hasRight) return null;
 
   return (
-    <div className="flex flex-wrap items-center gap-0.5 pt-0.5">
+    <div className="flex flex-wrap items-center gap-0.5 pt-1.5">
       <div className="flex flex-wrap items-center gap-0.5">
         <CopyButton text={copyText} />
         {showRegenerate && (
@@ -464,10 +459,11 @@ function renderRunItems(
     flushTools(`tools-${it.seq}`);
     if (it.kind === "assistant") {
       blocks.push(
-        <div key={`a-${it.id}-${it.seq}`} className="flex flex-col items-start">
-          <div className={MD_CLASS}>
-            <MarkdownRender content={it.content} final={it.final} fade={false} />
-          </div>
+        <div
+          key={`a-${it.id}-${it.seq}`}
+          className="flex w-full max-w-[min(100%,42rem)] flex-col items-start"
+        >
+          <ChatMarkdown content={it.content} final={it.final} fade={false} />
         </div>,
       );
     } else if (it.kind === "reasoning") {
@@ -572,17 +568,22 @@ export function ChatMessages({
 
   if (turns.length === 0) {
     return (
-      <div className="mt-auto flex flex-col items-center px-6 pb-8">
-        <p className="animate-rise text-2xl font-medium tracking-tight text-foreground/85">
+      <div className="mt-auto flex flex-col items-center px-6 pb-10">
+        <p className="animate-rise text-[1.65rem] font-medium tracking-[-0.03em] text-foreground/88">
           {agentName ? "有什么可以帮忙的？" : "开始对话"}
         </p>
+        {agentName ? (
+          <p className="animate-rise mt-2 text-sm text-muted-foreground/80 [animation-delay:60ms]">
+            向 {agentName} 提问，或粘贴一段内容开始
+          </p>
+        ) : null}
       </div>
     );
   }
 
   return (
     <>
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-3 py-4 md:px-4 md:py-6">
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-7 px-3 py-5 md:px-5 md:py-7">
         {turns.map((turn, ti) => {
           const isLast = ti === turns.length - 1;
           const runItems = turn.items.filter((it) => it.kind !== "user");
@@ -604,9 +605,9 @@ export function ChatMessages({
               (isLast && canAct));
 
           return (
-            <div key={turn.message.id} className="animate-rise flex flex-col gap-2.5">
+            <div key={turn.message.id} className="animate-rise flex flex-col gap-3">
               {editing ? (
-                <div className="animate-rise ml-auto w-full max-w-[85%] rounded-2xl border border-border bg-muted/20 p-2">
+                <div className="animate-rise ml-auto w-full max-w-[min(85%,36rem)] rounded-2xl border border-border/80 bg-muted/25 p-2.5 shadow-[var(--shadow-soft)]">
                   <Textarea
                     autoFocus
                     value={draft}
@@ -642,7 +643,7 @@ export function ChatMessages({
                   </div>
                 </div>
               ) : (
-                <div className="group flex flex-col items-end gap-1">
+                <div className="group flex flex-col items-end gap-1.5">
                   <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
                   <div className="flex items-end justify-end gap-1">
                     <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:translate-x-1.5 md:opacity-0 md:transition-[opacity,transform] md:duration-200 md:ease-fluid md:group-hover:translate-x-0 md:group-hover:opacity-100 md:focus-within:translate-x-0 md:focus-within:opacity-100">
@@ -668,7 +669,7 @@ export function ChatMessages({
                         <TooltipContent>编辑</TooltipContent>
                       </Tooltip>
                     </div>
-                    <div className="max-w-[85%] rounded-3xl bg-muted px-4 py-2 text-[15px] leading-7 text-foreground">
+                    <div className="max-w-[min(85%,36rem)] rounded-[1.35rem] bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
                       <div className="whitespace-pre-wrap break-words">
                         {turn.message.content}
                       </div>

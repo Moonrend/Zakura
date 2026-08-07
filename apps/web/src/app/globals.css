@@ -614,3 +614,350 @@
     transform: translate3d(0, 0, 0);
   }
 }
+
+/* ==========================================================================
+   聊天 Markdown（markstream + KaTeX）
+   把 markstream 默认灰蓝硬编码色映射到本站中性色 token。
+   ========================================================================== */
+
+.chat-md {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.chat-md--chat {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--foreground);
+  letter-spacing: -0.011em;
+}
+
+.chat-md--compact {
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.chat-md--muted {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--muted-foreground);
+}
+
+.chat-md .markstream-react {
+  --link-color: color-mix(in oklch, var(--foreground) 78%, var(--muted-foreground));
+  --blockquote-border-color: color-mix(in oklch, var(--border) 70%, var(--foreground));
+  --hr-border-color: var(--border);
+  --footnote-border: var(--border);
+  --table-border: var(--border);
+  --ms-font-mono: var(--font-mono);
+  --ms-radius: calc(var(--radius) + 2px);
+  --border: 0 0% 90%;
+  --background: 0 0% 100%;
+  --foreground: 0 0% 9%;
+  --secondary: 0 0% 96%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 45%;
+}
+
+.dark .chat-md .markstream-react {
+  --border: 0 0% 20%;
+  --background: 0 0% 9%;
+  --foreground: 0 0% 98%;
+  --secondary: 0 0% 16%;
+  --muted: 0 0% 16%;
+  --muted-foreground: 0 0% 65%;
+}
+
+/* 段落节奏：首尾去边距，中间更紧凑可读 */
+.chat-md .markstream-react .paragraph-node {
+  margin: 0.7em 0;
+  line-height: inherit;
+}
+
+.chat-md .markstream-react > .markdown-renderer > .node-slot:first-child .paragraph-node,
+.chat-md .markstream-react > .markdown-renderer > .node-content > .node-slot:first-child .paragraph-node {
+  margin-top: 0;
+}
+
+.chat-md .markstream-react > .markdown-renderer > .node-slot:last-child .paragraph-node,
+.chat-md .markstream-react > .markdown-renderer > .node-content > .node-slot:last-child .paragraph-node {
+  margin-bottom: 0;
+}
+
+/* 标题：聊天场景缩小档位，避免文档站级标题压过对话 */
+.chat-md--chat .markstream-react .heading-1 {
+  margin: 1.15em 0 0.45em;
+  font-size: 1.28em;
+  line-height: 1.3;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.chat-md--chat .markstream-react .heading-2 {
+  margin: 1.05em 0 0.4em;
+  font-size: 1.12em;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.chat-md--chat .markstream-react .heading-3 {
+  margin: 0.95em 0 0.35em;
+  font-size: 1.02em;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.chat-md--chat .markstream-react .heading-4,
+.chat-md--chat .markstream-react .heading-5,
+.chat-md--chat .markstream-react .heading-6 {
+  margin: 0.85em 0 0.3em;
+  font-size: 1em;
+  font-weight: 550;
+}
+
+.chat-md--compact .markstream-react .heading-1 {
+  font-size: 1.12em;
+  margin: 0.9em 0 0.35em;
+  font-weight: 600;
+}
+
+.chat-md--compact .markstream-react .heading-2 {
+  font-size: 1.05em;
+  margin: 0.85em 0 0.3em;
+  font-weight: 600;
+}
+
+.chat-md--compact .markstream-react .heading-3,
+.chat-md--compact .markstream-react .heading-4 {
+  font-size: 1em;
+  margin: 0.75em 0 0.25em;
+  font-weight: 550;
+}
+
+/* 列表 */
+.chat-md .markstream-react ul,
+.chat-md .markstream-react ol {
+  margin: 0.55em 0;
+  padding-left: 1.35em;
+}
+
+.chat-md .markstream-react li {
+  margin: 0.22em 0;
+  padding-left: 0.15em;
+}
+
+.chat-md .markstream-react li::marker {
+  color: color-mix(in oklch, var(--muted-foreground) 80%, transparent);
+}
+
+/* 行内代码 */
+.chat-md .markstream-react .inline-code {
+  padding: 0.12em 0.4em;
+  border-radius: 0.35em;
+  background: color-mix(in oklch, var(--muted) 88%, var(--foreground));
+  color: var(--foreground);
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+  border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+}
+
+.dark .chat-md .markstream-react .inline-code {
+  background: color-mix(in oklch, var(--muted) 70%, transparent);
+}
+
+/* 引用 */
+.chat-md .markstream-react .blockquote-node {
+  margin: 0.9em 0;
+  padding: 0.15em 0 0.15em 0.95em;
+  border-left-width: 3px;
+  border-left-color: color-mix(in oklch, var(--border) 40%, var(--foreground));
+  font-style: normal;
+  font-weight: 450;
+  color: var(--muted-foreground);
+}
+
+/* 链接 */
+.chat-md .markstream-react .link-node {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklch, var(--foreground) 28%, transparent);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+  transition: text-decoration-color 150ms var(--ease-fluid);
+}
+
+.chat-md .markstream-react .link-node:hover {
+  text-decoration-color: color-mix(in oklch, var(--foreground) 65%, transparent);
+}
+
+/* 表格 */
+.chat-md .markstream-react .table-node-wrapper {
+  margin: 0.95em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--background);
+  box-shadow: none;
+}
+
+.chat-md .markstream-react .table-node {
+  width: 100%;
+  margin: 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+.chat-md .markstream-react .table-node th,
+.chat-md .markstream-react .table-node td {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+  padding: 0.55em 0.85em;
+  vertical-align: top;
+  text-align: left;
+}
+
+.chat-md .markstream-react .table-node th:last-child,
+.chat-md .markstream-react .table-node td:last-child {
+  border-right: 0;
+}
+
+.chat-md .markstream-react .table-node thead th {
+  background: color-mix(in oklch, var(--muted) 82%, var(--background));
+  color: var(--foreground);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-md .markstream-react .table-node tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.chat-md .markstream-react .table-node tbody tr:nth-child(even) td {
+  background: color-mix(in oklch, var(--muted) 40%, transparent);
+}
+
+.chat-md .markstream-react .table-node tbody tr:hover td {
+  background: color-mix(in oklch, var(--muted) 62%, transparent);
+}
+
+.chat-md .markstream-react .table-node__resize-handle {
+  display: none;
+}
+
+/* 分割线 */
+.chat-md .markstream-react .hr-node,
+.chat-md .markstream-react .thematic-break {
+  margin: 1.4em 0;
+  border-top-color: var(--border);
+}
+
+/* 传统 Markdown 代码块：浅灰底，不要纯黑 */
+.chat-md .markstream-react pre[data-markstream-pre="1"],
+.chat-md .markstream-react pre[class^="language-"],
+.chat-md .markstream-react pre[class*=" language-"],
+.chat-md .markstream-react .code-block-node {
+  margin: 0.85em 0;
+  padding: 0.9em 1em;
+  overflow-x: auto;
+  border-radius: calc(var(--radius) + 2px);
+  border: 1px solid var(--border);
+  background: oklch(0.965 0 0);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  line-height: 1.65;
+  tab-size: 2;
+  box-shadow: none;
+}
+
+.dark .chat-md .markstream-react pre[data-markstream-pre="1"],
+.dark .chat-md .markstream-react pre[class^="language-"],
+.dark .chat-md .markstream-react pre[class*=" language-"],
+.dark .chat-md .markstream-react .code-block-node {
+  background: oklch(0.3 0 0);
+  border-color: oklch(1 0 0 / 12%);
+  color: oklch(0.93 0 0);
+}
+
+.chat-md .markstream-react pre[data-markstream-pre="1"] > code,
+.chat-md .markstream-react pre[class^="language-"] > code,
+.chat-md .markstream-react pre[class*=" language-"] > code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  white-space: pre;
+}
+
+/* 数学公式 */
+.chat-md .markstream-react .math-inline-wrapper {
+  padding: 0 0.05em;
+}
+
+.chat-md .markstream-react .math-block-node {
+  margin: 0.85em 0;
+}
+
+.chat-md .markstream-react .math-block {
+  margin: 0;
+  padding: 0.9em 1em;
+  overflow-x: auto;
+  text-align: center;
+  border-radius: calc(var(--radius) + 2px);
+  background: oklch(0.965 0 0);
+  border: 1px solid var(--border);
+}
+
+.dark .chat-md .markstream-react .math-block {
+  background: oklch(0.3 0 0);
+  border-color: oklch(1 0 0 / 12%);
+}
+
+.chat-md .markstream-react .math-block .katex-display {
+  margin: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.chat-md .markstream-react .katex {
+  font-size: 1.06em;
+  color: var(--foreground);
+}
+
+.chat-md .markstream-react .math-fallback,
+.chat-md .markstream-react .math-fallback-inline {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.chat-md--muted .markstream-react .katex {
+  color: var(--muted-foreground);
+}
+
+/* 图片 */
+.chat-md .markstream-react .image-node__img {
+  max-width: 100%;
+  border-radius: calc(var(--radius) + 4px);
+  border: 1px solid var(--border);
+}
+
+/* muted 变体：思考过程等弱化文本 */
+.chat-md--muted .markstream-react .paragraph-node,
+.chat-md--muted .markstream-react .heading-node {
+  color: var(--muted-foreground);
+}
+
+.chat-md--muted .markstream-react .inline-code {
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
+  color: var(--muted-foreground);
+}

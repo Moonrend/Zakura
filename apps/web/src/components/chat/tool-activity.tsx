@@ -10,7 +10,8 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
-import MarkdownRender from "markstream-react";
+import { ChatMarkdown } from "@/components/markdown/chat-markdown";
+
 import {
   Bot,
   Brain,
@@ -169,22 +170,6 @@ function Meta({ children }: { children: ReactNode }) {
   );
 }
 
-const TOOL_MD_CLASS =
-  "min-w-0 max-w-full break-words text-[12.5px] leading-[1.75] text-muted-foreground " +
-  "[&_h1]:mt-3 [&_h1]:mb-1.5 [&_h1]:text-[14px] [&_h1]:font-semibold [&_h1]:text-foreground " +
-  "[&_h2]:mt-3 [&_h2]:mb-1.5 [&_h2]:text-[13px] [&_h2]:font-semibold [&_h2]:text-foreground " +
-  "[&_h3]:mt-2.5 [&_h3]:mb-1 [&_h3]:text-[12.5px] [&_h3]:font-medium [&_h3]:text-foreground " +
-  "[&_h4]:mt-2 [&_h4]:text-[12.5px] [&_h4]:font-medium [&_h4]:text-foreground " +
-  "[&_p]:my-1.5 [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-4 [&_ol]:pl-4 " +
-  "[&_strong]:font-medium [&_strong]:text-foreground " +
-  "[&_a]:text-foreground/80 [&_a]:underline [&_a]:decoration-border [&_a]:underline-offset-2 hover:[&_a]:decoration-foreground/50 " +
-  "[&_code]:font-mono [&_code]:text-[0.9em] " +
-  "[&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-muted/50 [&_pre]:p-2.5 [&_pre]:text-[11.5px] " +
-  "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-2.5 " +
-  "[&_table]:my-2 [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_table]:text-[11.5px] " +
-  "[&_th]:border [&_th]:border-border [&_th]:px-1.5 [&_th]:py-1 [&_td]:border [&_td]:border-border [&_td]:px-1.5 [&_td]:py-1 " +
-  "[&_img]:max-w-full [&_img]:rounded-lg [&_hr]:my-3 [&_hr]:border-border/60";
-
 /**
  * 抓取回来的正文：Firecrawl / Jina Reader 这类工具返回的是整篇 Markdown，
  * 按 Markdown 渲染而不是塞进 <pre>，长文才读得下去。
@@ -219,9 +204,7 @@ function MarkdownDocBlock({ doc }: { doc: MarkdownDoc }) {
         </div>
       ) : null}
       <div className="max-h-[26rem] overflow-auto px-3 py-2">
-        <div className={TOOL_MD_CLASS}>
-          <MarkdownRender content={doc.markdown} final fade={false} />
-        </div>
+        <ChatMarkdown content={doc.markdown} final fade={false} variant="compact" />
       </div>
     </div>
   );
