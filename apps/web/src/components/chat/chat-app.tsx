@@ -389,6 +389,17 @@ export function ChatApp() {
         if (fromPrompt?.trim()) {
           pendingPromptRef.current = fromPrompt.trim();
           autoPromptSentRef.current = false;
+        } else {
+          try {
+            const stored = sessionStorage.getItem("zakura_pending_prompt");
+            if (stored?.trim()) {
+              pendingPromptRef.current = stored.trim();
+              autoPromptSentRef.current = false;
+              sessionStorage.removeItem("zakura_pending_prompt");
+            }
+          } catch {
+            /* ignore */
+          }
         }
         setAgentId(initial?.id ?? null);
       } catch (err) {
@@ -752,6 +763,40 @@ export function ChatApp() {
     seqRef.current = 0;
     clearAttachments();
     composerRef.current?.focus();
+  }
+
+  /** 新建定时任务：开新对话，让 Agent 用 create_schedule 创建 */
+  function handleAskAgentCreateSchedule(goal: string) {
+    if (!agentId || sending || runActive) return;
+    const prompt = [
+      "请用 create_schedule 为我创建定时任务。",
+      "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
+      "",
+      goal.trim(),
+    ].join("\n");
+    setSidebarMode("chats");
+    handleNewSession();
+    closeNavOnMobile();
+    void (async () => {
+      setSending(true);
+      setInput(prompt);
+      try {
+        const created = await createCloudSession(agentId);
+        setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+        draftKeyRef.current = created.id;
+        setSessionId(created.id);
+        seqRef.current = 0;
+        setEvents([]);
+        await sendCloudMessage(agentId, created.id, prompt, null, undefined, runOptions);
+        await refreshSessions();
+        focusComposerAfterPromptRef.current = true;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSending(false);
+        setInput("");
+      }
+    })();
   }
 
   async function handleDeleteSession(sid: string) {
@@ -1249,7 +1294,7 @@ export function ChatApp() {
                 />
               }
             >
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold text-foreground">
                 {agent?.name?.slice(0, 1) ?? <Bot className="h-4 w-4" />}
               </span>
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -1266,7 +1311,7 @@ export function ChatApp() {
                     closeNavOnMobile();
                   }}
                 >
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-foreground">
                     {a.name.slice(0, 1)}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{a.name}</span>
@@ -1278,7 +1323,7 @@ export function ChatApp() {
         </div>
 
         {/* 侧栏分区：对话 | 任务 */}
-        <div className="flex items-center gap-0.5 px-2 pt-1">
+        <div className="flex gap-3 border-b border-border/60 px-3">
           {(
             [
               { id: "chats" as const, label: "对话" },
@@ -1290,10 +1335,10 @@ export function ChatApp() {
               type="button"
               onClick={() => setSidebarMode(tab.id)}
               className={cn(
-                "flex-1 rounded-md px-2 py-1.5 text-sm transition-colors",
+                "-mb-px border-b-2 px-0.5 pb-2 pt-2 text-sm transition-colors",
                 sidebarMode === tab.id
-                  ? "bg-muted font-medium text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
+                  ? "border-foreground font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground",
               )}
             >
               {tab.label}
@@ -1538,6 +1583,7 @@ export function ChatApp() {
           <AutomationPanel
             agentId={agentId}
             className="min-h-0 flex-1"
+            onAskAgentCreate={handleAskAgentCreateSchedule}
             onOpenSession={(sid) => {
               if (!agentId) return;
               setSidebarMode("chats");

@@ -1,5 +1,5 @@
 /**
- * Agent 侧自动化工具：管理定时任务与心跳（主 chat 会话注入）。
+ * Agent 侧自动化工具：管理定时任务（主 chat 会话注入）。
  */
 import type { ModelToolDefinition } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
@@ -11,9 +11,6 @@ export const CREATE_SCHEDULE_TOOL = "create_schedule";
 export const UPDATE_SCHEDULE_TOOL = "update_schedule";
 export const DELETE_SCHEDULE_TOOL = "delete_schedule";
 export const RUN_SCHEDULE_TOOL = "run_schedule_now";
-export const GET_HEARTBEAT_TOOL = "get_heartbeat";
-export const SET_HEARTBEAT_TOOL = "set_heartbeat";
-export const RUN_HEARTBEAT_TOOL = "run_heartbeat_now";
 export const LIST_AUTOMATION_RUNS_TOOL = "list_automation_runs";
 
 const SET = new Set([
@@ -22,9 +19,6 @@ const SET = new Set([
   UPDATE_SCHEDULE_TOOL,
   DELETE_SCHEDULE_TOOL,
   RUN_SCHEDULE_TOOL,
-  GET_HEARTBEAT_TOOL,
-  SET_HEARTBEAT_TOOL,
-  RUN_HEARTBEAT_TOOL,
   LIST_AUTOMATION_RUNS_TOOL,
 ]);
 
@@ -118,44 +112,11 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
     {
       type: "function",
       function: {
-        name: GET_HEARTBEAT_TOOL,
-        description: "查看本 Agent 周期心跳配置（间隔、是否启用、下次时间）。",
-        parameters: { type: "object", properties: {} },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: SET_HEARTBEAT_TOOL,
-        description:
-          "配置周期心跳：enabled、interval_minutes（最小 5）、可选自定义 prompt。心跳用于无人值守自检。",
-        parameters: {
-          type: "object",
-          properties: {
-            enabled: { type: "boolean" },
-            interval_minutes: { type: "integer", minimum: 5, maximum: 10080 },
-            prompt: { type: "string", description: "自定义心跳指令；空则用平台默认" },
-          },
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: RUN_HEARTBEAT_TOOL,
-        description: "立即触发一次心跳（试跑）。",
-        parameters: { type: "object", properties: {} },
-      },
-    },
-    {
-      type: "function",
-      function: {
         name: LIST_AUTOMATION_RUNS_TOOL,
-        description: "列出最近的定时/心跳触发记录。",
+        description: "列出最近的定时任务触发记录。",
         parameters: {
           type: "object",
           properties: {
-            kind: { type: "string", enum: ["schedule", "heartbeat"] },
             limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
           },
         },
@@ -219,29 +180,9 @@ export async function callAutomationTool(
       const run = await automation.runScheduleNow(agent.tenantId, agent.id, id);
       return { text: JSON.stringify({ run }, null, 2) };
     }
-    if (name === GET_HEARTBEAT_TOOL) {
-      const hb = await automation.getHeartbeat(agent.tenantId, agent.id);
-      return { text: JSON.stringify({ heartbeat: hb }, null, 2) };
-    }
-    if (name === SET_HEARTBEAT_TOOL) {
-      const hb = await automation.upsertHeartbeat(agent.tenantId, agent.id, {
-        ...(typeof args.enabled === "boolean" ? { enabled: args.enabled } : {}),
-        ...(typeof args.interval_minutes === "number"
-          ? { intervalMinutes: args.interval_minutes }
-          : {}),
-        ...(args.prompt !== undefined ? { prompt: String(args.prompt) } : {}),
-      });
-      return { text: JSON.stringify({ heartbeat: hb }, null, 2) };
-    }
-    if (name === RUN_HEARTBEAT_TOOL) {
-      const run = await automation.runHeartbeatNow(agent.tenantId, agent.id);
-      return { text: JSON.stringify({ run }, null, 2) };
-    }
     if (name === LIST_AUTOMATION_RUNS_TOOL) {
-      const kind =
-        args.kind === "schedule" || args.kind === "heartbeat" ? args.kind : undefined;
       const runs = await automation.listRuns(agent.tenantId, agent.id, {
-        kind,
+        kind: "schedule",
         limit: typeof args.limit === "number" ? args.limit : 20,
       });
       return { text: JSON.stringify({ runs }, null, 2) };

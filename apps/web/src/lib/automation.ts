@@ -1,5 +1,5 @@
 /**
- * Agent 自动化：定时任务 + 周期检查 API 与人话文案。
+ * Agent 自动化：定时任务 API 与人话文案。
  * 原则：用户看到的是「什么时候做什么」，不先学 cron。
  */
 import { api } from "@/lib/api";
@@ -23,20 +23,6 @@ export type AgentSchedule = {
   updatedAt: string;
 };
 
-export type AgentHeartbeat = {
-  agentId: string;
-  enabled: boolean;
-  intervalMinutes: number;
-  prompt: string;
-  nextRunAt: string | null;
-  lastRunAt: string | null;
-  lastStatus: string | null;
-  lastError: string | null;
-  effectivePrompt: string;
-  createdAt?: string;
-  updatedAt?: string;
-};
-
 export type AutomationRun = {
   id: string;
   agentId: string;
@@ -52,17 +38,6 @@ export type AutomationRun = {
   completedAt: string | null;
   createdAt: string;
 };
-
-/** 周期检查间隔选项（分钟） */
-export const HEARTBEAT_INTERVAL_OPTIONS = [
-  { value: 15, label: "每 15 分钟" },
-  { value: 30, label: "每 30 分钟" },
-  { value: 60, label: "每小时" },
-  { value: 180, label: "每 3 小时" },
-  { value: 360, label: "每 6 小时" },
-  { value: 720, label: "每 12 小时" },
-  { value: 1440, label: "每天一次" },
-] as const;
 
 export type WhenPresetId =
   | "every_15m"
@@ -308,36 +283,6 @@ export async function runScheduleNow(agentId: string, scheduleId: string) {
   return res.run;
 }
 
-export async function getHeartbeat(agentId: string) {
-  const res = await api<{ heartbeat: AgentHeartbeat }>(
-    `/api/agents/${agentId}/heartbeat`,
-  );
-  return res.heartbeat;
-}
-
-export async function saveHeartbeat(
-  agentId: string,
-  body: {
-    enabled?: boolean;
-    intervalMinutes?: number;
-    prompt?: string;
-  },
-) {
-  const res = await api<{ heartbeat: AgentHeartbeat }>(
-    `/api/agents/${agentId}/heartbeat`,
-    { method: "PUT", json: body },
-  );
-  return res.heartbeat;
-}
-
-export async function runHeartbeatNow(agentId: string) {
-  const res = await api<{ run: AutomationRun }>(
-    `/api/agents/${agentId}/heartbeat/run`,
-    { method: "POST" },
-  );
-  return res.run;
-}
-
 export async function listAutomationRuns(
   agentId: string,
   opts?: { limit?: number; kind?: "schedule" | "heartbeat" },
@@ -350,19 +295,3 @@ export async function listAutomationRuns(
   );
   return res.runs;
 }
-
-/** 任务指令示例：降低「写什么」的空白焦虑 */
-export const PROMPT_EXAMPLES = [
-  {
-    title: "工作区巡检",
-    text: "检查工作区是否有未完成的任务或异常日志，有问题就修复；没事就简短汇报「一切正常」。",
-  },
-  {
-    title: "日报",
-    text: "根据今天的工作区变更写一份简短日报，保存到 /reports/daily.md。",
-  },
-  {
-    title: "依赖更新检查",
-    text: "检查项目是否有明显的过时依赖或安全告警，汇总成清单，不要擅自大改版本。",
-  },
-] as const;

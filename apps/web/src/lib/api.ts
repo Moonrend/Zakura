@@ -41,6 +41,9 @@ function getSession(): string | null {
 export function setSession(token: string | null) {
   if (token) localStorage.setItem("zakura_session", token);
   else localStorage.removeItem("zakura_session");
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("zakura_session_changed"));
+  }
 }
 
 export class ApiError extends Error {

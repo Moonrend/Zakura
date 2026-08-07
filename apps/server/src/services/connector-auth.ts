@@ -6,6 +6,11 @@
  * 供后续连接器或上游 MCP 引用。
  *
  * 字段 schema 一律来自目录声明或 kind 的通用默认值，服务代码不枚举任何厂商。
+ *
+ * 作用域：
+ * - OAuth 客户端配置 → connector_auth_profiles（租户/平台全局）
+ * - 连接器实例设置 → connector_settings（租户级）
+ * - 用户授权 / 安装 → agent_connector_installations（按 Agent）
  */
 import { decryptJson, encryptJson } from "@zakura/core";
 import {
@@ -17,7 +22,12 @@ import {
 import { and, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
-import { connectorAuthProfiles, connectorSettings, newId } from "../db/schema.js";
+import {
+  agentConnectorInstallations,
+  connectorAuthProfiles,
+  connectorSettings,
+  newId,
+} from "../db/schema.js";
 
 export const PLATFORM_SCOPE = "platform";
 
@@ -55,6 +65,15 @@ export interface ResolvedProfile {
   kind: ConnectorAuthKind;
 }
 
+export interface AgentConnectorInstallationView {
+  id: string;
+  agentId: string;
+  connectorRef: string;
+  enabled: boolean;
+  authorized: boolean;
+  updatedAt: string;
+}
+
 /** 无目录声明时（管理员自建档案）按 kind 给出的通用字段 */
 export function defaultFieldsForKind(kind: ConnectorAuthKind): ConnectorField[] {
   switch (kind) {
@@ -76,6 +95,7 @@ export function defaultFieldsForKind(kind: ConnectorAuthKind): ConnectorField[] 
 }
 
 function decrypt(secret: string, enc: string): Record<string, unknown> {
+  if (!enc) return {};
   try {
     return decryptJson<Record<string, unknown>>(secret, enc);
   } catch {
@@ -87,6 +107,10 @@ function configuredKeys(values: Record<string, unknown>): string[] {
   return Object.keys(values).filter(
     (key) => values[key] != null && String(values[key]).trim() !== "",
   );
+}
+
+function hasUsableOauth(values: Record<string, unknown>): boolean {
+  return typeof values.oauthAccessToken === "string" && values.oauthAccessToken.trim().length > 0;
 }
 
 export class ConnectorAuthService {
@@ -358,8 +382,7 @@ export class ConnectorAuthService {
   }
 
   /**
-   * OAuth 用户授权属于连接器本身，不属于共享 OAuth 客户端档案。
-   * 仍复用连接器设置表，避免为每个连接器再维护一张仅存几项加密值的表。
+   * @deprecated 认证资源已迁到 agent_connector_installations；保留仅作旧数据回读兼容。
    */
   async saveAuthorization(
     scopeKey: string,
@@ -437,5 +460,149 @@ export class ConnectorAuthService {
         set: { configEnc: encryptJson(this.appConfig.secret, current), updatedAt: now },
       });
     return current;
+  }
+
+  // ── Agent 安装（认证资源）──────────────────────────────────────────────
+
+  async listInstallations(
+    tenantId: string,
+    opts?: { connectorRef?: string; agentId?: string },
+  ): Promise<AgentConnectorInstallationView[]> {
+    const conditions = [eq(agentConnectorInstallations.tenantId, tenantId)];
+    if (opts?.connectorRef) {
+      conditions.push(eq(agentConnectorInstallations.connectorRef, opts.connectorRef));
+    }
+    if (opts?.agentId) {
+      conditions.push(eq(agentConnectorInstallations.agentId, opts.agentId));
+    }
+    const rows = await this.db
+      .select()
+      .from(agentConnectorInstallations)
+      .where(and(...conditions));
+    return rows.map((row) => {
+      const values = decrypt(this.appConfig.secret, row.configEnc);
+      return {
+        id: row.id,
+        agentId: row.agentId,
+        connectorRef: row.connectorRef,
+        enabled: row.enabled,
+        authorized: hasUsableOauth(values),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    });
+  }
+
+  async getInstallationConfig(
+    tenantId: string,
+    agentId: string,
+    connectorRef: string,
+  ): Promise<Record<string, unknown>> {
+    const row = await this.db.query.agentConnectorInstallations.findFirst({
+      where: and(
+        eq(agentConnectorInstallations.tenantId, tenantId),
+        eq(agentConnectorInstallations.agentId, agentId),
+        eq(agentConnectorInstallations.connectorRef, connectorRef),
+      ),
+    });
+    return row ? decrypt(this.appConfig.secret, row.configEnc) : {};
+  }
+
+  async ensureInstallations(
+    tenantId: string,
+    connectorRef: string,
+    agentIds: string[],
+  ): Promise<void> {
+    const unique = [...new Set(agentIds.map((id) => id.trim()).filter(Boolean))];
+    if (!unique.length) throw new Error("请至少选择一个 Agent");
+    const now = new Date();
+    for (const agentId of unique) {
+      const existing = await this.db.query.agentConnectorInstallations.findFirst({
+        where: and(
+          eq(agentConnectorInstallations.tenantId, tenantId),
+          eq(agentConnectorInstallations.agentId, agentId),
+          eq(agentConnectorInstallations.connectorRef, connectorRef),
+        ),
+      });
+      if (existing) {
+        if (!existing.enabled) {
+          await this.db
+            .update(agentConnectorInstallations)
+            .set({ enabled: true, updatedAt: now })
+            .where(eq(agentConnectorInstallations.id, existing.id));
+        }
+        continue;
+      }
+      await this.db.insert(agentConnectorInstallations).values({
+        id: newId(),
+        tenantId,
+        agentId,
+        connectorRef,
+        enabled: true,
+        configEnc: encryptJson(this.appConfig.secret, {}),
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  async removeInstallation(
+    tenantId: string,
+    connectorRef: string,
+    agentId: string,
+  ): Promise<void> {
+    await this.db
+      .delete(agentConnectorInstallations)
+      .where(
+        and(
+          eq(agentConnectorInstallations.tenantId, tenantId),
+          eq(agentConnectorInstallations.agentId, agentId),
+          eq(agentConnectorInstallations.connectorRef, connectorRef),
+        ),
+      );
+  }
+
+  /**
+   * OAuth 用户授权属于 Agent 安装的认证资源，不属于共享 OAuth 客户端档案。
+   */
+  async saveInstallationAuthorization(
+    tenantId: string,
+    agentId: string,
+    connectorRef: string,
+    values: {
+      accessToken: string;
+      refreshToken?: string;
+      expiresAt?: number;
+    },
+  ): Promise<void> {
+    let row = await this.db.query.agentConnectorInstallations.findFirst({
+      where: and(
+        eq(agentConnectorInstallations.tenantId, tenantId),
+        eq(agentConnectorInstallations.agentId, agentId),
+        eq(agentConnectorInstallations.connectorRef, connectorRef),
+      ),
+    });
+    if (!row) {
+      await this.ensureInstallations(tenantId, connectorRef, [agentId]);
+      row = await this.db.query.agentConnectorInstallations.findFirst({
+        where: and(
+          eq(agentConnectorInstallations.tenantId, tenantId),
+          eq(agentConnectorInstallations.agentId, agentId),
+          eq(agentConnectorInstallations.connectorRef, connectorRef),
+        ),
+      });
+      if (!row) throw new Error("安装连接器失败");
+    }
+    const current = decrypt(this.appConfig.secret, row.configEnc);
+    current.oauthAccessToken = values.accessToken;
+    if (values.refreshToken) current.oauthRefreshToken = values.refreshToken;
+    if (values.expiresAt !== undefined) current.oauthExpiresAt = values.expiresAt;
+    await this.db
+      .update(agentConnectorInstallations)
+      .set({
+        enabled: true,
+        configEnc: encryptJson(this.appConfig.secret, current),
+        updatedAt: new Date(),
+      })
+      .where(eq(agentConnectorInstallations.id, row.id));
   }
 }

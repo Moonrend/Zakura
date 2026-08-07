@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Blocks, Settings2, Sparkles } from "lucide-react";
+import { Blocks, Package, Settings2 } from "lucide-react";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -56,7 +56,7 @@ export default function SkillsPage() {
             商店
           </TabsTrigger>
           <TabsTrigger value="installed">
-            <Sparkles className="size-4" />
+            <Package className="size-4" />
             已安装
             {installedCount ? (
               <Badge variant="secondary" className="ml-1 text-[10px]">

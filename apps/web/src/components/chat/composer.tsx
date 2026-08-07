@@ -34,6 +34,30 @@ import { ContextWindowButton, type ContextWindowInfo } from "./context-window";
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
 
+/** 粘贴文本超过此阈值时改为附件，避免把大段内容塞进输入框 */
+const PASTE_AS_FILE_CHARS = 2000;
+const PASTE_AS_FILE_LINES = 40;
+
+function shouldPasteAsFile(text: string): boolean {
+  if (text.length >= PASTE_AS_FILE_CHARS) return true;
+  let lines = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) {
+      lines += 1;
+      if (lines > PASTE_AS_FILE_LINES) return true;
+    }
+  }
+  return false;
+}
+
+function pasteTextFile(text: string): File {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:TZ.]/g, "")
+    .slice(0, 14);
+  return new File([text], `paste-${stamp}.txt`, { type: "text/plain" });
+}
+
 export type ComposerModelItem = ModelRouteSelectorItem;
 
 export type ComposerReasoningValue = "default" | "off" | (string & {});
@@ -304,10 +328,17 @@ export function Composer({
 
   function handlePaste(e: ClipboardEvent<HTMLTextAreaElement>) {
     const files = Array.from(e.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    // 即使当前不能上传也要拦下来，交给上层给出「未开启电脑环境」的提示
+    if (files.length > 0) {
+      // 即使当前不能上传也要拦下来，交给上层给出「未开启电脑环境」的提示
+      e.preventDefault();
+      onAttachFiles(files);
+      return;
+    }
+    if (!canAttach) return;
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (!shouldPasteAsFile(text)) return;
     e.preventDefault();
-    onAttachFiles(files);
+    onAttachFiles([pasteTextFile(text)]);
   }
 
   function hasFiles(e: DragEvent): boolean {
@@ -350,17 +381,17 @@ export function Composer({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         className={cn(
-          "relative rounded-3xl border bg-background",
-          "transition-[border-color,box-shadow] duration-300 ease-fluid",
+          "relative rounded-xl border bg-background",
+          "transition-[border-color,box-shadow] duration-200 ease-out-soft",
           focused
             ? "border-ring/45 shadow-[var(--shadow-soft)]"
             : "border-border/70 shadow-sm hover:border-border",
-          dragging && "animate-drop-glow border-ring",
+          dragging && "border-dashed border-ring",
         )}
       >
         {/* 拖放覆盖层 */}
         {dragging && (
-          <div className="animate-pop absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-3xl border border-dashed border-ring/60 bg-background/85 text-sm text-foreground backdrop-blur-sm">
+          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-xl border border-dashed border-ring/60 bg-background/95 text-sm text-foreground">
             <Upload className="size-4" />
             {canAttach ? "松开即可上传到工作区" : "该 Agent 未开启电脑环境"}
           </div>

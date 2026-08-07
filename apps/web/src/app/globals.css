@@ -511,7 +511,7 @@
     animation-delay: 210ms;
   }
 
-  /** 运行中的状态文本：一束高光在字上扫过，比转圈更安静也更有生命力 */
+  /** 运行中的状态文本 */
   .text-shimmer {
     color: var(--color-muted-foreground);
   }
@@ -526,11 +526,6 @@
   .animate-rail {
     animation: rail-grow 420ms var(--ease-fluid) both;
     transform-origin: top center;
-  }
-
-  /** 拖放上传时输入框的呼吸描边 */
-  .animate-drop-glow {
-    animation: drop-glow 1.6s var(--ease-in-out-soft) infinite;
   }
 
   /** 右侧面板推入 */
@@ -561,46 +556,12 @@
   }
 }
 
-@keyframes shimmer-sweep {
-  from {
-    background-position: 180% 0;
-  }
-  to {
-    background-position: -60% 0;
-  }
-}
-
-@keyframes halo-pulse {
-  0% {
-    opacity: 0.45;
-    transform: scale(0.86);
-  }
-  70% {
-    opacity: 0;
-    transform: scale(1.35);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.35);
-  }
-}
-
 @keyframes rail-grow {
   from {
     transform: scaleY(0);
   }
   to {
     transform: scaleY(1);
-  }
-}
-
-@keyframes drop-glow {
-  0%,
-  100% {
-    box-shadow: 0 0 0 1px var(--color-ring), 0 0 0 6px color-mix(in oklch, var(--color-ring) 12%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 1px var(--color-ring), 0 0 0 11px color-mix(in oklch, var(--color-ring) 6%, transparent);
   }
 }
 

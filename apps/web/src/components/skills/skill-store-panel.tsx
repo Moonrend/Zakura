@@ -10,7 +10,6 @@ import {
   Package,
   RefreshCw,
   Search,
-  Sparkles,
   Terminal,
   X,
 } from "lucide-react";
@@ -36,9 +35,9 @@ import {
 import { SkillCard, SkillCardSkeleton } from "@/components/skills/skill-card";
 import { SkillInstallDialog } from "@/components/skills/skill-install-dialog";
 
-const STORE_ICON: Record<SkillStoreId, typeof Sparkles> = {
+const STORE_ICON: Record<SkillStoreId, typeof Package> = {
   curated: BadgeCheck,
-  builtin: Sparkles,
+  builtin: Package,
   "skills-sh": Package,
   github: GitFork,
 };

@@ -1,5 +1,5 @@
 /**
- * Agent 定时任务 / 心跳 REST API。
+ * Agent 定时任务 REST API。
  */
 import type { Hono } from "hono";
 import type { AppVariables } from "./routes.js";
@@ -136,59 +136,15 @@ export function registerAutomationRoutes(
     }
   });
 
-  // ── heartbeat ───────────────────────────────────────────────
-
-  app.get("/api/agents/:id/heartbeat", async (c) => {
-    const session = c.get("session")!;
-    const agent = await requireAgent(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const heartbeat = await automation.getHeartbeat(session.tenantId, agent.id);
-    return c.json({ heartbeat });
-  });
-
-  app.put("/api/agents/:id/heartbeat", async (c) => {
-    const session = c.get("session")!;
-    const agent = await requireAgent(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const body = await c.req
-      .json<{
-        enabled?: boolean;
-        intervalMinutes?: number;
-        prompt?: string;
-      }>()
-      .catch(() => ({}));
-    try {
-      const heartbeat = await automation.upsertHeartbeat(session.tenantId, agent.id, body);
-      return c.json({ heartbeat });
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, errStatus(err));
-    }
-  });
-
-  app.post("/api/agents/:id/heartbeat/run", async (c) => {
-    const session = c.get("session")!;
-    const agent = await requireAgent(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    try {
-      const run = await automation.runHeartbeatNow(session.tenantId, agent.id);
-      return c.json({ run }, 202);
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, errStatus(err));
-    }
-  });
-
   // ── audit log ───────────────────────────────────────────────
 
   app.get("/api/agents/:id/automation/runs", async (c) => {
     const session = c.get("session")!;
     const agent = await requireAgent(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const kindRaw = c.req.query("kind");
-    const kind =
-      kindRaw === "schedule" || kindRaw === "heartbeat" ? kindRaw : undefined;
     const limitRaw = Number(c.req.query("limit") ?? "30");
     const runs = await automation.listRuns(session.tenantId, agent.id, {
-      kind,
+      kind: "schedule",
       limit: Number.isFinite(limitRaw) ? limitRaw : 30,
     });
     return c.json({ runs });

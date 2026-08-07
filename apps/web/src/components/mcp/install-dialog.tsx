@@ -171,7 +171,7 @@ export function McpInstallDialog({
                         className={cn(
                           "w-full rounded-lg px-3 py-2 text-left ring-1 transition-colors",
                           active
-                            ? "bg-primary/10 ring-primary/40"
+                            ? "bg-muted ring-foreground/25"
                             : "bg-card ring-foreground/10 hover:bg-muted/50",
                         )}
                       >

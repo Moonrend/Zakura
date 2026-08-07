@@ -9,9 +9,9 @@ import {
   ExternalLink,
   FileText,
   Loader2,
+  Package,
   RefreshCw,
   Search,
-  Sparkles,
   Trash2,
   Users,
 } from "lucide-react";
@@ -122,7 +122,7 @@ function SkillDetailDialog({
       >
         <DialogHeader className="shrink-0 gap-1 border-b border-border px-4 py-3 pr-12 sm:px-5">
           <DialogTitle className="flex items-center gap-2 text-base">
-            {skill?.builtin ? <Sparkles className="size-4 shrink-0 text-primary" /> : null}
+            {skill?.builtin ? <Package className="size-4 shrink-0 text-muted-foreground" /> : null}
             <span className="truncate">{skill?.name ?? "技能详情"}</span>
             {skill?.builtin ? (
               <Badge variant="secondary" className="shrink-0 text-[10px]">
@@ -191,7 +191,7 @@ function SkillDetailDialog({
                           className={cn(
                             "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
                             installed
-                              ? "bg-primary/10 text-primary"
+                              ? "bg-muted text-foreground"
                               : "text-muted-foreground hover:bg-muted/60",
                           )}
                         >
@@ -390,13 +390,8 @@ export function SkillRegistryPanel({
               index > 0 && "border-t border-border",
             )}
           >
-            <div
-              className={cn(
-                "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 sm:mt-0",
-                skill.builtin ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
-              )}
-            >
-              <Sparkles className="size-4" />
+            <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted text-muted-foreground sm:mt-0">
+              <Package className="size-4" />
             </div>
 
             <div className="min-w-0 flex-1">

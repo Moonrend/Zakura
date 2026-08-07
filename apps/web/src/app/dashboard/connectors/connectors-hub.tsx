@@ -13,7 +13,14 @@ import {
 import { SettingsHeader } from "@/components/settings-shell";
 import { SearchField } from "@/components/ui/search-field";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
+import {
+  connectorNotificationsEnabled,
+  notificationPermission,
+  requestNotificationPermissionNow,
+  setConnectorNotificationsEnabled,
+} from "@/lib/browser-notifications";
 
 type IntegrationPackage = {
   slug: string;
@@ -43,9 +50,15 @@ function isConfigured(connector: ConnectorRow | undefined) {
 }
 
 function statusLabel(connector: ConnectorRow | undefined) {
-  if (connector?.status === "platform-provisioned") return "整站预配";
-  if (connector?.status === "ready") return "已配置";
-  if (connector?.status === "disabled") return "已停用";
+  if (!connector) return "待配置";
+  const installs = connector.installations?.length ?? 0;
+  if (connector.status === "platform-provisioned") {
+    return installs ? `整站预配 · ${installs} 已授权` : "整站预配";
+  }
+  if (connector.status === "ready") {
+    return installs ? `已配置 · ${installs} 已授权` : "已配置";
+  }
+  if (connector.status === "disabled") return "已停用";
   return "待配置";
 }
 
@@ -59,6 +72,27 @@ export default function ConnectorsHub() {
   const [q, setQ] = useState("");
   const [view, setView] = useState<ViewMode>("all");
   const [redirectUri, setRedirectUri] = useState("");
+  const [browserNotify, setBrowserNotify] = useState(true);
+
+  useEffect(() => {
+    setBrowserNotify(connectorNotificationsEnabled());
+  }, []);
+
+  async function onBrowserNotifyChange(next: boolean) {
+    setBrowserNotify(next);
+    setConnectorNotificationsEnabled(next);
+    if (!next) return;
+    const perm = await requestNotificationPermissionNow();
+    if (perm === "denied") {
+      toast.error("浏览器已拒绝通知权限，请在站点设置中手动开启");
+    } else if (perm === "unsupported") {
+      toast.error("当前浏览器不支持通知");
+    } else if (perm === "granted") {
+      toast.success("浏览器通知已开启");
+    } else if (notificationPermission() === "default") {
+      toast.message("请在浏览器弹窗中允许通知");
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -113,7 +147,21 @@ export default function ConnectorsHub() {
   }, [packages, q, view, bySlug]);
 
   const selectedSlug = searchParams.get("connector");
-  const selected = selectedSlug ? bySlug.get(selectedSlug) ?? [] : [];
+  const selected = useMemo(() => {
+    if (!selectedSlug) return [];
+    const byPackage = bySlug.get(selectedSlug);
+    if (byPackage?.length) return byPackage;
+    const match = connectors.find(
+      (item) => item.ref === selectedSlug || item.id === selectedSlug,
+    );
+    return match ? bySlug.get(match.package.slug) ?? [match] : [];
+  }, [bySlug, connectors, selectedSlug]);
+
+  useEffect(() => {
+    if (searchParams.get("oauth") === "1") {
+      toast.success("已为该 Agent 完成授权");
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     if (selectedSlug === "agent-remote") router.replace("/dashboard/agents");
@@ -148,10 +196,22 @@ export default function ConnectorsHub() {
 
   return (
     <div className="space-y-6">
-      <SettingsHeader title="平台连接器" />
+      <SettingsHeader
+        title="平台连接器"
+        actions={
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>浏览器通知</span>
+            <Switch
+              size="sm"
+              checked={browserNotify}
+              onCheckedChange={(v) => void onBrowserNotifyChange(Boolean(v))}
+            />
+          </label>
+        }
+      />
 
       <p className="text-xs text-muted-foreground">
-        厂商托管 MCP 见{" "}
+        OAuth 客户端按租户配置；每个 Agent 单独授权后才会注入工具。厂商托管 MCP 见{" "}
         <Link href="/dashboard/mcp/store" className="text-foreground underline-offset-4 hover:underline">
           MCP 商店
         </Link>

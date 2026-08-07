@@ -215,7 +215,7 @@ export function SkillInstallDialog({
                             active.name === skill.name
                               ? "border-foreground/40"
                               : "border-border",
-                            picked ? "bg-primary/10 text-primary" : "text-muted-foreground",
+                            picked ? "bg-muted text-foreground" : "text-muted-foreground",
                           )}
                         >
                           <button

@@ -38,7 +38,7 @@ export function buildSystemPrompt(
     "- 多步任务先用一两句话说明计划再执行；执行过程中的关键发现要在最终回复中体现。",
     "- 用户提到「上次 / 之前的对话 / 另一个会话」时，用 list_chat_sessions / search_chat_sessions 定位，再用 get_chat_messages 或 import_session_context 取上下文，不要假装记得。",
     "- 工作区内搜代码优先 re_fs_grep；多处改文件优先 re_apply_patch。",
-    "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）或 set_heartbeat；不要假装已设置。",
+    "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
       : "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",

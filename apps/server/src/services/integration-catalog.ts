@@ -14,6 +14,7 @@ import catalog from "../catalog/integration-packages.json" with { type: "json" }
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
+  agents,
   componentInstances,
   connectorAuthProfiles,
   agentSkills,
@@ -443,26 +444,45 @@ export class IntegrationCatalogService {
       ? await this.db.select().from(integrationComponents).where(inArray(integrationComponents.packageId, packageIds))
       : [];
 
-    const [instances, installedSkills] = scopeKey === PLATFORM_SCOPE
-      ? [[], []]
+    const [installedSkills] = scopeKey === PLATFORM_SCOPE
+      ? [[]]
       : await Promise.all([
-          this.db.select().from(componentInstances).where(eq(componentInstances.tenantId, scopeKey)),
           this.db.select().from(agentSkills).where(eq(agentSkills.tenantId, scopeKey)),
         ]);
     const skillNames = new Set(
       installedSkills.filter((row) => row.status === "installed").map((row) => row.name),
     );
-    const instanceConfigs = instances.map((row) => ({
-      row,
-      config: (() => {
-        try { return decryptJson<Record<string, unknown>>(this.appConfig.secret, row.configEnc); }
-        catch { return {}; }
-      })(),
-    }));
 
     const settingsByRef = new Map<string, Record<string, unknown>>();
     for (const { component } of connectors) {
       settingsByRef.set(component.ref, await this.auth.getSettings(scopeKey, component.ref));
+    }
+
+    const installationRows =
+      scopeKey === PLATFORM_SCOPE
+        ? []
+        : await this.auth.listInstallations(scopeKey);
+    const agentNameById = new Map<string, string>();
+    if (installationRows.length) {
+      const agentRows = await this.db
+        .select({ id: agents.id, name: agents.name })
+        .from(agents)
+        .where(
+          and(
+            eq(agents.tenantId, scopeKey),
+            inArray(
+              agents.id,
+              [...new Set(installationRows.map((row) => row.agentId))],
+            ),
+          ),
+        );
+      for (const row of agentRows) agentNameById.set(row.id, row.name);
+    }
+    const installationsByRef = new Map<string, typeof installationRows>();
+    for (const row of installationRows) {
+      const list = installationsByRef.get(row.connectorRef) ?? [];
+      list.push(row);
+      installationsByRef.set(row.connectorRef, list);
     }
 
     const items = connectors.map(({ component, pkg, auth }) => {
@@ -473,6 +493,10 @@ export class IntegrationCatalogService {
       const hasTools = packageComponents.some(
         (item) => item.packageId === pkg.id && item.kind === "tool",
       );
+      const installs = (installationsByRef.get(component.ref) ?? []).map((row) => ({
+        ...row,
+        agentName: agentNameById.get(row.agentId) ?? row.agentId,
+      }));
 
       return {
         id: component.id,
@@ -505,7 +529,9 @@ export class IntegrationCatalogService {
             settingsValues[key] != null &&
             String(settingsValues[key]).trim() !== "",
         ),
-        authorized: hasUsableToken(settingsValues),
+        /** 任一 Agent 安装已授权 */
+        authorized: installs.some((row) => row.authorized) || hasUsableToken(settingsValues),
+        installations: installs,
         docsUrl: auth.docsUrl,
         hasTools,
         capabilities: packageComponents
@@ -525,10 +551,7 @@ export class IntegrationCatalogService {
               config: itemConfig,
               installed: item.kind === "skill"
                 ? skillNames.has(item.ref)
-                : instanceConfigs.some(({ row, config: current }) =>
-                    row.providerId === itemConfig.providerId &&
-                    current.product === itemConfig.product &&
-                    hasUsableToken(current)),
+                : installs.some((row) => row.enabled),
             };
           }),
       };
@@ -555,8 +578,26 @@ export class IntegrationCatalogService {
     tenantId: string,
     connectorRef: string,
     values: { accessToken: string; refreshToken?: string; expiresAt?: number },
+    agentId: string,
   ) {
-    await this.auth.saveAuthorization(tenantId, connectorRef, values);
+    if (!agentId?.trim()) throw new Error("授权需要指定 Agent");
+    await this.auth.saveInstallationAuthorization(tenantId, agentId.trim(), connectorRef, values);
+    return (await this.listConnectors(tenantId)).find((item) => item.ref === connectorRef) ?? null;
+  }
+
+  async installConnector(tenantId: string, connectorRef: string, agentIds: string[]) {
+    const connectors = await this.loadConnectorComponents();
+    const match = connectors.find((item) => item.component.ref === connectorRef);
+    if (!match) throw new Error("连接器不存在");
+    const listed = await this.listConnectors(tenantId);
+    const view = listed.find((item) => item.ref === connectorRef);
+    if (!view?.ready) throw new Error("请先完成租户 OAuth / 凭据配置");
+    await this.auth.ensureInstallations(tenantId, connectorRef, agentIds);
+    return (await this.listConnectors(tenantId)).find((item) => item.ref === connectorRef) ?? null;
+  }
+
+  async uninstallConnector(tenantId: string, connectorRef: string, agentId: string) {
+    await this.auth.removeInstallation(tenantId, connectorRef, agentId);
     return (await this.listConnectors(tenantId)).find((item) => item.ref === connectorRef) ?? null;
   }
 
@@ -685,6 +726,7 @@ export class IntegrationCatalogService {
     tenantId: string,
     target: string,
     opts?: {
+      agentId?: string;
       credentials?: {
         values: Record<string, unknown>;
         settings?: Record<string, unknown>;
@@ -703,8 +745,14 @@ export class IntegrationCatalogService {
       ? null
       : await this.auth.resolveProfile(tenantId, auth.profile);
     const values = opts?.credentials?.values ?? resolved?.values ?? {};
+    const tenantSettings = await this.auth.getSettings(tenantId, matched.connector.ref);
+    const installConfig = opts?.agentId
+      ? await this.auth.getInstallationConfig(tenantId, opts.agentId, matched.connector.ref)
+      : {};
+    // 安装级 OAuth 令牌优先；回退租户 settings 兼容旧数据
     const settings =
-      opts?.credentials?.settings ?? (await this.auth.getSettings(tenantId, matched.connector.ref));
+      opts?.credentials?.settings ??
+      { ...tenantSettings, ...installConfig };
     const fallbacks = {
       ...fallbacksFromFields(auth.settings),
       ...fallbacksFromFields(auth.fields),
@@ -766,6 +814,7 @@ export class IntegrationCatalogService {
       existingInstance,
       scopes,
       auth,
+      agentId: opts?.agentId ?? null,
       /** 非 OAuth 认证时需要写入实例的凭据与设置 */
       credentials: needsGrant ? null : { values, settings },
       authorization,
@@ -791,19 +840,28 @@ export class IntegrationCatalogService {
   }
 
   /**
-   * 已配置的平台连接器直接工具目标。
+   * 已授权给指定 Agent 的平台连接器工具目标。
    * 这些目标只用于 Agent 工具分发，不会创建 component_instances。
    */
-  async listDirectConnectorTargets(tenantId: string) {
+  async listDirectConnectorTargets(tenantId: string, agentId: string) {
+    if (!agentId?.trim()) return [];
+    const installs = await this.auth.listInstallations(tenantId, { agentId: agentId.trim() });
+    const enabledRefs = new Set(
+      installs.filter((row) => row.enabled).map((row) => row.connectorRef),
+    );
+    if (!enabledRefs.size && !(await this.emailInstances.getTargetConfig(tenantId)).length) {
+      return [];
+    }
+
     const connectors = await this.listConnectors(tenantId);
     const targets: Array<Awaited<ReturnType<IntegrationCatalogService["resolveConnectorTarget"]>>> = [];
     for (const connector of connectors) {
-      if (!connector.ready) continue;
+      if (!connector.ready || !enabledRefs.has(connector.ref)) continue;
       for (const capability of connector.capabilities) {
         if (capability.kind !== "tool") continue;
         const mcpUrl = String(capability.config.mcpUrl ?? "").trim();
         if (!mcpUrl.startsWith("zakura://")) continue;
-        const target = await this.resolveConnectorTarget(tenantId, mcpUrl);
+        const target = await this.resolveConnectorTarget(tenantId, mcpUrl, { agentId });
         if (!target) continue;
         if (target.needsUserGrant && !target.authorization) continue;
         targets.push(target);
@@ -812,10 +870,13 @@ export class IntegrationCatalogService {
     for (const instance of await this.emailInstances.getTargetConfig(tenantId)) {
       const product = String(instance.config.product ?? "").trim();
       if (!product) continue;
+      // 多账号邮箱实例仍按租户配置；仅在装了对应 email 连接器的 Agent 上注入
+      const productRef = `email-${product}`;
+      if (!enabledRefs.has(productRef) && !enabledRefs.has("email")) continue;
       const base = await this.resolveConnectorTarget(
         tenantId,
         `zakura://email/${product}`,
-        { credentials: { values: instance.config } },
+        { agentId, credentials: { values: instance.config } },
       );
       if (!base) continue;
       const connectorRef = `email-instance-${instance.row.id}`;
@@ -833,8 +894,18 @@ export class IntegrationCatalogService {
       (target): target is NonNullable<typeof target> => target !== null,
     );
   }
-}
 
+  /** 入站等租户级场景：汇总所有 Agent 已安装的直连目标 */
+  async listAllDirectConnectorTargets(tenantId: string) {
+    const installs = await this.auth.listInstallations(tenantId);
+    const agentIds = [...new Set(installs.filter((row) => row.enabled).map((row) => row.agentId))];
+    const out: Awaited<ReturnType<IntegrationCatalogService["listDirectConnectorTargets"]>> = [];
+    for (const agentId of agentIds) {
+      out.push(...(await this.listDirectConnectorTargets(tenantId, agentId)));
+    }
+    return out;
+  }
+}
 /** 实例是否已经拿到可用令牌（OAuth 或静态 token） */
 function hasUsableToken(config: Record<string, unknown>): boolean {
   return (

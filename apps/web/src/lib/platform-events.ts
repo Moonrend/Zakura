@@ -59,6 +59,15 @@ export type PlatformEvent =
       agentId: string;
       sessionId: string;
       reason?: "created" | "updated";
+    }
+  | {
+      type: "connector_inbound";
+      ts: number;
+      agentId: string;
+      sessionId: string;
+      platform: string;
+      title: string;
+      preview?: string;
     };
 
 type Subscriber = {

@@ -32,7 +32,7 @@ import {
   ShieldCheck,
   Route,
   Container,
-  Sparkles,
+  Blocks,
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { AGENT_SUBNAV, fetchAgents, type AgentListItem } from "@/lib/agents";
@@ -96,7 +96,7 @@ const AGENT_ICONS: Record<string, IconComp> = {
   computer: Monitor,
   web: Globe,
   memory: Brain,
-  skills: Sparkles,
+  skills: Blocks,
   mcp: Cable,
   gateway: Route,
   platforms: MessageSquare,
@@ -651,7 +651,7 @@ function PlatformSidebar({
         id: "skills",
         href: "/dashboard/skills",
         label: "技能",
-        icon: Sparkles,
+        icon: Blocks,
         isActive: (path) =>
           path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
       },

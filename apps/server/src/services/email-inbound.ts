@@ -153,7 +153,7 @@ export class EmailInboundService {
     connectorRef?: string,
   ): Promise<boolean> {
     if (!supplied) return false;
-    const targets = await this.integrationCatalog.listDirectConnectorTargets(tenantId);
+    const targets = await this.integrationCatalog.listAllDirectConnectorTargets(tenantId);
     return targets.some((target) => {
       if (!isEmailTarget(target) || (connectorRef && target.connectorRef !== connectorRef)) return false;
       const settings = settingsOf(target);
@@ -167,11 +167,11 @@ export class EmailInboundService {
     try {
       const tenants = new Set<string>();
       const targetsByTenant = new Map<string, EmailTarget[]>();
-      // listDirectConnectorTargets already applies tenant credential precedence and readiness.
+      // listAllDirectConnectorTargets：按各 Agent 安装汇总已就绪邮箱目标。
       const rows = await this.db.select({ id: agents.tenantId }).from(agents);
       for (const row of rows) tenants.add(row.id);
       for (const tenantId of tenants) {
-        const targets = (await this.integrationCatalog.listDirectConnectorTargets(tenantId)).filter(
+        const targets = (await this.integrationCatalog.listAllDirectConnectorTargets(tenantId)).filter(
           (target) =>
             target.connectorRef.startsWith("email-") &&
             target.capabilityRef === "email-bettermail" &&
@@ -232,7 +232,7 @@ export class EmailInboundService {
     inboundSecret?: string,
     connectorRef?: string,
   ): Promise<boolean> {
-    const targets = (await this.integrationCatalog.listDirectConnectorTargets(tenantId)).filter(
+    const targets = (await this.integrationCatalog.listAllDirectConnectorTargets(tenantId)).filter(
       (target) =>
         isEmailTarget(target) &&
         (!connectorRef || target.connectorRef === connectorRef) &&

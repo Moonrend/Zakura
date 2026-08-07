@@ -1,12 +1,12 @@
 "use client";
 
-import { BadgeCheck, Check, Download, GitFork, Package, Sparkles, Star, Zap } from "lucide-react";
+import { BadgeCheck, Check, Download, GitFork, HardDrive, Package, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { formatCount, type SkillSearchItem, type SkillStoreId } from "@/lib/skills";
 
-const STORE_ICON: Record<SkillStoreId, typeof Sparkles> = {
-  builtin: Sparkles,
+const STORE_ICON: Record<SkillStoreId, typeof Package> = {
+  builtin: Package,
   curated: BadgeCheck,
   "skills-sh": Package,
   github: GitFork,
@@ -35,14 +35,7 @@ export function SkillCard({
       )}
     >
       <div className="flex w-full items-start gap-2.5">
-        <span
-          className={cn(
-            "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70",
-            item.store === "builtin" || item.store === "curated"
-              ? "bg-primary/10 text-primary"
-              : "bg-muted text-muted-foreground",
-          )}
-        >
+        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted text-muted-foreground">
           <Icon className="size-4" />
         </span>
         <span className="min-w-0 flex-1">
@@ -93,7 +86,7 @@ export function SkillCard({
         ) : null}
         {item.cached ? (
           <span className="inline-flex items-center gap-1">
-            <Zap className="size-3" />
+            <HardDrive className="size-3" />
             缓存
           </span>
         ) : null}

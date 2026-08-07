@@ -2,7 +2,6 @@
 
 /**
  * Agent 设置 · 自动化
- * 与对话侧栏共用同一内容模型：任务当「内容」读，不是机械表格。
  */
 import { useRouter } from "next/navigation";
 import { useAgentDetail } from "@/components/agent-detail-context";
@@ -33,6 +32,20 @@ export default function AgentAutomationPage() {
         <AutomationPanel
           agentId={id}
           className="max-h-[min(70vh,36rem)]"
+          onAskAgentCreate={(goal) => {
+            const prompt = [
+              "请用 create_schedule 为我创建定时任务。",
+              "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
+              "",
+              goal.trim(),
+            ].join("\n");
+            try {
+              sessionStorage.setItem("zakura_pending_prompt", prompt);
+            } catch {
+              /* ignore */
+            }
+            router.push(`/chat?agent=${id}`);
+          }}
           onOpenSession={(sid) => {
             router.push(`/chat?agent=${id}&session=${sid}`);
           }}

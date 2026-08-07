@@ -14,6 +14,7 @@ import {
 import type { AgentService } from "./agents.js";
 import type { CloudAgentRuntime } from "./cloud-agent-runtime.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
+import { platformEvents } from "./platform-events.js";
 
 function readBindingConfig(secret: string, configEnc: string | null | undefined): Record<string, unknown> {
   if (!configEnc?.trim()) return {};
@@ -763,6 +764,14 @@ export class RemoteAgentIngress {
           updatedAt: new Date(),
         })
         .where(eq(agentChannelThreads.id, thread.id));
+      platformEvents.publish(input.tenantId, {
+        type: "connector_inbound",
+        agentId: binding.agentId,
+        sessionId: thread.sessionId,
+        platform: input.platform,
+        title: (input.title || `${input.platform} 新消息`).slice(0, 80),
+        preview: input.text.trim().slice(0, 160) || undefined,
+      });
       return { accepted: true, duplicate: false, sessionId: thread.sessionId, runId };
     } catch (error) {
       await this.db.delete(agentChannelEvents).where(eq(agentChannelEvents.id, event.id));

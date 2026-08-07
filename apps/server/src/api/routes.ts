@@ -132,6 +132,8 @@ const upstreamOauthPending = new Map<
     tenantId: string;
     instanceId?: string;
     connectorRef?: string;
+    /** 平台连接器授权写入该 Agent 的安装记录 */
+    agentId?: string;
     mcpUrl: string;
     clientId: string;
     clientSecret?: string;
@@ -4408,9 +4410,23 @@ export async function createApiApp(deps: {
 
       let instanceId = pending.instanceId;
       if (pending.connectorRef) {
-        await integrationCatalog.saveConnectorAuthorization(pending.tenantId, pending.connectorRef, tokens);
+        if (!pending.agentId) {
+          throw new Error("连接器授权缺少 Agent");
+        }
+        await integrationCatalog.saveConnectorAuthorization(
+          pending.tenantId,
+          pending.connectorRef,
+          tokens,
+          pending.agentId,
+        );
+        await syncConnectorCapabilities(
+          pending.tenantId,
+          pending.connectorRef,
+          pending.agentId,
+          "install",
+        );
         return c.redirect(
-          `${config.webPublicUrl}/dashboard/connectors?connector=${encodeURIComponent(pending.connectorRef)}&oauth=1`,
+          `${config.webPublicUrl}/dashboard/connectors?connector=${encodeURIComponent(pending.connectorRef)}&agent=${encodeURIComponent(pending.agentId)}&oauth=1`,
         );
       }
       if (instanceId) {
@@ -4600,11 +4616,48 @@ export async function createApiApp(deps: {
     return c.json(peek);
   });
 
-  /** 平台连接器直接授权：只保存连接器授权，不创建 MCP 实例。 */
+  /** 连接器授权/撤销时同步捆绑技能到同一 Agent */
+  async function syncConnectorCapabilities(
+    tenantId: string,
+    connectorRef: string,
+    agentId: string,
+    mode: "install" | "uninstall",
+  ) {
+    if (!skills) return;
+    const connector = (await integrationCatalog.listConnectors(tenantId)).find(
+      (item) => item.ref === connectorRef,
+    );
+    if (!connector) return;
+    for (const skill of connector.capabilities.filter((item) => item.kind === "skill")) {
+      const source = String(skill.config.source ?? `builtin:${skill.ref}`).trim();
+      try {
+        if (mode === "install") {
+          await skills.install(tenantId, { source, agentIds: [agentId] });
+        } else {
+          await skills.uninstall(tenantId, agentId, skill.ref);
+        }
+      } catch (err) {
+        console.warn(
+          `[connector] sync skill ${skill.ref} (${mode}):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
+  /** 平台连接器直接授权：写入指定 Agent 的安装认证资源，不创建 MCP 实例。 */
   app.post("/api/connectors/:ref/oauth/start", async (c) => {
     const session = c.get("session")!;
     const connectorRef = c.req.param("ref");
+    const body = await c.req.json<{ agentId?: string }>().catch(() => ({} as { agentId?: string }));
+    const agentId = body.agentId?.trim() ?? "";
+    if (!agentId) {
+      return c.json({ error: "请选择要授权的 Agent" }, 400);
+    }
     try {
+      const agent = await agentService.get(session.tenantId, agentId);
+      if (!agent) return c.json({ error: "Agent 不存在" }, 404);
+
       const connector = (await integrationCatalog.listConnectors(session.tenantId)).find(
         (item) => item.ref === connectorRef || item.id === connectorRef,
       );
@@ -4617,7 +4670,10 @@ export async function createApiApp(deps: {
       if (!connector || !mcpUrl) {
         return c.json({ error: "连接器没有可授权的功能" }, 400);
       }
-      const target = await integrationCatalog.resolveConnectorTarget(session.tenantId, mcpUrl);
+      // 安装记录在授权成功回调时写入；此处不预创建空安装
+      const target = await integrationCatalog.resolveConnectorTarget(session.tenantId, mcpUrl, {
+        agentId,
+      });
       if (!target?.client || !target.discovery.authorizationEndpoint || !target.discovery.tokenEndpoint) {
         return c.json({ error: "请先保存有效的 OAuth 客户端配置" }, 400);
       }
@@ -4638,6 +4694,7 @@ export async function createApiApp(deps: {
       upstreamOauthPending.set(state, {
         tenantId: session.tenantId,
         connectorRef: connector.ref,
+        agentId,
         mcpUrl: target.mcpUrl,
         clientId: target.client.clientId,
         clientSecret: target.client.clientSecret,
@@ -4651,6 +4708,72 @@ export async function createApiApp(deps: {
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
+  });
+
+  /** 将连接器安装到指定 Agent（认证资源归属 Agent） */
+  app.post("/api/connectors/:ref/install", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{ agentIds?: string[]; all?: boolean }>();
+    try {
+      let agentIds = body.agentIds ?? [];
+      if (body.all) {
+        const list = await agentService.list(session.tenantId);
+        agentIds = list.map((item) => item.id);
+      } else {
+        const verified: string[] = [];
+        for (const id of agentIds) {
+          const agent = await agentService.get(session.tenantId, id);
+          if (!agent) return c.json({ error: `Agent 不存在: ${id}` }, 404);
+          verified.push(agent.id);
+        }
+        agentIds = verified;
+      }
+      const connector = await integrationCatalog.installConnector(
+        session.tenantId,
+        c.req.param("ref"),
+        agentIds,
+      );
+      for (const agentId of agentIds) {
+        await syncConnectorCapabilities(session.tenantId, c.req.param("ref"), agentId, "install");
+      }
+      return c.json({ connector });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.delete("/api/connectors/:ref/installations/:agentId", async (c) => {
+    const session = c.get("session")!;
+    try {
+      const connectorRef = c.req.param("ref");
+      const agentId = c.req.param("agentId");
+      await syncConnectorCapabilities(session.tenantId, connectorRef, agentId, "uninstall");
+      const connector = await integrationCatalog.uninstallConnector(
+        session.tenantId,
+        connectorRef,
+        agentId,
+      );
+      return c.json({ connector });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.get("/api/agents/:id/connectors", async (c) => {
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const installations = await integrationCatalog.auth.listInstallations(session.tenantId, {
+      agentId: agent.id,
+    });
+    const connectors = await integrationCatalog.listConnectors(session.tenantId);
+    const byRef = new Map(connectors.map((item) => [item.ref, item]));
+    return c.json({
+      installations: installations.map((row) => ({
+        ...row,
+        connector: byRef.get(row.connectorRef) ?? null,
+      })),
+    });
   });
 
   app.put("/api/connectors/:id/credentials", async (c) => {
@@ -4673,28 +4796,33 @@ export async function createApiApp(deps: {
       // Email inbound is configured on platform connectors (Amail/Bettermail/…),
       // not on Agent Chat SDK platforms. Bind only the connector just saved.
       if (scope === "tenant" && connector?.ref.startsWith("email-") && remoteIngress) {
-        const target = (await integrationCatalog.listDirectConnectorTargets(session.tenantId)).find(
-          (item) => item.connectorRef === connector.ref,
-        );
-        const targetSettings = target?.credentials?.settings ?? {};
         const inboundAgentId =
-          typeof targetSettings.inboundAgentId === "string"
-            ? targetSettings.inboundAgentId.trim()
+          typeof body.settings?.inboundAgentId === "string"
+            ? String(body.settings.inboundAgentId).trim()
             : "";
+        const settings = await integrationCatalog.auth.getSettings(session.tenantId, connector.ref);
+        const agentId =
+          inboundAgentId ||
+          (typeof settings.inboundAgentId === "string" ? settings.inboundAgentId.trim() : "");
         const inboundEnabled =
-          targetSettings.inboundEnabled === true ||
-          String(targetSettings.inboundEnabled ?? "").toLowerCase() === "true";
-        if (target && inboundAgentId && inboundEnabled) {
+          settings.inboundEnabled === true ||
+          String(settings.inboundEnabled ?? "").toLowerCase() === "true" ||
+          body.settings?.inboundEnabled === true ||
+          String(body.settings?.inboundEnabled ?? "").toLowerCase() === "true";
+        if (agentId && inboundEnabled) {
+          await integrationCatalog.auth.ensureInstallations(session.tenantId, connector.ref, [
+            agentId,
+          ]);
           await remoteIngress.ensureBinding(session.tenantId, {
-            agentId: inboundAgentId,
+            agentId,
             platform: "email",
             profileKey:
-              typeof (target.auth as { profile?: unknown }).profile === "string"
-                ? (target.auth as { profile: string }).profile
+              typeof (connector.auth as { profile?: unknown }).profile === "string"
+                ? (connector.auth as { profile: string }).profile
                 : connector.ref,
             label: connector.name || "邮箱 Agent",
             settings: {
-              allowedEmails: String(targetSettings.allowedEmails ?? "")
+              allowedEmails: String(settings.allowedEmails ?? body.settings?.allowedEmails ?? "")
                 .split(/[\s,;\n]+/)
                 .map((item) => item.trim())
                 .filter(Boolean),

@@ -748,7 +748,10 @@ export class McpGateway {
     if (this.integrationCatalog) {
       let directTargets: DirectConnectorTarget[] = [];
       try {
-        directTargets = await this.integrationCatalog.listDirectConnectorTargets(agent.tenantId);
+        directTargets = await this.integrationCatalog.listDirectConnectorTargets(
+          agent.tenantId,
+          agent.id,
+        );
       } catch (err) {
         console.warn(
           "[connector] list direct tools:",
@@ -781,6 +784,7 @@ export class McpGateway {
                   capabilityRef: target.capabilityRef,
                   providerId: target.providerId,
                   product: target.product,
+                  agentId: agent.id,
                 },
                 execution: t.execution,
                 agentScoped: true,
@@ -1125,11 +1129,22 @@ export class McpGateway {
       if (!connectorRef || !capabilityRef) {
         return textResult("连接器工具缺少目标信息", true);
       }
-      const target = (await this.integrationCatalog.listDirectConnectorTargets(tenantId)).find(
+      const agentId =
+        typeof meta.agentId === "string"
+          ? meta.agentId
+          : typeof opts?.agentId === "string"
+            ? opts.agentId
+            : tool.agentId ?? undefined;
+      if (!agentId) {
+        return textResult("连接器工具缺少 Agent 上下文", true);
+      }
+      const target = (
+        await this.integrationCatalog.listDirectConnectorTargets(tenantId, agentId)
+      ).find(
         (item) => item.connectorRef === connectorRef && item.capabilityRef === capabilityRef,
       );
       if (!target || !globalRegistry.has(target.providerId)) {
-        return textResult("连接器未配置或授权已失效", true);
+        return textResult("连接器未授权给该 Agent 或授权已失效", true);
       }
       const handle = directConnectorHandle(tenantId, target);
       const plugin = globalRegistry.get(target.providerId);
@@ -1139,15 +1154,20 @@ export class McpGateway {
         const accessToken = String(handle.config.oauthAccessToken ?? "").trim();
         if (accessToken && target.authorization) {
           await this.integrationCatalog
-            .saveConnectorAuthorization(tenantId, connectorRef, {
-              accessToken,
-              ...(typeof handle.config.oauthRefreshToken === "string"
-                ? { refreshToken: handle.config.oauthRefreshToken }
-                : {}),
-              ...(typeof handle.config.oauthExpiresAt === "number"
-                ? { expiresAt: handle.config.oauthExpiresAt }
-                : {}),
-            })
+            .saveConnectorAuthorization(
+              tenantId,
+              connectorRef,
+              {
+                accessToken,
+                ...(typeof handle.config.oauthRefreshToken === "string"
+                  ? { refreshToken: handle.config.oauthRefreshToken }
+                  : {}),
+                ...(typeof handle.config.oauthExpiresAt === "number"
+                  ? { expiresAt: handle.config.oauthExpiresAt }
+                  : {}),
+              },
+              agentId,
+            )
             .catch(() => undefined);
         }
       }

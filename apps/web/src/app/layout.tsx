@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
+import { ConnectorBrowserNotifications } from "@/components/connector-browser-notifications";
 import { PwaRegister } from "@/components/pwa-register";
 import { cn } from "@/lib/utils";
 import "./globals.css";
@@ -73,6 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               {children}
               <Toaster position="top-center" closeButton />
               <PwaRegister />
+              <ConnectorBrowserNotifications />
             </ConfirmDialogProvider>
           </TooltipProvider>
         </ThemeProvider>

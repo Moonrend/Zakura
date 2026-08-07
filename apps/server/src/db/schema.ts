@@ -578,6 +578,7 @@ export const connectorAuthProfiles = pgTable(
 /**
  * 连接器自身设置（如自建实例地址）。与档案分开存储：
  * 这些值属于单个连接器，不应随共享客户端传播到其它连接器。
+ * 注意：用户 OAuth 令牌等认证资源不在此表，见 agent_connector_installations。
  */
 export const connectorSettings = pgTable(
   "connector_settings",
@@ -589,6 +590,34 @@ export const connectorSettings = pgTable(
     ...timestamps,
   },
   (t) => [uniqueIndex("connector_settings_scope_ref").on(t.scopeKey, t.connectorRef)],
+);
+
+/**
+ * Agent 级连接器授权（认证资源）。
+ * OAuth 客户端配置在 connector_auth_profiles（租户/平台全局）；
+ * 用户授权令牌按 Agent 隔离，授权成功即写入本表。
+ */
+export const agentConnectorInstallations = pgTable(
+  "agent_connector_installations",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    connectorRef: text("connector_ref").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** 加密：oauthAccessToken / oauthRefreshToken / oauthExpiresAt 等 */
+    configEnc: text("config_enc").notNull().default(""),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agent_connector_installations_agent_ref").on(t.agentId, t.connectorRef),
+    index("agent_connector_installations_tenant").on(t.tenantId),
+    index("agent_connector_installations_tenant_connector").on(t.tenantId, t.connectorRef),
+  ],
 );
 
 /** 租户邮箱连接器实例；同一 provider 可配置多个账号并分别绑定 Agent。 */
@@ -1539,6 +1568,7 @@ export const schema = {
   integrationComponents,
   connectorAuthProfiles,
   connectorSettings,
+  agentConnectorInstallations,
   emailConnectorInstances,
   managedContainers,
   agentBindings,
@@ -1600,6 +1630,7 @@ export type IntegrationPackageRow = typeof integrationPackages.$inferSelect;
 export type IntegrationComponentRow = typeof integrationComponents.$inferSelect;
 export type ConnectorAuthProfileRow = typeof connectorAuthProfiles.$inferSelect;
 export type ConnectorSettingsRow = typeof connectorSettings.$inferSelect;
+export type AgentConnectorInstallation = typeof agentConnectorInstallations.$inferSelect;
 export type ManagedContainer = typeof managedContainers.$inferSelect;
 export type Setting = typeof settings.$inferSelect;
 export type PlatformService = typeof platformServices.$inferSelect;

@@ -49,6 +49,16 @@ export type PlatformEvent =
       agentId: string;
       sessionId: string;
       reason?: "created" | "updated";
+    }
+  | {
+      /** 连接器 / 远程通道入站（用于浏览器通知） */
+      type: "connector_inbound";
+      ts: number;
+      agentId: string;
+      sessionId: string;
+      platform: string;
+      title: string;
+      preview?: string;
     };
 
 type PlatformEventInput =
@@ -58,7 +68,8 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "platform_service_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "runner_node" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">
-  | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">;
+  | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "connector_inbound" }>, "ts">;
 
 type Listener = (event: PlatformEvent) => void;
 

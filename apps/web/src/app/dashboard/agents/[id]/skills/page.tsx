@@ -7,8 +7,8 @@ import {
   FileText,
   FolderPlus,
   Loader2,
+  Package,
   Plus,
-  Sparkles,
   Trash2,
 } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
@@ -179,7 +179,7 @@ export default function AgentSkillsPage() {
         </div>
       ) : !skills.length ? (
         <div className="rounded-lg border border-dashed border-border bg-card/50 p-8 text-center sm:p-10">
-          <Sparkles className="mx-auto mb-2 size-5 text-muted-foreground" />
+          <Package className="mx-auto mb-2 size-5 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">这个 Agent 还没有安装技能</p>
         </div>
       ) : (
@@ -198,15 +198,13 @@ export default function AgentSkillsPage() {
                   "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 sm:mt-0",
                   skill.status === "error"
                     ? "bg-destructive/10 text-destructive"
-                    : skill.builtin
-                      ? "bg-primary/10 text-primary"
-                      : "bg-muted text-muted-foreground",
+                    : "bg-muted text-muted-foreground",
                 )}
               >
                 {skill.status === "error" ? (
                   <AlertTriangle className="size-4" />
                 ) : (
-                  <Sparkles className="size-4" />
+                  <Package className="size-4" />
                 )}
               </div>
 

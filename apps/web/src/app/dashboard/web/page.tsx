@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
+  Cloud,
   ExternalLink,
   Plus,
   Save,
   Trash2,
-  Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
@@ -570,8 +570,8 @@ export default function WebPage() {
                       "transition-colors hover:bg-muted/50",
                     )}
                   >
-                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Zap className="size-4" />
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                      <Cloud className="size-4" />
                     </span>
                     <span className="min-w-0">
                       <span className="block text-sm font-medium">

@@ -83,7 +83,7 @@ function summarize(ev: CloudAgentEvent): string {
 function levelClass(ev: CloudAgentEvent): string {
   const p = ev.payload as Record<string, unknown>;
   if (ev.type === "run_error") return "text-destructive";
-  if (ev.type === "run_log" && p.level === "warn") return "text-amber-600 dark:text-amber-400";
+  if (ev.type === "run_log" && p.level === "warn") return "text-warning-foreground";
   if (ev.type === "run_log" && p.level === "error") return "text-destructive";
   return "text-muted-foreground";
 }

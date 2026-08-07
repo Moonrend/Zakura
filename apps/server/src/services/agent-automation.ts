@@ -1,17 +1,15 @@
 /**
- * Agent 自动化：定时任务（cron / @every）+ 周期心跳。
+ * Agent 自动化：定时任务（cron / @every）。
  * 进程内轮询 due 行，claim 后创建 system 会话并 startTurn。
  */
 import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   agentAutomationRuns,
-  agentHeartbeats,
   agentSchedules,
   agents,
   newId,
   type AgentAutomationRun,
-  type AgentHeartbeat,
   type AgentSchedule,
 } from "../db/schema.js";
 import {
@@ -20,16 +18,6 @@ import {
   nextRunAfter,
 } from "./cron-next.js";
 
-export const DEFAULT_HEARTBEAT_PROMPT = [
-  "【周期心跳】这是一次自动唤醒，不是用户实时对话。",
-  "请简要检查是否有待办、工作区异常、或上次任务未完成的事项。",
-  "若有可立即处理的小任务（读日志、修明显问题、更新状态）可直接执行；",
-  "若无需动作，用一两句话说明「空闲 / 一切正常」即可。",
-  "不要向用户索要确认（用户可能不在线）。",
-].join("");
-
-export const MIN_HEARTBEAT_MINUTES = 5;
-export const MAX_HEARTBEAT_MINUTES = 7 * 24 * 60; // 7d
 const TICK_MS = 20_000;
 const CLAIM_BATCH = 20;
 
@@ -71,35 +59,6 @@ function scheduleDto(row: AgentSchedule) {
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
     lastStatus: row.lastStatus,
     lastError: row.lastError,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-function heartbeatDto(row: AgentHeartbeat | null, agentId: string) {
-  if (!row) {
-    return {
-      agentId,
-      enabled: false,
-      intervalMinutes: 60,
-      prompt: "",
-      nextRunAt: null as string | null,
-      lastRunAt: null as string | null,
-      lastStatus: null as string | null,
-      lastError: null as string | null,
-      effectivePrompt: DEFAULT_HEARTBEAT_PROMPT,
-    };
-  }
-  return {
-    agentId: row.agentId,
-    enabled: row.enabled,
-    intervalMinutes: row.intervalMinutes,
-    prompt: row.prompt,
-    nextRunAt: row.nextRunAt?.toISOString() ?? null,
-    lastRunAt: row.lastRunAt?.toISOString() ?? null,
-    lastStatus: row.lastStatus,
-    lastError: row.lastError,
-    effectivePrompt: row.prompt.trim() || DEFAULT_HEARTBEAT_PROMPT,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -291,77 +250,6 @@ export class AgentAutomationService {
     return true;
   }
 
-  // ── heartbeat ─────────────────────────────────────────────────
-
-  async getHeartbeat(tenantId: string, agentId: string) {
-    const row = await this.db.query.agentHeartbeats.findFirst({
-      where: and(eq(agentHeartbeats.agentId, agentId), eq(agentHeartbeats.tenantId, tenantId)),
-    });
-    return heartbeatDto(row ?? null, agentId);
-  }
-
-  async upsertHeartbeat(
-    tenantId: string,
-    agentId: string,
-    input: {
-      enabled?: boolean;
-      intervalMinutes?: number;
-      prompt?: string;
-    },
-  ) {
-    const agent = await this.db.query.agents.findFirst({
-      where: and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
-    });
-    if (!agent) throw new Error("Agent not found");
-
-    const existing = await this.db.query.agentHeartbeats.findFirst({
-      where: eq(agentHeartbeats.agentId, agentId),
-    });
-
-    const enabled = input.enabled ?? existing?.enabled ?? false;
-    let intervalMinutes =
-      input.intervalMinutes ?? existing?.intervalMinutes ?? 60;
-    intervalMinutes = Math.min(
-      MAX_HEARTBEAT_MINUTES,
-      Math.max(MIN_HEARTBEAT_MINUTES, Math.floor(intervalMinutes)),
-    );
-    const prompt = input.prompt !== undefined ? input.prompt : (existing?.prompt ?? "");
-    const now = new Date();
-    const nextRunAt = enabled
-      ? new Date(now.getTime() + intervalMinutes * 60_000)
-      : null;
-
-    if (existing) {
-      await this.db
-        .update(agentHeartbeats)
-        .set({
-          enabled,
-          intervalMinutes,
-          prompt,
-          nextRunAt:
-            enabled && (!existing.enabled || input.intervalMinutes !== undefined)
-              ? nextRunAt
-              : enabled
-                ? existing.nextRunAt ?? nextRunAt
-                : null,
-          updatedAt: now,
-        })
-        .where(eq(agentHeartbeats.agentId, agentId));
-    } else {
-      await this.db.insert(agentHeartbeats).values({
-        agentId,
-        tenantId,
-        enabled,
-        intervalMinutes,
-        prompt,
-        nextRunAt,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-    return this.getHeartbeat(tenantId, agentId);
-  }
-
   // ── runs / manual trigger ─────────────────────────────────────
 
   async listRuns(
@@ -392,38 +280,15 @@ export class AgentAutomationService {
     return this.fireSchedule(row, { manual: true });
   }
 
-  async runHeartbeatNow(tenantId: string, agentId: string) {
-    const hb = await this.db.query.agentHeartbeats.findFirst({
-      where: and(eq(agentHeartbeats.agentId, agentId), eq(agentHeartbeats.tenantId, tenantId)),
-    });
-    // 允许未配置时用默认参数手动试跑
-    const effective: AgentHeartbeat = hb ?? {
-      agentId,
-      tenantId,
-      enabled: false,
-      intervalMinutes: 60,
-      prompt: "",
-      nextRunAt: null,
-      lastRunAt: null,
-      lastStatus: null,
-      lastError: null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    return this.fireHeartbeat(effective, { manual: true });
-  }
-
   // ── poll loop ─────────────────────────────────────────────────
 
-  async tick(): Promise<{ schedules: number; heartbeats: number }> {
-    if (this.ticking) return { schedules: 0, heartbeats: 0 };
-    if (!this.runner) return { schedules: 0, heartbeats: 0 };
+  async tick(): Promise<{ schedules: number }> {
+    if (this.ticking) return { schedules: 0 };
+    if (!this.runner) return { schedules: 0 };
     this.ticking = true;
     let schedules = 0;
-    let heartbeats = 0;
     try {
       schedules = await this.claimAndFireSchedules();
-      heartbeats = await this.claimAndFireHeartbeats();
     } catch (err) {
       console.warn(
         "[automation] tick failed:",
@@ -432,7 +297,7 @@ export class AgentAutomationService {
     } finally {
       this.ticking = false;
     }
-    return { schedules, heartbeats };
+    return { schedules };
   }
 
   private async claimAndFireSchedules(): Promise<number> {
@@ -502,42 +367,6 @@ export class AgentAutomationService {
       void this.fireSchedule({ ...row, nextRunAt: next }, { manual: false }).catch((err: unknown) => {
         console.warn("[automation] schedule fire failed:", row.id, err);
       });
-      n += 1;
-    }
-    return n;
-  }
-
-  private async claimAndFireHeartbeats(): Promise<number> {
-    const now = new Date();
-    const due = await this.db
-      .select()
-      .from(agentHeartbeats)
-      .where(and(eq(agentHeartbeats.enabled, true), lte(agentHeartbeats.nextRunAt, now)))
-      .orderBy(asc(agentHeartbeats.nextRunAt))
-      .limit(CLAIM_BATCH);
-
-    let n = 0;
-    for (const row of due) {
-      const next = new Date(now.getTime() + row.intervalMinutes * 60_000);
-      const claimed = await this.db
-        .update(agentHeartbeats)
-        .set({ nextRunAt: next, updatedAt: new Date() })
-        .where(
-          and(
-            eq(agentHeartbeats.agentId, row.agentId),
-            eq(agentHeartbeats.enabled, true),
-            row.nextRunAt
-              ? eq(agentHeartbeats.nextRunAt, row.nextRunAt)
-              : sql`${agentHeartbeats.nextRunAt} is null`,
-          ),
-        )
-        .returning();
-      if (!claimed.length) continue;
-      void this.fireHeartbeat({ ...row, nextRunAt: next }, { manual: false }).catch(
-        (err: unknown) => {
-          console.warn("[automation] heartbeat fire failed:", row.agentId, err);
-        },
-      );
       n += 1;
     }
     return n;
@@ -624,80 +453,6 @@ export class AgentAutomationService {
           updatedAt: new Date(),
         })
         .where(eq(agentSchedules.id, row.id));
-      throw err;
-    }
-  }
-
-  private async fireHeartbeat(
-    row: AgentHeartbeat,
-    _opts: { manual: boolean },
-  ): Promise<ReturnType<typeof runDto>> {
-    if (!this.runner) throw new Error("automation runner not configured");
-    const prompt = row.prompt.trim() || DEFAULT_HEARTBEAT_PROMPT;
-    const logId = newId();
-    const now = new Date();
-    await this.db.insert(agentAutomationRuns).values({
-      id: logId,
-      tenantId: row.tenantId,
-      agentId: row.agentId,
-      kind: "heartbeat",
-      status: "running",
-      prompt,
-      startedAt: now,
-      createdAt: now,
-    });
-
-    try {
-      const { sessionId, runId } = await this.runner.startAutomationTurn({
-        tenantId: row.tenantId,
-        agentId: row.agentId,
-        prompt,
-        title: "心跳",
-        kind: "heartbeat",
-      });
-      await this.db
-        .update(agentAutomationRuns)
-        .set({
-          status: "completed",
-          sessionId,
-          cloudRunId: runId,
-          completedAt: new Date(),
-          resultText: `started session ${sessionId}`,
-        })
-        .where(eq(agentAutomationRuns.id, logId));
-      await this.db
-        .update(agentHeartbeats)
-        .set({
-          lastRunAt: new Date(),
-          lastStatus: "ok",
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(agentHeartbeats.agentId, row.agentId));
-
-      const log = await this.db.query.agentAutomationRuns.findFirst({
-        where: eq(agentAutomationRuns.id, logId),
-      });
-      return runDto(log!);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.db
-        .update(agentAutomationRuns)
-        .set({
-          status: "failed",
-          error: message,
-          completedAt: new Date(),
-        })
-        .where(eq(agentAutomationRuns.id, logId));
-      await this.db
-        .update(agentHeartbeats)
-        .set({
-          lastRunAt: new Date(),
-          lastStatus: "failed",
-          lastError: message.slice(0, 500),
-          updatedAt: new Date(),
-        })
-        .where(eq(agentHeartbeats.agentId, row.agentId));
       throw err;
     }
   }

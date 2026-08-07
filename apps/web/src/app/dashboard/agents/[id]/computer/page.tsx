@@ -637,7 +637,7 @@ function CreateComputerDialog({
             </p>
           ) : null}
           {!createItems.length ? (
-            <p className="text-[11px] text-amber-700 dark:text-amber-400">
+            <p className="text-[11px] text-warning-foreground">
               当前没有可用运行节点。请联系管理员授权本机 Runner，或等待共享 Runner 上线。
             </p>
           ) : null}

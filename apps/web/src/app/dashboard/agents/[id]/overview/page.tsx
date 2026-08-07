@@ -10,7 +10,7 @@ import {
   MessageSquare,
   Plug,
   Settings2,
-  Sparkles,
+  Blocks,
   Wrench,
   ArrowUpRight,
 } from "lucide-react";
@@ -24,11 +24,11 @@ const QUICK_LINKS = [
   { href: "computer", label: "电脑", icon: HardDrive, hint: "工作区容器" },
   { href: "web", label: "网页", icon: Globe, hint: "搜索与抓取" },
   { href: "memory", label: "记忆", icon: Brain, hint: "长期记忆" },
-  { href: "skills", label: "技能", icon: Sparkles, hint: "Skill 包" },
+  { href: "skills", label: "技能", icon: Blocks, hint: "Skill 包" },
   { href: "mcp", label: "MCP", icon: Cable, hint: "工具绑定" },
   { href: "gateway", label: "AI Gateway", icon: Plug, hint: "模型代理与 Key" },
   { href: "platforms", label: "消息平台", icon: MessageSquare, hint: "外部渠道" },
-  { href: "automation", label: "自动化", icon: AlarmClock, hint: "定时与周期" },
+  { href: "automation", label: "自动化", icon: AlarmClock, hint: "定时任务" },
   { href: "tool-calls", label: "调用记录", icon: Wrench, hint: "工具轨迹" },
 ] as const;
 

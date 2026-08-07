@@ -63,9 +63,9 @@ type ListPayload = {
 
 const TONE_BADGE: Record<LifecycleView["tone"], string> = {
   neutral: "",
-  info: "border-sky-500/40 text-sky-700 dark:text-sky-300",
-  success: "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
-  warn: "border-amber-500/40 text-amber-700 dark:text-amber-300",
+  info: "text-muted-foreground",
+  success: "border-success/40 text-success",
+  warn: "border-warning/40 text-warning-foreground",
   danger: "border-destructive/50 text-destructive",
 };
 

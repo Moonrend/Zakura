@@ -152,7 +152,7 @@ export type CloudAgentRuntimeDeps = {
   agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
   /** 远程 Chat SDK 通道工具（可选；远程会话注入 chat_* 发帖/回帖工具） */
   remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
-  /** 定时 / 心跳自动化（可选；主 chat 注入 schedule/heartbeat 工具） */
+  /** 定时任务自动化（可选；主 chat 注入 schedule 工具） */
   automation?: AgentAutomationService | null;
 };
 
@@ -192,7 +192,7 @@ export class CloudAgentRuntime {
     const session = await this.store.createSession({
       tenantId: input.tenantId,
       agentId: input.agentId,
-      title: input.title.slice(0, 80) || (input.kind === "heartbeat" ? "心跳" : "定时任务"),
+      title: input.title.slice(0, 80) || "定时任务",
       kind: "system",
       origin: {
         source: "system",
@@ -204,11 +204,30 @@ export class CloudAgentRuntime {
       },
     });
 
+    // 标明自动触发，避免 Agent 当成用户实时对话去追问/寒暄
+    const name = input.scheduleName?.trim();
+    const content =
+      input.kind === "schedule"
+        ? [
+            `【定时任务】这是系统按计划自动触发的定时任务${name ? `「${name}」` : ""}，不是用户正在与你实时对话。`,
+            "请直接执行下方任务内容，完成后简要汇报结果；不要反问「需要我做什么」或等待用户回复。",
+            "",
+            "## 任务内容",
+            prompt,
+          ].join("\n")
+        : [
+            "【心跳任务】这是系统自动触发的心跳检查，不是用户正在与你实时对话。",
+            "请直接执行下方内容，完成后简要汇报；不要反问或等待用户回复。",
+            "",
+            "## 任务内容",
+            prompt,
+          ].join("\n");
+
     const { runId } = await this.startTurn({
       tenantId: input.tenantId,
       agentId: input.agentId,
       sessionId: session.id,
-      content: prompt,
+      content,
     });
     return { sessionId: session.id, runId };
   }
@@ -1089,7 +1108,6 @@ export class CloudAgentRuntime {
             return "会话工具";
           }
           if (isAutomationToolName(modelName)) {
-            if (modelName.includes("heartbeat")) return "心跳";
             if (modelName.includes("schedule")) return "定时任务";
             return "自动化";
           }
