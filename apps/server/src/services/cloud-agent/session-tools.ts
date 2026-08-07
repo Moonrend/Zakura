@@ -145,7 +145,10 @@ async function loadSessionMessages(
   store: CloudAgentSessionStore,
   sessionId: string,
 ): Promise<{ messages: ReturnType<typeof eventsToMessages>; turns: number }> {
-  const events = await store.listEvents(sessionId, { limit: 2000 });
+  const lastCompaction = await store.getLastCompaction(sessionId);
+  const events = await store.listEventsForChain(sessionId, {
+    afterSeq: lastCompaction?.seq ?? 0,
+  });
   const stored = events.map((e) => ({
     type: e.type,
     runId: e.runId,
@@ -256,9 +259,7 @@ export async function callSessionTool(
         typeof args.max_chars === "number"
           ? Math.min(Math.max(args.max_chars, 2000), 24_000)
           : 12_000;
-      const lastCompact = [...(await store.listEvents(sessionId, { limit: 2000 }))]
-        .reverse()
-        .find((e) => e.type === "context_compacted");
+      const lastCompact = await store.getLastCompaction(sessionId);
       const existingSummary =
         typeof (lastCompact?.payload as Record<string, unknown> | undefined)?.summary ===
         "string"

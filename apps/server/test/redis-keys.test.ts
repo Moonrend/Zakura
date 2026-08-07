@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { REDIS_KEYS, isRedisEnabled, redisUrlFromEnv } from "../src/services/redis.js";
-import { EVENT_RING_MAX, REDIS_TTL } from "../src/services/redis-store.js";
+import { EVENT_RING_MAX, REDIS_TTL, clipEventWindow } from "../src/services/redis-store.js";
 
 describe("redis helpers", () => {
   it("builds stable key namespaces", () => {
@@ -17,6 +17,12 @@ describe("redis helpers", () => {
     assert.equal(REDIS_KEYS.auth("abc"), "zakura:auth:key:abc");
     assert.equal(REDIS_KEYS.tools("a1"), "zakura:tools:agent:a1");
     assert.match(REDIS_KEYS.gwClient("a1", "ck"), /^zakura:gw:client:a1:/);
+  });
+
+  it("clipEventWindow keeps newest on full read, oldest on catch-up", () => {
+    const seqs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert.deepEqual(clipEventWindow(seqs, 3, 0), [8, 9, 10]);
+    assert.deepEqual(clipEventWindow(seqs, 3, 5), [1, 2, 3]);
   });
 
   it("keeps Memoh-like TTLs", () => {

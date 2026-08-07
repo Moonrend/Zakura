@@ -246,12 +246,24 @@ export function ConnectorConfigSheet({
       .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
   }, [open]);
 
+  const supportsInboundWebhook = useMemo(
+    () =>
+      !!connector &&
+      connector.ref.startsWith("email-") &&
+      connector.ref !== "email-bettermail" &&
+      (connector.auth.settings ?? []).some((field) => field.key === "inboundSecret"),
+    [connector],
+  );
+
   useEffect(() => {
-    if (!open || !connector?.ref.startsWith("email-")) return;
+    if (!open || !supportsInboundWebhook) {
+      setEmailWebhookUrl("");
+      return;
+    }
     void api<{ emailWebhookUrl?: string }>("/api/remote-channels")
       .then((result) => setEmailWebhookUrl(result.emailWebhookUrl ?? ""))
       .catch(() => setEmailWebhookUrl(""));
-  }, [connector?.ref, open]);
+  }, [open, supportsInboundWebhook]);
 
   async function save() {
     if (!connector) return;
@@ -411,7 +423,7 @@ export function ConnectorConfigSheet({
               </div>
               {connectors.length > 1 ? (
                 <label className="mt-4 block space-y-1.5">
-                  <span className="text-xs text-muted-foreground">邮箱服务类型</span>
+                  <span className="text-xs text-muted-foreground">连接器</span>
                   <select
                     value={connector.ref}
                     onChange={(event) => setActiveRef(event.target.value)}
@@ -707,7 +719,7 @@ export function ConnectorConfigSheet({
                 )}
               </section>
 
-              {connector.ref.startsWith("email-") && emailWebhookUrl ? (
+              {supportsInboundWebhook && emailWebhookUrl ? (
                 <section className="rounded-lg border border-dashed border-border p-3">
                   <h2 className="text-sm font-medium">入站 Webhook</h2>
                   <p className="mt-1 text-xs text-muted-foreground">

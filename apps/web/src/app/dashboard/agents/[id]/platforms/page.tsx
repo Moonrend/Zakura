@@ -23,7 +23,7 @@ export default function AgentPlatformsPage() {
         title="消息平台"
         description={
           <>
-            实例凭据独立 · 邮箱见{" "}
+            实例凭据独立 · SMTP / Amail / Bettermail 等见{" "}
             <a
               href="/dashboard/connectors"
               className="underline underline-offset-2 hover:text-foreground"

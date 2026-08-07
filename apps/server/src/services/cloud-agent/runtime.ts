@@ -269,7 +269,7 @@ export class CloudAgentRuntime {
     let targetMessageId: string;
     if (isRegenerate) {
       if (session.lastSeq === 0) throw new Error("会话为空，无法重新生成");
-      const events = await this.store.listEvents(input.sessionId, { limit: 2000 });
+      const events = await this.store.listEventsForChain(input.sessionId, { afterSeq: 0 });
       if (input.regenerateOfMessageId) {
         const found = events.some(
           (e) =>
@@ -555,7 +555,18 @@ export class CloudAgentRuntime {
     if (!agent) throw new Error("Agent 不存在");
     const cloud = agentCloudConfig(agent);
 
-    const history = await this.store.listEvents(input.sessionId, { limit: 2000 });
+    const lastCompaction = await this.store.getLastCompaction(input.sessionId);
+    const lastCompactionSeq = lastCompaction?.seq ?? 0;
+    const previousSummary =
+      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
+      "string"
+        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
+        : "";
+
+    // 与 executeRun 相同投影：压缩点之后的全部事件
+    const history = await this.store.listEventsForChain(input.sessionId, {
+      afterSeq: lastCompactionSeq,
+    });
     const lastUser = [...history].reverse().find((e) => e.type === "user_message");
     const targetMessageId = lastUser
       ? (lastUser.payload as Record<string, unknown>).messageId
@@ -567,29 +578,9 @@ export class CloudAgentRuntime {
             throw new Error("会话中没有可压缩的消息");
           })();
 
-    const lastCompaction = [...history]
-      .reverse()
-      .find((e) => e.type === "context_compacted");
-    const lastCompactionSeq = lastCompaction?.seq ?? 0;
-    const previousSummary =
-      typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
-      "string"
-        ? String((lastCompaction!.payload as Record<string, unknown>).summary)
-        : "";
-
-    const targetUserEvent = history.find(
-      (e) =>
-        e.type === "user_message" &&
-        (e.payload as Record<string, unknown>).messageId === targetMessageId,
-    );
-    const canUsePreviousSummary =
-      Boolean(previousSummary) && Boolean(targetUserEvent && targetUserEvent.seq > lastCompactionSeq);
-    const chainEvents = canUsePreviousSummary
-      ? history.filter((e) => e.seq > lastCompactionSeq)
-      : history;
-
+    const canUsePreviousSummary = Boolean(previousSummary);
     const chainRes = buildChainMessages(
-      chainEvents.map((e) => ({
+      history.map((e) => ({
         type: e.type,
         runId: e.runId,
         payload: e.payload as unknown as Record<string, unknown>,
@@ -600,9 +591,8 @@ export class CloudAgentRuntime {
     const budget = compactBudgetFromCloud(cloud);
     prepareHistoryForModel(allMessages, budget);
     const beforeChars = approxMessagesChars(allMessages);
-    const newerEvents = history.filter((e) => e.seq > lastCompactionSeq);
-    const newerUserMessages = newerEvents.filter((e) => e.type === "user_message").length;
-    const newerAssistantMessages = newerEvents.filter(
+    const newerUserMessages = history.filter((e) => e.type === "user_message").length;
+    const newerAssistantMessages = history.filter(
       (e) => e.type === "assistant_message",
     ).length;
     if (allMessages.length <= budget.keepRecent && !previousSummary) {
@@ -767,32 +757,36 @@ export class CloudAgentRuntime {
       payload: { runId, status: "thinking" },
     });
 
-    const history = await this.store.listEvents(sessionId, {
-      limit: 200,
-      skipFlush: true,
-    });
-    const lastCompaction = [...history]
-      .reverse()
-      .find((e) => e.type === "context_compacted");
+    // OpenCode / Memoh 式投影：
+    // 模型上下文 = 最近 context_compacted 检查点之后的全部 durable 事件（+ 摘要进 system）；
+    // Redis 热环只服务 SSE，不参与投影；体积用字符预算管理，不用事件条数窗。
+    const lastCompaction = await this.store.getLastCompaction(sessionId);
     const lastCompactionSeq = lastCompaction?.seq ?? 0;
     const compactedSummary =
       typeof (lastCompaction?.payload as Record<string, unknown> | undefined)?.summary ===
       "string"
         ? String((lastCompaction!.payload as Record<string, unknown>).summary)
         : "";
-    const targetUserEvent = history.find(
+
+    let history = await this.store.listEventsForChain(sessionId, {
+      afterSeq: lastCompactionSeq,
+    });
+    const targetInHistory = history.some(
       (e) =>
         e.type === "user_message" &&
         (e.payload as Record<string, unknown>).messageId === input.targetMessageId,
     );
-    const canUseCompactedSummary =
-      Boolean(compactedSummary) && Boolean(targetUserEvent && targetUserEvent.seq > lastCompactionSeq);
-    const chainEvents = canUseCompactedSummary
-      ? history.filter((e) => e.seq > lastCompactionSeq)
-      : history;
+    // 目标在压缩点之前（例如 regenerate 旧消息）：拉全量，不用摘要
+    let historySummary = "";
+    if (targetInHistory && compactedSummary) {
+      historySummary = compactedSummary;
+    } else if (!targetInHistory) {
+      history = await this.store.listEventsForChain(sessionId, { afterSeq: 0 });
+    }
+
     // 沿分支链重建上下文：重新生成的旧变体与其他分支不进入模型输入
     const chainRes = buildChainMessages(
-      chainEvents.map((e) => ({
+      history.map((e) => ({
         type: e.type,
         runId: e.runId,
         payload: e.payload as unknown as Record<string, unknown>,
@@ -810,7 +804,6 @@ export class CloudAgentRuntime {
       });
     }
 
-    let historySummary = canUseCompactedSummary ? compactedSummary : "";
     const sourceItems: CloudAgentContextSourceItem[] = [];
     if (historySummary) {
       sourceItems.push({

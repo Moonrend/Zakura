@@ -141,6 +141,8 @@ export default function ConnectorsHub() {
 
   useEffect(() => {
     if (selectedSlug === "agent-remote") router.replace("/dashboard/agents");
+    // 旧「邮箱」合并入口已拆成独立连接器
+    if (selectedSlug === "email") router.replace("/dashboard/connectors");
   }, [router, selectedSlug]);
 
   function openConnector(slug: string) {

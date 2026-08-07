@@ -93,19 +93,27 @@ export async function readRunSnapshot(runId: string): Promise<RunSnapshotRedis |
  * 事件环：RPUSH + LTRIM，供 SSE 续传 / listEvents 热读，减少打 Postgres。
  * 与 pending（待落库 delta）分离：环里是已对外可见的完整事件。
  */
-export function enqueueEventRing(
+/** afterSeq>0 续传取最旧一页；否则取最新（避免截掉刚写入的目标消息） */
+export function clipEventWindow<T>(events: T[], limit: number, afterSeq: number): T[] {
+  return afterSeq > 0 ? events.slice(0, limit) : events.slice(-limit);
+}
+
+export async function enqueueEventRing(
   redis: ZakuraRedis,
   sessionId: string,
   event: CloudAgentEvent,
-): void {
+): Promise<void> {
   const key = REDIS_KEYS.events(sessionId);
-  void redis
-    .multi()
-    .rPush(key, JSON.stringify(event))
-    .lTrim(key, -EVENT_RING_MAX, -1)
-    .expire(key, REDIS_TTL.session)
-    .exec()
-    .catch((err) => console.warn("[redis] event ring push failed:", err));
+  try {
+    await redis
+      .multi()
+      .rPush(key, JSON.stringify(event))
+      .lTrim(key, -EVENT_RING_MAX, -1)
+      .expire(key, REDIS_TTL.session)
+      .exec();
+  } catch (err) {
+    console.warn("[redis] event ring push failed:", err);
+  }
 }
 
 /** 从事件环按 afterSeq 读取；覆盖不全时返回 null，调用方回退 DB */
@@ -144,7 +152,7 @@ export async function readEventRing(
     const oldest = events[0]!.seq;
     if (afterSeq > 0 && oldest > afterSeq + 1) return null;
     events.sort((a, b) => a.seq - b.seq);
-    return events.slice(0, limit);
+    return clipEventWindow(events, limit, afterSeq);
   } catch {
     return null;
   }

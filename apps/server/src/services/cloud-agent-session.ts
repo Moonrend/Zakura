@@ -33,6 +33,7 @@ import {
 } from "./redis.js";
 import {
   enqueueEventRing,
+  clipEventWindow,
   readEventRing,
   writeRunSnapshot,
   writeSessionMeta,
@@ -229,12 +230,13 @@ export class CloudAgentSessionStore {
   }
 
   /** 事件对外可见后写入 Redis 环 + 刷新 meta（Memoh 式活状态） */
-  private mirrorEventToRedis(
+  private async mirrorEventToRedis(
     redis: ZakuraRedis | null,
     event: CloudAgentEvent,
     meta: { tenantId: string; agentId: string },
   ) {
-    if (redis) enqueueEventRing(redis, event.sessionId, event);
+    // 同步事件必须等环写完：executeRun 紧接着 listEvents 读环，否则会丢刚落库的 user_message
+    if (redis) await enqueueEventRing(redis, event.sessionId, event);
     void writeSessionMeta(event.sessionId, {
       tenantId: meta.tenantId,
       agentId: meta.agentId,
@@ -854,7 +856,7 @@ export class CloudAgentSessionStore {
     });
 
     this.emit(event);
-    this.mirrorEventToRedis(redis, event, meta);
+    await this.mirrorEventToRedis(redis, event, meta);
     void this.publishRedis(redis, event);
     if (SIDEBAR_TOUCH_TYPES.has(input.type)) {
       platformEvents.publish(meta.tenantId, {
@@ -915,7 +917,7 @@ export class CloudAgentSessionStore {
     this.emit(event.event);
     if (isRedisEnabled()) {
       void getRedis().then((redis) => {
-        if (redis) this.mirrorEventToRedis(redis, event.event, event);
+        if (redis) void this.mirrorEventToRedis(redis, event.event, event);
       });
     }
     if (SIDEBAR_TOUCH_TYPES.has(input.type)) {
@@ -1004,44 +1006,62 @@ export class CloudAgentSessionStore {
 
     const afterSeq = opts?.afterSeq ?? 0;
     const limit = Math.min(Math.max(opts?.limit ?? 500, 1), 2000);
+    const expectedLast = this.sessionMeta.get(sessionId)?.lastSeq;
 
-    // 优先读 Redis 事件环（Memoh 式活状态）；空洞再回退 Postgres
+    // 优先读 Redis 事件环（Memoh 式活状态）；空洞 / 落后于本进程已分配 seq 再回退 Postgres
     const fromRing = await readEventRing(sessionId, { afterSeq, limit });
     if (fromRing) {
       const redis = await getRedis();
-      if (!redis) return fromRing;
-      // 合并尚未入库的 pending delta
-      try {
-        const raw = await redis.lRange(REDIS_KEYS.pending(sessionId), 0, -1);
-        if (raw.length === 0) return fromRing;
-        const seen = new Set(fromRing.map((e) => e.seq));
-        const merged = [...fromRing];
-        for (const s of raw) {
-          try {
-            const ev = (JSON.parse(s) as PendingRow).event;
-            if (ev.seq > afterSeq && !seen.has(ev.seq)) {
-              seen.add(ev.seq);
-              merged.push(ev);
+      let merged = fromRing;
+      if (redis) {
+        try {
+          const raw = await redis.lRange(REDIS_KEYS.pending(sessionId), 0, -1);
+          if (raw.length > 0) {
+            const seen = new Set(fromRing.map((e) => e.seq));
+            merged = [...fromRing];
+            for (const s of raw) {
+              try {
+                const ev = (JSON.parse(s) as PendingRow).event;
+                if (ev.seq > afterSeq && !seen.has(ev.seq)) {
+                  seen.add(ev.seq);
+                  merged.push(ev);
+                }
+              } catch {
+                /* skip */
+              }
             }
-          } catch {
-            /* skip */
+            merged.sort((a, b) => a.seq - b.seq);
           }
+        } catch {
+          merged = fromRing;
         }
-        merged.sort((a, b) => a.seq - b.seq);
-        return merged.slice(0, limit);
-      } catch {
-        return fromRing;
+      }
+      const newest = merged.length > 0 ? merged[merged.length - 1]!.seq : 0;
+      // 同步事件刚写完、环推送尚未可见时 newest < expectedLast → 回退 DB
+      if (expectedLast == null || newest >= expectedLast || afterSeq > 0) {
+        return clipEventWindow(merged, limit, afterSeq);
       }
     }
 
-    const rows = await this.db
-      .select()
-      .from(cloudAgentEvents)
-      .where(
-        and(eq(cloudAgentEvents.sessionId, sessionId), gt(cloudAgentEvents.seq, afterSeq)),
-      )
-      .orderBy(asc(cloudAgentEvents.seq))
-      .limit(limit);
+    // afterSeq>0：按序续传下一页；否则取最新 limit 条（再翻成升序）
+    const rows =
+      afterSeq > 0
+        ? await this.db
+            .select()
+            .from(cloudAgentEvents)
+            .where(
+              and(eq(cloudAgentEvents.sessionId, sessionId), gt(cloudAgentEvents.seq, afterSeq)),
+            )
+            .orderBy(asc(cloudAgentEvents.seq))
+            .limit(limit)
+        : (
+            await this.db
+              .select()
+              .from(cloudAgentEvents)
+              .where(eq(cloudAgentEvents.sessionId, sessionId))
+              .orderBy(desc(cloudAgentEvents.seq))
+              .limit(limit)
+          ).reverse();
     const fromDb = rows.map(toEvent);
 
     const redis = await getRedis();
@@ -1073,7 +1093,63 @@ export class CloudAgentSessionStore {
       merged.push(e);
     }
     merged.sort((a, b) => a.seq - b.seq);
-    return merged.slice(0, limit);
+    return clipEventWindow(merged, limit, afterSeq);
+  }
+
+  /**
+   * 模型上下文投影专用（对齐 OpenCode / Memoh）：
+   * - 读 Postgres 权威事件流，不走 Redis 热环（热环只服务 SSE）
+   * - 返回 afterSeq 之后的**全部**事件（分页），不做条数尾窗截断
+   * - 上下文体积由上层用字符/token 预算 + compaction 管理
+   */
+  async listEventsForChain(
+    sessionId: string,
+    opts?: { afterSeq?: number },
+  ): Promise<CloudAgentEvent[]> {
+    await this.flushPending(sessionId);
+    const afterSeq = opts?.afterSeq ?? 0;
+    const pageSize = 500;
+    // ponytail: 极端兜底；正常会话靠 context_compacted 切边界，不应摸到此上限
+    const hardCap = 50_000;
+    const out: CloudAgentEvent[] = [];
+    let cursor = afterSeq;
+    for (;;) {
+      const rows = await this.db
+        .select()
+        .from(cloudAgentEvents)
+        .where(
+          and(eq(cloudAgentEvents.sessionId, sessionId), gt(cloudAgentEvents.seq, cursor)),
+        )
+        .orderBy(asc(cloudAgentEvents.seq))
+        .limit(pageSize);
+      if (rows.length === 0) break;
+      for (const row of rows) out.push(toEvent(row));
+      cursor = rows[rows.length - 1]!.seq;
+      if (rows.length < pageSize) break;
+      if (out.length >= hardCap) {
+        console.warn(
+          `[cloud-agent] listEventsForChain hit hardCap=${hardCap} session=${sessionId} afterSeq=${afterSeq}`,
+        );
+        break;
+      }
+    }
+    return out;
+  }
+
+  /** 最近一次上下文压缩事件（摘要在 payload.summary） */
+  async getLastCompaction(sessionId: string): Promise<CloudAgentEvent | null> {
+    const rows = await this.db
+      .select()
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "context_compacted"),
+        ),
+      )
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(1);
+    return rows[0] ? toEvent(rows[0]) : null;
   }
 
   async createRun(sessionId: string): Promise<CloudAgentRun> {

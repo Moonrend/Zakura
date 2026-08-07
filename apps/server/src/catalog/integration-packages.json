@@ -387,31 +387,31 @@
     ]
   },
   {
-    "slug": "email",
-    "name": "邮箱",
-    "description": "平台连接器：SMTP、Mailgun、Resend API、Amail、Bettermail。为 Agent 提供发信/收件工具；消息会话平台请使用 Chat SDK（Resend Email 等）。",
+    "slug": "email-smtp",
+    "name": "SMTP",
+    "description": "通过 SMTP 发送邮件。与 Mailgun、Resend、Amail、Bettermail 相互独立，各自单独配置。",
     "publisher": "reCloud",
     "category": "communication",
     "icon": "@",
     "accent": "#0f766e",
-    "homepage": "https://amail.wuyuan.dev/",
+    "homepage": "https://nodemailer.com/smtp/",
     "verified": false,
     "featured": true,
     "manifest": {
-      "summary": "在连接器中心配置邮箱凭据与工具。Amail 发信、Bettermail 收件；可选入站触发 Agent（需白名单）。Agent「平台」页仅接入 Chat SDK 消息通道。"
+      "summary": "仅发信。配置 SMTP 主机与发件地址后，Agent 可调用 send_email。可选入站 Webhook 触发 Agent。"
     },
     "components": [
       {
         "kind": "connector",
         "ref": "email-smtp",
         "name": "SMTP",
-        "description": "通过 SMTP 发送邮件；可与其它邮箱 provider 同时启用。",
+        "description": "通过 SMTP 发送邮件。",
         "config": {
           "providerId": "email",
           "auth": {
             "kind": "custom",
             "profile": "email-smtp",
-            "profileLabel": "SMTP 邮箱凭据",
+            "profileLabel": "SMTP 凭据",
             "docsUrl": "https://nodemailer.com/smtp/",
             "fields": [
               { "key": "smtpHost", "label": "SMTP 主机", "type": "text", "required": true, "placeholder": "smtp.example.com" },
@@ -428,20 +428,44 @@
               { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
             ]
           },
-          "pathHints": ["zakura://email/"]
+          "pathHints": ["zakura://email/smtp"]
         }
       },
+      {
+        "kind": "tool",
+        "ref": "email-smtp",
+        "name": "SMTP 发信",
+        "description": "通过 SMTP 发送邮件。",
+        "config": { "providerId": "email", "product": "smtp", "connectorRef": "email-smtp", "mcpUrl": "zakura://email/smtp", "scopes": "" }
+      }
+    ]
+  },
+  {
+    "slug": "email-mailgun",
+    "name": "Mailgun",
+    "description": "通过 Mailgun API 发送邮件。与其它邮箱连接器相互独立，各自单独配置。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "@",
+    "accent": "#f06b66",
+    "homepage": "https://documentation.mailgun.com/docs/mailgun/api-reference/",
+    "verified": false,
+    "featured": false,
+    "manifest": {
+      "summary": "仅发信。配置 API Key 与域名后，Agent 可调用 send_email。可选入站 Webhook 触发 Agent。"
+    },
+    "components": [
       {
         "kind": "connector",
         "ref": "email-mailgun",
         "name": "Mailgun",
-        "description": "通过 Mailgun API 发送邮件；可与其它邮箱 provider 同时启用。",
+        "description": "通过 Mailgun API 发送邮件。",
         "config": {
           "providerId": "email",
           "auth": {
             "kind": "custom",
             "profile": "email-mailgun",
-            "profileLabel": "Mailgun 邮箱凭据",
+            "profileLabel": "Mailgun 凭据",
             "docsUrl": "https://documentation.mailgun.com/docs/mailgun/api-reference/",
             "fields": [
               { "key": "apiToken", "label": "Mailgun API Key", "type": "secret", "required": true },
@@ -456,75 +480,143 @@
               { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
             ]
           },
-          "pathHints": ["zakura://email/"]
+          "pathHints": ["zakura://email/mailgun"]
         }
       },
       {
+        "kind": "tool",
+        "ref": "email-mailgun",
+        "name": "Mailgun 发信",
+        "description": "通过 Mailgun API 发送邮件。",
+        "config": { "providerId": "email", "product": "mailgun", "connectorRef": "email-mailgun", "mcpUrl": "zakura://email/mailgun", "scopes": "" }
+      }
+    ]
+  },
+  {
+    "slug": "email-resendapi",
+    "name": "Resend",
+    "description": "通过 Resend API 发送邮件。与 Chat SDK「Resend Email」消息通道不同；本连接器只提供发信工具。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "@",
+    "accent": "#000000",
+    "homepage": "https://resend.com/docs/api-reference/emails/send-email",
+    "verified": false,
+    "featured": true,
+    "manifest": {
+      "summary": "仅发信。配置 API Key 后，Agent 可调用 send_email。可选自定义 API 地址与入站 Webhook。"
+    },
+    "components": [
+      {
         "kind": "connector",
         "ref": "email-resendapi",
-        "name": "Resend API",
-        "description": "通过 Resend API 发送邮件；可与其它邮箱 provider 同时启用。",
+        "name": "Resend",
+        "description": "通过 Resend API 发送邮件。",
         "config": {
           "providerId": "email",
           "auth": {
             "kind": "custom",
             "profile": "email-resendapi",
-            "profileLabel": "Resend 邮箱凭据",
+            "profileLabel": "Resend 凭据",
             "docsUrl": "https://resend.com/docs/api-reference/emails/send-email",
             "fields": [
-              { "key": "apiToken", "label": "Resend API Key", "type": "secret", "required": true }
+              { "key": "apiToken", "label": "Resend API Key", "type": "secret", "required": true },
+              { "key": "baseUrl", "label": "Resend API 地址", "type": "url", "placeholder": "https://api.resend.com/emails" }
             ],
             "settings": [
               { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
-              { "key": "baseUrl", "label": "Resend API 地址", "type": "url" },
               { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
               { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
               { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
               { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
             ]
           },
-          "pathHints": ["zakura://email/"]
+          "pathHints": ["zakura://email/resendapi"]
         }
       },
+      {
+        "kind": "tool",
+        "ref": "email-resendapi",
+        "name": "Resend 发信",
+        "description": "通过 Resend API 发送邮件。",
+        "config": { "providerId": "email", "product": "resendapi", "connectorRef": "email-resendapi", "mcpUrl": "zakura://email/resendapi", "scopes": "" }
+      }
+    ]
+  },
+  {
+    "slug": "email-amail",
+    "name": "Amail",
+    "description": "通过自托管 Amail 网关发信（仅发件，不收件）。支持自定义 API 地址；与 Bettermail / SMTP 等相互独立。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "@",
+    "accent": "#0ea5e9",
+    "homepage": "https://amail.wuyuan.dev/",
+    "verified": false,
+    "featured": true,
+    "manifest": {
+      "summary": "仅发信。填写 API Key 与可选自定义 API 地址后，Agent 可发送并列出已发送邮件。"
+    },
+    "components": [
       {
         "kind": "connector",
         "ref": "email-amail",
         "name": "Amail",
-        "description": "通过 Amail 发送并列出已发送邮件；可与其它邮箱 provider 同时启用。",
+        "description": "通过 Amail 发送并列出已发送邮件（仅发件）。",
         "config": {
           "providerId": "email",
           "auth": {
             "kind": "custom",
             "profile": "email-amail",
-            "profileLabel": "Amail 邮箱凭据",
+            "profileLabel": "Amail 凭据",
             "docsUrl": "https://amail.wuyuan.dev/",
             "fields": [
               { "key": "apiToken", "label": "Amail API Key", "type": "secret", "required": true },
-              { "key": "providerId", "label": "Amail Provider ID", "type": "text" }
+              { "key": "baseUrl", "label": "Amail API 地址", "type": "url", "placeholder": "https://amail-service.192325.xyz" },
+              { "key": "providerId", "label": "Amail Provider ID", "type": "text", "placeholder": "auto" }
             ],
             "settings": [
-              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" },
-              { "key": "baseUrl", "label": "Amail 服务地址", "type": "url" },
-              { "key": "inboundEnabled", "label": "收到邮件时触发 Agent", "type": "boolean" },
-              { "key": "inboundAgentId", "label": "入站目标 Agent ID", "type": "text" },
-              { "key": "allowedEmails", "label": "入站发件人白名单", "type": "textarea", "placeholder": "alice@example.com\n*@trusted.example.com" },
-              { "key": "inboundSecret", "label": "入站 Webhook 密钥", "type": "secret" }
+              { "key": "fromEmail", "label": "默认发件地址", "type": "text", "required": true, "placeholder": "agent@example.com" }
             ]
           },
-          "pathHints": ["zakura://email/"]
+          "pathHints": ["zakura://email/amail"]
         }
       },
+      {
+        "kind": "tool",
+        "ref": "email-amail",
+        "name": "Amail 发信",
+        "description": "通过 Amail API 发送并列出已发送邮件。",
+        "config": { "providerId": "email", "product": "amail", "connectorRef": "email-amail", "mcpUrl": "zakura://email/amail", "scopes": "" }
+      }
+    ]
+  },
+  {
+    "slug": "email-bettermail",
+    "name": "Bettermail",
+    "description": "从 Bettermail 主动拉取收件箱（仅收件，不发信）。与 Amail / SMTP 等相互独立，各自单独配置。",
+    "publisher": "reCloud",
+    "category": "communication",
+    "icon": "@",
+    "accent": "#7c3aed",
+    "homepage": "https://bettermail.dev/",
+    "verified": false,
+    "featured": true,
+    "manifest": {
+      "summary": "仅主动收件。配置服务地址与邮箱后，Agent 可调用 receive_emails；可选轮询触发 Agent。"
+    },
+    "components": [
       {
         "kind": "connector",
         "ref": "email-bettermail",
         "name": "Bettermail",
-        "description": "从 Bettermail 收件箱读取邮件；可与其它邮箱 provider 同时启用。",
+        "description": "从 Bettermail 主动读取收件箱（仅收件）。",
         "config": {
           "providerId": "email",
           "auth": {
             "kind": "custom",
             "profile": "email-bettermail",
-            "profileLabel": "Bettermail 邮箱凭据",
+            "profileLabel": "Bettermail 凭据",
             "docsUrl": "https://bettermail.dev/",
             "fields": [
               { "key": "apiToken", "label": "Bettermail API Token", "type": "secret" }
@@ -538,42 +630,14 @@
               { "key": "pollIntervalSeconds", "label": "收件轮询间隔（秒）", "type": "text", "defaultValue": "30" }
             ]
           },
-          "pathHints": ["zakura://email/"]
+          "pathHints": ["zakura://email/bettermail"]
         }
-      },
-      {
-        "kind": "tool",
-        "ref": "email-smtp",
-        "name": "SMTP 发信",
-        "description": "通过 SMTP 发送邮件。",
-        "config": { "providerId": "email", "product": "smtp", "connectorRef": "email-smtp", "mcpUrl": "zakura://email/smtp", "scopes": "" }
-      },
-      {
-        "kind": "tool",
-        "ref": "email-mailgun",
-        "name": "Mailgun 发信",
-        "description": "通过 Mailgun API 发送邮件。",
-        "config": { "providerId": "email", "product": "mailgun", "connectorRef": "email-mailgun", "mcpUrl": "zakura://email/mailgun", "scopes": "" }
-      },
-      {
-        "kind": "tool",
-        "ref": "email-resendapi",
-        "name": "Resend API 发信",
-        "description": "通过 Resend API 发送邮件。",
-        "config": { "providerId": "email", "product": "resendapi", "connectorRef": "email-resendapi", "mcpUrl": "zakura://email/resendapi", "scopes": "" }
-      },
-      {
-        "kind": "tool",
-        "ref": "email-amail",
-        "name": "Amail 发信",
-        "description": "通过 Amail API 发送并列出已发送邮件。",
-        "config": { "providerId": "email", "product": "amail", "connectorRef": "email-amail", "mcpUrl": "zakura://email/amail", "scopes": "" }
       },
       {
         "kind": "tool",
         "ref": "email-bettermail",
         "name": "Bettermail 收件",
-        "description": "从 Bettermail 收件箱读取邮件；读取后邮件会按 Bettermail API 语义被消费。",
+        "description": "从 Bettermail 收件箱主动读取邮件；读取后邮件会按 Bettermail API 语义被消费。",
         "config": { "providerId": "email", "product": "bettermail", "connectorRef": "email-bettermail", "mcpUrl": "zakura://email/bettermail", "scopes": "" }
       }
     ]
