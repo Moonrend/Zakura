@@ -616,8 +616,70 @@
 }
 
 /* ==========================================================================
+   聊天页配色：对齐 shadcn dark（深炭灰），侧栏再深一档
+   ========================================================================== */
+
+.chat-shell {
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chat-sidebar: oklch(0.97 0 0);
+  --chat-code-bg: oklch(0.97 0 0);
+  --chat-code-fg: oklch(0.205 0 0);
+  --chat-code-bar: oklch(0.955 0 0);
+  color-scheme: light;
+}
+
+.dark .chat-shell {
+  /* 与 shadcn neutral dark 同档：主区深炭，不是浅灰 */
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  /* 侧栏比主区更深 */
+  --chat-sidebar: oklch(0.11 0 0);
+  --chat-code-bg: oklch(0.205 0 0);
+  --chat-code-fg: oklch(0.92 0 0);
+  --chat-code-bar: oklch(0.18 0 0);
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 28%), 0 8px 28px oklch(0 0 0 / 36%);
+  color-scheme: dark;
+}
+
+.chat-shell .chat-sidebar {
+  background: var(--chat-sidebar);
+}
+
+/* ==========================================================================
    聊天 Markdown（markstream + KaTeX）
-   把 markstream 默认灰蓝硬编码色映射到本站中性色 token。
+   把 markstream 默认灰蓝硬编码色映射到聊天页 token。
    ========================================================================== */
 
 .chat-md {
@@ -653,21 +715,21 @@
   --table-border: var(--border);
   --ms-font-mono: var(--font-mono);
   --ms-radius: calc(var(--radius) + 2px);
-  --border: 0 0% 90%;
-  --background: 0 0% 100%;
-  --foreground: 0 0% 9%;
-  --secondary: 0 0% 96%;
-  --muted: 0 0% 96%;
+  --border: 0 0% 88%;
+  --background: 0 0% 98%;
+  --foreground: 0 0% 18%;
+  --secondary: 0 0% 93%;
+  --muted: 0 0% 93%;
   --muted-foreground: 0 0% 45%;
 }
 
 .dark .chat-md .markstream-react {
-  --border: 0 0% 20%;
-  --background: 0 0% 9%;
-  --foreground: 0 0% 98%;
-  --secondary: 0 0% 16%;
-  --muted: 0 0% 16%;
-  --muted-foreground: 0 0% 65%;
+  --border: 0 0% 100% / 10%;
+  --background: 0 0% 14.5%;
+  --foreground: 0 0% 98.5%;
+  --secondary: 0 0% 26.9%;
+  --muted: 0 0% 26.9%;
+  --muted-foreground: 0 0% 70.8%;
 }
 
 /* 段落节奏：首尾去边距，中间更紧凑可读 */
@@ -800,7 +862,7 @@
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: calc(var(--radius) + 2px);
-  background: var(--background);
+  background: color-mix(in oklch, var(--muted) 35%, var(--background));
   box-shadow: none;
 }
 
@@ -858,68 +920,120 @@
   border-top-color: var(--border);
 }
 
-/* 传统 Markdown 代码块：浅灰底，不要纯黑 */
+/* 代码块：Shiki 渲染 + 灰底 + 顶部复制栏 */
+.chat-md .markstream-react .code-block-container,
+.chat-md .markstream-react .code-block,
+.chat-md .markstream-react .code-block-node {
+  margin: 0.85em 0;
+  overflow: hidden;
+  border-radius: calc(var(--radius) + 4px);
+  border: 1px solid var(--border);
+  background: var(--chat-code-bg) !important;
+  color: var(--chat-code-fg);
+  box-shadow: none;
+}
+
+.chat-md .markstream-react .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  background: var(--chat-code-bar) !important;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.chat-md .markstream-react .code-block-language {
+  color: var(--muted-foreground);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.chat-md .markstream-react .code-block-btn,
+.chat-md .markstream-react .code-action-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+  border-radius: 0.35rem;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+  transition:
+    background-color 150ms var(--ease-fluid),
+    color 150ms var(--ease-fluid),
+    border-color 150ms var(--ease-fluid);
+}
+
+.chat-md .markstream-react .code-block-btn:hover,
+.chat-md .markstream-react .code-action-btn:hover {
+  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  border-color: color-mix(in oklch, var(--border) 50%, var(--foreground));
+  color: var(--foreground);
+}
+
+.chat-md .markstream-react .code-block-badge {
+  background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
+  color: var(--muted-foreground);
+}
+
+.chat-md .markstream-react .code-block-content,
+.chat-md .markstream-react .code-fallback-plain,
+.chat-md .markstream-react .code-block-content .shiki,
+.chat-md .markstream-react .code-block-content pre {
+  margin: 0 !important;
+  background: transparent !important;
+  font-size: 0.84em;
+  line-height: 1.65;
+  font-family: var(--font-mono);
+}
+
+.chat-md .markstream-react .code-block-content {
+  max-height: min(56vh, 28rem);
+  overflow: auto;
+  padding: 0.15rem 0;
+}
+
+.chat-md .markstream-react .code-block-content .shiki,
+.chat-md .markstream-react .code-block-content .shiki code {
+  background: transparent !important;
+}
+
 .chat-md .markstream-react pre[data-markstream-pre="1"],
 .chat-md .markstream-react pre[class^="language-"],
-.chat-md .markstream-react pre[class*=" language-"],
-.chat-md .markstream-react .code-block-node {
+.chat-md .markstream-react pre[class*=" language-"] {
   margin: 0.85em 0;
   padding: 0.9em 1em;
   overflow-x: auto;
   border-radius: calc(var(--radius) + 2px);
   border: 1px solid var(--border);
-  background: oklch(0.965 0 0);
-  color: var(--foreground);
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
   font-family: var(--font-mono);
   font-size: 0.84em;
   line-height: 1.65;
   tab-size: 2;
-  box-shadow: none;
 }
 
-.dark .chat-md .markstream-react pre[data-markstream-pre="1"],
-.dark .chat-md .markstream-react pre[class^="language-"],
-.dark .chat-md .markstream-react pre[class*=" language-"],
-.dark .chat-md .markstream-react .code-block-node {
-  background: oklch(0.3 0 0);
-  border-color: oklch(1 0 0 / 12%);
-  color: oklch(0.93 0 0);
-}
-
-.chat-md .markstream-react pre[data-markstream-pre="1"] > code,
-.chat-md .markstream-react pre[class^="language-"] > code,
-.chat-md .markstream-react pre[class*=" language-"] > code {
-  display: block;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  font: inherit;
-  color: inherit;
-  white-space: pre;
-}
-
-/* 数学公式 */
+/* 数学公式：无背景、无边框 */
 .chat-md .markstream-react .math-inline-wrapper {
   padding: 0 0.05em;
 }
 
 .chat-md .markstream-react .math-block-node {
-  margin: 0.85em 0;
+  margin: 0.75em 0;
 }
 
 .chat-md .markstream-react .math-block {
   margin: 0;
-  padding: 0.9em 1em;
+  padding: 0.35em 0;
   overflow-x: auto;
   text-align: center;
-  border-radius: calc(var(--radius) + 2px);
-  background: oklch(0.965 0 0);
-  border: 1px solid var(--border);
-}
-
-.dark .chat-md .markstream-react .math-block {
-  background: oklch(0.3 0 0);
-  border-color: oklch(1 0 0 / 12%);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .chat-md .markstream-react .math-block .katex-display {

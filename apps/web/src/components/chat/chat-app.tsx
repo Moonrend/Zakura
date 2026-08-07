@@ -107,6 +107,21 @@ const REASONING_KEY = "zakura_chat_reasoning";
 const DRAFT_KEY_PREFIX = "zakura_chat_draft";
 const DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000;
 
+/** 把当前 agent/session 写回地址栏，刷新后仍停在同一对话；新对话则清掉 session */
+function syncChatUrl(agentId: string | null, sessionId: string | null) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (agentId) url.searchParams.set("agent", agentId);
+  else url.searchParams.delete("agent");
+  if (sessionId) url.searchParams.set("session", sessionId);
+  else url.searchParams.delete("session");
+  const next = url.searchParams.toString()
+    ? `${url.pathname}?${url.searchParams.toString()}`
+    : url.pathname;
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (next !== current) window.history.replaceState({}, "", next);
+}
+
 /** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
 const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: string }> = [
   { value: "chat", label: SESSION_KIND_LABELS.chat },
@@ -516,6 +531,12 @@ export function ChatApp() {
       cancelled = true;
     };
   }, [agentId, authed, loadSession]);
+
+  // agentReady 后再同步 URL，避免首屏加载深链 session 前被清掉
+  useEffect(() => {
+    if (!authed || !agentReady) return;
+    syncChatUrl(agentId, sessionId);
+  }, [authed, agentReady, agentId, sessionId]);
 
   // 引导深链：Agent 就绪后自动发送首条消息
   useEffect(() => {
@@ -1198,7 +1219,7 @@ export function ChatApp() {
   }
 
   return (
-    <div className="flex h-svh bg-background">
+    <div className="chat-shell flex h-svh bg-background text-foreground">
       {/* ===== 侧边栏（桌面内联收展；移动端覆盖式抽屉） ===== */}
       {sidebarOpen && (
         <div
@@ -1209,9 +1230,9 @@ export function ChatApp() {
       )}
       <aside
         className={cn(
-          "flex h-full shrink-0 flex-col border-r border-border/60 bg-muted/20",
+          "chat-sidebar flex h-full shrink-0 flex-col border-r border-border/50",
           "md:transition-[width] md:duration-200",
-          "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[290px] max-md:bg-background max-md:shadow-xl max-md:transition-transform max-md:duration-200",
+          "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[290px] max-md:shadow-xl max-md:transition-transform max-md:duration-200",
           sidebarOpen
             ? "w-[264px] max-md:translate-x-0"
             : "w-0 overflow-hidden border-r-0 max-md:-translate-x-full",

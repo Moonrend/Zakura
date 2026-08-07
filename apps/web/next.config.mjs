@@ -15,14 +15,13 @@ const markstreamDist = path.join(
 const emptyModule = path.join(__dirname, "src/lib/empty-module.js");
 /**
  * 未安装的可选 peer → 空模块，避免 Next 编译失败。
- * 已安装的 peer（如 katex）不要放这里，否则公式/高亮会被静默 stub 掉。
+ * 已安装的 peer（katex / stream-markdown）不要放这里。
  */
 const optionalPeerAliases = {
   "@terrastruct/d2": emptyModule,
   "@antv/infographic": emptyModule,
   mermaid: emptyModule,
   "stream-monaco": emptyModule,
-  "stream-markdown": emptyModule,
 };
 const markstreamAliases = {
   "markstream-react$": path.join(markstreamDist, "index.js"),
@@ -33,7 +32,7 @@ const markstreamAliases = {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["markstream-react", "katex"],
+  transpilePackages: ["markstream-react", "katex", "stream-markdown"],
   turbopack: {
     resolveAlias: {
       "markstream-react": path.join(markstreamDist, "index.js"),
@@ -43,7 +42,6 @@ const nextConfig = {
       "@antv/infographic": "./src/lib/empty-module.js",
       mermaid: "./src/lib/empty-module.js",
       "stream-monaco": "./src/lib/empty-module.js",
-      "stream-markdown": "./src/lib/empty-module.js",
     },
   },
   webpack: (config, { webpack }) => {
@@ -53,7 +51,7 @@ const nextConfig = {
     };
     // 动态 import / 深层子路径有时绕过 resolve.alias，再用替换兜底（仅未安装 peer）
     const optionalPeerPattern =
-      /^(?:@terrastruct\/d2|@antv\/infographic|mermaid|stream-monaco|stream-markdown)$/;
+      /^(?:@terrastruct\/d2|@antv\/infographic|mermaid|stream-monaco)$/;
     config.plugins.push(
       new webpack.NormalModuleReplacementPlugin(optionalPeerPattern, emptyModule),
     );
