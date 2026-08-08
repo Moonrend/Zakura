@@ -39,6 +39,30 @@ describe("platform services catalog", () => {
     assert.equal(specs[0]!.ports?.[0]?.hostPort, 19080);
     assert.equal(specs[0]!.ports?.[0]?.hostIp, "127.0.0.1");
     assert.equal(specs[0]!.labels?.["zakura.service"], "searxng");
+    assert.equal(specs[0]!.env?.SEARXNG_LIMITER, "false");
+  });
+
+  it("mounts SearXNG settings with json format enabled", async () => {
+    const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dataDir = mkdtempSync(join(tmpdir(), "zakura-searxng-"));
+    try {
+      const specs = buildManagedSpecs(
+        PLATFORM_SERVICE_CATALOG.searxng,
+        {},
+        "zakura",
+        { dataDir },
+      );
+      const vol = specs[0]!.volumes?.[0];
+      assert.ok(vol?.hostPath);
+      assert.equal(vol!.containerPath, "/etc/searxng");
+      const yml = readFileSync(join(vol!.hostPath!, "settings.yml"), "utf8");
+      assert.match(yml, /formats:/);
+      assert.match(yml, /- json/);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("uses container DNS when the server runs in Docker", () => {

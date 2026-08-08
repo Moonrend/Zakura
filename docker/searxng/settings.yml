@@ -1,0 +1,9 @@
+# Zakura compose SearXNG — JSON required for web search API
+use_default_settings: true
+search:
+  formats:
+    - html
+    - json
+server:
+  limiter: false
+  bind_address: "0.0.0.0"

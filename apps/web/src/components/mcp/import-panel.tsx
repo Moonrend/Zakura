@@ -208,7 +208,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
         }>;
       }>("/api/mcp/import-vscode", {
         method: "POST",
-        json: { config: vscodeJson, keys, start: startAfter },
+        json: { config: vscodeJson, keys, start: startAfter, all: true },
       });
       toast.success(`已导入 ${res.count} 个 MCP`);
       onComplete?.({ instanceIds: res.results.map((result) => result.instance.id) });
@@ -250,6 +250,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
           args: config.args,
           packageManager: config.packageManager,
           start: startAfter,
+          all: true,
         },
       });
       toast.success(

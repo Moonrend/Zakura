@@ -29,7 +29,7 @@ import {
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
 import { REDIS_KEYS } from "./redis.js";
-import { redisGetJson, redisSetJson, REDIS_TTL } from "./redis-store.js";
+import { redisDel, redisGetJson, redisSetJson, REDIS_TTL } from "./redis-store.js";
 import { TtlCache } from "../model-router/cache.js";
 import { callAgentNativeTool, listAgentNativeTools } from "./agent-tools.js";
 import {
@@ -74,6 +74,14 @@ const LEGACY_SKILLS_RESOURCE_URI = "zakura://agent/skills";
 const LEGACY_SKILL_RESOURCE_PREFIX = "zakura://agent/skills/";
 
 type InstanceRow = typeof componentInstances.$inferSelect;
+
+/** 单实例 tools/list 预缓存条目 */
+type CachedInstanceTools = {
+  tools: McpToolDef[];
+  providerId: string;
+  slug: string;
+  updatedAt: number;
+};
 
 export interface ResolvedTool {
   qualifiedName: string;
@@ -355,8 +363,11 @@ export class McpGateway {
   private runtimeNodes: import("./runtime-nodes.js").RuntimeNodeService | null = null;
   private instanceMigrations: import("./platform-assistant-tools.js").InstanceMigrationPort | null =
     null;
-  /** 工具列表进程内短缓存：Redis 往返也要毫秒级，热路径优先本地命中 */
+  /** Agent 聚合工具列表进程内短缓存 */
   private readonly toolsMemCache = new TtlCache<ResolvedTool[]>(30_000);
+  /** 单实例 MCP tools/list 预缓存（热路径只读，不现场拉取） */
+  private readonly instanceToolsMemCache = new TtlCache<CachedInstanceTools>(60_000);
+  private readonly instanceToolsRefreshing = new Set<string>();
 
   constructor(
     private readonly db: Db,
@@ -426,12 +437,146 @@ export class McpGateway {
     if ("instanceMigrations" in deps) this.instanceMigrations = deps.instanceMigrations ?? null;
   }
 
+  /** 绑定变更 / 实例就绪后清工具缓存，避免 stdio 启动窗口期把空列表缓存 5min */
+  invalidateToolsCache(agentId: string): void {
+    this.toolsMemCache.delete(agentId);
+    void redisDel(REDIS_KEYS.tools(agentId));
+  }
+
+  clearInstanceToolsCache(instanceId: string): void {
+    this.instanceToolsMemCache.delete(instanceId);
+    void redisDel(REDIS_KEYS.instanceTools(instanceId));
+  }
+
+  private async invalidateTenantAgentToolsCaches(tenantId: string): Promise<void> {
+    if (!this.agentService) return;
+    const list = await this.agentService.list(tenantId);
+    for (const agent of list) this.invalidateToolsCache(agent.id);
+  }
+
+  private async readInstanceToolsCache(
+    instanceId: string,
+  ): Promise<CachedInstanceTools | null> {
+    const mem = this.instanceToolsMemCache.get(instanceId);
+    if (mem) return mem;
+    const cached = await redisGetJson<CachedInstanceTools>(
+      REDIS_KEYS.instanceTools(instanceId),
+    );
+    if (cached?.tools) {
+      this.instanceToolsMemCache.set(instanceId, cached);
+      return cached;
+    }
+    return null;
+  }
+
+  /**
+   * 从上游拉取 tools/list 并写入实例预缓存。
+   * 启动就绪 / 缓存未命中时后台调用；Agent 热路径不走这里。
+   */
+  async refreshInstanceTools(
+    tenantId: string,
+    instanceId: string,
+  ): Promise<CachedInstanceTools | null> {
+    if (this.instanceToolsRefreshing.has(instanceId)) {
+      return this.readInstanceToolsCache(instanceId);
+    }
+    this.instanceToolsRefreshing.add(instanceId);
+    try {
+      const instance = await this.db.query.componentInstances.findFirst({
+        where: and(
+          eq(componentInstances.id, instanceId),
+          eq(componentInstances.tenantId, tenantId),
+        ),
+      });
+      if (!instance || instance.status !== "running") return null;
+      if (!globalRegistry.has(instance.providerId)) return null;
+
+      const plugin = globalRegistry.get(instance.providerId);
+      let handle: InstanceHandle;
+      try {
+        handle = await this.orchestrator.toHandle(tenantId, instanceId);
+      } catch {
+        return null;
+      }
+
+      const hasCreds =
+        (typeof handle.config.oauthAccessToken === "string" &&
+          handle.config.oauthAccessToken.trim().length > 0) ||
+        (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim().length > 0);
+      const lastError = instance.lastError ?? "";
+      if (
+        (handle.config.authRequired === true || lastError.startsWith("AUTH_REQUIRED")) &&
+        !hasCreds
+      ) {
+        return null;
+      }
+
+      const listed = await plugin.listTools(handle);
+      const entry: CachedInstanceTools = {
+        tools: listed,
+        providerId: instance.providerId,
+        slug: instance.slug,
+        updatedAt: Date.now(),
+      };
+      this.instanceToolsMemCache.set(instanceId, entry);
+      void redisSetJson(
+        REDIS_KEYS.instanceTools(instanceId),
+        entry,
+        REDIS_TTL.instanceTools,
+      );
+      await this.invalidateTenantAgentToolsCaches(tenantId);
+      return entry;
+    } catch (err) {
+      console.warn(
+        `[mcp] refreshInstanceTools ${instanceId}:`,
+        err instanceof Error ? err.message.slice(0, 200) : err,
+      );
+      return null;
+    } finally {
+      this.instanceToolsRefreshing.delete(instanceId);
+    }
+  }
+
+  /** 热路径：只读预缓存；未命中则后台刷新，本轮不现场 tools/list */
+  private async toolsFromInstanceCache(
+    tenantId: string,
+    instance: InstanceRow,
+  ): Promise<{ tools: McpToolDef[]; hit: boolean }> {
+    const cached = await this.readInstanceToolsCache(instance.id);
+    if (cached) return { tools: cached.tools, hit: true };
+    void this.refreshInstanceTools(tenantId, instance.id).catch(() => undefined);
+    return { tools: [], hit: false };
+  }
+
+  /** 进程启动时：为已 running 的实例补刷 tools 预缓存（auto-start 不会再次触发 ready） */
+  async warmRunningInstanceTools(opts?: { tenantId?: string }): Promise<number> {
+    const filters = [eq(componentInstances.status, "running")];
+    if (opts?.tenantId) {
+      filters.unshift(eq(componentInstances.tenantId, opts.tenantId));
+    }
+    const rows = await this.db
+      .select({ id: componentInstances.id, tenantId: componentInstances.tenantId })
+      .from(componentInstances)
+      .where(and(...filters));
+    let n = 0;
+    for (const row of rows) {
+      const hit = await this.readInstanceToolsCache(row.id);
+      if (hit) continue;
+      const refreshed = await this.refreshInstanceTools(row.tenantId, row.id);
+      if (refreshed) n += 1;
+    }
+    return n;
+  }
+
   /**
    * 解析 Agent 应暴露的 MCP 实例。
    * 热路径只返回已 running 的实例；stopped 的后台拉起，绝不阻塞首字。
+   * @returns warming=true 时调用方勿缓存工具列表（stdio 等冷启动尚未完成）
    */
-  private async resolveAgentMcpInstances(agent: Agent): Promise<InstanceRow[]> {
-    if (!this.agentService) return [];
+  private async resolveAgentMcpInstances(
+    agent: Agent,
+  ): Promise<{ instances: InstanceRow[]; warming: boolean }> {
+    if (!this.agentService) return { instances: [], warming: false };
     const mcpMode = getAgentMcpMode(agent);
     const boundIds =
       mcpMode === "selected"
@@ -459,11 +604,17 @@ export class McpGateway {
     const stopped = candidates.filter((i) => i.status !== "running");
     // ponytail: 不在 listTools 热路径 ensureStarted（可卡到 30s）；后台预热下一轮可用
     if (stopped.length) {
-      void this.ensureInstancesRunning(agent.tenantId, stopped).catch((err) =>
-        console.warn("[mcp] background auto-start:", err),
-      );
+      void this.ensureInstancesRunning(agent.tenantId, stopped)
+        .then(async (ready) => {
+          for (const inst of ready) {
+            if (inst.status === "running") {
+              await this.refreshInstanceTools(agent.tenantId, inst.id).catch(() => undefined);
+            }
+          }
+        })
+        .catch((err) => console.warn("[mcp] background auto-start:", err));
     }
-    return running;
+    return { instances: running, warming: stopped.length > 0 };
   }
 
   /** 租户策略下的 MCP 实例列表（热路径不启动） */
@@ -542,11 +693,25 @@ export class McpGateway {
       (DEFAULT_TASK_OPTIONAL_TOOLS.has(tool.localName)
         ? { taskSupport: "optional" as const }
         : undefined);
-    const _meta =
-      instanceSlug && tool._meta
-        ? rewriteToolUiMeta(tool._meta, (uri) => qualifyResourceUri(instanceSlug, uri))
-        : tool._meta;
-    return { ...tool, execution, _meta };
+    let _meta = tool._meta;
+    if (instanceSlug && tool._meta) {
+      try {
+        _meta = rewriteToolUiMeta(tool._meta, (uri) =>
+          qualifyResourceUri(instanceSlug, uri),
+        );
+      } catch {
+        _meta = tool._meta;
+      }
+    }
+    return {
+      ...tool,
+      inputSchema:
+        tool.inputSchema && typeof tool.inputSchema === "object"
+          ? tool.inputSchema
+          : { type: "object", properties: {} },
+      execution,
+      _meta,
+    };
   }
 
   private builtinTools(tenantId: string): ResolvedTool[] {
@@ -678,14 +843,18 @@ export class McpGateway {
       return cached;
     }
 
-    const tools = await this.listToolsForAgentUncached(agent);
-    this.toolsMemCache.set(agent.id, tools);
-    // 短 TTL：对齐 Memoh toolsCacheTTL，避免每轮 Run 重复枚举
-    void redisSetJson(cacheKey, tools, REDIS_TTL.tools);
+    const { tools, cacheable } = await this.listToolsForAgentUncached(agent);
+    if (cacheable) {
+      this.toolsMemCache.set(agent.id, tools);
+      // 短 TTL：对齐 Memoh toolsCacheTTL，避免每轮 Run 重复枚举
+      void redisSetJson(cacheKey, tools, REDIS_TTL.tools);
+    }
     return tools;
   }
 
-  private async listToolsForAgentUncached(agent: Agent): Promise<ResolvedTool[]> {
+  private async listToolsForAgentUncached(
+    agent: Agent,
+  ): Promise<{ tools: ResolvedTool[]; cacheable: boolean }> {
     const platformDefaults = await getAgentWebDefaults(this.db);
     const effective = effectiveAgentWebDefaults(getAgentProviders(agent), platformDefaults);
 
@@ -822,7 +991,7 @@ export class McpGateway {
         ),
       );
 
-    const instances = await this.resolveAgentMcpInstances(agent);
+    const { instances, warming } = await this.resolveAgentMcpInstances(agent);
     const allInstances = [
       ...capabilityInstances.filter((instance) => {
         if (instance.providerId === "web-search" && !effective.webSearchEnabled) return false;
@@ -834,66 +1003,62 @@ export class McpGateway {
 
     const listedBatches = await Promise.all(
       allInstances.map(async (instance) => {
-        if (!globalRegistry.has(instance.providerId)) return [] as ResolvedTool[];
-        const plugin = globalRegistry.get(instance.providerId);
-        let handle: InstanceHandle;
-        try {
-          handle = await this.orchestrator.toHandle(agent.tenantId, instance.id);
-        } catch {
-          return [] as ResolvedTool[];
+        if (!globalRegistry.has(instance.providerId)) {
+          return { tools: [] as ResolvedTool[], hit: true };
         }
         try {
-          if (
-            handle.config.authRequired === true &&
-            !(
-              (typeof handle.config.oauthAccessToken === "string" &&
-                handle.config.oauthAccessToken.trim()) ||
-              (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim())
-            )
-          ) {
-            console.warn(
-              `[mcp] agent listTools ${instance.slug}: skipped (AUTH_REQUIRED)`,
-            );
-            return [] as ResolvedTool[];
-          }
-          const listed = await plugin.listTools(handle);
-          return listed.map((t) => {
-            let name = withRePrefix(t.name);
-            // 冲突名在合并阶段再 qualify
-            return this.enrichResolvedTool(
-              {
-                qualifiedName: name,
-                instanceId: instance.id,
-                providerId: instance.providerId,
-                localName: t.name,
-                description: t.description,
-                inputSchema: t.inputSchema,
-                title: t.title,
-                outputSchema: t.outputSchema,
-                annotations: t.annotations,
-                securitySchemes: t.securitySchemes,
-                _meta: t._meta,
-                execution: t.execution,
-                agentId: agent.id,
-              },
-              instance.slug,
-            );
-          });
+          const { tools: listed, hit } = await this.toolsFromInstanceCache(
+            agent.tenantId,
+            instance,
+          );
+          return {
+            hit,
+            tools: listed.map((t) => {
+              // 始终带实例 slug，避免模型分不清来自哪个 MCP（如 re_kitesurf__click）
+              const name = withRePrefix(qualify(instance.slug, t.name));
+              return this.enrichResolvedTool(
+                {
+                  qualifiedName: name,
+                  instanceId: instance.id,
+                  providerId: instance.providerId,
+                  localName: t.name,
+                  description: t.description
+                    ? `[${instance.slug}] ${t.description}`
+                    : `[${instance.slug}] ${t.name}`,
+                  inputSchema:
+                    t.inputSchema && typeof t.inputSchema === "object"
+                      ? t.inputSchema
+                      : { type: "object", properties: {} },
+                  title: t.title,
+                  outputSchema: t.outputSchema,
+                  annotations: t.annotations,
+                  securitySchemes: t.securitySchemes,
+                  _meta: t._meta,
+                  execution: t.execution,
+                  agentId: agent.id,
+                },
+                instance.slug,
+              );
+            }),
+          };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
-          return [] as ResolvedTool[];
+          return { tools: [] as ResolvedTool[], hit: false };
         }
       }),
     );
 
+    let instanceCacheComplete = true;
     for (const batch of listedBatches) {
-      for (const t of batch) {
+      if (!batch.hit) instanceCacheComplete = false;
+      for (const t of batch.tools) {
         let name = t.qualifiedName;
+        // 极端撞名（同 slug 或手工改名）时再追加短 id
         if (usedNames.has(name) && t.instanceId) {
-          const slug =
-            allInstances.find((i) => i.id === t.instanceId)?.slug ?? t.instanceId.slice(0, 8);
-          name = withRePrefix(qualify(slug, t.localName));
+          name = withRePrefix(
+            qualify(`${t.instanceId.slice(0, 8)}`, t.localName),
+          );
         }
         if (usedNames.has(name)) continue;
         usedNames.add(name);
@@ -901,7 +1066,8 @@ export class McpGateway {
       }
     }
 
-    return tools;
+    // 冷启动或实例预缓存未齐时不写 agent 聚合缓存
+    return { tools, cacheable: !warming && instanceCacheComplete };
   }
 
   async listToolsForTenant(
@@ -948,84 +1114,56 @@ export class McpGateway {
 
     for (const instance of instances) {
       if (!globalRegistry.has(instance.providerId)) continue;
-      const plugin = globalRegistry.get(instance.providerId);
-      let handle: InstanceHandle;
       try {
-        handle = await this.orchestrator.toHandle(tenantId, instance.id);
-      } catch {
-        continue;
-      }
-      let listed: McpToolDef[] = [];
-      try {
-        const lastError = instance.lastError ?? "";
-        const hasCreds =
-          (typeof handle.config.oauthAccessToken === "string" &&
-            handle.config.oauthAccessToken.trim().length > 0) ||
-          (typeof handle.config.apiKey === "string" && handle.config.apiKey.trim().length > 0);
-        const authBlocked =
-          (handle.config.authRequired === true || lastError.startsWith("AUTH_REQUIRED")) &&
-          !hasCreds;
-        const unreachable = lastError.startsWith("UNREACHABLE");
-
-        if (authBlocked) {
-          console.warn(
-            `[mcp] listTools ${instance.slug}: skipped (AUTH_REQUIRED — 请完成上游 OAuth 或填写 API Key)`,
+        const { tools: listed } = await this.toolsFromInstanceCache(tenantId, instance);
+        for (const t of listed) {
+          const rawQualified = qualify(instance.slug, t.name);
+          const qualifiedName = withRePrefix(rawQualified);
+          const bare = withRePrefix(t.name);
+          if (
+            allowlist &&
+            !allowlist.includes(qualifiedName) &&
+            !allowlist.includes(bare) &&
+            !allowlist.includes(t.name) &&
+            !allowlist.includes(rawQualified)
+          ) {
+            continue;
+          }
+          if (
+            denylist &&
+            (denylist.includes(qualifiedName) ||
+              denylist.includes(bare) ||
+              denylist.includes(t.name) ||
+              denylist.includes(rawQualified))
+          ) {
+            continue;
+          }
+          tools.push(
+            this.enrichResolvedTool(
+              {
+                qualifiedName,
+                instanceId: instance.id,
+                providerId: instance.providerId,
+                localName: t.name,
+                description: `[${instance.name}] ${t.description}`,
+                inputSchema:
+                  t.inputSchema && typeof t.inputSchema === "object"
+                    ? t.inputSchema
+                    : { type: "object", properties: {} },
+                title: t.title,
+                outputSchema: t.outputSchema,
+                annotations: t.annotations,
+                securitySchemes: t.securitySchemes,
+                _meta: t._meta,
+                execution: t.execution,
+              },
+              instance.slug,
+            ),
           );
-          continue;
         }
-        if (unreachable) {
-          console.warn(
-            `[mcp] listTools ${instance.slug}: skipped (UNREACHABLE — 实际调用时会重试)`,
-          );
-          continue;
-        }
-        listed = await plugin.listTools(handle);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.warn(`[mcp] listTools ${instance.slug}: ${msg.slice(0, 200)}`);
-        continue;
-      }
-      for (const t of listed) {
-        const rawQualified = qualify(instance.slug, t.name);
-        const qualifiedName = withRePrefix(rawQualified);
-        const bare = withRePrefix(t.name);
-        if (
-          allowlist &&
-          !allowlist.includes(qualifiedName) &&
-          !allowlist.includes(bare) &&
-          !allowlist.includes(t.name) &&
-          !allowlist.includes(rawQualified)
-        ) {
-          continue;
-        }
-        if (
-          denylist &&
-          (denylist.includes(qualifiedName) ||
-            denylist.includes(bare) ||
-            denylist.includes(t.name) ||
-            denylist.includes(rawQualified))
-        ) {
-          continue;
-        }
-        tools.push(
-          this.enrichResolvedTool(
-            {
-              qualifiedName,
-              instanceId: instance.id,
-              providerId: instance.providerId,
-              localName: t.name,
-              description: `[${instance.name}] ${t.description}`,
-              inputSchema: t.inputSchema,
-              title: t.title,
-              outputSchema: t.outputSchema,
-              annotations: t.annotations,
-              securitySchemes: t.securitySchemes,
-              _meta: t._meta,
-              execution: t.execution,
-            },
-            instance.slug,
-          ),
-        );
       }
     }
 
@@ -1516,7 +1654,7 @@ export class McpGateway {
       }
     }
 
-    const instances = await this.resolveAgentMcpInstances(agent);
+    const { instances } = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
       if (!globalRegistry.has(instance.providerId)) continue;
@@ -1770,7 +1908,7 @@ export class McpGateway {
       });
     }
 
-    const instances = await this.resolveAgentMcpInstances(agent);
+    const { instances } = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
       if (!globalRegistry.has(instance.providerId)) continue;
@@ -1988,7 +2126,7 @@ export class McpGateway {
       });
     }
 
-    const instances = await this.resolveAgentMcpInstances(agent);
+    const { instances } = await this.resolveAgentMcpInstances(agent);
 
     for (const instance of instances) {
       if (!globalRegistry.has(instance.providerId)) continue;

@@ -542,10 +542,12 @@ export class ConnectionCatalogService {
       } catch {
         /* leave stopped */
       }
-      if (req.agentIds?.length) {
-        for (const agentId of req.agentIds) {
-          await this.agents.bindInstance(tenantId, agentId, instance.id).catch(() => undefined);
-        }
+      const agentIds = await this.agents.resolveInstallAgentIds(tenantId, {
+        agentIds: req.agentIds,
+        all: req.all,
+      });
+      if (agentIds.length) {
+        await this.agents.bindInstanceToAgents(tenantId, instance.id, agentIds);
       }
       return {
         id: `instance:${instance.id}`,
@@ -578,7 +580,10 @@ export class ConnectionCatalogService {
         (server.installKinds?.length ?? 0) > 0;
 
       const bundled: ConnectionInstallResult[] = [];
-      const agentIds = req.agentIds?.length ? req.agentIds : [];
+      const agentIds = await this.agents.resolveInstallAgentIds(tenantId, {
+        agentIds: req.agentIds,
+        all: req.all,
+      });
 
       // 纯插件：只有 skills / hooks
       if (!hasMcp && (server.skills?.length || server.hooks)) {
@@ -669,9 +674,7 @@ export class ConnectionCatalogService {
         /* leave */
       }
       if (agentIds.length) {
-        for (const agentId of agentIds) {
-          await this.agents.bindInstance(tenantId, agentId, instance.id).catch(() => undefined);
-        }
+        await this.agents.bindInstanceToAgents(tenantId, instance.id, agentIds);
       }
       if (server.skills?.length && agentIds.length) {
         for (const skill of server.skills) {

@@ -78,6 +78,8 @@ export { isComputerEnvEnabled, needsContainer, normalizeCaps } from "./agent-cap
 export class AgentService {
   readonly workspace: AgentWorkspaceService;
   private readonly agentCache = new TtlCache<Agent>(AGENT_CACHE_TTL_MS);
+  /** 绑定变更时清 Agent 工具缓存（由 McpGateway 注入） */
+  private toolsCacheInvalidator: ((agentId: string) => void) | null = null;
 
   constructor(
     private readonly db: Db,
@@ -86,6 +88,14 @@ export class AgentService {
     nodes?: import("./runtime-nodes.js").RuntimeNodeService,
   ) {
     this.workspace = new AgentWorkspaceService(db, runtime, config, nodes);
+  }
+
+  setToolsCacheInvalidator(fn: (agentId: string) => void): void {
+    this.toolsCacheInvalidator = fn;
+  }
+
+  private invalidateToolsCache(agentId: string): void {
+    this.toolsCacheInvalidator?.(agentId);
   }
 
   private rememberAgent(agent: Agent): Agent {
@@ -156,12 +166,12 @@ export class AgentService {
       if (i === 19) throw new Error(`Agent slug already exists: ${slug}`);
     }
 
-    // 搜索/抓取默认跟随平台设置；只有显式配置才写入 Agent 覆盖值。
+    // MCP 默认对全部 Agent 可用（mode=all）；需要隔离时再切 selected + bindings
     const defaultConfig =
       input.config ??
       ({
         providers: {
-          mcp: { mode: "selected", instanceIds: [] },
+          mcp: { mode: "all", instanceIds: [] },
         },
       } satisfies Record<string, unknown>);
 
@@ -488,7 +498,47 @@ export class AgentService {
       .onConflictDoNothing()
       .returning();
 
+    this.invalidateToolsCache(agent.id);
     return row ?? (await this.listBindings(agent.id)).find((b) => b.instanceId === instanceId);
+  }
+
+  /**
+   * MCP 安装目标：未指定 agentIds 或 all=true → 租户全部 Agent。
+   * all=false 且给出 agentIds → 仅这些 Agent。
+   */
+  async resolveInstallAgentIds(
+    tenantId: string,
+    opts?: { agentIds?: string[]; all?: boolean },
+  ): Promise<string[]> {
+    if (opts?.all === false) {
+      if (!opts.agentIds?.length) return [];
+      const out: string[] = [];
+      for (const id of opts.agentIds) {
+        const agent = await this.get(tenantId, id);
+        if (agent) out.push(agent.id);
+      }
+      return out;
+    }
+    if (opts?.all === true || !opts?.agentIds?.length) {
+      return (await this.list(tenantId)).map((a) => a.id);
+    }
+    const out: string[] = [];
+    for (const id of opts.agentIds) {
+      const agent = await this.get(tenantId, id);
+      if (agent) out.push(agent.id);
+    }
+    return out;
+  }
+
+  /** 将 MCP 实例绑定到多个 Agent，并清工具缓存 */
+  async bindInstanceToAgents(
+    tenantId: string,
+    instanceId: string,
+    agentIds: string[],
+  ): Promise<void> {
+    for (const agentId of agentIds) {
+      await this.bindInstance(tenantId, agentId, instanceId).catch(() => undefined);
+    }
   }
 
   async unbindInstance(tenantId: string, agentId: string, instanceId: string) {
@@ -497,6 +547,7 @@ export class AgentService {
     await this.db
       .delete(agentBindings)
       .where(and(eq(agentBindings.agentId, agent.id), eq(agentBindings.instanceId, instanceId)));
+    this.invalidateToolsCache(agent.id);
     return { ok: true as const };
   }
 
@@ -561,6 +612,7 @@ export class AgentService {
         createdAt: now,
       });
     }
+    this.invalidateToolsCache(agent.id);
     return this.listBindings(agent.id);
   }
 
@@ -581,6 +633,9 @@ export class AgentService {
 
     if (patch.mcp?.mode === "selected" && Array.isArray(patch.mcp.instanceIds)) {
       await this.setMcpBindings(tenantId, agentId, patch.mcp.instanceIds);
+    } else if (patch.mcp) {
+      // mode=all / exposeFs 等变更也要丢掉旧的工具聚合缓存
+      this.invalidateToolsCache(agent.id);
     }
 
     return this.rememberAgent(updated ?? agent);

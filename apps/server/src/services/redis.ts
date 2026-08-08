@@ -116,6 +116,8 @@ export const REDIS_KEYS = {
   auth: (keyHash: string) => `zakura:auth:key:${keyHash}`,
   /** Agent 工具列表短缓存 */
   tools: (agentId: string) => `zakura:tools:agent:${agentId}`,
+  /** 单实例 MCP tools/list 预缓存（启动时写入，热路径只读） */
+  instanceTools: (instanceId: string) => `zakura:tools:instance:${instanceId}`,
   /** Gateway clientSessionKey → sessionId */
   gwClient: (agentId: string, clientKey: string) =>
     `zakura:gw:client:${agentId}:${encodeURIComponent(clientKey)}`,

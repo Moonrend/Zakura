@@ -14,8 +14,8 @@ export type AgentProvidersConfig = {
   };
   /**
    * Extra MCP / component instances (generic-mcp, openviking, …).
-   * - mode "all": inherit every running non-capability instance
-   * - mode "selected": only instances listed in agent_bindings / instanceIds (default)
+   * - mode "all": inherit every running non-capability instance (default for new agents)
+   * - mode "selected": only instances listed in agent_bindings / instanceIds
    */
   mcp?: {
     mode?: "all" | "selected";

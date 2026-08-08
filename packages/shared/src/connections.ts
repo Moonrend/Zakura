@@ -92,6 +92,8 @@ export type ConnectionInstallRequest = {
   kind?: ConnectionKind;
   runtimeNodeId?: string | null;
   agentIds?: string[];
+  /** true / 未指定 agentIds 时绑定租户全部 Agent（MCP 默认） */
+  all?: boolean;
   credentialScope?: "tenant" | "platform";
   config?: Record<string, unknown>;
   name?: string;

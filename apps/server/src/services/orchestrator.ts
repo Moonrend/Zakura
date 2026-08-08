@@ -175,6 +175,8 @@ function mergeMaskedConfig(
 
 export class Orchestrator {
   private nodes: RuntimeNodeService | null = null;
+  /** 实例启动并完成 afterStart 后回调（用于预缓存 tools/list） */
+  private onInstanceReady: ((tenantId: string, instanceId: string) => void) | null = null;
 
   constructor(
     private readonly db: Db,
@@ -184,6 +186,39 @@ export class Orchestrator {
 
   setRuntimeNodes(nodes: RuntimeNodeService): void {
     this.nodes = nodes;
+  }
+
+  /** 实例停止后清预缓存 */
+  private onInstanceStopped: ((tenantId: string, instanceId: string) => void) | null = null;
+
+  setOnInstanceReady(fn: (tenantId: string, instanceId: string) => void): void {
+    this.onInstanceReady = fn;
+  }
+
+  setOnInstanceStopped(fn: (tenantId: string, instanceId: string) => void): void {
+    this.onInstanceStopped = fn;
+  }
+
+  private notifyInstanceReady(tenantId: string, instanceId: string): void {
+    try {
+      this.onInstanceReady?.(tenantId, instanceId);
+    } catch (err) {
+      console.warn(
+        "[orch] onInstanceReady:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  private notifyInstanceStopped(tenantId: string, instanceId: string): void {
+    try {
+      this.onInstanceStopped?.(tenantId, instanceId);
+    } catch (err) {
+      console.warn(
+        "[orch] onInstanceStopped:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   private ctx(
@@ -472,6 +507,7 @@ export class Orchestrator {
         this.emitInstance(instance, "running");
         const handle = await this.toHandle(tenantId, instanceId);
         await plugin.afterStart?.(handle, ctx);
+        this.notifyInstanceReady(tenantId, instanceId);
         return handle;
       }
 
@@ -655,6 +691,7 @@ export class Orchestrator {
 
       const handle = await this.toHandle(tenantId, instanceId);
       await plugin.afterStart?.(handle, ctx);
+      this.notifyInstanceReady(tenantId, instanceId);
       return handle;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -725,6 +762,7 @@ export class Orchestrator {
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
     this.emitInstance(instance, "stopped");
+    this.notifyInstanceStopped(tenantId, instanceId);
   }
 
   /** Merge/replace encrypted config for an existing instance */

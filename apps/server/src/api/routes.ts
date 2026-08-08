@@ -3409,10 +3409,22 @@ export async function createApiApp(deps: {
       oauthScopes?: string;
       /** 复用平台连接器 OAuth 客户端（与 hostPatterns / connector.ref 对齐） */
       oauthConnectorRef?: string;
+      agentIds?: string[];
+      all?: boolean;
     }>();
     if (!body.mcpUrl) return c.json({ error: "mcpUrl required" }, 400);
 
     const authMode = body.authMode ?? (body.apiKey?.trim() ? "apiKey" : "none");
+    const bindImportedMcp = async (instanceId: string) => {
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
+      if (agentIds.length) {
+        await agentService.bindInstanceToAgents(session.tenantId, instanceId, agentIds);
+      }
+      return agentIds;
+    };
 
     try {
       const connectorTarget = await integrationCatalog.resolveConnectorTarget(
@@ -3466,6 +3478,7 @@ export async function createApiApp(deps: {
             connectorConfig,
           );
         }
+        await bindImportedMcp(instance.id);
 
         purgeUpstreamOauthPending();
         const discovery = connectorTarget.discovery;
@@ -3581,6 +3594,7 @@ export async function createApiApp(deps: {
               : {}),
           },
         });
+        await bindImportedMcp(instance.id);
 
         purgeUpstreamOauthPending();
         const client = await resolveUpstreamOauthClient({
@@ -3709,6 +3723,7 @@ export async function createApiApp(deps: {
         }
       }
 
+      const boundAgentIds = await bindImportedMcp(instance.id);
       const fresh = await loadInstanceWithContainers(db, session.tenantId, instance.id);
       const authRequired = !!fresh?.lastError?.startsWith("AUTH_REQUIRED");
 
@@ -3719,7 +3734,8 @@ export async function createApiApp(deps: {
           started,
           startError,
           authRequired,
-          qualifiedPreview: tools.slice(0, 20).map((t) => `${slug}__${t.name}`),
+          boundAgentIds,
+          qualifiedPreview: tools.slice(0, 8).map((t) => `re_${t.name}`),
         },
         201,
       );
@@ -3736,6 +3752,8 @@ export async function createApiApp(deps: {
       start?: boolean;
       /** Only import these keys; default all */
       keys?: string[];
+      agentIds?: string[];
+      all?: boolean;
     }>();
     if (body.config == null) return c.json({ error: "config required" }, 400);
 
@@ -3749,6 +3767,11 @@ export async function createApiApp(deps: {
         entries = entries.filter((e) => allow.has(e.key));
       }
       if (!entries.length) return c.json({ error: "没有可导入的条目" }, 400);
+
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
 
       const results: Array<{
         key: string;
@@ -3778,6 +3801,9 @@ export async function createApiApp(deps: {
             startError = err instanceof Error ? err.message : String(err);
           }
         }
+        if (agentIds.length) {
+          await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
+        }
         results.push({
           key: entry.key,
           instance: await loadInstanceWithContainers(db, session.tenantId, instance.id),
@@ -3788,7 +3814,7 @@ export async function createApiApp(deps: {
         });
       }
 
-      return c.json({ count: results.length, results }, 201);
+      return c.json({ count: results.length, results, boundAgentIds: agentIds }, 201);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -4021,6 +4047,9 @@ export async function createApiApp(deps: {
       slug?: string;
       displayName?: string;
       start?: boolean;
+      agentIds?: string[];
+      all?: boolean;
+      runtimeNodeId?: string | null;
     }>();
     if (!body.name) return c.json({ error: "name required" }, 400);
     try {
@@ -4035,12 +4064,14 @@ export async function createApiApp(deps: {
       if (body.slug?.trim()) plan.slug = body.slug.trim();
       if (body.displayName?.trim()) plan.name = body.displayName.trim();
 
+      const needsRunner = plan.providerId === "stdio-mcp";
       const instance = await orchestrator.createInstance({
         tenantId: session.tenantId,
         providerId: plan.providerId,
         name: plan.name,
         slug: plan.slug,
         config: plan.config,
+        runtimeNodeId: needsRunner ? (body.runtimeNodeId ?? null) : null,
       });
 
       let started = false;
@@ -4052,6 +4083,14 @@ export async function createApiApp(deps: {
         } catch (err) {
           startError = err instanceof Error ? err.message : String(err);
         }
+      }
+
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
+      if (agentIds.length) {
+        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
       }
 
       const fresh = await loadInstanceWithContainers(db, session.tenantId, instance.id);
@@ -4076,6 +4115,7 @@ export async function createApiApp(deps: {
           authRequired,
           envHints: plan.envHints,
           storeId: server.storeId,
+          boundAgentIds: agentIds,
         },
         201,
       );
@@ -4097,6 +4137,9 @@ export async function createApiApp(deps: {
       workingDir?: string;
       packageManager?: "npm" | "pypi" | "oci" | "binary";
       start?: boolean;
+      agentIds?: string[];
+      all?: boolean;
+      runtimeNodeId?: string | null;
     }>();
     if (!body.command?.trim()) return c.json({ error: "command required" }, 400);
     try {
@@ -4135,6 +4178,7 @@ export async function createApiApp(deps: {
           workingDir: body.workingDir ?? "/data",
           packageManager,
         },
+        runtimeNodeId: body.runtimeNodeId ?? null,
       });
 
       let started = false;
@@ -4148,8 +4192,21 @@ export async function createApiApp(deps: {
         }
       }
 
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
+      if (agentIds.length) {
+        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
+      }
+
       return c.json(
-        { instance: await loadInstanceWithContainers(db, session.tenantId, instance.id), started, startError },
+        {
+          instance: await loadInstanceWithContainers(db, session.tenantId, instance.id),
+          started,
+          startError,
+          boundAgentIds: agentIds,
+        },
         201,
       );
     } catch (err) {
@@ -4458,6 +4515,8 @@ export async function createApiApp(deps: {
           instanceId,
           applyOauthTokensToConfig(current, tokens),
         );
+        // OAuth 凭证到位后补刷 tools 预缓存（此前 AUTH_REQUIRED 会跳过）
+        void gateway.refreshInstanceTools(pending.tenantId, instanceId);
       } else {
         const host = (() => {
           try {

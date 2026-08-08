@@ -129,6 +129,11 @@ services:
     container_name: zakura-searxng
     ports:
       - "8080:8080"
+    environment:
+      SEARXNG_LIMITER: "false"
+      SEARXNG_SECRET: zakura-compose-searxng
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
     networks:
       - zakura
     restart: unless-stopped

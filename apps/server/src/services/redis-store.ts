@@ -14,6 +14,8 @@ export const REDIS_TTL = {
   auth: 30,
   /** Agent 工具列表短缓存（热路径命中优先；配置变更后最多 5min 过期） */
   tools: 300,
+  /** 单实例 MCP 工具预缓存（启动/刷新时写入；热路径不现场 tools/list） */
+  instanceTools: 24 * 60 * 60,
   /** Gateway clientSessionKey → sessionId */
   gwClient: 24 * 60 * 60,
 } as const;

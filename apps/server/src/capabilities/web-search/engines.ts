@@ -256,10 +256,20 @@ export const searchEngines: SearchEngine[] = [
       url.searchParams.set("q", req.query);
       url.searchParams.set("format", "json");
       if (req.language) url.searchParams.set("language", req.language);
-      const headers: Record<string, string> = { Accept: "application/json" };
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "User-Agent": "Zakura/0.1",
+      };
       if (creds.apiKey) headers.Authorization = `Bearer ${creds.apiKey}`;
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(30000) });
-      if (!res.ok) throw new Error(`SearXNG HTTP ${res.status}`);
+      if (!res.ok) {
+        if (res.status === 403) {
+          throw new Error(
+            "SearXNG HTTP 403：实例未启用 JSON（settings.yml 中 search.formats 需包含 json）。托管实例请重新 Deploy",
+          );
+        }
+        throw new Error(`SearXNG HTTP ${res.status}`);
+      }
       const data = (await readJson(res)) as {
         results?: Array<{ title?: string; url?: string; content?: string }>;
       };

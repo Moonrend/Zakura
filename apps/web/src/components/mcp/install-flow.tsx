@@ -188,7 +188,18 @@ export function McpInstallFlow({
   }, [config.kind, config.auth, config.mcpUrl, config.oauth?.providerId]);
 
   async function bindAgents(id: string) {
-    const ids = resolveAgentIds(agentTargetRef.current, agentsRef.current);
+    // 服务端安装 API 已默认绑定；此处保留作 OAuth 完成等补绑，并避免 agents 未加载时静默跳过
+    let list = agentsRef.current;
+    if (agentTargetRef.current.all && !list.length) {
+      try {
+        list = await fetchAgents();
+        setAgents(list);
+        agentsRef.current = list;
+      } catch {
+        /* 服务端已绑定则无妨 */
+      }
+    }
+    const ids = resolveAgentIds(agentTargetRef.current, list);
     if (!ids.length) return;
     await Promise.all(
       ids.map((agentId) =>
@@ -198,6 +209,12 @@ export function McpInstallFlow({
         }).catch(() => undefined),
       ),
     );
+  }
+
+  function installAgentPayload() {
+    return agentTargetRef.current.all
+      ? { all: true as const }
+      : { all: false as const, agentIds: agentTargetRef.current.agentIds };
   }
 
   async function finishInstall(result: InstallResult) {
@@ -327,6 +344,7 @@ export function McpInstallFlow({
         env: envValues,
         displayName: config.name,
         start: true,
+        ...installAgentPayload(),
       },
     });
 
@@ -374,6 +392,7 @@ export function McpInstallFlow({
         workingDir: config.workingDir ?? "/data",
         packageManager: config.packageManager ?? "npm",
         start: true,
+        ...installAgentPayload(),
       },
     });
     if (!res.started && res.startError) {
@@ -407,6 +426,7 @@ export function McpInstallFlow({
           authMode: "oauth",
           start: false,
           ...oauthClientPayload(),
+          ...installAgentPayload(),
         },
       });
       setInstanceId(res.instance.id);
@@ -451,6 +471,7 @@ export function McpInstallFlow({
         apiKey: config.auth === "apiKey" ? config.apiKey || pat : "",
         headerName: config.headerName ?? "Authorization",
         start: true,
+        ...installAgentPayload(),
       },
     });
     if (res.authRequired) {
@@ -488,6 +509,7 @@ export function McpInstallFlow({
           apiKey: pat.trim(),
           headerName: "Authorization",
           start: true,
+          ...installAgentPayload(),
         },
       });
       toast.success("已接入并启动");

@@ -171,6 +171,22 @@ async function main() {
     agentService.workspace.resolveCdp(agentId),
   );
   gateway.setAgentService(agentService);
+  agentService.setToolsCacheInvalidator((agentId) => gateway.invalidateToolsCache(agentId));
+  orchestrator.setOnInstanceReady((tenantId, instanceId) => {
+    void gateway.refreshInstanceTools(tenantId, instanceId);
+  });
+  orchestrator.setOnInstanceStopped((_tenantId, instanceId) => {
+    gateway.clearInstanceToolsCache(instanceId);
+  });
+  // 已 running 的实例不会再走 start → 启动时补刷 tools 预缓存
+  void gateway
+    .warmRunningInstanceTools()
+    .then((n) => {
+      if (n > 0) console.log(`[mcp] warmed tools cache for ${n} running instance(s)`);
+    })
+    .catch((err) => {
+      console.warn("[mcp] warm running tools failed:", err);
+    });
   gateway.setBrowserService(browserService);
   gateway.setMemoryStore(memoryStore);
   gateway.setMemoryProviders(memoryProviders);

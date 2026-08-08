@@ -705,7 +705,9 @@ export class PlatformServiceManager {
 
       await this.removeServiceContainers(key);
 
-      const specs = buildManagedSpecs(def, cfg, this.config.dockerNetwork);
+      const specs = buildManagedSpecs(def, cfg, this.config.dockerNetwork, {
+        dataDir: this.config.dataDir,
+      });
       const refs: PlatformContainerRef[] = [];
       let endpointUrl: string | null = null;
       const total = specs.length;
