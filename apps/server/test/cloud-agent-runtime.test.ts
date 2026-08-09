@@ -253,6 +253,34 @@ describe("buildChainMessages", () => {
     assert.throws(() => buildChainMessages([], "nope"));
   });
 
+  it("keeps mid-run steer user_message inside the answering run", () => {
+    const events = [
+      { type: "user_message", runId: "r1", payload: { messageId: "m1", content: "做重构", parentRunId: null } },
+      { type: "run_start", runId: "r1", payload: { runId: "r1", replyToMessageId: "m1" } },
+      { type: "assistant_message", runId: "r1", payload: { messageId: "a1", content: "先改 A" } },
+      {
+        type: "user_message",
+        runId: "r1",
+        payload: { messageId: "s1", content: "别动测试", steer: true },
+      },
+      { type: "assistant_message", runId: "r1", payload: { messageId: "a2", content: "好的跳过测试" } },
+      { type: "run_end", runId: "r1", payload: { status: "completed" } },
+      { type: "user_message", runId: "r2", payload: { messageId: "m2", content: "继续", parentRunId: "r1" } },
+    ];
+    const res = buildChainMessages(events, "m2");
+    assert.equal(res.turns, 2);
+    assert.deepEqual(
+      res.messages.map((m) => [m.role, m.content]),
+      [
+        ["user", "做重构"],
+        ["assistant", "先改 A"],
+        ["user", "别动测试"],
+        ["assistant", "好的跳过测试"],
+        ["user", "继续"],
+      ],
+    );
+  });
+
   it("chains OpenAI Gateway events that lack runId / run_start", () => {
     const events = [
       {
@@ -669,7 +697,13 @@ describe("runSubagent", () => {
         return { ...ev, id: `ev-${events.length}`, seq: events.length, createdAt: "" };
       },
       isCancelRequested: async () => false,
+      onRunCancel: () => () => {},
       finishRun: async () => {},
+      listQueued: async () => [],
+      drainSteerQueued: async () => [],
+      takeNextQueued: async () => null,
+      enqueueQueued: async () => [],
+      publishQueueSnapshot: async () => {},
     };
     return { store, events, sessions };
   }

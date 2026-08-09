@@ -1,13 +1,15 @@
 /**
- * Cloud Agent REST + SSE 路由。
- * SSE 使用 fetch（带 Authorization），支持 afterSeq 断点续传与多设备同步。
+ * Cloud Agent REST 路由。
+ * 会话事件的实时推送见 realtime/socket-gateway.ts（Socket.IO，afterSeq 续传）。
  */
 import type { Hono } from "hono";
 import {
   parseCloudAgentConfig,
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
+  resolveFollowUpMode,
   type CloudAgentAttachment,
+  type CloudAgentFollowUpMode,
   type CloudAgentRunOptions,
 } from "@zakura/shared";
 import type { AppVariables } from "./routes.js";
@@ -88,6 +90,9 @@ export function registerCloudAgentRoutes(
     store: CloudAgentSessionStore;
     runtime: {
       startTurn: CloudAgentRuntime["startTurn"];
+      enqueueFollowUp: CloudAgentRuntime["enqueueFollowUp"];
+      interruptWithQueued: CloudAgentRuntime["interruptWithQueued"];
+      startNextQueued: CloudAgentRuntime["startNextQueued"];
       compactSession?: CloudAgentRuntime["compactSession"];
       forkSession?: CloudAgentRuntime["forkSession"];
     };
@@ -98,6 +103,22 @@ export function registerCloudAgentRoutes(
 
   async function requireAgent(tenantId: string, agentId: string) {
     return agentService.get(tenantId, agentId);
+  }
+
+  /** 运行中再发消息的模式：请求显式指定优先，否则用 Agent 配置（默认 steer） */
+  async function resolveQueueMode(
+    tenantId: string,
+    agentId: string,
+    requested: CloudAgentFollowUpMode | undefined,
+  ): Promise<CloudAgentFollowUpMode> {
+    if (requested === "steer" || requested === "queue") return requested;
+    const agent = await requireAgent(tenantId, agentId);
+    if (!agent) return "steer";
+    try {
+      return resolveFollowUpMode(parseCloudAgentConfig(JSON.parse(agent.configJson || "{}")));
+    } catch {
+      return "steer";
+    }
   }
 
   async function isOpenAiGatewaySession(
@@ -148,6 +169,8 @@ export function registerCloudAgentRoutes(
       autoTitle?: boolean;
       /** Gateway 模型名转发；null/{} 清除 */
       gatewayModelMap?: Record<string, string> | null;
+      /** 运行中再发消息：steer | queue；null 恢复默认 steer */
+      followUpMode?: CloudAgentFollowUpMode | null;
     }>();
 
     let configJson: Record<string, unknown> = {};
@@ -184,6 +207,12 @@ export function registerCloudAgentRoutes(
     if (body.enableTools !== undefined) next.enableTools = body.enableTools;
     if (body.autoMemory !== undefined) next.autoMemory = body.autoMemory;
     if (body.autoTitle !== undefined) next.autoTitle = body.autoTitle;
+    if (body.followUpMode !== undefined) {
+      if (body.followUpMode === null) delete next.followUpMode;
+      else if (body.followUpMode === "steer" || body.followUpMode === "queue") {
+        next.followUpMode = body.followUpMode;
+      }
+    }
     if (body.gatewayModelMap !== undefined) {
       if (body.gatewayModelMap == null) {
         delete next.gatewayModelMap;
@@ -287,12 +316,24 @@ export function registerCloudAgentRoutes(
     const row = await store.getSession(session.tenantId, agentId, sid);
     if (!row) return c.json({ error: "Not found" }, 404);
     const afterSeq = Number(c.req.query("afterSeq") ?? "0");
-    const events = await store.listEvents(sid, {
-      afterSeq: Number.isFinite(afterSeq) ? afterSeq : 0,
-    });
+    const [events, queue] = await Promise.all([
+      store.listEvents(sid, {
+        afterSeq: Number.isFinite(afterSeq) ? afterSeq : 0,
+      }),
+      store.listQueued(sid),
+    ]);
+    // 自愈：队列只应在运行期存在；发现空闲残留（进程中断等）就继续出队
+    if (queue.length > 0 && !row.activeRunId) {
+      void runtime.startNextQueued({
+        tenantId: session.tenantId,
+        agentId,
+        sessionId: sid,
+      });
+    }
     return c.json({
       session: sessionDto(row),
       events,
+      queue,
     });
   });
 
@@ -340,19 +381,21 @@ export function registerCloudAgentRoutes(
     return c.json({ ok: true });
   });
 
-  /** 发送用户消息并启动 Run；parentRunId 指定分支父节点（编辑重发=兄弟分支） */
+  /**
+   * 发送用户消息。空闲且无排队 → 立即启动 Run；运行中或已有排队 → 服务端入队
+   * （steer 项在下一工具批后注入当前回合，queue 项等回合结束按 FIFO 逐条发出）。
+   * parentRunId 指定分支父节点（编辑重发=兄弟分支），仅对立即启动生效。
+   */
   app.post("/api/agents/:id/cloud/sessions/:sid/messages", async (c) => {
     if (!modelRouter) {
       return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
     }
     const session = c.get("session")!;
-    const sourceSession = await store.getSession(
-      session.tenantId,
-      c.req.param("id"),
-      c.req.param("sid"),
-    );
+    const agentId = c.req.param("id");
+    const sid = c.req.param("sid");
+    const sourceSession = await store.getSession(session.tenantId, agentId, sid);
     if (!sourceSession) return c.json({ error: "Not found" }, 404);
-    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+    if (await isOpenAiGatewaySession(session.tenantId, agentId, sid)) {
       return c.json(
         { error: "OpenAI Gateway 会话只能 fork 后在 Chat 中继续，原会话不会被修改" },
         403,
@@ -363,23 +406,101 @@ export function registerCloudAgentRoutes(
       parentRunId?: string | null;
       attachments?: CloudAgentAttachment[];
       options?: unknown;
+      /** 覆盖 agent.cloud.followUpMode；仅活跃 Run 时有意义 */
+      followUp?: CloudAgentFollowUpMode;
     }>();
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
     if (!body.content?.trim() && attachments.length === 0) {
       return c.json({ error: "content 必填" }, 400);
     }
     const options = parseRunOptions(body.options);
+
+    const enqueue = async () => {
+      const mode = await resolveQueueMode(session.tenantId, agentId, body.followUp);
+      const result = await runtime.enqueueFollowUp({
+        tenantId: session.tenantId,
+        agentId,
+        sessionId: sid,
+        content: body.content ?? "",
+        ...(attachments.length ? { attachments } : {}),
+        mode,
+      });
+      return c.json({ queued: true, ...result }, 202);
+    };
+
     try {
+      const pending = await store.listQueued(sid);
+      if (sourceSession.activeRunId || pending.length > 0) {
+        return await enqueue();
+      }
       const result = await runtime.startTurn({
         tenantId: session.tenantId,
-        agentId: c.req.param("id"),
-        sessionId: c.req.param("sid"),
+        agentId,
+        sessionId: sid,
         content: body.content ?? "",
         ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(options ? { options } : {}),
       });
       return c.json(result, 202);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // 竞争：请求间隙他端刚开新 Run → 转入队而不是报错
+      if (message.includes("进行中的 Run")) {
+        try {
+          return await enqueue();
+        } catch (e2) {
+          return c.json({ error: e2 instanceof Error ? e2.message : String(e2) }, 400);
+        }
+      }
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  /** 编辑排队中的消息（服务端队列，变更以 queue_update 快照广播） */
+  app.patch("/api/agents/:id/cloud/sessions/:sid/queue/:messageId", async (c) => {
+    const session = c.get("session")!;
+    const sid = c.req.param("sid");
+    const row = await store.getSession(session.tenantId, c.req.param("id"), sid);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    const body = await c.req
+      .json<{ content?: string }>()
+      .catch(() => ({}) as { content?: string });
+    if (typeof body.content !== "string" || !body.content.trim()) {
+      return c.json({ error: "content 必填" }, 400);
+    }
+    const item = await store.updateQueued(sid, c.req.param("messageId"), {
+      content: body.content,
+    });
+    if (!item) return c.json({ error: "排队消息不存在（可能已发出）" }, 404);
+    return c.json({ ok: true, item });
+  });
+
+  /** 移除排队中的消息 */
+  app.delete("/api/agents/:id/cloud/sessions/:sid/queue/:messageId", async (c) => {
+    const session = c.get("session")!;
+    const sid = c.req.param("sid");
+    const row = await store.getSession(session.tenantId, c.req.param("id"), sid);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    const hit = await store.removeQueued(sid, c.req.param("messageId"));
+    return c.json({ ok: true, removed: Boolean(hit), ...(hit ? { item: hit } : {}) });
+  });
+
+  /** 引导：打断当前 Run，取消收尾后立即用这条排队消息开新回合 */
+  app.post("/api/agents/:id/cloud/sessions/:sid/queue/:messageId/interrupt", async (c) => {
+    const session = c.get("session")!;
+    const agentId = c.req.param("id");
+    const sid = c.req.param("sid");
+    const row = await store.getSession(session.tenantId, agentId, sid);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    try {
+      const result = await runtime.interruptWithQueued({
+        tenantId: session.tenantId,
+        agentId,
+        sessionId: sid,
+        messageId: c.req.param("messageId"),
+      });
+      return c.json(result);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -507,79 +628,5 @@ export function registerCloudAgentRoutes(
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
-  });
-
-  /**
-   * 持久事件流（SSE）。
-   * Query: afterSeq — 只推送 seq > afterSeq 的事件；断线重连传上次收到的 seq。
-   */
-  app.get("/api/agents/:id/cloud/sessions/:sid/events", async (c) => {
-    const session = c.get("session")!;
-    const agentId = c.req.param("id");
-    const sid = c.req.param("sid");
-    const row = await store.getSession(session.tenantId, agentId, sid);
-    if (!row) return c.json({ error: "Not found" }, 404);
-
-    const afterRaw = Number(c.req.query("afterSeq") ?? "0");
-    let cursor = Number.isFinite(afterRaw) ? afterRaw : 0;
-
-    const encoder = new TextEncoder();
-    let unsubscribe: (() => void) | null = null;
-    let heartbeat: ReturnType<typeof setInterval> | null = null;
-    let closed = false;
-
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const send = (event: string, data: unknown) => {
-          if (closed) return;
-          controller.enqueue(
-            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-          );
-        };
-
-        try {
-          const backlog = await store.listEvents(sid, { afterSeq: cursor });
-          for (const ev of backlog) {
-            send("cloud", ev);
-            cursor = Math.max(cursor, ev.seq);
-          }
-          send("ready", { sessionId: sid, afterSeq: cursor });
-
-          unsubscribe = store.subscribe(sid, (ev) => {
-            if (ev.seq <= cursor) return;
-            send("cloud", ev);
-            cursor = ev.seq;
-          });
-
-          heartbeat = setInterval(() => {
-            if (closed) return;
-            try {
-              controller.enqueue(encoder.encode(`: ping\n\n`));
-            } catch {
-              /* ignore */
-            }
-          }, 15_000);
-        } catch (err) {
-          send("error", {
-            message: err instanceof Error ? err.message : String(err),
-          });
-          controller.close();
-        }
-      },
-      cancel() {
-        closed = true;
-        if (heartbeat) clearInterval(heartbeat);
-        unsubscribe?.();
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "X-Accel-Buffering": "no",
-      },
-    });
   });
 }

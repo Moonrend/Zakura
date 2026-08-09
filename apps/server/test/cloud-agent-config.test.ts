@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseCloudAgentConfig } from "@zakura/shared";
+import { parseCloudAgentConfig, resolveFollowUpMode } from "@zakura/shared";
 
 describe("parseCloudAgentConfig", () => {
   it("reads nested cloud bag", () => {
@@ -65,5 +65,13 @@ describe("parseCloudAgentConfig", () => {
   it("returns empty on invalid", () => {
     assert.deepEqual(parseCloudAgentConfig(null), {});
     assert.deepEqual(parseCloudAgentConfig("x"), {});
+  });
+
+  it("reads followUpMode and defaults resolve to steer", () => {
+    assert.equal(parseCloudAgentConfig({ cloud: { followUpMode: "steer" } }).followUpMode, "steer");
+    assert.equal(parseCloudAgentConfig({ cloud: { followUpMode: "queue" } }).followUpMode, "queue");
+    assert.equal(parseCloudAgentConfig({ cloud: { followUpMode: "nope" } }).followUpMode, undefined);
+    assert.equal(resolveFollowUpMode({}), "steer");
+    assert.equal(resolveFollowUpMode({ followUpMode: "queue" }), "queue");
   });
 });

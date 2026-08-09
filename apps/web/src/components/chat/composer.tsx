@@ -9,6 +9,7 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { ArrowUp, Brain, File as FileIcon, Paperclip, Square, Upload, X } from "lucide-react";
@@ -213,8 +214,10 @@ export function Composer({
   onStop,
   textareaRef,
   routeReady,
-  sending,
+  sending: _sending,
   runActive,
+  /** 运行中发送按钮的提示（注入 / 排队） */
+  runSendHint,
   attachments,
   attachmentPreviews,
   uploads,
@@ -235,6 +238,11 @@ export function Composer({
   compactingContext,
   onContextWindowOpenChange,
   onCompactContext,
+  queueSlot,
+  canRecallQueued,
+  onRecallQueued,
+  editing,
+  onCancelEdit,
   className,
 }: {
   value: string;
@@ -246,6 +254,8 @@ export function Composer({
   routeReady: boolean;
   sending: boolean;
   runActive: boolean;
+  /** 运行中且有内容时，发送按钮的 tooltip */
+  runSendHint?: string;
   attachments: CloudAgentAttachment[];
   attachmentPreviews: AttachmentPreviews;
   uploads: PendingUpload[];
@@ -266,6 +276,14 @@ export function Composer({
   compactingContext: boolean;
   onContextWindowOpenChange: (open: boolean) => void;
   onCompactContext: () => void;
+  /** 贴在输入卡片上方的排队列表 */
+  queueSlot?: ReactNode;
+  /** 输入框为空时按 ↑ 可把最近排队的消息召回编辑（Codex edit_queued_message） */
+  canRecallQueued?: boolean;
+  onRecallQueued?: () => void;
+  /** 编辑已发送消息：内容在 Composer 里改，发送后成兄弟分支 */
+  editing?: boolean;
+  onCancelEdit?: () => void;
   className?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -276,8 +294,9 @@ export function Composer({
   const [focused, setFocused] = useState(false);
 
   const uploading = uploads.length > 0;
+  // 不因 sending 禁用：首条 POST 进行中也可把下一句入队
   const canSend =
-    routeReady && !sending && !uploading && (value.trim().length > 0 || attachments.length > 0);
+    routeReady && !uploading && (value.trim().length > 0 || attachments.length > 0);
 
   /**
    * 自动高度。不依赖 CSS `field-sizing: content`（Firefox / Safari 尚未支持），
@@ -312,17 +331,46 @@ export function Composer({
     return () => observer.disconnect();
   }, [resize, textareaRef]);
 
+  /** 运行中有内容时改为「入队」；无内容时仍是停止 */
+  const showStop = runActive && !canSend;
+
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Escape") {
+      if (editing) {
+        e.preventDefault();
+        onCancelEdit?.();
+        return;
+      }
       e.currentTarget.blur();
       return;
     }
-    if (e.key !== "Enter") return;
-    // 中日韩输入法组字中：回车用于确认候选词，不能触发发送
+    // 中日韩输入法组字中：按键（候选导航/回车选词）都交给输入法
     if (composingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+    // 空输入框按 ↑：把最近排队的消息召回输入框编辑（不与光标移动冲突）
+    if (
+      e.key === "ArrowUp" &&
+      canRecallQueued &&
+      !editing &&
+      value === "" &&
+      !e.shiftKey &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
+      e.preventDefault();
+      onRecallQueued?.();
+      return;
+    }
+    if (e.key !== "Enter") return;
+    // Ctrl/⌘+Enter：始终发送（与换行、系统快捷键不冲突）
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      if (canSend) onSend();
+      return;
+    }
     if (e.shiftKey || e.altKey) return; // 换行
     e.preventDefault();
-    if (runActive) return;
+    // 运行中也可发送：服务端入队，当前回合结束后按序发出
     if (canSend) onSend();
   }
 
@@ -373,22 +421,26 @@ export function Composer({
 
   return (
     <div className={cn("mx-auto w-full max-w-3xl", className)}>
-      <div
-        onDragEnter={handleDragEnter}
-        onDragOver={(e) => {
-          if (hasFiles(e)) e.preventDefault();
-        }}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={cn(
-          "relative rounded-xl border bg-background",
-          "transition-[border-color,box-shadow] duration-200 ease-out-soft",
-          focused
-            ? "border-ring/45 shadow-[var(--shadow-soft)]"
-            : "border-border/70 shadow-sm hover:border-border",
-          dragging && "border-dashed border-ring",
-        )}
-      >
+      <div className="flex flex-col">
+        {/* 排队区：输入卡片上方 */}
+        {queueSlot}
+
+        <div
+          onDragEnter={handleDragEnter}
+          onDragOver={(e) => {
+            if (hasFiles(e)) e.preventDefault();
+          }}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={cn(
+            "relative z-10 rounded-xl border bg-background",
+            "transition-[border-color,box-shadow] duration-200 ease-out-soft",
+            focused || editing
+              ? "border-ring/45 shadow-[var(--shadow-soft)]"
+              : "border-border/70 shadow-sm hover:border-border",
+            dragging && "border-dashed border-ring",
+          )}
+        >
         {/* 拖放覆盖层 */}
         {dragging && (
           <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-xl border border-dashed border-ring/60 bg-background/95 text-sm text-foreground">
@@ -396,6 +448,26 @@ export function Composer({
             {canAttach ? "松开即可上传到工作区" : "该 Agent 未开启电脑环境"}
           </div>
         )}
+
+        {editing ? (
+          <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
+            <span className="text-xs text-muted-foreground">
+              编辑消息 · 发送后成为新分支
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs text-muted-foreground"
+              onClick={() => onCancelEdit?.()}
+            >
+              取消
+              <kbd className="ml-1.5 rounded border border-border/70 bg-muted/50 px-1 font-sans text-[10px] text-muted-foreground/80">
+                Esc
+              </kbd>
+            </Button>
+          </div>
+        ) : null}
 
         {/* 待发送附件 */}
         <div className="disclosure" data-open={showAttachmentRow ? "" : undefined}>
@@ -422,7 +494,15 @@ export function Composer({
           rows={1}
           /* 发送中不禁用输入框：禁用会抢走焦点，且用户常要接着敲下一句 */
           disabled={!routeReady}
-          placeholder={routeReady ? "发送消息…" : "请先配置 chat 模型路由"}
+          placeholder={
+            !routeReady
+              ? "请先配置 chat 模型路由"
+              : editing
+                ? "编辑消息…"
+                : runActive
+                  ? "发送后续…"
+                  : "发送消息…"
+          }
           onChange={(e) => onValueChange(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
@@ -518,16 +598,18 @@ export function Composer({
 
           <Tooltip>
             <TooltipTrigger render={<span className="inline-flex" />}>
-              {/* 发送 / 停止：同一枚按钮里两个图标交叉形变 */}
+              {/* 发送 / 入队 / 停止：有内容时优先发送（运行中=入队），空内容且运行中才是停止 */}
               <Button
                 size="icon"
-                variant={runActive ? "secondary" : "default"}
-                aria-label={runActive ? "停止生成" : "发送"}
-                disabled={runActive ? false : !canSend}
-                onClick={() => (runActive ? onStop() : onSend())}
+                variant={showStop ? "secondary" : "default"}
+                aria-label={
+                  showStop ? "停止生成" : editing ? "发送编辑" : runActive ? "加入队列" : "发送"
+                }
+                disabled={showStop ? false : !canSend}
+                onClick={() => (showStop ? onStop() : onSend())}
                 className="relative size-9 shrink-0 rounded-full"
               >
-                {runActive && (
+                {showStop && (
                   <svg
                     viewBox="0 0 36 36"
                     aria-hidden
@@ -549,26 +631,31 @@ export function Composer({
                   <ArrowUp
                     className={cn(
                       "col-start-1 row-start-1 size-4 transition-[transform,opacity] duration-300 ease-overshoot",
-                      runActive ? "rotate-90 scale-50 opacity-0" : "rotate-0 scale-100 opacity-100",
+                      showStop ? "rotate-90 scale-50 opacity-0" : "rotate-0 scale-100 opacity-100",
                     )}
                   />
                   <Square
                     className={cn(
                       "col-start-1 row-start-1 size-3 transition-[transform,opacity] duration-300 ease-overshoot",
-                      runActive ? "rotate-0 scale-100 opacity-100" : "-rotate-90 scale-50 opacity-0",
+                      showStop ? "rotate-0 scale-100 opacity-100" : "-rotate-90 scale-50 opacity-0",
                     )}
                   />
                 </span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              {runActive
+              {showStop
                 ? "停止生成"
                 : uploading
                   ? "等待附件上传完成"
-                  : "发送 · Shift+Enter 换行"}
+                  : editing
+                    ? "发送编辑 · Esc 取消"
+                    : runActive
+                      ? (runSendHint ?? "发送到当前回合")
+                      : "发送 · Shift+Enter 换行"}
             </TooltipContent>
           </Tooltip>
+        </div>
         </div>
       </div>
     </div>

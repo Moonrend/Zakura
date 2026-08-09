@@ -112,6 +112,16 @@ export const REDIS_KEYS = {
   meta: (sessionId: string) => `zakura:cloud:meta:${sessionId}`,
   /** Run 状态快照 */
   run: (runId: string) => `zakura:cloud:run:${runId}`,
+  /** 会话级后续消息队列（JSON 快照；steer/queue 两类条目） */
+  queue: (sessionId: string) => `zakura:cloud:queue:${sessionId}`,
+  /** 立即发送：取消收尾后优先开跑的下一条（从队列摘出） */
+  queueNext: (sessionId: string) => `zakura:cloud:queue-next:${sessionId}`,
+  /** Run 取消广播频道（全局单频道，跨实例即时掐流） */
+  cancelChannel: "zakura:cloud:cancel",
+  /** 平台事件跨实例 fan-out（按租户） */
+  platformChannel: (tenantId: string) => `zakura:platform:evt:${tenantId}`,
+  /** 平台事件跨实例 fan-out（host 级广播，所有租户可见） */
+  platformChannelAll: "zakura:platform:evt:all",
   /** API Key 鉴权缓存 */
   auth: (keyHash: string) => `zakura:auth:key:${keyHash}`,
   /** Agent 工具列表短缓存 */
@@ -121,4 +131,7 @@ export const REDIS_KEYS = {
   /** Gateway clientSessionKey → sessionId */
   gwClient: (agentId: string, clientKey: string) =>
     `zakura:gw:client:${agentId}:${encodeURIComponent(clientKey)}`,
+  /** 危机支持邮件冷却（按用户邮箱，24h） */
+  crisisSupport: (userKey: string) =>
+    `zakura:email:crisis-support:${encodeURIComponent(userKey)}`,
 } as const;

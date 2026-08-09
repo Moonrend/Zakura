@@ -70,7 +70,6 @@ import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerAutomationRoutes } from "./automation-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
-import { platformEvents } from "../services/platform-events.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { AgentAutomationService } from "../services/agent-automation.js";
 import { EmailInboundService } from "../services/email-inbound.js";
@@ -124,6 +123,12 @@ import {
   getAgentWebDefaults,
   saveAgentWebDefaults,
 } from "../services/agent-defaults.js";
+import { bindTransactionalEmail } from "../services/transactional-email.js";
+import {
+  getPlatformTransactionalEmailPublic,
+  patchPlatformTransactionalEmail,
+  type PlatformTransactionalEmailPatch,
+} from "../services/platform-transactional-email.js";
 
 /** Short-lived upstream OAuth PKCE state (in-memory) */
 const upstreamOauthPending = new Map<
@@ -303,6 +308,15 @@ function canManageMcpOauthApps(
   return isSessionAdmin(session);
 }
 
+/** 系统发信：SaaS 超管；OSS 租户管理员 */
+function canManageTransactionalEmail(
+  session: { role: string; userId: string; isPlatformAdmin?: boolean },
+  config: AppConfig,
+): boolean {
+  if (config.multiTenant) return session.isPlatformAdmin === true;
+  return isSessionAdmin(session);
+}
+
 export type AppVariables = {
   session?: {
     userId: string;
@@ -394,6 +408,12 @@ export async function createApiApp(deps: {
   skills?: import("../services/skills/index.js").SkillsService;
   connections?: import("../services/connection-catalog.js").ConnectionCatalogService;
   instanceMigrations?: import("../services/instance-migration.js").InstanceMigrationService | null;
+  /**
+   * 云端会话事件存储。必须由调用方注入并全进程唯一 —— 本地事件投递走进程内
+   * emit()，多实例会导致同进程产生的事件互相收不到（Redis 那条路会被
+   * INSTANCE_ID 自过滤）。实时网关与本模块共用同一个实例。
+   */
+  cloudSessionStore: CloudAgentSessionStore;
 }) {
   const {
     db,
@@ -424,6 +444,7 @@ export async function createApiApp(deps: {
     skills,
     connections,
     instanceMigrations,
+    cloudSessionStore,
   } = deps;
   const mcpStore = new McpStoreService(db, config);
   const upstreamOauth = new McpUpstreamOauthService(config);
@@ -432,11 +453,11 @@ export async function createApiApp(deps: {
   const connectorAuth = new ConnectorAuthService(db, config);
   const tenantService = new TenantService(db);
   const app = new Hono<{ Variables: AppVariables }>();
+  bindTransactionalEmail({ db, secret: config.secret });
   let emailInbound: EmailInboundService | null = null;
   let remoteIngress: RemoteAgentIngress | null = null;
   let remoteRuntime: RemoteChannelRuntime | null = null;
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
-  let cloudSessionStore: CloudAgentSessionStore | null = null;
   const automation = new AgentAutomationService(db);
 
   // Request timing: log any /api call > 300ms (or all when ZAKURA_HTTP_TIMING=1)
@@ -2468,63 +2489,9 @@ export async function createApiApp(deps: {
     });
   }
 
-  /**
-   * 平台事件（SSE）：MCP 实例状态与安装进度、Agent 工作区进度、
-   * Runner 心跳、工作区文件变更。瞬态信号不落库；断线重连后
-   * 前端应重新拉一次对应快照接口对齐状态。
-   */
-  app.get("/api/events", async (c) => {
-    const session = c.get("session")!;
-    const tenantId = session.tenantId;
-    const encoder = new TextEncoder();
-    let unsubscribe: (() => void) | null = null;
-    let heartbeat: ReturnType<typeof setInterval> | null = null;
-    let closed = false;
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const send = (event: string, data: unknown) => {
-          if (closed) return;
-          try {
-            controller.enqueue(
-              encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-            );
-          } catch {
-            /* stream closed */
-          }
-        };
-        send("ready", { ts: Date.now() });
-        unsubscribe = platformEvents.subscribe(tenantId, (ev) => send("platform", ev));
-        heartbeat = setInterval(() => {
-          if (closed) return;
-          try {
-            controller.enqueue(encoder.encode(`: ping\n\n`));
-          } catch {
-            /* ignore */
-          }
-        }, 15_000);
-      },
-      cancel() {
-        closed = true;
-        if (heartbeat) clearInterval(heartbeat);
-        unsubscribe?.();
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "X-Accel-Buffering": "no",
-      },
-    });
-  });
-
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
-    const cloudStore = new CloudAgentSessionStore(db);
-    cloudSessionStore = cloudStore;
+    const cloudStore = cloudSessionStore;
     remoteIngress = new RemoteAgentIngress(
       db,
       agentService,
@@ -2608,13 +2575,17 @@ export async function createApiApp(deps: {
     }
     if (!modelRouter) {
       // 无模型路由：注册只读会话 API，发消息时返回明确错误
+      const unavailable = async (): Promise<never> => {
+        throw new Error("模型路由未启用，请先配置 chat 上游");
+      };
       registerCloudAgentRoutes(app, {
         agentService,
         store: cloudStore,
         runtime: {
-          startTurn: async () => {
-            throw new Error("模型路由未启用，请先配置 chat 上游");
-          },
+          startTurn: unavailable,
+          enqueueFollowUp: unavailable,
+          interruptWithQueued: unavailable,
+          startNextQueued: async () => {},
         },
         modelRouter,
       });
@@ -2628,7 +2599,7 @@ export async function createApiApp(deps: {
       agentService,
       gateway,
       modelRouter,
-      store: cloudSessionStore ?? new CloudAgentSessionStore(db),
+      store: cloudSessionStore,
       memoryStore,
       memoryProviders,
       skills,
@@ -4991,6 +4962,34 @@ export async function createApiApp(deps: {
         ...result,
         checklist: result.checklist ?? googleOauthSetupChecklist(result.redirectUri),
       });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.get("/api/settings/email/transactional", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageTransactionalEmail(session, config)) {
+      return c.json({ error: "需要平台管理员权限" }, 403);
+    }
+    return c.json(await getPlatformTransactionalEmailPublic(db, config.secret));
+  });
+
+  app.put("/api/settings/email/transactional", async (c) => {
+    const session = c.get("session")!;
+    if (!canManageTransactionalEmail(session, config)) {
+      return c.json({ error: "需要平台管理员权限" }, 403);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as PlatformTransactionalEmailPatch;
+    try {
+      const saved = await patchPlatformTransactionalEmail(db, config.secret, {
+        enabled: body.enabled,
+        fromEmail: body.fromEmail,
+        baseUrl: body.baseUrl,
+        providerId: body.providerId,
+        apiToken: body.apiToken,
+      });
+      return c.json(saved);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

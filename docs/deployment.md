@@ -19,10 +19,11 @@ Redis **默认开启**，热路径对齐 Memoh `session_runtime` 思路：**活�
 |----------|------|
 | `zakura:cloud:seq:` | 会话事件序号 INCR |
 | `zakura:cloud:pending:` | 待批落库的 delta |
-| `zakura:cloud:events:` | 近期事件环（最多 500，SSE/listEvents 热读） |
+| `zakura:cloud:events:` | 近期事件环（最多 500，实时续传/listEvents 热读） |
 | `zakura:cloud:meta:` | 会话元数据快照 |
 | `zakura:cloud:run:` | Run 状态快照 |
-| `zakura:cloud:evt:` | Pub/Sub 实时 fan-out |
+| `zakura:cloud:evt:` | Pub/Sub 会话事件 fan-out（按会话） |
+| `zakura:platform:evt:` | Pub/Sub 平台事件 fan-out（按租户，`:all` 为 host 级广播） |
 | `zakura:auth:key:` | API Key 鉴权短缓存（30s） |
 | `zakura:tools:agent:` | Agent 工具列表短缓存（5s） |
 | `zakura:gw:client:` | Gateway clientSessionKey → sessionId |
@@ -40,7 +41,7 @@ Redis **默认开启**，热路径对齐 Memoh `session_runtime` 思路：**活�
 - 会话序号用 Redis `INCR` 分配
 - 实时事件用 Redis Pub/Sub 跨实例推送
 - `assistant_delta` / `reasoning_delta` **先推送、再异步批落库**，避免每 token 一次 DB 事务
-- `listEvents` / SSE 续传优先读事件环，减少打 Postgres
+- `listEvents` / Socket.IO `subscribe:session` 续传优先读事件环，减少打 Postgres
 - 鉴权与工具列表走短 TTL 缓存
 
 ```env
@@ -63,27 +64,54 @@ COMPOSE_PROFILES=postgres docker compose up -d
 - Redis 6+（推荐 7）
 - 与 API 同低延迟网络（同 VPC / 同 compose 网络）
 - 持久化可选（AOF/RDB）；丢短时 delta 可接受，终态事件仍同步写 Postgres
-- 多副本 API **必须** 共用同一 Redis，否则 SSE 跨实例收不到事件
+- 多副本 API **必须** 共用同一 Redis，否则会话事件与平台事件跨实例都收不到
 - **启动时连不上 Redis 会直接退出**（除非 `REDIS_URL=off`）
 
-## 2. 反向代理：SSE 必须禁用缓冲
+## 2. 反向代理：实时连接与流式禁缓冲
 
-Cloud Agent 事件流与 OpenAI Gateway 流式接口均为 **SSE**（`text/event-stream`）。任何缓冲都会表现为「模型本身很快，经 Zakura 后首字/流式很慢」。
+前后端实时通信走 **Socket.IO**（`/api/socket.io`，WebSocket 优先、HTTP long-polling 兜底）；OpenAI Gateway 流式接口仍是 **SSE**（`text/event-stream`）。任何缓冲都会表现为「模型本身很快，经 Zakura 后首字/流式很慢」。
 
 ### 硬性要求（与代理品牌无关）
 
 对转发到 Zakura API 的路径（至少 `/api/`、`/v1/`，以及长连接 `/mcp`）：
 
-1. **关闭响应缓冲**（不得攒包再刷）
+1. **关闭响应缓冲**（不得攒包再刷）——对 SSE 与 Socket.IO 的 polling 传输都必需
 2. **关闭或绕过响应缓存**
 3. **读/写超时 ≥ 3600s**（对话与工具轮可能很长）
 4. 保留上游头：`X-Accel-Buffering: no`（nginx）、以及 `Cache-Control: no-cache`
 5. HTTP/1.1 或 HTTP/2 均可；不要对 SSE 做 body 压缩再缓冲
-6. 若前面还有 CDN / Cloudflare：**对该路径关闭缓冲型代理或改用 Workers/直回源**；橙色云代理可能无视 `X-Accel-Buffering`
+6. **透传 WebSocket 升级头**（`Upgrade` / `Connection: upgrade`）到 `/api/socket.io`。不透传不会致命——Socket.IO 会自动降级到 polling 继续工作——但会白白损失 WebSocket 的低开销
+7. 若前面还有 CDN / Cloudflare：**对该路径关闭缓冲型代理或改用 Workers/直回源**；橙色云代理可能无视 `X-Accel-Buffering`
+8. 多副本 + polling 传输需要**会话粘滞**（sticky session），否则握手会在副本间跳转失败
 
 ### nginx 示例
 
+> 注意：`/api/` 这类流式路径惯用的 `proxy_set_header Connection "";` 会**清掉 WebSocket 升级头**。
+> 因此 `/api/socket.io` 必须单独用一个 location，并按 `$connection_upgrade` 透传。
+
 ```nginx
+# 放在 http {} 块中
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# 实时连接：必须放在 /api/ 之前（nginx 前缀 location 取最长匹配）
+location /api/socket.io {
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_pass http://zakura_api;
+}
+
 location /api/ {
     proxy_http_version 1.1;
     proxy_set_header Connection "";
@@ -168,7 +196,7 @@ http:
 ### Cloudflare / 其它 CDN
 
 - 对 `/api/*`、`/v1/*` 优先 **DNS only（灰云）** 或 Spectrum / Tunnel 直回源
-- 若必须橙云：关闭 Rocket Loader、确认无 Worker 二次缓冲；SSE 兼容性以实测为准
+- 若必须橙云：关闭 Rocket Loader、确认无 Worker 二次缓冲；橙云对 WebSocket 支持良好，SSE 兼容性以实测为准
 
 ## 3. 环境变量清单（生产）
 
@@ -194,8 +222,9 @@ ZAKURA_DATA_DIR=/data
 - [ ] Web 聊天流式：**首字延迟**接近直连上游（Redis 默认开启，不应再被 Postgres 每 token 拖住）
 - [ ] 进程启动日志含 `redis: redis://…`；连不上时应直接失败（除非 `REDIS_URL=off`）
 - [ ] 同一会话刷新后仍能看到完整正文、工具卡片、思考记录
-- [ ] 浏览器 DevTools → EventStream：`/api/agents/.../events` 持续收到 `cloud` 事件，而非结束时一次性到齐
-- [ ] （多实例）两个 API 副本时，连在 A 上的 SSE 能收到 B 上产生的事件
+- [ ] 浏览器 DevTools → Network → WS：`/api/socket.io` 帧中 `cloud` 事件逐条到达，而非结束时一次性到齐
+- [ ] DevTools → Network → WS：`/api/socket.io/?EIO=4&transport=websocket` 持续收帧
+- [ ] （多实例）两个 API 副本时，连在 A 上的会话事件能收到 B 上产生的事件
 - [ ] 代理 access log 中流式请求 duration 与对话时长一致（而不是固定几秒就结束）
 
 ## 5. 与「展示缺失」相关的路径说明
@@ -205,4 +234,4 @@ Web UI 只渲染 **已落库 / 已推送的 Cloud Agent 事件**。若会话经 
 - 服务端已写入 `reasoning_delta`、`tool_call_*` 时，控制台与本地 Web 表现一致
 - 纯客户端工具或客户端自带 Zakura MCP 时，工具可能只在最终 `assistant_message.toolCalls` 中出现（设计如此）
 
-排查时先看会话 `events` 是否含 `reasoning_delta` / `tool_call_start`，再查代理是否缓冲 SSE。
+排查时先看会话 `events` 是否含 `reasoning_delta` / `tool_call_start`，再查代理是否缓冲流式响应或阻断 WebSocket 升级。

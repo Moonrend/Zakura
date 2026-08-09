@@ -42,22 +42,25 @@ describe("platform services catalog", () => {
     assert.equal(specs[0]!.env?.SEARXNG_LIMITER, "false");
   });
 
-  it("mounts SearXNG settings with json format enabled", async () => {
+  it("forces SearXNG JSON formats via entrypoint (not hostPath bind)", () => {
+    const specs = buildManagedSpecs(PLATFORM_SERVICE_CATALOG.searxng, {}, "zakura");
+    const ep = specs[0]!.entrypoint?.join(" ") ?? "";
+    assert.match(ep, /settings\.yml/);
+    assert.match(ep, /- json/);
+    assert.match(ep, /entrypoint\.sh/);
+    // DinD cannot reliably bind Zakura's /data volume → no hostPath mount
+    assert.equal(specs[0]!.volumes?.length ?? 0, 0);
+  });
+
+  it("ensureSearxngConfigDir still writes json-capable settings", async () => {
     const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
+    const { ensureSearxngConfigDir } = await import("../src/platform-services/catalog.js");
     const dataDir = mkdtempSync(join(tmpdir(), "zakura-searxng-"));
     try {
-      const specs = buildManagedSpecs(
-        PLATFORM_SERVICE_CATALOG.searxng,
-        {},
-        "zakura",
-        { dataDir },
-      );
-      const vol = specs[0]!.volumes?.[0];
-      assert.ok(vol?.hostPath);
-      assert.equal(vol!.containerPath, "/etc/searxng");
-      const yml = readFileSync(join(vol!.hostPath!, "settings.yml"), "utf8");
+      const dir = ensureSearxngConfigDir(dataDir);
+      const yml = readFileSync(join(dir, "settings.yml"), "utf8");
       assert.match(yml, /formats:/);
       assert.match(yml, /- json/);
     } finally {

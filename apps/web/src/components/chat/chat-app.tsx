@@ -26,7 +26,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { CloudAgentEvent, CloudAgentRunOptions } from "@zakura/shared";
+import type { CloudAgentEvent, CloudAgentRunOptions, CloudAgentFollowUpMode } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -70,9 +70,11 @@ import {
   forkCloudSession,
   getCloudConfig,
   getCloudSession,
+  interruptWithQueuedMessage,
   listChatModels,
   listCloudSessions,
   regenerateCloudRun,
+  removeQueuedMessage,
   saveCloudConfig,
   searchCloudSessions,
   sendCloudMessage,
@@ -81,6 +83,7 @@ import {
   SESSION_KIND_LABELS,
   type ChatModelOption,
   type CloudAgentAttachment,
+  type CloudAgentQueuedMessage,
   type CloudAgentSessionKind,
   type CloudSearchHit,
   type CloudSession,
@@ -97,6 +100,7 @@ import {
   type PendingUpload,
   reasoningItemsFromLevels,
 } from "./composer";
+import { MessageQueue } from "./message-queue";
 import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
 import { AutomationPanel } from "./automation-panel";
@@ -245,6 +249,8 @@ export function ChatApp() {
   const [enableTools, setEnableTools] = useState(true);
   const [autoMemory, setAutoMemory] = useState(true);
   const [autoTitle, setAutoTitle] = useState(true);
+  /** 运行中再发：steer=下一工具后注入（默认）；queue=整轮结束后再发 */
+  const [followUpMode, setFollowUpMode] = useState<CloudAgentFollowUpMode>("steer");
   const [maxSubagentDepth, setMaxSubagentDepth] = useState("2");
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [hasChatRoute, setHasChatRoute] = useState(true);
@@ -263,8 +269,26 @@ export function ChatApp() {
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
   /** 正在上传的文件（含进度），用于在输入框里显示占位片 */
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
+  const [queue, setQueue] = useState<CloudAgentQueuedMessage[]>([]);
+  /**
+   * 正在编辑的已发送消息：编辑一律召回 Composer 复用完整能力（附件/换行/模型选项），
+   * 不做行内简易文本框。发送时按 parentKey 建新分支，原消息保留为兄弟变体。
+   */
+  const [editingTarget, setEditingTarget] = useState<{
+    messageId: string;
+    parentKey: string;
+  } | null>(null);
   /** 上传中的请求，用于取消 */
   const uploadAbortsRef = useRef<Map<string, AbortController>>(new Map());
+  /** 已应用的队列快照 seq：重放/乱序事件不回退队列 */
+  const queueSeqRef = useRef(0);
+  /** 发送串行链：多次快速发送按序到达服务端（顺序由服务端队列保证） */
+  const sendChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  /** 当前会话 id 的同步镜像：串行链内的发送不能读过期的 state */
+  const sessionIdRef = useRef<string | null>(null);
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
   const seqRef = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const fileNonceRef = useRef(1);
@@ -291,7 +315,35 @@ export function ChatApp() {
   const agent = agents.find((a) => a.id === agentId) ?? null;
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
   const isGatewaySession = activeSession?.origin.channel === "openai-gateway";
-  const runActive = Boolean(activeSession?.activeRunId);
+  /**
+   * 活跃 Run 优先从事件流推导（有序、无请求竞态）。
+   * 引导/出队是「run_end(cancelled) → 立刻 run_start 新回合」的连续事件；
+   * 若依赖拉会话列表，两次刷新响应乱序会把「运行中」闪成「已结束」，
+   * 让停止按钮消失、重新生成等操作在运行中提前出现。
+   * 事件窗口里没有 run_start（刚加载/Gateway 会话）时回退会话快照。
+   */
+  const activeRunId = useMemo(() => {
+    let latest: { runId: string; ended: boolean } | null = null;
+    for (const ev of events) {
+      if (ev.type === "run_start" && ev.runId) {
+        latest = { runId: ev.runId, ended: false };
+      } else if (ev.type === "run_end" && ev.runId && latest?.runId === ev.runId) {
+        latest.ended = true;
+      }
+    }
+    if (latest) return latest.ended ? null : latest.runId;
+    return activeSession?.activeRunId ?? null;
+  }, [events, activeSession?.activeRunId]);
+  /**
+   * 队列只在运行期存在（停止/完成后服务端自动继续出队），
+   * 因此「有排队消息」也按运行中展示，避免出队间隙闪成空闲。
+   */
+  const runActive = Boolean(activeRunId) || queue.length > 0;
+
+  // 串行发送链在 state 提交前就可能读取会话 id，保持同步镜像
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   const turns = useMemo(
     () => buildConversationTurns(events, { variantByMessage, branchByParent }),
     [events, variantByMessage, branchByParent],
@@ -430,6 +482,14 @@ export function ChatApp() {
         return [...prev, ev].sort((a, b) => a.seq - b.seq);
       });
       if (ev.seq > seqRef.current) seqRef.current = ev.seq;
+      // 服务端队列快照：全量替换（只认更新的 seq，重放不回退）
+      if (ev.type === "queue_update") {
+        const p = ev.payload as { items?: CloudAgentQueuedMessage[] };
+        if (ev.seq >= queueSeqRef.current) {
+          queueSeqRef.current = ev.seq;
+          setQueue(Array.isArray(p.items) ? p.items : []);
+        }
+      }
       if (
         ev.type === "run_start" ||
         ev.type === "run_end" ||
@@ -447,6 +507,7 @@ export function ChatApp() {
     async (aid: string, sid: string) => {
       const res = await getCloudSession(aid, sid, 0);
       setSessionId(sid);
+      sessionIdRef.current = sid;
       setEvents(res.events);
       const sessionHasModel = Boolean(res.session.model);
       setModel(sessionHasModel ? res.session.model! : agentDefaultsRef.current.model);
@@ -468,8 +529,12 @@ export function ChatApp() {
       draftsRef.current.set(sid, res.session.draftText ?? "");
       setVariantByMessage({});
       setBranchByParent({});
+      setEditingTarget(null);
       const maxSeq = res.events.reduce((m, e) => Math.max(m, e.seq), 0);
       seqRef.current = maxSeq;
+      // 服务端队列随会话加载（其它设备排的消息也在这里）
+      setQueue(res.queue ?? []);
+      queueSeqRef.current = maxSeq;
       setSessions((prev) => {
         const others = prev.filter((s) => s.id !== sid);
         return [res.session, ...others].sort(
@@ -514,6 +579,7 @@ export function ChatApp() {
         setEnableTools(cfg.cloud.enableTools !== false);
         setAutoMemory(cfg.cloud.autoMemory !== false);
         setAutoTitle(cfg.cloud.autoTitle !== false);
+        setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
         setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
         setModels(chatModels);
         const pending = pendingSessionRef.current;
@@ -621,29 +687,13 @@ export function ChatApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅响应过滤变化
   }, [kindFilter]);
 
-  // —— SSE 订阅 ——
+  // —— 会话事件订阅（重连与 afterSeq 续传由传输层处理）——
   useEffect(() => {
     if (!sessionId || !agentId) return;
-    let unsub = subscribeCloudEvents(agentId, sessionId, seqRef.current, {
+    return subscribeCloudEvents(agentId, sessionId, seqRef.current, {
       onEvent: mergeEvent,
-      onError: (msg) => console.warn("[chat sse]", msg),
+      onError: (msg) => console.warn("[chat realtime]", msg),
     });
-    const resub = () => {
-      unsub();
-      unsub = subscribeCloudEvents(agentId, sessionId, seqRef.current, {
-        onEvent: mergeEvent,
-      });
-    };
-    const onVis = () => {
-      if (document.visibilityState === "visible") resub();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    const timer = setInterval(resub, 60_000);
-    return () => {
-      unsub();
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVis);
-    };
   }, [agentId, sessionId, mergeEvent]);
 
   // —— 平台事件：其它会话新建/更新（含 Gateway）同步侧栏 ——
@@ -757,10 +807,14 @@ export function ChatApp() {
   function handleNewSession() {
     if (!agentId) return;
     setSessionId(null);
+    sessionIdRef.current = null;
     setEvents([]);
     setVariantByMessage({});
     setBranchByParent({});
     seqRef.current = 0;
+    queueSeqRef.current = 0;
+    setQueue([]);
+    setEditingTarget(null);
     clearAttachments();
     composerRef.current?.focus();
   }
@@ -785,6 +839,7 @@ export function ChatApp() {
         setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
         draftKeyRef.current = created.id;
         setSessionId(created.id);
+        sessionIdRef.current = created.id;
         seqRef.current = 0;
         setEvents([]);
         await sendCloudMessage(agentId, created.id, prompt, null, undefined, runOptions);
@@ -908,6 +963,90 @@ export function ChatApp() {
     setAttachments([]);
   }
 
+  /**
+   * 编辑排队消息：从服务端队列摘回主输入框（保留换行与附件），
+   * 复用完整输入能力（图片/文件/模型选项），改完再发送即可。
+   */
+  function handleQueuedEdit(messageId: string) {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid) return;
+    const item = queueRef.current.find((m) => m.messageId === messageId);
+    if (!item) return;
+    if (latestInputRef.current.trim() || attachments.length > 0) {
+      toast.error("输入框还有未发送的内容，先发送或清空后再编辑排队消息");
+      return;
+    }
+    setQueue((prev) => prev.filter((m) => m.messageId !== messageId));
+    setInput(item.content);
+    latestInputRef.current = item.content;
+    if (item.attachments?.length) setAttachments(item.attachments);
+    void removeQueuedMessage(aid, sid, messageId).catch((err) => {
+      toast.error(err instanceof Error ? err.message : String(err));
+    });
+    composerRef.current?.focus();
+  }
+
+  function handleQueuedRemove(messageId: string) {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid) return;
+    setQueue((prev) => prev.filter((m) => m.messageId !== messageId));
+    void removeQueuedMessage(aid, sid, messageId).catch((err) => {
+      toast.error(err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  /** 立即发送：打断当前 Run，只用这一条马上开新回合 */
+  function handleQueuedInterrupt(messageId: string) {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid) return;
+    // 立刻出队：服务端 claim 后 queue_update 也会收敛；先消掉等待感
+    setQueue((prev) => prev.filter((m) => m.messageId !== messageId));
+    void interruptWithQueuedMessage(aid, sid, messageId).catch((err) => {
+      toast.error(err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  /** 空输入框按 ↑：召回最近排队的消息进输入框编辑（Codex edit_queued_message） */
+  function handleRecallQueued() {
+    const last = queueRef.current[queueRef.current.length - 1];
+    if (!last) return;
+    handleQueuedEdit(last.messageId);
+  }
+
+  /**
+   * 编辑已发送消息：召回 Composer（复用附件/换行/模型选项等完整能力）。
+   * 原消息不删除 —— 发送后按 parentKey 成为兄弟分支变体。
+   */
+  function handleEditStart(
+    messageId: string,
+    parentKey: string,
+    content: string,
+    msgAttachments: CloudAgentAttachment[],
+  ) {
+    if (runActive) return;
+    // 已在编辑另一条时直接改目标；否则保护输入框里的未发送内容
+    if (!editingTarget && (latestInputRef.current.trim() || attachments.length > 0)) {
+      toast.error("输入框还有未发送的内容，先发送或清空后再编辑消息");
+      return;
+    }
+    setEditingTarget({ messageId, parentKey });
+    setInput(content);
+    latestInputRef.current = content;
+    setAttachments(msgAttachments);
+    composerRef.current?.focus();
+  }
+
+  /** 取消编辑：清空召回的内容，回到普通输入态 */
+  function handleEditCancel() {
+    setEditingTarget(null);
+    setInput("");
+    latestInputRef.current = "";
+    setAttachments([]);
+  }
+
   function removeAttachment(path: string) {
     dropPreview(path);
     setAttachments((prev) => prev.filter((a) => a.path !== path));
@@ -1007,7 +1146,7 @@ export function ChatApp() {
     uploadAbortsRef.current.get(id)?.abort();
   }, []);
 
-  // 离开页面时中止在途上传，避免请求悬着
+  // 离开页面时中止在途上传
   useEffect(() => {
     const aborts = uploadAbortsRef.current;
     return () => {
@@ -1016,24 +1155,22 @@ export function ChatApp() {
     };
   }, []);
 
-  async function handleSend() {
-    if (!agentId || sending || runActive) return;
-    const content = input.trim();
-    if (!content && attachments.length === 0) return;
-    const sentAttachments = attachments;
-    const sentPreviews = previewsRef.current;
-    setInput("");
-    latestInputRef.current = "";
-    draftsRef.current.delete(draftKeyRef.current);
-    // 预览地址随消息一起「离开」输入框，交给消息流的附件卡片自己渲染
-    for (const url of Object.values(sentPreviews)) URL.revokeObjectURL(url);
-    previewsRef.current = {};
-    setAttachmentPreviews({});
-    setAttachments([]);
+  /**
+   * 真正打 API 发一条消息（串行链内执行）。会话不存在则先创建；
+   * 服务端根据运行状态决定：空闲直接开 Run，运行中/有排队则入服务端队列
+   * （steer 项在下一工具批后注入，queue 项等回合结束按 FIFO 发出）。
+   */
+  async function dispatchOutbound(
+    content: string,
+    sentAttachments: CloudAgentAttachment[],
+    parentRunId: string | null | undefined,
+    sentPreviews: Record<string, string>,
+  ) {
+    if (!agentId) return;
     setSending(true);
     try {
-      let sid = sessionId;
-      if (isGatewaySession && sid) {
+      let sid = sessionIdRef.current;
+      if (sid && sessions.find((s) => s.id === sid)?.origin.channel === "openai-gateway") {
         sid = await forkToWritableSession(sid);
       }
       if (!sid) {
@@ -1045,31 +1182,88 @@ export function ChatApp() {
           reasoning,
           draftText: "",
         });
-        // 会话 key 提前对齐，避免草稿同步 effect 把已发送内容存回「新对话」
         draftKeyRef.current = created.id;
         setSessionId(created.id);
+        sessionIdRef.current = created.id;
         seqRef.current = 0;
+        queueSeqRef.current = 0;
         setEvents([]);
+        setQueue([]);
         sid = created.id;
       }
-      await sendCloudMessage(
+      const res = await sendCloudMessage(
         agentId,
         sid,
         content,
-        parentForSend(),
+        parentRunId,
         sentAttachments,
         runOptions,
       );
+      // 服务端入队：乐观补一条占位，快照事件到达后全量对齐
+      if (res.queued && res.messageId) {
+        const mid = res.messageId;
+        setQueue((prev) =>
+          prev.some((m) => m.messageId === mid)
+            ? prev
+            : [
+                ...prev,
+                {
+                  messageId: mid,
+                  content,
+                  attachments: sentAttachments,
+                  mode: res.mode === "queue" ? "queue" : "steer",
+                  createdAt: new Date().toISOString(),
+                },
+              ],
+        );
+      }
       await refreshSessions();
       scrollToBottom("smooth");
+      for (const url of Object.values(sentPreviews)) URL.revokeObjectURL(url);
     } catch (err) {
+      // 还原输入与附件（含图片预览），用户可修改后重发
       setInput(content);
       latestInputRef.current = content;
       setAttachments(sentAttachments);
+      previewsRef.current = { ...previewsRef.current, ...sentPreviews };
+      setAttachmentPreviews({ ...previewsRef.current });
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setSending(false);
     }
+  }
+
+  /**
+   * 发送：内容立即离开输入框，实际 POST 走串行链保证到达顺序。
+   * 运行中无需特判——服务端统一决定注入 / 排队 / 直接开新回合。
+   */
+  function handleSend() {
+    if (!agentId) return;
+    const content = input.trim();
+    if ((!content && attachments.length === 0) || uploads.length > 0) return;
+    const sentAttachments = attachments;
+    const sentPreviews = previewsRef.current;
+    const parentRunId = parentForSend();
+    setInput("");
+    latestInputRef.current = "";
+    draftsRef.current.delete(draftKeyRef.current);
+    previewsRef.current = {};
+    setAttachmentPreviews({});
+    setAttachments([]);
+
+    // 编辑态：不追加新回合，而是按 parentKey 建分支变体
+    const editing = editingTarget;
+    if (editing) {
+      setEditingTarget(null);
+      sendChainRef.current = sendChainRef.current
+        .catch(() => {})
+        .then(() => handleEditSend(editing.parentKey, content, sentAttachments));
+      return;
+    }
+
+    sendChainRef.current = sendChainRef.current
+      .catch(() => {})
+      .then(() => dispatchOutbound(content, sentAttachments, parentRunId, sentPreviews));
   }
 
   async function handleRegenerate(messageId: string) {
@@ -1091,8 +1285,13 @@ export function ChatApp() {
     }
   }
 
-  async function handleEditSend(parentKey: string, content: string) {
-    if (!agentId || !sessionId || runActive || !content.trim()) return;
+  async function handleEditSend(
+    parentKey: string,
+    content: string,
+    sentAttachments: CloudAgentAttachment[] = [],
+  ) {
+    if (!agentId || !sessionId || runActive) return;
+    if (!content.trim() && sentAttachments.length === 0) return;
     try {
       let sid = sessionId;
       if (isGatewaySession) {
@@ -1103,7 +1302,7 @@ export function ChatApp() {
         sid,
         content.trim(),
         parentKey === "" ? null : parentKey,
-        undefined,
+        sentAttachments.length > 0 ? sentAttachments : undefined,
         runOptions,
       );
       setBranchByParent((prev) => {
@@ -1183,6 +1382,7 @@ export function ChatApp() {
     enableTools?: boolean;
     autoMemory?: boolean;
     autoTitle?: boolean;
+    followUpMode?: CloudAgentFollowUpMode;
     maxSubagentDepth?: string;
   };
 
@@ -1194,6 +1394,7 @@ export function ChatApp() {
       if (patch.enableTools !== undefined) body.enableTools = patch.enableTools;
       if (patch.autoMemory !== undefined) body.autoMemory = patch.autoMemory;
       if (patch.autoTitle !== undefined) body.autoTitle = patch.autoTitle;
+      if (patch.followUpMode !== undefined) body.followUpMode = patch.followUpMode;
       if (patch.maxSubagentDepth !== undefined) {
         const n = Number(patch.maxSubagentDepth);
         body.maxSubagentDepth =
@@ -1663,11 +1864,12 @@ export function ChatApp() {
             <ChatMessages
               turns={turns}
               runActive={runActive}
-              activeRunId={activeSession?.activeRunId}
+              activeRunId={activeRunId}
               agentName={agent?.name}
               canAct={hasChatRoute && !runActive && !sending}
+              editingMessageId={editingTarget?.messageId ?? null}
               onRegenerate={(mid) => void handleRegenerate(mid)}
-              onEditSend={(parentKey, content) => void handleEditSend(parentKey, content)}
+              onEditStart={handleEditStart}
               onSelectVariant={(mid, runId) =>
                 setVariantByMessage((prev) => ({ ...prev, [mid]: runId }))
               }
@@ -1679,7 +1881,7 @@ export function ChatApp() {
           </div>
         </div>
 
-        {/* 组合器 */}
+        {/* 组合器：排队列表贴在输入框上方连成一块 */}
         <div className="relative shrink-0 px-2.5 pt-1 pb-[max(env(safe-area-inset-bottom),0.625rem)] md:px-4 md:pb-4">
           {!atBottom && !emptyConversation && (
             <button
@@ -1700,6 +1902,21 @@ export function ChatApp() {
             routeReady={hasChatRoute}
             sending={sending}
             runActive={runActive}
+            runSendHint={followUpMode === "steer" ? "注入当前回合" : "加入队列"}
+            queueSlot={
+              queue.length > 0 ? (
+                <MessageQueue
+                  items={queue}
+                  onEdit={handleQueuedEdit}
+                  onRemove={handleQueuedRemove}
+                  onInterrupt={handleQueuedInterrupt}
+                />
+              ) : null
+            }
+            canRecallQueued={queue.length > 0}
+            onRecallQueued={handleRecallQueued}
+            editing={Boolean(editingTarget)}
+            onCancelEdit={handleEditCancel}
             attachments={attachments}
             attachmentPreviews={attachmentPreviews}
             uploads={uploads}
@@ -1807,6 +2024,35 @@ export function ChatApp() {
                   }}
                 />
               </SettingsRow>
+              <Separator />
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="min-w-0 space-y-0.5">
+                  <Label>执行中发消息</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {followUpMode === "steer" ? "下一工具后注入" : "结束后按序发送"}
+                  </p>
+                </div>
+                <Select
+                  value={followUpMode}
+                  onValueChange={(v) => {
+                    if (v !== "steer" && v !== "queue") return;
+                    setFollowUpMode(v);
+                    saveSettingsNow({ followUpMode: v });
+                  }}
+                  items={[
+                    { value: "steer", label: "注入" },
+                    { value: "queue", label: "排队" },
+                  ]}
+                >
+                  <SelectTrigger className="w-24">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="steer">注入</SelectItem>
+                    <SelectItem value="queue">排队</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <Separator />
               <div className="flex items-center justify-between gap-4 py-3">
                 <Label>子代理深度</Label>

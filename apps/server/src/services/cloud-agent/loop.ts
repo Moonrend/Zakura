@@ -20,11 +20,72 @@ import type { McpGateway } from "../mcp-gateway.js";
 import type { ModelRouterService } from "../model-router.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import { isAbortError } from "../../model-router/http.js";
-import { compactToolResultsInPlace, type CompactBudget } from "./messages.js";
+import { compactToolResultsInPlace, buildUserMessage, type CompactBudget } from "./messages.js";
 import { mcpResultToText, parseToolArgs } from "./tools.js";
 
-/** 取消标记轮询间隔：取消后最长这么久就会掐断上游流 */
-const CANCEL_POLL_MS = 700;
+/** 取消标记兜底轮询间隔：pub/sub 丢失时最长这么久也会掐断 */
+const CANCEL_POLL_MS = 500;
+
+/**
+ * 把会话队列中 mode=steer 的项写入模型上下文，并落库 user_message(steer)
+ * 供时间线展示；随后广播队列快照（store 内部完成），多设备同步移除。
+ */
+async function injectPendingSteers(
+  store: CloudAgentSessionStore,
+  sessionId: string,
+  runId: string,
+  messages: ModelChatMessage[],
+): Promise<number> {
+  const items = await store.drainSteerQueued(sessionId);
+  for (const item of items) {
+    await store.appendEvent({
+      sessionId,
+      type: "user_message",
+      runId,
+      payload: {
+        messageId: item.messageId,
+        content: item.content,
+        steer: true,
+        ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+      },
+    });
+    messages.push(buildUserMessage(item.content, item.attachments ?? []));
+  }
+  return items.length;
+}
+
+/**
+ * 取消观察器：监听即时取消信号 + 兜底轮询完整取消链（含祖先 Run）。
+ * 用于与慢工具调用赛跑——取消后不再等工具结果，立刻收尾。
+ */
+function watchCancel(
+  cancelPromise: Promise<void>,
+  cancelled: () => Promise<boolean>,
+): { hit: Promise<"cancelled">; dispose: () => void } {
+  let disposed = false;
+  let resolveHit: (v: "cancelled") => void = () => {};
+  const hit = new Promise<"cancelled">((resolve) => {
+    resolveHit = resolve;
+  });
+  void cancelPromise.then(() => {
+    if (!disposed) resolveHit("cancelled");
+  });
+  const timer = setInterval(() => {
+    void cancelled().then(
+      (yes) => {
+        if (yes && !disposed) resolveHit("cancelled");
+      },
+      () => {},
+    );
+  }, CANCEL_POLL_MS);
+  return {
+    hit,
+    dispose() {
+      disposed = true;
+      clearInterval(timer);
+    },
+  };
+}
 
 export type AgentLoopDeps = {
   store: CloudAgentSessionStore;
@@ -81,6 +142,11 @@ export type AgentLoopInput = {
   /** 循环内工具结果压缩预算（缺省用平台默认） */
   compactBudget?: Partial<CompactBudget>;
   hooks?: AgentLoopHooks;
+  /**
+   * 每轮模型调用前（注入 steer 后）：解析 workspace 图片等。
+   * 主循环用它把中途附件转成多模态 parts。
+   */
+  beforeModelRound?: (messages: ModelChatMessage[]) => Promise<void>;
 };
 
 export type AgentLoopResult = {
@@ -238,8 +304,10 @@ async function streamModelRound(
     options?: CloudAgentRunOptions;
     messages: ModelChatMessage[];
     definitions: ModelToolDefinition[];
-    /** 取消检查（本 Run 标记 + 祖先链）；轮询命中即掐断上游流 */
+    /** 取消检查（本 Run 标记 + 祖先链）；兜底轮询命中即掐断上游流 */
     isCancelled: () => Promise<boolean>;
+    /** 即时取消信号：requestCancel 触达的瞬间 abort，无需等轮询 */
+    cancelPromise: Promise<void>;
   },
 ): Promise<{
   publisher: DeltaPublisher;
@@ -258,8 +326,12 @@ async function streamModelRound(
       messageId,
       "reasoning_delta",
     );
-    // 流式期间轮询取消标记：命中则 abort，fetch 立即断开，不再等模型把话说完
+    // 即时信号优先；轮询只兜底 pub/sub 丢失的场景
     const ctrl = new AbortController();
+    let roundDone = false;
+    void input.cancelPromise.then(() => {
+      if (!roundDone && !ctrl.signal.aborted) ctrl.abort();
+    });
     const poll = setInterval(() => {
       void input.isCancelled().then(
         (yes) => {
@@ -327,6 +399,7 @@ async function streamModelRound(
       );
       await new Promise((r) => setTimeout(r, 1500 * attempt));
     } finally {
+      roundDone = true;
       clearInterval(poll);
     }
   }
@@ -339,258 +412,346 @@ export async function runAgentLoop(
   const { store } = deps;
   const { tenantId, agent, cloud, options, sessionId, runId, messages, definitions, nameMap } = input;
 
+  // 即时取消：requestCancel（本实例或经 Redis 频道跨实例）触达瞬间掐流/弃工具，
+  // DB 标记只作兜底轮询。监听器在 finally 注销。
+  let cancelSignalled = false;
+  let signalCancel: () => void = () => {};
+  const cancelPromise = new Promise<void>((resolve) => {
+    signalCancel = () => {
+      cancelSignalled = true;
+      resolve();
+    };
+  });
+  const offCancel = store.onRunCancel(runId, signalCancel);
+
   const cancelled = async (): Promise<boolean> =>
+    cancelSignalled ||
     (await store.isCancelRequested(runId)) ||
     (input.isCancelled ? await input.isCancelled() : false);
 
-  let lastText = "";
-  let round = 0;
-  while (true) {
-    if (await cancelled()) {
-      await finishCancelled(store, sessionId, runId);
-      return { status: "cancelled", finalText: lastText, rounds: round };
-    }
-
-    // round 0 的 thinking 已在 executeRun 发出；此处只推后续轮的 streaming，避免同步落库挡首字
-    if (round > 0) {
-      void store.appendEvent({
-        sessionId,
-        type: "run_status",
-        runId,
-        payload: { runId, status: "streaming" },
-      });
-    }
-
-    const roundStarted = Date.now();
-    let publisher: DeltaPublisher;
-    let result: Awaited<ReturnType<ModelRouterService["chatStream"]>>;
-    try {
-      ({ publisher, result } = await streamModelRound(deps, {
-        tenantId,
-        sessionId,
-        runId,
-        cloud,
-        messages,
-        definitions,
-        isCancelled: cancelled,
-        ...(options ? { options } : {}),
-      }));
-    } catch (err) {
-      // 取消掐断的流：收尾为 cancelled 而非 failed（错误不是故障）
-      if (isAbortError(err) || (await cancelled())) {
+  try {
+    let lastText = "";
+    let round = 0;
+    while (true) {
+      if (await cancelled()) {
         await finishCancelled(store, sessionId, runId);
         return { status: "cancelled", finalText: lastText, rounds: round };
       }
-      throw err;
-    }
 
-    const toolCalls = result.toolCalls ?? [];
-    const text = result.content ?? "";
-    if (text) lastText = text;
-    await appendRunLog(store, sessionId, runId, "info", `第 ${round + 1} 轮模型调用完成`, {
-      model: result.model,
-      route: result.routeSlug,
-      durationMs: Date.now() - roundStarted,
-      toolCalls: toolCalls.length,
-      ...(result.usage
-        ? {
-            promptTokens: result.usage.promptTokens,
-            completionTokens: result.usage.completionTokens,
+      // round 0 的 thinking 已在 executeRun 发出；此处只推后续轮的 streaming，避免同步落库挡首字
+      if (round > 0) {
+        void store.appendEvent({
+          sessionId,
+          type: "run_status",
+          runId,
+          payload: { runId, status: "streaming" },
+        });
+      }
+
+      try {
+        await input.beforeModelRound?.(messages);
+      } catch (err) {
+        console.warn(
+          `[agent-loop] beforeModelRound failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+
+      const roundStarted = Date.now();
+      let publisher: DeltaPublisher;
+      let result: Awaited<ReturnType<ModelRouterService["chatStream"]>>;
+      try {
+        ({ publisher, result } = await streamModelRound(deps, {
+          tenantId,
+          sessionId,
+          runId,
+          cloud,
+          messages,
+          definitions,
+          isCancelled: cancelled,
+          cancelPromise,
+          ...(options ? { options } : {}),
+        }));
+      } catch (err) {
+        // 取消掐断的流：收尾为 cancelled 而非 failed（错误不是故障）
+        if (isAbortError(err) || (await cancelled())) {
+          await finishCancelled(store, sessionId, runId);
+          return { status: "cancelled", finalText: lastText, rounds: round };
+        }
+        throw err;
+      }
+
+      const toolCalls = result.toolCalls ?? [];
+      const text = result.content ?? "";
+      if (text) lastText = text;
+      await appendRunLog(store, sessionId, runId, "info", `第 ${round + 1} 轮模型调用完成`, {
+        model: result.model,
+        route: result.routeSlug,
+        durationMs: Date.now() - roundStarted,
+        toolCalls: toolCalls.length,
+        ...(result.usage
+          ? {
+              promptTokens: result.usage.promptTokens,
+              completionTokens: result.usage.completionTokens,
+            }
+          : {}),
+      });
+
+      if (toolCalls.length === 0) {
+        // 先落本轮助手正文，再决定是结束还是吞入 steer 继续
+        await store.appendEvent({
+          sessionId,
+          type: "assistant_message",
+          runId,
+          payload: { messageId: publisher.messageId, content: text },
+        });
+        if (text) {
+          messages.push({ role: "assistant", content: text });
+        }
+        const steered = await injectPendingSteers(store, sessionId, runId, messages);
+        if (steered > 0) {
+          await appendRunLog(store, sessionId, runId, "info", "结束前注入用户补充", {
+            count: steered,
+          });
+          round += 1;
+          continue;
+        }
+        await store.appendEvent({
+          sessionId,
+          type: "run_end",
+          runId,
+          payload: { runId, status: "completed" },
+        });
+        await store.finishRun(sessionId, runId, "completed");
+        return { status: "completed", finalText: text, rounds: round + 1 };
+      }
+
+      // 有工具调用：增量文本已作为 delta 发布，与 tool_call_* 合成同一条 assistant
+      messages.push({
+        role: "assistant",
+        content: text || null,
+        toolCalls,
+      });
+
+      for (const call of toolCalls) {
+        const modelName = call.function.name;
+        const qualified = nameMap.get(modelName) ?? modelName;
+        await store.appendEvent({
+          sessionId,
+          type: "tool_call_start",
+          runId,
+          payload: {
+            toolCallId: call.id,
+            name: modelName,
+            title: input.hooks?.toolTitle?.(modelName, qualified) ?? qualified,
+          },
+        });
+        await store.appendEvent({
+          sessionId,
+          type: "tool_call_args",
+          runId,
+          payload: {
+            toolCallId: call.id,
+            arguments: call.function.arguments,
+          },
+        });
+      }
+
+      // 特殊调用的批量预解析（如同一轮内多个子代理并行执行）
+      let preResolved = new Map<string, LoopToolOutcome>();
+      if (input.hooks?.preResolveCalls) {
+        preResolved = await input.hooks.preResolveCalls(toolCalls);
+      }
+
+      /** 取消时补发未执行工具的结果（不阻塞收尾；UI 稍后收敛即可） */
+      const abandonRemaining = (from: number): void => {
+        const rest = toolCalls.slice(from);
+        if (rest.length === 0) return;
+        void Promise.all(
+          rest.map((call) =>
+            store.appendEvent({
+              sessionId,
+              type: "tool_call_result",
+              runId,
+              payload: {
+                toolCallId: call.id,
+                name: call.function.name,
+                isError: true,
+                resultText: "（已取消：该工具调用未执行）",
+                durationMs: 0,
+              },
+            }),
+          ),
+        ).catch((err) => console.warn("[agent-loop] abandonRemaining failed:", err));
+      };
+
+      for (const [index, call] of toolCalls.entries()) {
+        if (await cancelled()) {
+          abandonRemaining(index);
+          await finishCancelled(store, sessionId, runId);
+          return { status: "cancelled", finalText: lastText, rounds: round + 1 };
+        }
+
+        const modelName = call.function.name;
+        const qualified = nameMap.get(modelName) ?? modelName;
+        await store.appendEvent({
+          sessionId,
+          type: "run_status",
+          runId,
+          payload: { runId, status: "tool", detail: modelName },
+        });
+
+        const started = Date.now();
+        const args = parseToolArgs(call.function.arguments);
+        // 工具执行与取消赛跑：取消后不再等慢工具的结果（其进程可能继续到自然结束）
+        const watcher = watchCancel(cancelPromise, cancelled);
+        let raced:
+          | { kind: "ok"; outcome: LoopToolOutcome }
+          | { kind: "err"; err: unknown }
+          | "cancelled";
+        try {
+          raced = await Promise.race([
+            (async () => {
+              try {
+                const resolved =
+                  preResolved.get(call.id) ??
+                  (await input.hooks?.interceptCall?.(call, args));
+                const outcome = resolved ?? {
+                  result: await deps.gateway.callTool(tenantId, qualified, args, {
+                    agentId: agent.id,
+                  }),
+                };
+                return { kind: "ok" as const, outcome };
+              } catch (err) {
+                return { kind: "err" as const, err };
+              }
+            })(),
+            watcher.hit,
+          ]);
+        } finally {
+          watcher.dispose();
+        }
+
+        if (raced === "cancelled") {
+          const note = "（已取消：不再等待该工具结果）";
+          void store.appendEvent({
+            sessionId,
+            type: "tool_call_result",
+            runId,
+            payload: {
+              toolCallId: call.id,
+              name: modelName,
+              isError: true,
+              resultText: note,
+              durationMs: Date.now() - started,
+            },
+          });
+          abandonRemaining(index + 1);
+          await finishCancelled(store, sessionId, runId);
+          return { status: "cancelled", finalText: lastText, rounds: round + 1 };
+        }
+
+        let outcome: LoopToolOutcome;
+        if (raced.kind === "err") {
+          const err = raced.err;
+          // 取消引发的工具中断：补齐剩余调用后整体收尾为 cancelled
+          if (isAbortError(err) || (await cancelled())) {
+            abandonRemaining(index);
+            await finishCancelled(store, sessionId, runId);
+            return { status: "cancelled", finalText: lastText, rounds: round + 1 };
           }
-        : {}),
-    });
+          outcome = {
+            result: {
+              content: [
+                { type: "text", text: err instanceof Error ? err.message : String(err) },
+              ],
+              isError: true,
+            },
+          };
+        } else {
+          outcome = raced.outcome;
+        }
+        const { text: resultText, isError } = mcpResultToText(outcome.result);
+        const durationMs = Date.now() - started;
 
-    if (toolCalls.length === 0) {
-      await store.appendEvent({
-        sessionId,
-        type: "assistant_message",
-        runId,
-        payload: { messageId: publisher.messageId, content: text },
-      });
-      await store.appendEvent({
-        sessionId,
-        type: "run_end",
-        runId,
-        payload: { runId, status: "completed" },
-      });
-      await store.finishRun(sessionId, runId, "completed");
-      return { status: "completed", finalText: text, rounds: round + 1 };
-    }
-
-    // 有工具调用：增量文本已作为 delta 发布，与 tool_call_* 合成同一条 assistant
-    messages.push({
-      role: "assistant",
-      content: text || null,
-      toolCalls,
-    });
-
-    for (const call of toolCalls) {
-      const modelName = call.function.name;
-      const qualified = nameMap.get(modelName) ?? modelName;
-      await store.appendEvent({
-        sessionId,
-        type: "tool_call_start",
-        runId,
-        payload: {
-          toolCallId: call.id,
-          name: modelName,
-          title: input.hooks?.toolTitle?.(modelName, qualified) ?? qualified,
-        },
-      });
-      await store.appendEvent({
-        sessionId,
-        type: "tool_call_args",
-        runId,
-        payload: {
-          toolCallId: call.id,
-          arguments: call.function.arguments,
-        },
-      });
-    }
-
-    // 特殊调用的批量预解析（如同一轮内多个子代理并行执行）
-    let preResolved = new Map<string, LoopToolOutcome>();
-    if (input.hooks?.preResolveCalls) {
-      preResolved = await input.hooks.preResolveCalls(toolCalls);
-    }
-
-    /** 取消时为尚未执行的调用补发结果事件，避免 UI 里永远停在「运行中」 */
-    const abandonRemaining = async (from: number): Promise<void> => {
-      for (const call of toolCalls.slice(from)) {
         await store.appendEvent({
           sessionId,
           type: "tool_call_result",
           runId,
           payload: {
             toolCallId: call.id,
-            name: call.function.name,
-            isError: true,
-            resultText: "（已取消：该工具调用未执行）",
-            durationMs: 0,
+            name: modelName,
+            isError,
+            resultText,
+            durationMs,
+            ...(outcome.link
+              ? { childSessionId: outcome.link.sessionId, childAgentId: outcome.link.agentId }
+              : {}),
           },
         });
+
+        try {
+          await input.hooks?.afterToolCall?.(call, args, { resultText, isError });
+        } catch (err) {
+          console.warn(
+            `[agent-loop] afterToolCall hook failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+
         messages.push({
           role: "tool",
-          content: "（已取消：该工具调用未执行）",
-          toolCallId: call.id,
-          name: call.function.name,
-        });
-      }
-    };
-
-    for (const [index, call] of toolCalls.entries()) {
-      if (await cancelled()) {
-        await abandonRemaining(index);
-        await finishCancelled(store, sessionId, runId);
-        return { status: "cancelled", finalText: lastText, rounds: round + 1 };
-      }
-
-      const modelName = call.function.name;
-      const qualified = nameMap.get(modelName) ?? modelName;
-      await store.appendEvent({
-        sessionId,
-        type: "run_status",
-        runId,
-        payload: { runId, status: "tool", detail: modelName },
-      });
-
-      const started = Date.now();
-      const args = parseToolArgs(call.function.arguments);
-      let outcome: LoopToolOutcome;
-      try {
-        const resolved =
-          preResolved.get(call.id) ?? (await input.hooks?.interceptCall?.(call, args));
-        outcome = resolved ?? {
-          result: await deps.gateway.callTool(tenantId, qualified, args, {
-            agentId: agent.id,
-          }),
-        };
-      } catch (err) {
-        // 取消引发的工具中断：补齐剩余调用后整体收尾为 cancelled
-        if (isAbortError(err) || (await cancelled())) {
-          await abandonRemaining(index);
-          await finishCancelled(store, sessionId, runId);
-          return { status: "cancelled", finalText: lastText, rounds: round + 1 };
-        }
-        outcome = {
-          result: {
-            content: [
-              { type: "text", text: err instanceof Error ? err.message : String(err) },
-            ],
-            isError: true,
-          },
-        };
-      }
-      const { text: resultText, isError } = mcpResultToText(outcome.result);
-      const durationMs = Date.now() - started;
-
-      await store.appendEvent({
-        sessionId,
-        type: "tool_call_result",
-        runId,
-        payload: {
+          content: resultText,
           toolCallId: call.id,
           name: modelName,
-          isError,
-          resultText,
-          durationMs,
-          ...(outcome.link
-            ? { childSessionId: outcome.link.sessionId, childAgentId: outcome.link.agentId }
-            : {}),
-        },
-      });
-
-      try {
-        await input.hooks?.afterToolCall?.(call, args, { resultText, isError });
-      } catch (err) {
-        console.warn(
-          `[agent-loop] afterToolCall hook failed:`,
-          err instanceof Error ? err.message : err,
-        );
+        });
       }
 
-      messages.push({
-        role: "tool",
-        content: resultText,
-        toolCallId: call.id,
-        name: modelName,
-      });
-    }
+      // Codex 式：工具批结束后注入排队的用户补充，再进下一轮模型
+      const steered = await injectPendingSteers(store, sessionId, runId, messages);
+      if (steered > 0) {
+        await appendRunLog(store, sessionId, runId, "info", "工具后注入用户补充", {
+          count: steered,
+        });
+      }
 
-    // 循环内上下文过大：分级就地压缩较旧的工具结果
-    const compacted = compactToolResultsInPlace(messages, input.compactBudget);
-    if (compacted > 0) {
-      await appendRunLog(store, sessionId, runId, "info", "循环内压缩旧工具结果", {
-        compacted,
-      });
-    }
+      // 循环内上下文过大：分级就地压缩较旧的工具结果
+      const compacted = compactToolResultsInPlace(messages, input.compactBudget);
+      if (compacted > 0) {
+        await appendRunLog(store, sessionId, runId, "info", "循环内压缩旧工具结果", {
+          compacted,
+        });
+      }
 
-    round += 1;
-    if (input.maxRounds != null && round >= input.maxRounds) {
-      const note =
-        input.maxRoundsNote?.(input.maxRounds, lastText) ??
-        `已达到配置的最大工具轮次（${input.maxRounds}），请继续发送消息以接着处理。`;
-      const messageId = newId();
-      await store.appendEvent({
-        sessionId,
-        type: "assistant_delta",
-        runId,
-        payload: { messageId, delta: note },
-      });
-      await store.appendEvent({
-        sessionId,
-        type: "assistant_message",
-        runId,
-        payload: { messageId, content: note },
-      });
-      await store.appendEvent({
-        sessionId,
-        type: "run_end",
-        runId,
-        payload: { runId, status: "completed" },
-      });
-      await store.finishRun(sessionId, runId, "completed");
-      return { status: "max_rounds", finalText: note, rounds: round };
+      round += 1;
+      if (input.maxRounds != null && round >= input.maxRounds) {
+        const note =
+          input.maxRoundsNote?.(input.maxRounds, lastText) ??
+          `已达到配置的最大工具轮次（${input.maxRounds}），请继续发送消息以接着处理。`;
+        const messageId = newId();
+        await store.appendEvent({
+          sessionId,
+          type: "assistant_delta",
+          runId,
+          payload: { messageId, delta: note },
+        });
+        await store.appendEvent({
+          sessionId,
+          type: "assistant_message",
+          runId,
+          payload: { messageId, content: note },
+        });
+        await store.appendEvent({
+          sessionId,
+          type: "run_end",
+          runId,
+          payload: { runId, status: "completed" },
+        });
+        await store.finishRun(sessionId, runId, "completed");
+        return { status: "max_rounds", finalText: note, rounds: round };
+      }
     }
+  } finally {
+    offCancel();
   }
 }

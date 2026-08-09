@@ -18,8 +18,10 @@ import { ModelUpstreamsService } from "./services/model-upstreams.js";
 import { ModelCatalogService } from "./services/model-catalog.js";
 import { UpstreamModelsService } from "./services/upstream-models.js";
 import { ToolCallStore } from "./services/tool-call-store.js";
+import { CloudAgentSessionStore } from "./services/cloud-agent-session.js";
 import { OauthService } from "./services/oauth.js";
 import { createApiApp } from "./api/routes.js";
+import { createSocketGateway } from "./realtime/socket-gateway.js";
 import { createMcpHandler } from "./mcp/http.js";
 import { createAgentTaskInfrastructure } from "./services/mcp-task-store.js";
 import { createOauthApp } from "./oauth/http.js";
@@ -114,6 +116,8 @@ async function main() {
     (tenantId) => modelRouter.invalidateCache(tenantId),
   );
   const toolCallStore = new ToolCallStore(db);
+  // 全进程唯一：API 路由与实时网关共用，否则本地 emit 投递互相收不到
+  const cloudSessionStore = new CloudAgentSessionStore(db);
   const oauth = new OauthService(db, config);
   const workspaceFsProvider = new ServerWorkspaceFsProvider(db, config, runtimeNodes);
   const migrations = new MigrationService(db, config, runtimeNodes);
@@ -299,6 +303,7 @@ async function main() {
       skills: skillsService,
       connections: connectionCatalog,
       instanceMigrations,
+      cloudSessionStore,
     }),
   );
 
@@ -352,10 +357,17 @@ async function main() {
     await requireRedis();
   }
 
-  serve({
+  const server = serve({
     fetch: app.fetch,
     hostname: config.host,
     port: config.port,
+  });
+
+  // 实时网关与 Hono 共用同一个 http.Server：非 /api/socket.io 的请求照常透传。
+  createSocketGateway(server as import("node:http").Server, {
+    db,
+    config,
+    store: cloudSessionStore,
   });
 }
 

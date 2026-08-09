@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { useMe } from "@/components/me-context";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { PlatformHeadscalePanel } from "@/components/platform-headscale-panel";
+import { PlatformTransactionalEmailPanel } from "@/components/platform-transactional-email-panel";
 import { PlatformSkillTokenPanel } from "@/components/skills/platform-skill-token-panel";
 import { PlatformConnectorProvisionPanel } from "@/components/connections/platform-connector-provision";
 import { Badge } from "@/components/ui/badge";
@@ -314,6 +315,8 @@ export default function AdminPage() {
       </SettingsSection>
 
       <PlatformHeadscalePanel />
+
+      <PlatformTransactionalEmailPanel />
 
       <PlatformSkillTokenPanel />
 

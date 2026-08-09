@@ -17,6 +17,7 @@ import {
   type PlatformServiceProgressSnapshot,
 } from "@/lib/platform-events";
 import { SettingsHeader } from "@/components/settings-shell";
+import { PlatformTransactionalEmailPanel } from "@/components/platform-transactional-email-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -276,6 +277,8 @@ export default function PlatformServicesPage() {
           </Button>
         }
       />
+
+      {!me.multiTenant ? <PlatformTransactionalEmailPanel /> : null}
 
       <div className="divide-y rounded-lg border border-border bg-card">
         {data.services.map((s) => {

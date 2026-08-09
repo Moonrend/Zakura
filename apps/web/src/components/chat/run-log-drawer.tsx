@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { CloudAgentEvent } from "@zakura/shared";
+import { isSilentAgentTool } from "@zakura/shared";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -100,8 +101,39 @@ export function RunLogDrawer({
   const [verbose, setVerbose] = useState(false);
 
   const rows = useMemo(() => {
-    if (verbose) return events;
-    return events.filter(
+    const silentIds = new Set<string>();
+    for (const e of events) {
+      const p = e.payload as Record<string, unknown>;
+      if (
+        e.type === "tool_call_start" &&
+        typeof p.name === "string" &&
+        isSilentAgentTool(p.name) &&
+        typeof p.toolCallId === "string"
+      ) {
+        silentIds.add(p.toolCallId);
+      }
+    }
+    const visible = events.filter((e) => {
+      const p = e.payload as Record<string, unknown>;
+      if (
+        e.type === "tool_call_start" ||
+        e.type === "tool_call_args" ||
+        e.type === "tool_call_result"
+      ) {
+        if (typeof p.toolCallId === "string" && silentIds.has(p.toolCallId)) return false;
+        if (typeof p.name === "string" && isSilentAgentTool(p.name)) return false;
+      }
+      if (
+        e.type === "run_status" &&
+        typeof p.detail === "string" &&
+        isSilentAgentTool(p.detail)
+      ) {
+        return false;
+      }
+      return true;
+    });
+    if (verbose) return visible;
+    return visible.filter(
       (e) =>
         e.type !== "assistant_delta" &&
         e.type !== "tool_call_args" &&

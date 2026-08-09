@@ -169,6 +169,16 @@ export function buildChainMessages(
     if (ev.type === "user_message") {
       const mid = typeof p.messageId === "string" ? p.messageId : null;
       if (!mid) continue;
+      // 同 Run 注入：挂在 runEvents，不当新回合锚点
+      if (p.steer === true && ev.runId) {
+        let list = runEvents.get(ev.runId);
+        if (!list) {
+          list = [];
+          runEvents.set(ev.runId, list);
+        }
+        list.push(ev);
+        continue;
+      }
       const parentRunId =
         "parentRunId" in p
           ? typeof p.parentRunId === "string"
@@ -310,10 +320,12 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
     const p = ev.payload;
     if (ev.type === "user_message") {
       flushAssistant();
-      messages.push({
-        role: "user",
-        content: typeof p.content === "string" ? p.content : "",
-      });
+      messages.push(
+        buildUserMessage(
+          typeof p.content === "string" ? p.content : "",
+          parseAttachments(p.attachments),
+        ),
+      );
       continue;
     }
     if (ev.runId && failedRuns.has(ev.runId)) continue;

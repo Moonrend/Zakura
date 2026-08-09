@@ -181,6 +181,9 @@ export class DockerRuntime implements ContainerRuntime {
       Image: spec.image,
       Env: env,
       Labels: labels,
+      ...(spec.entrypoint && spec.entrypoint.length > 0
+        ? { Entrypoint: spec.entrypoint }
+        : {}),
       ...(spec.command && spec.command.length > 0 ? { Cmd: spec.command } : {}),
       ...(spec.workingDir ? { WorkingDir: spec.workingDir } : {}),
       ExposedPorts: Object.keys(exposed).length ? exposed : undefined,

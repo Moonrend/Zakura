@@ -6,17 +6,23 @@ import type {
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
   CloudAgentEvent,
+  CloudAgentFollowUpMode,
+  CloudAgentQueuedMessage,
   CloudAgentRunOptions,
   CloudAgentRunStatus,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
 } from "@zakura/shared";
+import { isSilentAgentTool } from "@zakura/shared";
 import { api } from "@/lib/api";
+import { acquireSocket } from "@/lib/socket";
 
 export type {
   CloudAgentAttachment,
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
+  CloudAgentFollowUpMode,
+  CloudAgentQueuedMessage,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
 };
@@ -530,6 +536,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         if (!id || toolMap.has(id)) continue;
         const name =
           typeof tc.function?.name === "string" ? tc.function.name : "tool";
+        if (isSilentAgentTool(name)) continue;
         const args =
           typeof tc.function?.arguments === "string" ? tc.function.arguments : undefined;
         const call: TimelineToolCall = {
@@ -548,9 +555,11 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       flushReasoning();
       flushAssistant();
       const id = typeof p.toolCallId === "string" ? p.toolCallId : ev.id;
+      const name = typeof p.name === "string" ? p.name : "tool";
+      if (isSilentAgentTool(name)) continue;
       const call: TimelineToolCall = {
         toolCallId: id,
-        name: typeof p.name === "string" ? p.name : "tool",
+        name,
         title: typeof p.title === "string" ? p.title : undefined,
         status: "running",
       };
@@ -567,6 +576,8 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     }
     if (ev.type === "tool_call_result") {
       const id = typeof p.toolCallId === "string" ? p.toolCallId : "";
+      const resultName = typeof p.name === "string" ? p.name : "";
+      if (isSilentAgentTool(resultName)) continue;
       let call = toolMap.get(id);
       // 旧 Gateway 只写 result、无 start：合成工具卡片，避免结果被丢弃
       if (!call && id) {
@@ -574,7 +585,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         flushAssistant();
         call = {
           toolCallId: id,
-          name: typeof p.name === "string" ? p.name : "tool",
+          name: resultName || "tool",
           status: "done",
         };
         toolMap.set(id, call);
@@ -593,11 +604,13 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "run_status") {
+      const detail = typeof p.detail === "string" ? p.detail : undefined;
+      if (detail && isSilentAgentTool(detail)) continue;
       items.push({
         kind: "status",
         id: ev.id,
         status: (typeof p.status === "string" ? p.status : "thinking") as CloudAgentRunStatus,
-        detail: typeof p.detail === "string" ? p.detail : undefined,
+        detail,
         seq: ev.seq,
         runId: ev.runId,
       });
@@ -725,6 +738,13 @@ export function buildConversationTurns(
     const p = ev.payload as Record<string, unknown>;
     if (ev.type === "user_message") {
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
+      // 同 Run 注入：进当前回合时间线，不开新 turn
+      if (p.steer === true && ev.runId) {
+        const list = eventsByRun.get(ev.runId) ?? [];
+        list.push(ev);
+        eventsByRun.set(ev.runId, list);
+        continue;
+      }
       const parentKey =
         "parentRunId" in p
           ? typeof p.parentRunId === "string"
@@ -886,7 +906,12 @@ export async function createCloudSession(agentId: string, title?: string) {
 }
 
 export async function getCloudSession(agentId: string, sessionId: string, afterSeq = 0) {
-  return api<{ session: CloudSession; events: CloudAgentEvent[] }>(
+  return api<{
+    session: CloudSession;
+    events: CloudAgentEvent[];
+    /** 服务端排队中的后续消息（跨设备同步） */
+    queue?: CloudAgentQueuedMessage[];
+  }>(
     `/api/agents/${agentId}/cloud/sessions/${sessionId}?afterSeq=${afterSeq}`,
     { cacheTtlMs: false },
   );
@@ -917,12 +942,20 @@ export async function sendCloudMessage(
   parentRunId?: string | null,
   attachments?: CloudAgentAttachment[],
   options?: CloudAgentRunOptions,
+  followUp?: CloudAgentFollowUpMode,
 ) {
   const json: Record<string, unknown> = { content };
   if (parentRunId !== undefined) json.parentRunId = parentRunId;
   if (attachments?.length) json.attachments = attachments;
   if (options && Object.keys(options).length > 0) json.options = options;
-  return api<{ runId: string }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/messages`, {
+  if (followUp) json.followUp = followUp;
+  return api<{
+    runId?: string;
+    /** 服务端已入队（运行中或前面还有排队消息） */
+    queued?: boolean;
+    messageId?: string;
+    mode?: CloudAgentFollowUpMode;
+  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/messages`, {
     method: "POST",
     json,
   });
@@ -949,6 +982,43 @@ export async function cancelCloudRun(agentId: string, sessionId: string, runId?:
     method: "POST",
     json: { runId },
   });
+}
+
+/** 编辑服务端排队中的消息 */
+export async function updateQueuedMessage(
+  agentId: string,
+  sessionId: string,
+  messageId: string,
+  content: string,
+) {
+  return api<{ ok: boolean; item: CloudAgentQueuedMessage }>(
+    `/api/agents/${agentId}/cloud/sessions/${sessionId}/queue/${messageId}`,
+    { method: "PATCH", json: { content } },
+  );
+}
+
+/** 移除服务端排队中的消息 */
+export async function removeQueuedMessage(
+  agentId: string,
+  sessionId: string,
+  messageId: string,
+) {
+  return api<{ ok: boolean; removed: boolean; item?: CloudAgentQueuedMessage }>(
+    `/api/agents/${agentId}/cloud/sessions/${sessionId}/queue/${messageId}`,
+    { method: "DELETE" },
+  );
+}
+
+/** 立即发送：从队列摘出该条，取消当前 Run 后优先用它开新回合 */
+export async function interruptWithQueuedMessage(
+  agentId: string,
+  sessionId: string,
+  messageId: string,
+) {
+  return api<{ ok: boolean }>(
+    `/api/agents/${agentId}/cloud/sessions/${sessionId}/queue/${messageId}/interrupt`,
+    { method: "POST", json: {} },
+  );
 }
 
 export type CloudSessionCompactionResult = {
@@ -1191,14 +1261,11 @@ export async function saveCloudConfig(
   });
 }
 
-function getSessionToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("zakura_session");
-}
-
 /**
- * 带鉴权的 SSE（fetch + ReadableStream），支持 afterSeq 续传。
- * 返回 unsubscribe。
+ * 订阅会话事件（Socket.IO，room `session:<id>`），支持 afterSeq 续传。
+ *
+ * 重连由 Socket.IO 内建处理：内部记录已收到的最大 seq，每次 connect 都用最新
+ * 游标重新订阅，因此断线期间产生的事件会被服务端回放补齐。返回 unsubscribe。
  */
 export function subscribeCloudEvents(
   agentId: string,
@@ -1210,69 +1277,52 @@ export function subscribeCloudEvents(
     onError?: (message: string) => void;
   },
 ): () => void {
-  const ctrl = new AbortController();
+  const { socket, release } = acquireSocket();
   let closed = false;
+  let lastSeq = afterSeq;
 
-  void (async () => {
-    try {
-      const token = getSessionToken();
-      const res = await fetch(
-        `/api/agents/${agentId}/cloud/sessions/${sessionId}/events?afterSeq=${afterSeq}`,
-        {
-          headers: {
-            Accept: "text/event-stream",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          signal: ctrl.signal,
-        },
-      );
-      if (!res.ok || !res.body) {
-        handlers.onError?.(`SSE ${res.status}`);
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+  const onCloud = (ev: CloudAgentEvent) => {
+    if (closed || ev.sessionId !== sessionId) return;
+    if (ev.seq > lastSeq) lastSeq = ev.seq;
+    handlers.onEvent(ev);
+  };
 
-      while (!closed) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          if (!part.trim() || part.startsWith(":")) continue;
-          let eventName = "message";
-          const dataLines: string[] = [];
-          for (const line of part.split("\n")) {
-            if (line.startsWith("event:")) eventName = line.slice(6).trim();
-            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-          }
-          if (!dataLines.length) continue;
-          try {
-            const data = JSON.parse(dataLines.join("\n")) as unknown;
-            if (eventName === "cloud") {
-              handlers.onEvent(data as CloudAgentEvent);
-            } else if (eventName === "ready") {
-              const ready = data as { afterSeq?: number };
-              handlers.onReady?.(ready.afterSeq ?? afterSeq);
-            } else if (eventName === "error") {
-              const err = data as { message?: string };
-              handlers.onError?.(err.message ?? "stream error");
-            }
-          } catch {
-            /* ignore malformed */
-          }
+  const armSubscription = () => {
+    if (closed) return;
+    socket.emit(
+      "subscribe:session",
+      { agentId, sessionId, afterSeq: lastSeq },
+      (res: { ok: true; afterSeq: number } | { ok: false; error: string }) => {
+        if (closed) return;
+        if (res?.ok) {
+          if (res.afterSeq > lastSeq) lastSeq = res.afterSeq;
+          handlers.onReady?.(lastSeq);
+        } else {
+          handlers.onError?.(res?.error ?? "subscribe failed");
         }
-      }
-    } catch (err) {
-      if (closed || (err instanceof DOMException && err.name === "AbortError")) return;
-      handlers.onError?.(err instanceof Error ? err.message : String(err));
-    }
-  })();
+      },
+    );
+  };
+
+  const onConnectError = (err: Error) => {
+    if (closed) return;
+    // 中间件拒绝（鉴权失败）：socket.active 为 false，不会自动重试，属终态需上报。
+    // 传输错误：active 仍为 true，Socket.IO 正在退避重连，保持安静 —— 否则调用方
+    // 的 toast.error 会随每次重试刷屏。
+    if (!socket.active) handlers.onError?.(err.message);
+  };
+
+  socket.on("cloud", onCloud);
+  socket.on("connect", armSubscription);
+  socket.on("connect_error", onConnectError);
+  if (socket.connected) armSubscription();
 
   return () => {
     closed = true;
-    ctrl.abort();
+    socket.off("cloud", onCloud);
+    socket.off("connect", armSubscription);
+    socket.off("connect_error", onConnectError);
+    if (socket.connected) socket.emit("unsubscribe:session", { sessionId });
+    release();
   };
 }

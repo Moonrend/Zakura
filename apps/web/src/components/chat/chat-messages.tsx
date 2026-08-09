@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   BookmarkCheck,
+  Brain,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tooltip,
   TooltipContent,
@@ -305,7 +304,7 @@ function ReasoningBlock({
   if (!content.trim()) return null;
 
   return (
-    <div className="flex w-full max-w-[min(100%,42rem)] flex-col items-start">
+    <div className="flex max-w-full min-w-0 flex-col items-start">
       <button
         type="button"
         aria-expanded={open}
@@ -313,22 +312,44 @@ function ReasoningBlock({
         onClick={() => {
           setOpen((v) => !v);
         }}
-        className="group inline-flex h-7 items-center gap-1 rounded-lg px-1.5 text-xs text-muted-foreground transition-colors duration-150 ease-fluid hover:bg-muted/60 hover:text-foreground"
+        className={cn(
+          "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
+          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/50 hover:text-foreground",
+        )}
       >
-        <ChevronDown
+        <span
           className={cn(
-            "size-3.5 transition-transform duration-200 ease-fluid",
-            open ? "rotate-0" : "-rotate-90",
+            "relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background",
+            active && "running-halo text-foreground/70",
+          )}
+        >
+          {active ? (
+            <span
+              className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+              aria-hidden
+            />
+          ) : (
+            <Brain className="animate-pop size-3.5 opacity-70" />
+          )}
+        </span>
+        <span className={cn("min-w-0 truncate", active && "text-shimmer")}>
+          {active ? "思考中…" : "思考过程"}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
+            open && "rotate-90",
           )}
         />
-        <span>{active ? "思考中" : "思考过程"}</span>
       </button>
-      <Disclosure open={open} className="w-full" innerClassName="w-full">
-        <div
-          id={`reasoning-${id}`}
-          className="mt-1 border-l-2 border-border/60 pl-3.5"
-        >
-          <ChatMarkdown content={content} final={!active} fade={false} variant="muted" />
+      <Disclosure open={open} className="w-full max-w-[min(100%,42rem)]">
+        <div id={`reasoning-${id}`} className="min-w-0 py-1 pr-1 pl-[26px]">
+          <ChatMarkdown
+            content={content}
+            final={!active}
+            fade={active}
+            variant="muted"
+          />
         </div>
       </Disclosure>
     </div>
@@ -440,6 +461,21 @@ function renderRunItems(
     }
   }
 
+  // 只有时间线末尾仍是 reasoning（尚未进入工具/正文）时才算活动思考
+  let activeReasoningSeq: number | null = null;
+  let activeReasoningHasContent = false;
+  if (opts.showStatus) {
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const it = items[i]!;
+      if (it.kind === "status" || it.kind === "sources" || it.kind === "memory") continue;
+      if (it.kind === "reasoning") {
+        activeReasoningSeq = it.seq;
+        activeReasoningHasContent = Boolean(it.content.trim());
+      }
+      break;
+    }
+  }
+
   for (const it of items) {
     if (it.kind === "tool") {
       // 成功的 get_file_url 由 SharedFileCards 以附件样式展示，避免工具行重复
@@ -457,11 +493,26 @@ function renderRunItems(
     // sources / memory 由 AnswerToolbar 统一展示
     if (it.kind === "status" || it.kind === "sources" || it.kind === "memory") continue;
     flushTools(`tools-${it.seq}`);
-    if (it.kind === "assistant") {
+    if (it.kind === "user") {
+      // 运行中注入（steer）的用户消息：挂在当前回合时间线上的右对齐气泡
+      blocks.push(
+        <div
+          key={`u-${it.id}-${it.seq}`}
+          className="animate-rise mt-1.5 flex w-full flex-col items-end gap-1.5"
+        >
+          {it.attachments?.length ? (
+            <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
+          ) : null}
+          <div className="max-w-[min(85%,36rem)] rounded-[1.35rem] bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
+            <div className="whitespace-pre-wrap break-words">{it.content}</div>
+          </div>
+        </div>,
+      );
+    } else if (it.kind === "assistant") {
       blocks.push(
         <div
           key={`a-${it.id}-${it.seq}`}
-          className="flex w-full max-w-[min(100%,42rem)] flex-col items-start"
+          className="mt-1.5 flex w-full max-w-[min(100%,42rem)] flex-col items-start"
         >
           <ChatMarkdown content={it.content} final={it.final} fade={false} />
         </div>,
@@ -472,7 +523,7 @@ function renderRunItems(
           key={`r-${it.id}-${it.seq}`}
           id={`${it.id}-${it.seq}`}
           content={it.content}
-          active={opts.showStatus && it.runId === lastStatus?.runId}
+          active={activeReasoningSeq === it.seq}
         />,
       );
     } else if (it.kind === "error") {
@@ -494,27 +545,32 @@ function renderRunItems(
   flushTools("tools-tail");
 
   if (opts.showStatus && lastStatus) {
-    blocks.push(
-      <div
-        key={`s-${lastStatus.id}`}
-        className="animate-rise flex items-center gap-2 text-xs"
-      >
-        <span className="running-halo relative flex size-3.5 items-center justify-center text-muted-foreground">
-          <span
-            className="size-2.5 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
-            aria-hidden
-          />
-        </span>
-        <span className="text-shimmer">
-          {STATUS_LABEL[lastStatus.status] ?? `${lastStatus.status}…`}
-          {lastStatus.status === "tool" && lastStatus.detail ? (
-            <span className="font-mono"> {lastStatus.detail}</span>
-          ) : null}
-        </span>
-      </div>,
-    );
+    // 活动思考行已自带「思考中…」，避免底部再叠一条同义状态
+    if (lastStatus.status !== "thinking" || !activeReasoningHasContent) {
+      blocks.push(
+        <div
+          key={`s-${lastStatus.id}`}
+          className="animate-rise flex items-center gap-2 py-1 text-[13px] text-muted-foreground/85"
+        >
+          <span className="running-halo relative flex size-[18px] items-center justify-center">
+            <span
+              className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+              aria-hidden
+            />
+          </span>
+          <span className="text-shimmer">
+            {STATUS_LABEL[lastStatus.status] ?? `${lastStatus.status}…`}
+            {lastStatus.status === "tool" && lastStatus.detail ? (
+              <span className="font-mono"> {lastStatus.detail}</span>
+            ) : null}
+          </span>
+        </div>,
+      );
+    }
   }
-  return blocks;
+
+  if (blocks.length === 0) return null;
+  return <div className="flex flex-col gap-0">{blocks}</div>;
 }
 
 function turnAssistantText(items: TimelineItem[]): string {
@@ -566,8 +622,9 @@ export function ChatMessages({
   activeRunId,
   agentName,
   canAct,
+  editingMessageId,
   onRegenerate,
-  onEditSend,
+  onEditStart,
   onSelectVariant,
   onSelectBranch,
   onOpenFile,
@@ -577,14 +634,20 @@ export function ChatMessages({
   activeRunId?: string | null;
   agentName?: string;
   canAct: boolean;
+  /** 正在下方 Composer 编辑的消息 id */
+  editingMessageId?: string | null;
   onRegenerate: (messageId: string) => void;
-  onEditSend: (parentKey: string, content: string) => void;
+  /** 召回 Composer 编辑（复用附件/换行等完整能力） */
+  onEditStart: (
+    messageId: string,
+    parentKey: string,
+    content: string,
+    attachments: CloudAgentAttachment[],
+  ) => void;
   onSelectVariant: (messageId: string, runId: string) => void;
   onSelectBranch: (parentKey: string, messageId: string) => void;
   onOpenFile?: (path: string) => void;
 }) {
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
     items: CloudAgentContextSourceItem[];
@@ -613,12 +676,17 @@ export function ChatMessages({
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-7 px-3 py-5 md:px-5 md:py-7">
         {turns.map((turn, ti) => {
           const isLast = ti === turns.length - 1;
-          const runItems = turn.items.filter((it) => it.kind !== "user");
-          const userItem = turn.items.find((it) => it.kind === "user");
+          // 锚点用户消息单独渲染；运行中注入（steer）的用户消息保留在 runItems 里按序展示
+          const runItems = turn.items.filter(
+            (it) => !(it.kind === "user" && it.id === turn.message.id),
+          );
+          const userItem = turn.items.find(
+            (it) => it.kind === "user" && it.id === turn.message.id,
+          );
           const attachments =
             userItem?.kind === "user" ? (userItem.attachments ?? []) : [];
           const turnRunning = runActive && turn.activeRunId === activeRunId;
-          const editing = editingId === turn.message.id;
+          const editing = editingMessageId === turn.message.id;
           const sources = collectTurnSources(runItems);
           const sharedFiles = collectTurnSharedFiles(runItems);
           const copyText = turnAssistantText(runItems);
@@ -634,40 +702,9 @@ export function ChatMessages({
           return (
             <div key={turn.message.id} className="animate-rise flex flex-col gap-3">
               {editing ? (
-                <div className="animate-rise ml-auto w-full max-w-[min(85%,36rem)] rounded-2xl border border-border/80 bg-muted/25 p-2.5 shadow-[var(--shadow-soft)]">
-                  <Textarea
-                    autoFocus
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    className="min-h-[3rem] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") setEditingId(null);
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        // 输入法组字中的回车是确认候选词，不能当作发送
-                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-                        e.preventDefault();
-                        if (draft.trim()) {
-                          onEditSend(turn.message.parentKey, draft.trim());
-                          setEditingId(null);
-                        }
-                      }
-                    }}
-                  />
-                  <div className="flex justify-end gap-1.5 pt-1">
-                    <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>
-                      取消
-                    </Button>
-                    <Button
-                      size="sm"
-                      disabled={!draft.trim() || !canAct}
-                      onClick={() => {
-                        onEditSend(turn.message.parentKey, draft.trim());
-                        setEditingId(null);
-                      }}
-                    >
-                      发送
-                    </Button>
-                  </div>
+                <div className="animate-rise ml-auto flex items-center gap-2 rounded-full border border-primary/35 bg-primary/10 px-3 py-1.5 text-xs text-muted-foreground">
+                  <Pencil className="size-3 shrink-0 text-primary" />
+                  <span>正在下方输入框编辑这条消息</span>
                 </div>
               ) : (
                 <div className="group flex flex-col items-end gap-1.5">
@@ -683,11 +720,15 @@ export function ChatMessages({
                               variant="ghost"
                               className="size-7 text-muted-foreground"
                               aria-label="编辑"
-                              disabled={!canAct}
-                              onClick={() => {
-                                setEditingId(turn.message.id);
-                                setDraft(turn.message.content);
-                              }}
+                              disabled={!canAct || runActive}
+                              onClick={() =>
+                                onEditStart(
+                                  turn.message.id,
+                                  turn.message.parentKey,
+                                  turn.message.content,
+                                  attachments,
+                                )
+                              }
                             />
                           }
                         >

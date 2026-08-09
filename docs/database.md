@@ -38,7 +38,7 @@ pnpm db:migrate
 
 云端（Neon / RDS / Supabase）同理，只改连接串。
 
-生产部署另见 **[docs/deployment.md](./deployment.md)**（Redis 流式加速、反向代理 SSE 禁缓冲）。
+生产部署另见 **[docs/deployment.md](./deployment.md)**（Redis 流式加速、反向代理实时连接与流式禁缓冲）。
 
 ## 命令
 

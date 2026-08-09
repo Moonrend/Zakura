@@ -6,6 +6,18 @@
  */
 import type { ModelToolCall } from "./model-router.js";
 
+/**
+ * Agent 可调用、但不在任何用户界面展示的内部工具。
+ * 事件仍会落库供模型历史重建；时间线 / 运行日志 / 工具卡片需过滤。
+ */
+export const SILENT_AGENT_TOOL_NAMES = ["send_crisis_support_resources"] as const;
+
+export type SilentAgentToolName = (typeof SILENT_AGENT_TOOL_NAMES)[number];
+
+export function isSilentAgentTool(name: string): boolean {
+  return (SILENT_AGENT_TOOL_NAMES as readonly string[]).includes(name);
+}
+
 export const CLOUD_AGENT_EVENT_TYPES = [
   "user_message",
   "run_start",
@@ -26,6 +38,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   /** 会话历史被压缩成可复用摘要（手动或自动触发） */
   "context_compacted",
   "session_update",
+  /** 服务端后续消息队列快照（每次变更全量广播，多设备同步） */
+  "queue_update",
 ] as const;
 
 export type CloudAgentEventType = (typeof CLOUD_AGENT_EVENT_TYPES)[number];
@@ -152,6 +166,39 @@ export type CloudAgentUserMessagePayload = {
   parentRunId?: string | null;
   /** 随消息上传的附件；图片会作为多模态内容发给模型 */
   attachments?: CloudAgentAttachment[];
+  /**
+   * 同 Run 内中途注入（下一工具批结束后进入模型），不是新回合锚点。
+   * 投影/UI 应把它挂在当前 Run 时间线上，而不是开新 ConversationTurn。
+   */
+  steer?: boolean;
+};
+
+/** 运行中收到用户消息时的默认策略 */
+export type CloudAgentFollowUpMode = "steer" | "queue";
+
+/**
+ * 服务端后续消息队列条目（对齐 Codex：pending_steers + queued_user_messages）。
+ * 队列由服务端持有并广播快照，任意设备可增删改；Run 结束后由服务端按 FIFO
+ * 逐条开新回合（一次一条），mode=steer 的条目在活跃 Run 的下一工具批后注入。
+ */
+export type CloudAgentQueuedMessage = {
+  messageId: string;
+  content: string;
+  attachments?: CloudAgentAttachment[];
+  /**
+   * steer：活跃 Run 下一工具批结束后注入当前回合；
+   * queue：等当前 Run 结束后作为新回合发送。
+   * Run 结束时仍未注入的 steer 项与 queue 项一样按 FIFO 开新回合。
+   */
+  mode: CloudAgentFollowUpMode;
+  /** 引导标记：取消当前 Run 后立即用这条开启新回合 */
+  interrupt?: boolean;
+  createdAt: string;
+};
+
+/** 队列快照：每次入队/编辑/移除/出队后全量广播（条目少，天然幂等） */
+export type CloudAgentQueueUpdatePayload = {
+  items: CloudAgentQueuedMessage[];
 };
 
 export type CloudAgentRunStartPayload = {
@@ -316,7 +363,8 @@ export type CloudAgentEventPayload =
   | CloudAgentMemoryUpdatedPayload
   | CloudAgentContextSourcesPayload
   | CloudAgentContextCompactedPayload
-  | CloudAgentSessionUpdatePayload;
+  | CloudAgentSessionUpdatePayload
+  | CloudAgentQueueUpdatePayload;
 
 export type CloudAgentEvent = {
   id: string;
@@ -369,6 +417,12 @@ export type CloudAgentConfig = {
   compactKeepRecent?: number;
   /** 单条工具结果进入模型前的字符上限（默认 12000） */
   maxToolResultChars?: number;
+  /**
+   * 运行中用户再发消息时的策略（默认 steer）：
+   * - steer：下一工具批结束后注入当前 Run（Codex 式纠偏）
+   * - queue：等当前 Run 整轮结束后再开新回合
+   */
+  followUpMode?: CloudAgentFollowUpMode;
 };
 
 export type CloudAgentRunOptions = {
@@ -422,5 +476,13 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.maxToolResultChars === "number" && cloud.maxToolResultChars >= 1_000) {
     out.maxToolResultChars = Math.min(Math.floor(cloud.maxToolResultChars), 80_000);
   }
+  if (cloud.followUpMode === "steer" || cloud.followUpMode === "queue") {
+    out.followUpMode = cloud.followUpMode;
+  }
   return out;
+}
+
+/** 未配置时默认 steer（下一工具后再注入） */
+export function resolveFollowUpMode(cloud: CloudAgentConfig): CloudAgentFollowUpMode {
+  return cloud.followUpMode === "queue" ? "queue" : "steer";
 }

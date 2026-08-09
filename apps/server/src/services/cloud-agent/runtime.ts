@@ -14,6 +14,7 @@ import {
   type CloudAgentAttachment,
   type CloudAgentConfig,
   type CloudAgentContextSourceItem,
+  type CloudAgentFollowUpMode,
   type CloudAgentRunOptions,
   type CloudAgentSessionOrigin,
   type ModelChatContentPart,
@@ -86,6 +87,11 @@ import {
   isAutomationToolName,
   listAutomationToolDefinitions,
 } from "./automation-tools.js";
+import {
+  callCrisisSupportTool,
+  isCrisisSupportToolName,
+  listCrisisSupportToolDefinitions,
+} from "./crisis-support-tools.js";
 import type { AgentAutomationService } from "../agent-automation.js";
 
 export type SessionCompactionResult = {
@@ -106,11 +112,12 @@ export type SessionForkResult = {
   mode: "copy";
 };
 
-/** Fork 时跳过流式碎片，只留终态事件，UI/模型上下文都够用且更快 */
+/** Fork 时跳过流式碎片与瞬态快照，只留终态事件，UI/模型上下文都够用且更快 */
 const FORK_SKIP_EVENT_TYPES = new Set<string>([
   "assistant_delta",
   "reasoning_delta",
   "run_log",
+  "queue_update",
 ]);
 
 /** Agent.configJson → cloud 配置（宽容解析） */
@@ -354,16 +361,155 @@ export class CloudAgentRuntime {
             payload: { runId: run.id, status: "cancelled" },
           });
           await this.store.finishRun(input.sessionId, run.id, "cancelled");
+          // 停止只中断当前回合：排队消息继续按序发出
+          void this.startNextQueued({
+            tenantId: input.tenantId,
+            agentId: input.agentId,
+            sessionId: input.sessionId,
+          });
           return;
         }
         console.error("[cloud-agent] run failed:", message);
         await failRun(this.store, input.sessionId, run.id, message);
+        // Codex 式：出错结束回合后继续发下一条排队消息
+        void this.startNextQueued({
+          tenantId: input.tenantId,
+          agentId: input.agentId,
+          sessionId: input.sessionId,
+        });
       } catch (e) {
         console.error("[cloud-agent] failed to record run error:", e);
       }
     });
 
     return { runId: run.id };
+  }
+
+  /**
+   * 后续消息入队（服务端权威队列，queue_update 快照实时同步到所有设备）：
+   * - mode=steer 且有活跃 Run：loop 在下一工具批结束后注入当前回合
+   * - 其余情况：当前 Run 结束后由服务端按 FIFO 逐条开新回合（一次一条）
+   */
+  async enqueueFollowUp(input: {
+    tenantId: string;
+    agentId: string;
+    sessionId: string;
+    content?: string;
+    attachments?: CloudAgentAttachment[];
+    mode?: CloudAgentFollowUpMode;
+  }): Promise<{ messageId: string; mode: CloudAgentFollowUpMode }> {
+    const content = input.content?.trim() ?? "";
+    const attachments = parseAttachments(input.attachments);
+    if (!content && attachments.length === 0) throw new Error("消息不能为空");
+
+    const session = await this.store.getSession(
+      input.tenantId,
+      input.agentId,
+      input.sessionId,
+    );
+    if (!session) throw new Error("会话不存在");
+    // 没有活跃 Run 时无处注入，一律按 queue 排队（随后立即出队开新回合）
+    const mode: CloudAgentFollowUpMode =
+      session.activeRunId && input.mode !== "queue" ? "steer" : "queue";
+
+    const messageId = newId();
+    await this.store.enqueueQueued(input.sessionId, {
+      messageId,
+      content,
+      attachments,
+      mode,
+      createdAt: new Date().toISOString(),
+    });
+    if (!session.activeRunId) {
+      void this.startNextQueued({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        sessionId: input.sessionId,
+      });
+    }
+    return { messageId, mode };
+  }
+
+  /**
+   * 空闲时取队头开新回合（Codex maybe_send_next_queued_input：一次只发一条）。
+   * 触发点：Run 结束（完成/失败/用户停止）、入队时会话空闲、引导取消收尾后。
+   * 停止运行不清队列——「停止」只中断当前回合，排队消息继续按序发出，
+   * 因此队列只在有消息待执行时短暂存在。
+   */
+  async startNextQueued(input: {
+    tenantId: string;
+    agentId: string;
+    sessionId: string;
+  }): Promise<void> {
+    try {
+      for (;;) {
+        const session = await this.store.getSession(
+          input.tenantId,
+          input.agentId,
+          input.sessionId,
+        );
+        if (!session || session.activeRunId) return;
+        // 立即发送优先于 FIFO 队头
+        const taken =
+          (await this.store.takeQueueNext(input.sessionId)) ??
+          (await this.store.takeNextQueued(input.sessionId));
+        if (!taken) return;
+        // 空内容项（不应出现）：丢弃并继续看下一条
+        if (!taken.content.trim() && !taken.attachments?.length) continue;
+        try {
+          await this.startTurn({
+            tenantId: input.tenantId,
+            agentId: input.agentId,
+            sessionId: input.sessionId,
+            content: taken.content,
+            ...(taken.attachments?.length ? { attachments: taken.attachments } : {}),
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.includes("进行中的 Run")) {
+            // 竞争失败（他端刚开新回合）：放回「下一条」槽，等那轮结束后再出队
+            await this.store.requeueFront(input.sessionId, taken);
+            return;
+          }
+          // 配置类错误（如模型路由缺失）：丢弃该项避免死循环，保留后续项
+          console.warn("[cloud-agent] queue drain startTurn failed:", message);
+          return;
+        }
+        return;
+      }
+    } catch (err) {
+      console.warn("[cloud-agent] startNextQueued failed:", err);
+    }
+  }
+
+  /**
+   * 立即发送：从队列摘出该条；有活跃 Run 则取消，收尾后优先用这条开新回合。
+   * 其它排队消息保持原序，不跟着插队。
+   */
+  async interruptWithQueued(input: {
+    tenantId: string;
+    agentId: string;
+    sessionId: string;
+    messageId: string;
+  }): Promise<{ ok: boolean }> {
+    const session = await this.store.getSession(
+      input.tenantId,
+      input.agentId,
+      input.sessionId,
+    );
+    if (!session) throw new Error("会话不存在");
+    const hit = await this.store.claimQueuedForImmediate(input.sessionId, input.messageId);
+    if (!hit) return { ok: false };
+    if (session.activeRunId) {
+      await this.store.requestCancel(input.sessionId, session.activeRunId);
+    } else {
+      void this.startNextQueued({
+        tenantId: input.tenantId,
+        agentId: input.agentId,
+        sessionId: input.sessionId,
+      });
+    }
+    return { ok: true };
   }
 
   private async log(
@@ -930,6 +1076,12 @@ export class CloudAgentRuntime {
         }
       }
 
+      for (const def of listCrisisSupportToolDefinitions()) {
+        if (definitions.some((d) => d.function.name === def.function.name)) continue;
+        definitions.push(def);
+        nameMap.set(def.function.name, def.function.name);
+      }
+
       try {
         peerAgents = (await this.deps.agentService.list(tenantId)).filter(
           (a) => a.id !== agent.id,
@@ -1088,6 +1240,7 @@ export class CloudAgentRuntime {
       definitions,
       nameMap,
       compactBudget: budget,
+      beforeModelRound: (msgs) => this.resolveWorkspaceImages(agent, msgs),
       ...(input.options ? { options: input.options } : {}),
       ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
       hooks: {
@@ -1144,6 +1297,15 @@ export class CloudAgentRuntime {
                 },
               };
             }
+          }
+          if (isCrisisSupportToolName(call.function.name)) {
+            const out = await callCrisisSupportTool(this.store, agent, sessionId);
+            return {
+              result: {
+                content: [{ type: "text", text: out.text }],
+                isError: out.isError === true,
+              },
+            };
           }
           if (isSessionToolName(call.function.name)) {
             const out = await callSessionTool(
@@ -1225,7 +1387,14 @@ export class CloudAgentRuntime {
       },
     });
 
-    if (result.status === "cancelled") return;
+    if (result.status === "cancelled") {
+      // 停止只中断当前回合：引导项/排队消息在取消收尾后继续按序发出
+      void this.startNextQueued({ tenantId, agentId: agent.id, sessionId });
+      return;
+    }
+
+    // Codex 式：回合结束后（完成/轮次上限）按 FIFO 出队下一条
+    void this.startNextQueued({ tenantId, agentId: agent.id, sessionId });
 
     // —— 运行后处理（不阻塞会话）：自动标题 + 自动记忆 ——
     void (async () => {

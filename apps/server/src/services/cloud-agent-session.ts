@@ -10,6 +10,7 @@ import type {
   CloudAgentEvent,
   CloudAgentEventPayload,
   CloudAgentEventType,
+  CloudAgentQueuedMessage,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
 } from "@zakura/shared";
@@ -19,6 +20,7 @@ import {
   cloudAgentRuns,
   cloudAgentSessions,
   newId,
+  users,
   type CloudAgentRun,
   type CloudAgentSession,
 } from "../db/schema.js";
@@ -145,6 +147,25 @@ function kindCondition(kinds: SessionKindFilter | undefined) {
   return [inArray(cloudAgentSessions.kind, list)];
 }
 
+/** 队列快照的 Redis 存活时长：足够跨天续用，又不会永久漏存 */
+const QUEUE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+function normalizeQueuedMessage(item: CloudAgentQueuedMessage): CloudAgentQueuedMessage {
+  return {
+    messageId: item.messageId,
+    content: item.content ?? "",
+    attachments: item.attachments ?? [],
+    mode: item.mode === "queue" ? "queue" : "steer",
+    ...(item.interrupt ? { interrupt: true } : {}),
+    createdAt: item.createdAt || new Date().toISOString(),
+  };
+}
+
+type CancelFanoutMessage = {
+  from: string;
+  runId: string;
+};
+
 export class CloudAgentSessionStore {
   /** sessionId → listeners */
   private readonly listeners = new Map<string, Set<SessionListener>>();
@@ -163,6 +184,18 @@ export class CloudAgentSessionStore {
     string,
     { tenantId: string; agentId: string; lastSeq: number; seqSeeded: boolean }
   >();
+  /** REDIS_URL=off 时的进程内会话队列 */
+  private readonly memQueues = new Map<string, CloudAgentQueuedMessage[]>();
+  /** REDIS_URL=off：立即发送待开跑的下一条 */
+  private readonly memQueueNext = new Map<string, CloudAgentQueuedMessage>();
+  /** sessionId → 队列读改写串行链（本实例内避免并发丢更新） */
+  private readonly queueChains = new Map<string, Promise<unknown>>();
+  /** 已收到取消信号的 Run（本地快速判定，免打 DB） */
+  private readonly cancelledRuns = new Set<string>();
+  /** runId → 取消回调（loop 注册，收到信号立即 abort 上游流） */
+  private readonly cancelListeners = new Map<string, Set<() => void>>();
+  /** 全局取消频道订阅（懒启动，跨实例即时传导） */
+  private cancelSubReady: Promise<void> | null = null;
 
   constructor(private readonly db: Db) {}
 
@@ -206,7 +239,7 @@ export class CloudAgentSessionStore {
     });
     if (meta.seqSeeded) return;
     const redis = await requireRedis();
-    await redis.set(REDIS_KEYS.seq(sessionId), String(meta.lastSeq), { NX: true });
+    await this.raiseRedisSeqFloor(redis, sessionId, meta.lastSeq);
     meta.seqSeeded = true;
   }
 
@@ -439,43 +472,111 @@ export class CloudAgentSessionStore {
     await entry.unsub();
   }
 
-  /** Redis INCR；seq 已在 warmSession 播种时跳过 exists/DB */
+  /**
+   * 把 Redis seq 抬到 >= floor（只升不降）。
+   * ponytail: SET NX 无法修复 Redis 从旧快照恢复后落后于 Postgres 的情况。
+   */
+  private async raiseRedisSeqFloor(
+    redis: ZakuraRedis,
+    sessionId: string,
+    floor: number,
+  ): Promise<void> {
+    if (floor < 0) return;
+    const key = REDIS_KEYS.seq(sessionId);
+    // 原子：cur < floor 才 SET，避免并发 INCR 被回写压低
+    await redis.eval(
+      `local cur = tonumber(redis.call('GET', KEYS[1]) or '-1')
+       local floor = tonumber(ARGV[1])
+       if cur < floor then redis.call('SET', KEYS[1], floor) end
+       return 0`,
+      { keys: [key], arguments: [String(floor)] },
+    );
+  }
+
+  /** Redis INCR；落后时按 DB/进程高水位抬升后再 +1 */
   private async nextSeqRedis(redis: ZakuraRedis, sessionId: string): Promise<number> {
     const key = REDIS_KEYS.seq(sessionId);
-    const meta = this.sessionMeta.get(sessionId);
+    let meta = this.sessionMeta.get(sessionId);
     if (!meta?.seqSeeded) {
-      const exists = await redis.exists(key);
-      if (!exists) {
-        const lastSeq =
-          meta?.lastSeq ??
-          (
-            await this.db.query.cloudAgentSessions.findFirst({
-              where: eq(cloudAgentSessions.id, sessionId),
-              columns: { lastSeq: true, tenantId: true, agentId: true },
-            })
-          )?.lastSeq;
-        if (lastSeq == null) throw new Error("会话不存在");
-        await redis.set(key, String(lastSeq), { NX: true });
-      }
-      if (meta) meta.seqSeeded = true;
-      else {
-        const row = await this.db.query.cloudAgentSessions.findFirst({
-          where: eq(cloudAgentSessions.id, sessionId),
-          columns: { tenantId: true, agentId: true, lastSeq: true },
-        });
-        if (!row) throw new Error("会话不存在");
-        this.sessionMeta.set(sessionId, {
+      const row = await this.db.query.cloudAgentSessions.findFirst({
+        where: eq(cloudAgentSessions.id, sessionId),
+        columns: { lastSeq: true, tenantId: true, agentId: true },
+      });
+      if (!row) throw new Error("会话不存在");
+      const floor = Math.max(meta?.lastSeq ?? 0, row.lastSeq);
+      await this.raiseRedisSeqFloor(redis, sessionId, floor);
+      if (!meta) {
+        meta = {
           tenantId: row.tenantId,
           agentId: row.agentId,
-          lastSeq: row.lastSeq,
+          lastSeq: floor,
           seqSeeded: true,
-        });
+        };
+        this.sessionMeta.set(sessionId, meta);
+      } else {
+        meta.lastSeq = floor;
+        meta.seqSeeded = true;
       }
+    } else {
+      // 同进程已观测到的高水位：Redis 回滚时仍能抬回去
+      await this.raiseRedisSeqFloor(redis, sessionId, meta.lastSeq);
     }
     const seq = await redis.incr(key);
     const m = this.sessionMeta.get(sessionId);
     if (m) m.lastSeq = seq;
     return seq;
+  }
+
+  /** 唯一约束冲突时：按 DB last_seq 重新抬升 Redis 后再分配 */
+  private async nextSeqRedisAfterConflict(
+    redis: ZakuraRedis,
+    sessionId: string,
+  ): Promise<number> {
+    const row = await this.db.query.cloudAgentSessions.findFirst({
+      where: eq(cloudAgentSessions.id, sessionId),
+      columns: { lastSeq: true, tenantId: true, agentId: true },
+    });
+    if (!row) throw new Error("会话不存在");
+    const meta = this.sessionMeta.get(sessionId);
+    const floor = Math.max(meta?.lastSeq ?? 0, row.lastSeq);
+    await this.raiseRedisSeqFloor(redis, sessionId, floor);
+    if (meta) {
+      meta.lastSeq = floor;
+      meta.seqSeeded = true;
+    } else {
+      this.sessionMeta.set(sessionId, {
+        tenantId: row.tenantId,
+        agentId: row.agentId,
+        lastSeq: floor,
+        seqSeeded: true,
+      });
+    }
+    const seq = await redis.incr(REDIS_KEYS.seq(sessionId));
+    const m = this.sessionMeta.get(sessionId);
+    if (m) m.lastSeq = seq;
+    return seq;
+  }
+
+  private isSeqUniqueViolation(err: unknown): boolean {
+    const messages: string[] = [];
+    let cur: unknown = err;
+    for (let i = 0; i < 6 && cur; i++) {
+      if (cur instanceof Error) {
+        messages.push(cur.message);
+        cur = cur.cause;
+        continue;
+      }
+      if (cur && typeof cur === "object" && "message" in cur) {
+        messages.push(String((cur as { message: unknown }).message));
+      }
+      break;
+    }
+    const text = messages.join("\n");
+    return (
+      text.includes("cloud_agent_events_session_seq") ||
+      (text.includes("duplicate key") && text.includes("session_seq")) ||
+      (text.includes("unique") && text.includes("session_seq"))
+    );
   }
 
   private schedulePersistFlush(sessionId: string): void {
@@ -515,17 +616,20 @@ export class CloudAgentSessionStore {
 
         try {
           await this.db.transaction(async (tx) => {
-            await tx.insert(cloudAgentEvents).values(
-              rows.map(({ event }) => ({
-                id: event.id,
-                sessionId: event.sessionId,
-                seq: event.seq,
-                type: event.type,
-                runId: event.runId,
-                payloadJson: JSON.stringify(event.payload),
-                createdAt: new Date(event.createdAt),
-              })),
-            );
+            await tx
+              .insert(cloudAgentEvents)
+              .values(
+                rows.map(({ event }) => ({
+                  id: event.id,
+                  sessionId: event.sessionId,
+                  seq: event.seq,
+                  type: event.type,
+                  runId: event.runId,
+                  payloadJson: JSON.stringify(event.payload),
+                  createdAt: new Date(event.createdAt),
+                })),
+              )
+              .onConflictDoNothing();
             const maxSeq = Math.max(...rows.map((r) => r.event.seq));
             const touchSidebar = rows.some((r) => SIDEBAR_TOUCH_TYPES.has(r.event.type));
             await tx
@@ -666,6 +770,22 @@ export class CloudAgentSessionStore {
     return row ?? null;
   }
 
+  /** 会话创建者注册邮箱（系统通知 / 危机支持收件人） */
+  async resolveSessionOwnerEmail(
+    tenantId: string,
+    agentId: string,
+    sessionId: string,
+  ): Promise<string | null> {
+    const session = await this.getSession(tenantId, agentId, sessionId);
+    if (!session?.createdByUserId) return null;
+    const user = await this.db.query.users.findFirst({
+      where: eq(users.id, session.createdByUserId),
+      columns: { email: true },
+    });
+    const email = user?.email?.trim();
+    return email || null;
+  }
+
   async updateSession(
     tenantId: string,
     agentId: string,
@@ -720,6 +840,9 @@ export class CloudAgentSessionStore {
     await this.db.delete(cloudAgentSessions).where(eq(cloudAgentSessions.id, sessionId));
     this.listeners.delete(sessionId);
     this.sessionMeta.delete(sessionId);
+    this.memQueues.delete(sessionId);
+    this.memQueueNext.delete(sessionId);
+    this.queueChains.delete(sessionId);
     void this.releaseRedisSubscription(sessionId);
     const redis = await getRedis();
     if (redis) {
@@ -729,6 +852,8 @@ export class CloudAgentSessionStore {
           REDIS_KEYS.pending(sessionId),
           REDIS_KEYS.events(sessionId),
           REDIS_KEYS.meta(sessionId),
+          REDIS_KEYS.queue(sessionId),
+          REDIS_KEYS.queueNext(sessionId),
         ]);
       } catch {
         /* ignore */
@@ -779,7 +904,7 @@ export class CloudAgentSessionStore {
     const eventId = newId();
     const now = new Date();
     const seq = await this.nextSeqRedis(redis, input.sessionId);
-    const event: CloudAgentEvent = {
+    let event: CloudAgentEvent = {
       id: eventId,
       sessionId: input.sessionId,
       seq,
@@ -836,24 +961,40 @@ export class CloudAgentSessionStore {
       return event;
     }
 
-    await this.db.transaction(async (tx) => {
-      await tx.insert(cloudAgentEvents).values({
-        id: eventId,
-        sessionId: input.sessionId,
-        seq,
-        type: input.type,
-        runId: input.runId ?? null,
-        payloadJson: JSON.stringify(input.payload),
-        createdAt: now,
+    const persist = async (e: CloudAgentEvent) => {
+      await this.db.transaction(async (tx) => {
+        await tx.insert(cloudAgentEvents).values({
+          id: e.id,
+          sessionId: e.sessionId,
+          seq: e.seq,
+          type: e.type,
+          runId: e.runId,
+          payloadJson: JSON.stringify(e.payload),
+          createdAt: new Date(e.createdAt),
+        });
+        await tx
+          .update(cloudAgentSessions)
+          .set({
+            lastSeq: sql`greatest(${cloudAgentSessions.lastSeq}, ${e.seq})`,
+            updatedAt: new Date(e.createdAt),
+          })
+          .where(eq(cloudAgentSessions.id, e.sessionId));
       });
-      await tx
-        .update(cloudAgentSessions)
-        .set({
-          lastSeq: sql`greatest(${cloudAgentSessions.lastSeq}, ${seq})`,
-          updatedAt: now,
-        })
-        .where(eq(cloudAgentSessions.id, input.sessionId));
-    });
+    };
+
+    try {
+      await persist(event);
+    } catch (err) {
+      if (!this.isSeqUniqueViolation(err)) throw err;
+      // Redis 落后于 Postgres：抬升后换号重试一次
+      console.warn(
+        `[cloud-agent] seq conflict session=${input.sessionId} seq=${seq}, resync from db`,
+      );
+      const retrySeq = await this.nextSeqRedisAfterConflict(redis, input.sessionId);
+      event = { ...event, seq: retrySeq };
+      meta.lastSeq = retrySeq;
+      await persist(event);
+    }
 
     this.emit(event);
     await this.mirrorEventToRedis(redis, event, meta);
@@ -1243,12 +1384,87 @@ export class CloudAgentSessionStore {
       .update(cloudAgentRuns)
       .set({ cancelRequested: true })
       .where(eq(cloudAgentRuns.id, targetId));
+    // 即时传导：本进程直接触发监听器；跨实例经全局频道广播（DB 标记只作兜底轮询）
+    this.fireRunCancel(targetId);
+    if (isRedisEnabled()) {
+      void getRedis().then((redis) => {
+        if (!redis) return;
+        const msg: CancelFanoutMessage = { from: INSTANCE_ID, runId: targetId };
+        return redis.publish(REDIS_KEYS.cancelChannel, JSON.stringify(msg));
+      }).catch((err) => console.warn("[cloud-agent] cancel publish failed:", err));
+    }
     return true;
   }
 
   async isCancelRequested(runId: string): Promise<boolean> {
+    if (this.cancelledRuns.has(runId)) return true;
     const run = await this.getRun(runId);
     return Boolean(run?.cancelRequested);
+  }
+
+  /**
+   * 注册 Run 取消监听（loop 用于即时 abort 上游流与放弃慢工具等待）。
+   * 已处于取消态则同步触发一次；返回注销函数。
+   */
+  onRunCancel(runId: string, listener: () => void): () => void {
+    if (this.cancelledRuns.has(runId)) {
+      try {
+        listener();
+      } catch {
+        /* ignore */
+      }
+      return () => {};
+    }
+    let set = this.cancelListeners.get(runId);
+    if (!set) {
+      set = new Set();
+      this.cancelListeners.set(runId, set);
+    }
+    set.add(listener);
+    void this.ensureCancelSubscription();
+    return () => {
+      const cur = this.cancelListeners.get(runId);
+      cur?.delete(listener);
+      if (cur && cur.size === 0) this.cancelListeners.delete(runId);
+    };
+  }
+
+  private fireRunCancel(runId: string): void {
+    this.cancelledRuns.add(runId);
+    const set = this.cancelListeners.get(runId);
+    if (!set) return;
+    this.cancelListeners.delete(runId);
+    for (const fn of set) {
+      try {
+        fn();
+      } catch (err) {
+        console.warn("[cloud-agent] cancel listener error:", err);
+      }
+    }
+  }
+
+  /** 订阅全局取消频道（一次即可）；其它实例 requestCancel 时本实例的 loop 也能即时收到 */
+  private ensureCancelSubscription(): Promise<void> {
+    if (!isRedisEnabled()) return Promise.resolve();
+    if (!this.cancelSubReady) {
+      this.cancelSubReady = (async () => {
+        const sub = await this.ensureSubClient();
+        if (!sub) return;
+        await sub.subscribe(REDIS_KEYS.cancelChannel, (message: string) => {
+          try {
+            const msg = JSON.parse(message) as CancelFanoutMessage;
+            if (msg.from === INSTANCE_ID) return;
+            if (typeof msg.runId === "string" && msg.runId) this.fireRunCancel(msg.runId);
+          } catch {
+            /* ignore malformed */
+          }
+        });
+      })().catch((err) => {
+        this.cancelSubReady = null;
+        console.warn("[cloud-agent] cancel channel subscribe failed:", err);
+      }) as Promise<void>;
+    }
+    return this.cancelSubReady;
   }
 
   /**
@@ -1328,5 +1544,248 @@ export class CloudAgentSessionStore {
         updatedAt: now,
       })
       .where(and(eq(cloudAgentSessions.id, sessionId), eq(cloudAgentSessions.activeRunId, runId)));
+    // 会话队列跨 Run 存续（服务端权威）；只清理该 Run 的取消状态
+    this.cancelledRuns.delete(runId);
+    this.cancelListeners.delete(runId);
+  }
+
+  // —— 会话级后续消息队列（服务端权威，跨设备同步） ——
+  // 对齐 Codex：mode=steer 项由 loop 在下一工具批后注入当前 Run；
+  // Run 结束后由 runtime 按 FIFO 一次取一条开新回合。每次变更广播 queue_update 快照。
+
+  private async readQueueItems(sessionId: string): Promise<CloudAgentQueuedMessage[]> {
+    if (isRedisEnabled()) {
+      const redis = await getRedis();
+      if (redis) {
+        try {
+          const raw = await redis.get(REDIS_KEYS.queue(sessionId));
+          if (!raw) return [];
+          const parsed = JSON.parse(raw) as unknown;
+          if (!Array.isArray(parsed)) return [];
+          return (parsed as CloudAgentQueuedMessage[])
+            .filter((i) => i && typeof i.messageId === "string")
+            .map(normalizeQueuedMessage);
+        } catch {
+          return [];
+        }
+      }
+    }
+    return this.memQueues.get(sessionId) ?? [];
+  }
+
+  private async writeQueueItems(
+    sessionId: string,
+    items: CloudAgentQueuedMessage[],
+  ): Promise<void> {
+    if (isRedisEnabled()) {
+      const redis = await getRedis();
+      if (redis) {
+        try {
+          if (items.length === 0) await redis.del(REDIS_KEYS.queue(sessionId));
+          else {
+            await redis.set(REDIS_KEYS.queue(sessionId), JSON.stringify(items), {
+              EX: QUEUE_TTL_SECONDS,
+            });
+          }
+          return;
+        } catch (err) {
+          console.warn("[cloud-agent] queue write failed:", err);
+        }
+      }
+    }
+    if (items.length === 0) this.memQueues.delete(sessionId);
+    else this.memQueues.set(sessionId, items);
+  }
+
+  /** 串行化同会话的队列读改写；跨实例的罕见交错由快照广播收敛 */
+  private mutateQueue<T>(
+    sessionId: string,
+    fn: (items: CloudAgentQueuedMessage[]) => { items: CloudAgentQueuedMessage[]; result: T },
+  ): Promise<T> {
+    const prev = this.queueChains.get(sessionId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(async () => {
+        const current = await this.readQueueItems(sessionId);
+        const { items, result } = fn([...current]);
+        await this.writeQueueItems(sessionId, items);
+        return result;
+      });
+    this.queueChains.set(sessionId, next);
+    return next;
+  }
+
+  async listQueued(sessionId: string): Promise<CloudAgentQueuedMessage[]> {
+    return this.readQueueItems(sessionId);
+  }
+
+  /** 全量快照广播（持久事件，SSE/断点续传天然覆盖多设备） */
+  async publishQueueSnapshot(sessionId: string): Promise<void> {
+    try {
+      const items = await this.readQueueItems(sessionId);
+      await this.appendEvent({
+        sessionId,
+        type: "queue_update",
+        runId: null,
+        payload: { items },
+      });
+    } catch (err) {
+      console.warn("[cloud-agent] queue snapshot publish failed:", err);
+    }
+  }
+
+  async enqueueQueued(
+    sessionId: string,
+    item: CloudAgentQueuedMessage,
+  ): Promise<CloudAgentQueuedMessage[]> {
+    const snapshot = await this.mutateQueue(sessionId, (items) => {
+      const next = [...items.filter((i) => i.messageId !== item.messageId), normalizeQueuedMessage(item)];
+      return { items: next, result: next };
+    });
+    await this.publishQueueSnapshot(sessionId);
+    return snapshot;
+  }
+
+  async updateQueued(
+    sessionId: string,
+    messageId: string,
+    patch: { content?: string },
+  ): Promise<CloudAgentQueuedMessage | null> {
+    const hit = await this.mutateQueue(sessionId, (items) => {
+      let found: CloudAgentQueuedMessage | null = null;
+      const next = items.map((i) => {
+        if (i.messageId !== messageId) return i;
+        found = { ...i, ...(patch.content !== undefined ? { content: patch.content } : {}) };
+        return found;
+      });
+      return { items: next, result: found };
+    });
+    if (hit) await this.publishQueueSnapshot(sessionId);
+    return hit;
+  }
+
+  async removeQueued(
+    sessionId: string,
+    messageId: string,
+  ): Promise<CloudAgentQueuedMessage | null> {
+    const hit = await this.mutateQueue(sessionId, (items) => {
+      const found = items.find((i) => i.messageId === messageId) ?? null;
+      return { items: items.filter((i) => i.messageId !== messageId), result: found };
+    });
+    if (hit) await this.publishQueueSnapshot(sessionId);
+    return hit;
+  }
+
+  /** 引导：标记 interrupt 并移到队头（随后由调用方取消当前 Run / 触发出队） */
+  async promoteQueued(
+    sessionId: string,
+    messageId: string,
+  ): Promise<CloudAgentQueuedMessage | null> {
+    const hit = await this.mutateQueue(sessionId, (items) => {
+      const found = items.find((i) => i.messageId === messageId);
+      if (!found) return { items, result: null };
+      const promoted: CloudAgentQueuedMessage = { ...found, interrupt: true };
+      return {
+        items: [promoted, ...items.filter((i) => i.messageId !== messageId)],
+        result: promoted,
+      };
+    });
+    if (hit) await this.publishQueueSnapshot(sessionId);
+    return hit;
+  }
+
+  /**
+   * 立即发送：从队列摘出该条，写入 queue-next（取消收尾后优先开跑）。
+   * 其它排队消息不动；队列快照立刻不含该条，UI 可马上消失。
+   */
+  async claimQueuedForImmediate(
+    sessionId: string,
+    messageId: string,
+  ): Promise<CloudAgentQueuedMessage | null> {
+    const hit = await this.mutateQueue(sessionId, (items) => {
+      const found = items.find((i) => i.messageId === messageId);
+      if (!found) return { items, result: null };
+      return {
+        items: items.filter((i) => i.messageId !== messageId),
+        result: { ...found, interrupt: true },
+      };
+    });
+    if (!hit) return null;
+    await this.writeQueueNext(sessionId, hit);
+    await this.publishQueueSnapshot(sessionId);
+    return hit;
+  }
+
+  /** 取出立即发送待办（一次性）；没有则 null */
+  async takeQueueNext(sessionId: string): Promise<CloudAgentQueuedMessage | null> {
+    if (isRedisEnabled()) {
+      const redis = await getRedis();
+      if (redis) {
+        try {
+          const key = REDIS_KEYS.queueNext(sessionId);
+          const raw = await redis.get(key);
+          if (!raw) return null;
+          await redis.del(key);
+          const parsed = JSON.parse(raw) as CloudAgentQueuedMessage;
+          if (!parsed?.messageId) return null;
+          return normalizeQueuedMessage(parsed);
+        } catch (err) {
+          console.warn("[cloud-agent] queue-next read failed:", err);
+          return null;
+        }
+      }
+    }
+    const hit = this.memQueueNext.get(sessionId) ?? null;
+    if (hit) this.memQueueNext.delete(sessionId);
+    return hit;
+  }
+
+  private async writeQueueNext(
+    sessionId: string,
+    item: CloudAgentQueuedMessage,
+  ): Promise<void> {
+    if (isRedisEnabled()) {
+      const redis = await getRedis();
+      if (redis) {
+        try {
+          await redis.set(REDIS_KEYS.queueNext(sessionId), JSON.stringify(item), {
+            EX: QUEUE_TTL_SECONDS,
+          });
+          return;
+        } catch (err) {
+          console.warn("[cloud-agent] queue-next write failed:", err);
+        }
+      }
+    }
+    this.memQueueNext.set(sessionId, item);
+  }
+
+  /** FIFO 取队头（Run 结束后由服务端开下一回合） */
+  async takeNextQueued(sessionId: string): Promise<CloudAgentQueuedMessage | null> {
+    const hit = await this.mutateQueue(sessionId, (items) => {
+      const [head, ...rest] = items;
+      return { items: head ? rest : items, result: head ?? null };
+    });
+    if (hit) await this.publishQueueSnapshot(sessionId);
+    return hit;
+  }
+
+  /** 出队后 startTurn 竞争失败时放回队头（不丢消息） */
+  async requeueFront(sessionId: string, item: CloudAgentQueuedMessage): Promise<void> {
+    await this.mutateQueue(sessionId, (items) => ({
+      items: [normalizeQueuedMessage(item), ...items.filter((i) => i.messageId !== item.messageId)],
+      result: null,
+    }));
+    await this.publishQueueSnapshot(sessionId);
+  }
+
+  /** 取出全部 mode=steer 项（loop 在工具批后注入当前 Run），FIFO */
+  async drainSteerQueued(sessionId: string): Promise<CloudAgentQueuedMessage[]> {
+    const drained = await this.mutateQueue(sessionId, (items) => ({
+      items: items.filter((i) => i.mode !== "steer"),
+      result: items.filter((i) => i.mode === "steer"),
+    }));
+    if (drained.length > 0) await this.publishQueueSnapshot(sessionId);
+    return drained;
   }
 }

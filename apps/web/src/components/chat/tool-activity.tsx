@@ -45,6 +45,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { cn } from "@/lib/utils";
 import { formatSize } from "@/lib/agent-fs";
 import type { TimelineToolCall } from "@/lib/cloud-agent";
+import { isSilentAgentTool } from "@zakura/shared";
 import {
   hostOf,
   isBareAck,
@@ -974,8 +975,12 @@ export function ToolActivity({
   calls: TimelineToolCall[];
   onOpenFile?: (path: string) => void;
 }) {
+  const visibleCalls = useMemo(
+    () => calls.filter((c) => !isSilentAgentTool(c.name)),
+    [calls],
+  );
   const [showAll, setShowAll] = useState(false);
-  const hasRunning = calls.some((c) => c.status === "running");
+  const hasRunning = visibleCalls.some((c) => c.status === "running");
   /**
    * 只折叠「历史记录」里的长工具链。本轮眼看着跑出来的步骤不折，
    * 否则运行结束的一瞬间列表会突然缩掉一大截。
@@ -986,23 +991,24 @@ export function ToolActivity({
   }, [hasRunning]);
 
   const collapsible =
-    calls.length > COLLAPSE_THRESHOLD && !hasRunning && !streamedRef.current;
+    visibleCalls.length > COLLAPSE_THRESHOLD && !hasRunning && !streamedRef.current;
   const middle = useMemo(
-    () => (collapsible ? calls.slice(HEAD_ROWS, calls.length - TAIL_ROWS) : []),
-    [calls, collapsible],
+    () =>
+      collapsible ? visibleCalls.slice(HEAD_ROWS, visibleCalls.length - TAIL_ROWS) : [],
+    [visibleCalls, collapsible],
   );
 
-  if (calls.length === 0) return null;
+  if (visibleCalls.length === 0) return null;
 
-  const head = collapsible ? calls.slice(0, HEAD_ROWS) : calls;
-  const tail = collapsible ? calls.slice(calls.length - TAIL_ROWS) : [];
+  const head = collapsible ? visibleCalls.slice(0, HEAD_ROWS) : visibleCalls;
+  const tail = collapsible ? visibleCalls.slice(visibleCalls.length - TAIL_ROWS) : [];
 
   const row = (c: TimelineToolCall, i: number) => (
     <ToolRow key={`${c.toolCallId}-${i}`} call={c} onOpenFile={onOpenFile} />
   );
 
   return (
-    <div className="relative flex w-full min-w-0 flex-col items-start py-0.5">
+    <div className="relative flex w-full min-w-0 flex-col items-start">
       {/* 时间轴竖线：从首行图标中心贯到末行图标中心 */}
       <span
         aria-hidden
@@ -1023,7 +1029,7 @@ export function ToolActivity({
           </Disclosure>
         </>
       )}
-      {tail.map((c, i) => row(c, i + calls.length - TAIL_ROWS))}
+          {tail.map((c, i) => row(c, i + visibleCalls.length - TAIL_ROWS))}
     </div>
   );
 }

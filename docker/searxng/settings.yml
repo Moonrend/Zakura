@@ -7,3 +7,4 @@ search:
 server:
   limiter: false
   bind_address: "0.0.0.0"
+  secret_key: "zakura-compose-searxng"

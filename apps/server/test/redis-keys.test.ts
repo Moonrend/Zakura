@@ -14,6 +14,13 @@ describe("redis helpers", () => {
     assert.equal(REDIS_KEYS.events("s1"), "zakura:cloud:events:s1");
     assert.equal(REDIS_KEYS.meta("s1"), "zakura:cloud:meta:s1");
     assert.equal(REDIS_KEYS.run("r1"), "zakura:cloud:run:r1");
+    assert.equal(REDIS_KEYS.queue("s1"), "zakura:cloud:queue:s1");
+    assert.equal(REDIS_KEYS.queueNext("s1"), "zakura:cloud:queue-next:s1");
+    assert.equal(REDIS_KEYS.cancelChannel, "zakura:cloud:cancel");
+    assert.equal(
+      REDIS_KEYS.crisisSupport("user@example.com"),
+      "zakura:email:crisis-support:user%40example.com",
+    );
     assert.equal(REDIS_KEYS.auth("abc"), "zakura:auth:key:abc");
     assert.equal(REDIS_KEYS.tools("a1"), "zakura:tools:agent:a1");
     assert.match(REDIS_KEYS.gwClient("a1", "ck"), /^zakura:gw:client:a1:/);

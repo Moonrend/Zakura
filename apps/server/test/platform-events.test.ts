@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { platformEvents, type PlatformEvent } from "../src/services/platform-events.js";
+import { closeRedis } from "../src/services/redis.js";
 import {
   beginAgentProgress,
   clearAgentProgress,
   finishAgentProgress,
   logAgentProgress,
 } from "../src/services/agent-progress.js";
+
+after(async () => {
+  // 订阅会惰性建立 Redis 连接，不关会吊住测试进程
+  await platformEvents.close();
+  await closeRedis();
+});
 
 describe("platformEvents bus", () => {
   it("delivers events only to the tenant's subscribers", () => {

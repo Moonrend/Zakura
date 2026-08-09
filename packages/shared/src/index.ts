@@ -55,6 +55,8 @@ export interface ContainerSpec {
   ports?: PortBinding[];
   volumes?: VolumeBinding[];
   command?: string[];
+  /** Override image ENTRYPOINT (Docker create Entrypoint) */
+  entrypoint?: string[];
   /** Container working directory (defaults to image WORKDIR) */
   workingDir?: string;
   network?: string;
@@ -561,16 +563,23 @@ export type {
 export {
   CLOUD_AGENT_EVENT_TYPES,
   CLOUD_AGENT_SESSION_KINDS,
+  SILENT_AGENT_TOOL_NAMES,
+  isSilentAgentTool,
   parseCloudAgentConfig,
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
+  resolveFollowUpMode,
 } from "./cloud-agent.js";
 export type {
+  SilentAgentToolName,
   CloudAgentEventType,
   CloudAgentRunStatus,
   CloudAgentSessionStatus,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
+  CloudAgentFollowUpMode,
+  CloudAgentQueuedMessage,
+  CloudAgentQueueUpdatePayload,
   CloudAgentUserMessagePayload,
   CloudAgentRunStartPayload,
   CloudAgentReasoningDeltaPayload,

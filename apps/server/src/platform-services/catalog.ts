@@ -17,9 +17,24 @@ search:
 server:
   limiter: false
   bind_address: "0.0.0.0"
+  secret_key: "zakura-managed-searxng"
 `;
 
-/** Write settings + return host dir to mount at /etc/searxng. */
+/**
+ * Always rewrite settings on boot. Prefer this over hostPath binds:
+ * Zakura-in-Docker often can't bind its /data volume path onto sibling containers
+ * (daemon sees a different host path), so anonymous VOLUME keeps the stock
+ * formats:[html]-only file and format=json stays 403 forever.
+ */
+export function searxngEntrypoint(): string[] {
+  return [
+    "sh",
+    "-c",
+    `cat > /etc/searxng/settings.yml <<'ZAKURA_SEARXNG_EOF'\n${SEARXNG_SETTINGS_YML}ZAKURA_SEARXNG_EOF\nexec /usr/local/searxng/entrypoint.sh`,
+  ];
+}
+
+/** @deprecated Prefer searxngEntrypoint(); kept for tests / optional bind mounts. */
 export function ensureSearxngConfigDir(dataDir: string): string {
   const dir = join(dataDir, "platform-services", "searxng");
   mkdirSync(dir, { recursive: true });
@@ -69,6 +84,7 @@ export type PlatformContainerRole = {
   volumes?: ContainerSpec["volumes"];
   shmSize?: number;
   command?: string[];
+  entrypoint?: string[];
   healthcheck?: ContainerSpec["healthcheck"];
   /**
    * After this container starts, wait before starting the next one
@@ -105,11 +121,12 @@ export const PLATFORM_SERVICE_CATALOG: Record<PlatformServiceKey, PlatformServic
         containerPort: 8080,
         defaultHostPort: 18080,
         hostIp: "127.0.0.1",
-        // limiter off — localhost API; JSON enabled via mounted settings.yml
+        // limiter off — localhost API; JSON forced via entrypoint (see searxngEntrypoint)
         env: {
           SEARXNG_LIMITER: "false",
           SEARXNG_SECRET: "zakura-managed-searxng",
         },
+        entrypoint: searxngEntrypoint(),
       },
     ],
   },
@@ -257,7 +274,7 @@ export function buildManagedSpecs(
   def: PlatformServiceDef,
   cfg: PlatformServiceConfig,
   network: string,
-  opts?: { dataDir?: string },
+  _opts?: { dataDir?: string },
 ): ContainerSpec[] {
   const redisName = containerNameFor(def.key, "redis");
   const rabbitName = containerNameFor(def.key, "rabbitmq");
@@ -290,16 +307,6 @@ export function buildManagedSpecs(
         // Silence ephemeral redis password warning; keep redis internal requirepass
         env.REDIS_PASSWORD = env.REDIS_PASSWORD ?? token;
       }
-    }
-
-    // SearXNG: mount settings with search.formats including json (else format=json → 403)
-    let volumes = role.volumes;
-    if (def.key === "searxng" && (role.primary || role.role === "main") && opts?.dataDir) {
-      const hostPath = ensureSearxngConfigDir(opts.dataDir);
-      volumes = [
-        ...(volumes ?? []),
-        { hostPath, containerPath: "/etc/searxng" },
-      ];
     }
 
     // Firecrawl full stack: wire sibling containers so harness does NOT try DinD
@@ -356,10 +363,11 @@ export function buildManagedSpecs(
       purpose: "component" as const,
       env,
       ports,
-      volumes,
+      volumes: role.volumes,
       network,
       shmSize: role.shmSize,
       command: role.command,
+      entrypoint: role.entrypoint,
       healthcheck: role.healthcheck,
       restartPolicy: "unless-stopped" as const,
       labels: {
