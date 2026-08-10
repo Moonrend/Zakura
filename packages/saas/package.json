@@ -1,6 +1,8 @@
 {
   "name": "@zakura/saas",
   "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "author": "Sunwuyuan <wuyuan.dev>",
   "private": true,
   "type": "module",
   "description": "Zakura SaaS edition — multi-tenant, registration, members/invites. Strip with `pnpm strip:saas`.",
