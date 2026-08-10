@@ -37,6 +37,10 @@ export const tenants = pgTable("tenants", {
   onboardingCompleted: boolean("onboarding_completed").notNull().default(false),
   /** JSON map of wizard steps, e.g. { agentCreated: true, mcpConnected: false } */
   onboardingSteps: text("onboarding_steps").notNull().default("{}"),
+  /** Platform-admin team suspension. Non-null blocks every session scoped to this tenant. */
+  suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  suspendedReason: text("suspended_reason"),
+  suspendedByUserId: text("suspended_by_user_id"),
   ...timestamps,
 });
 
@@ -60,6 +64,13 @@ export const users = pgTable(
      * 平台管理员默认视为已授权。
      */
     canUseLocalRunner: boolean("can_use_local_runner").notNull().default(false),
+    /**
+     * 平台封号：非空即视为已封禁。会话仍可能有效，但鉴权中间件会拒绝。
+     * 由 services/account-status.ts 统一读取并缓存。
+     */
+    suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+    suspendedReason: text("suspended_reason"),
+    suspendedByUserId: text("suspended_by_user_id"),
     ...timestamps,
   },
   (t) => [uniqueIndex("users_email").on(t.email)],

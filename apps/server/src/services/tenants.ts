@@ -381,6 +381,7 @@ export class TenantService {
     const { invite, tenant } = found;
     if (invite.acceptedAt) throw new TenantAccessError("Invite already used", 400);
     if (invite.expiresAt < new Date()) throw new TenantAccessError("Invite expired", 400);
+    if (tenant.suspendedAt) throw new TenantAccessError("该团队已被封禁", 403);
 
     let user: User | undefined;
     if (input.userId) {
@@ -398,8 +399,7 @@ export class TenantService {
       if (!user) {
         if (!input.password || input.password.length < 8) {
           throw new TenantAccessError("Password required (min 8 chars) to create account", 400);
-        }
-        const now = new Date();
+        }        const now = new Date();
         const [created] = await this.db
           .insert(users)
           .values({
@@ -421,6 +421,8 @@ export class TenantService {
         if (!ok) throw new TenantAccessError("Invalid credentials", 401);
       }
     }
+
+    if (user.suspendedAt) throw new TenantAccessError("账号已被封禁", 403);
 
     const existing = await this.getMembership(tenant.id, user.id);
     if (existing) {

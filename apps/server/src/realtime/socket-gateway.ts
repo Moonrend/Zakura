@@ -16,6 +16,7 @@ import type { CloudAgentSessionStore } from "../services/cloud-agent-session.js"
 import type { CloudAgentEvent } from "@zakura/shared";
 import { platformEvents, type PlatformEvent } from "../services/platform-events.js";
 import { authenticateApiKey, verifySession } from "../services/auth.js";
+import { checkSessionSuspended } from "../services/account-status.js";
 
 /** 握手通过后挂在 socket 上的身份 */
 type SocketSession = {
@@ -72,6 +73,9 @@ export function createSocketGateway(
 
         const session = verifySession(config.secret, token);
         if (session) {
+          if (await checkSessionSuspended(db, session)) {
+            return next(new Error("account_suspended"));
+          }
           socket.data.session = {
             userId: session.userId,
             tenantId: session.tenantId,
@@ -83,6 +87,14 @@ export function createSocketGateway(
 
         const keyed = await authenticateApiKey(db, token);
         if (keyed) {
+          if (
+            await checkSessionSuspended(db, {
+              userId: "api-key",
+              tenantId: keyed.tenant.id,
+            })
+          ) {
+            return next(new Error("account_suspended"));
+          }
           socket.data.session = {
             userId: "api-key",
             tenantId: keyed.tenant.id,

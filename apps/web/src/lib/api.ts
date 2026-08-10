@@ -86,6 +86,19 @@ async function executeRequest<T>(path: string, init?: ApiInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...fetchInit, headers, body });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
+    // 封号后旧会话仍能过签名校验，但中间件会回 403；清掉本地 token 并踢回登录页。
+    if (
+      typeof window !== "undefined" &&
+      res.status === 403 &&
+      data.code === "account_suspended" &&
+      !window.location.pathname.startsWith("/login")
+    ) {
+      setSession(null);
+      const reason =
+        typeof data.error === "string" ? data.error : "账号或所在团队已被封禁";
+      const next = `/login?suspended=1&reason=${encodeURIComponent(reason)}`;
+      window.location.replace(next);
+    }
     throw new ApiError(
       typeof data.error === "string" ? data.error : `HTTP ${res.status}`,
       res.status,

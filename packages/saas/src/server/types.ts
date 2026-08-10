@@ -38,6 +38,10 @@ export type SaasHostDeps = {
       membership: { role: string };
     }>;
     listMembers: (tenantId: string) => Promise<unknown[]>;
+    updateTenant: (
+      tenantId: string,
+      patch: { name?: string },
+    ) => Promise<{ id: string; slug: string; name: string }>;
     updateMemberRole: (
       tenantId: string,
       membershipId: string,
@@ -140,6 +144,8 @@ export type SaasHostDeps = {
   ) => Promise<{ setupCompleted: boolean; mode: string; version: string }>;
   /** Optional: seed local runner / network defaults for newly created tenants */
   onTenantCreated?: (tenantId: string) => Promise<void>;
+  /** 封号/解封后清除宿主侧账号状态缓存 */
+  invalidateSuspension?: (kind: "user" | "tenant", id: string) => void;
   /**
    * Optional: platform admin runner management (shared runners).
    * Injected by host to avoid circular package deps.

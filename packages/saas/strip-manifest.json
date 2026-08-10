@@ -1,13 +1,16 @@
 {
   "$comment": "Paths relative to repo root. Removed by scripts/strip-saas.mjs when producing a pure OSS tree.",
-  "directories": ["packages/saas"],
+  "directories": ["packages/saas", "apps/web/src/app/dashboard/admin", "apps/web/src/components/admin"],
   "files": [
     "apps/web/src/app/register/page.tsx",
     "apps/web/src/app/invite/[token]/page.tsx",
-    "apps/web/src/app/dashboard/admin/page.tsx",
     "apps/web/src/app/dashboard/settings/members/page.tsx",
     "apps/web/src/app/dashboard/settings/tenants/page.tsx",
-    "apps/web/src/app/console/oauth/zerocat/callback/page.tsx"
+    "apps/web/src/app/console/oauth/zerocat/callback/page.tsx",
+    "apps/web/src/lib/admin.ts",
+    "apps/web/src/lib/format.ts",
+    "apps/web/src/hooks/use-paged-list.ts",
+    "apps/web/src/components/ui/data-table.tsx"
   ],
   "packageJsonDeps": {
     "apps/server/package.json": ["@zakura/saas"]

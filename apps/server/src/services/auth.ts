@@ -59,10 +59,22 @@ export type LoginResult = {
   membership: TenantMembership;
 };
 
+/** 密码正确但账号/团队被封时抛出；路由层映射为 403 + code。 */
+export class LoginBlockedError extends Error {
+  readonly status = 403 as const;
+  readonly code = "account_suspended" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "LoginBlockedError";
+  }
+}
+
 /**
  * Authenticate by global email + password, then resolve a tenant membership.
  * - With tenantSlug/tenantId: use that tenant
  * - Without: first active membership (earliest joined); prefer isDefault tenant if any
+ *
+ * 封号文案只在密码校验通过后返回，避免被用来枚举账号。
  */
 export async function loginUser(
   db: Db,
@@ -79,6 +91,11 @@ export async function loginUser(
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return null;
 
+  if (user.suspendedAt) {
+    const base = "账号已被封禁";
+    throw new LoginBlockedError(user.suspendedReason ? `${base}：${user.suspendedReason}` : base);
+  }
+
   const memberships = await db
     .select({
       membership: tenantMemberships,
@@ -93,13 +110,19 @@ export async function loginUser(
 
   if (memberships.length === 0) return null;
 
-  let picked = memberships.find((m) => m.tenant.isDefault) ?? memberships[0];
+  // 被封禁的团队不参与自动挑选
+  const selectable = memberships.filter((m) => !m.tenant.suspendedAt);
+  if (selectable.length === 0) {
+    throw new LoginBlockedError("所在团队已被封禁");
+  }
+
+  let picked = selectable.find((m) => m.tenant.isDefault) ?? selectable[0];
   if (opts?.tenantId) {
-    const match = memberships.find((m) => m.tenant.id === opts.tenantId);
+    const match = selectable.find((m) => m.tenant.id === opts.tenantId);
     if (!match) return null;
     picked = match;
   } else if (opts?.tenantSlug) {
-    const match = memberships.find((m) => m.tenant.slug === opts.tenantSlug);
+    const match = selectable.find((m) => m.tenant.slug === opts.tenantSlug);
     if (!match) return null;
     picked = match;
   }
@@ -132,6 +155,7 @@ export async function switchTenantSession(
 ): Promise<string | null> {
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) return null;
+  if (user.suspendedAt) return null;
   const membership = await db.query.tenantMemberships.findFirst({
     where: and(
       eq(tenantMemberships.userId, userId),
@@ -144,6 +168,7 @@ export async function switchTenantSession(
     where: eq(tenants.id, tenantId),
   });
   if (!tenant) return null;
+  if (tenant.suspendedAt) return null;
   return signSession(secret, {
     userId: user.id,
     tenantId: tenant.id,

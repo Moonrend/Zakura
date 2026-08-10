@@ -26,6 +26,7 @@ import {
   Shield,
   SlidersHorizontal,
   Store,
+  Users,
   Wrench,
   HardDrive,
   Building2,
@@ -608,6 +609,110 @@ function AgentConfigSidebar({
   );
 }
 
+/** 超管后台独立侧边栏：顶栏返回 + 分组导航 */
+function AdminSidebar({ pathname }: { pathname: string }) {
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  const groups: Array<{ label: string; items: SubNavItem[] }> = [
+    {
+      label: "总览",
+      items: [
+        {
+          href: "/dashboard/admin",
+          label: "概览",
+          icon: LayoutDashboard,
+          isActive: (path) => path === "/dashboard/admin",
+        },
+      ],
+    },
+    {
+      label: "账号",
+      items: [
+        { href: "/dashboard/admin/users", label: "用户", icon: Users },
+        { href: "/dashboard/admin/tenants", label: "团队", icon: Building2 },
+      ],
+    },
+    {
+      label: "资源",
+      items: [
+        { href: "/dashboard/admin/runners", label: "共享 Runner", icon: HardDrive },
+        { href: "/dashboard/admin/platform", label: "平台服务", icon: Container },
+      ],
+    },
+    {
+      label: "配置",
+      items: [
+        { href: "/dashboard/admin/agent-defaults", label: "Agent 默认", icon: Bot },
+        { href: "/dashboard/admin/auth", label: "登录与认证", icon: KeyRound },
+      ],
+    },
+  ];
+
+  function closeMobile() {
+    if (isMobile) setOpenMobile(false);
+  }
+
+  return (
+    <>
+      <SidebarHeader className="gap-2 border-b border-sidebar-border px-3 py-3">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="返回控制台"
+              render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+            >
+              <ArrowLeft />
+              <span>返回</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+
+        <div className="min-w-0 px-1 group-data-[collapsible=icon]:hidden">
+          <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            超级管理员
+          </div>
+          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium">
+            <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="truncate">平台后台</span>
+          </div>
+        </div>
+      </SidebarHeader>
+
+      <SidebarContent>
+        {groups.map((group) => (
+          <SidebarGroup key={group.label}>
+            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = item.isActive
+                    ? item.isActive(pathname)
+                    : defaultActive(pathname, item.href);
+                  return (
+                    <SidebarMenuItem key={item.href}>
+                      <SidebarMenuButton
+                        isActive={active}
+                        tooltip={item.label}
+                        render={<Link href={item.href} onClick={closeMobile} />}
+                      >
+                        <Icon />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
+      </SidebarContent>
+
+      <SidebarUserFooter />
+    </>
+  );
+}
+
 function PlatformSidebar({
   tenant,
   multiTenant,
@@ -831,11 +936,15 @@ export function AppSidebar({
 }) {
   const pathname = usePathname();
   const agentId = parseAgentId(pathname);
+  const inAdmin =
+    multiTenant && isPlatformAdmin && pathname.startsWith("/dashboard/admin");
 
   return (
     <Sidebar collapsible="icon" variant="inset">
       {agentId ? (
         <AgentConfigSidebar agentId={agentId} pathname={pathname} />
+      ) : inAdmin ? (
+        <AdminSidebar pathname={pathname} />
       ) : (
         <PlatformSidebar
           tenant={tenant}

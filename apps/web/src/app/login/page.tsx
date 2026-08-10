@@ -22,6 +22,14 @@ export default function LoginPage() {
   const [zerocatEnabled, setZerocatEnabled] = useState(false);
   const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
   const [platformReady, setPlatformReady] = useState(false);
+  const [suspendNotice, setSuspendNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("suspended") !== "1") return;
+    const reason = params.get("reason")?.trim();
+    setSuspendNotice(reason || "账号或所在团队已被封禁");
+  }, []);
 
   useEffect(() => {
     void api<PlatformInfo>("/api/platform")
@@ -66,6 +74,11 @@ export default function LoginPage() {
           </div>
         ) : (
           <>
+            {suspendNotice ? (
+              <div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-xs text-destructive">
+                {suspendNotice}
+              </div>
+            ) : null}
             {zerocatEnabled ? (
               <div className={showPasswordForm ? "mb-6 space-y-3" : "space-y-3"}>
                 <Button

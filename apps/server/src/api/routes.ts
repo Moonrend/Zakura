@@ -26,11 +26,18 @@ import {
   extractBearer,
   isSessionAdmin,
   loginUser,
+  LoginBlockedError,
   sessionFromLogin,
   signSession,
   switchTenantSession,
   verifySession,
 } from "../services/auth.js";
+import {
+  checkSessionSuspended,
+  invalidateTenantSuspension,
+  invalidateUserSuspension,
+  suspensionMessage,
+} from "../services/account-status.js";
 import { InstanceNotFoundError, type Orchestrator } from "../services/orchestrator.js";
 import { qualifyResourceUri, type McpGateway } from "../services/mcp-gateway.js";
 import type { AgentService } from "../services/agents.js";
@@ -544,6 +551,14 @@ export async function createApiApp(deps: {
     // session token or API key both accepted for API
     const session = verifySession(config.secret, token);
     if (session) {
+      // 会话是无状态签名的，封号后旧 token 仍能通过签名校验 → 每请求回查一次（带 TTL 缓存）
+      const suspended = await checkSessionSuspended(db, session);
+      if (suspended) {
+        return c.json(
+          { error: suspensionMessage(suspended), code: "account_suspended" },
+          403,
+        );
+      }
       c.set("session", session);
       await next();
       return;
@@ -552,6 +567,16 @@ export async function createApiApp(deps: {
     const { authenticateApiKey } = await import("../services/auth.js");
     const keyed = await authenticateApiKey(db, token);
     if (keyed) {
+      const suspended = await checkSessionSuspended(db, {
+        userId: "api-key",
+        tenantId: keyed.tenant.id,
+      });
+      if (suspended) {
+        return c.json(
+          { error: suspensionMessage(suspended), code: "account_suspended" },
+          403,
+        );
+      }
       c.set("session", {
         userId: "api-key",
         tenantId: keyed.tenant.id,
@@ -757,9 +782,17 @@ export async function createApiApp(deps: {
     if (!body.email || !body.password) {
       return c.json({ error: "email and password required" }, 400);
     }
-    const result = await loginUser(db, body.email, body.password, {
-      tenantSlug: body.tenantSlug?.trim() || undefined,
-    });
+    let result;
+    try {
+      result = await loginUser(db, body.email, body.password, {
+        tenantSlug: body.tenantSlug?.trim() || undefined,
+      });
+    } catch (err) {
+      if (err instanceof LoginBlockedError) {
+        return c.json({ error: err.message, code: err.code }, err.status);
+      }
+      throw err;
+    }
     if (!result) return c.json({ error: "Invalid credentials" }, 401);
     const session = signSession(config.secret, {
       userId: result.user.id,
@@ -2875,6 +2908,10 @@ export async function createApiApp(deps: {
         encryptJson,
         decryptJson,
         tenants: tenantService,
+        invalidateSuspension: (kind: "user" | "tenant", id: string) => {
+          if (kind === "user") invalidateUserSuspension(id);
+          else invalidateTenantSuspension(id);
+        },
         signSession,
         sessionFromLogin,
         switchTenantSession,

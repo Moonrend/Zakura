@@ -439,6 +439,7 @@ export async function completeZerocatOauth(
 
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) throw new RegisterError("OAuth 关联后未找到用户", 500);
+  if (user.suspendedAt) throw new RegisterError("账号已被封禁", 403);
 
   const memberships = await db
     .select({
@@ -453,10 +454,23 @@ export async function completeZerocatOauth(
     throw new RegisterError("账号尚未加入任何租户", 403);
   }
 
-  const picked = memberships[0] as {
-    membership: { role: string };
-    tenant: { id: string; slug: string; name: string; onboardingCompleted: boolean };
-  };
+  const selectable = (
+    memberships as Array<{
+      membership: { role: string };
+      tenant: {
+        id: string;
+        slug: string;
+        name: string;
+        onboardingCompleted: boolean;
+        suspendedAt?: Date | null;
+      };
+    }>
+  ).filter((m) => !m.tenant.suspendedAt);
+  if (selectable.length === 0) {
+    throw new RegisterError("所在团队已被封禁", 403);
+  }
+
+  const picked = selectable[0];
 
   return {
     user: {
