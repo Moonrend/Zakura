@@ -10,8 +10,13 @@ data
 .DS_Store
 coverage
 *.log
+*.tsbuildinfo
+tmp-*
+.tmp-*
+.playwright-cli/
 certs/
 *.pem
 *.key
 apps/server/src/mcp/stdio-bridge.bundle.mjs
 .claude/
+tsc-out.txt

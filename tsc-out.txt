@@ -1,6 +1,0 @@
-src/mcp/http.ts(54,3): error TS2741: Property '_zod' is missing in type 'ZodLiteral<"tasks/update">' but required in type 'SomeType'.
-src/mcp/http.ts(55,3): error TS2741: Property '_zod' is missing in type 'ZodObject<{ taskId: ZodString; inputResponses: ZodOptional<ZodRecord<ZodString, ZodUnknown>>; }, "strip", ZodTypeAny, { ...; }, { ...; }>' but required in type 'SomeType'.
-src/mcp/http.ts(63,3): error TS2741: Property '_zod' is missing in type 'ZodLiteral<"server/discover">' but required in type 'SomeType'.
-src/mcp/http.ts(64,3): error TS2741: Property '_zod' is missing in type 'ZodOptional<ZodRecord<ZodString, ZodUnknown>>' but required in type 'SomeType'.
-src/mcp/http.ts(164,9): error TS18046: 'request.params' is of type 'unknown'.
-src/mcp/http.ts(165,9): error TS18046: 'request.params' is of type 'unknown'.
