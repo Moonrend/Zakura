@@ -1,4 +1,4 @@
-import { and, asc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gte, ne, sql } from "drizzle-orm";
 import {
   TUNNEL_PROVIDER_IDS,
   TUNNEL_PROVIDER_META,
@@ -382,7 +382,7 @@ export class NetworkSettingsService {
       .where(
         and(
           eq(portExposures.tenantId, tenantId),
-          sql`${portExposures.createdAt} >= ${startOfDay}`,
+          gte(portExposures.createdAt, startOfDay),
         ),
       );
 

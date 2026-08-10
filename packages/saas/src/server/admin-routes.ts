@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { and, asc, count, desc, eq, ilike, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import bcrypt from "bcryptjs";
 import { RegisterError, registerSaasUser } from "./register-user.js";
 import type { SaasApp, SaasHostDeps, SaasSession } from "./types.js";
@@ -166,10 +166,10 @@ export function registerAdminResourceRoutes(app: SaasApp, deps: AdminRoutesDeps)
       db.select({ n: count() }).from(users),
       db.select({ n: count() }).from(users).where(isNotNull(users.suspendedAt)),
       db.select({ n: count() }).from(users).where(eq(users.isPlatformAdmin, true)),
-      db.select({ n: count() }).from(users).where(sql`${users.createdAt} >= ${since}`),
+      db.select({ n: count() }).from(users).where(gte(users.createdAt, since)),
       db.select({ n: count() }).from(tenants),
       db.select({ n: count() }).from(tenants).where(isNotNull(tenants.suspendedAt)),
-      db.select({ n: count() }).from(tenants).where(sql`${tenants.createdAt} >= ${since}`),
+      db.select({ n: count() }).from(tenants).where(gte(tenants.createdAt, since)),
     ]);
 
     let runners = { total: 0, shared: 0, online: 0 };
