@@ -7,3 +7,5 @@
 [GNU Affero General Public License v3.0](./LICENSE)
 Copyright (C) 2026 `Sunwuyuan <wuyuan.dev>`
 
+
+此项目曾在 [LINUX DO](https://linux.do/) 推广过。
