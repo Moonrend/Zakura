@@ -5,12 +5,10 @@ import { parseCloudAgentSessionOrigin } from "@zakura/shared";
 import type { Agent } from "../src/db/schema.js";
 import type { AgentService } from "../src/services/agents.js";
 import type { CloudAgentSessionStore } from "../src/services/cloud-agent-session.js";
-import type { McpGateway } from "../src/services/mcp-gateway.js";
 import type { ModelRouterService } from "../src/services/model-router.js";
 import {
   OpenAiGatewayService,
   extractClaudeCodeSessionId,
-  mergeTools,
   resolveClientSessionKey,
   resolveGatewayModel,
   rewriteGatewayModel,
@@ -19,15 +17,6 @@ import {
 import { hasApiKeyScope } from "../src/services/auth.js";
 import { registerOpenAiGatewayRoutes } from "../src/api/openai-gateway-routes.js";
 
-const serverTool = (name: string) => ({
-  type: "function" as const,
-  function: {
-    name,
-    description: `server ${name}`,
-    parameters: { type: "object", properties: {} },
-  },
-});
-
 const clientTool = (name: string) => ({
   type: "function" as const,
   function: {
@@ -35,34 +24,6 @@ const clientTool = (name: string) => ({
     description: `client ${name}`,
     parameters: { type: "object", properties: {} },
   },
-});
-
-describe("OpenAI gateway tool policy", () => {
-  it("skips server tool injection when Zakura MCP tools are already present", () => {
-    const result = mergeTools([serverTool("re_fs_read")], [
-      clientTool("re_fs_read"),
-      clientTool("local_search"),
-    ]);
-    assert.equal(result.usedZakuraMcp, true);
-    assert.deepEqual(
-      result.tools.map((tool) => tool.function.name),
-      ["re_fs_read", "local_search"],
-    );
-  });
-
-  it("injects server tools when the request has no Zakura MCP tool", () => {
-    const result = mergeTools([serverTool("re_fs_read")], [clientTool("local_search")]);
-    assert.equal(result.usedZakuraMcp, false);
-    assert.deepEqual(
-      result.tools.map((tool) => tool.function.name),
-      ["re_fs_read", "local_search"],
-    );
-  });
-
-  it("keeps the client definition on a name collision", () => {
-    const result = mergeTools([serverTool("local_search")], [clientTool("local_search")]);
-    assert.equal(result.tools[0]?.function.description, "client local_search");
-  });
 });
 
 describe("OpenAI gateway session origin", () => {
@@ -151,7 +112,6 @@ describe("OpenAI gateway session continuation", () => {
     let created = 0;
     const service = new OpenAiGatewayService({
       agentService: { get: async () => agent } as unknown as AgentService,
-      gateway: { listToolsForAgent: async () => [] } as unknown as McpGateway,
       modelRouter: { resolveRoute: async () => null } as unknown as ModelRouterService,
       store: {
         getSession: async () => null,
@@ -223,7 +183,6 @@ describe("OpenAI gateway session continuation", () => {
       ];
     const service = new OpenAiGatewayService({
       agentService: { get: async () => agent } as unknown as AgentService,
-      gateway: { listToolsForAgent: async () => [] } as unknown as McpGateway,
       modelRouter: { resolveRoute: async () => null } as unknown as ModelRouterService,
       store: {
         listGatewaySessions: async () => [
@@ -254,10 +213,10 @@ describe("OpenAI gateway session continuation", () => {
   });
 });
 
-describe("OpenAI gateway proxy behavior", () => {
-  it("uses the client model and merges server tools into the request", async () => {
-    let calledTool = false;
+describe("OpenAI gateway thin proxy", () => {
+  it("passthrough client tools and messages without injecting Zakura system/tools", async () => {
     let seenTools: string[] = [];
+    let seenMessages: Array<{ role: string }> = [];
     const agent = {
       id: "agent-1",
       tenantId: "tenant-1",
@@ -266,64 +225,46 @@ describe("OpenAI gateway proxy behavior", () => {
       configJson: JSON.stringify({ cloud: { systemPrompt: "custom" } }),
       enableMemory: false,
     } as unknown as Agent;
-    const fakeAgentService = {
-      get: async () => agent,
-    } as unknown as AgentService;
-    const fakeGateway = {
-      listToolsForAgent: async () => [
-        {
-          qualifiedName: "re_server_tool",
-          description: "server tool",
-          inputSchema: { type: "object", properties: {} },
-        },
-      ],
-      callTool: async () => {
-        calledTool = true;
-        return { content: [{ type: "text", text: "tool-ok" }] };
-      },
-    } as unknown as McpGateway;
-    const fakeStore = {
-      createSession: async () => ({ id: "session-1" }),
-      getSession: async () => null,
-      listEvents: async () => [],
-      listGatewaySessions: async () => [],
-      appendEvent: async () => ({}),
-      warmSession: async () => {},
-      updateSession: async () => null,
-    } as unknown as CloudAgentSessionStore;
-    const fakeRouter = {
-      resolveRoute: async () => null,
-      chat: async (
-        _tenantId: string,
-        _messages: unknown,
-        _route: unknown,
-        options: { tools?: Array<{ function: { name: string } }> },
-      ) => {
-        seenTools = options.tools?.map((tool) => tool.function.name) ?? [];
-        return {
-          content: "ok",
-          model: "client-model",
-          openai: {
-            id: "chatcmpl_test",
-            object: "chat.completion",
-            created: 0,
-            model: "client-model",
-            choices: [
-              {
-                index: 0,
-                message: { role: "assistant", content: "ok" },
-                finish_reason: "stop",
-              },
-            ],
-          },
-        };
-      },
-    } as unknown as ModelRouterService;
     const service = new OpenAiGatewayService({
-      agentService: fakeAgentService,
-      gateway: fakeGateway,
-      modelRouter: fakeRouter,
-      store: fakeStore,
+      agentService: { get: async () => agent } as unknown as AgentService,
+      modelRouter: {
+        resolveRoute: async () => null,
+        chat: async (
+          _tenantId: string,
+          messages: Array<{ role: string }>,
+          _route: unknown,
+          options: { tools?: Array<{ function: { name: string } }> },
+        ) => {
+          seenMessages = messages;
+          seenTools = options.tools?.map((tool) => tool.function.name) ?? [];
+          return {
+            content: "ok",
+            model: "client-model",
+            openai: {
+              id: "chatcmpl_test",
+              object: "chat.completion",
+              created: 0,
+              model: "client-model",
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: "ok" },
+                  finish_reason: "stop",
+                },
+              ],
+            },
+          };
+        },
+      } as unknown as ModelRouterService,
+      store: {
+        createSession: async () => ({ id: "session-1" }),
+        getSession: async () => null,
+        listEvents: async () => [],
+        listGatewaySessions: async () => [],
+        appendEvent: async () => ({}),
+        warmSession: async () => {},
+        updateSession: async () => null,
+      } as unknown as CloudAgentSessionStore,
     });
 
     const context = await service.prepare("tenant-1", "agent-1", {
@@ -334,12 +275,23 @@ describe("OpenAI gateway proxy behavior", () => {
     await service.invoke("tenant-1", context);
 
     assert.equal(context.model, "client-model");
-    assert.deepEqual(seenTools, ["re_server_tool", "local_tool"]);
-    assert.equal(calledTool, false);
+    assert.deepEqual(
+      context.messages.map((m) => m.role),
+      ["user"],
+    );
+    assert.deepEqual(
+      context.invokeOptions.tools?.map((t) => t.function.name),
+      ["local_tool"],
+    );
+    assert.deepEqual(
+      seenMessages.map((m) => m.role),
+      ["user"],
+    );
+    assert.deepEqual(seenTools, ["local_tool"]);
   });
 
-  it("executes Zakura tools on the server instead of returning them to the client", async () => {
-    let callCount = 0;
+  it("returns tool_calls to the client instead of executing them server-side", async () => {
+    let chatCount = 0;
     const agent = {
       id: "agent-1",
       tenantId: "tenant-1",
@@ -348,39 +300,12 @@ describe("OpenAI gateway proxy behavior", () => {
       configJson: JSON.stringify({}),
       enableMemory: false,
     } as unknown as Agent;
-    const rounds: Array<{ tools?: string; content?: string }> = [];
     const service = new OpenAiGatewayService({
       agentService: { get: async () => agent } as unknown as AgentService,
-      gateway: {
-        listToolsForAgent: async () => [
-          {
-            qualifiedName: "re_shell_exec",
-            description: "run shell",
-            inputSchema: { type: "object", properties: {} },
-          },
-        ],
-        callTool: async (_t: string, name: string) => {
-          callCount += 1;
-          assert.equal(name, "re_shell_exec");
-          return { content: [{ type: "text", text: "vue ui started" }] };
-        },
-      } as unknown as McpGateway,
       modelRouter: {
         resolveRoute: async () => null,
-        chat: async (
-          _tenantId: string,
-          messages: Array<{ role: string; content?: string | null }>,
-        ) => {
-          const last = messages[messages.length - 1];
-          if (last?.role === "tool") {
-            rounds.push({ content: "done" });
-            return {
-              content: "已在云端启动 vue ui",
-              model: "m",
-              openai: { id: "x", object: "chat.completion", created: 0, model: "m", choices: [] },
-            };
-          }
-          rounds.push({ tools: "re_shell_exec" });
+        chat: async () => {
+          chatCount += 1;
           return {
             content: "",
             model: "m",
@@ -388,7 +313,7 @@ describe("OpenAI gateway proxy behavior", () => {
               {
                 id: "call_1",
                 type: "function",
-                function: { name: "re_shell_exec", arguments: "{\"cmd\":\"vue ui\"}" },
+                function: { name: "Bash", arguments: "{\"command\":\"ls\"}" },
               },
             ],
             openai: { id: "x", object: "chat.completion", created: 0, model: "m", choices: [] },
@@ -407,14 +332,14 @@ describe("OpenAI gateway proxy behavior", () => {
     });
 
     const context = await service.prepare("tenant-1", "agent-1", {
-      messages: [{ role: "user", content: "启动 vue ui" }],
+      messages: [{ role: "user", content: "列出文件" }],
+      tools: [clientTool("Bash")],
     });
     const result = await service.invoke("tenant-1", context);
 
-    assert.equal(callCount, 1);
-    assert.equal(result.content, "已在云端启动 vue ui");
-    assert.equal(result.toolCalls?.length ?? 0, 0);
-    assert.equal(rounds.length, 2);
+    assert.equal(chatCount, 1);
+    assert.equal(result.toolCalls?.length, 1);
+    assert.equal(result.toolCalls?.[0]?.function.name, "Bash");
   });
 });
 

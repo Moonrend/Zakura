@@ -13,26 +13,12 @@ import type { AgentService } from "./agents.js";
 import { agentCloudConfig } from "./cloud-agent/runtime.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
 import { DeltaPublisher } from "./cloud-agent/loop.js";
-import { buildSystemPrompt } from "./cloud-agent/prompts.js";
-import {
-  mcpResultToText,
-  parseToolArgs,
-  toolsToDefinitions,
-} from "./cloud-agent/tools.js";
-import type { McpGateway } from "./mcp-gateway.js";
-import { buildMemoryContext, resolveAgentMemory } from "./memory-runtime.js";
-import type { MemoryProvidersService } from "./memory-providers.js";
-import type { MemoryStore } from "./memory-store.js";
 import type { ModelRouterService } from "./model-router.js";
-import { buildOpenAIChatCompletion } from "../model-router/openai-response.js";
 import { parseRouteOptions } from "../model-router/types.js";
-import type { SkillsService } from "./skills/service.js";
 import { readGwClientSession, writeGwClientSession } from "./redis-store.js";
 
 /** 无客户端 session 头时，只在最近空闲窗口内做 messages 归并 */
 const GATEWAY_MATCH_IDLE_MS = 2 * 60 * 60 * 1000;
-/** 记忆召回（含 embedding）可拖到秒级；首字路径超时后空记忆开流 */
-const GATEWAY_MEMORY_BUDGET_MS = 80;
 
 function gatewayTimingEnabled(): boolean {
   return process.env.ZAKURA_HTTP_TIMING === "1" || process.env.ZAKURA_GATEWAY_TIMING === "1";
@@ -81,10 +67,6 @@ export type OpenAiGatewayContext = {
   routeId: string | undefined;
   messages: ModelChatMessage[];
   invokeOptions: ModelChatInvokeOptions;
-  /** 模型工具名 → MCP qualifiedName；用于云端执行 */
-  toolNameMap: Map<string, string>;
-  /** 客户端已自带 Zakura MCP 工具定义时，工具执行交给客户端 */
-  usedZakuraMcp: boolean;
   /** 会话首轮（用于临时标题 / 自动标题） */
   isFirstTurn: boolean;
 };
@@ -363,34 +345,15 @@ export function rewriteGatewayModel(
   return rewritten?.trim() || model;
 }
 
-export function mergeTools(
-  serverTools: ModelToolDefinition[],
-  clientTools: ModelToolDefinition[],
-): { tools: ModelToolDefinition[]; usedZakuraMcp: boolean } {
-  const serverNames = new Set(serverTools.map((tool) => tool.function.name));
-  const usedZakuraMcp = clientTools.some((tool) => serverNames.has(tool.function.name));
-  if (usedZakuraMcp) return { tools: clientTools, usedZakuraMcp };
-
-  const clientNames = new Set(clientTools.map((tool) => tool.function.name));
-  return {
-    tools: [
-      ...serverTools.filter((tool) => !clientNames.has(tool.function.name)),
-      ...clientTools,
-    ],
-    usedZakuraMcp,
-  };
-}
-
+/**
+ * 薄代理：鉴权 / 模型路由 / 会话落库；透传客户端 messages+tools，不注入云端工具、不代执行。
+ */
 export class OpenAiGatewayService {
   constructor(
     private readonly deps: {
       agentService: AgentService;
-      gateway: McpGateway;
       modelRouter: ModelRouterService;
       store: CloudAgentSessionStore;
-      memoryStore?: MemoryStore;
-      memoryProviders?: MemoryProvidersService;
-      skills?: SkillsService;
     },
   ) {}
 
@@ -422,53 +385,6 @@ export class OpenAiGatewayService {
       throw new Error("Gateway 目前只支持 n=1");
     }
 
-    const toolsPromise =
-      cloud.enableTools === false
-        ? Promise.resolve({
-            definitions: [] as ModelToolDefinition[],
-            nameMap: new Map<string, string>(),
-          })
-        : this.deps.gateway.listToolsForAgent(agent).then((t) => toolsToDefinitions(t));
-
-    // ponytail: 记忆召回可拖到秒级；首字路径 80ms 超时后空记忆开流（对齐 cloud-agent runtime）
-    const memoryPromise = (async () => {
-      if (
-        !(
-          agent.enableMemory &&
-          cloud.autoMemory !== false &&
-          this.deps.memoryProviders
-        )
-      ) {
-        return "";
-      }
-      try {
-        const resolved = await resolveAgentMemory(this.deps.memoryProviders!, agent);
-        if (!resolved) return "";
-        return (
-          await buildMemoryContext(
-            this.deps.memoryStore ?? null,
-            resolved,
-            agent,
-            lastUserContent(messages) || undefined,
-          )
-        ).text;
-      } catch (err) {
-        console.warn("[openai-gateway] memory context failed:", err);
-        return "";
-      }
-    })();
-    const memoryWithBudget = Promise.race([
-      memoryPromise,
-      new Promise<string>((resolve) =>
-        setTimeout(() => resolve(""), GATEWAY_MEMORY_BUDGET_MS),
-      ),
-    ]);
-
-    const skillsPromise = this.deps.skills
-      ? this.deps.skills.promptSummary(tenantId, agent.id)
-      : Promise.resolve("");
-
-    // session / 路由预热 与 tools/memory/skills 互不依赖，并行抢时间
     const sessionPromise = this.getOrCreateSession({
       tenantId,
       agent,
@@ -486,23 +402,9 @@ export class OpenAiGatewayService {
       })
       .catch(() => null);
 
-    const [listed, memoryContext, skills, session] = await Promise.all([
-      toolsPromise,
-      memoryWithBudget,
-      skillsPromise,
-      sessionPromise,
-      routeWarmPromise,
-    ]);
+    const [session] = await Promise.all([sessionPromise, routeWarmPromise]);
     mark("parallel");
 
-    const merged = mergeTools(listed.definitions, clientTools);
-    // 合并后仍保留服务端工具名映射，供云端执行
-    const toolNameMap = listed.nameMap;
-
-    const systemPrompt = buildSystemPrompt(agent, cloud, {
-      memoryContext: memoryContext || undefined,
-      skills: skills || undefined,
-    });
     const routeOptions = parseRouteOptions({
       ...asRecord(body.routeOptions ?? body.route_options),
       ...(typeof body.temperature === "number" ? { temperature: body.temperature } : {}),
@@ -515,7 +417,7 @@ export class OpenAiGatewayService {
     });
     const extensions = parseGatewayExtensions(body);
     const invokeOptions: ModelChatInvokeOptions = {
-      ...(merged.tools.length ? { tools: merged.tools } : {}),
+      ...(clientTools.length ? { tools: clientTools } : {}),
       ...(parseToolChoice(body.tool_choice ?? body.toolChoice)
         ? { toolChoice: parseToolChoice(body.tool_choice ?? body.toolChoice) }
         : {}),
@@ -591,10 +493,8 @@ export class OpenAiGatewayService {
       runId,
       model,
       routeId: clientModel ? undefined : cloud.modelRouteId?.trim() || undefined,
-      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      messages,
       invokeOptions,
-      toolNameMap,
-      usedZakuraMcp: merged.usedZakuraMcp,
       isFirstTurn,
     };
   }
@@ -609,207 +509,74 @@ export class OpenAiGatewayService {
     },
   ): Promise<ModelChatResult> {
     try {
-      const messages = [...context.messages];
-      // 默认无上限；仅当 Agent 显式配置 maxToolRounds 时才截断
-      const maxRounds = agentCloudConfig(context.agent).maxToolRounds;
-      let result: ModelChatResult | null = null;
-      let lastText = "";
+      if (callbacks?.signal?.aborted) {
+        const err = new Error("Aborted");
+        err.name = "AbortError";
+        throw err;
+      }
 
-      for (let round = 0; maxRounds == null || round < maxRounds; round += 1) {
-        if (callbacks?.signal?.aborted) {
-          const err = new Error("Aborted");
-          err.name = "AbortError";
-          throw err;
-        }
+      const routeQuery = {
+        capability: "chat" as const,
+        ...(context.routeId ? { routeId: context.routeId } : {}),
+        ...(context.model ? { alias: context.model } : {}),
+      };
 
-        const routeQuery = {
-          capability: "chat" as const,
-          ...(context.routeId ? { routeId: context.routeId } : {}),
-          ...(context.model ? { alias: context.model } : {}),
-        };
+      const messageId = newId();
+      const publisher = new DeltaPublisher(
+        this.deps.store,
+        context.sessionId,
+        context.runId,
+        messageId,
+      );
+      const reasoningPublisher = new DeltaPublisher(
+        this.deps.store,
+        context.sessionId,
+        context.runId,
+        messageId,
+        "reasoning_delta",
+      );
 
-        // 与 Agent loop 对齐：DeltaPublisher 批落库；reasoning 也写事件供 Web UI 渲染
-        const messageId = newId();
-        const publisher = new DeltaPublisher(
-          this.deps.store,
-          context.sessionId,
-          context.runId,
-          messageId,
-        );
-        const reasoningPublisher = new DeltaPublisher(
-          this.deps.store,
-          context.sessionId,
-          context.runId,
-          messageId,
-          "reasoning_delta",
-        );
-
-        // 客户端要求流式时，每一轮都 chatStream 推送文本；云端工具轮不把 tool_calls 回给客户端
-        result = callbacks
-          ? await this.deps.modelRouter.chatStream(
-              tenantId,
-              messages,
-              routeQuery,
-              context.invokeOptions,
-              {
-                onDelta: (text) => {
-                  callbacks.onDelta?.(text);
-                  publisher.push(text);
-                },
-                onReasoningDelta: (text) => {
-                  callbacks.onReasoningDelta?.(text);
-                  reasoningPublisher.push(text);
-                },
-                signal: callbacks.signal,
+      const result = callbacks
+        ? await this.deps.modelRouter.chatStream(
+            tenantId,
+            context.messages,
+            routeQuery,
+            context.invokeOptions,
+            {
+              onDelta: (text) => {
+                callbacks.onDelta?.(text);
+                publisher.push(text);
               },
-            )
-          : await this.deps.modelRouter.chat(
-              tenantId,
-              messages,
-              routeQuery,
-              context.invokeOptions,
-            );
+              onReasoningDelta: (text) => {
+                callbacks.onReasoningDelta?.(text);
+                reasoningPublisher.push(text);
+              },
+              signal: callbacks.signal,
+            },
+          )
+        : await this.deps.modelRouter.chat(
+            tenantId,
+            context.messages,
+            routeQuery,
+            context.invokeOptions,
+          );
+      await publisher.drain();
+      await reasoningPublisher.drain();
+      if (!callbacks && result.content) {
+        publisher.push(result.content);
         await publisher.drain();
-        await reasoningPublisher.drain();
-        if (!callbacks && result.content) {
-          publisher.push(result.content);
-          await publisher.drain();
-        }
-
-        if (result.content) lastText = result.content;
-
-        const toolCalls = result.toolCalls ?? [];
-        if (toolCalls.length === 0) {
-          // 本轮无工具：写出最终 assistant_message（与 loop 同 messageId）
-          await this.deps.store.appendEvent({
-            sessionId: context.sessionId,
-            type: "assistant_message",
-            runId: context.runId,
-            payload: { messageId, content: result.content ?? "" },
-          });
-          break;
-        }
-
-        // 客户端已通过 MCP 自带 Zakura 工具：原样返回 tool_calls
-        if (context.usedZakuraMcp) break;
-
-        const hasServerTool = toolCalls.some((call) =>
-          context.toolNameMap.has(call.function.name),
-        );
-        // 全是客户端本地工具：交还给客户端
-        if (!hasServerTool) break;
-
-        messages.push({
-          role: "assistant",
-          content: result.content || null,
-          toolCalls,
-        });
-
-        for (const call of toolCalls) {
-          await this.deps.store.appendEvent({
-            sessionId: context.sessionId,
-            type: "tool_call_start",
-            runId: context.runId,
-            payload: {
-              toolCallId: call.id,
-              name: call.function.name,
-              title: call.function.name,
-            },
-          });
-          await this.deps.store.appendEvent({
-            sessionId: context.sessionId,
-            type: "tool_call_args",
-            runId: context.runId,
-            payload: {
-              toolCallId: call.id,
-              arguments: call.function.arguments,
-            },
-          });
-        }
-
-        for (const call of toolCalls) {
-          const qualified = context.toolNameMap.get(call.function.name);
-          let resultText: string;
-          let isError = false;
-          const started = Date.now();
-          if (!qualified) {
-            resultText = `工具 ${call.function.name} 需在客户端执行，云端无法调用`;
-            isError = true;
-          } else {
-            try {
-              const raw = await this.deps.gateway.callTool(
-                tenantId,
-                qualified,
-                parseToolArgs(call.function.arguments),
-                { agentId: context.agent.id },
-              );
-              const parsed = mcpResultToText(raw);
-              resultText = parsed.text;
-              isError = parsed.isError;
-            } catch (err) {
-              resultText = err instanceof Error ? err.message : String(err);
-              isError = true;
-            }
-          }
-          await this.deps.store.appendEvent({
-            sessionId: context.sessionId,
-            type: "tool_call_result",
-            runId: context.runId,
-            payload: {
-              toolCallId: call.id,
-              name: call.function.name,
-              isError,
-              resultText,
-              durationMs: Date.now() - started,
-            },
-          });
-          messages.push({
-            role: "tool",
-            content: resultText,
-            toolCallId: call.id,
-            name: call.function.name,
-          });
-        }
-        result = null;
       }
 
-      // 仅在显式配置了上限且仍未得到最终回答时软收尾
-      if (!result) {
-        const note =
-          maxRounds != null
-            ? `已达到最大工具轮次（${maxRounds}），请继续发送消息以接着处理。`
-            : "工具循环已结束，但未得到最终回答。";
-        const content = lastText ? `${lastText}\n\n${note}` : note;
-        if (callbacks?.onDelta) callbacks.onDelta(lastText ? `\n\n${note}` : note);
-        const openai = buildOpenAIChatCompletion({
-          model: context.model ?? "zakura",
-          content,
-          finishReason: "stop",
-        });
-        result = {
-          content,
-          model: context.model ?? openai.model,
-          finishReason: "stop",
-          openai,
-        };
-      }
-
-      // 工具轮已在循环内写出 assistant_message；仅「交还客户端 tool_calls」或软收尾时再补一条
-      const needsFinalAssistant =
-        Boolean(result.toolCalls?.length) ||
-        !(await this.hasAssistantMessageForRun(context.sessionId, context.runId));
-      if (needsFinalAssistant) {
-        await this.deps.store.appendEvent({
-          sessionId: context.sessionId,
-          type: "assistant_message",
-          runId: context.runId,
-          payload: {
-            messageId: newId(),
-            content: result.content ?? "",
-            ...(result.toolCalls?.length ? { toolCalls: result.toolCalls } : {}),
-          },
-        });
-      }
+      await this.deps.store.appendEvent({
+        sessionId: context.sessionId,
+        type: "assistant_message",
+        runId: context.runId,
+        payload: {
+          messageId,
+          content: result.content ?? "",
+          ...(result.toolCalls?.length ? { toolCalls: result.toolCalls } : {}),
+        },
+      });
       await this.deps.store.appendEvent({
         sessionId: context.sessionId,
         type: "run_end",
@@ -822,7 +589,6 @@ export class OpenAiGatewayService {
         model: result.model || context.model || null,
         modelRouteId: routeId,
       });
-      // 不挡响应：首轮结束后后台生成标题
       if (context.isFirstTurn) {
         void this.maybeAutoTitle({
           tenantId,
@@ -854,12 +620,6 @@ export class OpenAiGatewayService {
       }
       throw err;
     }
-  }
-
-  /** 本 Run 是否已有最终 assistant_message（无工具轮在循环内已写出） */
-  private async hasAssistantMessageForRun(sessionId: string, runId: string): Promise<boolean> {
-    const events = await this.deps.store.listEvents(sessionId, { limit: 80 });
-    return events.some((ev) => ev.runId === runId && ev.type === "assistant_message");
   }
 
   /** 首轮完成后后台生成标题；失败静默，不拖慢 Gateway 响应 */

@@ -2649,12 +2649,8 @@ export async function createApiApp(deps: {
   if (modelRouter) {
     const openAiGateway = new OpenAiGatewayService({
       agentService,
-      gateway,
       modelRouter,
       store: cloudSessionStore,
-      memoryStore,
-      memoryProviders,
-      skills,
     });
     registerOpenAiGatewayRoutes(app, {
       db,

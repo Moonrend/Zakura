@@ -306,7 +306,7 @@ export default function AgentGatewayPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="AI Gateway"
-        description="OpenAI 兼容代理。客户端使用 Base URL + 下方 Key 调用 /v1。"
+        description="模型代理 + 会话记录。透传客户端 messages/tools，不注入云端工具；需要 Zakura 工具时请单独接 MCP。"
       />
 
       <SettingsSection title="接入">
@@ -324,8 +324,9 @@ export default function AgentGatewayPage() {
             <CopyButton value={gatewayBaseUrl} />
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            填 Base URL + Key 即可。Claude Code / Codex 等自带 session 头会按会话归并；
-            其它客户端按 user 消息历史对齐最近会话。
+            填 Base URL + Key 即可做模型代理，对话会记入本 Agent。Claude Code / Codex 等自带
+            session 头会按会话归并；其它客户端按 user 消息历史对齐最近会话。云端工具请用 MCP
+            端点接入，不要指望 Gateway 注入。
           </p>
         </div>
       </SettingsSection>
