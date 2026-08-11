@@ -50,7 +50,8 @@ zakura-local.190823.xyz {
 		}
 	}
 
-	handle /v1/* {
+	# /v1 与 /v1/*（裸路径也要进 API；勿只写 /v1/*）
+	handle /v1* {
 		reverse_proxy zakura:8787 {
 			flush_interval -1
 			transport http {

@@ -127,7 +127,7 @@ location /api/ {
     proxy_pass http://zakura_api;
 }
 
-location /v1/ {
+location /v1 {
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_buffering off;
@@ -151,7 +151,7 @@ handle /api/* {
     }
 }
 
-handle /v1/* {
+handle /v1* {
     reverse_proxy zakura:8787 {
         flush_interval -1
         transport http {
