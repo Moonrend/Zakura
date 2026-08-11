@@ -868,9 +868,10 @@ export async function callAgentNativeTool(
   exposures?: import("./port-exposures.js").ExposureService | null,
   fileShares?: import("./file-shares.js").FileShareService | null,
 ): Promise<McpToolResult> {
+  // 提升到 try 外，catch 里才能 scrub 宿主路径
+  let fsOnce: WorkspaceFs | null = null;
   try {
     // 仅 fs_* / get_file_url 时打开磁盘/Runner；避免 shell/browser 等工具每次都查节点、建 FS
-    let fsOnce: WorkspaceFs | null = null;
     const getFs = async (): Promise<WorkspaceFs> => {
       if (fsOnce) return fsOnce;
       fsOnce = workspaceFsProvider
