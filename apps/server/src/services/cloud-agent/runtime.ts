@@ -1099,21 +1099,25 @@ export class CloudAgentRuntime {
           function: {
             name: DELEGATE_TOOL_NAME,
             description:
-              "将一个独立子任务委派给同租户的另一个 Agent 执行（它拥有自己的工具与记忆），阻塞等待其最终答复。适用于需要该 Agent 专属能力或职责分工的场景。",
+              "Delegate a self-contained subtask to another agent in the same tenant (it has its own tools and memory). Blocks until that agent returns a final answer. Use when you need that agent's specialized capability or a clear division of labor.",
             parameters: {
               type: "object",
               properties: {
                 agentSlug: {
                   type: "string",
-                  description: `目标 Agent 的 slug。可选：${peerAgents
+                  description: `Target agent slug. Options: ${peerAgents
                     .slice(0, 20)
                     .map((a) => a.slug)
                     .join(", ")}`,
                 },
-                task: { type: "string", description: "交给对方的任务描述，应自包含" },
+                task: {
+                  type: "string",
+                  description: "Self-contained task description for the other agent",
+                },
                 context: {
                   type: "string",
-                  description: "可选补充上下文（对方看不到本会话历史）",
+                  description:
+                    "Optional extra context (the other agent cannot see this conversation history)",
                 },
               },
               required: ["agentSlug", "task"],

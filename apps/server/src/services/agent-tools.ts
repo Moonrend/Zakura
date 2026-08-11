@@ -1057,7 +1057,7 @@ export async function callAgentNativeTool(
         name === "revoke_file_url" ||
         name === "list_file_urls")
     ) {
-      return textResult("电脑环境未启用", true);
+      return textResult("Computer environment is not enabled", true);
     }
     if (!agent.enableMemory && (MEMORY_TOOL_NAMES as readonly string[]).includes(name)) {
       return textResult("Memory disabled for this agent", true);
@@ -1366,7 +1366,7 @@ export async function callAgentNativeTool(
         if (!memory) return textResult("Memory store not configured", true);
         if (kind === "openviking") {
           return textResult(
-            "OpenViking 不走本地 search_memory；请使用 OpenViking 自身工具浏览上下文。",
+            "OpenViking does not use local search_memory; browse context with OpenViking's own tools.",
             true,
           );
         }
@@ -1393,7 +1393,7 @@ export async function callAgentNativeTool(
             ...packed,
             note:
               packed.retrievalMode === "hybrid"
-                ? "retrieval=hybrid（语义种子+关键词+图谱）"
+                ? "retrieval=hybrid (semantic seeds + keyword + graph)"
                 : "retrieval=keyword_graph",
           });
         }
@@ -1437,7 +1437,10 @@ export async function callAgentNativeTool(
       }
       case "get_memory": {
         if (kind === "mem0") {
-          return textResult("mem0 请用 list_memories / search_memory；单条 get 请走 mem0 控制台或 API", true);
+          return textResult(
+            "For mem0 use list_memories / search_memory; fetch a single item via the mem0 console or API",
+            true,
+          );
         }
         if (!memory) return textResult("Memory store not configured", true);
         const item = await memory.get(agent.tenantId, agent.id, String(args.id ?? ""));
@@ -1492,7 +1495,7 @@ export async function callAgentNativeTool(
       }
       case "update_memory": {
         if (kind === "mem0") {
-          return textResult("mem0 更新请使用 mem0 API / 控制台", true);
+          return textResult("Update mem0 memories via the mem0 API / console", true);
         }
         if (!memory) return textResult("Memory store not configured", true);
         const patchBase: {
@@ -1550,7 +1553,7 @@ export async function callAgentNativeTool(
       }
       case "pin_memory": {
         if (kind === "mem0") {
-          return textResult("mem0 不支持本地 pin；请在 mem0 侧管理", true);
+          return textResult("mem0 does not support local pin; manage pins on the mem0 side", true);
         }
         if (!memory) return textResult("Memory store not configured", true);
         const item = await memory.update(agent.tenantId, agent.id, String(args.id ?? ""), {
@@ -1567,7 +1570,7 @@ export async function callAgentNativeTool(
             return okJson({
               total: listed.memories.length,
               provider: "mem0",
-              note: "计数来自 mem0 list（上限 200）",
+              note: "Counts from mem0 list (capped at 200)",
             });
           } catch (err) {
             return textResult(err instanceof Error ? err.message : String(err), true);

@@ -722,7 +722,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "containers_list",
-        description: "列出当前租户由 Zakura 管理的容器",
+        description: "List containers managed by Zakura for the current tenant",
         inputSchema: {
           type: "object",
           properties: {
@@ -739,15 +739,15 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "containers_create",
-        description: "为 Agent 分配一个工作区/临时容器",
+        description: "Allocate a workspace or ephemeral container for an agent",
         inputSchema: {
           type: "object",
           required: ["image"],
           properties: {
-            image: { type: "string", description: "Docker 镜像" },
+            image: { type: "string", description: "Docker image" },
             name: { type: "string" },
             purpose: { type: "string", enum: ["workspace", "ephemeral"], default: "ephemeral" },
-            allocated_to: { type: "string", description: "Agent / session 标识" },
+            allocated_to: { type: "string", description: "Agent / session id" },
             command: { type: "array", items: { type: "string" } },
             env: { type: "object", additionalProperties: { type: "string" } },
           },
@@ -759,7 +759,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "containers_exec",
-        description: "在已分配的容器中执行命令",
+        description: "Run a command in an allocated container",
         inputSchema: {
           type: "object",
           required: ["container_id", "command"],
@@ -776,7 +776,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "containers_stop",
-        description: "停止并移除容器",
+        description: "Stop and remove a container",
         inputSchema: {
           type: "object",
           required: ["container_id"],
@@ -792,7 +792,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "containers_logs",
-        description: "获取容器日志",
+        description: "Fetch container logs",
         inputSchema: {
           type: "object",
           required: ["container_id"],
@@ -808,7 +808,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "instances_list",
-        description: "列出已编排的组件实例及其健康状态",
+        description: "List orchestrated component instances and their health",
         inputSchema: { type: "object", properties: {} },
         builtin: true,
       },
@@ -817,7 +817,7 @@ export class McpGateway {
         instanceId: null,
         providerId: "zakura",
         localName: "agents_list",
-        description: "列出当前租户的 Agent 配置（不含工具细节）",
+        description: "List agent configs for the current tenant (without tool details)",
         inputSchema: { type: "object", properties: {} },
         builtin: true,
       },

@@ -63,12 +63,12 @@ assert.ok(handle);
 const defs = listRemoteChannelToolDefinitions(handle);
 assert.ok(defs.some((d) => d.function.name === CHAT_POST_MESSAGE));
 const postDesc = defs.find((d) => d.function.name === CHAT_POST_MESSAGE)!.function.description;
-assert.match(postDesc, /自动流式|不必再用本工具重复/);
-assert.match(postDesc, /进度/);
+assert.match(postDesc, /streamed to the current thread|do not repost/i);
+assert.match(postDesc, /progress/i);
 
 const prompt = remoteChannelPromptBlock(handle);
 assert.match(prompt, /👀/);
-assert.match(prompt, /自动流式/);
+assert.match(prompt, /streamed/i);
 assert.match(prompt, /chat_post_message/);
 
 const posted = await callRemoteChannelTool(handle, CHAT_POST_MESSAGE, {

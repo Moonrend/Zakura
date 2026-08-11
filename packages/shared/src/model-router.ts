@@ -592,6 +592,16 @@ export interface ModelToolDefinition {
     parameters?: Record<string, unknown>;
     strict?: boolean;
   };
+  /**
+   * gpt-5.4+ tool_search：为 true 时参数 schema 可延迟加载。
+   * 常驻 Zakura 内置工具不应设置。
+   */
+  deferLoading?: boolean;
+  /** 与 deferLoading 搭配：按 MCP/provider 归入 namespace，压缩顶层 tools 数组 */
+  namespace?: {
+    name: string;
+    description?: string;
+  };
 }
 
 export interface ModelToolCall {

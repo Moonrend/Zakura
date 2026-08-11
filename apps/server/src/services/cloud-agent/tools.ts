@@ -43,9 +43,154 @@ export function mcpResultToText(result: unknown): { text: string; isError: boole
   }
   let text = parts.join("\n").trim() || JSON.stringify(result);
   if (text.length > RESULT_TEXT_LIMIT) {
-    text = `${text.slice(0, RESULT_TEXT_LIMIT)}\n…(截断)`;
+    text = `${text.slice(0, RESULT_TEXT_LIMIT)}\n…(truncated)`;
   }
   return { text, isError: r.isError === true };
+}
+
+/**
+ * zakura-agent 热路径 localName：每轮常驻。
+ * computer/memory 里低频工具不在此集合，走 namespace defer。
+ */
+export const NATIVE_ALWAYS_ON_LOCAL_NAMES = new Set([
+  "agent_info",
+  "fs_read",
+  "fs_write",
+  "fs_edit",
+  "fs_list",
+  "fs_grep",
+  "apply_patch",
+  "shell_exec",
+  "browser_observe",
+  "browser_action",
+  "list_skills",
+  "read_skill",
+  "memory_context",
+  "search_memory",
+  "add_memory",
+]);
+
+type NativeDeferNs = { name: string; description: string };
+
+/** 返回 null = 常驻；否则为 defer 命名空间 */
+export function nativeDeferredNamespace(localName: string): NativeDeferNs | null {
+  if (NATIVE_ALWAYS_ON_LOCAL_NAMES.has(localName)) return null;
+
+  if (localName === "desktop_info" || localName.startsWith("computer_")) {
+    return {
+      name: "desktop",
+      description:
+        "Virtual desktop GUI: screenshot, mouse and keyboard (xdotool). Use when operating the full desktop beyond Chromium browser_* tools.",
+    };
+  }
+
+  if (
+    localName === "fs_mkdir" ||
+    localName === "fs_delete" ||
+    localName === "fs_stat" ||
+    localName === "fs_move" ||
+    localName === "get_file_url" ||
+    localName === "revoke_file_url" ||
+    localName === "list_file_urls"
+  ) {
+    return {
+      name: "workspace_files",
+      description:
+        "Less-common workspace file ops: mkdir/delete/stat/move and temporary public file share URLs.",
+    };
+  }
+
+  if (
+    localName === "list_exposers" ||
+    localName === "expose_port" ||
+    localName === "unexpose_port" ||
+    localName === "list_exposures"
+  ) {
+    return {
+      name: "port_expose",
+      description: "Expose workspace ports via tunnel providers (Cloudflare etc.).",
+    };
+  }
+
+  if (localName === "search_skills" || localName === "install_skill") {
+    return {
+      name: "skills_store",
+      description: "Search skill registries and install new skills into the workspace.",
+    };
+  }
+
+  if (
+    localName === "list_memories" ||
+    localName === "get_memory" ||
+    localName === "update_memory" ||
+    localName === "delete_memory" ||
+    localName === "pin_memory" ||
+    localName === "memory_stats" ||
+    localName === "link_memories" ||
+    localName === "memory_graph"
+  ) {
+    return {
+      name: "memory_admin",
+      description:
+        "Memory CRUD, pin, stats, and graph beyond memory_context/search_memory/add_memory.",
+    };
+  }
+
+  // 未知原生工具：常驻，避免误伤
+  return null;
+}
+
+/**
+ * 是否每轮直接塞进 tools（不 defer）。
+ * zakura-connector 也标 agentScoped，不能靠 agentScoped/builtin。
+ */
+export function isAlwaysOnResolvedTool(tool: ResolvedTool): boolean {
+  if (tool.providerId === "web-search" || tool.providerId === "web-fetch") return true;
+  if (tool.providerId === "zakura-subagent") return true;
+  if (tool.providerId !== "zakura-agent") return false;
+  return nativeDeferredNamespace(tool.localName) === null;
+}
+
+/** @deprecated 使用 isAlwaysOnResolvedTool；保留别名以免外部引用断裂 */
+export function isZakuraBuiltinTool(tool: ResolvedTool): boolean {
+  return isAlwaysOnResolvedTool(tool);
+}
+
+/** 从 qualifiedName 抽 slug：re_<slug>__local / <slug>__local */
+export function namespaceSlugFromTool(tool: ResolvedTool): string {
+  const q = tool.qualifiedName;
+  const m = /^(?:re_)?(.+?)__/.exec(q);
+  if (m?.[1]) return m[1];
+  if (tool.providerId && tool.providerId !== "zakura-connector") {
+    return tool.providerId;
+  }
+  return "external";
+}
+
+function deferredNamespaceFor(tool: ResolvedTool): {
+  name: string;
+  description: string;
+} {
+  if (tool.providerId === "zakura-agent") {
+    return (
+      nativeDeferredNamespace(tool.localName) ?? {
+        name: "zakura_extra",
+        description: "Other Zakura agent tools.",
+      }
+    );
+  }
+  const slug = namespaceSlugFromTool(tool);
+  const name = sanitizeToolName(slug);
+  const kind =
+    tool.providerId === "zakura-connector"
+      ? "connector"
+      : tool.instanceId
+        ? "MCP server"
+        : "tool provider";
+  return {
+    name,
+    description: `${kind} "${slug}" (${tool.providerId || "unknown"})`,
+  };
 }
 
 export function toolsToDefinitions(tools: ResolvedTool[]): {
@@ -57,7 +202,14 @@ export function toolsToDefinitions(tools: ResolvedTool[]): {
   const definitions: ModelToolDefinition[] = [];
 
   for (const t of tools) {
-    let name = sanitizeToolName(t.qualifiedName);
+    const alwaysOn = isAlwaysOnResolvedTool(t);
+    // 官方：namespace 内用短 function name；撞名再回退到 qualified
+    let name = sanitizeToolName(
+      !alwaysOn && t.localName ? t.localName : t.qualifiedName,
+    );
+    if (used.has(name)) {
+      name = sanitizeToolName(t.qualifiedName);
+    }
     if (used.has(name)) {
       let i = 2;
       while (used.has(`${name.slice(0, 60)}_${i}`)) i += 1;
@@ -75,6 +227,12 @@ export function toolsToDefinitions(tools: ResolvedTool[]): {
             ? t.inputSchema
             : { type: "object", properties: {} },
       },
+      ...(alwaysOn
+        ? {}
+        : {
+            deferLoading: true,
+            namespace: deferredNamespaceFor(t),
+          }),
     });
   }
   return { definitions, nameMap };

@@ -36,7 +36,7 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: LIST_SESSIONS_TOOL,
         description:
-          "列出本 Agent 最近的聊天会话（标题、时间、状态）。需要回顾或续接旧对话时先调用。",
+          "List this agent's recent chat sessions (title, time, status). Call first when reviewing or continuing a past conversation.",
         parameters: {
           type: "object",
           properties: {
@@ -45,7 +45,7 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
               minimum: 1,
               maximum: 50,
               default: 15,
-              description: "返回条数",
+              description: "Max sessions to return",
             },
             include_archived: {
               type: "boolean",
@@ -60,11 +60,11 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: SEARCH_SESSIONS_TOOL,
         description:
-          "按关键词搜索本 Agent 的历史会话（标题 + 消息正文）。找到 session_id 后可用 get_chat_messages / import_session_context。",
+          "Search this agent's past sessions by keyword (title + message body). After you have a session_id, use get_chat_messages / import_session_context.",
         parameters: {
           type: "object",
           properties: {
-            query: { type: "string", description: "搜索词" },
+            query: { type: "string", description: "Search query" },
             limit: {
               type: "integer",
               minimum: 1,
@@ -81,7 +81,7 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: GET_MESSAGES_TOOL,
         description:
-          "读取某会话的对话摘录（用户/助手轮次，工具输出已压缩）。用于核对旧对话细节。",
+          "Read a transcript excerpt from a session (user/assistant turns; tool outputs are compressed). Use to verify details from an older chat.",
         parameters: {
           type: "object",
           properties: {
@@ -91,7 +91,7 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
               minimum: 1,
               maximum: 40,
               default: 20,
-              description: "最多返回最近多少条模型消息",
+              description: "Max recent model messages to return",
             },
           },
           required: ["session_id"],
@@ -103,7 +103,7 @@ export function listSessionToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: IMPORT_SESSION_TOOL,
         description:
-          "导入另一会话的上下文摘要（不修改当前会话事件流）。把返回的 summary 当作背景继续工作；需要持久续聊请让用户使用「从会话派生」或你说明摘要要点。",
+          "Import a context summary from another session (does not mutate the current session event stream). Treat the returned summary as background; for a durable fork ask the user to use \"fork from session\" or restate the key points yourself.",
         parameters: {
           type: "object",
           properties: {
@@ -226,7 +226,7 @@ export async function callSessionTool(
       const sessionId = String(args.session_id ?? "").trim();
       if (!sessionId) return { text: "session_id is required", isError: true };
       const row = await store.getSession(agent.tenantId, agent.id, sessionId);
-      if (!row) return { text: "会话不存在或不属于本 Agent", isError: true };
+      if (!row) return { text: "Session not found or not owned by this agent", isError: true };
 
       const { messages, turns } = await loadSessionMessages(store, sessionId);
 
@@ -274,14 +274,14 @@ export async function callSessionTool(
         .join("\n");
       const summary = [
         existingSummary
-          ? `【已有压缩摘要】\n${existingSummary.slice(0, Math.floor(maxChars * 0.5))}`
+          ? `[Existing compaction summary]\n${existingSummary.slice(0, Math.floor(maxChars * 0.5))}`
           : "",
-        olderCount > 0 ? `【更早对话摘录】\n${digest}` : "",
+        olderCount > 0 ? `[Older conversation digest]\n${digest}` : "",
         recent.length
-          ? `【最近 ${recent.length} 条】\n${recentText}`
+          ? `[Recent ${recent.length} messages]\n${recentText}`
           : messages.length
-            ? `【全文摘录】\n${buildCompactionDigest(messages).slice(0, maxChars)}`
-            : "（空会话）",
+            ? `[Full digest]\n${buildCompactionDigest(messages).slice(0, maxChars)}`
+            : "(empty session)",
       ]
         .filter(Boolean)
         .join("\n\n")
@@ -295,7 +295,7 @@ export async function callSessionTool(
             turns,
             message_count: messages.length,
             summary,
-            note: "以上为导入上下文，不会自动写入当前会话。需要时请在回复中沿用关键事实。",
+            note: "Imported context only; it is not written into the current session. Reuse key facts in your reply when needed.",
           },
           null,
           2,

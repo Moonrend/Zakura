@@ -107,7 +107,7 @@ export class RemoteChannelSessionRegistry implements RemoteChannelToolPort {
 
 const MESSAGE_SCHEMA = {
   type: "string",
-  description: "要发送的文本；支持 Markdown",
+  description: "Message text; Markdown supported",
 } as const;
 
 export function listRemoteChannelToolDefinitions(
@@ -119,10 +119,10 @@ export function listRemoteChannelToolDefinitions(
       function: {
         name: CHAT_POST_MESSAGE,
         description: [
-          `向当前远程会话额外发帖（默认线程 ${handle.threadId}）。`,
-          "最终答复会自动流式发送到当前线程，不必再用本工具重复发一遍。",
-          "适合：工具执行中的进度更新、分步结论、补充说明、或发到其他 threadId。",
-          "message 用自然语言/Markdown。",
+          `Post an extra message in the current remote session (default thread ${handle.threadId}).`,
+          "The final assistant reply is streamed to the current thread automatically — do not repost that same text with this tool.",
+          "Use for: progress during tool runs, intermediate conclusions, follow-ups, or posting to another threadId.",
+          "message should be natural language / Markdown.",
         ].join(" "),
         parameters: {
           type: "object",
@@ -130,7 +130,7 @@ export function listRemoteChannelToolDefinitions(
             message: MESSAGE_SCHEMA,
             threadId: {
               type: "string",
-              description: `完整线程 id（如 slack:C123:ts）；默认 ${handle.threadId}`,
+              description: `Full thread id (e.g. slack:C123:ts); default ${handle.threadId}`,
             },
           },
           required: ["message"],
@@ -141,14 +141,15 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_POST_CHANNEL_MESSAGE,
-        description: "在频道发顶层消息（不挂在现有线程下）。channelId 需带平台前缀。",
+        description:
+          "Post a top-level channel message (not under an existing thread). channelId must include the platform prefix.",
         parameters: {
           type: "object",
           properties: {
             message: MESSAGE_SCHEMA,
             channelId: {
               type: "string",
-              description: `完整频道 id；默认 ${handle.channelId}`,
+              description: `Full channel id; default ${handle.channelId}`,
             },
           },
           required: ["message"],
@@ -159,11 +160,11 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_SEND_DIRECT_MESSAGE,
-        description: "打开（或复用）与用户的私信并发送消息。",
+        description: "Open (or reuse) a DM with a user and send a message.",
         parameters: {
           type: "object",
           properties: {
-            userId: { type: "string", description: "平台用户 id" },
+            userId: { type: "string", description: "Platform user id" },
             message: MESSAGE_SCHEMA,
           },
           required: ["userId", "message"],
@@ -174,18 +175,18 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_ADD_REACTION,
-        description: "给指定消息添加 emoji 反应。",
+        description: "Add an emoji reaction to a message.",
         parameters: {
           type: "object",
           properties: {
-            messageId: { type: "string", description: "平台消息 id" },
+            messageId: { type: "string", description: "Platform message id" },
             emoji: {
               type: "string",
-              description: "emoji 名，如 thumbs_up / white_check_mark",
+              description: "Emoji name, e.g. thumbs_up / white_check_mark",
             },
             threadId: {
               type: "string",
-              description: `完整线程 id；默认 ${handle.threadId}`,
+              description: `Full thread id; default ${handle.threadId}`,
             },
           },
           required: ["messageId", "emoji"],
@@ -196,15 +197,15 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_START_TYPING,
-        description: "在线程中显示正在输入指示。",
+        description: "Show a typing indicator in a thread.",
         parameters: {
           type: "object",
           properties: {
             threadId: {
               type: "string",
-              description: `完整线程 id；默认 ${handle.threadId}`,
+              description: `Full thread id; default ${handle.threadId}`,
             },
-            status: { type: "string", description: "可选状态文案" },
+            status: { type: "string", description: "Optional status text" },
           },
         },
       },
@@ -213,15 +214,15 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_FETCH_MESSAGES,
-        description: "拉取线程近期消息。",
+        description: "Fetch recent messages from a thread.",
         parameters: {
           type: "object",
           properties: {
             threadId: {
               type: "string",
-              description: `完整线程 id；默认 ${handle.threadId}`,
+              description: `Full thread id; default ${handle.threadId}`,
             },
-            limit: { type: "integer", description: "条数，默认 20" },
+            limit: { type: "integer", description: "Count; default 20" },
           },
         },
       },
@@ -230,13 +231,13 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_FETCH_THREAD,
-        description: "获取线程元信息（频道、是否 DM 等）。",
+        description: "Get thread metadata (channel, DM flag, etc.).",
         parameters: {
           type: "object",
           properties: {
             threadId: {
               type: "string",
-              description: `完整线程 id；默认 ${handle.threadId}`,
+              description: `Full thread id; default ${handle.threadId}`,
             },
           },
         },
@@ -246,13 +247,13 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_GET_CHANNEL_INFO,
-        description: "获取频道元信息。",
+        description: "Get channel metadata.",
         parameters: {
           type: "object",
           properties: {
             channelId: {
               type: "string",
-              description: `完整频道 id；默认 ${handle.channelId}`,
+              description: `Full channel id; default ${handle.channelId}`,
             },
           },
         },
@@ -262,11 +263,11 @@ export function listRemoteChannelToolDefinitions(
       type: "function",
       function: {
         name: CHAT_GET_USER,
-        description: "按用户 id 查询资料。",
+        description: "Look up a user profile by id.",
         parameters: {
           type: "object",
           properties: {
-            userId: { type: "string", description: "平台用户 id" },
+            userId: { type: "string", description: "Platform user id" },
           },
           required: ["userId"],
         },
@@ -328,14 +329,14 @@ async function dispatch(
   switch (name) {
     case CHAT_POST_MESSAGE: {
       const message = args.message;
-      if (message == null || message === "") throw new Error("message 不能为空");
+      if (message == null || message === "") throw new Error("message is required");
       const threadId = str(args, "threadId") ?? handle.threadId;
       const sent = await chat.thread(threadId).post(toPostable(message));
       return { messageId: sent.id, threadId: sent.threadId };
     }
     case CHAT_POST_CHANNEL_MESSAGE: {
       const message = args.message;
-      if (message == null || message === "") throw new Error("message 不能为空");
+      if (message == null || message === "") throw new Error("message is required");
       const channelId = str(args, "channelId") ?? handle.channelId;
       const sent = await chat.channel(channelId).post(toPostable(message));
       return { messageId: sent.id, threadId: sent.threadId };
@@ -343,8 +344,8 @@ async function dispatch(
     case CHAT_SEND_DIRECT_MESSAGE: {
       const userId = str(args, "userId");
       const message = args.message;
-      if (!userId) throw new Error("userId 不能为空");
-      if (message == null || message === "") throw new Error("message 不能为空");
+      if (!userId) throw new Error("userId is required");
+      if (message == null || message === "") throw new Error("message is required");
       const dm = await chat.openDM(userId);
       const sent = await dm.post(toPostable(message));
       return { messageId: sent.id, threadId: sent.threadId };
@@ -352,7 +353,7 @@ async function dispatch(
     case CHAT_ADD_REACTION: {
       const messageId = str(args, "messageId");
       const emoji = str(args, "emoji");
-      if (!messageId || !emoji) throw new Error("messageId 与 emoji 必填");
+      if (!messageId || !emoji) throw new Error("messageId and emoji are required");
       const threadId = str(args, "threadId") ?? handle.threadId;
       await chat.thread(threadId).adapter.addReaction(threadId, messageId, emoji);
       return { added: true, emoji, messageId, threadId };
@@ -405,32 +406,32 @@ async function dispatch(
     }
     case CHAT_GET_USER: {
       const userId = str(args, "userId");
-      if (!userId) throw new Error("userId 不能为空");
+      if (!userId) throw new Error("userId is required");
       if (typeof chat.getUser !== "function") {
-        throw new Error("当前 Chat 实例不支持 getUser");
+        throw new Error("This Chat instance does not support getUser");
       }
       return (await chat.getUser(userId)) ?? null;
     }
     default:
-      throw new Error(`未知远程通道工具: ${name}`);
+      throw new Error(`Unknown remote channel tool: ${name}`);
   }
 }
 
 export function remoteChannelPromptBlock(handle: RemoteChannelSessionHandle): string {
   return [
-    "# 远程消息通道（必读）",
-    `你正在 ${handle.platform} 远程会话中对话（线程 ${handle.threadId}，频道 ${handle.channelId}）。`,
+    "# Remote messaging channel (required)",
+    `You are chatting in a ${handle.platform} remote session (thread ${handle.threadId}, channel ${handle.channelId}).`,
     "",
-    "## 如何回复用户",
-    "- 用户消息到达时平台会自动贴 👀；你的最终文本答复会以真实消息流式编辑发到当前线程（工具执行期间仍保留已发出内容）。",
-    "- 因此：正常最终回复直接写助手文本即可，不要再用 chat_post_message 把同一段话发第二遍。",
-    "- chat_post_message：工具执行中的进度、分步结论、补充气泡，或发到其他 threadId。",
-    "- chat_add_reaction / chat_start_typing / chat_send_direct_message：反应、输入状态、私信。",
+    "## How to reply",
+    "- When a user message arrives the platform auto-reacts with 👀; your final text reply is streamed as a real message into the current thread (content already posted during tool runs is kept).",
+    "- Therefore: write the normal final answer as assistant text — do not also chat_post_message the same text again.",
+    "- chat_post_message: progress during tool runs, intermediate conclusions, extra bubbles, or another threadId.",
+    "- chat_add_reaction / chat_start_typing / chat_send_direct_message: reactions, typing, DMs.",
     "",
-    "## 鼓励多回复",
-    "- 长任务边做边说：先用 chat_post_message 简短确认，再调工具，关键进度可再发；最终结论写在助手文本里自动流式发出。",
-    "- 短问题也要有最终文本答复。",
-    "- 对当前线程的正常回复不需要事先征求确认。",
-    "- 用对方语言；简洁可读，Markdown 可用。",
+    "## Prefer multiple updates",
+    "- For long tasks, narrate as you go: brief chat_post_message confirmation, then tools, then more progress; put the final conclusion in assistant text so it streams automatically.",
+    "- Short questions still need a final text reply.",
+    "- Normal replies to the current thread do not need prior confirmation.",
+    "- Match the user's language; keep it concise and readable; Markdown is fine.",
   ].join("\n");
 }

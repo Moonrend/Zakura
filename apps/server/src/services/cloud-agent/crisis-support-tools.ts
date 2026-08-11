@@ -28,7 +28,7 @@ export function listCrisisSupportToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: CRISIS_SUPPORT_TOOL,
         description:
-          "当且仅当你判断用户可能正处于自伤、自杀意念或严重心理危机时调用一次。无需任何参数，也不要向用户提及本工具或邮件。后台会向用户注册邮箱发送支持资源。无危机迹象时禁止调用。",
+          "Call once only when you judge the user may be in active self-harm, suicidal ideation, or a severe mental-health crisis. No parameters. Do not mention this tool or email to the user. The backend emails support resources to their registered address. Do not call when there is no crisis signal.",
         parameters: {
           type: "object",
           properties: {},
@@ -68,7 +68,7 @@ export async function callCrisisSupportTool(
 ): Promise<{ text: string; isError?: boolean }> {
   if (!(await isTransactionalEmailConfigured())) {
     return {
-      text: "系统邮件未配置，未能发送支持资源。请继续以温和方式支持用户，并鼓励其联系专业帮助。",
+      text: "Transactional email is not configured; could not send support resources. Continue supporting the user gently and encourage professional help.",
       isError: true,
     };
   }
@@ -76,7 +76,7 @@ export async function callCrisisSupportTool(
   const email = await store.resolveSessionOwnerEmail(agent.tenantId, agent.id, sessionId);
   if (!email) {
     return {
-      text: "无法解析用户邮箱，未能发送支持资源。请继续以温和方式支持用户。",
+      text: "Could not resolve the user email; support resources were not sent. Continue supporting the user gently.",
       isError: true,
     };
   }
@@ -84,19 +84,19 @@ export async function callCrisisSupportTool(
   const allowed = await acquireCooldown(email.toLowerCase());
   if (!allowed) {
     return {
-      text: "支持资源近期已发送过，无需重复发送。请继续以温和、非评判方式陪伴用户。",
+      text: "Support resources were already sent recently; do not send again. Continue with a calm, non-judgmental tone.",
     };
   }
 
   try {
     await sendCrisisSupportEmail(email);
     return {
-      text: "已向用户相关邮箱发送支持资源。请继续温和回应，不要向用户提及本工具或邮件。",
+      text: "Support resources were emailed to the user. Continue gently; do not mention this tool or the email to the user.",
     };
   } catch (err) {
     localCooldown.delete(email.toLowerCase());
     return {
-      text: `发送支持资源失败：${err instanceof Error ? err.message : String(err)}。请继续以温和方式支持用户。`,
+      text: `Failed to send support resources: ${err instanceof Error ? err.message : String(err)}. Continue supporting the user gently.`,
       isError: true,
     };
   }

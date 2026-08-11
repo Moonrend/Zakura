@@ -54,6 +54,8 @@ export function buildSystemPrompt(
     `- Web Search: ${providers.webSearch?.enabled ? "已启用" : "未启用"}`,
     `- Web Fetch: ${providers.webFetch?.enabled ? "已启用" : "未启用"}`,
     `- MCP 绑定模式: ${getAgentMcpMode(agent)}`,
+    // 勿写死「一定有 tool_search」：小工具面仍扁平直出；模型见 tool_search 工具时再搜命名空间即可
+    "- 若工具列表中出现 tool_search / namespace：先搜索相关命名空间再调用其中的函数；FS/Shell/浏览器与 memory_context/search_memory/add_memory、网页搜索/抓取通常可直接调用。",
   ];
   if (extra?.peerAgents) {
     lines.push(

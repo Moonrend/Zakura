@@ -32,7 +32,8 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       type: "function",
       function: {
         name: LIST_SCHEDULES_TOOL,
-        description: "列出本 Agent 的定时任务（名称、cron/周期、下次执行、状态）。",
+        description:
+          "List this agent's schedules (name, cron/interval, next run, status).",
         parameters: { type: "object", properties: {} },
       },
     },
@@ -41,11 +42,11 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       function: {
         name: CREATE_SCHEDULE_TOOL,
         description: [
-          "创建定时任务。pattern 支持：",
-          "5 段 cron（分 时 日 月 周，UTC），如 `0 9 * * 1-5`；",
-          "`@hourly` / `@daily` / `@weekly`；",
-          "`@every_30m` / `@every_2h`。",
-          "prompt 为每次触发时注入的任务指令。",
+          "Create a schedule. pattern supports:",
+          "5-field cron (min hour dom month dow, UTC), e.g. `0 9 * * 1-5`;",
+          "`@hourly` / `@daily` / `@weekly`;",
+          "`@every_30m` / `@every_2h`.",
+          "prompt is the task instruction injected on each trigger.",
         ].join(" "),
         parameters: {
           type: "object",
@@ -59,7 +60,7 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
             max_runs: {
               type: "integer",
               minimum: 1,
-              description: "最多执行次数；省略则不限",
+              description: "Max runs; omit for unlimited",
             },
           },
         },
@@ -69,7 +70,8 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       type: "function",
       function: {
         name: UPDATE_SCHEDULE_TOOL,
-        description: "更新定时任务字段（name/pattern/prompt/enabled/max_runs 等）。",
+        description:
+          "Update schedule fields (name/pattern/prompt/enabled/max_runs, etc.).",
         parameters: {
           type: "object",
           required: ["schedule_id"],
@@ -89,7 +91,7 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       type: "function",
       function: {
         name: DELETE_SCHEDULE_TOOL,
-        description: "删除定时任务。",
+        description: "Delete a schedule.",
         parameters: {
           type: "object",
           required: ["schedule_id"],
@@ -101,7 +103,8 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       type: "function",
       function: {
         name: RUN_SCHEDULE_TOOL,
-        description: "立即触发一次定时任务（额外执行，不影响原定周期）。",
+        description:
+          "Trigger a schedule once immediately (extra run; does not change the normal cadence).",
         parameters: {
           type: "object",
           required: ["schedule_id"],
@@ -113,7 +116,7 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
       type: "function",
       function: {
         name: LIST_AUTOMATION_RUNS_TOOL,
-        description: "列出最近的定时任务触发记录。",
+        description: "List recent schedule trigger records.",
         parameters: {
           type: "object",
           properties: {

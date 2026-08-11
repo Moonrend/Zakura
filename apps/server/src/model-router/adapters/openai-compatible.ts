@@ -22,10 +22,29 @@ import {
   toModelChatResult,
 } from "../openai-response.js";
 import { acceptsImageInput, imageOmittedText } from "../media.js";
+import { packOpenAiChatTools, shouldUseToolSearchPack } from "../openai-tools.js";
+import {
+  responsesChat,
+  responsesChatStream,
+} from "../openai-responses-api.js";
 import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
 
 type OpenAiCompatProtocol = (typeof OPENAI_COMPATIBLE_PROTOCOLS)[number];
+
+function wantsResponsesToolSearch(
+  model: string,
+  tools: import("@zakura/shared").ModelToolDefinition[] | undefined,
+): boolean {
+  if (!tools?.length) return false;
+  let always = 0;
+  let deferred = 0;
+  for (const t of tools) {
+    if (t.deferLoading) deferred += 1;
+    else always += 1;
+  }
+  return shouldUseToolSearchPack(model, always, deferred);
+}
 
 function chatUrl(route: ResolvedRoute): string {
   const { config, protocol } = route.upstream;
@@ -103,13 +122,39 @@ async function chat(
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
 ): Promise<ModelChatResult> {
+  const useResponses = wantsResponsesToolSearch(route.model, options?.tools);
+  if (useResponses) {
+    const packed = packOpenAiChatTools(options?.tools, route.model, {
+      format: "responses",
+      messages,
+    });
+    if (packed?.tools.length) {
+      try {
+        return await responsesChat(route, messages, packed.tools, {
+          toolChoice: options?.toolChoice,
+          temperature: route.options.temperature,
+          maxTokens: route.options.maxTokens,
+        });
+      } catch (err) {
+        console.warn(
+          `[openai] responses failed, falling back to chat/completions:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
   const body: Record<string, unknown> = {
     model: route.model,
     messages: mapOpenAiCompatibleMessages(route, messages),
   };
   if (route.options.temperature != null) body.temperature = route.options.temperature;
   if (route.options.maxTokens != null) body.max_tokens = route.options.maxTokens;
-  if (options?.tools?.length) body.tools = options.tools;
+  const packedTools = packOpenAiChatTools(options?.tools, route.model, {
+    format: "chat",
+    messages,
+  });
+  if (packedTools?.tools.length) body.tools = packedTools.tools;
   if (options?.toolChoice) body.tool_choice = options.toolChoice;
   applyReasoningOptions(route.upstream.protocol, body, route.options, route.meta);
   if (options?.extensions) {
@@ -172,6 +217,34 @@ async function chatStream(
   options: ModelChatInvokeOptions | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
+  const useResponses = wantsResponsesToolSearch(route.model, options?.tools);
+  if (useResponses) {
+    const packed = packOpenAiChatTools(options?.tools, route.model, {
+      format: "responses",
+      messages,
+    });
+    if (packed?.tools.length) {
+      try {
+        return await responsesChatStream(
+          route,
+          messages,
+          packed.tools,
+          {
+            toolChoice: options?.toolChoice,
+            temperature: route.options.temperature,
+            maxTokens: route.options.maxTokens,
+          },
+          callbacks,
+        );
+      } catch (err) {
+        console.warn(
+          `[openai] responses stream failed, falling back to chat/completions:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+  }
+
   const body: Record<string, unknown> = {
     model: route.model,
     messages: mapOpenAiCompatibleMessages(route, messages),
@@ -179,7 +252,11 @@ async function chatStream(
   };
   if (route.options.temperature != null) body.temperature = route.options.temperature;
   if (route.options.maxTokens != null) body.max_tokens = route.options.maxTokens;
-  if (options?.tools?.length) body.tools = options.tools;
+  const packedTools = packOpenAiChatTools(options?.tools, route.model, {
+    format: "chat",
+    messages,
+  });
+  if (packedTools?.tools.length) body.tools = packedTools.tools;
   if (options?.toolChoice) body.tool_choice = options.toolChoice;
   applyReasoningOptions(route.upstream.protocol, body, route.options, route.meta);
   if (options?.extensions) Object.assign(body, options.extensions);
