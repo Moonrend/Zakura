@@ -234,15 +234,23 @@ describe("native tiering smoke", () => {
       ),
       "gmail",
     );
-    const { definitions } = toolsToDefinitions([
+    const { definitions, nameMap } = toolsToDefinitions([
       resolved({
         qualifiedName: "re_computer_click",
         localName: "computer_click",
         providerId: "zakura-agent",
       }),
+      resolved({
+        qualifiedName: "re_fs_stat",
+        localName: "fs_stat",
+        providerId: "zakura-agent",
+      }),
     ]);
-    assert.equal(definitions[0]?.function.name, "computer_click");
+    assert.equal(definitions[0]?.function.name, "re_computer_click");
     assert.equal(definitions[0]?.namespace?.name, "desktop");
+    assert.equal(definitions[1]?.function.name, "re_fs_stat");
+    assert.equal(nameMap.get("re_fs_stat"), "re_fs_stat");
+    assert.ok(!nameMap.has("fs_stat"), "short localName must not be exposed");
   });
 });
 

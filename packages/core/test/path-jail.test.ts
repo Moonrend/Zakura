@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PathJailError, resolveInRoot, toApiPath, toWorkspacePath } from "../src/path-jail.js";
+import {
+  PathJailError,
+  resolveInRoot,
+  scrubHostPathsInMessage,
+  toApiPath,
+  toWorkspacePath,
+} from "../src/path-jail.js";
 
 describe("resolveInRoot path jail", () => {
   const root = mkdtempSync(join(tmpdir(), "zakura-jail-"));
@@ -17,6 +23,21 @@ describe("resolveInRoot path jail", () => {
   it("treats leading slash as workspace-relative", () => {
     const abs = resolveInRoot(root, "/README.md");
     assert.equal(toWorkspacePath(root, abs), "README.md");
+  });
+
+  it("strips /workspace and host root prefixes", () => {
+    assert.equal(
+      toWorkspacePath(root, resolveInRoot(root, "/workspace/lib/i18n.ts")),
+      "lib/i18n.ts",
+    );
+    const hostAbs = join(root, "lib", "i18n.ts").replace(/\\/g, "/");
+    assert.equal(toWorkspacePath(root, resolveInRoot(root, hostAbs)), "lib/i18n.ts");
+  });
+
+  it("scrubs host paths in error messages", () => {
+    const msg = `ENOENT: no such file or directory, stat '${join(root, "lib", "a.ts")}'`;
+    assert.match(scrubHostPathsInMessage(root, msg), /\/workspace/);
+    assert.ok(!scrubHostPathsInMessage(root, msg).includes(root.replace(/\\/g, "/")));
   });
 
   it("rejects .. escape", () => {

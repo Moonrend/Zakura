@@ -203,13 +203,8 @@ export function toolsToDefinitions(tools: ResolvedTool[]): {
 
   for (const t of tools) {
     const alwaysOn = isAlwaysOnResolvedTool(t);
-    // 官方：namespace 内用短 function name；撞名再回退到 qualified
-    let name = sanitizeToolName(
-      !alwaysOn && t.localName ? t.localName : t.qualifiedName,
-    );
-    if (used.has(name)) {
-      name = sanitizeToolName(t.qualifiedName);
-    }
+    // 云端工具一律用 re_ 限定名，避免与本地/短名工具混淆；撞名再加后缀
+    let name = sanitizeToolName(t.qualifiedName);
     if (used.has(name)) {
       let i = 2;
       while (used.has(`${name.slice(0, 60)}_${i}`)) i += 1;

@@ -1,5 +1,7 @@
 import {
   LocalWorkspaceFs,
+  PathJailError,
+  scrubHostPathsInMessage,
   textResult,
   unwrapShellCommand,
   type WorkspaceFs,
@@ -9,7 +11,6 @@ import type { McpToolResult, MemoryProviderKind, McpToolAnnotations } from "@zak
 import { AGENT_WORKSPACE_ROOT } from "@zakura/shared";
 import type { Agent } from "../db/schema.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
-import { PathJailError } from "@zakura/core";
 import { isComputerEnvEnabled } from "./agent-caps.js";
 import type { AgentWorkspaceService } from "./agent-workspace.js";
 import { MEMORY_LAYERS, type MemoryStore } from "./memory-store.js";
@@ -823,8 +824,11 @@ function okJson(data: unknown): McpToolResult {
   return textResult(JSON.stringify(data, null, 2));
 }
 
-function errText(err: unknown): McpToolResult {
-  const msg = err instanceof Error ? err.message : String(err);
+function errText(err: unknown, workspaceRoot?: string): McpToolResult {
+  let msg = err instanceof Error ? err.message : String(err);
+  if (workspaceRoot) {
+    msg = scrubHostPathsInMessage(workspaceRoot, msg);
+  }
   return textResult(msg, true);
 }
 
@@ -1701,6 +1705,10 @@ export async function callAgentNativeTool(
     }
   } catch (err) {
     if (err instanceof PathJailError) return textResult(err.message, true);
-    return errText(err);
+    const root =
+      fsOnce && typeof (fsOnce as LocalWorkspaceFs).getRoot === "function"
+        ? (fsOnce as LocalWorkspaceFs).getRoot()
+        : undefined;
+    return errText(err, root);
   }
 }

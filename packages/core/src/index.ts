@@ -11,7 +11,15 @@ export {
   textResult,
 } from "./crypto.js";
 
-export { PathJailError, resolveInRoot, toWorkspacePath, toApiPath, entryName } from "./path-jail.js";
+export {
+  PathJailError,
+  CONTAINER_WORKSPACE_ROOT,
+  resolveInRoot,
+  toWorkspacePath,
+  toApiPath,
+  entryName,
+  scrubHostPathsInMessage,
+} from "./path-jail.js";
 export type {
   WorkspaceFs,
   WorkspaceFsProvider,
