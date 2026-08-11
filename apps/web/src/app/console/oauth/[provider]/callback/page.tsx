@@ -2,8 +2,7 @@
 
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { toast } from "sonner";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Check, Loader2, X } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -11,8 +10,10 @@ import { Button } from "@/components/ui/button";
 function CallbackInner() {
   const router = useRouter();
   const params = useSearchParams();
+  const routeParams = useParams<{ provider: string }>();
+  const provider = routeParams.provider;
   const [status, setStatus] = useState<"loading" | "ok" | "error">("loading");
-  const [msg, setMsg] = useState("正在完成 ZeroCat 登录…");
+  const [msg, setMsg] = useState("正在完成登录…");
 
   useEffect(() => {
     const code = params.get("code");
@@ -21,6 +22,11 @@ function CallbackInner() {
     const errorDescription = params.get("error_description");
 
     void (async () => {
+      if (!provider) {
+        setStatus("error");
+        setMsg("缺少 OAuth 提供商");
+        return;
+      }
       if (error) {
         setStatus("error");
         setMsg(errorDescription || error || "授权被拒绝");
@@ -36,7 +42,7 @@ function CallbackInner() {
           session: string;
           next?: string;
           tenant?: { onboardingCompleted?: boolean };
-        }>("/api/auth/oauth/zerocat/callback", {
+        }>(`/api/auth/oauth/${encodeURIComponent(provider)}/callback`, {
           method: "POST",
           json: { code, state },
         });
@@ -52,7 +58,7 @@ function CallbackInner() {
         setMsg(err instanceof Error ? err.message : String(err));
       }
     })();
-  }, [params, router]);
+  }, [params, provider, router]);
 
   return (
     <div className="mx-auto flex min-h-[60vh] max-w-md flex-col items-center justify-center gap-4 p-6 text-center">
@@ -87,8 +93,8 @@ function CallbackInner() {
   );
 }
 
-/** SaaS ZeroCat OAuth callback — listed in strip-manifest. */
-export default function ZerocatOauthCallbackPage() {
+/** SaaS OAuth login callback — listed in strip-manifest. */
+export default function OauthLoginCallbackPage() {
   return (
     <Suspense
       fallback={

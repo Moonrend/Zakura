@@ -3,7 +3,7 @@ import { and, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, ne, 
 import bcrypt from "bcryptjs";
 import { RegisterError, registerSaasUser } from "./register-user.js";
 import type { SaasApp, SaasHostDeps, SaasSession } from "./types.js";
-import type { OauthSchema } from "./oauth-zerocat.js";
+import type { OauthSchema } from "./oauth-login.js";
 
 /**
  * 平台超管后台的资源型 API：用户 / 团队 / 共享 Runner 的列表（服务端分页 + 搜索 +

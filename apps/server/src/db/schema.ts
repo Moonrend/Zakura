@@ -83,7 +83,7 @@ export const oauthIdentities = pgTable(
   "oauth_identities",
   {
     id: text("id").primaryKey().$defaultFn(newId),
-    /** Provider id, e.g. "zerocat" */
+    /** Provider id, e.g. "google" | "github" | "microsoft" | "zerocat" */
     provider: text("provider").notNull(),
     /** Stable subject from IdP (openid / sub) */
     providerUserId: text("provider_user_id").notNull(),

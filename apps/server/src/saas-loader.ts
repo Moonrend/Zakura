@@ -13,6 +13,13 @@ const SAAS_SERVER_SPEC = "@zakura/saas/server";
 /** Duck type — avoids a hard compile-time dependency after `pnpm strip:saas`. */
 export type SaasServerModule = {
   registerSaasRoutes: (app: unknown, deps: unknown) => void;
+  listPublicOauthProviders?: (deps: unknown) => Promise<
+    Array<{ id: string; name: string; enabled: boolean }>
+  >;
+  loadLoginPolicy?: (deps: unknown) => Promise<{
+    effective: { disablePasswordLogin: boolean };
+  }>;
+  /** @deprecated Prefer listPublicOauthProviders + loadLoginPolicy */
   loadZerocatConfig?: (deps: unknown) => Promise<{
     public: { enabled: boolean; disablePasswordLogin?: boolean };
   }>;

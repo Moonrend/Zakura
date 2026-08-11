@@ -6,7 +6,7 @@
     "apps/web/src/app/invite/[token]/page.tsx",
     "apps/web/src/app/dashboard/settings/members/page.tsx",
     "apps/web/src/app/dashboard/settings/tenants/page.tsx",
-    "apps/web/src/app/console/oauth/zerocat/callback/page.tsx",
+    "apps/web/src/app/console/oauth/[provider]/callback/page.tsx",
     "apps/web/src/lib/admin.ts",
     "apps/web/src/lib/format.ts",
     "apps/web/src/hooks/use-paged-list.ts",

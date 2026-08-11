@@ -494,11 +494,11 @@ export async function createApiApp(deps: {
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
     if (config.edition === "saas") {
       publicPaths.add("/api/auth/register");
-      publicPaths.add("/api/auth/oauth/zerocat");
-      publicPaths.add("/api/auth/oauth/zerocat/start");
-      publicPaths.add("/api/auth/oauth/zerocat/callback");
     }
     const path = c.req.path;
+    const isOauthLoginPublic =
+      config.edition === "saas" &&
+      /^\/api\/auth\/oauth\/[^/]+(\/(start|callback))?$/.test(path);
     const isInvitePublic =
       config.edition === "saas" &&
       (/^\/api\/invites\/[^/]+$/.test(path) ||
@@ -508,6 +508,7 @@ export async function createApiApp(deps: {
     // probe/import require auth — intentional
     if (
       publicPaths.has(path) ||
+      isOauthLoginPublic ||
       isInvitePublic ||
       isFileSharePublic ||
       isEmailInbound ||
@@ -669,22 +670,29 @@ export async function createApiApp(deps: {
     if (config.edition === "saas") {
       try {
         const saas = await loadSaasServer();
-        if (saas?.loadZerocatConfig) {
-          const { public: pub } = await saas.loadZerocatConfig({
-            db,
-            schema: {
-              users,
-              tenants,
-              tenantMemberships,
-              oauthIdentities,
-              oauthLoginStates,
-              settings,
-              newId,
-            },
-            secret: config.secret,
-            webPublicUrl: config.webPublicUrl,
-            decryptJson,
-          });
+        const oauthDeps = {
+          db,
+          schema: {
+            users,
+            tenants,
+            tenantMemberships,
+            oauthIdentities,
+            oauthLoginStates,
+            settings,
+            newId,
+          },
+          secret: config.secret,
+          webPublicUrl: config.webPublicUrl,
+          decryptJson,
+        };
+        if (saas?.listPublicOauthProviders && saas?.loadLoginPolicy) {
+          oauthProviders.push(...(await saas.listPublicOauthProviders(oauthDeps)));
+          const policy = await saas.loadLoginPolicy(oauthDeps);
+          if (policy.effective.disablePasswordLogin) {
+            passwordLoginEnabled = false;
+          }
+        } else if (saas?.loadZerocatConfig) {
+          const { public: pub } = await saas.loadZerocatConfig(oauthDeps);
           oauthProviders.push({
             id: "zerocat",
             name: "ZeroCat",
@@ -752,24 +760,30 @@ export async function createApiApp(deps: {
     if (config.edition === "saas") {
       try {
         const saas = await loadSaasServer();
-        if (saas?.loadZerocatConfig) {
-          const { public: pub } = await saas.loadZerocatConfig({
-            db,
-            schema: {
-              users,
-              tenants,
-              tenantMemberships,
-              oauthIdentities,
-              oauthLoginStates,
-              settings,
-              newId,
-            },
-            secret: config.secret,
-            webPublicUrl: config.webPublicUrl,
-            decryptJson,
-          });
+        const oauthDeps = {
+          db,
+          schema: {
+            users,
+            tenants,
+            tenantMemberships,
+            oauthIdentities,
+            oauthLoginStates,
+            settings,
+            newId,
+          },
+          secret: config.secret,
+          webPublicUrl: config.webPublicUrl,
+          decryptJson,
+        };
+        if (saas?.loadLoginPolicy) {
+          const policy = await saas.loadLoginPolicy(oauthDeps);
+          if (policy.effective.disablePasswordLogin) {
+            return c.json({ error: "邮箱密码登录已关闭，请使用 OAuth 登录" }, 403);
+          }
+        } else if (saas?.loadZerocatConfig) {
+          const { public: pub } = await saas.loadZerocatConfig(oauthDeps);
           if (pub.disablePasswordLogin) {
-            return c.json({ error: "邮箱密码登录已关闭，请使用 ZeroCat 登录" }, 403);
+            return c.json({ error: "邮箱密码登录已关闭，请使用 OAuth 登录" }, 403);
           }
         }
       } catch {

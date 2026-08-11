@@ -3,13 +3,17 @@ import type { SaasApp, SaasHostDeps, SaasSession, SaasTenantRole } from "./types
 import { RegisterError, registerSaasUser } from "./register-user.js";
 import { registerAdminResourceRoutes } from "./admin-routes.js";
 import {
-  completeZerocatOauth,
-  loadZerocatConfig,
-  saveZerocatConfig,
-  startZerocatOauth,
+  completeOauthLogin,
+  isLoginOauthProviderId,
+  listAdminOauthProviders,
+  loadLoginPolicy,
+  loadProviderConfig,
+  saveLoginPolicy,
+  saveProviderConfig,
+  startOauthLogin,
   type OauthSchema,
-  type ZerocatOauthPatch,
-} from "./oauth-zerocat.js";
+  type ProviderPatch,
+} from "./oauth-login.js";
 
 function handleTenantErr(err: unknown) {
   if (err && typeof err === "object" && "status" in err && "message" in err) {
@@ -76,9 +80,9 @@ export function registerSaasRoutes(
   // ── Public self-registration ──────────────────────────────────────────
   app.post("/api/auth/register", async (c) => {
     try {
-      const { public: pub } = await loadZerocatConfig(oauthDeps());
-      if (pub.disablePasswordLogin) {
-        return c.json({ error: "邮箱注册已关闭，请使用 ZeroCat 登录" }, 403);
+      const policy = await loadLoginPolicy(oauthDeps());
+      if (policy.effective.disablePasswordLogin) {
+        return c.json({ error: "邮箱注册已关闭，请使用 OAuth 登录" }, 403);
       }
     } catch {
       /* ignore */
@@ -129,20 +133,28 @@ export function registerSaasRoutes(
     }
   });
 
-  // ── ZeroCat OAuth login (public) ──────────────────────────────────────
-  app.get("/api/auth/oauth/zerocat", async (c) => {
-    const { public: pub } = await loadZerocatConfig(oauthDeps());
+  // ── Login OAuth providers (public) ────────────────────────────────────
+  app.get("/api/auth/oauth/:provider", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginOauthProviderId(provider)) {
+      return c.json({ error: "unknown oauth provider" }, 404);
+    }
+    const { public: pub } = await loadProviderConfig(oauthDeps(), provider);
     return c.json({
-      provider: "zerocat",
-      name: "ZeroCat",
-      enabled: pub.enabled,
+      provider: pub.id,
+      name: pub.name,
+      enabled: pub.ready,
       redirectUri: pub.redirectUri,
     });
   });
 
-  app.post("/api/auth/oauth/zerocat/start", async (c) => {
+  app.post("/api/auth/oauth/:provider/start", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginOauthProviderId(provider)) {
+      return c.json({ error: "unknown oauth provider" }, 404);
+    }
     try {
-      const result = await startZerocatOauth(oauthDeps());
+      const result = await startOauthLogin(oauthDeps(), provider);
       return c.json(result);
     } catch (err) {
       if (err instanceof RegisterError) {
@@ -152,12 +164,16 @@ export function registerSaasRoutes(
     }
   });
 
-  app.post("/api/auth/oauth/zerocat/callback", async (c) => {
+  app.post("/api/auth/oauth/:provider/callback", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginOauthProviderId(provider)) {
+      return c.json({ error: "unknown oauth provider" }, 404);
+    }
     const body = await c.req
       .json<{ code?: string; state?: string }>()
       .catch(() => ({} as { code?: string; state?: string }));
     try {
-      const result = await completeZerocatOauth(oauthDeps(), {
+      const result = await completeOauthLogin(oauthDeps(), provider, {
         code: body.code ?? "",
         state: body.state ?? "",
       });
@@ -477,27 +493,59 @@ export function registerSaasRoutes(
     );
   });
 
-  app.get("/api/admin/oauth/zerocat", async (c) => {
-    const { public: pub, stored } = await loadZerocatConfig(oauthDeps());
+  app.get("/api/admin/oauth/providers", async (c) => {
+    const providers = await listAdminOauthProviders(oauthDeps());
+    const policy = await loadLoginPolicy(oauthDeps());
     return c.json({
-      ...pub,
-      // Admin sees configured toggle even if secret missing (enabled flag as stored)
-      enabled: stored.enabled,
-      ready: pub.enabled,
-      disablePasswordLogin: stored.disablePasswordLogin,
+      providers,
+      disablePasswordLogin: policy.stored.disablePasswordLogin,
+      passwordLoginEnabled: !policy.effective.disablePasswordLogin,
+      anyOauthReady: policy.anyOauthReady,
     });
   });
 
-  app.put("/api/admin/oauth/zerocat", async (c) => {
-    const body = await c.req.json<ZerocatOauthPatch>().catch(() => ({} as ZerocatOauthPatch));
+  app.put("/api/admin/oauth/login-policy", async (c) => {
+    const body = await c.req
+      .json<{ disablePasswordLogin?: boolean }>()
+      .catch(() => ({} as { disablePasswordLogin?: boolean }));
     try {
-      const pub = await saveZerocatConfig(oauthDeps(), body);
-      const { stored } = await loadZerocatConfig(oauthDeps());
+      const policy = await saveLoginPolicy(oauthDeps(), body);
+      return c.json({
+        disablePasswordLogin: policy.stored.disablePasswordLogin,
+        passwordLoginEnabled: !policy.effective.disablePasswordLogin,
+        anyOauthReady: policy.anyOauthReady,
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.get("/api/admin/oauth/:provider", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginOauthProviderId(provider)) {
+      return c.json({ error: "unknown oauth provider" }, 404);
+    }
+    const { public: pub, stored } = await loadProviderConfig(oauthDeps(), provider);
+    return c.json({
+      ...pub,
+      enabled: stored.enabled,
+      ready: pub.ready,
+    });
+  });
+
+  app.put("/api/admin/oauth/:provider", async (c) => {
+    const provider = c.req.param("provider");
+    if (!isLoginOauthProviderId(provider)) {
+      return c.json({ error: "unknown oauth provider" }, 404);
+    }
+    const body = await c.req.json<ProviderPatch>().catch(() => ({} as ProviderPatch));
+    try {
+      const pub = await saveProviderConfig(oauthDeps(), provider, body);
+      const { stored } = await loadProviderConfig(oauthDeps(), provider);
       return c.json({
         ...pub,
         enabled: stored.enabled,
-        ready: pub.enabled,
-        disablePasswordLogin: stored.disablePasswordLogin,
+        ready: pub.ready,
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

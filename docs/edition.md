@@ -11,12 +11,14 @@ Zakura 以**同一套核心代码**交付两种部署形态；SaaS 能力集中�
 
 ## 登录 OAuth（SaaS）
 
-平台超管可在 `/dashboard/admin` 配置 **ZeroCat OAuth**（授权码 + PKCE）：
+平台超管可在 `/dashboard/admin/auth` 配置多个登录 OAuth 提供商（Google / GitHub / Microsoft / ZeroCat，授权码 + PKCE）：
 
-- 回调地址：`{ZAKURA_WEB_URL}/console/oauth/zerocat/callback`
+- 回调地址：`{ZAKURA_WEB_URL}/console/oauth/{provider}/callback`
 - Client Secret 加密存入平台 settings，不回传前端
-- 启用且配置完整后，登录页出现「使用 ZeroCat 登录」
+- 按提供商独立启用；登录页仅展示已就绪的提供商
+- 相同邮箱自动合并到同一用户（占位邮箱如 `*@zerocat.oauth` 不参与跨账号合并）
 - 首次登录可按配置自动创建用户与租户（或仅允许已有邮箱关联）
+- 可全局关闭邮箱密码登录（需至少一个 OAuth 可用）
 
 ## 启用 SaaS（开发仓）
 

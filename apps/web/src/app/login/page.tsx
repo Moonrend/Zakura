@@ -12,14 +12,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BrandMark } from "@/components/brand-mark";
 
+type OauthProvider = { id: string; name: string; enabled: boolean };
+
 export default function LoginPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
-  const [oauthLoading, setOauthLoading] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
-  const [zerocatEnabled, setZerocatEnabled] = useState(false);
+  const [oauthProviders, setOauthProviders] = useState<OauthProvider[]>([]);
   const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
   const [platformReady, setPlatformReady] = useState(false);
   const [suspendNotice, setSuspendNotice] = useState<string | null>(null);
@@ -34,7 +36,7 @@ export default function LoginPage() {
   useEffect(() => {
     void api<PlatformInfo>("/api/platform")
       .then((p) => {
-        setZerocatEnabled(!!p.oauthProviders?.some((x) => x.id === "zerocat" && x.enabled));
+        setOauthProviders((p.oauthProviders ?? []).filter((x) => x.enabled));
         const pwd = p.passwordLoginEnabled !== false;
         setPasswordLoginEnabled(pwd);
         setRegistrationEnabled(!!(p.registrationEnabled || (p.edition === "saas" && pwd)));
@@ -43,21 +45,23 @@ export default function LoginPage() {
       .finally(() => setPlatformReady(true));
   }, []);
 
-  async function startZerocat() {
-    setOauthLoading(true);
+  async function startOauth(providerId: string) {
+    setOauthLoading(providerId);
     try {
-      const res = await api<{ authorizeUrl: string }>("/api/auth/oauth/zerocat/start", {
-        method: "POST",
-      });
+      const res = await api<{ authorizeUrl: string }>(
+        `/api/auth/oauth/${encodeURIComponent(providerId)}/start`,
+        { method: "POST" },
+      );
       window.location.href = res.authorizeUrl;
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
-      setOauthLoading(false);
+      setOauthLoading(null);
     }
   }
 
   const showPasswordForm = passwordLoginEnabled;
-  const showZerocatOnly = zerocatEnabled && !passwordLoginEnabled;
+  const hasOauth = oauthProviders.length > 0;
+  const oauthOnly = hasOauth && !passwordLoginEnabled;
 
   return (
     <div className="relative grid min-h-svh place-items-center p-6">
@@ -79,18 +83,21 @@ export default function LoginPage() {
                 {suspendNotice}
               </div>
             ) : null}
-            {zerocatEnabled ? (
+            {hasOauth ? (
               <div className={showPasswordForm ? "mb-6 space-y-3" : "space-y-3"}>
-                <Button
-                  type="button"
-                  variant={showZerocatOnly ? "default" : "outline"}
-                  className="w-full"
-                  disabled={oauthLoading}
-                  onClick={() => void startZerocat()}
-                >
-                  {oauthLoading ? <Loader2 className="animate-spin" /> : null}
-                  {oauthLoading ? "跳转中…" : "使用 ZeroCat 登录"}
-                </Button>
+                {oauthProviders.map((p, i) => (
+                  <Button
+                    key={p.id}
+                    type="button"
+                    variant={oauthOnly && i === 0 ? "default" : "outline"}
+                    className="w-full"
+                    disabled={!!oauthLoading}
+                    onClick={() => void startOauth(p.id)}
+                  >
+                    {oauthLoading === p.id ? <Loader2 className="animate-spin" /> : null}
+                    {oauthLoading === p.id ? "跳转中…" : `使用 ${p.name} 登录`}
+                  </Button>
+                ))}
                 {showPasswordForm ? (
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <div className="h-px flex-1 bg-border" />
@@ -154,7 +161,7 @@ export default function LoginPage() {
                 </Button>
               </form>
             ) : null}
-            {!zerocatEnabled && !showPasswordForm ? (
+            {!hasOauth && !showPasswordForm ? (
               <p className="text-center text-sm text-muted-foreground">暂无可用的登录方式</p>
             ) : null}
             {registrationEnabled && showPasswordForm ? (
