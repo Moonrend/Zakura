@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -23,6 +23,7 @@ export default function LoginPage() {
   const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [oauthProviders, setOauthProviders] = useState<OauthProvider[]>([]);
   const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
+  const [highlightedMethod, setHighlightedMethod] = useState("auto");
   const [platformReady, setPlatformReady] = useState(false);
   const [suspendNotice, setSuspendNotice] = useState<string | null>(null);
 
@@ -40,6 +41,7 @@ export default function LoginPage() {
         const pwd = p.passwordLoginEnabled !== false;
         setPasswordLoginEnabled(pwd);
         setRegistrationEnabled(!!(p.registrationEnabled || (p.edition === "saas" && pwd)));
+        setHighlightedMethod(p.highlightedLoginMethod || "auto");
       })
       .catch(() => undefined)
       .finally(() => setPlatformReady(true));
@@ -61,7 +63,121 @@ export default function LoginPage() {
 
   const showPasswordForm = passwordLoginEnabled;
   const hasOauth = oauthProviders.length > 0;
-  const oauthOnly = hasOauth && !passwordLoginEnabled;
+
+  const orderedOauth = useMemo(() => {
+    if (highlightedMethod === "auto" || highlightedMethod === "password") {
+      return oauthProviders;
+    }
+    const hit = oauthProviders.find((p) => p.id === highlightedMethod);
+    if (!hit) return oauthProviders;
+    return [hit, ...oauthProviders.filter((p) => p.id !== hit.id)];
+  }, [oauthProviders, highlightedMethod]);
+
+  const highlightPassword =
+    highlightedMethod === "password" ||
+    (highlightedMethod === "auto" && showPasswordForm && !hasOauth);
+
+  const highlightOauthId =
+    highlightedMethod !== "auto" && highlightedMethod !== "password"
+      ? highlightedMethod
+      : highlightedMethod === "auto" && hasOauth && !showPasswordForm
+        ? orderedOauth[0]?.id
+        : highlightedMethod === "auto" && hasOauth
+          ? null
+          : null;
+
+  const passwordFirst = highlightPassword && hasOauth && showPasswordForm;
+
+  const passwordForm = showPasswordForm ? (
+    <form
+      className="space-y-4"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        try {
+          const res = await api<{ session: string }>("/api/auth/login", {
+            method: "POST",
+            json: { email, password },
+          });
+          setSession(res.session);
+          toast.success("登录成功");
+          const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
+          router.push(
+            current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
+          );
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : String(err));
+        } finally {
+          setLoading(false);
+        }
+      }}
+    >
+      <div className="space-y-1.5">
+        <Label htmlFor="email">邮箱</Label>
+        <Input
+          id="email"
+          type="email"
+          autoComplete="username"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="password">密码</Label>
+        <Input
+          id="password"
+          type="password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+      <Button
+        type="submit"
+        className="w-full"
+        variant={highlightPassword ? "default" : "outline"}
+        disabled={loading}
+      >
+        {loading ? <Loader2 className="animate-spin" /> : null}
+        {loading ? "登录中…" : "继续"}
+      </Button>
+    </form>
+  ) : null;
+
+  const oauthBlock = hasOauth ? (
+    <div className="space-y-3">
+      {orderedOauth.map((p) => {
+        const highlighted =
+          highlightOauthId === p.id ||
+          (highlightedMethod === "auto" &&
+            !showPasswordForm &&
+            orderedOauth[0]?.id === p.id);
+        return (
+          <Button
+            key={p.id}
+            type="button"
+            variant={highlighted ? "default" : "outline"}
+            className="w-full"
+            disabled={!!oauthLoading}
+            onClick={() => void startOauth(p.id)}
+          >
+            {oauthLoading === p.id ? <Loader2 className="animate-spin" /> : null}
+            {oauthLoading === p.id ? "跳转中…" : `使用 ${p.name} 登录`}
+          </Button>
+        );
+      })}
+    </div>
+  ) : null;
+
+  const divider = (
+    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+      <div className="h-px flex-1 bg-border" />
+      <span>{passwordFirst ? "或使用第三方" : "或使用邮箱"}</span>
+      <div className="h-px flex-1 bg-border" />
+    </div>
+  );
 
   return (
     <div className="relative grid min-h-svh place-items-center p-6">
@@ -83,84 +199,25 @@ export default function LoginPage() {
                 {suspendNotice}
               </div>
             ) : null}
-            {hasOauth ? (
-              <div className={showPasswordForm ? "mb-6 space-y-3" : "space-y-3"}>
-                {oauthProviders.map((p, i) => (
-                  <Button
-                    key={p.id}
-                    type="button"
-                    variant={oauthOnly && i === 0 ? "default" : "outline"}
-                    className="w-full"
-                    disabled={!!oauthLoading}
-                    onClick={() => void startOauth(p.id)}
-                  >
-                    {oauthLoading === p.id ? <Loader2 className="animate-spin" /> : null}
-                    {oauthLoading === p.id ? "跳转中…" : `使用 ${p.name} 登录`}
-                  </Button>
-                ))}
-                {showPasswordForm ? (
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <div className="h-px flex-1 bg-border" />
-                    <span>或使用邮箱</span>
-                    <div className="h-px flex-1 bg-border" />
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {showPasswordForm ? (
-              <form
-                className="space-y-4"
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  setLoading(true);
-                  try {
-                    const res = await api<{ session: string }>("/api/auth/login", {
-                      method: "POST",
-                      json: { email, password },
-                    });
-                    setSession(res.session);
-                    toast.success("登录成功");
-                    const current = await api<{ onboardingCompleted?: boolean }>(
-                      "/api/tenant/current",
-                    );
-                    router.push(
-                      current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
-                    );
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : String(err));
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
-              >
-                <div className="space-y-1.5">
-                  <Label htmlFor="email">邮箱</Label>
-                  <Input
-                    id="email"
-                    type="email"
-                    autoComplete="username"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="password">密码</Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
-                <Button type="submit" className="w-full" disabled={loading}>
-                  {loading ? <Loader2 className="animate-spin" /> : null}
-                  {loading ? "登录中…" : "继续"}
-                </Button>
-              </form>
-            ) : null}
+            <div className="space-y-6">
+              {passwordFirst ? (
+                <>
+                  {passwordForm}
+                  {hasOauth ? (
+                    <>
+                      {divider}
+                      {oauthBlock}
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {oauthBlock}
+                  {hasOauth && showPasswordForm ? divider : null}
+                  {passwordForm}
+                </>
+              )}
+            </div>
             {!hasOauth && !showPasswordForm ? (
               <p className="text-center text-sm text-muted-foreground">暂无可用的登录方式</p>
             ) : null}

@@ -72,9 +72,31 @@ export type ProviderPatch = {
   allowRegistration?: boolean;
 };
 
+/** Which login CTA to emphasize on /login. `auto` = first ready OAuth, else password. */
+export type HighlightedLoginMethod = "auto" | "password" | LoginOauthProviderId;
+
 export type LoginPolicy = {
   disablePasswordLogin: boolean;
+  highlightedMethod: HighlightedLoginMethod;
 };
+
+export function parseHighlightedMethod(value: unknown): HighlightedLoginMethod {
+  if (value === "auto" || value === "password") return value;
+  if (typeof value === "string" && isLoginOauthProviderId(value)) return value;
+  return "auto";
+}
+
+/** Fall back to auto when the chosen method is unavailable. */
+export function resolveHighlightedMethod(opts: {
+  stored: HighlightedLoginMethod;
+  passwordLoginEnabled: boolean;
+  readyProviderIds: readonly string[];
+}): HighlightedLoginMethod {
+  const { stored, passwordLoginEnabled, readyProviderIds } = opts;
+  if (stored === "auto") return "auto";
+  if (stored === "password") return passwordLoginEnabled ? "password" : "auto";
+  return readyProviderIds.includes(stored) ? stored : "auto";
+}
 
 type NormalizedProfile = {
   providerUserId: string;
@@ -444,50 +466,77 @@ export async function saveProviderConfig(
 
 export async function loadLoginPolicy(
   deps: Pick<OauthLoginDeps, "db" | "schema" | "secret" | "webPublicUrl" | "decryptJson">,
-): Promise<{ stored: LoginPolicy; effective: LoginPolicy; anyOauthReady: boolean }> {
-  let stored: LoginPolicy = { disablePasswordLogin: false };
+): Promise<{
+  stored: LoginPolicy;
+  effective: LoginPolicy & { highlightedMethod: HighlightedLoginMethod };
+  anyOauthReady: boolean;
+  readyProviderIds: LoginOauthProviderId[];
+}> {
+  let stored: LoginPolicy = { disablePasswordLogin: false, highlightedMethod: "auto" };
   const parsed = await readSettingsJson(deps, LOGIN_POLICY_SETTINGS_KEY);
   if (parsed && typeof parsed === "object") {
+    const obj = parsed as Partial<LoginPolicy>;
     stored = {
-      disablePasswordLogin: !!(parsed as LoginPolicy).disablePasswordLogin,
+      disablePasswordLogin: !!obj.disablePasswordLogin,
+      highlightedMethod: parseHighlightedMethod(obj.highlightedMethod),
     };
   } else {
     // Migrate legacy ZeroCat flag into effective policy (without writing yet)
     const zc = await loadProviderConfig(deps, "zerocat");
     if (zc.stored.disablePasswordLogin) {
-      stored = { disablePasswordLogin: true };
+      stored = { disablePasswordLogin: true, highlightedMethod: "auto" };
     }
   }
 
-  let anyOauthReady = false;
+  const readyProviderIds: LoginOauthProviderId[] = [];
   for (const id of LOGIN_OAUTH_PROVIDERS) {
     const { public: pub } = await loadProviderConfig(deps, id);
-    if (pub.ready) {
-      anyOauthReady = true;
-      break;
-    }
+    if (pub.ready) readyProviderIds.push(id);
   }
+  const anyOauthReady = readyProviderIds.length > 0;
+  const disablePasswordLogin = !!(stored.disablePasswordLogin && anyOauthReady);
 
   return {
     stored,
     anyOauthReady,
+    readyProviderIds,
     effective: {
-      disablePasswordLogin: !!(stored.disablePasswordLogin && anyOauthReady),
+      disablePasswordLogin,
+      highlightedMethod: resolveHighlightedMethod({
+        stored: stored.highlightedMethod,
+        passwordLoginEnabled: !disablePasswordLogin,
+        readyProviderIds,
+      }),
     },
   };
 }
 
 export async function saveLoginPolicy(
   deps: OauthLoginDeps,
-  patch: Partial<LoginPolicy>,
-): Promise<{ stored: LoginPolicy; effective: LoginPolicy; anyOauthReady: boolean }> {
+  patch: {
+    disablePasswordLogin?: boolean;
+    highlightedMethod?: string;
+  },
+): Promise<{
+  stored: LoginPolicy;
+  effective: LoginPolicy;
+  anyOauthReady: boolean;
+  readyProviderIds: LoginOauthProviderId[];
+}> {
   const current = await loadLoginPolicy(deps);
   const next: LoginPolicy = {
     disablePasswordLogin: patch.disablePasswordLogin ?? current.stored.disablePasswordLogin,
+    highlightedMethod:
+      patch.highlightedMethod !== undefined
+        ? parseHighlightedMethod(patch.highlightedMethod)
+        : current.stored.highlightedMethod,
   };
 
   if (next.disablePasswordLogin && !current.anyOauthReady) {
     throw new Error("禁止邮箱登录前请先启用至少一个可用的 OAuth 提供商（Client ID / Secret）");
+  }
+  if (next.disablePasswordLogin && next.highlightedMethod === "password") {
+    next.highlightedMethod = "auto";
   }
 
   await writeSettingsJson(deps, LOGIN_POLICY_SETTINGS_KEY, next);
@@ -793,4 +842,14 @@ export function __oauthLoginSelfCheck(): void {
   if (!isLoginOauthProviderId("google")) throw new Error("google id rejected");
   if (isLoginOauthProviderId("twitter")) throw new Error("unknown id accepted");
   if (asEmail("  Foo@Bar.COM ") !== "foo@bar.com") throw new Error("email normalize failed");
+  if (parseHighlightedMethod("github") !== "github") throw new Error("highlight parse failed");
+  if (
+    resolveHighlightedMethod({
+      stored: "google",
+      passwordLoginEnabled: true,
+      readyProviderIds: ["github"],
+    }) !== "auto"
+  ) {
+    throw new Error("highlight resolve should fall back");
+  }
 }

@@ -17,7 +17,7 @@ export type SaasServerModule = {
     Array<{ id: string; name: string; enabled: boolean }>
   >;
   loadLoginPolicy?: (deps: unknown) => Promise<{
-    effective: { disablePasswordLogin: boolean };
+    effective: { disablePasswordLogin: boolean; highlightedMethod?: string };
   }>;
   /** @deprecated Prefer listPublicOauthProviders + loadLoginPolicy */
   loadZerocatConfig?: (deps: unknown) => Promise<{

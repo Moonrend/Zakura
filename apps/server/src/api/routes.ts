@@ -667,6 +667,7 @@ export async function createApiApp(deps: {
     const meta = await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
     const oauthProviders: Array<{ id: string; name: string; enabled: boolean }> = [];
     let passwordLoginEnabled = true;
+    let highlightedLoginMethod: string = "auto";
     if (config.edition === "saas") {
       try {
         const saas = await loadSaasServer();
@@ -690,6 +691,9 @@ export async function createApiApp(deps: {
           const policy = await saas.loadLoginPolicy(oauthDeps);
           if (policy.effective.disablePasswordLogin) {
             passwordLoginEnabled = false;
+          }
+          if (policy.effective.highlightedMethod) {
+            highlightedLoginMethod = policy.effective.highlightedMethod;
           }
         } else if (saas?.loadZerocatConfig) {
           const { public: pub } = await saas.loadZerocatConfig(oauthDeps);
@@ -715,6 +719,7 @@ export async function createApiApp(deps: {
       registrationEnabled: config.edition === "saas" && passwordLoginEnabled,
       passwordLoginEnabled,
       oauthProviders,
+      highlightedLoginMethod,
     });
   });
 

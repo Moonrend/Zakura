@@ -501,19 +501,23 @@ export function registerSaasRoutes(
       disablePasswordLogin: policy.stored.disablePasswordLogin,
       passwordLoginEnabled: !policy.effective.disablePasswordLogin,
       anyOauthReady: policy.anyOauthReady,
+      highlightedMethod: policy.stored.highlightedMethod,
+      highlightedMethodEffective: policy.effective.highlightedMethod,
     });
   });
 
   app.put("/api/admin/oauth/login-policy", async (c) => {
     const body = await c.req
-      .json<{ disablePasswordLogin?: boolean }>()
-      .catch(() => ({} as { disablePasswordLogin?: boolean }));
+      .json<{ disablePasswordLogin?: boolean; highlightedMethod?: string }>()
+      .catch(() => ({} as { disablePasswordLogin?: boolean; highlightedMethod?: string }));
     try {
       const policy = await saveLoginPolicy(oauthDeps(), body);
       return c.json({
         disablePasswordLogin: policy.stored.disablePasswordLogin,
         passwordLoginEnabled: !policy.effective.disablePasswordLogin,
         anyOauthReady: policy.anyOauthReady,
+        highlightedMethod: policy.stored.highlightedMethod,
+        highlightedMethodEffective: policy.effective.highlightedMethod,
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

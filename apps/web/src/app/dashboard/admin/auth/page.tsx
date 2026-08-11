@@ -32,6 +32,8 @@ type ProvidersResponse = {
   disablePasswordLogin: boolean;
   passwordLoginEnabled: boolean;
   anyOauthReady: boolean;
+  highlightedMethod: string;
+  highlightedMethodEffective?: string;
 };
 
 type Draft = {
@@ -77,6 +79,8 @@ export default function AdminAuthPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft());
   const [disablePasswordLogin, setDisablePasswordLogin] = useState(false);
+  const [highlightedMethod, setHighlightedMethod] = useState("auto");
+  const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
   const [anyOauthReady, setAnyOauthReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -87,6 +91,8 @@ export default function AdminAuthPage() {
   function applyList(res: ProvidersResponse, preferId?: string | null) {
     setProviders(res.providers);
     setDisablePasswordLogin(res.disablePasswordLogin);
+    setHighlightedMethod(res.highlightedMethod || "auto");
+    setPasswordLoginEnabled(res.passwordLoginEnabled !== false);
     setAnyOauthReady(res.anyOauthReady);
     const nextId =
       (preferId && res.providers.some((p) => p.id === preferId) && preferId) ||
@@ -151,18 +157,25 @@ export default function AdminAuthPage() {
     }
   }
 
-  async function savePolicy(next: boolean) {
+  async function savePolicy(patch: {
+    disablePasswordLogin?: boolean;
+    highlightedMethod?: string;
+  }) {
     setSavingPolicy(true);
     try {
       const res = await api<{
         disablePasswordLogin: boolean;
+        passwordLoginEnabled: boolean;
         anyOauthReady: boolean;
+        highlightedMethod: string;
       }>("/api/admin/oauth/login-policy", {
         method: "PUT",
-        json: { disablePasswordLogin: next },
+        json: patch,
       });
       setDisablePasswordLogin(res.disablePasswordLogin);
+      setPasswordLoginEnabled(res.passwordLoginEnabled !== false);
       setAnyOauthReady(res.anyOauthReady);
+      setHighlightedMethod(res.highlightedMethod || "auto");
       toast.success("登录策略已更新");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -193,12 +206,30 @@ export default function AdminAuthPage() {
             <Switch
               checked={disablePasswordLogin}
               disabled={savingPolicy || (!anyOauthReady && !disablePasswordLogin)}
-              onCheckedChange={(v) => void savePolicy(v)}
+              onCheckedChange={(v) => void savePolicy({ disablePasswordLogin: v })}
             />
+          </SettingsField>
+          <SettingsField label="高亮登录方式">
+            <select
+              className="h-9 w-full max-w-xs rounded-md border border-input bg-background px-3 text-sm"
+              value={highlightedMethod}
+              disabled={savingPolicy}
+              onChange={(e) => void savePolicy({ highlightedMethod: e.target.value })}
+            >
+              <option value="auto">自动（默认）</option>
+              {passwordLoginEnabled ? <option value="password">邮箱密码</option> : null}
+              {providers
+                .filter((p) => p.ready)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </select>
           </SettingsField>
         </div>
         <p className="text-xs text-muted-foreground">
-          需至少一个 OAuth 提供商配置完整可用后才会生效。同邮箱跨提供商登录会自动关联到同一用户。
+          高亮项在登录页使用主按钮样式并排在前面；若所选方式不可用会回退为自动。
         </p>
       </SettingsSection>
 
