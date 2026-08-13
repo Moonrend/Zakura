@@ -32,7 +32,20 @@ const markstreamAliases = {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ["markstream-react", "katex", "stream-markdown"],
+  transpilePackages: [
+    "markstream-react",
+    "katex",
+    "stream-markdown",
+    "@opentelemetry/api",
+    "@opentelemetry/api-logs",
+    "@opentelemetry/sdk-logs",
+    "@opentelemetry/exporter-logs-otlp-http",
+    "@opentelemetry/otlp-exporter-base",
+    "@opentelemetry/otlp-transformer",
+    "@opentelemetry/resources",
+    "@opentelemetry/semantic-conventions",
+    "@opentelemetry/core",
+  ],
   turbopack: {
     resolveAlias: {
       "markstream-react": path.join(markstreamDist, "index.js"),

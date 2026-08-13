@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
 import { ConnectorBrowserNotifications } from "@/components/connector-browser-notifications";
 import { PwaRegister } from "@/components/pwa-register";
+import { OtelProvider } from "@/components/otel-provider";
 import { cn } from "@/lib/utils";
 import "./globals.css";
 
@@ -71,10 +72,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ThemeProvider>
           <TooltipProvider>
             <ConfirmDialogProvider>
-              {children}
-              <Toaster position="top-center" closeButton />
-              <PwaRegister />
-              <ConnectorBrowserNotifications />
+              <OtelProvider>
+                {children}
+                <Toaster position="top-center" closeButton />
+                <PwaRegister />
+                <ConnectorBrowserNotifications />
+              </OtelProvider>
             </ConfirmDialogProvider>
           </TooltipProvider>
         </ThemeProvider>

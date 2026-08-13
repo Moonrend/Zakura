@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import postgres from "postgres";
 import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import { migrate as migratePg } from "drizzle-orm/postgres-js/migrator";
+import { log } from "@zakura/core";
 import { resolveDbKind } from "./client.js";
 import { createPglite } from "./pglite.js";
 
@@ -14,7 +15,7 @@ const migrationsFolder = resolve(root, "drizzle");
 
 export async function runMigrations(databaseUrl: string): Promise<void> {
   const kind = resolveDbKind(databaseUrl);
-  console.log(`[db] migrate kind=${kind}`);
+  log.info("db.migrate_start", { db_kind: kind });
 
   if (kind === "pglite") {
     let dir = databaseUrl.replace(/^pglite:/i, "").replace(/^file:/i, "");
@@ -30,19 +31,19 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
     await client.close();
   } else {
     const sql = postgres(databaseUrl, { max: 1 });
-    await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch((err) => {
-      console.warn("[db] CREATE EXTENSION vector:", err);
+    await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch(() => {
+      log.warn("db.extension_unavailable", { extension: "vector" });
     });
     // 会话标题模糊搜索用；装不上（托管库未提供 / 权限不足）时搜索自动回退 ILIKE
-    await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`.catch((err) => {
-      console.warn("[db] CREATE EXTENSION pg_trgm（会话搜索将回退 ILIKE）:", err);
+    await sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`.catch(() => {
+      log.warn("db.extension_unavailable", { extension: "pg_trgm" });
     });
     const db = drizzlePg(sql);
     await migratePg(db, { migrationsFolder });
     await sql.end({ timeout: 5 });
   }
 
-  console.log("[db] migrate ok");
+  log.info("db.migrate_ok", { db_kind: kind });
 }
 
 const isCli =
@@ -53,7 +54,7 @@ if (isCli) {
   const databaseUrl =
     process.env.DATABASE_URL ?? `pglite:${resolve(root, "../../data/pglite")}`;
   runMigrations(databaseUrl).catch((err) => {
-    console.error(err);
+    log.fatal("db.migrate_fatal", { err });
     process.exit(1);
   });
 }

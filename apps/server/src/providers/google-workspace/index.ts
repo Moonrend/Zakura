@@ -1,5 +1,5 @@
 import type { ProviderPlugin, InstanceHandle, ProviderContext } from "@zakura/core";
-import { textResult } from "@zakura/core";
+import { componentLogger, textResult } from "@zakura/core";
 import type {
   HealthResult,
   McpToolDef,
@@ -124,9 +124,7 @@ function runtimeCtx(handle: InstanceHandle): ProviderContext {
     resolveEndpoint: (port, path = "") =>
       `http://127.0.0.1:${port}${path.startsWith("/") || !path ? path : `/${path}`}`,
     logger: {
-      info: (msg, meta) => console.log(`[google-workspace] ${msg}`, meta ?? ""),
-      warn: (msg, meta) => console.warn(`[google-workspace] ${msg}`, meta ?? ""),
-      error: (msg, meta) => console.error(`[google-workspace] ${msg}`, meta ?? ""),
+      ...componentLogger("google-workspace"),
     },
   };
 }

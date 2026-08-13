@@ -15,6 +15,7 @@ import {
 } from "../db/schema.js";
 import { REDIS_KEYS } from "./redis.js";
 import { redisGetJson, redisSetJson, REDIS_TTL } from "./redis-store.js";
+import { recordUserUsage } from "./user-usage.js";
 
 export interface SessionPayload {
   userId: string;
@@ -127,6 +128,14 @@ export async function loginUser(
     picked = match;
   }
 
+  recordUserUsage({
+    tenantId: picked.tenant.id,
+    userId: user.id,
+    category: "auth",
+    action: "login",
+    summary: "password",
+  });
+
   return {
     user,
     tenant: picked.tenant,
@@ -138,6 +147,13 @@ export function sessionFromLogin(
   secret: string,
   result: LoginResult,
 ): string {
+  recordUserUsage({
+    tenantId: result.tenant.id,
+    userId: result.user.id,
+    category: "auth",
+    action: "login",
+    summary: "session",
+  });
   return signSession(secret, {
     userId: result.user.id,
     tenantId: result.tenant.id,

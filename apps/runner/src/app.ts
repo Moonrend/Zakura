@@ -5,7 +5,9 @@ import {
   LocalWorkspaceFs,
   PathJailError,
   exportWorkspace,
+  getTelemetry,
   importWorkspace,
+  log,
 } from "@zakura/core";
 import type { RunnerAuthConfig } from "./auth.js";
 import { requireRunnerAuth, tokenMatches, extractBearer } from "./auth.js";
@@ -68,15 +70,33 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     publicUrl: cfg.publicUrl,
   });
   if (publicHost === "127.0.0.1") {
-    console.warn(
-      "[runner] desktop endpoints will use 127.0.0.1 — set ZAKURA_RUNNER_PUBLIC_HOST (or PUBLIC_URL) for remote access",
-    );
+    log.warn("runner.loopback_desktop");
   }
   const dockerWs = new RunnerDockerWorkspace(cfg.storageRoot, publicHost);
   const dockerComponents = new RunnerDockerComponents(cfg.storageRoot, publicHost);
   const tunnels = new TunnelManager();
 
-  app.get("/health", (c) => c.json({ ok: true, service: "zakura-runner" }));
+  app.get("/health", (c) => c.json(getTelemetry().health.live()));
+  app.get("/livez", (c) => c.json(getTelemetry().health.live()));
+  app.get("/readyz", async (c) => {
+    const docker = await dockerWs.ping();
+    const body = {
+      status: docker.ok ? ("ready" as const) : ("not_ready" as const),
+      service: "zakura-runner",
+      version: cfg.version,
+      checks: {
+        docker: docker.ok
+          ? { status: "up" as const }
+          : { status: "down" as const, message: docker.error },
+      },
+    };
+    return c.json(body, docker.ok ? 200 : 503);
+  });
+  app.get("/metrics", (c) =>
+    c.text(getTelemetry().metrics.renderPrometheus(), 200, {
+      "content-type": "text/plain; version=0.0.4; charset=utf-8",
+    }),
+  );
 
   app.get("/v1/ping", async (c) => {
     const hostInfo = collectHostInfo(cfg.storageRoot, cfg.publicUrl);
@@ -175,6 +195,64 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
         timeoutMs: body.timeoutMs,
       });
       return c.json(result);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 400);
+    }
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/jobs", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      command?: string[];
+      workingDir?: string;
+      env?: Record<string, string>;
+      timeoutMs?: number;
+      stdin?: string;
+    };
+    if (!body.command?.length) return c.json({ error: "command is required" }, 400);
+    try {
+      const snap = await dockerWs.startJob(c.req.param("agentId"), body.command, {
+        workingDir: body.workingDir,
+        env: body.env,
+        timeoutMs: body.timeoutMs,
+        stdin: body.stdin,
+      });
+      return c.json(snap);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 400);
+    }
+  });
+
+  app.get("/v1/workspaces/:agentId/exec/jobs/:jobId", async (c) => {
+    const job = dockerWs.getJob(c.req.param("agentId"), c.req.param("jobId"));
+    if (!job) return c.json({ error: "Shell job not found" }, 404);
+    return c.json(job.snapshot());
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/jobs/:jobId/wait", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      waitMs?: number;
+      stdin?: string;
+    };
+    try {
+      const snap = await dockerWs.waitJob(
+        c.req.param("agentId"),
+        c.req.param("jobId"),
+        typeof body.waitMs === "number" ? body.waitMs : 20_000,
+        typeof body.stdin === "string" ? body.stdin : undefined,
+      );
+      return c.json(snap);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 400);
+    }
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/jobs/:jobId/kill", async (c) => {
+    try {
+      const snap = await dockerWs.killJob(c.req.param("agentId"), c.req.param("jobId"));
+      return c.json(snap);
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, e.status === 404 ? 404 : 400);

@@ -20,6 +20,9 @@ import type {
 } from "../services/cloud-agent-session.js";
 import type { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import type { ModelRouterService } from "../services/model-router.js";
+import type { McpGateway } from "../services/mcp-gateway.js";
+import type { SkillsService } from "../services/skills/index.js";
+import { toComposerCapabilities } from "../services/cloud-agent/composer-capabilities.js";
 import { parseRouteOptions } from "../model-router/types.js";
 
 function sessionDto(row: {
@@ -74,12 +77,32 @@ function parseKindsParam(raw: string | undefined): SessionKindFilter | undefined
   return kinds.length > 0 ? kinds : undefined;
 }
 
+/** options 里的字符串数组：去空白、去重、限量，避免请求体撑爆 prompt */
+function parseNameList(raw: unknown, limit: number): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const value = item.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function parseRunOptions(raw: unknown): CloudAgentRunOptions | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const o = raw as Record<string, unknown>;
   const routeOptions = parseRouteOptions({ reasoning: o.reasoning });
   const out: CloudAgentRunOptions = {};
   if (routeOptions.reasoning) out.reasoning = routeOptions.reasoning;
+  const skills = parseNameList(o.skills, 8);
+  if (skills) out.skills = skills;
+  const disabledTools = parseNameList(o.disabledTools, 500);
+  if (disabledTools) out.disabledTools = disabledTools;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -97,9 +120,11 @@ export function registerCloudAgentRoutes(
       forkSession?: CloudAgentRuntime["forkSession"];
     };
     modelRouter?: ModelRouterService;
+    gateway?: McpGateway;
+    skills?: SkillsService;
   },
 ) {
-  const { agentService, store, runtime, modelRouter } = deps;
+  const { agentService, store, runtime, modelRouter, gateway, skills } = deps;
 
   async function requireAgent(tenantId: string, agentId: string) {
     return agentService.get(tenantId, agentId);
@@ -136,6 +161,18 @@ export function registerCloudAgentRoutes(
     }
   }
 
+  /** Composer 加号菜单：已装技能 + 可开关的连接器 / MCP / 内置工具 */
+  app.get("/api/agents/:id/cloud/composer", async (c) => {
+    const session = c.get("session")!;
+    const agent = await requireAgent(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const [installed, tools] = await Promise.all([
+      skills ? skills.listForAgent(session.tenantId, agent.id).catch(() => []) : Promise.resolve([]),
+      gateway ? gateway.listToolsForAgent(agent).catch(() => []) : Promise.resolve([]),
+    ]);
+    return c.json(toComposerCapabilities({ skills: installed, tools }));
+  });
+
   app.get("/api/agents/:id/cloud/config", async (c) => {
     const session = c.get("session")!;
     const agent = await requireAgent(session.tenantId, c.req.param("id"));
@@ -161,12 +198,21 @@ export function registerCloudAgentRoutes(
       systemPrompt?: string;
       model?: string | null;
       modelRouteId?: string | null;
+      /** 压缩专用模型；null/"" 清除 → 回退对话模型 */
+      compactModel?: string | null;
+      compactModelRouteId?: string | null;
       maxToolRounds?: number | null;
       /** 子代理最大嵌套深度（1-5）；null/0 恢复默认（2） */
       maxSubagentDepth?: number | null;
       enableTools?: boolean;
       autoMemory?: boolean;
       autoTitle?: boolean;
+      autoCompact?: boolean;
+      compactThresholdChars?: number | null;
+      compactSoftThresholdChars?: number | null;
+      compactKeepRecent?: number | null;
+      compactKeepRecentChars?: number | null;
+      maxToolResultChars?: number | null;
       /** Gateway 模型名转发；null/{} 清除 */
       gatewayModelMap?: Record<string, string> | null;
       /** 运行中再发消息：steer | queue；null 恢复默认 steer */
@@ -193,6 +239,17 @@ export function registerCloudAgentRoutes(
       if (body.modelRouteId === null || body.modelRouteId === "") delete next.modelRouteId;
       else next.modelRouteId = body.modelRouteId;
     }
+    if (body.compactModel !== undefined) {
+      if (body.compactModel === null || body.compactModel === "") delete next.compactModel;
+      else next.compactModel = body.compactModel;
+    }
+    if (body.compactModelRouteId !== undefined) {
+      if (body.compactModelRouteId === null || body.compactModelRouteId === "") {
+        delete next.compactModelRouteId;
+      } else {
+        next.compactModelRouteId = body.compactModelRouteId;
+      }
+    }
     if (body.maxToolRounds !== undefined) {
       if (body.maxToolRounds == null || body.maxToolRounds <= 0) delete next.maxToolRounds;
       else next.maxToolRounds = body.maxToolRounds;
@@ -207,6 +264,48 @@ export function registerCloudAgentRoutes(
     if (body.enableTools !== undefined) next.enableTools = body.enableTools;
     if (body.autoMemory !== undefined) next.autoMemory = body.autoMemory;
     if (body.autoTitle !== undefined) next.autoTitle = body.autoTitle;
+    if (body.autoCompact !== undefined) next.autoCompact = body.autoCompact;
+    if (body.compactThresholdChars !== undefined) {
+      if (body.compactThresholdChars == null || body.compactThresholdChars < 8_000) {
+        delete next.compactThresholdChars;
+      } else {
+        next.compactThresholdChars = Math.floor(body.compactThresholdChars);
+      }
+    }
+    if (body.compactSoftThresholdChars !== undefined) {
+      if (
+        body.compactSoftThresholdChars == null ||
+        body.compactSoftThresholdChars < 4_000
+      ) {
+        delete next.compactSoftThresholdChars;
+      } else {
+        next.compactSoftThresholdChars = Math.floor(body.compactSoftThresholdChars);
+      }
+    }
+    if (body.compactKeepRecent !== undefined) {
+      if (body.compactKeepRecent == null || body.compactKeepRecent < 4) {
+        delete next.compactKeepRecent;
+      } else {
+        next.compactKeepRecent = Math.min(Math.floor(body.compactKeepRecent), 64);
+      }
+    }
+    if (body.compactKeepRecentChars !== undefined) {
+      if (body.compactKeepRecentChars == null || body.compactKeepRecentChars < 4_000) {
+        delete next.compactKeepRecentChars;
+      } else {
+        next.compactKeepRecentChars = Math.min(
+          Math.floor(body.compactKeepRecentChars),
+          200_000,
+        );
+      }
+    }
+    if (body.maxToolResultChars !== undefined) {
+      if (body.maxToolResultChars == null || body.maxToolResultChars < 1_000) {
+        delete next.maxToolResultChars;
+      } else {
+        next.maxToolResultChars = Math.min(Math.floor(body.maxToolResultChars), 80_000);
+      }
+    }
     if (body.followUpMode !== undefined) {
       if (body.followUpMode === null) delete next.followUpMode;
       else if (body.followUpMode === "steer" || body.followUpMode === "queue") {
@@ -316,10 +415,43 @@ export function registerCloudAgentRoutes(
     const row = await store.getSession(session.tenantId, agentId, sid);
     if (!row) return c.json({ error: "Not found" }, 404);
     const afterSeq = Number(c.req.query("afterSeq") ?? "0");
+    const beforeSeq = Number(c.req.query("beforeSeq") ?? "");
+    const safeAfter = Number.isFinite(afterSeq) ? afterSeq : 0;
+    const safeBefore = Number.isFinite(beforeSeq) && beforeSeq > 0 ? beforeSeq : 0;
+
+    if (safeBefore > 0) {
+      const page = await store.listEventsBefore(sid, { beforeSeq: safeBefore });
+      return c.json({
+        session: sessionDto(row),
+        events: page.events,
+        hasMore: page.hasMore,
+        queue: [],
+      });
+    }
+
+    // afterSeq=0：UI 首屏历史，勿走 listEvents 默认 500 尾窗（长会话会空屏）
+    if (safeAfter === 0) {
+      const [page, queue] = await Promise.all([
+        store.listEventsForUi(sid),
+        store.listQueued(sid),
+      ]);
+      if (queue.length > 0 && !row.activeRunId) {
+        void runtime.startNextQueued({
+          tenantId: session.tenantId,
+          agentId,
+          sessionId: sid,
+        });
+      }
+      return c.json({
+        session: sessionDto(row),
+        events: page.events,
+        hasMore: page.hasMore,
+        queue,
+      });
+    }
+
     const [events, queue] = await Promise.all([
-      store.listEvents(sid, {
-        afterSeq: Number.isFinite(afterSeq) ? afterSeq : 0,
-      }),
+      store.listEvents(sid, { afterSeq: safeAfter }),
       store.listQueued(sid),
     ]);
     // 自愈：队列只应在运行期存在；发现空闲残留（进程中断等）就继续出队
@@ -333,8 +465,26 @@ export function registerCloudAgentRoutes(
     return c.json({
       session: sessionDto(row),
       events,
+      hasMore: false,
       queue,
     });
+  });
+
+  /** 按需加载工具完整参数/结果（历史瘦身后展开详情） */
+  app.get("/api/agents/:id/cloud/sessions/:sid/tools", async (c) => {
+    const session = c.get("session")!;
+    const agentId = c.req.param("id");
+    const sid = c.req.param("sid");
+    const row = await store.getSession(session.tenantId, agentId, sid);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    const raw = c.req.query("ids") ?? "";
+    const ids = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (ids.length === 0) return c.json({ tools: [] });
+    const tools = await store.getToolCallDetails(sid, ids);
+    return c.json({ tools });
   });
 
   app.patch("/api/agents/:id/cloud/sessions/:sid", async (c) => {
@@ -554,6 +704,33 @@ export function registerCloudAgentRoutes(
         agentId: c.req.param("id"),
         sessionId: c.req.param("sid"),
         retry: true,
+        ...(options ? { options } : {}),
+      });
+      return c.json(result, 202);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /** 继续：上次 Run 被中途停止后，从中断处接着做（不展示新用户气泡） */
+  app.post("/api/agents/:id/cloud/sessions/:sid/continue", async (c) => {
+    if (!modelRouter) {
+      return c.json({ error: "模型路由未启用，请先配置 chat 上游" }, 400);
+    }
+    const session = c.get("session")!;
+    if (await isOpenAiGatewaySession(session.tenantId, c.req.param("id"), c.req.param("sid"))) {
+      return c.json({ error: "OpenAI Gateway 会话只能 fork 后继续" }, 403);
+    }
+    const body = await c.req
+      .json<{ options?: unknown }>()
+      .catch(() => ({}) as { options?: unknown });
+    const options = parseRunOptions(body.options);
+    try {
+      const result = await runtime.startTurn({
+        tenantId: session.tenantId,
+        agentId: c.req.param("id"),
+        sessionId: c.req.param("sid"),
+        continue: true,
         ...(options ? { options } : {}),
       });
       return c.json(result, 202);

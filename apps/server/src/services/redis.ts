@@ -8,6 +8,7 @@
  * - auth / tools / gw client：鉴权与工具列表短 TTL 缓存
  */
 import { createClient, type RedisClientType } from "redis";
+import { log, recordPlatformFault } from "@zakura/core";
 
 export type ZakuraRedis = RedisClientType;
 
@@ -51,18 +52,18 @@ export async function requireRedis(): Promise<ZakuraRedis> {
       c.on("error", (err) => {
         if (!warned) {
           warned = true;
-          console.warn("[redis] error:", err instanceof Error ? err.message : err);
+          recordPlatformFault("redis.client", err, { dep: "redis" });
         }
       });
       await c.connect();
       client = c;
-      console.log(`[redis] connected (${url.replace(/:[^:@/]+@/, ":***@")})`);
+      log.info("dep.up", { dep: "redis" });
       return c;
     } catch (err) {
       client = null;
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `Redis 连接失败（REDIS_URL=${url}）。请检查地址或设 REDIS_URL=off 显式关闭：${msg}`,
+        `Redis 连接失败。请检查 REDIS_URL 或设 REDIS_URL=off 显式关闭：${msg}`,
       );
     } finally {
       connecting = null;
@@ -79,13 +80,13 @@ export async function createRedisSubscriber(): Promise<ZakuraRedis | null> {
   try {
     const c = createClient({ url }) as ZakuraRedis;
     c.on("error", (err) => {
-      console.warn("[redis] subscriber error:", err instanceof Error ? err.message : err);
+      recordPlatformFault("redis.subscriber", err, { dep: "redis" });
     });
     await c.connect();
     return c;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Redis subscriber 连接失败（REDIS_URL=${url}）：${msg}`);
+    throw new Error(`Redis subscriber 连接失败：${msg}`);
   }
 }
 

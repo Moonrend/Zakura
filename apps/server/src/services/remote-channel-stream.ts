@@ -2,6 +2,7 @@
  * 远程通道出站投递：用真实消息 post + edit（不用 Telegram draft 流）。
  * Draft 在工具执行等空闲间隙会被客户端清掉，表现为「发着发着消失」。
  */
+import { recordPlatformFault } from "@zakura/core";
 import type { CloudAgentEvent } from "@zakura/shared";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
 
@@ -70,10 +71,9 @@ export async function deliverRunToThread(
         trailing = setTimeout(() => {
           trailing = null;
           void flush(true).catch((error) => {
-            console.warn(
-              "[remote-agent] trailing edit failed:",
-              error instanceof Error ? error.message : error,
-            );
+            recordPlatformFault("remote_agent.stream_edit", error, {
+              subsystem: "remote_agent",
+            });
           });
         }, editThrottleMs - (now - lastEditAt));
       }
@@ -98,10 +98,9 @@ export async function deliverRunToThread(
         await thread.adapter.editMessage(thread.id, sent.id, { markdown: text });
       }
     } catch (error) {
-      console.warn(
-        "[remote-agent] message edit failed:",
-        error instanceof Error ? error.message : error,
-      );
+      recordPlatformFault("remote_agent.stream_edit", error, {
+        subsystem: "remote_agent",
+      });
     }
   };
 
@@ -196,10 +195,9 @@ export function createRunTextStream(
           kick();
         })
         .catch((error) => {
-          console.warn(
-            "[remote-agent] stream catch-up failed:",
-            error instanceof Error ? error.message : error,
-          );
+          recordPlatformFault("remote_agent.stream_catchup", error, {
+            subsystem: "remote_agent",
+          });
           kick();
         });
 
@@ -245,11 +243,8 @@ export async function acknowledgeInboundMessage(
   if (messageId && typeof thread.adapter?.addReaction === "function") {
     try {
       await thread.adapter.addReaction(String(thread.id), messageId, "👀");
-    } catch (error) {
-      console.warn(
-        "[remote-agent] 👀 reaction failed:",
-        error instanceof Error ? error.message : error,
-      );
+    } catch {
+      /* 平台不支持表情或权限不足：对用户无影响 */
     }
   }
   if (typeof thread.startTyping === "function") {

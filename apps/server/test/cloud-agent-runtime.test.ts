@@ -3,15 +3,31 @@ import { describe, it } from "node:test";
 import {
   buildChainMessages,
   buildCompactionDigest,
+  buildCompactionSystemPrompt,
   buildSessionReuseDigest,
   buildUserMessage,
   CloudAgentRuntime,
   compactToolResultsInPlace,
   eventsToMessages,
+  extractFailureSignals,
+  extractFileOpsFromMessages,
+  formatHistorySummaryForPrompt,
+  isContextOverflowError,
+  mergeFileOps,
   parseAttachments,
+  parseFileOpsFromSummary,
   parseMemoryExtraction,
   prepareHistoryForModel,
+  resolveCompactBudgetForContextWindow,
+  splitMessagesForCompaction,
 } from "../src/services/cloud-agent-runtime.js";
+import {
+  applyTokenCalibration,
+  estimateTextTokens,
+  estimateMessagesTokens,
+  lastCancelledRunId,
+  resolveContextWindowBudget,
+} from "@zakura/shared";
 import type { ModelChatMessage } from "@zakura/shared";
 import {
   absorbChatStreamChunk,
@@ -19,6 +35,47 @@ import {
   createChatStreamState,
 } from "../src/model-router/openai-response.js";
 import { extractSnippet } from "../src/services/cloud-agent-session.js";
+
+describe("lastCancelledRunId", () => {
+  it("returns the last cancelled run", () => {
+    assert.equal(
+      lastCancelledRunId([
+        { type: "run_start", runId: "r1", payload: { runId: "r1" } },
+        { type: "run_end", runId: "r1", payload: { status: "cancelled" } },
+      ]),
+      "r1",
+    );
+  });
+
+  it("returns null when last run completed or is still running", () => {
+    assert.equal(
+      lastCancelledRunId([
+        { type: "run_start", runId: "r1", payload: { runId: "r1" } },
+        { type: "run_end", runId: "r1", payload: { status: "cancelled" } },
+        { type: "run_start", runId: "r2", payload: { runId: "r2" } },
+        { type: "run_end", runId: "r2", payload: { status: "completed" } },
+      ]),
+      null,
+    );
+    assert.equal(
+      lastCancelledRunId([
+        { type: "run_start", runId: "r1", payload: { runId: "r1" } },
+        { type: "assistant_delta", runId: "r1", payload: { delta: "…" } },
+      ]),
+      null,
+    );
+  });
+
+  it("reads run_end from a tail window without the matching run_start", () => {
+    assert.equal(
+      lastCancelledRunId([
+        { type: "assistant_delta", runId: "r9", payload: { delta: "半截" } },
+        { type: "run_end", runId: "r9", payload: { status: "cancelled" } },
+      ]),
+      "r9",
+    );
+  });
+});
 
 describe("eventsToMessages", () => {
   it("reconstructs user/assistant/tool sequence", () => {
@@ -125,6 +182,7 @@ describe("eventsToMessages", () => {
     const msgs = eventsToMessages([
       { type: "user_message", runId: "r1", payload: { content: "hi" } },
       { type: "run_log", runId: "r1", payload: { level: "info", message: "x" } },
+      { type: "tool_call_progress", runId: "r1", payload: { toolCallId: "c1", stdout: "log" } },
       { type: "memory_updated", runId: "r1", payload: { items: [] } },
       { type: "context_sources", runId: "r1", payload: { items: [] } },
       { type: "session_update", runId: "r1", payload: { title: "t" } },
@@ -207,6 +265,29 @@ describe("buildChainMessages", () => {
     );
     const resA = buildChainMessages(events, "mA");
     assert.equal(resA.messages.some((m) => m.content === "走B"), false);
+  });
+
+  it("keeps cancelled parent run output so continue can resume", () => {
+    const events = [
+      { type: "user_message", runId: "r1", payload: { messageId: "m1", content: "做任务", parentRunId: null } },
+      { type: "run_start", runId: "r1", payload: { runId: "r1", replyToMessageId: "m1" } },
+      { type: "assistant_message", runId: "r1", payload: { content: "已改一半" } },
+      { type: "run_end", runId: "r1", payload: { status: "cancelled" } },
+      {
+        type: "user_message",
+        runId: "r2",
+        payload: { messageId: "m2", content: "请继续", parentRunId: "r1", continue: true },
+      },
+    ];
+    const res = buildChainMessages(events, "m2");
+    assert.deepEqual(
+      res.messages.map((m) => [m.role, m.content]),
+      [
+        ["user", "做任务"],
+        ["assistant", "已改一半"],
+        ["user", "请继续"],
+      ],
+    );
   });
 
   it("keeps user message but drops output of failed parent runs", () => {
@@ -372,7 +453,7 @@ describe("context compaction", () => {
     assert.ok(after < before);
   });
 
-  it("buildCompactionDigest prefers structured roles", () => {
+  it("buildCompactionDigest prefers structured roles and file paths", () => {
     const digest = buildCompactionDigest([
       { role: "user", content: "部署生产环境" },
       {
@@ -390,7 +471,100 @@ describe("context compaction", () => {
     ]);
     assert.match(digest, /用户/);
     assert.match(digest, /助手/);
-    assert.match(digest, /re_fs_read|工具/);
+    assert.match(digest, /re_fs_read|工具|文件轨迹/);
+    assert.match(digest, /a\.yml/);
+    assert.match(digest, /<read-files>/);
+  });
+
+  it("extractFileOpsFromMessages tracks read vs write", () => {
+    const ops = extractFileOpsFromMessages([
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "r1",
+            type: "function",
+            function: { name: "re_fs_read", arguments: '{"path":"src/app.ts"}' },
+          },
+          {
+            id: "w1",
+            type: "function",
+            function: {
+              name: "re_fs_edit",
+              arguments: '{"path":"src/app.ts","old_text":"a","new_text":"b"}',
+            },
+          },
+          {
+            id: "p1",
+            type: "function",
+            function: {
+              name: "re_apply_patch",
+              arguments: JSON.stringify({
+                patches: [
+                  { path: "src/b.ts", old_text: "x", new_text: "y" },
+                  { path: "src/c.ts", old_text: "1", new_text: "2" },
+                ],
+              }),
+            },
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(ops.modifiedFiles.sort(), ["src/app.ts", "src/b.ts", "src/c.ts"].sort());
+    // 已改文件不重复出现在已读
+    assert.ok(!ops.readFiles.includes("src/app.ts"));
+  });
+
+  it("mergeFileOps and parseFileOpsFromSummary accumulate paths", () => {
+    const merged = mergeFileOps(
+      { readFiles: ["a.ts"], modifiedFiles: ["b.ts"] },
+      { readFiles: ["c.ts", "b.ts"], modifiedFiles: ["d.ts"] },
+    );
+    assert.ok(merged.modifiedFiles.includes("b.ts"));
+    assert.ok(merged.modifiedFiles.includes("d.ts"));
+    assert.ok(merged.readFiles.includes("a.ts"));
+    assert.ok(merged.readFiles.includes("c.ts"));
+    assert.ok(!merged.readFiles.includes("b.ts"));
+
+    const parsed = parseFileOpsFromSummary(`
+## 代码状态
+### 已读文件
+- packages/foo/bar.ts
+### 已改文件
+- packages/foo/bar.ts
+- apps/server/src/x.ts
+<read-files>
+packages/foo/bar.ts
+extra/read.ts
+</read-files>
+<modified-files>
+apps/server/src/x.ts
+</modified-files>
+`);
+    assert.ok(parsed.readFiles.includes("extra/read.ts"));
+    assert.ok(parsed.modifiedFiles.includes("apps/server/src/x.ts"));
+  });
+
+  it("buildCompactionSystemPrompt requires coding structure", () => {
+    const prompt = buildCompactionSystemPrompt({
+      previousSummary: "## 目标\n修登录",
+      previousOps: { readFiles: ["auth.ts"], modifiedFiles: [] },
+    });
+    assert.match(prompt, /代码状态/);
+    assert.match(prompt, /关键决策/);
+    assert.match(prompt, /auth\.ts/);
+    assert.match(prompt, /已有摘要/);
+  });
+
+  it("formatHistorySummaryForPrompt adds coding guidance", () => {
+    const text = formatHistorySummaryForPrompt("## 目标\n实现压缩", {
+      readFiles: ["messages.ts"],
+      modifiedFiles: ["runtime.ts"],
+    });
+    assert.match(text, /重新读取|已改/);
+    assert.match(text, /runtime\.ts/);
+    assert.match(text, /messages\.ts/);
   });
 
   it("buildSessionReuseDigest splits recent vs older", () => {
@@ -406,7 +580,197 @@ describe("context compaction", () => {
     assert.equal(olderCount, 34);
     assert.ok(digest.length > 0);
   });
+
+  it("splitMessagesForCompaction cuts on user turn boundaries", () => {
+    const messages: ModelChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "old task " + "x".repeat(500) },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "re_fs_read", arguments: '{"path":"a.ts"}' },
+          },
+        ],
+      },
+      { role: "tool", content: "file body " + "y".repeat(400), toolCallId: "c1", name: "re_fs_read" },
+      { role: "assistant", content: "done old" },
+      { role: "user", content: "new task" },
+      { role: "assistant", content: "working on new" },
+    ];
+    const split = splitMessagesForCompaction(messages, {
+      keepRecent: 4,
+      keepRecentChars: 200,
+      thresholdChars: 8_000,
+    });
+    assert.equal(split.systemPrefix.length, 1);
+    assert.equal(split.systemPrefix[0]!.role, "system");
+    // recent 应从某个 user 起，不能以 tool 开头
+    assert.ok(split.recent.length > 0);
+    assert.notEqual(split.recent[0]!.role, "tool");
+    assert.ok(
+      split.recent[0]!.role === "user" || split.recent[0]!.role === "assistant",
+    );
+    // older + recent = body
+    assert.equal(
+      split.older.length + split.recent.length,
+      messages.length - 1,
+    );
+  });
+
+  it("splitMessagesForCompaction never orphans tool results at cut", () => {
+    const messages: ModelChatMessage[] = [
+      { role: "user", content: "u1" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "t1",
+            type: "function",
+            function: { name: "re_shell_exec", arguments: '{"command":"ls"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: "out " + "z".repeat(3000),
+        toolCallId: "t1",
+        name: "re_shell_exec",
+      },
+      { role: "user", content: "u2 keep me" },
+      { role: "assistant", content: "ok" },
+    ];
+    const split = splitMessagesForCompaction(messages, {
+      keepRecentChars: 50,
+      keepRecent: 8,
+      thresholdChars: 8_000,
+    });
+    if (split.recent.length) {
+      assert.notEqual(split.recent[0]!.role, "tool");
+    }
+  });
+
+  it("isContextOverflowError detects common patterns", () => {
+    assert.equal(isContextOverflowError(new Error("context_length_exceeded")), true);
+    assert.equal(isContextOverflowError(new Error("This model's maximum context length is")), true);
+    assert.equal(isContextOverflowError(new Error("prompt is too long")), true);
+    assert.equal(isContextOverflowError(new Error("普通网络错误")), false);
+  });
+
+  it("extractFailureSignals picks shell errors", () => {
+    const signals = extractFailureSignals([
+      {
+        role: "tool",
+        name: "re_shell_exec",
+        toolCallId: "1",
+        content: "exit code: 1\nError: tsc failed\nsrc/a.ts(1,1): error TS2322",
+      },
+      {
+        role: "tool",
+        name: "re_fs_read",
+        toolCallId: "2",
+        content: "export const x = 1",
+      },
+    ]);
+    assert.ok(signals.length >= 1);
+    assert.match(signals[0]!.signal, /error|exit|tsc/i);
+  });
+
+  it("buildCompactionDigest includes failure section", () => {
+    const digest = buildCompactionDigest([
+      { role: "user", content: "fix" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "1",
+            type: "function",
+            function: { name: "re_shell_exec", arguments: '{"command":"npm test"}' },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        name: "re_shell_exec",
+        toolCallId: "1",
+        content: "FAIL tests/a.test.ts\nError: expected true",
+      },
+    ]);
+    assert.match(digest, /失败|验证/);
+    assert.match(digest, /FAIL|Error/);
+  });
+
+  it("resolveCompactBudgetForContextWindow tightens for small windows", () => {
+    const tight = resolveCompactBudgetForContextWindow(
+      { thresholdChars: 200_000, softThresholdChars: 140_000, keepRecentChars: 80_000 },
+      32_000,
+    );
+    assert.ok(tight.thresholdTokens < estimateTokensRough(200_000));
+    assert.ok(tight.thresholdTokens >= 2_000);
+    assert.ok(tight.softThresholdTokens <= tight.thresholdTokens);
+    assert.ok(tight.contextLimitTokens === 32_000);
+
+    const bigWindow = resolveCompactBudgetForContextWindow(
+      { thresholdChars: 40_000 },
+      200_000,
+    );
+    // 用户 40k chars ≈ 10k tokens，应严于窗口 85%
+    assert.ok(bigWindow.thresholdTokens <= 12_000);
+  });
+
+  it("estimateTextTokens is CJK-aware", () => {
+    const en = estimateTextTokens("hello world test");
+    const zh = estimateTextTokens("你好世界测试一下");
+    // 中文应按字计，明显多于「字数/4」
+    assert.ok(zh >= 7);
+    assert.ok(en >= 2);
+    assert.ok(zh > en);
+  });
+
+  it("applyTokenCalibration clamps and scales", () => {
+    const base = 1000;
+    const up = applyTokenCalibration(base, {
+      measuredPromptTokens: 1800,
+      estimatedAtMeasure: 1000,
+    });
+    assert.equal(up, 1800);
+    const capped = applyTokenCalibration(base, {
+      measuredPromptTokens: 5000,
+      estimatedAtMeasure: 1000,
+    });
+    assert.ok(capped <= 2200);
+  });
+
+  it("resolveContextWindowBudget leaves reserve for output", () => {
+    const b = resolveContextWindowBudget({ contextLimitTokens: 128_000 });
+    assert.ok(b.reserveTokens >= 2_000);
+    assert.ok(b.hardTokens < b.usableTokens);
+    assert.ok(b.softTokens < b.hardTokens);
+  });
+
+  it("estimateMessagesTokens grows with tool dumps", () => {
+    const small = estimateMessagesTokens([{ role: "user", content: "hi" }]);
+    const big = estimateMessagesTokens([
+      { role: "user", content: "hi" },
+      {
+        role: "tool",
+        name: "re_fs_read",
+        content: "x".repeat(8_000),
+        toolCallId: "1",
+      },
+    ]);
+    assert.ok(big > small + 1_000);
+  });
 });
+
+function estimateTokensRough(chars: number): number {
+  return Math.ceil(chars / 4);
+}
 
 describe("parseMemoryExtraction", () => {
   it("parses fenced JSON object", () => {

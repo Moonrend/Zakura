@@ -1,11 +1,14 @@
 "use client";
 
+import { useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { useTheme } from "next-themes";
 import MarkdownRender, {
   MarkdownCodeBlockNode,
   setCustomComponents,
   type NodeComponentProps,
 } from "markstream-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ensureMarkstream } from "./markstream-setup";
 
@@ -21,24 +24,55 @@ type CodeBlockAst = {
   updatedCode?: string;
 };
 
-/** Shiki 高亮 + 自带复制按钮；主题用灰调，不用纯黑 */
+function CodeCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!text) return null;
+  return (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="ghost"
+      className="absolute top-1.5 right-1.5 z-10 text-muted-foreground hover:text-foreground"
+      aria-label={copied ? "已复制" : "复制"}
+      onClick={() => {
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+    >
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </Button>
+  );
+}
+
+/** Shiki 高亮；无顶栏/语言标签，角上一个复制按钮 */
 function ChatCodeBlock({
   node,
   isDark,
   ctx,
 }: NodeComponentProps<CodeBlockAst>) {
   return (
-    <MarkdownCodeBlockNode
-      node={node}
-      isDark={isDark}
-      stream={ctx?.codeBlockStream !== false}
-      lightTheme="github-light"
-      darkTheme="github-dark-dimmed"
-      showFontSizeButtons={false}
-      showCollapseButton={false}
-      showTooltips={false}
-      {...(ctx?.codeBlockProps as object | undefined)}
-    />
+    <div className="chat-md-code relative my-[0.6em] w-full">
+      <MarkdownCodeBlockNode
+        node={node}
+        isDark={isDark}
+        stream={ctx?.codeBlockStream !== false}
+        lightTheme="github-light"
+        darkTheme="github-dark-dimmed"
+        showFontSizeButtons={false}
+        showCollapseButton={false}
+        showPreviewButton={false}
+        showExpandButton={false}
+        showTooltips={false}
+        enableFontSizeControl={false}
+        isShowPreview={false}
+        {...(ctx?.codeBlockProps as object | undefined)}
+        showHeader={false}
+        showCopyButton={false}
+      />
+      <CodeCopyButton text={node.code} />
+    </div>
   );
 }
 
@@ -61,7 +95,7 @@ const VARIANT_CLASS: Record<ChatMarkdownVariant, string> = {
 /**
  * 聊天区 Markdown（markstream）：
  * - 公式：内置 KaTeX 节点
- * - 代码：Shiki 渲染 + 复制按钮（灰底，非纯黑）
+ * - 代码：Shiki 渲染，无顶栏，角上复制
  */
 export function ChatMarkdown({
   content,
@@ -89,13 +123,17 @@ export function ChatMarkdown({
         fade={fade}
         customId="chat-md"
         isDark={isDark}
-        codeBlockStream
+        // 生成中用稳定的 pre，避免代码高亮层重复挂载；完成后再启用高亮。
+        renderCodeBlocksAsPre={!final}
+        codeBlockStream={final}
         themes={["github-light", "github-dark-dimmed"]}
         codeBlockProps={{
-          showCopyButton: true,
-          showHeader: true,
+          showCopyButton: false,
+          showHeader: false,
           showFontSizeButtons: false,
           showCollapseButton: false,
+          showPreviewButton: false,
+          showExpandButton: false,
           showTooltips: false,
         }}
         deferNodesUntilVisible={false}

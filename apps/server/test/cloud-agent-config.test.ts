@@ -39,26 +39,38 @@ describe("parseCloudAgentConfig", () => {
       cloud: {
         autoCompact: false,
         compactThresholdChars: 20_000,
+        compactSoftThresholdChars: 12_000,
         compactKeepRecent: 8,
+        compactKeepRecentChars: 16_000,
         maxToolResultChars: 4_000,
+        compactModel: "gpt-4o-mini",
+        compactModelRouteId: "route_mini",
       },
     });
     assert.equal(cfg.autoCompact, false);
     assert.equal(cfg.compactThresholdChars, 20_000);
+    assert.equal(cfg.compactSoftThresholdChars, 12_000);
     assert.equal(cfg.compactKeepRecent, 8);
+    assert.equal(cfg.compactKeepRecentChars, 16_000);
     assert.equal(cfg.maxToolResultChars, 4_000);
+    assert.equal(cfg.compactModel, "gpt-4o-mini");
+    assert.equal(cfg.compactModelRouteId, "route_mini");
   });
 
   it("ignores invalid compact thresholds", () => {
     const cfg = parseCloudAgentConfig({
       cloud: {
         compactThresholdChars: 100,
+        compactSoftThresholdChars: 10,
         compactKeepRecent: 1,
+        compactKeepRecentChars: 100,
         maxToolResultChars: 10,
       },
     });
     assert.equal(cfg.compactThresholdChars, undefined);
+    assert.equal(cfg.compactSoftThresholdChars, undefined);
     assert.equal(cfg.compactKeepRecent, undefined);
+    assert.equal(cfg.compactKeepRecentChars, undefined);
     assert.equal(cfg.maxToolResultChars, undefined);
   });
 

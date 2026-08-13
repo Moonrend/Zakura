@@ -101,6 +101,14 @@ async function executeRequest<T>(path: string, init?: ApiInit): Promise<T> {
       const next = `/login?suspended=1&reason=${encodeURIComponent(reason)}`;
       window.location.replace(next);
     }
+    if (res.status >= 500 && typeof window !== "undefined") {
+      void import("./otel").then(({ reportClientError }) => {
+        reportClientError("client.api", typeof data.error === "string" ? data.error : `HTTP ${res.status}`, {
+          kind: "api",
+          status_class: "5xx",
+        });
+      });
+    }
     throw new ApiError(
       typeof data.error === "string" ? data.error : `HTTP ${res.status}`,
       res.status,

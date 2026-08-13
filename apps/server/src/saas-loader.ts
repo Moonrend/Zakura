@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { log, recordPlatformFault } from "@zakura/core";
 import type { ZakuraEdition } from "@zakura/shared";
 
 const require = createRequire(import.meta.url);
@@ -72,9 +73,7 @@ export function resolveEdition(): ZakuraEdition {
   if (explicit !== "saas") return "oss";
 
   if (!isSaasPackagePresent()) {
-    console.warn(
-      "[config] SaaS edition requested but @zakura/saas is not installed; falling back to oss",
-    );
+    log.warn("boot.saas_package_missing");
     return "oss";
   }
   return "saas";
@@ -111,6 +110,6 @@ export async function loadSaasServer(): Promise<SaasServerModule | null> {
       lastErr = err;
     }
   }
-  console.warn("[saas] failed to load @zakura/saas/server:", lastErr);
+  recordPlatformFault("saas.load", lastErr, { subsystem: "saas" });
   return null;
 }

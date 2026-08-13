@@ -45,6 +45,9 @@ services:
       # 工作区 / Runner 默认镜像（可由环境覆盖）
       ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:debian}
       ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
+      # 可选：OTLP logs 完整 URL（Axiom: https://<region>.aws.edge.axiom.co/v1/logs）
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
       # 平台自托管 Headscale：数据面由 zakura-host-ts（host 网 + kernel TUN）加入本机网。
       # 控制面主机勿再跑个人 Tailscale 内核客户端，否则会与 host-ts 抢 TUN/100.x。
     volumes:
@@ -54,6 +57,12 @@ services:
     # 经 docker0 访问宿主机 tailscale0 上的 Runner（100.64/10）需要主机 ip_forward=1
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/livez"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy

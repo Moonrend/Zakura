@@ -1,8 +1,10 @@
 "use client";
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, useEffect } from "react";
+import { setOtelIdentity } from "@/lib/otel";
 
 export type MeInfo = {
+  user?: { id: string };
   tenant: {
     id?: string;
     name: string;
@@ -25,6 +27,9 @@ export function MeProvider({
   value: MeInfo;
   children: React.ReactNode;
 }) {
+  useEffect(() => {
+    setOtelIdentity(value.user?.id, value.tenant?.id);
+  }, [value.user?.id, value.tenant?.id]);
   return <MeContext.Provider value={value}>{children}</MeContext.Provider>;
 }
 

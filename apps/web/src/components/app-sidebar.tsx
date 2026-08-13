@@ -875,6 +875,11 @@ function PlatformSidebar({
           ...(multiTenant
             ? [
                 {
+                  href: "/dashboard/settings/usage",
+                  label: "成员用量",
+                  icon: Users,
+                } satisfies SubNavItem,
+                {
                   href: "/dashboard/settings/teams",
                   label: "所有团队",
                   icon: Building2,

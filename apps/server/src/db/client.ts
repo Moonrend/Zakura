@@ -4,6 +4,7 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
+import { log } from "@zakura/core";
 import { createPglite } from "./pglite.js";
 
 export type Db =
@@ -75,8 +76,8 @@ export async function createDb(opts: {
 
   const sql = postgres(opts.databaseUrl, { max: 10 });
   // Ensure pgvector is available on managed Postgres (no-op if already installed)
-  await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch((err) => {
-    console.warn("[db] CREATE EXTENSION vector failed (need superuser?):", err);
+  await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch(() => {
+    log.warn("db.extension_unavailable", { extension: "vector" });
   });
   const db = drizzlePg(sql, { schema });
   return {

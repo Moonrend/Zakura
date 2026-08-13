@@ -70,5 +70,5 @@ export function useStickToBottom<
     return () => observer.disconnect();
   }, [scrollEl, contentEl]);
 
-  return { scrollRef, contentRef, atBottom, scrollToBottom, sync };
+  return { scrollRef, contentRef, scrollEl, atBottom, scrollToBottom, sync };
 }

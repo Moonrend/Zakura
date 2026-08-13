@@ -1345,6 +1345,7 @@ export const cloudAgentSessions = pgTable(
     index("cloud_agent_sessions_agent").on(t.agentId, t.updatedAt),
     index("cloud_agent_sessions_agent_kind").on(t.agentId, t.kind, t.updatedAt),
     index("cloud_agent_sessions_tenant").on(t.tenantId),
+    index("cloud_agent_sessions_created_by").on(t.createdByUserId, t.updatedAt),
   ],
 );
 
@@ -1385,6 +1386,70 @@ export const cloudAgentRuns = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("cloud_agent_runs_session").on(t.sessionId, t.createdAt)],
+);
+
+/**
+ * Per-user usage telemetry. Product data plane — never printed.
+ * Query by user_id (and tenant_id). No prompts, tokens, or URLs.
+ */
+export const userUsageEvents = pgTable(
+  "user_usage_events",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** user | api_key | system */
+    actorKind: text("actor_kind").notNull().default("user"),
+    /** auth | session | run | tool | admin */
+    category: text("category").notNull(),
+    action: text("action").notNull(),
+    /** ok | error */
+    status: text("status").notNull().default("ok"),
+    durationMs: integer("duration_ms").notNull().default(0),
+    agentId: text("agent_id"),
+    sessionId: text("session_id"),
+    resourceKind: text("resource_kind"),
+    resourceId: text("resource_id"),
+    summary: text("summary").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("user_usage_events_user_time").on(t.userId, t.createdAt),
+    index("user_usage_events_tenant_user_time").on(t.tenantId, t.userId, t.createdAt),
+    index("user_usage_events_tenant_cat_time").on(t.tenantId, t.category, t.createdAt),
+  ],
+);
+
+/** Daily rollup for cheap per-user analytics. day is UTC YYYY-MM-DD. */
+export const userUsageDaily = pgTable(
+  "user_usage_daily",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    day: text("day").notNull(),
+    logins: integer("logins").notNull().default(0),
+    sessionsStarted: integer("sessions_started").notNull().default(0),
+    runsOk: integer("runs_ok").notNull().default(0),
+    runsError: integer("runs_error").notNull().default(0),
+    toolCalls: integer("tool_calls").notNull().default(0),
+    toolErrors: integer("tool_errors").notNull().default(0),
+    durationMs: integer("duration_ms").notNull().default(0),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("user_usage_daily_unique").on(t.tenantId, t.userId, t.day),
+    index("user_usage_daily_user_day").on(t.userId, t.day),
+    index("user_usage_daily_tenant_day").on(t.tenantId, t.day),
+  ],
 );
 
 /**
@@ -1607,6 +1672,8 @@ export const schema = {
   cloudAgentSessions,
   cloudAgentEvents,
   cloudAgentRuns,
+  userUsageEvents,
+  userUsageDaily,
   mcpStoreSources,
   skills,
   agentSkills,
@@ -1651,6 +1718,8 @@ export type McpPolicy = typeof mcpPolicies.$inferSelect;
 export type Memory = typeof memories.$inferSelect;
 export type MemoryEdge = typeof memoryEdges.$inferSelect;
 export type ToolCallLog = typeof toolCallLogs.$inferSelect;
+export type UserUsageEvent = typeof userUsageEvents.$inferSelect;
+export type UserUsageDaily = typeof userUsageDaily.$inferSelect;
 export type OauthClient = typeof oauthClients.$inferSelect;
 export type UpstreamOauthClient = typeof upstreamOauthClients.$inferSelect;
 export type OauthAuthCode = typeof oauthAuthCodes.$inferSelect;

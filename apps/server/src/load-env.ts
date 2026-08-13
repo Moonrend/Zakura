@@ -28,7 +28,9 @@ export function loadEnvFiles(files?: string[]) {
       const eq = trimmed.indexOf("=");
       if (eq <= 0) continue;
       const key = trimmed.slice(0, eq).trim();
-      if (!key || key in process.env) continue;
+      if (!key) continue;
+      // empty shell/compose placeholders must not block .env
+      if (key in process.env && (process.env[key] ?? "").trim() !== "") continue;
       let value = trimmed.slice(eq + 1).trim();
       if (
         (value.startsWith('"') && value.endsWith('"')) ||

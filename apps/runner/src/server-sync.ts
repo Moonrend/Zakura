@@ -1,3 +1,4 @@
+import { log, recordPlatformFault } from "@zakura/core";
 import type { RunnerHostInfo, RuntimeNodeDto } from "@zakura/shared";
 import { collectHostInfo } from "./host-info.js";
 
@@ -61,7 +62,7 @@ export function startServerSync(cfg: ServerSyncConfig): { stop: () => void } {
       const hostInfo = collectHostInfo(cfg.storageRoot, cfg.publicUrl);
       const endpoint = resolveEndpoint(hostInfo, cfg.publicUrl);
       if (!endpoint) {
-        console.warn("[runner-sync] skip: no reachable endpoint (waiting for Tailscale/IP)");
+        log.warn("runner.sync_no_endpoint");
         return;
       }
 
@@ -75,21 +76,20 @@ export function startServerSync(cfg: ServerSyncConfig): { stop: () => void } {
           capabilities: { docker: true, runner: true },
         });
         if (!reg.ok) {
-          console.warn(
-            `[runner-sync] register failed status=${reg.status}`,
-            typeof reg.json === "object" ? reg.json : "",
-          );
+          recordPlatformFault("runner.register", `status=${reg.status}`, {
+            subsystem: "runner_sync",
+          });
           return;
         }
         const node = (reg.json as { node?: RuntimeNodeDto } | null)?.node;
         if (!node?.id) {
-          console.warn("[runner-sync] register ok but missing node.id");
+          recordPlatformFault("runner.register_missing_id", undefined, {
+            subsystem: "runner_sync",
+          });
           return;
         }
         nodeId = node.id;
-        console.log(
-          `[runner-sync] registered id=${nodeId} endpoint=${endpoint} status=${node.status}`,
-        );
+        log.info("runner.registered", { status: node.status });
         return;
       }
 
@@ -99,15 +99,14 @@ export function startServerSync(cfg: ServerSyncConfig): { stop: () => void } {
         { authorization: `Bearer ${cfg.token}` },
       );
       if (hb.status === 401 || hb.status === 404) {
-        console.warn(`[runner-sync] heartbeat ${hb.status}, will re-register`);
+        log.warn("runner.heartbeat_reregister", { status: hb.status });
         nodeId = null;
         return;
       }
       if (!hb.ok) {
-        console.warn(
-          `[runner-sync] heartbeat failed status=${hb.status}`,
-          typeof hb.json === "object" ? hb.json : "",
-        );
+        recordPlatformFault("runner.heartbeat", `status=${hb.status}`, {
+          subsystem: "runner_sync",
+        });
         return;
       }
       // Periodically refresh endpoint via register (IP may change)
@@ -122,21 +121,16 @@ export function startServerSync(cfg: ServerSyncConfig): { stop: () => void } {
           storageRoot: cfg.storageRoot,
           capabilities: { docker: true, runner: true },
         });
-        console.log(`[runner-sync] endpoint refreshed → ${endpoint}`);
+        log.info("runner.endpoint_refreshed");
       }
     } catch (err) {
-      console.warn(
-        "[runner-sync] error",
-        err instanceof Error ? err.message : String(err),
-      );
+      recordPlatformFault("runner.sync", err, { subsystem: "runner_sync" });
     } finally {
       inFlight = false;
     }
   };
 
-  console.log(
-    `[runner-sync] enabled server=${base} intervalMs=${intervalMs}`,
-  );
+  log.info("runner.sync_started", { interval_ms: intervalMs });
   void tick();
   timer = setInterval(() => void tick(), intervalMs);
 

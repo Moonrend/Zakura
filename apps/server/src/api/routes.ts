@@ -1,6 +1,17 @@
 import { Hono, type Context } from "hono";
 import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
-import { generateApiKey, globalRegistry, decryptJson, encryptJson } from "@zakura/core";
+import {
+  decryptJson,
+  encryptJson,
+  generateApiKey,
+  getTelemetry,
+  globalRegistry,
+  idsFromSession,
+  log,
+  recordPlatformFault,
+  withLogContext,
+} from "@zakura/core";
+import { mountPlatformProbes } from "../observability.js";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
@@ -85,6 +96,9 @@ import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
 import { RemoteChannelRuntime, REMOTE_PLATFORMS } from "../services/remote-channel-runtime.js";
 import { OpenAiGatewayService } from "../services/openai-gateway.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
+import { registerUsageRoutes } from "./usage-routes.js";
+import { registerOtelRoutes } from "./otel-routes.js";
+import { bindUserUsage } from "../services/user-usage.js";
 import { TenantService } from "../services/tenants.js";
 import { registerMigrationRoutes } from "./migration-routes.js";
 import { registerSkillRoutes } from "./skill-routes.js";
@@ -283,10 +297,7 @@ async function resolveUpstreamOauthClient(opts: {
         instanceId: opts.record.instanceId,
       });
     } catch (err) {
-      console.warn(
-        "[oauth] persist upstream client failed:",
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("oauth.persist_client", err, { subsystem: "oauth" });
     }
   }
 
@@ -467,28 +478,23 @@ export async function createApiApp(deps: {
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
   const automation = new AgentAutomationService(db);
 
-  // Request timing: log any /api call > 300ms (or all when ZAKURA_HTTP_TIMING=1)
-  app.use("/api/*", async (c, next) => {
-    const t0 = performance.now();
-    await next();
-    const ms = performance.now() - t0;
-    const always = process.env.ZAKURA_HTTP_TIMING === "1";
-    if (always || ms >= 300) {
-      console.warn(
-        `[http] ${c.req.method} ${c.req.path} ${ms.toFixed(0)}ms status=${c.res.status}`,
-      );
-    }
-  });
+  mountPlatformProbes(app as unknown as import("hono").Hono);
 
   app.use("/api/*", async (c, next) => {
     const publicPaths = new Set([
       "/api/health",
+      "/api/livez",
+      "/api/ready",
+      "/api/readyz",
+      "/api/metrics",
       "/api/platform",
       "/api/setup",
       "/api/auth/login",
       "/api/oauth/authorize-info",
       "/api/mcp/upstream-oauth/callback",
       "/api/runtime-nodes/register",
+      "/api/otel/config",
+      "/api/otel/v1/logs",
     ]);
     const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
@@ -523,7 +529,15 @@ export async function createApiApp(deps: {
           if (session) c.set("session", session);
         }
       }
-      await next();
+      if (path === "/api/otel/config" || path === "/api/otel/v1/logs") {
+        const auth = c.req.header("authorization");
+        const token = extractBearer(auth) ?? c.req.header("x-zakura-session") ?? undefined;
+        if (token) {
+          const session = verifySession(config.secret, token);
+          if (session) c.set("session", session);
+        }
+      }
+      await withLogContext(idsFromSession(c.get("session")), next);
       return;
     }
     // Runner heartbeat uses rnr_* bearer (handled in route)
@@ -531,7 +545,7 @@ export async function createApiApp(deps: {
       c.req.method === "POST" &&
       /^\/api\/runtime-nodes\/[^/]+\/heartbeat$/.test(c.req.path)
     ) {
-      await next();
+      await withLogContext(idsFromSession(c.get("session")), next);
       return;
     }
     // Host-served bootstrap script (token in query; validated in route)
@@ -539,7 +553,7 @@ export async function createApiApp(deps: {
       c.req.method === "GET" &&
       /^\/api\/runtime-nodes\/[^/]+\/bootstrap\.sh$/.test(c.req.path)
     ) {
-      await next();
+      await withLogContext(idsFromSession(c.get("session")), next);
       return;
     }
 
@@ -561,7 +575,7 @@ export async function createApiApp(deps: {
         );
       }
       c.set("session", session);
-      await next();
+      await withLogContext(idsFromSession(session), next);
       return;
     }
 
@@ -585,14 +599,17 @@ export async function createApiApp(deps: {
         // API keys are machine credentials — not tenant admins
         role: "api_key",
       });
-      await next();
+      await withLogContext(
+        idsFromSession({ userId: "api-key", tenantId: keyed.tenant.id }),
+        next,
+      );
       return;
     }
 
     return c.json({ error: "Unauthorized" }, 401);
   });
 
-  app.get("/api/health", (c) => c.json({ status: "ok", service: "zakura" }));
+  registerOtelRoutes(app);
 
   const handleEmailInbound = async (c: Context<{ Variables: AppVariables }>) => {
     if (!emailInbound) return c.json({ error: "邮箱入站服务未启用" }, 503);
@@ -1818,10 +1835,7 @@ export async function createApiApp(deps: {
         );
         result = { ...result, agent };
       } catch (err) {
-        console.warn(
-          "[api] default MCP auto-install failed:",
-          err instanceof Error ? err.message : err,
-        );
+        recordPlatformFault("api.default_mcp_install", err, { subsystem: "api" });
       }
       try {
         await integrationCatalog.auth.ensureInstallations(
@@ -1830,10 +1844,7 @@ export async function createApiApp(deps: {
           [result.agent.id],
         );
       } catch (err) {
-        console.warn(
-          "[api] browser-notifications auto-install failed:",
-          err instanceof Error ? err.message : err,
-        );
+        recordPlatformFault("api.browser_notifications_install", err, { subsystem: "api" });
       }
       return c.json(
         {
@@ -1894,8 +1905,8 @@ export async function createApiApp(deps: {
           providerId: t.providerId,
           inputSchema: t.inputSchema,
         }));
-      } catch (err) {
-        console.warn(`[api] listToolsForAgent ${agent.slug}:`, err);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "api_list_tools" });
       }
       try {
         const listed = await gateway.listResourcesForAgent(agent);
@@ -1907,8 +1918,8 @@ export async function createApiApp(deps: {
           title: r.title,
           providerId: r.providerId,
         }));
-      } catch (err) {
-        console.warn(`[api] listResourcesForAgent ${agent.slug}:`, err);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "api_list_resources" });
       }
       try {
         const listed = await gateway.listPromptsForAgent(agent);
@@ -1919,8 +1930,8 @@ export async function createApiApp(deps: {
           arguments: p.arguments,
           providerId: p.providerId,
         }));
-      } catch (err) {
-        console.warn(`[api] listPromptsForAgent ${agent.slug}:`, err);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "api_list_prompts" });
       }
       try {
         const listed = await gateway.listResourceTemplatesForAgent(agent);
@@ -1932,16 +1943,16 @@ export async function createApiApp(deps: {
           title: t.title,
           providerId: t.providerId,
         }));
-      } catch (err) {
-        console.warn(`[api] listResourceTemplatesForAgent ${agent.slug}:`, err);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "api_list_resource_templates" });
       }
 
       const container = await agentService.workspace.getWorkspaceContainer(agent.id);
       let desktop: Awaited<ReturnType<typeof agentService.workspace.getDesktopInfo>>;
       try {
         desktop = await agentService.workspace.getDesktopInfo(agent);
-      } catch (err) {
-        console.warn(`[api] getDesktopInfo ${agent.slug}:`, err);
+      } catch {
+        getTelemetry().platformFaults.inc({ kind: "api.desktop_info" });
         desktop = {
           enabled: false,
           computer: false,
@@ -1976,7 +1987,7 @@ export async function createApiApp(deps: {
         desktop,
       });
     } catch (err) {
-      console.error("[api] GET /api/agents/:id", err);
+      recordPlatformFault("api.agent_get", err, { subsystem: "api" });
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
@@ -2563,9 +2574,13 @@ export async function createApiApp(deps: {
     void cloudStore
       .recoverInterruptedRuns()
       .then((n) => {
-        if (n > 0) console.log(`[cloud-agent] recovered ${n} interrupted run(s)`);
+        if (n > 0) log.info("boot.cloud_agent_recovered", { count: n });
       })
-      .catch((err) => console.warn("[cloud-agent] recover interrupted runs failed:", err));
+      .catch((err) =>
+        recordPlatformFault("cloud_agent.recover_interrupted", err, {
+          subsystem: "cloud_agent",
+        }),
+      );
     if (modelRouter) {
       const { AgentHooksService } = await import("../services/agent-hooks.js");
       const agentHooks = new AgentHooksService(agentService.workspace);
@@ -2598,10 +2613,9 @@ export async function createApiApp(deps: {
         .from(tenants)
         .then((rows) => Promise.all(rows.map((row) => remoteRuntime?.startTenant(row.id))))
         .catch((error) => {
-          console.warn(
-            "[remote-agent] failed to start persisted bindings:",
-            error instanceof Error ? error.message : error,
-          );
+          recordPlatformFault("remote_agent.start_bindings", error, {
+            subsystem: "remote_agent",
+          });
         });
       // MCP 客户端可经 re_spawn_subagent 在云端运行子代理
       gateway.setSubagentRunner({
@@ -2613,6 +2627,8 @@ export async function createApiApp(deps: {
         store: cloudStore,
         runtime: cloudRuntime,
         modelRouter,
+        gateway,
+        skills,
       });
       registerAutomationRoutes(app, { agentService, automation });
       emailInbound = new EmailInboundService(
@@ -2640,6 +2656,8 @@ export async function createApiApp(deps: {
           startNextQueued: async () => {},
         },
         modelRouter,
+        gateway,
+        skills,
       });
       // 自动化 CRUD 仍可配置；触发会失败直至模型路由可用
       registerAutomationRoutes(app, { agentService, automation });
@@ -2893,7 +2911,7 @@ export async function createApiApp(deps: {
         c.req.raw,
       );
     } catch (err) {
-      console.warn("[remote-agent] webhook failed:", err);
+      recordPlatformFault("remote_agent.webhook", err, { subsystem: "remote_agent" });
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });
@@ -2908,6 +2926,9 @@ export async function createApiApp(deps: {
     runtimeNodes,
     networkSettings,
   });
+  if (config.edition === "saas") {
+    registerUsageRoutes(app as never, { db, usage: bindUserUsage(db) });
+  }
 
   if (config.edition === "saas") {
     const saas = await loadSaasServer();
@@ -4637,10 +4658,7 @@ export async function createApiApp(deps: {
     if (scope === "tenant") {
       await skills?.syncBuiltins(session.tenantId);
       await integrationCatalog.ensureBrowserNotificationsInstalled(session.tenantId).catch((err) => {
-        console.warn(
-          "[api] browser-notifications ensure failed:",
-          err instanceof Error ? err.message : err,
-        );
+        recordPlatformFault("api.browser_notifications_ensure", err, { subsystem: "api" });
       });
     }
     const scopeKey = scope === "platform" ? "platform" : session.tenantId;
@@ -4739,10 +4757,7 @@ export async function createApiApp(deps: {
           await skills.uninstall(tenantId, agentId, skill.ref);
         }
       } catch (err) {
-        console.warn(
-          `[connector] sync skill ${skill.ref} (${mode}):`,
-          err instanceof Error ? err.message : err,
-        );
+        getTelemetry().platformFaults.inc({ kind: "connector.sync_skill" });
       }
     }
   }

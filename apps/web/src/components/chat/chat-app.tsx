@@ -24,9 +24,21 @@ import {
   SquarePen,
   Square,
   Trash2,
+  Loader2,
   X,
 } from "lucide-react";
-import type { CloudAgentEvent, CloudAgentRunOptions, CloudAgentFollowUpMode } from "@zakura/shared";
+import type {
+  CloudAgentEvent,
+  CloudAgentFollowUpMode,
+  CloudAgentRunOptions,
+  ComposerCapabilities,
+} from "@zakura/shared";
+import {
+  DEFAULT_CONTEXT_LIMIT_TOKENS,
+  estimateEventPayloadTokens,
+  estimateTextTokens,
+  estimateTokensFromChars,
+} from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -65,12 +77,15 @@ import {
   buildConversationTurns,
   cancelCloudRun,
   compactCloudSession,
+  continueCloudRun,
   createCloudSession,
+  fetchComposerCapabilities,
   deleteCloudSession,
   forkCloudSession,
   getCloudConfig,
   getCloudSession,
   interruptWithQueuedMessage,
+  lastCancelledRunId,
   listChatModels,
   listCloudSessions,
   regenerateCloudRun,
@@ -109,7 +124,7 @@ import { RunLogDrawer } from "./run-log-drawer";
 const AGENT_KEY = "zakura_chat_agent";
 const REASONING_KEY = "zakura_chat_reasoning";
 const DRAFT_KEY_PREFIX = "zakura_chat_draft";
-const DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000;
+
 
 /** 把当前 agent/session 写回地址栏，刷新后仍停在同一对话；新对话则清掉 session */
 function syncChatUrl(agentId: string | null, sessionId: string | null) {
@@ -157,21 +172,26 @@ function groupSessions(sessions: CloudSession[]): Array<{
   return groups.filter((g) => g.items.length > 0);
 }
 
-function eventTextWeight(ev: CloudAgentEvent): number {
-  const p = ev.payload as Record<string, unknown>;
-  let chars = 40;
-  if (typeof p.content === "string") chars += p.content.length;
-  if (typeof p.delta === "string") chars += p.delta.length;
-  if (typeof p.resultText === "string") chars += Math.min(p.resultText.length, 12_000);
-  if (typeof p.arguments === "string") chars += Math.min(p.arguments.length, 4_000);
-  if (Array.isArray(p.attachments)) {
-    chars += p.attachments.length * 160;
-  }
-  return chars;
-}
-
 function latestCompaction(events: CloudAgentEvent[]) {
   return [...events].reverse().find((ev) => ev.type === "context_compacted") ?? null;
+}
+
+/** 最近一次模型调用的 measured prompt_tokens（run_log） */
+function latestMeasuredPromptTokens(events: CloudAgentEvent[]): number | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i]!;
+    if (ev.type !== "run_log") continue;
+    const data = (ev.payload as { data?: Record<string, unknown> }).data;
+    if (!data) continue;
+    const n =
+      typeof data.promptTokens === "number"
+        ? data.promptTokens
+        : typeof data.calibratedPromptTokens === "number"
+          ? data.calibratedPromptTokens
+          : null;
+    if (n != null && n > 0) return n;
+  }
+  return null;
 }
 
 function buildContextWindowInfo(
@@ -183,18 +203,43 @@ function buildContextWindowInfo(
   const compactionPayload = (compaction?.payload ?? {}) as Record<string, unknown>;
   const summary =
     typeof compactionPayload.summary === "string" ? compactionPayload.summary : "";
-  const charsAfterCompaction = events
+
+  // 与压缩点之后的事件 + 摘要，用 CJK 感知估算（与服务端一致）
+  let estimatedTokens = events
     .filter((ev) => ev.seq > compactionSeq)
-    .reduce((sum, ev) => sum + eventTextWeight(ev), 0);
-  const summaryChars = summary ? summary.length + 80 : 0;
-  const usedTokens = Math.ceil((charsAfterCompaction + summaryChars) / 4);
-  const limitTokens = modelItem?.contextLimit ?? DEFAULT_CONTEXT_LIMIT_TOKENS;
-  const beforeChars =
-    typeof compactionPayload.beforeChars === "number" ? compactionPayload.beforeChars : 0;
-  const afterChars =
-    typeof compactionPayload.afterChars === "number" ? compactionPayload.afterChars : 0;
+    .reduce(
+      (sum, ev) => sum + estimateEventPayloadTokens(ev.payload as Record<string, unknown>),
+      0,
+    );
+  if (summary) estimatedTokens += estimateTextTokens(summary) + 20;
+
+  const measured = latestMeasuredPromptTokens(events);
+  // 有 measured 时优先（更接近真实 prompt）；压缩后 measured 可能偏旧，仍作上限参考
+  const usedTokens =
+    measured != null && measured > 0
+      ? Math.max(estimatedTokens, Math.min(measured, estimatedTokens * 2.2))
+      : estimatedTokens;
+
+  const limitTokens =
+    modelItem?.contextLimit && modelItem.contextLimit > 0
+      ? modelItem.contextLimit
+      : DEFAULT_CONTEXT_LIMIT_TOKENS;
+
+  const beforeTokens =
+    typeof compactionPayload.beforeTokens === "number"
+      ? compactionPayload.beforeTokens
+      : typeof compactionPayload.beforeChars === "number"
+        ? estimateTokensFromChars(compactionPayload.beforeChars)
+        : 0;
+  const afterTokens =
+    typeof compactionPayload.afterTokens === "number"
+      ? compactionPayload.afterTokens
+      : typeof compactionPayload.afterChars === "number"
+        ? estimateTokensFromChars(compactionPayload.afterChars)
+        : 0;
+
   return {
-    usedTokens,
+    usedTokens: Math.max(0, Math.round(usedTokens)),
     limitTokens,
     ratio: limitTokens > 0 ? usedTokens / limitTokens : 0,
     messageCount: events.filter(
@@ -205,12 +250,12 @@ function buildContextWindowInfo(
     lastSummary: summary || undefined,
     lastCompactedAt: compaction?.createdAt,
     lastSavedTokens:
-      beforeChars > afterChars ? Math.ceil((beforeChars - afterChars) / 4) : undefined,
+      beforeTokens > afterTokens ? Math.round(beforeTokens - afterTokens) : undefined,
     systemSessionId:
       typeof compactionPayload.systemSessionId === "string"
         ? compactionPayload.systemSessionId
         : undefined,
-    source: modelItem?.contextLimit ? "model" : "estimated",
+    source: measured != null ? "measured" : modelItem?.contextLimit ? "model" : "estimated",
   };
 }
 
@@ -225,6 +270,11 @@ export function ChatApp() {
   /** 会话类型过滤：chat=日常对话；subagent/delegate/system=系统产生的对话记录 */
   const [kindFilter, setKindFilter] = useState<CloudAgentSessionKind | "all">("chat");
   const [events, setEvents] = useState<CloudAgentEvent[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const hasMoreHistoryRef = useRef(false);
+  const loadingOlderRef = useRef(false);
+  const oldestSeqRef = useRef(0);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
@@ -269,6 +319,12 @@ export function ChatApp() {
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
   /** 正在上传的文件（含进度），用于在输入框里显示占位片 */
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  const [composerCap, setComposerCap] = useState<ComposerCapabilities>({
+    skills: [],
+    groups: [],
+  });
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [disabledGroupIds, setDisabledGroupIds] = useState<string[]>([]);
   /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
   const [queue, setQueue] = useState<CloudAgentQueuedMessage[]>([]);
   /**
@@ -339,6 +395,8 @@ export function ChatApp() {
    * 因此「有排队消息」也按运行中展示，避免出队间隙闪成空闲。
    */
   const runActive = Boolean(activeRunId) || queue.length > 0;
+  const canContinue =
+    Boolean(sessionId) && hasChatRoute && !runActive && !sending && Boolean(lastCancelledRunId(events));
 
   // 串行发送链在 state 提交前就可能读取会话 id，保持同步镜像
   useEffect(() => {
@@ -388,6 +446,7 @@ export function ChatApp() {
   const {
     scrollRef,
     contentRef,
+    scrollEl,
     atBottom,
     scrollToBottom,
     sync: syncScroll,
@@ -407,10 +466,26 @@ export function ChatApp() {
   }, [isMobile]);
 
   const runOptions = useMemo<CloudAgentRunOptions | undefined>(() => {
-    if (reasoning === "default") return undefined;
-    if (reasoning === "off") return { reasoning: { enabled: false } };
-    return { reasoning: { enabled: true, effort: reasoning } };
-  }, [reasoning]);
+    const options: CloudAgentRunOptions = {};
+    if (reasoning === "off") options.reasoning = { enabled: false };
+    else if (reasoning !== "default") options.reasoning = { enabled: true, effort: reasoning };
+    if (selectedSkills.length > 0) options.skills = selectedSkills;
+    if (disabledGroupIds.length > 0 && composerCap.groups.length > 0) {
+      const disabled = new Set(disabledGroupIds);
+      const tools: string[] = [];
+      const seen = new Set<string>();
+      for (const group of composerCap.groups) {
+        if (!disabled.has(group.id)) continue;
+        for (const name of group.tools) {
+          if (seen.has(name)) continue;
+          seen.add(name);
+          tools.push(name);
+        }
+      }
+      if (tools.length > 0) options.disabledTools = tools;
+    }
+    return Object.keys(options).length > 0 ? options : undefined;
+  }, [reasoning, selectedSkills, disabledGroupIds, composerCap.groups]);
 
   // —— 鉴权 + Agent 列表 ——
   useEffect(() => {
@@ -509,6 +584,10 @@ export function ChatApp() {
       setSessionId(sid);
       sessionIdRef.current = sid;
       setEvents(res.events);
+      const hasMore = Boolean(res.hasMore);
+      setHasMoreHistory(hasMore);
+      hasMoreHistoryRef.current = hasMore;
+      oldestSeqRef.current = res.events[0]?.seq ?? 0;
       const sessionHasModel = Boolean(res.session.model);
       setModel(sessionHasModel ? res.session.model! : agentDefaultsRef.current.model);
       setModelRouteId(
@@ -545,6 +624,70 @@ export function ChatApp() {
     [],
   );
 
+  const loadOlderMessages = useCallback(async () => {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    const beforeSeq = oldestSeqRef.current;
+    if (!aid || !sid || beforeSeq <= 0) return;
+    if (loadingOlderRef.current || !hasMoreHistoryRef.current) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const prevHeight = scrollEl?.scrollHeight ?? 0;
+    const prevTop = scrollEl?.scrollTop ?? 0;
+    try {
+      const res = await getCloudSession(aid, sid, { beforeSeq });
+      const hasMore = Boolean(res.hasMore) && res.events.length > 0;
+      hasMoreHistoryRef.current = hasMore;
+      setHasMoreHistory(hasMore);
+      if (res.events.length === 0) return;
+      setEvents((prev) => {
+        const seen = new Set(prev.map((e) => e.seq));
+        const older = res.events.filter((e) => !seen.has(e.seq));
+        if (older.length === 0) {
+          hasMoreHistoryRef.current = false;
+          setHasMoreHistory(false);
+          return prev;
+        }
+        const merged = [...older, ...prev];
+        oldestSeqRef.current = merged[0]?.seq ?? beforeSeq;
+        return merged;
+      });
+      requestAnimationFrame(() => {
+        if (!scrollEl) return;
+        scrollEl.scrollTop = prevTop + (scrollEl.scrollHeight - prevHeight);
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "加载更早消息失败");
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [agentId, scrollEl]);
+
+  const resetConversationEvents = useCallback(() => {
+    setEvents([]);
+    setHasMoreHistory(false);
+    hasMoreHistoryRef.current = false;
+    oldestSeqRef.current = 0;
+  }, []);
+
+  useEffect(() => {
+    if (!scrollEl) return;
+    const onScroll = () => {
+      if (scrollEl.scrollTop < 120) void loadOlderMessages();
+    };
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => scrollEl.removeEventListener("scroll", onScroll);
+  }, [scrollEl, loadOlderMessages]);
+
+  // 首屏未撑满视口时继续回拉，避免「还有历史但滚不到顶」
+  useEffect(() => {
+    if (!scrollEl || !hasMoreHistory || loadingOlder) return;
+    if (scrollEl.scrollHeight <= scrollEl.clientHeight + 48) {
+      void loadOlderMessages();
+    }
+  }, [scrollEl, hasMoreHistory, loadingOlder, events.length, loadOlderMessages]);
+
   // —— 切换 Agent：加载会话/配置/模型 ——
   useEffect(() => {
     if (!agentId || !authed) return;
@@ -554,6 +697,9 @@ export function ChatApp() {
     previewsRef.current = {};
     setAttachmentPreviews({});
     setAttachments([]);
+    setSelectedSkills([]);
+    setDisabledGroupIds([]);
+    setComposerCap({ skills: [], groups: [] });
     setFileRequest(null);
     let cancelled = false;
     (async () => {
@@ -567,6 +713,11 @@ export function ChatApp() {
           listChatModels(),
         ]);
         if (cancelled) return;
+        void fetchComposerCapabilities(agentId)
+          .then((cap) => {
+            if (!cancelled) setComposerCap(cap);
+          })
+          .catch(() => {});
         setSessions(list);
         setHasChatRoute(cfg.hasChatRoute);
         setSystemPrompt(cfg.cloud.systemPrompt ?? "");
@@ -587,7 +738,7 @@ export function ChatApp() {
         // 有待发送 prompt 时开新会话草稿，避免挂在旧对话上
         if (pendingPromptRef.current) {
           setSessionId(null);
-          setEvents([]);
+          resetConversationEvents();
           seqRef.current = 0;
           setSessions(list);
         } else if (pending && pending.agentId === agentId) {
@@ -596,7 +747,7 @@ export function ChatApp() {
           await loadSession(agentId, list[0]!.id);
         } else {
           setSessionId(null);
-          setEvents([]);
+          resetConversationEvents();
           seqRef.current = 0;
         }
         if (!cancelled) setAgentReady(true);
@@ -607,7 +758,7 @@ export function ChatApp() {
     return () => {
       cancelled = true;
     };
-  }, [agentId, authed, loadSession]);
+  }, [agentId, authed, loadSession, resetConversationEvents]);
 
   // agentReady 后再同步 URL，避免首屏加载深链 session 前被清掉
   useEffect(() => {
@@ -630,7 +781,7 @@ export function ChatApp() {
         setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
         setSessionId(created.id);
         seqRef.current = 0;
-        setEvents([]);
+        resetConversationEvents();
         await sendCloudMessage(agentId, created.id, prompt, null);
         await refreshSessions();
         await loadSession(agentId, created.id);
@@ -652,7 +803,7 @@ export function ChatApp() {
         setInput("");
       }
     })();
-  }, [agentId, agentReady, authed, loadSession, refreshSessions]);
+  }, [agentId, agentReady, authed, loadSession, refreshSessions, resetConversationEvents]);
 
   useEffect(() => {
     if (sending || !focusComposerAfterPromptRef.current) return;
@@ -677,7 +828,7 @@ export function ChatApp() {
         if (list[0]) await loadSession(agentId, list[0].id);
         else {
           setSessionId(null);
-          setEvents([]);
+          resetConversationEvents();
           seqRef.current = 0;
         }
       } catch (err) {
@@ -808,7 +959,7 @@ export function ChatApp() {
     if (!agentId) return;
     setSessionId(null);
     sessionIdRef.current = null;
-    setEvents([]);
+    resetConversationEvents();
     setVariantByMessage({});
     setBranchByParent({});
     seqRef.current = 0;
@@ -816,6 +967,7 @@ export function ChatApp() {
     setQueue([]);
     setEditingTarget(null);
     clearAttachments();
+    setSelectedSkills([]);
     composerRef.current?.focus();
   }
 
@@ -841,7 +993,7 @@ export function ChatApp() {
         setSessionId(created.id);
         sessionIdRef.current = created.id;
         seqRef.current = 0;
-        setEvents([]);
+        resetConversationEvents();
         await sendCloudMessage(agentId, created.id, prompt, null, undefined, runOptions);
         await refreshSessions();
         focusComposerAfterPromptRef.current = true;
@@ -865,7 +1017,7 @@ export function ChatApp() {
         if (next[0]) await loadSession(agentId, next[0].id);
         else {
           setSessionId(null);
-          setEvents([]);
+          resetConversationEvents();
           seqRef.current = 0;
         }
       }
@@ -884,7 +1036,7 @@ export function ChatApp() {
         if (next[0]) await loadSession(agentId, next[0].id);
         else {
           setSessionId(null);
-          setEvents([]);
+          resetConversationEvents();
           seqRef.current = 0;
         }
       }
@@ -1165,6 +1317,7 @@ export function ChatApp() {
     sentAttachments: CloudAgentAttachment[],
     parentRunId: string | null | undefined,
     sentPreviews: Record<string, string>,
+    sentSkills: string[],
   ) {
     if (!agentId) return;
     setSending(true);
@@ -1187,7 +1340,7 @@ export function ChatApp() {
         sessionIdRef.current = created.id;
         seqRef.current = 0;
         queueSeqRef.current = 0;
-        setEvents([]);
+        resetConversationEvents();
         setQueue([]);
         sid = created.id;
       }
@@ -1227,6 +1380,7 @@ export function ChatApp() {
       setAttachments(sentAttachments);
       previewsRef.current = { ...previewsRef.current, ...sentPreviews };
       setAttachmentPreviews({ ...previewsRef.current });
+      setSelectedSkills(sentSkills);
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setSending(false);
@@ -1243,6 +1397,7 @@ export function ChatApp() {
     if ((!content && attachments.length === 0) || uploads.length > 0) return;
     const sentAttachments = attachments;
     const sentPreviews = previewsRef.current;
+    const sentSkills = selectedSkills;
     const parentRunId = parentForSend();
     setInput("");
     latestInputRef.current = "";
@@ -1250,6 +1405,7 @@ export function ChatApp() {
     previewsRef.current = {};
     setAttachmentPreviews({});
     setAttachments([]);
+    setSelectedSkills([]);
 
     // 编辑态：不追加新回合，而是按 parentKey 建分支变体
     const editing = editingTarget;
@@ -1263,7 +1419,9 @@ export function ChatApp() {
 
     sendChainRef.current = sendChainRef.current
       .catch(() => {})
-      .then(() => dispatchOutbound(content, sentAttachments, parentRunId, sentPreviews));
+      .then(() =>
+        dispatchOutbound(content, sentAttachments, parentRunId, sentPreviews, sentSkills),
+      );
   }
 
   async function handleRegenerate(messageId: string) {
@@ -1322,6 +1480,23 @@ export function ChatApp() {
       await cancelCloudRun(agentId, sessionId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleContinue() {
+    if (!agentId || !sessionId || runActive || sending) return;
+    setSending(true);
+    try {
+      let sid = sessionId;
+      if (isGatewaySession) {
+        sid = await forkToWritableSession(sessionId);
+      }
+      await continueCloudRun(agentId, sid, runOptions);
+      await refreshSessions();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
     }
   }
 
@@ -1861,11 +2036,25 @@ export function ChatApp() {
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
           <div ref={contentRef} className="flex min-h-full flex-col">
+            {(loadingOlder || hasMoreHistory) && !emptyConversation && (
+              <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+                {loadingOlder ? (
+                  <>
+                    <Loader2 className="size-3.5 animate-spin" />
+                    加载更早消息…
+                  </>
+                ) : (
+                  "上滑加载更早消息"
+                )}
+              </div>
+            )}
             <ChatMessages
               turns={turns}
               runActive={runActive}
               activeRunId={activeRunId}
               agentName={agent?.name}
+              agentId={agentId}
+              sessionId={sessionId}
               canAct={hasChatRoute && !runActive && !sending}
               editingMessageId={editingTarget?.messageId ?? null}
               onRegenerate={(mid) => void handleRegenerate(mid)}
@@ -1898,6 +2087,8 @@ export function ChatApp() {
             onValueChange={setInput}
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
+            showContinue={canContinue}
+            onContinue={() => void handleContinue()}
             textareaRef={composerRef}
             routeReady={hasChatRoute}
             sending={sending}
@@ -1923,12 +2114,26 @@ export function ChatApp() {
             canAttach={Boolean(agent?.enableComputer)}
             attachHint={
               agent?.enableComputer
-                ? "上传文件到工作区（也可直接拖入或粘贴）"
-                : "需要开启电脑环境才能上传文件"
+                ? "上传文件"
+                : "需要开启电脑环境"
             }
             onAttachFiles={(files) => void handleAttachFiles(files)}
             onRemoveAttachment={removeAttachment}
             onCancelUpload={cancelUpload}
+            skills={composerCap.skills}
+            selectedSkills={selectedSkills}
+            onToggleSkill={(name) =>
+              setSelectedSkills((prev) =>
+                prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name],
+              )
+            }
+            toolGroups={composerCap.groups}
+            disabledGroupIds={disabledGroupIds}
+            onToggleGroup={(id) =>
+              setDisabledGroupIds((prev) =>
+                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+              )
+            }
             models={modelItems}
             model={displayModel}
             modelRouteId={modelRouteId}

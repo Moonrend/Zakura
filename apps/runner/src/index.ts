@@ -1,9 +1,9 @@
 import { serve } from "@hono/node-server";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { initTelemetry, log } from "@zakura/core";
 import { createAuthConfig } from "./auth.js";
 import { createRunnerApp } from "./app.js";
-import { collectHostInfo } from "./host-info.js";
 import { startServerSync } from "./server-sync.js";
 
 const VERSION = "0.1.0";
@@ -56,6 +56,7 @@ export async function startRunner(opts?: RunnerLaunchOptions): Promise<{
     : loadRunnerEnv();
 
   mkdirSync(env.storageRoot, { recursive: true });
+  const telemetry = initTelemetry({ service: "zakura-runner", version: VERSION });
   const auth = createAuthConfig(env.token);
   const app = createRunnerApp({
     storageRoot: env.storageRoot,
@@ -66,14 +67,16 @@ export async function startRunner(opts?: RunnerLaunchOptions): Promise<{
     serverUrl: env.serverUrl,
   });
 
-  const hostInfo = collectHostInfo(env.storageRoot, env.publicUrl);
-  console.log(
-    `[runner] starting version=${VERSION} port=${env.port} storage=${env.storageRoot} host=${hostInfo.hostname}`,
-  );
+  log.info("process.starting", { version: VERSION, bind_port: env.port });
 
   return new Promise((resolvePromise, reject) => {
     const server = serve({ fetch: app.fetch, port: env.port, hostname: env.host }, (info) => {
-      console.log(`[runner] listening on http://${info.address}:${info.port}`);
+      telemetry.health.setReady(true);
+      log.info("process.ready", {
+        version: VERSION,
+        bind_host: info.address,
+        bind_port: info.port,
+      });
 
       let stopSync: (() => void) | undefined;
       const serverUrl = env.serverUrl?.trim();
@@ -86,9 +89,7 @@ export async function startRunner(opts?: RunnerLaunchOptions): Promise<{
           publicUrl: env.publicUrl,
         }).stop;
       } else {
-        console.warn(
-          "[runner] ZAKURA_RUNNER_SERVER_URL unset — skip register/heartbeat (cloud will see offline)",
-        );
+        log.warn("runner.sync_disabled");
       }
 
       resolvePromise({
@@ -113,7 +114,7 @@ const isDirectRun =
 
 if (isDirectRun) {
   startRunner().catch((err) => {
-    console.error("[runner] fatal", err);
+    log.fatal("process.fatal", { err });
     process.exit(1);
   });
 }

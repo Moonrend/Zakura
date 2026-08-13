@@ -4,6 +4,8 @@ import {
   scrubHostPathsInMessage,
   textResult,
   unwrapShellCommand,
+  formatShellToolResult,
+  tailText,
   type WorkspaceFs,
   type WorkspaceFsProvider,
 } from "@zakura/core";
@@ -446,20 +448,39 @@ export function listAgentNativeTools(
       tool(
         "shell_exec",
         [
-          `Run any shell command in the agent workspace container via bash -lc.`,
-          `cwd defaults to ${AGENT_WORKSPACE_ROOT} (bind-mounted host workspace — same files as fs_* tools).`,
-          `Preinstalled: python3/pip/venv, node/npm/npx, gcc/g++/make, git, jq, rg, fd, sqlite3, curl/wget.`,
-          `Write project files under ${AGENT_WORKSPACE_ROOT} so the console file browser can see them.`,
-          `Caches: ${AGENT_WORKSPACE_ROOT}/.cache/{npm,pip}. Requires workspace started.`,
+          `Run a shell command in the agent workspace via bash -lc (PTY, stdin attached).`,
+          `cwd defaults to ${AGENT_WORKSPACE_ROOT}. Output streams to the user live.`,
+          `If the process is still running when this call returns (prompt / idle / wait_ms), you get status=running and job_id.`,
+          `Continue with the same tool: pass job_id to wait longer, stdin (include a trailing newline) to answer prompts, or kill=true to stop it.`,
+          `Prefer noninteractive flags (-y, DEBIAN_FRONTEND=noninteractive) when you do not need a prompt.`,
         ].join(" "),
         {
           type: "object",
-          required: ["command"],
           properties: {
             command: {
               type: "string",
               description:
-                "Arbitrary shell command (no allowlist). Do not wrap the whole command in quotes. Example: python3 main.py",
+                "Shell command to start (not required when resuming with job_id). Do not wrap the whole command in quotes. Example: python3 main.py",
+            },
+            job_id: {
+              type: "string",
+              description: "Resume a still-running job from a previous shell_exec call",
+            },
+            stdin: {
+              type: "string",
+              description:
+                "Bytes to write to the process stdin. Include a trailing newline for line-based prompts.",
+            },
+            wait_ms: {
+              type: "integer",
+              minimum: 0,
+              maximum: 300000,
+              description:
+                "Max milliseconds to wait before returning (default = timeout×1000). 0 = return immediately after start. Idle prompts still return sooner.",
+            },
+            kill: {
+              type: "boolean",
+              description: "If true, terminate the job_id process",
             },
             working_dir: {
               type: "string",
@@ -470,7 +491,7 @@ export function listAgentNativeTools(
               minimum: 1,
               maximum: 300,
               default: 300,
-              description: "Seconds before the command is terminated (default 300)",
+              description: "Hard-kill seconds for a newly started command (default 300)",
             },
           },
         },
@@ -867,6 +888,7 @@ export async function callAgentNativeTool(
   workspaceFsProvider?: WorkspaceFsProvider | null,
   exposures?: import("./port-exposures.js").ExposureService | null,
   fileShares?: import("./file-shares.js").FileShareService | null,
+  extra?: { onProgress?: (message: string, data?: Record<string, unknown>) => void },
 ): Promise<McpToolResult> {
   // 提升到 try 外，catch 里才能 scrub 宿主路径
   let fsOnce: WorkspaceFs | null = null;
@@ -1303,21 +1325,66 @@ export async function callAgentNativeTool(
         });
       }
       case "shell_exec": {
+        const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
         const command = unwrapShellCommand(String(args.command ?? ""));
-        if (!command.trim()) return textResult("command is required", true);
+        const stdin = typeof args.stdin === "string" ? args.stdin : undefined;
+        const kill = args.kill === true;
+        if (!jobId && !command.trim()) {
+          return textResult("command or job_id is required", true);
+        }
         const timeoutSeconds =
           typeof args.timeout === "number" && args.timeout > 0
             ? Math.min(Math.ceil(args.timeout), 300)
             : 300;
-        const result = await workspace.execInWorkspace(
+        const waitMs =
+          typeof args.wait_ms === "number" && args.wait_ms >= 0
+            ? Math.min(Math.floor(args.wait_ms), 300_000)
+            : timeoutSeconds * 1000;
+        const emit = (snap: {
+          jobId: string;
+          stdout: string;
+          stderr: string;
+          running: boolean;
+        }) => {
+          extra?.onProgress?.("shell", {
+            jobId: snap.jobId,
+            stdout: tailText(snap.stdout),
+            stderr: tailText(snap.stderr),
+            running: snap.running,
+          });
+        };
+        const workingDir =
+          typeof args.working_dir === "string" ? args.working_dir : undefined;
+        if (jobId) {
+          if (kill) {
+            const snap = await workspace.killShellJob(agent, jobId);
+            emit(snap);
+            return okJson(formatShellToolResult(snap));
+          }
+          const snap = await workspace.waitShellJob(agent, jobId, waitMs, {
+            stdin,
+            onOutput: emit,
+          });
+          emit(snap);
+          return okJson(formatShellToolResult(snap));
+        }
+        const started = await workspace.startShellJob(
           agent,
-          ["timeout", "--signal=TERM", "--kill-after=5s", `${timeoutSeconds}s`, "bash", "-lc", command],
+          ["bash", "-lc", command],
           {
-          workingDir: typeof args.working_dir === "string" ? args.working_dir : undefined,
-          timeoutMs: timeoutSeconds * 1000,
+            workingDir,
+            timeoutMs: timeoutSeconds * 1000,
+            stdin,
+            onOutput: emit,
           },
         );
-        return okJson(result);
+        emit(started);
+        if (waitMs <= 0) return okJson(formatShellToolResult(started));
+        const snap = await workspace.waitShellJob(agent, started.jobId, waitMs, {
+          onOutput: emit,
+        });
+        emit(snap);
+        return okJson(formatShellToolResult(snap));
       }
       case "browser_observe": {
         if (!browser) return textResult("Browser service not configured", true);

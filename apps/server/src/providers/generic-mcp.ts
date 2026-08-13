@@ -1,5 +1,5 @@
 import type { ProviderPlugin, InstanceHandle, ProviderContext } from "@zakura/core";
-import { textResult } from "@zakura/core";
+import { componentLogger, textResult } from "@zakura/core";
 import type {
   HealthResult,
   McpCompleteParams,
@@ -122,11 +122,7 @@ function runtimeCtx(handle: InstanceHandle): ProviderContext {
     db: dbRef,
     resolveEndpoint: (port, path = "") =>
       `http://127.0.0.1:${port}${path.startsWith("/") || !path ? path : `/${path}`}`,
-    logger: {
-      info: (msg, meta) => console.log(`[generic-mcp] ${msg}`, meta ?? ""),
-      warn: (msg, meta) => console.warn(`[generic-mcp] ${msg}`, meta ?? ""),
-      error: (msg, meta) => console.error(`[generic-mcp] ${msg}`, meta ?? ""),
-    },
+    logger: componentLogger("generic-mcp"),
   };
 }
 

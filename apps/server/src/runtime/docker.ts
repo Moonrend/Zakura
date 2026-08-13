@@ -4,9 +4,12 @@ import { PassThrough } from "node:stream";
 import {
   resolveDockerContextSocketPath,
   toDockerHostPath,
+  ShellJob,
+  bindExecStream,
   type ContainerRuntime,
   type CreateContainerOptions,
   type RunningContainer,
+  recordPlatformFault,
 } from "@zakura/core";
 import type { ContainerSpec } from "@zakura/shared";
 
@@ -239,7 +242,7 @@ export class DockerRuntime implements ContainerRuntime {
       } catch (err) {
         const msg = dockerErr(err).message;
         if (!/already (connected|exists)|endpoint with name/i.test(msg)) {
-          console.warn(`[docker] network connect: ${msg}`);
+          recordPlatformFault("docker.network_connect", msg, { dep: "docker" });
         }
       }
     }
@@ -342,6 +345,57 @@ export class DockerRuntime implements ContainerRuntime {
       stdout: demuxed.stdout,
       stderr: demuxed.stderr,
     };
+  }
+
+  /**
+   * PTY exec with stdin. Caller owns the ShellJob (registry / timeout / wait).
+   */
+  async execJob(
+    containerId: string,
+    command: string[],
+    opts: {
+      agentId: string;
+      workingDir?: string;
+      env?: Record<string, string>;
+      stdin?: string;
+    },
+  ): Promise<ShellJob> {
+    const container = this.docker.getContainer(containerId);
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      WorkingDir: opts.workingDir,
+      Env: opts.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: true,
+    })) as unknown as NodeJS.ReadWriteStream;
+    const job = new ShellJob({ agentId: opts.agentId });
+    bindExecStream(job, stream, {
+      inspect: () => exec.inspect(),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch {
+          /* process may already be gone */
+        }
+      },
+    });
+    if (opts.stdin) {
+      setTimeout(() => job.write(opts.stdin!), 30);
+    }
+    return job;
   }
 
   /**

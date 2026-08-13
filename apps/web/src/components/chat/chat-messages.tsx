@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BookmarkCheck,
-  Brain,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -30,12 +29,10 @@ import type {
   SharedFileAttachment,
   TimelineItem,
   TimelineMemoryItem,
-  TimelineToolCall,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
-import { Disclosure } from "@/components/ui/disclosure";
 import { ChatMarkdown } from "@/components/markdown/chat-markdown";
-import { ToolActivity } from "./tool-activity";
+import { ToolActivity, type ActivityStep } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 
 function isImageMime(mime: string, fileName: string): boolean {
@@ -279,83 +276,6 @@ function MemoryChip({ items }: { items: TimelineMemoryItem[] }) {
   );
 }
 
-function ReasoningBlock({
-  id,
-  content,
-  active,
-}: {
-  id: string;
-  content: string;
-  active: boolean;
-}) {
-  const [open, setOpen] = useState(active);
-  const wasActiveRef = useRef(active);
-
-  useEffect(() => {
-    const wasActive = wasActiveRef.current;
-    if (active && !wasActive) {
-      setOpen(true);
-    } else if (!active && wasActive) {
-      setOpen(false);
-    }
-    wasActiveRef.current = active;
-  }, [active]);
-
-  if (!content.trim()) return null;
-
-  return (
-    <div className="flex max-w-full min-w-0 flex-col items-start">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={`reasoning-${id}`}
-        onClick={() => {
-          setOpen((v) => !v);
-        }}
-        className={cn(
-          "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
-          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/50 hover:text-foreground",
-        )}
-      >
-        <span
-          className={cn(
-            "relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background",
-            active && "running-halo text-foreground/70",
-          )}
-        >
-          {active ? (
-            <span
-              className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
-              aria-hidden
-            />
-          ) : (
-            <Brain className="animate-pop size-3.5 opacity-70" />
-          )}
-        </span>
-        <span className={cn("min-w-0 truncate", active && "text-shimmer")}>
-          {active ? "思考中…" : "思考过程"}
-        </span>
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
-            open && "rotate-90",
-          )}
-        />
-      </button>
-      <Disclosure open={open} className="w-full max-w-[min(100%,42rem)]">
-        <div id={`reasoning-${id}`} className="min-w-0 py-1 pr-1 pl-[26px]">
-          <ChatMarkdown
-            content={content}
-            final={!active}
-            fade={active}
-            variant="muted"
-          />
-        </div>
-      </Disclosure>
-    </div>
-  );
-}
-
 /** 回答下方统一操作栏：复制 / 重新生成 / 来源 / 记忆 / 变体切换 */
 function AnswerToolbar({
   copyText,
@@ -432,7 +352,7 @@ function AnswerToolbar({
   );
 }
 
-/** 把回合条目渲染为块序列：连续 tool 合并为一组灰色文本行 */
+/** 把回合条目渲染为块序列：连续思考+工具合并为一组，正文开始后自动收成首条 */
 function renderRunItems(
   items: TimelineItem[],
   opts: {
@@ -440,14 +360,25 @@ function renderRunItems(
     canAct: boolean;
     onRetry: () => void;
     onOpenFile?: (path: string) => void;
+    agentId?: string | null;
+    sessionId?: string | null;
   },
 ) {
   const blocks: ReactNode[] = [];
-  let toolBuf: TimelineToolCall[] = [];
-  const flushTools = (key: string) => {
-    if (toolBuf.length === 0) return;
-    blocks.push(<ToolActivity key={key} calls={toolBuf} onOpenFile={opts.onOpenFile} />);
-    toolBuf = [];
+  let stepBuf: ActivityStep[] = [];
+  const flushSteps = (key: string, autoCollapse: boolean) => {
+    if (stepBuf.length === 0) return;
+    blocks.push(
+      <ToolActivity
+        key={key}
+        steps={stepBuf}
+        autoCollapse={autoCollapse}
+        onOpenFile={opts.onOpenFile}
+        agentId={opts.agentId}
+        sessionId={opts.sessionId}
+      />,
+    );
+    stepBuf = [];
   };
 
   let lastStatus: Extract<TimelineItem, { kind: "status" }> | null = null;
@@ -467,7 +398,14 @@ function renderRunItems(
   if (opts.showStatus) {
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const it = items[i]!;
-      if (it.kind === "status" || it.kind === "sources" || it.kind === "memory") continue;
+      if (
+        it.kind === "status" ||
+        it.kind === "sources" ||
+        it.kind === "memory" ||
+        it.kind === "compaction"
+      ) {
+        continue;
+      }
       if (it.kind === "reasoning") {
         activeReasoningSeq = it.seq;
         activeReasoningHasContent = Boolean(it.content.trim());
@@ -487,12 +425,45 @@ function renderRunItems(
       ) {
         continue;
       }
-      toolBuf.push(it.call);
+      stepBuf.push({ kind: "tool", call: it.call });
+      continue;
+    }
+    if (it.kind === "reasoning") {
+      if (!it.content.trim()) continue;
+      stepBuf.push({
+        kind: "reasoning",
+        id: `${it.id}-${it.seq}`,
+        content: it.content,
+        active: activeReasoningSeq === it.seq,
+      });
+      continue;
+    }
+    if (it.kind === "compaction") {
+      stepBuf.push({
+        kind: "compaction",
+        id: `${it.id}-${it.seq}`,
+        active: it.active,
+        summary: it.summary,
+        beforeChars: it.beforeChars,
+        afterChars: it.afterChars,
+        droppedMessages: it.droppedMessages,
+        keptMessages: it.keptMessages,
+        source: it.source,
+        durationMs: it.durationMs,
+        model: it.model,
+        phase: it.phase,
+        progress: it.progress,
+        failed: it.failed,
+      });
       continue;
     }
     // sources / memory 由 AnswerToolbar 统一展示
+    // 压缩中的 status 已由 compaction 步骤表达，避免底部再叠一条
     if (it.kind === "status" || it.kind === "sources" || it.kind === "memory") continue;
-    flushTools(`tools-${it.seq}`);
+    // 正文开始 → 收起刚结束的思考/工具组；历史回合一律收
+    const collapseSteps =
+      (it.kind === "assistant" && Boolean(it.content.trim())) || !opts.showStatus;
+    flushSteps(`steps-${it.seq}`, collapseSteps);
     if (it.kind === "user") {
       // 运行中注入（steer）的用户消息：挂在当前回合时间线上的右对齐气泡
       blocks.push(
@@ -512,19 +483,10 @@ function renderRunItems(
       blocks.push(
         <div
           key={`a-${it.id}-${it.seq}`}
-          className="mt-1.5 flex w-full max-w-[min(100%,42rem)] flex-col items-start"
+          className="mt-1.5 flex w-full flex-col items-start"
         >
           <ChatMarkdown content={it.content} final={it.final} fade={false} />
         </div>,
-      );
-    } else if (it.kind === "reasoning") {
-      blocks.push(
-        <ReasoningBlock
-          key={`r-${it.id}-${it.seq}`}
-          id={`${it.id}-${it.seq}`}
-          content={it.content}
-          active={activeReasoningSeq === it.seq}
-        />,
       );
     } else if (it.kind === "error") {
       blocks.push(
@@ -542,11 +504,17 @@ function renderRunItems(
       );
     }
   }
-  flushTools("tools-tail");
+  flushSteps("steps-tail", !opts.showStatus);
 
   if (opts.showStatus && lastStatus) {
-    // 活动思考行已自带「思考中…」，避免底部再叠一条同义状态
-    if (lastStatus.status !== "thinking" || !activeReasoningHasContent) {
+    const compactingDetail =
+      typeof lastStatus.detail === "string" &&
+      /压缩上下文/.test(lastStatus.detail);
+    // 活动思考行 / 压缩步骤已自带状态，避免底部再叠
+    const skipStatus =
+      compactingDetail ||
+      (lastStatus.status === "thinking" && activeReasoningHasContent);
+    if (!skipStatus) {
       blocks.push(
         <div
           key={`s-${lastStatus.id}`}
@@ -621,6 +589,8 @@ export function ChatMessages({
   runActive,
   activeRunId,
   agentName,
+  agentId,
+  sessionId,
   canAct,
   editingMessageId,
   onRegenerate,
@@ -633,6 +603,8 @@ export function ChatMessages({
   runActive: boolean;
   activeRunId?: string | null;
   agentName?: string;
+  agentId?: string | null;
+  sessionId?: string | null;
   canAct: boolean;
   /** 正在下方 Composer 编辑的消息 id */
   editingMessageId?: string | null;
@@ -701,7 +673,7 @@ export function ChatMessages({
 
           return (
             <div key={turn.message.id} className="animate-rise flex flex-col gap-3">
-              {editing ? (
+              {turn.message.continue ? null : editing ? (
                 <div className="animate-rise ml-auto flex items-center gap-2 rounded-full border border-primary/35 bg-primary/10 px-3 py-1.5 text-xs text-muted-foreground">
                   <Pencil className="size-3 shrink-0 text-primary" />
                   <span>正在下方输入框编辑这条消息</span>
@@ -762,6 +734,8 @@ export function ChatMessages({
                 canAct,
                 onRetry: () => onRegenerate(turn.message.id),
                 onOpenFile,
+                agentId,
+                sessionId,
               })}
 
               {sharedFiles.length > 0 && (
@@ -775,7 +749,7 @@ export function ChatMessages({
                   memoryItems={memoryItems}
                   canAct={canAct}
                   runActive={runActive}
-                  showRegenerate={canAct && !turnRunning}
+                  showRegenerate={canAct && !turnRunning && !turn.message.continue}
                   variants={turn.variants}
                   variantIndex={turn.variantIndex}
                   onRegenerate={() => onRegenerate(turn.message.id)}

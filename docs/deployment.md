@@ -67,6 +67,45 @@ COMPOSE_PROFILES=postgres docker compose up -d
 - 多副本 API **必须** 共用同一 Redis，否则会话事件与平台事件跨实例都收不到
 - **启动时连不上 Redis 会直接退出**（除非 `REDIS_URL=off`）
 
+## 1.1 平台探针与遥测
+
+stdout 仍是进程生命周期和依赖状态（JSON 一行一条）。每条日志带 `user.id` / `tenant.id`（纯平台或未登录为 `"0"`；API Key 的 `user.id` 为 `"0"`，`tenant.id` 为对应租户）。租户事件正文（Agent 回合、工具调用）仍走产品存储，不把路径、URL、邮箱、密钥打进日志。Prometheus 标签仍然只有粗粒度 `route_class` / `dep` / `kind`，不要把 id 做成指标标签。
+
+| 探针 | 含义 | 成功 | 失败 |
+|------|------|------|------|
+| `GET /livez`（`/api/health`） | 进程存活 | 200 | 进程挂了才失败 |
+| `GET /readyz`（`/api/ready`） | 可接流量：boot 完成 + DB；Redis 开启时也必须通 | 200 | 503 |
+| `GET /metrics` | Prometheus 文本。标签只有粗粒度 `route_class` / `dep` / `kind`，没有租户或路径 | 200 | — |
+
+编排用 `/livez` 做 liveness、`/readyz` 做 readiness。日志级别：`ZAKURA_LOG_LEVEL=info`（默认）。
+
+### OpenTelemetry 日志采集
+
+前后端都走官方 OpenTelemetry Logs SDK，协议是 **OTLP/HTTP**。采集端用 [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/)（或 Grafana Alloy / SigNoz / Grafana Cloud 等任意 OTLP 兼容端）。未配置 endpoint 时只写 stdout，不外发。
+
+后端读官方 Logs 导出变量（和 Axiom 示例一样：完整 `/v1/logs` URL + Header 里的 dataset）：
+
+```env
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=https://us-east-1.aws.edge.axiom.co/v1/logs
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>,X-Axiom-Dataset=<dataset>
+```
+
+未配置 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` 时只写 stdout。启动日志里 `otel: "on"|"off"`。`GET /api/otel/config` 的 `collector` / `dest` 是导出器是否挂上、目标主机名（不含密钥）。
+
+不要用 Axiom 的 `/v1/ingest/<dataset>`（那是事件 API，不是 OTLP）。Traces 示例里的 `/v1/traces` 对应日志就是 `/v1/logs`。
+
+前端错误发到 `POST /api/otel/v1/logs`，服务端盖上可信的 `user.id` / `tenant.id` 后再按 OTLP 转发。浏览器不要直连采集端。
+
+在 Loki / Grafana / SigNoz 里按属性过滤：
+
+```
+user.id = "<用户 id>"
+tenant.id = "<租户 id>"
+user.id = "0"          # 纯平台
+```
+
+用户用量（**仅 SaaS**）：同一套 Postgres/PGlite，启动时 migrate 会建 `user_usage_*` 两张小表，不用另开库、不用装扩展。OSS 不注册接口、不写数据。控制台：**设置 → 成员用量**。
+
 ## 2. 反向代理：实时连接与流式禁缓冲
 
 前后端实时通信走 **Socket.IO**（`/api/socket.io`，WebSocket 优先、HTTP long-polling 兜底）；OpenAI Gateway 流式接口仍是 **SSE**（`text/event-stream`）。任何缓冲都会表现为「模型本身很快，经 Zakura 后首字/流式很慢」。

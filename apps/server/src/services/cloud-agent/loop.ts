@@ -6,6 +6,7 @@
  * 差异（上下文构建、工具面、提示词、轮次上限、特殊工具处理）全部由调用方
  * 通过输入与 hooks 注入，引擎本身不区分「谁在跑」。
  */
+import { recordPlatformFault } from "@zakura/core";
 import type {
   CloudAgentConfig,
   CloudAgentEventType,
@@ -20,7 +21,17 @@ import type { McpGateway } from "../mcp-gateway.js";
 import type { ModelRouterService } from "../model-router.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import { isAbortError } from "../../model-router/http.js";
-import { compactToolResultsInPlace, buildUserMessage, type CompactBudget } from "./messages.js";
+import {
+  estimateRequestTokens,
+  applyTokenCalibration,
+  type TokenCalibration,
+} from "@zakura/shared";
+import {
+  compactToolResultsInPlace,
+  buildUserMessage,
+  isContextOverflowError,
+  type CompactBudget,
+} from "./messages.js";
 import { mcpResultToText, parseToolArgs } from "./tools.js";
 
 /** 取消标记兜底轮询间隔：pub/sub 丢失时最长这么久也会掐断 */
@@ -118,6 +129,15 @@ export type AgentLoopHooks = {
   ) => Promise<void>;
   /** tool_call_start 的展示标题（缺省 = qualified 名） */
   toolTitle?: (modelName: string, qualified: string) => string | undefined;
+  /**
+   * 循环内上下文超硬阈值，或上游 context overflow 时：
+   * 同步 LLM 摘要并**就地改写** messages（保留 system + recent turns）。
+   * 返回 true 表示已压缩，调用方可重试模型。
+   */
+  compactInLoop?: (
+    messages: ModelChatMessage[],
+    reason?: "threshold" | "overflow",
+  ) => Promise<boolean>;
 };
 
 export type AgentLoopInput = {
@@ -214,7 +234,9 @@ export class DeltaPublisher {
           payload: { messageId: this.messageId, delta: chunk },
         })
         .catch((err) => {
-          console.warn("[cloud-agent] delta publish failed:", err);
+          recordPlatformFault("cloud_agent.delta_publish", err, {
+            subsystem: "cloud_agent",
+          });
         }),
     ]);
   }
@@ -242,7 +264,7 @@ export async function appendRunLog(
       payload: { runId, level, message, ...(data ? { data } : {}) },
     });
   } catch (err) {
-    console.warn("[cloud-agent] run_log failed:", err);
+    recordPlatformFault("cloud_agent.run_log", err, { subsystem: "cloud_agent" });
   }
 }
 
@@ -308,6 +330,8 @@ async function streamModelRound(
     isCancelled: () => Promise<boolean>;
     /** 即时取消信号：requestCancel 触达的瞬间 abort，无需等轮询 */
     cancelPromise: Promise<void>;
+    /** 上下文溢出时同步压缩 messages 并返回是否成功 */
+    onContextOverflow?: (messages: ModelChatMessage[]) => Promise<boolean>;
   },
 ): Promise<{
   publisher: DeltaPublisher;
@@ -316,6 +340,7 @@ async function streamModelRound(
 }> {
   const { tenantId, sessionId, runId, cloud, messages, definitions } = input;
   const maxAttempts = 3;
+  let overflowCompactUsed = false;
   for (let attempt = 1; ; attempt += 1) {
     const messageId = newId();
     const publisher = new DeltaPublisher(deps.store, sessionId, runId, messageId);
@@ -378,6 +403,52 @@ async function streamModelRound(
       // 取消引发的中断：直接抛出，由 runAgentLoop 走取消收尾（不重试）
       if (isAbortError(err) || ctrl.signal.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
+
+      // 上下文超长：同步压缩后重试一轮（整次 streamModelRound 仅一次）
+      if (
+        !overflowCompactUsed &&
+        isContextOverflowError(err) &&
+        input.onContextOverflow
+      ) {
+        overflowCompactUsed = true;
+        if (publisher.emitted || reasoningPublisher.emitted) {
+          await deps.store.appendEvent({
+            sessionId,
+            type: "assistant_rollback",
+            runId,
+            payload: { messageId: publisher.messageId, reason: "context_overflow" },
+          });
+        }
+        await appendRunLog(
+          deps.store,
+          sessionId,
+          runId,
+          "warn",
+          "上下文超长，正在同步压缩后重试",
+          { error: message.slice(0, 400) },
+        );
+        try {
+          const ok = await input.onContextOverflow(messages);
+          if (ok) {
+            attempt = 0; // 下一轮 for 会 +1 → 1，相当于溢出后重新计数
+            continue;
+          }
+        } catch (compactErr) {
+          await appendRunLog(
+            deps.store,
+            sessionId,
+            runId,
+            "warn",
+            "溢出后压缩失败",
+            {
+              error:
+                compactErr instanceof Error ? compactErr.message : String(compactErr),
+            },
+          );
+        }
+        throw err;
+      }
+
       const retryable = (err as { retryable?: boolean }).retryable === true;
       if (!retryable || attempt >= maxAttempts) throw err;
       if (await input.isCancelled()) throw err;
@@ -432,6 +503,8 @@ export async function runAgentLoop(
   try {
     let lastText = "";
     let round = 0;
+    /** 用上游 prompt_tokens 校准后续体积判断 */
+    let tokenCal: TokenCalibration | null = null;
     while (true) {
       if (await cancelled()) {
         await finishCancelled(store, sessionId, runId);
@@ -451,10 +524,9 @@ export async function runAgentLoop(
       try {
         await input.beforeModelRound?.(messages);
       } catch (err) {
-        console.warn(
-          `[agent-loop] beforeModelRound failed:`,
-          err instanceof Error ? err.message : err,
-        );
+        recordPlatformFault("cloud_agent.before_model_round", err, {
+          subsystem: "cloud_agent",
+        });
       }
 
       const roundStarted = Date.now();
@@ -471,6 +543,12 @@ export async function runAgentLoop(
           isCancelled: cancelled,
           cancelPromise,
           ...(options ? { options } : {}),
+          ...(input.hooks?.compactInLoop
+            ? {
+                onContextOverflow: (msgs) =>
+                  input.hooks!.compactInLoop!(msgs, "overflow"),
+              }
+            : {}),
         }));
       } catch (err) {
         // 取消掐断的流：收尾为 cancelled 而非 failed（错误不是故障）
@@ -484,15 +562,42 @@ export async function runAgentLoop(
       const toolCalls = result.toolCalls ?? [];
       const text = result.content ?? "";
       if (text) lastText = text;
+
+      // 记录本轮请求体积：估算 + 上游 measured，供校准与 run_log
+      const estimatedPrompt = estimateRequestTokens({
+        messages,
+        tools: definitions,
+      });
+      const measuredPrompt =
+        typeof result.usage?.promptTokens === "number" && result.usage.promptTokens > 0
+          ? result.usage.promptTokens
+          : undefined;
+      if (measuredPrompt != null) {
+        tokenCal = {
+          measuredPromptTokens: measuredPrompt,
+          estimatedAtMeasure: estimatedPrompt,
+        };
+      }
+      const calibratedPrompt = applyTokenCalibration(estimatedPrompt, tokenCal);
+
       await appendRunLog(store, sessionId, runId, "info", `第 ${round + 1} 轮模型调用完成`, {
         model: result.model,
         route: result.routeSlug,
         durationMs: Date.now() - roundStarted,
         toolCalls: toolCalls.length,
+        estimatedPromptTokens: estimatedPrompt,
+        calibratedPromptTokens: calibratedPrompt,
         ...(result.usage
           ? {
               promptTokens: result.usage.promptTokens,
               completionTokens: result.usage.completionTokens,
+            }
+          : {}),
+        ...(tokenCal
+          ? {
+              calibrationRatio: Number(
+                (tokenCal.measuredPromptTokens / tokenCal.estimatedAtMeasure).toFixed(3),
+              ),
             }
           : {}),
       });
@@ -563,11 +668,11 @@ export async function runAgentLoop(
         preResolved = await input.hooks.preResolveCalls(toolCalls);
       }
 
-      /** 取消时补发未执行工具的结果（不阻塞收尾；UI 稍后收敛即可） */
-      const abandonRemaining = (from: number): void => {
+      /** 取消时补发未完成工具的结果，先于 run_end 落库，避免 UI 一直转圈 */
+      const abandonRemaining = async (from: number): Promise<void> => {
         const rest = toolCalls.slice(from);
         if (rest.length === 0) return;
-        void Promise.all(
+        await Promise.all(
           rest.map((call) =>
             store.appendEvent({
               sessionId,
@@ -582,12 +687,16 @@ export async function runAgentLoop(
               },
             }),
           ),
-        ).catch((err) => console.warn("[agent-loop] abandonRemaining failed:", err));
+        ).catch((err) =>
+          recordPlatformFault("cloud_agent.abandon_remaining", err, {
+            subsystem: "cloud_agent",
+          }),
+        );
       };
 
       for (const [index, call] of toolCalls.entries()) {
         if (await cancelled()) {
-          abandonRemaining(index);
+          await abandonRemaining(index);
           await finishCancelled(store, sessionId, runId);
           return { status: "cancelled", finalText: lastText, rounds: round + 1 };
         }
@@ -619,6 +728,29 @@ export async function runAgentLoop(
                 const outcome = resolved ?? {
                   result: await deps.gateway.callTool(tenantId, qualified, args, {
                     agentId: agent.id,
+                    onProgress: (message, data) => {
+                      const stdout =
+                        data && typeof data.stdout === "string" ? data.stdout : undefined;
+                      const stderr =
+                        data && typeof data.stderr === "string" ? data.stderr : undefined;
+                      const jobId =
+                        data && typeof data.jobId === "string" ? data.jobId : undefined;
+                      const running =
+                        data && typeof data.running === "boolean" ? data.running : undefined;
+                      void store.appendEvent({
+                        sessionId,
+                        type: "tool_call_progress",
+                        runId,
+                        payload: {
+                          toolCallId: call.id,
+                          message,
+                          ...(stdout != null ? { stdout } : {}),
+                          ...(stderr != null ? { stderr } : {}),
+                          ...(jobId ? { jobId } : {}),
+                          ...(running != null ? { running } : {}),
+                        },
+                      });
+                    },
                   }),
                 };
                 return { kind: "ok" as const, outcome };
@@ -646,7 +778,7 @@ export async function runAgentLoop(
               durationMs: Date.now() - started,
             },
           });
-          abandonRemaining(index + 1);
+          await abandonRemaining(index + 1);
           await finishCancelled(store, sessionId, runId);
           return { status: "cancelled", finalText: lastText, rounds: round + 1 };
         }
@@ -656,7 +788,7 @@ export async function runAgentLoop(
           const err = raced.err;
           // 取消引发的工具中断：补齐剩余调用后整体收尾为 cancelled
           if (isAbortError(err) || (await cancelled())) {
-            abandonRemaining(index);
+            await abandonRemaining(index);
             await finishCancelled(store, sessionId, runId);
             return { status: "cancelled", finalText: lastText, rounds: round + 1 };
           }
@@ -693,10 +825,9 @@ export async function runAgentLoop(
         try {
           await input.hooks?.afterToolCall?.(call, args, { resultText, isError });
         } catch (err) {
-          console.warn(
-            `[agent-loop] afterToolCall hook failed:`,
-            err instanceof Error ? err.message : err,
-          );
+          recordPlatformFault("cloud_agent.after_tool_call", err, {
+            subsystem: "cloud_agent",
+          });
         }
 
         messages.push({
@@ -715,12 +846,31 @@ export async function runAgentLoop(
         });
       }
 
-      // 循环内上下文过大：分级就地压缩较旧的工具结果
+      // 循环内上下文过大：先分级就地压工具结果，仍超 token 硬阈值则同步 LLM 摘要
       const compacted = compactToolResultsInPlace(messages, input.compactBudget);
       if (compacted > 0) {
         await appendRunLog(store, sessionId, runId, "info", "循环内压缩旧工具结果", {
           compacted,
         });
+      }
+      const estNow = estimateRequestTokens({ messages, tools: definitions });
+      const sizeNow = applyTokenCalibration(estNow, tokenCal);
+      const hardTokens = input.compactBudget?.thresholdTokens ?? 15_000;
+      if (sizeNow > hardTokens && input.hooks?.compactInLoop) {
+        try {
+          const did = await input.hooks.compactInLoop(messages, "threshold");
+          if (did) {
+            await appendRunLog(store, sessionId, runId, "info", "循环内已同步摘要压缩上下文", {
+              calibratedTokens: sizeNow,
+              hardTokens,
+            });
+            tokenCal = null;
+          }
+        } catch (err) {
+          await appendRunLog(store, sessionId, runId, "warn", "循环内同步摘要失败", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
 
       round += 1;

@@ -7,6 +7,7 @@
  * cloud-agent-session 一致 —— 信封带实例 ID 自过滤，订阅按租户引用计数。
  * REDIS_URL=off 或 Redis 不可用时自动降级为纯进程内投递。
  */
+import { recordPlatformFault } from "@zakura/core";
 import { newId } from "../db/schema.js";
 import {
   createRedisSubscriber,
@@ -79,6 +80,16 @@ export type PlatformEvent =
       title: string;
       body?: string;
       url?: string;
+    }
+  | {
+      /** 租户连接器/远程通道的用户可见提示（不要打 stdout） */
+      type: "connector_notice";
+      ts: number;
+      agentId: string;
+      bindingId?: string;
+      platform: string;
+      level: "info" | "warn" | "error" | "ok";
+      message: string;
     };
 
 type PlatformEventInput =
@@ -90,7 +101,8 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "connector_inbound" }>, "ts">
-  | Omit<Extract<PlatformEvent, { type: "browser_notify" }>, "ts">;
+  | Omit<Extract<PlatformEvent, { type: "browser_notify" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "connector_notice" }>, "ts">;
 
 type Listener = (event: PlatformEvent) => void;
 
@@ -142,7 +154,10 @@ export class PlatformEventBus {
           return c;
         })
         .catch((err) => {
-          console.warn("[platform-events] redis subscriber unavailable:", err);
+          recordPlatformFault("platform_events.subscriber", err, {
+            subsystem: "platform_events",
+            dep: "redis",
+          });
           return null;
         });
     }
@@ -166,7 +181,10 @@ export class PlatformEventBus {
         }
       };
     } catch (err) {
-      console.warn("[platform-events] redis subscribe failed:", err);
+      recordPlatformFault("platform_events.subscribe", err, {
+        subsystem: "platform_events",
+        dep: "redis",
+      });
       return null;
     }
   }
@@ -178,7 +196,10 @@ export class PlatformEventBus {
       if (msg.from === this.instanceId) return;
       this.emitLocal(msg.tenantId, msg.event);
     } catch (err) {
-      console.warn("[platform-events] redis message parse failed:", err);
+      recordPlatformFault("platform_events.parse", err, {
+        subsystem: "platform_events",
+        dep: "redis",
+      });
     }
   };
 
@@ -189,7 +210,10 @@ export class PlatformEventBus {
       if (msg.from === this.instanceId) return;
       this.emitLocalAll(msg.event);
     } catch (err) {
-      console.warn("[platform-events] redis broadcast parse failed:", err);
+      recordPlatformFault("platform_events.broadcast_parse", err, {
+        subsystem: "platform_events",
+        dep: "redis",
+      });
     }
   };
 
@@ -248,7 +272,10 @@ export class PlatformEventBus {
       .catch((err) => {
         if (this.warnedPublish) return;
         this.warnedPublish = true;
-        console.warn("[platform-events] redis publish failed:", err);
+        recordPlatformFault("platform_events.publish", err, {
+          subsystem: "platform_events",
+          dep: "redis",
+        });
       });
   }
 
@@ -259,7 +286,9 @@ export class PlatformEventBus {
       try {
         fn(event);
       } catch (err) {
-        console.warn("[platform-events] listener error:", err);
+        recordPlatformFault("platform_events.listener", err, {
+          subsystem: "platform_events",
+        });
       }
     }
   }
@@ -270,7 +299,9 @@ export class PlatformEventBus {
         try {
           fn(event);
         } catch (err) {
-          console.warn("[platform-events] listener error:", err);
+          recordPlatformFault("platform_events.listener", err, {
+          subsystem: "platform_events",
+        });
         }
       }
     }

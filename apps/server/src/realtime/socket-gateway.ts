@@ -13,6 +13,7 @@ import { Server as SocketIoServer, type Socket } from "socket.io";
 import type { Db } from "../db/client.js";
 import type { AppConfig } from "../config.js";
 import type { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
+import { getTelemetry, idsFromSession, recordPlatformFault, withLogContext } from "@zakura/core";
 import type { CloudAgentEvent } from "@zakura/shared";
 import { platformEvents, type PlatformEvent } from "../services/platform-events.js";
 import { authenticateApiKey, verifySession } from "../services/auth.js";
@@ -104,9 +105,9 @@ export function createSocketGateway(
           return next();
         }
         return next(new Error("unauthorized"));
-      } catch (err) {
+      } catch {
         // 兜底：任何异常都必须调用 next()，否则握手会一直挂到客户端超时
-        console.warn("[realtime] handshake auth failed:", err);
+        getTelemetry().authFailures.inc({ kind: "realtime" });
         return next(new Error("unauthorized"));
       }
     })();
@@ -158,7 +159,7 @@ export function createSocketGateway(
     };
 
     socket.on("subscribe:session", (payload: SubscribeSessionPayload, ack?: SubscribeAck) => {
-      void (async () => {
+      void withLogContext(idsFromSession(session), async () => {
         const agentId = typeof payload?.agentId === "string" ? payload.agentId : "";
         const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
         const afterRaw = Number(payload?.afterSeq ?? 0);
@@ -209,7 +210,7 @@ export function createSocketGateway(
           dropSession(sessionId);
           ack?.({ ok: false, error: err instanceof Error ? err.message : String(err) });
         }
-      })();
+      });
     });
 
     socket.on("unsubscribe:session", (payload: { sessionId?: unknown }) => {
@@ -218,15 +219,17 @@ export function createSocketGateway(
     });
 
     socket.on("disconnect", () => {
-      for (const unsub of sessionSubs.values()) {
-        try {
-          unsub();
-        } catch (err) {
-          console.warn("[realtime] session unsubscribe failed:", err);
+      withLogContext(idsFromSession(session), () => {
+        for (const unsub of sessionSubs.values()) {
+          try {
+            unsub();
+          } catch (err) {
+            recordPlatformFault("realtime.unsubscribe", err, { subsystem: "realtime" });
+          }
         }
-      }
-      sessionSubs.clear();
-      releaseTenant(session.tenantId);
+        sessionSubs.clear();
+        releaseTenant(session.tenantId);
+      });
     });
   });
 

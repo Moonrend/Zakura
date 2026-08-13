@@ -8,6 +8,10 @@ import { getAgentMcpMode, getAgentProviders } from "../agent-providers.js";
 import { SUBAGENT_TOOL_QUALIFIED } from "../mcp-gateway.js";
 import { DELEGATE_TOOL_NAME } from "./tools.js";
 
+/** 用户点「继续」时写入的用户消息（UI 隐藏气泡） */
+export const CONTINUE_TURN_PROMPT =
+  "请从上次中断处继续执行当前任务。已完成的步骤不要重复，从未做完的地方接着做。";
+
 export function buildSystemPrompt(
   agent: Agent,
   cloud: CloudAgentConfig,
@@ -18,6 +22,8 @@ export function buildSystemPrompt(
     subagents?: boolean;
     /** 已启用技能的「名称 + 路径 + 描述」清单 */
     skills?: string;
+    /** 用户本回合在 Composer 里显式点选的技能名 */
+    requestedSkills?: string[];
     /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_* 工具发帖 */
     remoteChannel?: string;
   },
@@ -38,6 +44,7 @@ export function buildSystemPrompt(
     "- 多步任务先用一两句话说明计划再执行；执行过程中的关键发现要在最终回复中体现。",
     "- 用户提到「上次 / 之前的对话 / 另一个会话」时，用 list_chat_sessions / search_chat_sessions 定位，再用 get_chat_messages 或 import_session_context 取上下文，不要假装记得。",
     "- 工作区内搜代码优先 re_fs_grep；多处改文件优先 re_apply_patch。",
+    "- re_shell_exec 的输出会实时显示给用户。命令若停在提示符或长时间无输出，会先返回 status=running 和 job_id：用同一工具传 job_id 继续等待，stdin 回答提示（记得换行），kill=true 结束进程。",
     "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
@@ -87,6 +94,14 @@ export function buildSystemPrompt(
       "- 用户需要某项能力而现有技能都不覆盖时，可用 re_search_skills 搜索、re_install_skill 安装（安装会写入用户工作区，事先说明你要装什么）。",
     );
   }
+  if (extra?.requestedSkills?.length) {
+    lines.push(
+      "",
+      "# 本回合指定技能",
+      `用户已明确要求使用：${extra.requestedSkills.map((s) => `「${s}」`).join("、")}。`,
+      "先用 re_read_skill 逐个读取其 SKILL.md，再严格按其中的步骤完成任务；技能确实不适用于当前请求时，说明原因而不是默默忽略。",
+    );
+  }
   if (extra?.remoteChannel) {
     lines.push("", extra.remoteChannel);
   }
@@ -108,7 +123,12 @@ export function buildSystemPrompt(
     );
   }
   if (extra?.historySummary) {
-    lines.push("", "# 早前对话摘要", "更早的对话已压缩为以下摘要：", extra.historySummary);
+    lines.push(
+      "",
+      "# 早前对话摘要（压缩检查点）",
+      "更早的对话已被压缩。摘要为结构化上下文（目标/进度/决策/代码状态）；完整旧事件仍在库中但不进入本轮模型。",
+      extra.historySummary,
+    );
   }
   if (cloud.systemPrompt?.trim()) {
     lines.push("", "# 自定义指令（优先级最高）", cloud.systemPrompt.trim());

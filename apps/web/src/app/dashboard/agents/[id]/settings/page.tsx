@@ -66,6 +66,15 @@ type LocalState = {
   systemPrompt: string;
   model: string;
   modelRouteId: string | null;
+  /** 空 = 跟随对话模型 */
+  compactModel: string;
+  compactModelRouteId: string | null;
+  autoCompact: boolean;
+  compactThresholdChars: string;
+  compactSoftThresholdChars: string;
+  compactKeepRecent: string;
+  compactKeepRecentChars: string;
+  maxToolResultChars: string;
   enableTools: boolean;
   autoMemory: boolean;
   autoTitle: boolean;
@@ -86,6 +95,14 @@ function cloudToLocal(cloud: CloudAgentConfig): Pick<
   | "systemPrompt"
   | "model"
   | "modelRouteId"
+  | "compactModel"
+  | "compactModelRouteId"
+  | "autoCompact"
+  | "compactThresholdChars"
+  | "compactSoftThresholdChars"
+  | "compactKeepRecent"
+  | "compactKeepRecentChars"
+  | "maxToolResultChars"
   | "enableTools"
   | "autoMemory"
   | "autoTitle"
@@ -96,6 +113,21 @@ function cloudToLocal(cloud: CloudAgentConfig): Pick<
     systemPrompt: cloud.systemPrompt ?? "",
     model: cloud.model ?? "",
     modelRouteId: cloud.modelRouteId ?? null,
+    compactModel: cloud.compactModel ?? "",
+    compactModelRouteId: cloud.compactModelRouteId ?? null,
+    autoCompact: cloud.autoCompact !== false,
+    compactThresholdChars:
+      cloud.compactThresholdChars != null ? String(cloud.compactThresholdChars) : "",
+    compactSoftThresholdChars:
+      cloud.compactSoftThresholdChars != null
+        ? String(cloud.compactSoftThresholdChars)
+        : "",
+    compactKeepRecent:
+      cloud.compactKeepRecent != null ? String(cloud.compactKeepRecent) : "",
+    compactKeepRecentChars:
+      cloud.compactKeepRecentChars != null ? String(cloud.compactKeepRecentChars) : "",
+    maxToolResultChars:
+      cloud.maxToolResultChars != null ? String(cloud.maxToolResultChars) : "",
     enableTools: cloud.enableTools !== false,
     autoMemory: cloud.autoMemory !== false,
     autoTitle: cloud.autoTitle !== false,
@@ -161,6 +193,14 @@ export default function AgentSettingsPage() {
     systemPrompt?: string;
     model?: string;
     modelRouteId?: string | null;
+    compactModel?: string;
+    compactModelRouteId?: string | null;
+    autoCompact?: boolean;
+    compactThresholdChars?: string;
+    compactSoftThresholdChars?: string;
+    compactKeepRecent?: string;
+    compactKeepRecentChars?: string;
+    maxToolResultChars?: string;
     enableTools?: boolean;
     autoMemory?: boolean;
     autoTitle?: boolean;
@@ -211,6 +251,50 @@ export default function AgentSettingsPage() {
       if (patch.model !== undefined) cloudPatch.model = patch.model || null;
       if (patch.modelRouteId !== undefined) {
         cloudPatch.modelRouteId = patch.modelRouteId || null;
+      }
+      if (patch.compactModel !== undefined) {
+        cloudPatch.compactModel = patch.compactModel || null;
+      }
+      if (patch.compactModelRouteId !== undefined) {
+        cloudPatch.compactModelRouteId = patch.compactModelRouteId || null;
+      }
+      if (patch.autoCompact !== undefined) cloudPatch.autoCompact = patch.autoCompact;
+      if (patch.compactThresholdChars !== undefined) {
+        const n = Number(patch.compactThresholdChars);
+        cloudPatch.compactThresholdChars =
+          patch.compactThresholdChars.trim() === "" || !Number.isFinite(n) || n < 8_000
+            ? null
+            : Math.floor(n);
+      }
+      if (patch.compactSoftThresholdChars !== undefined) {
+        const n = Number(patch.compactSoftThresholdChars);
+        cloudPatch.compactSoftThresholdChars =
+          patch.compactSoftThresholdChars.trim() === "" ||
+          !Number.isFinite(n) ||
+          n < 4_000
+            ? null
+            : Math.floor(n);
+      }
+      if (patch.compactKeepRecent !== undefined) {
+        const n = Number(patch.compactKeepRecent);
+        cloudPatch.compactKeepRecent =
+          patch.compactKeepRecent.trim() === "" || !Number.isFinite(n) || n < 4
+            ? null
+            : Math.min(Math.floor(n), 64);
+      }
+      if (patch.compactKeepRecentChars !== undefined) {
+        const n = Number(patch.compactKeepRecentChars);
+        cloudPatch.compactKeepRecentChars =
+          patch.compactKeepRecentChars.trim() === "" || !Number.isFinite(n) || n < 4_000
+            ? null
+            : Math.min(Math.floor(n), 200_000);
+      }
+      if (patch.maxToolResultChars !== undefined) {
+        const n = Number(patch.maxToolResultChars);
+        cloudPatch.maxToolResultChars =
+          patch.maxToolResultChars.trim() === "" || !Number.isFinite(n) || n < 1_000
+            ? null
+            : Math.min(Math.floor(n), 80_000);
       }
       if (patch.enableTools !== undefined) cloudPatch.enableTools = patch.enableTools;
       if (patch.autoMemory !== undefined) cloudPatch.autoMemory = patch.autoMemory;
@@ -273,11 +357,48 @@ export default function AgentSettingsPage() {
     return items;
   }, [chatModels, state?.model]);
 
+  const compactModelItems = useMemo<ModelRouteSelectorItem[]>(() => {
+    const items: ModelRouteSelectorItem[] = [
+      {
+        value: "__follow__",
+        label: "跟随对话模型",
+        hint: "默认",
+        keywords: ["default", "默认", "跟随"],
+        providers: [],
+      },
+      ...chatModels.map((m) => ({
+        value: m.alias,
+        label: m.name,
+        hint: m.upstream,
+        keywords: [m.alias, m.upstream ?? ""].filter(Boolean),
+        providers: m.providers,
+      })),
+    ];
+    if (
+      state?.compactModel &&
+      state.compactModel !== "__follow__" &&
+      !chatModels.some((m) => m.alias === state.compactModel)
+    ) {
+      items.push({
+        value: state.compactModel,
+        label: state.compactModel,
+        hint: undefined,
+        keywords: [],
+        providers: [],
+      });
+    }
+    return items;
+  }, [chatModels, state?.compactModel]);
+
   const displayModel =
     state?.model ||
     chatModels.find((m) => m.isDefault)?.alias ||
     chatModels[0]?.alias ||
     "";
+
+  const displayCompactModel = state?.compactModel?.trim()
+    ? state.compactModel
+    : "__follow__";
 
   async function removeAgent() {
     if (!agent) return;
@@ -476,6 +597,123 @@ export default function AgentSettingsPage() {
                   placeholder={chatModels.length === 0 ? "暂无模型" : "选择模型"}
                   className="h-9 max-w-none w-full justify-between rounded-md border border-input bg-transparent px-3 font-normal text-foreground"
                 />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">上下文压缩模型</label>
+                <p className="text-xs text-muted-foreground">
+                  长对话摘要时使用的模型，建议选便宜、速度快的小模型；未设置则回退到上方对话模型。
+                </p>
+                <ModelRouteSelector
+                  items={compactModelItems}
+                  value={displayCompactModel}
+                  routeId={
+                    displayCompactModel === "__follow__" ? null : state.compactModelRouteId
+                  }
+                  onSelectionChange={(alias, routeId) => {
+                    if (!alias || alias === "__follow__") {
+                      setState((prev) =>
+                        prev
+                          ? { ...prev, compactModel: "", compactModelRouteId: null }
+                          : prev,
+                      );
+                      saveNow({ compactModel: "", compactModelRouteId: null });
+                      return;
+                    }
+                    setState((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            compactModel: alias,
+                            compactModelRouteId: routeId,
+                          }
+                        : prev,
+                    );
+                    saveNow({ compactModel: alias, compactModelRouteId: routeId });
+                  }}
+                  disabled={chatModels.length === 0}
+                  placeholder="跟随对话模型"
+                  className="h-9 max-w-none w-full justify-between rounded-md border border-input bg-transparent px-3 font-normal text-foreground"
+                />
+              </div>
+              <Separator />
+              <SettingsRow label="自动压缩上下文" htmlFor="behave-auto-compact">
+                <Switch
+                  id="behave-auto-compact"
+                  checked={state.autoCompact}
+                  onCheckedChange={(v) => setField("autoCompact", Boolean(v), true)}
+                />
+              </SettingsRow>
+              <p className="text-xs text-muted-foreground -mt-1">
+                关闭后仅按回合截断历史，不再调用模型生成摘要。阈值留空则用平台默认，并会按模型上下文窗口自动收紧。
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1">
+                  <label htmlFor="compact-hard" className="text-xs font-medium">
+                    硬阈值（字符）
+                  </label>
+                  <Input
+                    id="compact-hard"
+                    type="number"
+                    min={8000}
+                    placeholder="60000"
+                    value={state.compactThresholdChars}
+                    onChange={(e) => setField("compactThresholdChars", e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="compact-soft" className="text-xs font-medium">
+                    软阈值（字符）
+                  </label>
+                  <Input
+                    id="compact-soft"
+                    type="number"
+                    min={4000}
+                    placeholder="硬阈值 × 0.7"
+                    value={state.compactSoftThresholdChars}
+                    onChange={(e) => setField("compactSoftThresholdChars", e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="compact-keep-n" className="text-xs font-medium">
+                    保留最近条数上限
+                  </label>
+                  <Input
+                    id="compact-keep-n"
+                    type="number"
+                    min={4}
+                    max={64}
+                    placeholder="16"
+                    value={state.compactKeepRecent}
+                    onChange={(e) => setField("compactKeepRecent", e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="compact-keep-chars" className="text-xs font-medium">
+                    保留最近字符量
+                  </label>
+                  <Input
+                    id="compact-keep-chars"
+                    type="number"
+                    min={4000}
+                    placeholder="24000"
+                    value={state.compactKeepRecentChars}
+                    onChange={(e) => setField("compactKeepRecentChars", e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1 sm:col-span-2">
+                  <label htmlFor="max-tool-result" className="text-xs font-medium">
+                    单条工具结果上限（字符）
+                  </label>
+                  <Input
+                    id="max-tool-result"
+                    type="number"
+                    min={1000}
+                    placeholder="12000"
+                    className="max-w-xs"
+                    value={state.maxToolResultChars}
+                    onChange={(e) => setField("maxToolResultChars", e.target.value)}
+                  />
+                </div>
               </div>
               <Separator />
               <div className="space-y-1.5">

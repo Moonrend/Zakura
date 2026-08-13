@@ -12,6 +12,7 @@
  * - OSS + Tailscale 官方云：可先试宿主机 CLI；否则 sidecar
  * - SaaS + Tailscale 官方云：主机不加入租户网
  */
+import { log, recordPlatformFault } from "@zakura/core";
 import Docker from "dockerode";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -180,7 +181,7 @@ export class HostTailscaleService {
         process.env.ZAKURA_TAILSCALE_IMAGE?.trim() || "tailscale/tailscale:latest",
       );
     } catch (err) {
-      console.warn("[host-tailscale] pull image failed:", dockerErr(err).message);
+      recordPlatformFault("host_tailscale.pull", err, { subsystem: "host_tailscale" });
       return null;
     }
 
@@ -199,14 +200,12 @@ export class HostTailscaleService {
       const info = await container.inspect();
       exists = true;
       if (platform && this.platformContainerNeedsRecreate(info, extraArgs)) {
-        console.warn(
-          "[host-tailscale] recreating platform sidecar (need host net + kernel TUN, no advertise-tags)",
-        );
+        log.warn("host_tailscale.recreate_sidecar");
         try {
           await container.stop({ t: 5 }).catch(() => undefined);
           await container.remove({ force: true });
         } catch (err) {
-          console.warn("[host-tailscale] remove old container failed:", dockerErr(err).message);
+          recordPlatformFault("host_tailscale.remove", err, { subsystem: "host_tailscale" });
           return null;
         }
         exists = false;
@@ -225,12 +224,9 @@ export class HostTailscaleService {
           platform,
         });
       } catch (err) {
-        console.warn("[host-tailscale] create failed:", dockerErr(err).message);
+        recordPlatformFault("host_tailscale.create", err, { subsystem: "host_tailscale" });
         if (platform) {
-          console.warn(
-            "[host-tailscale] 平台模式需要宿主机 /dev/net/tun。" +
-              "若本机已有个人 Tailscale 内核客户端，请在 Headscale 控制面主机上停用它，改由本 sidecar 加入自托管网。",
-          );
+          log.warn("host_tailscale.tun_unavailable");
         }
         return null;
       }
@@ -242,7 +238,7 @@ export class HostTailscaleService {
         await container.start();
       }
     } catch (err) {
-      console.warn("[host-tailscale] start failed:", dockerErr(err).message);
+      recordPlatformFault("host_tailscale.start", err, { subsystem: "host_tailscale" });
       return null;
     }
 

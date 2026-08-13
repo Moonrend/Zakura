@@ -1,4 +1,9 @@
-import { globalRegistry, type InstanceHandle } from "@zakura/core";
+import {
+  getTelemetry,
+  globalRegistry,
+  recordPlatformFault,
+  type InstanceHandle,
+} from "@zakura/core";
 import type { McpToolResult } from "@zakura/shared";
 import { parseCloudAgentConfig } from "@zakura/shared";
 import type { AgentService } from "./agents.js";
@@ -135,7 +140,7 @@ export class EmailInboundService {
     if (this.timer) return;
     this.timer = setInterval(() => {
       void this.poll().catch((error) => {
-        console.warn("[email-inbound] poll failed:", error instanceof Error ? error.message : error);
+        recordPlatformFault("email_inbound.poll", error, { subsystem: "email_inbound" });
       });
     }, 15_000);
     this.timer.unref?.();
@@ -209,7 +214,7 @@ export class EmailInboundService {
 
     const agent = await this.agentService.get(tenantId, agentId);
     if (!agent) {
-      console.warn(`[email-inbound] Agent not found: ${tenantId}/${agentId}`);
+      getTelemetry().platformFaults.inc({ kind: "email_inbound.agent_missing" });
       return;
     }
 

@@ -28,6 +28,7 @@ import {
   type ConnectorOauthField,
 } from "@/components/connections/connector-oauth-form";
 import { api } from "@/lib/api";
+import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   getCloudConfig,
   listChatModels,
@@ -194,6 +195,16 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    return subscribePlatformEvents((ev) => {
+      if (ev.type !== "connector_notice") return;
+      if (ev.agentId && ev.agentId !== agentId) return;
+      if (ev.level === "error") toast.error(ev.message);
+      else if (ev.level === "warn") toast.warning(ev.message);
+      else toast.message(ev.message);
+    });
+  }, [agentId]);
 
   useEffect(() => {
     if (editingBinding) {

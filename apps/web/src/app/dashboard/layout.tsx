@@ -14,7 +14,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 
 type MeResponse = MeInfo & {
-  tenant: MeInfo["tenant"] & { onboardingCompleted?: boolean };
+  user?: { id: string };
+  tenant: MeInfo["tenant"] & { id?: string; onboardingCompleted?: boolean };
 };
 
 function shouldForceOnboarding(pathname: string) {
@@ -42,6 +43,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         const res = await api<MeResponse>("/api/me");
         if (cancelled) return;
         const info: MeInfo = {
+          user: res.user?.id ? { id: res.user.id } : undefined,
           tenant: res.tenant,
           isPlatformAdmin: !!res.isPlatformAdmin && !!res.multiTenant,
           multiTenant: !!res.multiTenant,

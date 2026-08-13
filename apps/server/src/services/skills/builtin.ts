@@ -380,11 +380,12 @@ ${F}
 
 ## 执行命令
 
-\`re_shell_exec\` 走 \`bash -lc\`，没有命令白名单，\`working_dir\` 相对工作区根。
+\`re_shell_exec\` 走 PTY（\`bash -lc\`），输出实时给用户看。没有命令白名单，\`working_dir\` 相对工作区根。
 
 - 一条命令做一件事，便于定位失败
 - 长输出先过滤再看：\`... | tail -50\`、\`... | rg -i error\`
-- 需要几分钟的任务（构建、训练），先说明你在等什么，别静默挂着
+- 需要几分钟的任务（构建、训练）：输出会直播，不必改用 \`tail\` 假装在等
+- 交互式提示（\`read\`、确认、密码）：看返回的 stdout，再带 \`job_id\` + \`stdin\`（含换行）继续；能非交互就加 \`-y\` / \`DEBIAN_FRONTEND=noninteractive\`
 - 装依赖前先看有没有：\`python3 -c "import x"\` / \`node -e "require('x')"\` 比无脑 \`pip install\` 快
 
 ## 排错

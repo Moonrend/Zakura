@@ -599,9 +599,6 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --chat-sidebar: oklch(0.97 0 0);
-  --chat-code-bg: oklch(0.97 0 0);
-  --chat-code-fg: oklch(0.205 0 0);
-  --chat-code-bar: oklch(0.955 0 0);
   color-scheme: light;
 }
 
@@ -627,9 +624,6 @@
   --ring: oklch(0.556 0 0);
   /* 侧栏比主区更深 */
   --chat-sidebar: oklch(0.11 0 0);
-  --chat-code-bg: oklch(0.205 0 0);
-  --chat-code-fg: oklch(0.92 0 0);
-  --chat-code-bar: oklch(0.18 0 0);
   --shadow-soft: 0 1px 2px oklch(0 0 0 / 28%), 0 8px 28px oklch(0 0 0 / 36%);
   color-scheme: dark;
 }
@@ -644,6 +638,7 @@
    ========================================================================== */
 
 .chat-md {
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   overflow-wrap: break-word;
@@ -816,19 +811,102 @@
   text-decoration-color: color-mix(in oklch, var(--foreground) 65%, transparent);
 }
 
+/* 折叠块：保留原生 details 交互，只补充更清晰的标题栏和展开状态 */
+.chat-md .markstream-react details {
+  margin: 0.95em 0;
+  overflow: hidden;
+  border: 1px solid
+    color-mix(in oklch, hsl(var(--border)) 85%, hsl(var(--foreground)));
+  border-radius: calc(var(--radius) + 2px);
+  background: color-mix(in oklch, hsl(var(--muted)) 24%, transparent);
+}
+
+.chat-md .markstream-react details > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.55em;
+  min-height: 2.35rem;
+  padding: 0.55rem 0.8rem;
+  cursor: pointer;
+  list-style: none;
+  color: hsl(var(--foreground));
+  font-weight: 550;
+  user-select: none;
+  transition:
+    background-color 150ms var(--ease-fluid),
+    color 150ms var(--ease-fluid);
+}
+
+.chat-md .markstream-react details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-md .markstream-react details > summary::marker {
+  content: "";
+}
+
+.chat-md .markstream-react details > summary::before {
+  width: 0.45em;
+  height: 0.45em;
+  flex: 0 0 auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: hsl(var(--muted-foreground));
+  content: "";
+  transform: rotate(-45deg) translate(-0.08em, 0.08em);
+  transition: transform 180ms var(--ease-overshoot);
+}
+
+.chat-md .markstream-react details[open] > summary::before {
+  transform: rotate(45deg) translate(-0.08em, -0.08em);
+}
+
+.chat-md .markstream-react details > summary:hover {
+  background: color-mix(in oklch, hsl(var(--muted)) 58%, transparent);
+}
+
+.chat-md .markstream-react details > summary:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.chat-md .markstream-react details[open] > summary {
+  border-bottom: 1px solid
+    color-mix(in oklch, hsl(var(--border)) 85%, transparent);
+  background: color-mix(in oklch, hsl(var(--muted)) 42%, transparent);
+}
+
+.chat-md .markstream-react details > summary + * {
+  margin-top: 0.75rem;
+}
+
+.chat-md .markstream-react details > :not(summary) {
+  margin-inline: 0.85rem;
+}
+
+.chat-md .markstream-react details > :last-child {
+  margin-bottom: 0.85rem;
+}
+
 /* 表格 */
 .chat-md .markstream-react .table-node-wrapper {
   margin: 0.95em 0;
   max-width: 100%;
   overflow-x: auto;
-  border: 1px solid var(--border);
+  overscroll-behavior-inline: contain;
+  scrollbar-color: color-mix(in oklch, hsl(var(--muted-foreground)) 45%, transparent) transparent;
+  scrollbar-width: thin;
+  border: 1px solid hsl(var(--border));
   border-radius: calc(var(--radius) + 2px);
-  background: color-mix(in oklch, var(--muted) 35%, var(--background));
+  background: color-mix(in oklch, hsl(var(--muted)) 35%, hsl(var(--background)));
   box-shadow: none;
 }
 
 .chat-md .markstream-react .table-node {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   margin: 0;
   border-collapse: separate;
   border-spacing: 0;
@@ -839,11 +917,12 @@
 .chat-md .markstream-react .table-node th,
 .chat-md .markstream-react .table-node td {
   border: 0;
-  border-bottom: 1px solid var(--border);
-  border-right: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+  border-bottom: 1px solid hsl(var(--border));
+  border-right: 1px solid color-mix(in oklch, hsl(var(--border)) 80%, transparent);
   padding: 0.55em 0.85em;
   vertical-align: top;
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .chat-md .markstream-react .table-node th:last-child,
@@ -852,10 +931,11 @@
 }
 
 .chat-md .markstream-react .table-node thead th {
-  background: color-mix(in oklch, var(--muted) 82%, var(--background));
-  color: var(--foreground);
+  background: color-mix(in oklch, hsl(var(--muted)) 82%, hsl(var(--background)));
+  color: hsl(var(--foreground));
   font-weight: 600;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: normal;
 }
 
 .chat-md .markstream-react .table-node tbody tr:last-child td {
@@ -863,15 +943,31 @@
 }
 
 .chat-md .markstream-react .table-node tbody tr:nth-child(even) td {
-  background: color-mix(in oklch, var(--muted) 40%, transparent);
+  background: color-mix(in oklch, hsl(var(--muted)) 40%, transparent);
 }
 
 .chat-md .markstream-react .table-node tbody tr:hover td {
-  background: color-mix(in oklch, var(--muted) 62%, transparent);
+  background: color-mix(in oklch, hsl(var(--muted)) 62%, transparent);
+}
+
+.chat-md .markstream-react .table-node td code,
+.chat-md .markstream-react .table-node th code {
+  white-space: nowrap;
 }
 
 .chat-md .markstream-react .table-node__resize-handle {
   display: none;
+}
+
+@media (max-width: 640px) {
+  .chat-md .markstream-react .table-node {
+    font-size: 0.86em;
+  }
+
+  .chat-md .markstream-react .table-node th,
+  .chat-md .markstream-react .table-node td {
+    padding: 0.5em 0.65em;
+  }
 }
 
 /* 分割线 */
@@ -881,63 +977,47 @@
   border-top-color: var(--border);
 }
 
-/* 代码块：Shiki 渲染 + 灰底 + 顶部复制栏 */
+/* 代码块：全宽描边卡片，无底色，角上复制
+   边框画在 .chat-md-code 上，且不用 --border：
+   .markstream-react 把 --border 改写成 HSL 三段值，solid var(--border) 非法。 */
+.chat-md-code {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid oklch(0.82 0 0);
+  border-radius: var(--radius);
+}
+
+.dark .chat-md-code {
+  border-color: oklch(1 0 0 / 22%);
+}
+
+.chat-md-code .code-block-container,
+.chat-md-code .code-block,
+.chat-md-code .code-block-node {
+  margin: 0;
+}
+
 .chat-md .markstream-react .code-block-container,
 .chat-md .markstream-react .code-block,
 .chat-md .markstream-react .code-block-node {
-  margin: 0.85em 0;
+  width: 100%;
+  max-width: 100%;
   overflow: hidden;
-  border-radius: calc(var(--radius) + 4px);
-  border: 1px solid var(--border);
-  background: var(--chat-code-bg) !important;
-  color: var(--chat-code-fg);
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
   box-shadow: none;
+  contain: none;
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
 }
 
-.chat-md .markstream-react .code-block-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.4rem 0.7rem;
-  background: var(--chat-code-bar) !important;
-  border-bottom: 1px solid var(--border);
-  color: var(--muted-foreground);
-}
-
-.chat-md .markstream-react .code-block-language {
-  color: var(--muted-foreground);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  font-size: 0.7rem;
-  font-weight: 500;
-}
-
-.chat-md .markstream-react .code-block-btn,
-.chat-md .markstream-react .code-action-btn {
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted-foreground);
-  border-radius: 0.35rem;
-  font-size: 0.72rem;
-  padding: 0.2rem 0.55rem;
-  cursor: pointer;
-  transition:
-    background-color 150ms var(--ease-fluid),
-    color 150ms var(--ease-fluid),
-    border-color 150ms var(--ease-fluid);
-}
-
-.chat-md .markstream-react .code-block-btn:hover,
-.chat-md .markstream-react .code-action-btn:hover {
-  background: color-mix(in oklch, var(--muted) 70%, transparent);
-  border-color: color-mix(in oklch, var(--border) 50%, var(--foreground));
-  color: var(--foreground);
-}
-
-.chat-md .markstream-react .code-block-badge {
-  background: color-mix(in oklch, var(--muted) 80%, var(--foreground));
-  color: var(--muted-foreground);
+.chat-md .markstream-react .code-block-header,
+.chat-md .markstream-react .code-block-footer,
+.chat-md .markstream-react .code-block-language,
+.chat-md .markstream-react .code-block-badge,
+.chat-md .markstream-react .code-block-actions {
+  display: none;
 }
 
 .chat-md .markstream-react .code-block-content,
@@ -946,7 +1026,7 @@
 .chat-md .markstream-react .code-block-content pre {
   margin: 0 !important;
   background: transparent !important;
-  font-size: 0.84em;
+  font-size: 0.8125rem;
   line-height: 1.65;
   font-family: var(--font-mono);
 }
@@ -954,7 +1034,7 @@
 .chat-md .markstream-react .code-block-content {
   max-height: min(56vh, 28rem);
   overflow: auto;
-  padding: 0.15rem 0;
+  padding: 0.875rem 1rem;
 }
 
 .chat-md .markstream-react .code-block-content .shiki,
@@ -965,17 +1045,30 @@
 .chat-md .markstream-react pre[data-markstream-pre="1"],
 .chat-md .markstream-react pre[class^="language-"],
 .chat-md .markstream-react pre[class*=" language-"] {
-  margin: 0.85em 0;
-  padding: 0.9em 1em;
+  display: block;
+  width: 100%;
+  margin: 0.6em 0;
+  padding: 0.875rem 1rem;
   overflow-x: auto;
-  border-radius: calc(var(--radius) + 2px);
-  border: 1px solid var(--border);
-  background: var(--chat-code-bg);
-  color: var(--chat-code-fg);
+  border-radius: var(--radius);
+  border: 1px solid oklch(0.82 0 0);
+  background: transparent;
   font-family: var(--font-mono);
-  font-size: 0.84em;
+  font-size: 0.8125rem;
   line-height: 1.65;
   tab-size: 2;
+}
+
+.chat-md .markstream-react pre[data-markstream-pre="1"] code,
+.chat-md .markstream-react pre[class^="language-"] code,
+.chat-md .markstream-react pre[class*=" language-"] code {
+  margin: 0;
+}
+
+.dark .chat-md .markstream-react pre[data-markstream-pre="1"],
+.dark .chat-md .markstream-react pre[class^="language-"],
+.dark .chat-md .markstream-react pre[class*=" language-"] {
+  border-color: oklch(1 0 0 / 22%);
 }
 
 /* 数学公式：无背景、无边框 */

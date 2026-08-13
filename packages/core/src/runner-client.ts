@@ -8,6 +8,7 @@ import type {
   WorkspaceFs,
   WorkspaceFsEntry,
 } from "./workspace-fs.js";
+import type { ShellJobSnapshot } from "./shell-job.js";
 
 export type RunnerClientOptions = {
   baseUrl: string;
@@ -318,6 +319,65 @@ export class RunnerClient {
     );
     if (!res.ok) throw new Error(await res.text());
     return (await res.json()) as { exitCode: number; stdout: string; stderr: string };
+  }
+
+  async startExecJob(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number; stdin?: string },
+  ): Promise<ShellJobSnapshot> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          command,
+          workingDir: opts?.workingDir,
+          env: opts?.env,
+          timeoutMs: opts?.timeoutMs,
+          stdin: opts?.stdin,
+        }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as ShellJobSnapshot;
+  }
+
+  async getExecJob(agentId: string, jobId: string): Promise<ShellJobSnapshot> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as ShellJobSnapshot;
+  }
+
+  async waitExecJob(
+    agentId: string,
+    jobId: string,
+    waitMs: number,
+    stdin?: string,
+  ): Promise<ShellJobSnapshot> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/wait`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ waitMs, stdin }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as ShellJobSnapshot;
+  }
+
+  async killExecJob(agentId: string, jobId: string): Promise<ShellJobSnapshot> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/kill`,
+      { method: "POST", headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as ShellJobSnapshot;
   }
 
   async listDetailed(agentId: string, path: string): Promise<ListDetailedResult> {

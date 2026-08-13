@@ -15,6 +15,7 @@ import {
 import { formatAbsolute, formatRelative } from "@/lib/format";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { SuspendDialog } from "@/components/admin/suspend-dialog";
+import { UserUsagePanel } from "@/components/usage/user-usage-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -262,6 +263,8 @@ export default function AdminUserDetailPage() {
           </TableBody>
         </Table>
       </SettingsSection>
+
+      <UserUsagePanel userId={userId} scope="all" />
 
       {data.runners.length ? (
         <SettingsSection title={`创建的 Runner（${data.runners.length}）`}>

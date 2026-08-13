@@ -1,5 +1,11 @@
 import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
-import { globalRegistry, textResult, type InstanceHandle } from "@zakura/core";
+import {
+  getTelemetry,
+  globalRegistry,
+  recordPlatformFault,
+  textResult,
+  type InstanceHandle,
+} from "@zakura/core";
 import type {
   McpCompleteParams,
   McpCompleteResult,
@@ -526,11 +532,8 @@ export class McpGateway {
       );
       await this.invalidateTenantAgentToolsCaches(tenantId);
       return entry;
-    } catch (err) {
-      console.warn(
-        `[mcp] refreshInstanceTools ${instanceId}:`,
-        err instanceof Error ? err.message.slice(0, 200) : err,
-      );
+    } catch {
+      getTelemetry().mcpErrors.inc({ kind: "refresh_instance_tools" });
       return null;
     } finally {
       this.instanceToolsRefreshing.delete(instanceId);
@@ -612,7 +615,9 @@ export class McpGateway {
             }
           }
         })
-        .catch((err) => console.warn("[mcp] background auto-start:", err));
+        .catch((err) =>
+          recordPlatformFault("mcp.background_autostart", err, { subsystem: "mcp" }),
+        );
     }
     return { instances: running, warming: stopped.length > 0 };
   }
@@ -648,7 +653,7 @@ export class McpGateway {
     const stopped = candidates.filter((i) => i.status !== "running");
     if (stopped.length) {
       void this.ensureInstancesRunning(tenantId, stopped).catch((err) =>
-        console.warn("[mcp] background auto-start:", err),
+        recordPlatformFault("mcp.background_autostart", err, { subsystem: "mcp" }),
       );
     }
     return running;
@@ -674,11 +679,8 @@ export class McpGateway {
             ),
           })) ?? instance;
         if (fresh.status === "running") ready.push(fresh);
-      } catch (err) {
-        console.warn(
-          `[mcp] auto-start ${instance.slug}:`,
-          err instanceof Error ? err.message : err,
-        );
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "autostart" });
       }
     }
     return ready;
@@ -874,7 +876,7 @@ export class McpGateway {
             });
           }
         } catch (err) {
-          console.warn(`[mcp] background capability start:`, err);
+          recordPlatformFault("mcp.capability_start", err, { subsystem: "mcp" });
         }
       })();
     }
@@ -888,7 +890,7 @@ export class McpGateway {
         );
         memoryKind = (resolved?.kind as MemoryProviderKind) ?? "builtin";
       } catch (err) {
-        console.warn(`[mcp] memory provider:`, err);
+        recordPlatformFault("mcp.memory_provider", err, { subsystem: "mcp" });
         memoryKind = "builtin";
       }
     }
@@ -922,11 +924,8 @@ export class McpGateway {
           agent.tenantId,
           agent.id,
         );
-      } catch (err) {
-        console.warn(
-          "[connector] list direct tools:",
-          err instanceof Error ? err.message : String(err),
-        );
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "connector_list" });
       }
       const connectorListed = await Promise.all(
         directTargets.map(async (target) => {
@@ -951,6 +950,7 @@ export class McpGateway {
                 _meta: {
                   ...(t._meta ?? {}),
                   connectorRef: target.connectorRef,
+                  connectorName: target.connectorName,
                   capabilityRef: target.capabilityRef,
                   providerId: target.providerId,
                   product: target.product,
@@ -961,11 +961,8 @@ export class McpGateway {
                 agentId: agent.id,
               });
             });
-          } catch (err) {
-            console.warn(
-              `[connector] listTools ${target.connectorRef}/${target.capabilityRef}:`,
-              err instanceof Error ? err.message : String(err),
-            );
+          } catch {
+            getTelemetry().mcpErrors.inc({ kind: "connector_list_tools" });
             return [] as ResolvedTool[];
           }
         }),
@@ -1041,9 +1038,8 @@ export class McpGateway {
               );
             }),
           };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[mcp] agent listTools ${instance.slug}: ${msg.slice(0, 200)}`);
+        } catch {
+          getTelemetry().mcpErrors.inc({ kind: "list_tools" });
           return { tools: [] as ResolvedTool[], hit: false };
         }
       }),
@@ -1161,9 +1157,8 @@ export class McpGateway {
             ),
           );
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] listTools ${instance.slug}: ${msg.slice(0, 200)}`);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_tools" });
       }
     }
 
@@ -1174,7 +1169,11 @@ export class McpGateway {
     tenantId: string,
     qualifiedName: string,
     args: Record<string, unknown>,
-    opts?: { apiKeyId?: string; agentId?: string | null },
+    opts?: {
+      apiKeyId?: string;
+      agentId?: string | null;
+      onProgress?: (message: string, data?: Record<string, unknown>) => void;
+    },
   ): Promise<McpToolResult | McpCreateTaskResult> {
     const tools = await this.listToolsForTenant(tenantId, opts);
     const tool = tools.find((t) => t.qualifiedName === qualifiedName);
@@ -1243,7 +1242,11 @@ export class McpGateway {
     tenantId: string,
     tool: ResolvedTool,
     args: Record<string, unknown>,
-    opts?: { apiKeyId?: string; agentId?: string | null },
+    opts?: {
+      apiKeyId?: string;
+      agentId?: string | null;
+      onProgress?: (message: string, data?: Record<string, unknown>) => void;
+    },
   ): Promise<McpToolResult | McpCreateTaskResult> {
     void opts;
     // 云端子代理：以隔离上下文 mini-loop 执行子任务（MCP 客户端可直接调用）
@@ -1344,6 +1347,7 @@ export class McpGateway {
         this.workspaceFsProvider,
         this.exposureService,
         this.fileShareService,
+        opts?.onProgress ? { onProgress: opts.onProgress } : undefined,
       );
     }
 
@@ -1517,11 +1521,8 @@ export class McpGateway {
     try {
       const list = await this.skillsService.listForAgent(agent.tenantId, agent.id);
       return list.filter((s) => s.enabled && s.status === "installed");
-    } catch (err) {
-      console.warn(
-        `[mcp] agent skill resources ${agent.slug}:`,
-        err instanceof Error ? err.message : err,
-      );
+    } catch {
+      getTelemetry().mcpErrors.inc({ kind: "skill_resources" });
       return [];
     }
   }
@@ -1646,11 +1647,8 @@ export class McpGateway {
             agentId: agent.id,
           });
         }
-      } catch (err) {
-        console.warn(
-          `[mcp] agent workspace fs resources ${agent.slug}:`,
-          err instanceof Error ? err.message : err,
-        );
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "workspace_resources" });
       }
     }
 
@@ -1697,9 +1695,8 @@ export class McpGateway {
             agentId: agent.id,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] agent listResources ${instance.slug}: ${msg.slice(0, 200)}`);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_resources" });
       }
     }
 
@@ -1763,9 +1760,8 @@ export class McpGateway {
             _meta: r._meta,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] listResources ${instance.slug}: ${msg.slice(0, 200)}`);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_resources" });
       }
     }
 
@@ -1953,9 +1949,8 @@ export class McpGateway {
             agentId: agent.id,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] agent listPrompts ${instance.slug}: ${msg.slice(0, 200)}`);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_prompts" });
       }
     }
 
@@ -2018,9 +2013,8 @@ export class McpGateway {
             _meta: p._meta,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[mcp] listPrompts ${instance.slug}: ${msg.slice(0, 200)}`);
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_prompts" });
       }
     }
 
@@ -2169,11 +2163,8 @@ export class McpGateway {
             agentId: agent.id,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[mcp] agent listResourceTemplates ${instance.slug}: ${msg.slice(0, 200)}`,
-        );
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_resource_templates" });
       }
     }
 
@@ -2237,11 +2228,8 @@ export class McpGateway {
             _meta: t._meta,
           });
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[mcp] listResourceTemplates ${instance.slug}: ${msg.slice(0, 200)}`,
-        );
+      } catch {
+        getTelemetry().mcpErrors.inc({ kind: "list_resource_templates" });
       }
     }
 

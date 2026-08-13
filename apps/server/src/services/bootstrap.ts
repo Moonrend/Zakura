@@ -13,7 +13,7 @@ import {
   type Tenant,
   type User,
 } from "../db/schema.js";
-import { globalRegistry } from "@zakura/core";
+import { globalRegistry, log } from "@zakura/core";
 import bcrypt from "bcryptjs";
 import type { SetupPayload } from "@zakura/shared";
 
@@ -121,9 +121,7 @@ export async function ensureSaasPlatformAdmin(db: Db) {
     .returning();
 
   if (updated) {
-    console.log(
-      `[saas] promoted ${updated.email} to platform admin (was single-tenant setup)`,
-    );
+    log.info("boot.platform_admin_promoted");
   }
   return updated ?? null;
 }

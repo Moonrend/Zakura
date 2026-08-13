@@ -1,3 +1,5 @@
+import { foldPtyText } from "@zakura/shared";
+
 /**
  * 工具返回值解析。
  *
@@ -217,6 +219,8 @@ export type ShellResult = {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  status?: "running" | "exited" | "timeout";
+  jobId?: string;
 };
 
 /** shell_exec 返回 `{stdout, stderr, exitCode}`；解析失败返回 null */
@@ -229,10 +233,16 @@ export function parseShellResult(raw?: string): ShellResult | null {
       "stdout" in parsed || "stderr" in parsed || "exitCode" in parsed || "exit_code" in parsed;
     if (!hasShape) return null;
     const code = parsed.exitCode ?? parsed.exit_code;
+    const status =
+      parsed.status === "running" || parsed.status === "exited" || parsed.status === "timeout"
+        ? parsed.status
+        : undefined;
     return {
-      stdout: typeof parsed.stdout === "string" ? parsed.stdout : "",
-      stderr: typeof parsed.stderr === "string" ? parsed.stderr : "",
+      stdout: typeof parsed.stdout === "string" ? foldPtyText(parsed.stdout) : "",
+      stderr: typeof parsed.stderr === "string" ? foldPtyText(parsed.stderr) : "",
       exitCode: typeof code === "number" ? code : null,
+      status,
+      jobId: typeof parsed.job_id === "string" ? parsed.job_id : undefined,
     };
   } catch {
     return null;

@@ -10,6 +10,8 @@ import {
   buildCompactionDigest,
   buildSessionReuseDigest,
   eventsToMessages,
+  fileOpsFromCompactionPayload,
+  formatHistorySummaryForPrompt,
   messageTextForSummary,
 } from "./messages.js";
 
@@ -260,11 +262,10 @@ export async function callSessionTool(
           ? Math.min(Math.max(args.max_chars, 2000), 24_000)
           : 12_000;
       const lastCompact = await store.getLastCompaction(sessionId);
+      const compactPayload = (lastCompact?.payload ?? {}) as Record<string, unknown>;
       const existingSummary =
-        typeof (lastCompact?.payload as Record<string, unknown> | undefined)?.summary ===
-        "string"
-          ? String((lastCompact!.payload as Record<string, unknown>).summary)
-          : "";
+        typeof compactPayload.summary === "string" ? compactPayload.summary : "";
+      const existingOps = fileOpsFromCompactionPayload(compactPayload);
       const { digest, recent, olderCount } = buildSessionReuseDigest(messages, {
         maxChars,
         keepRecent: 8,
@@ -274,7 +275,10 @@ export async function callSessionTool(
         .join("\n");
       const summary = [
         existingSummary
-          ? `[Existing compaction summary]\n${existingSummary.slice(0, Math.floor(maxChars * 0.5))}`
+          ? `[Existing compaction summary]\n${formatHistorySummaryForPrompt(
+              existingSummary.slice(0, Math.floor(maxChars * 0.5)),
+              existingOps,
+            )}`
           : "",
         olderCount > 0 ? `[Older conversation digest]\n${digest}` : "",
         recent.length

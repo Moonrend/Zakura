@@ -12,10 +12,13 @@ import type {
   CloudAgentRunStatus,
   CloudAgentSessionKind,
   CloudAgentSessionOrigin,
+  ComposerCapabilities,
 } from "@zakura/shared";
-import { isSilentAgentTool } from "@zakura/shared";
+import { isSilentAgentTool, lastCancelledRunId } from "@zakura/shared";
 import { api } from "@/lib/api";
 import { acquireSocket } from "@/lib/socket";
+
+export { lastCancelledRunId };
 
 export type {
   CloudAgentAttachment,
@@ -69,6 +72,11 @@ export type TimelineToolCall = {
   childSessionId?: string;
   /** 子会话所属 Agent（委派时为目标 Agent） */
   childAgentId?: string;
+  /** 完整 args/result 未随历史下发，展开时再拉 */
+  detailPending?: boolean;
+  /** 执行中的 stdout 预览（shell 等） */
+  liveStdout?: string;
+  liveStderr?: string;
 };
 
 export type TimelineMemoryItem = {
@@ -126,14 +134,22 @@ export type TimelineItem =
   | {
       kind: "compaction";
       id: string;
+      /** true=进行中；false=已完成 */
+      active: boolean;
       summary: string;
       beforeChars: number;
       afterChars: number;
       droppedMessages: number;
       keptMessages: number;
-      source: "manual" | "auto";
+      source: "manual" | "auto" | "soft" | "fork" | "overflow";
       systemSessionId?: string;
+      durationMs?: number;
+      model?: string;
+      phase?: "start" | "summarizing";
+      progress?: number;
+      failed?: boolean;
       seq: number;
+      runId?: string | null;
     }
   | { kind: "error"; id: string; message: string; seq: number };
 
@@ -574,6 +590,15 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       if (call && typeof p.arguments === "string") call.arguments = p.arguments;
       continue;
     }
+    if (ev.type === "tool_call_progress") {
+      const id = typeof p.toolCallId === "string" ? p.toolCallId : "";
+      const call = toolMap.get(id);
+      if (call && call.status === "running") {
+        if (typeof p.stdout === "string") call.liveStdout = p.stdout;
+        if (typeof p.stderr === "string") call.liveStderr = p.stderr;
+      }
+      continue;
+    }
     if (ev.type === "tool_call_result") {
       const id = typeof p.toolCallId === "string" ? p.toolCallId : "";
       const resultName = typeof p.name === "string" ? p.name : "";
@@ -600,6 +625,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         if (typeof p.name === "string") call.name = p.name;
         if (typeof p.childSessionId === "string") call.childSessionId = p.childSessionId;
         if (typeof p.childAgentId === "string") call.childAgentId = p.childAgentId;
+        if (p.detailPending === true) call.detailPending = true;
       }
       continue;
     }
@@ -641,19 +667,87 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       }
       continue;
     }
+    if (ev.type === "context_compacting") {
+      flushReasoning();
+      // 与工具类似：同一 Run 内复用进行中条目，避免刷多条
+      const runKey = ev.runId ?? ev.id;
+      let existing = items.find(
+        (it) =>
+          it.kind === "compaction" &&
+          it.active &&
+          (it.runId === ev.runId || it.id === `compacting-${runKey}`),
+      ) as Extract<TimelineItem, { kind: "compaction" }> | undefined;
+      if (!existing) {
+        existing = {
+          kind: "compaction",
+          id: `compacting-${runKey}`,
+          active: true,
+          summary: "",
+          beforeChars: typeof p.beforeChars === "number" ? p.beforeChars : 0,
+          afterChars: 0,
+          droppedMessages: typeof p.olderMessages === "number" ? p.olderMessages : 0,
+          keptMessages: typeof p.keepMessages === "number" ? p.keepMessages : 0,
+          source:
+            p.source === "manual" ||
+            p.source === "soft" ||
+            p.source === "overflow" ||
+            p.source === "auto"
+              ? p.source
+              : "auto",
+          phase: p.phase === "summarizing" ? "summarizing" : "start",
+          progress: typeof p.progress === "number" ? p.progress : 15,
+          seq: ev.seq,
+          runId: ev.runId,
+        };
+        items.push(existing);
+      } else {
+        existing.seq = ev.seq;
+        if (typeof p.beforeChars === "number") existing.beforeChars = p.beforeChars;
+        if (p.phase === "start" || p.phase === "summarizing") existing.phase = p.phase;
+        if (typeof p.progress === "number") existing.progress = p.progress;
+      }
+      continue;
+    }
     if (ev.type === "context_compacted") {
-      items.push({
+      flushReasoning();
+      const source =
+        p.source === "manual" ||
+        p.source === "soft" ||
+        p.source === "fork" ||
+        p.source === "overflow"
+          ? p.source
+          : "auto";
+      // 结束进行中的压缩步骤
+      const active = items.find(
+        (it) =>
+          it.kind === "compaction" &&
+          it.active &&
+          (ev.runId == null || it.runId === ev.runId || it.runId == null),
+      ) as Extract<TimelineItem, { kind: "compaction" }> | undefined;
+      const done: Extract<TimelineItem, { kind: "compaction" }> = {
         kind: "compaction",
         id: ev.id,
+        active: false,
         summary: typeof p.summary === "string" ? p.summary : "",
         beforeChars: typeof p.beforeChars === "number" ? p.beforeChars : 0,
         afterChars: typeof p.afterChars === "number" ? p.afterChars : 0,
         droppedMessages: typeof p.droppedMessages === "number" ? p.droppedMessages : 0,
         keptMessages: typeof p.keptMessages === "number" ? p.keptMessages : 0,
-        source: p.source === "auto" ? "auto" : "manual",
-        systemSessionId: typeof p.systemSessionId === "string" ? p.systemSessionId : undefined,
+        source,
+        systemSessionId:
+          typeof p.systemSessionId === "string" ? p.systemSessionId : undefined,
+        durationMs: typeof p.durationMs === "number" ? p.durationMs : undefined,
+        model: typeof p.model === "string" ? p.model : undefined,
+        failed: p.failed === true,
+        progress: 100,
         seq: ev.seq,
-      });
+        runId: ev.runId,
+      };
+      if (active) {
+        Object.assign(active, done);
+      } else {
+        items.push(done);
+      }
       continue;
     }
     if (ev.type === "run_error") {
@@ -699,7 +793,14 @@ export type ConversationSelection = {
 };
 
 export type ConversationTurn = {
-  message: { id: string; content: string; seq: number; parentKey: string };
+  message: {
+    id: string;
+    content: string;
+    seq: number;
+    parentKey: string;
+    /** 从中断处接着做：不展示用户气泡 */
+    continue?: boolean;
+  };
   /** 兄弟用户消息 id（含自身，seq 升序） */
   siblings: string[];
   siblingIndex: number;
@@ -725,6 +826,7 @@ export function buildConversationTurns(
     content: string;
     seq: number;
     parentKey: string;
+    continue?: boolean;
     event: CloudAgentEvent;
   };
   const userMsgs = new Map<string, UserNode>();
@@ -756,6 +858,7 @@ export function buildConversationTurns(
         content: typeof p.content === "string" ? p.content : "",
         seq: ev.seq,
         parentKey,
+        ...(p.continue === true ? { continue: true } : {}),
         event: ev,
       };
       userMsgs.set(mid, node);
@@ -801,15 +904,45 @@ export function buildConversationTurns(
         ev.type === "assistant_rollback" ||
         ev.type === "tool_call_start" ||
         ev.type === "tool_call_args" ||
+        ev.type === "tool_call_progress" ||
         ev.type === "tool_call_result" ||
         ev.type === "run_status" ||
+        ev.type === "run_end" ||
         ev.type === "run_error" ||
         ev.type === "memory_updated" ||
-        ev.type === "context_sources")
+        ev.type === "context_sources" ||
+        ev.type === "context_compacting" ||
+        ev.type === "context_compacted")
     ) {
       const list = eventsByRun.get(ev.runId) ?? [];
       list.push(ev);
       eventsByRun.set(ev.runId, list);
+    }
+  }
+
+  // 历史尾窗截断时，最早一批 user_message 的 parentRunId 可能不在已加载事件里，
+  // 若不提升为根，从 parentKey="" 起步会得到空 turns（长对话空白欢迎页）。
+  if ((childrenByParent.get("") ?? []).length === 0 && userMsgs.size > 0) {
+    const knownParents = new Set<string>(["", ...eventsByRun.keys()]);
+    for (const list of runsByReply.values()) {
+      for (const rid of list) knownParents.add(rid);
+    }
+    for (const node of userMsgs.values()) {
+      if (knownParents.has(node.parentKey)) continue;
+      const prev = childrenByParent.get(node.parentKey);
+      if (prev) {
+        const idx = prev.indexOf(node.id);
+        if (idx >= 0) prev.splice(idx, 1);
+        if (prev.length === 0) childrenByParent.delete(node.parentKey);
+      }
+      node.parentKey = "";
+      const roots = childrenByParent.get("") ?? [];
+      roots.push(node.id);
+      childrenByParent.set("", roots);
+    }
+    const roots = childrenByParent.get("");
+    if (roots && roots.length > 1) {
+      roots.sort((a, b) => (userMsgs.get(a)?.seq ?? 0) - (userMsgs.get(b)?.seq ?? 0));
     }
   }
 
@@ -839,7 +972,13 @@ export function buildConversationTurns(
 
     const turnEvents = [node.event, ...(activeRunId ? (eventsByRun.get(activeRunId) ?? []) : [])];
     turns.push({
-      message: { id: node.id, content: node.content, seq: node.seq, parentKey },
+      message: {
+        id: node.id,
+        content: node.content,
+        seq: node.seq,
+        parentKey,
+        ...(node.continue ? { continue: true } : {}),
+      },
       siblings,
       siblingIndex: siblings.indexOf(chosenId),
       variants,
@@ -905,16 +1044,60 @@ export async function createCloudSession(agentId: string, title?: string) {
   });
 }
 
-export async function getCloudSession(agentId: string, sessionId: string, afterSeq = 0) {
+export async function getCloudSession(
+  agentId: string,
+  sessionId: string,
+  opts: number | { afterSeq?: number; beforeSeq?: number } = 0,
+) {
+  const afterSeq = typeof opts === "number" ? opts : (opts.afterSeq ?? 0);
+  const beforeSeq = typeof opts === "number" ? undefined : opts.beforeSeq;
+  const qs = new URLSearchParams();
+  if (beforeSeq != null && beforeSeq > 0) qs.set("beforeSeq", String(beforeSeq));
+  else qs.set("afterSeq", String(afterSeq));
   return api<{
     session: CloudSession;
     events: CloudAgentEvent[];
+    /** 是否还有更早事件可翻页 */
+    hasMore?: boolean;
     /** 服务端排队中的后续消息（跨设备同步） */
     queue?: CloudAgentQueuedMessage[];
-  }>(
-    `/api/agents/${agentId}/cloud/sessions/${sessionId}?afterSeq=${afterSeq}`,
-    { cacheTtlMs: false },
-  );
+  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}?${qs}`, {
+    cacheTtlMs: false,
+  });
+}
+
+/** 按需加载工具完整参数/结果（历史瘦身后展开） */
+export async function getCloudToolDetails(
+  agentId: string,
+  sessionId: string,
+  toolCallIds: string[],
+) {
+  const ids = [...new Set(toolCallIds.filter(Boolean))].slice(0, 40);
+  if (ids.length === 0) return { tools: [] as Array<{
+    toolCallId: string;
+    name?: string;
+    arguments?: string;
+    resultText?: string;
+    isError?: boolean;
+    durationMs?: number;
+    childSessionId?: string;
+    childAgentId?: string;
+  }> };
+  const qs = new URLSearchParams({ ids: ids.join(",") });
+  return api<{
+    tools: Array<{
+      toolCallId: string;
+      name?: string;
+      arguments?: string;
+      resultText?: string;
+      isError?: boolean;
+      durationMs?: number;
+      childSessionId?: string;
+      childAgentId?: string;
+    }>;
+  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/tools?${qs}`, {
+    cacheTtlMs: false,
+  });
 }
 
 export async function forkCloudSession(agentId: string, sessionId: string, title?: string) {
@@ -933,6 +1116,12 @@ export async function forkCloudSession(agentId: string, sessionId: string, title
 
 export async function deleteCloudSession(agentId: string, sessionId: string) {
   return api(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, { method: "DELETE" });
+}
+
+export async function fetchComposerCapabilities(agentId: string) {
+  return api<ComposerCapabilities>(`/api/agents/${agentId}/cloud/composer`, {
+    cacheTtlMs: false,
+  });
 }
 
 export async function sendCloudMessage(
@@ -1047,6 +1236,21 @@ export async function retryCloudRun(
     method: "POST",
     json: options && Object.keys(options).length > 0 ? { options } : {},
   });
+}
+
+/** 中途停止后继续：从上次 cancelled Run 接着做 */
+export async function continueCloudRun(
+  agentId: string,
+  sessionId: string,
+  options?: CloudAgentRunOptions,
+) {
+  return api<{ runId: string }>(
+    `/api/agents/${agentId}/cloud/sessions/${sessionId}/continue`,
+    {
+      method: "POST",
+      json: options && Object.keys(options).length > 0 ? { options } : {},
+    },
+  );
 }
 
 export async function updateCloudSession(
@@ -1240,7 +1444,13 @@ export async function saveCloudConfig(
   cloud: Partial<
     Omit<
       CloudAgentConfig,
-      "maxToolRounds" | "model" | "modelRouteId" | "maxSubagentDepth" | "gatewayModelMap"
+      | "maxToolRounds"
+      | "model"
+      | "modelRouteId"
+      | "compactModel"
+      | "compactModelRouteId"
+      | "maxSubagentDepth"
+      | "gatewayModelMap"
     >
   > & {
     /** null 表示清除限制 */
@@ -1249,6 +1459,15 @@ export async function saveCloudConfig(
     model?: string | null;
     /** 空串/undefined 表示动态路由 */
     modelRouteId?: string | null;
+    /** 压缩专用模型；null/"" 清除 → 回退对话模型 */
+    compactModel?: string | null;
+    compactModelRouteId?: string | null;
+    autoCompact?: boolean;
+    compactThresholdChars?: number | null;
+    compactSoftThresholdChars?: number | null;
+    compactKeepRecent?: number | null;
+    compactKeepRecentChars?: number | null;
+    maxToolResultChars?: number | null;
     /** null/0 恢复默认嵌套深度（2） */
     maxSubagentDepth?: number | null;
     /** null/{} 清除 Gateway 模型转发 */

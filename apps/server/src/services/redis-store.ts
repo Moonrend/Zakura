@@ -2,6 +2,7 @@
  * Redis 热数据（对齐 Memoh session_runtime 思路）：
  * 活状态/近期事件/鉴权与工具缓存进 Redis；Postgres 仍是权威持久化。
  */
+import { recordPlatformFault } from "@zakura/core";
 import type { CloudAgentEvent } from "@zakura/shared";
 import { getRedis, isRedisEnabled, requireRedis, REDIS_KEYS, type ZakuraRedis } from "./redis.js";
 
@@ -60,7 +61,7 @@ export async function redisSetJson(
   try {
     await redis.set(key, JSON.stringify(value), { EX: ttlSec });
   } catch (err) {
-    console.warn("[redis] setJson failed:", err instanceof Error ? err.message : err);
+    recordPlatformFault("redis.set_json", err, { dep: "redis" });
   }
 }
 
@@ -114,7 +115,7 @@ export async function enqueueEventRing(
       .expire(key, REDIS_TTL.session)
       .exec();
   } catch (err) {
-    console.warn("[redis] event ring push failed:", err);
+    recordPlatformFault("redis.event_ring", err, { dep: "redis" });
   }
 }
 

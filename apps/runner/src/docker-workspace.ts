@@ -6,7 +6,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
-import { resolveDockerContextSocketPath, toDockerHostPath } from "@zakura/core";
+import {
+  resolveDockerContextSocketPath,
+  toDockerHostPath,
+  ShellJob,
+  ShellJobRegistry,
+  bindExecStream,
+  type ShellJobSnapshot,
+} from "@zakura/core";
 import {
   AGENT_PORT_CDP,
   AGENT_PORT_NOVNC,
@@ -90,6 +97,7 @@ export type WorkspaceInfo = {
 
 export class RunnerDockerWorkspace {
   private readonly docker: Docker;
+  private readonly jobs = new ShellJobRegistry();
 
   constructor(
     private readonly storageRoot: string,
@@ -307,6 +315,7 @@ export class RunnerDockerWorkspace {
   }
 
   async stop(agentId: string, remove = true): Promise<{ ok: true }> {
+    await this.jobs.killAgent(agentId);
     const existing = await this.findByAgent(agentId);
     if (!existing) return { ok: true };
     try {
@@ -401,6 +410,84 @@ export class RunnerDockerWorkspace {
     const probe = await this.probeWorkspaceMount(existing.dockerId);
     if (!probe.ok) throw new Error(probe.error);
     return this.execRaw(existing.dockerId, command, opts);
+  }
+
+  async startJob(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number },
+  ): Promise<ShellJobSnapshot> {
+    const existing = await this.findByAgent(agentId);
+    if (!existing || existing.status !== "running") {
+      throw new Error("Workspace container not running on this runner");
+    }
+    const container = this.docker.getContainer(existing.dockerId);
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      WorkingDir: opts?.workingDir,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: true,
+    })) as unknown as NodeJS.ReadWriteStream;
+    const job = new ShellJob({ agentId });
+    bindExecStream(job, stream, {
+      inspect: () => exec.inspect(),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch {
+          /* gone */
+        }
+      },
+    });
+    this.jobs.add(job);
+    if (opts?.stdin) setTimeout(() => job.write(opts.stdin!), 30);
+    if (opts?.timeoutMs && opts.timeoutMs > 0) {
+      setTimeout(() => {
+        if (job.snapshot().running) void job.kill();
+      }, opts.timeoutMs);
+    }
+    return job.snapshot();
+  }
+
+  getJob(agentId: string, jobId: string): ShellJob | undefined {
+    return this.jobs.getForAgent(agentId, jobId);
+  }
+
+  async waitJob(
+    agentId: string,
+    jobId: string,
+    waitMs: number,
+    stdin?: string,
+  ): Promise<ShellJobSnapshot> {
+    const job = this.jobs.getForAgent(agentId, jobId);
+    if (!job) throw new Error("Shell job not found");
+    if (stdin) job.write(stdin);
+    return job.wait(waitMs);
+  }
+
+  async killJob(agentId: string, jobId: string): Promise<ShellJobSnapshot> {
+    const job = this.jobs.getForAgent(agentId, jobId);
+    if (!job) throw new Error("Shell job not found");
+    await job.kill();
+    return job.snapshot();
+  }
+
+  async killAgentJobs(agentId: string): Promise<void> {
+    await this.jobs.killAgent(agentId);
   }
 
   /**

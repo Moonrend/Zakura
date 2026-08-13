@@ -16,7 +16,9 @@ import { createWeixinAdapter } from "chat-adapter-weixin";
 import { createPostgresState, type PostgresStateAdapter } from "@chat-adapter/state-pg";
 import { createMemoryState, type MemoryStateAdapter } from "@chat-adapter/state-memory";
 import { randomBytes } from "node:crypto";
+import { recordPlatformFault } from "@zakura/core";
 import type { AppConfig } from "../config.js";
+import { platformEvents } from "./platform-events.js";
 import type { ConnectorAuthService } from "./connector-auth.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
 import type {
@@ -168,7 +170,9 @@ export class RemoteChannelRuntime {
     return handler(request, {
       waitUntil: (promise: Promise<unknown>) => {
         void promise.catch((error) => {
-          console.warn("[remote-agent] async webhook failed:", error);
+          recordPlatformFault("remote_agent.webhook_async", error, {
+            subsystem: "remote_agent",
+          });
         });
       },
     });
@@ -200,10 +204,9 @@ export class RemoteChannelRuntime {
       try {
         await this.startBinding(tenantId, binding.id);
       } catch (error) {
-        console.warn(
-          `[remote-agent] failed to start ${binding.platform}/${binding.id}:`,
-          error instanceof Error ? error.message : error,
-        );
+        recordPlatformFault("remote_agent.start_binding", error, {
+          subsystem: "remote_agent",
+        });
       }
     }
   }
@@ -257,7 +260,7 @@ export class RemoteChannelRuntime {
 
   private async tryRegisterTelegramWebhook(
     tenantId: string,
-    binding: { id: string; platform: string; profileKey: string },
+    binding: { id: string; platform: string; profileKey: string; agentId?: string },
   ): Promise<void> {
     if (binding.platform !== "telegram") return;
     const creds = await this.resolveCredentials(tenantId, binding);
@@ -301,7 +304,14 @@ export class RemoteChannelRuntime {
         if (!response.ok || result.ok !== true) {
           throw new Error(result.description || `Telegram HTTP ${response.status}`);
         }
-        console.info(`[remote-agent] Telegram webhook registered: ${webhookUrl}`);
+        platformEvents.publish(tenantId, {
+          type: "connector_notice",
+          agentId: binding.agentId ?? "",
+          bindingId: binding.id,
+          platform: "telegram",
+          level: "ok",
+          message: "Telegram webhook 已登记",
+        });
         return;
       } catch (error) {
         lastError = error;
@@ -309,10 +319,17 @@ export class RemoteChannelRuntime {
       }
     }
 
-    console.warn(
-      `[remote-agent] Telegram webhook registration failed after 3 attempts for ${binding.id}:`,
-      lastError instanceof Error ? lastError.message : lastError,
-    );
+    recordPlatformFault("remote_agent.telegram_webhook", lastError, {
+      subsystem: "remote_agent",
+    });
+    platformEvents.publish(tenantId, {
+      type: "connector_notice",
+      agentId: binding.agentId ?? "",
+      bindingId: binding.id,
+      platform: "telegram",
+      level: "error",
+      message: "Telegram webhook 登记失败，请检查 Bot Token 与公网地址",
+    });
   }
 
   private async stateFor(
@@ -332,7 +349,10 @@ export class RemoteChannelRuntime {
     return state;
   }
 
-  private async getBot(tenantId: string, binding: { id: string; platform: string; profileKey: string }): Promise<Bot> {
+  private async getBot(
+    tenantId: string,
+    binding: { id: string; platform: string; profileKey: string; agentId?: string },
+  ): Promise<Bot> {
     const existing = this.bots.get(binding.id);
     if (existing) return existing;
     if (!isChatSdkPlatform(binding.platform)) throw new Error(`不支持远程平台: ${binding.platform}`);
@@ -522,7 +542,7 @@ export class RemoteChannelRuntime {
         await deliverRunToThread(thread, this.store, result.sessionId, result.runId);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
-        console.warn(`[remote-agent] message handling failed for ${binding.id}:`, reason);
+        recordPlatformFault("remote_agent.inbound", error, { subsystem: "remote_agent" });
         await thread.post(`Agent 暂时无法处理消息：${reason}`);
       }
     };
@@ -550,21 +570,28 @@ export class RemoteChannelRuntime {
 
     void registerPlatformSlashCommands(binding.platform, adapterConfig)
       .then((result) => {
-        if (result.skipped) {
-          console.info(`[remote-agent] slash menu ${binding.platform}: ${result.detail}`);
-          return;
-        }
-        if (!result.ok) {
-          console.warn(`[remote-agent] slash menu register failed (${binding.platform}):`, result.detail);
-          return;
-        }
-        console.info(`[remote-agent] slash menu registered (${binding.platform}):`, result.detail);
+        if (result.skipped) return;
+        platformEvents.publish(tenantId, {
+          type: "connector_notice",
+          agentId: binding.agentId ?? "",
+          bindingId: binding.id,
+          platform: binding.platform,
+          level: result.ok ? "ok" : "error",
+          message: result.detail,
+        });
       })
       .catch((error) => {
-        console.warn(
-          `[remote-agent] slash menu register error (${binding.platform}):`,
-          error instanceof Error ? error.message : error,
-        );
+        recordPlatformFault("remote_agent.slash_menu", error, {
+          subsystem: "remote_agent",
+        });
+        platformEvents.publish(tenantId, {
+          type: "connector_notice",
+          agentId: binding.agentId ?? "",
+          bindingId: binding.id,
+          platform: binding.platform,
+          level: "error",
+          message: "斜杠指令注册失败",
+        });
       });
 
     this.bots.set(binding.id, bot);

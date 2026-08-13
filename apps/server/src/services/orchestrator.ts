@@ -1,9 +1,12 @@
 import { and, eq, ne, notInArray } from "drizzle-orm";
 import {
+  componentLogger,
   decryptJson,
   DecryptError,
   encryptJson,
+  getTelemetry,
   globalRegistry,
+  recordPlatformFault,
   type InstanceHandle,
   type ProviderContext,
   type RunnerClient,
@@ -203,10 +206,7 @@ export class Orchestrator {
     try {
       this.onInstanceReady?.(tenantId, instanceId);
     } catch (err) {
-      console.warn(
-        "[orch] onInstanceReady:",
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("orch.instance_ready_hook", err, { subsystem: "orch" });
     }
   }
 
@@ -214,10 +214,7 @@ export class Orchestrator {
     try {
       this.onInstanceStopped?.(tenantId, instanceId);
     } catch (err) {
-      console.warn(
-        "[orch] onInstanceStopped:",
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("orch.instance_stopped_hook", err, { subsystem: "orch" });
     }
   }
 
@@ -234,11 +231,7 @@ export class Orchestrator {
       db: this.db,
       resolveEndpoint: (hostPort, path = "") =>
         `http://${host}:${hostPort}${path.startsWith("/") || !path ? path : `/${path}`}`,
-      logger: {
-        info: (msg, meta) => console.log(`[orch] ${msg}`, meta ?? ""),
-        warn: (msg, meta) => console.warn(`[orch] ${msg}`, meta ?? ""),
-        error: (msg, meta) => console.error(`[orch] ${msg}`, meta ?? ""),
-      },
+      logger: componentLogger("orch"),
     };
   }
 
@@ -426,10 +419,7 @@ export class Orchestrator {
         started += 1;
       } catch (err) {
         failed += 1;
-        console.warn(
-          `[orch] auto-start ${row.slug} (${row.providerId}):`,
-          err instanceof Error ? err.message : err,
-        );
+        getTelemetry().mcpErrors.inc({ kind: "orch_autostart" });
       }
     }
     return { started, failed, skipped };
@@ -731,7 +721,7 @@ export class Orchestrator {
         );
         await client.stopInstance(instanceId, true);
       } catch (err) {
-        console.warn(`[orch] runner stop ${instance.slug}:`, err);
+        recordPlatformFault("orch.runner_stop", err, { subsystem: "orch" });
       }
       for (const c of containers) {
         await this.db
@@ -746,7 +736,7 @@ export class Orchestrator {
           await this.runtime.stop(c.dockerId);
           await this.runtime.remove(c.dockerId, true);
         } catch (err) {
-          console.warn(`[orch] stop/remove ${c.name}:`, err);
+          recordPlatformFault("orch.container_stop", err, { subsystem: "orch" });
         }
         await this.db
           .update(managedContainers)

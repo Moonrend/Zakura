@@ -2,6 +2,7 @@
  * 市场定期同步：刷新 MCP 文件缓存 + 插件市场缓存，并重建商店目录索引（名称/描述）。
  * 与 SkillsService 后台刷新并列，互不耦合。
  */
+import { recordPlatformFault } from "@zakura/core";
 import { BUILTIN_MARKETS, CURATED_OAUTH_MCPS } from "@zakura/shared";
 import type { McpStoreService } from "./mcp-store.js";
 import type { StoreCatalogService } from "./store-catalog.js";
@@ -40,7 +41,7 @@ export class MarketSyncService {
       // 插件市场：每轮最多同步一个，避免打爆 git
       await this.syncOnePluginMarket();
     } catch (err) {
-      console.warn("[market-sync]", err instanceof Error ? err.message : err);
+      recordPlatformFault("market_sync.tick", err, { subsystem: "market_sync" });
     } finally {
       this.running = false;
     }
@@ -50,7 +51,7 @@ export class MarketSyncService {
     const result = await this.mcpStore.sync({ force: false });
     for (const row of result.results) {
       if (row.error) {
-        console.warn(`[market-sync] ${row.storeId}: ${row.error}`);
+        recordPlatformFault("market_sync.store", row.error, { subsystem: "market_sync" });
         continue;
       }
       await this.indexMcpStore(row.storeId);
@@ -169,10 +170,7 @@ export class MarketSyncService {
         null,
       );
     } catch (err) {
-      console.warn(
-        `[market-sync] plugin ${market.id}:`,
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("market_sync.plugin", err, { subsystem: "market_sync" });
     }
   }
 }

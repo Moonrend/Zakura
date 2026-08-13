@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
-import { generateApiKey } from "@zakura/core";
+import { generateApiKey, recordPlatformFault } from "@zakura/core";
 import { rmSync } from "node:fs";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -304,7 +304,7 @@ export class AgentService {
       return this.workspace.start(agent);
     }
     void this.workspace.start(agent).catch((err) => {
-      console.error(`[agent] workspace start failed ${agent.slug}:`, err);
+      recordPlatformFault("agent.workspace_start", err, { subsystem: "agent" });
     });
     return agent;
   }
@@ -677,10 +677,7 @@ export class AgentService {
     try {
       agent = await this.ensureDefaultMcpBindings(tenantId, agent, orchestrator);
     } catch (err) {
-      console.warn(
-        `[agent] default MCP bindings ${agent.slug}:`,
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("agent.default_mcp_bindings", err, { subsystem: "agent" });
     }
     const prefs = getAgentProviders(agent);
 

@@ -38,6 +38,7 @@ import {
   isCreateTaskResult,
   toPublicToolDescriptor,
 } from "@zakura/shared";
+import { getTelemetry } from "@zakura/core";
 import { textResult } from "@zakura/core";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -209,7 +210,7 @@ function createAgentMcpServer(opts: {
       request && typeof request === "object" && "method" in request
         ? String((request as { method: unknown }).method)
         : "unknown";
-    console.warn(`[mcp] Method not found on agent ${pathSlug}: ${method}`);
+    getTelemetry().mcpErrors.inc({ kind: "method_not_found" });
     throw new McpError(ErrorCode.MethodNotFound, `Method not found: ${method}`);
   };
 
@@ -364,11 +365,8 @@ function createAgentMcpServer(opts: {
           return item;
         }),
       };
-    } catch (err) {
-      console.warn(
-        `[mcp] resources/list ${pathSlug}:`,
-        err instanceof Error ? err.message : err,
-      );
+    } catch {
+      getTelemetry().mcpErrors.inc({ kind: "resources_list" });
       return { resources: [] };
     }
   });
@@ -412,11 +410,8 @@ function createAgentMcpServer(opts: {
           return item;
         }),
       };
-    } catch (err) {
-      console.warn(
-        `[mcp] prompts/list ${pathSlug}:`,
-        err instanceof Error ? err.message : err,
-      );
+    } catch {
+      getTelemetry().mcpErrors.inc({ kind: "prompts_list" });
       return { prompts: [] };
     }
   });
@@ -470,11 +465,8 @@ function createAgentMcpServer(opts: {
           return item;
         }),
       };
-    } catch (err) {
-      console.warn(
-        `[mcp] resources/templates/list ${pathSlug}:`,
-        err instanceof Error ? err.message : err,
-      );
+    } catch {
+      getTelemetry().mcpErrors.inc({ kind: "resource_templates_list" });
       return { resourceTemplates: [] };
     }
   });

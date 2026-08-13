@@ -69,12 +69,12 @@ const app = new Hono();
 
 app.get("/health", (c) =>
   c.json({
-    ok: true,
+    status: "ok",
     service: "oauth-bridge",
-    publicBaseUrl,
     googleConfigured: !!loadConfig().googleClientId,
   }),
 );
+app.get("/livez", (c) => c.json({ status: "ok", service: "oauth-bridge" }));
 
 /** RFC 8414 Authorization Server Metadata */
 app.get("/.well-known/oauth-authorization-server", (c) =>
@@ -239,5 +239,14 @@ app.post("/token", async (c) => {
   });
 });
 
-console.log(`[oauth-bridge] listening on ${publicBaseUrl} (port ${port})`);
+process.stdout.write(
+  `${JSON.stringify({
+    ts: new Date().toISOString(),
+    level: "info",
+    service: "oauth-bridge",
+    event: "process.ready",
+    bind_port: port,
+    google_configured: !!loadConfig().googleClientId,
+  })}\n`,
+);
 serve({ fetch: app.fetch, port, hostname: "0.0.0.0" });

@@ -2,6 +2,7 @@
  * Agent 自动化：定时任务（cron / @every）。
  * 进程内轮询 due 行，claim 后创建 system 会话并 startTurn。
  */
+import { log, recordPlatformFault } from "@zakura/core";
 import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
@@ -98,7 +99,7 @@ export class AgentAutomationService {
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     // boot 后稍等再扫，避免与 migrate 抢
     setTimeout(() => void this.tick(), 3_000);
-    console.log("[automation] scheduler started (poll 20s)");
+    log.info("boot.automation_scheduler", { poll_sec: 20 });
   }
 
   stop(): void {
@@ -290,10 +291,7 @@ export class AgentAutomationService {
     try {
       schedules = await this.claimAndFireSchedules();
     } catch (err) {
-      console.warn(
-        "[automation] tick failed:",
-        err instanceof Error ? err.message : err,
-      );
+      recordPlatformFault("automation.tick", err, { subsystem: "automation" });
     } finally {
       this.ticking = false;
     }
@@ -365,7 +363,7 @@ export class AgentAutomationService {
       if (!claimed.length) continue;
 
       void this.fireSchedule({ ...row, nextRunAt: next }, { manual: false }).catch((err: unknown) => {
-        console.warn("[automation] schedule fire failed:", row.id, err);
+        recordPlatformFault("automation.fire", err, { subsystem: "automation" });
       });
       n += 1;
     }

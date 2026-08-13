@@ -1,7 +1,13 @@
 import { and, eq } from "drizzle-orm";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { RunnerClient } from "@zakura/core";
+import {
+  RunnerClient,
+  ShellJobRegistry,
+  ensureWorkspaceDir,
+  recordPlatformFault,
+  type ShellJobSnapshot,
+} from "@zakura/core";
 import {
   AGENT_DESKTOP_HEIGHT,
   AGENT_DESKTOP_WIDTH,
@@ -29,7 +35,6 @@ import {
   finishAgentProgress,
   logAgentProgress,
 } from "./agent-progress.js";
-import { ensureWorkspaceDir } from "@zakura/core";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
 
 function isLoopbackHost(host: string): boolean {
@@ -161,6 +166,7 @@ export interface DesktopEndpoints {
 export class AgentWorkspaceService {
   /** agentId:containerPort → host tunnel (survives Docker Desktop port-publish failures) */
   private readonly tunnels = new Map<string, TcpTunnel>();
+  private readonly shellJobs = new ShellJobRegistry();
 
   constructor(
     private readonly db: Db,
@@ -418,7 +424,7 @@ export class AgentWorkspaceService {
         chromeInside: true,
       };
     } catch (err) {
-      console.warn(`[agent-ws] CDP tunnel failed for ${agentId}:`, err);
+      recordPlatformFault("agent_ws.cdp_tunnel", err, { subsystem: "agent_ws" });
       return {
         url: null,
         reason: `CDP 隧道建立失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -451,7 +457,7 @@ export class AgentWorkspaceService {
     await this.runtime
       .exec(dockerId, ["bash", "-lc", script], { workingDir: "/" })
       .catch((err) => {
-        console.warn("[agent-ws] tryStartChromeInside failed:", err);
+        recordPlatformFault("agent_ws.chrome_start", err, { subsystem: "agent_ws" });
       });
   }
 
@@ -833,7 +839,7 @@ export class AgentWorkspaceService {
 
   private async waitDesktopReady(
     dockerId: string,
-    agent: Agent,
+    _agent: Agent,
     timeoutMs: number,
     onTick?: (percent: number, message: string) => void,
   ) {
@@ -861,7 +867,9 @@ export class AgentWorkspaceService {
       await new Promise((r) => setTimeout(r, 2000));
     }
     onTick?.(96, "依赖安装超时，容器可能仍在后台继续");
-    console.warn(`[agent-ws] feature ready timeout for ${agent.slug}`);
+    recordPlatformFault("agent_ws.feature_ready_timeout", undefined, {
+      subsystem: "agent_ws",
+    });
   }
 
   /** Start workspace container on a remote Runner Agent. */
@@ -963,6 +971,7 @@ export class AgentWorkspaceService {
 
   async stop(agent: Agent, opts?: { removeContainer?: boolean }): Promise<Agent> {
     this.closeTunnelsForAgent(agent.id);
+    await this.shellJobs.killAgent(agent.id);
 
     if (this.isRemoteAgent(agent)) {
       // Remote-bound: only stop on Runner — never touch local Docker
@@ -978,7 +987,7 @@ export class AgentWorkspaceService {
         await client.stopWorkspace(agent.id, opts?.removeContainer !== false);
       } catch (err) {
         remoteErr = err;
-        console.warn(`[agent-ws] remote stop ${agent.slug}:`, err);
+        recordPlatformFault("agent_ws.remote_stop", err, { subsystem: "agent_ws" });
       }
       const row = await this.getWorkspaceContainer(agent.id);
       if (row) {
@@ -1023,7 +1032,7 @@ export class AgentWorkspaceService {
               .where(eq(managedContainers.id, row.id));
           }
         } catch (err) {
-          console.warn(`[agent-ws] stop workspace ${agent.slug}:`, err);
+          recordPlatformFault("agent_ws.stop", err, { subsystem: "agent_ws" });
         }
       }
     }
@@ -1101,5 +1110,137 @@ export class AgentWorkspaceService {
       env,
       timeoutMs: opts?.timeoutMs,
     });
+  }
+
+  private shellCwd(workingDir?: string): string {
+    if (!workingDir) return AGENT_WORKSPACE_ROOT;
+    const raw = workingDir.replace(/\\/g, "/");
+    return raw.startsWith(AGENT_WORKSPACE_ROOT)
+      ? raw
+      : `${AGENT_WORKSPACE_ROOT}/${raw.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
+  }
+
+  private shellEnv(extra?: Record<string, string>): Record<string, string> {
+    return {
+      PATH: "/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      HOME: AGENT_WORKSPACE_ROOT,
+      TERM: "xterm-256color",
+      PYTHONUNBUFFERED: "1",
+      CI: "1",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+      ...extra,
+    };
+  }
+
+  async startShellJob(
+    agent: Agent,
+    command: string[],
+    opts?: {
+      workingDir?: string;
+      env?: Record<string, string>;
+      timeoutMs?: number;
+      stdin?: string;
+      onOutput?: (snap: ShellJobSnapshot) => void;
+    },
+  ): Promise<ShellJobSnapshot> {
+    const workingDir = this.shellCwd(opts?.workingDir);
+    const env = this.shellEnv(opts?.env);
+    const timeoutMs = opts?.timeoutMs;
+
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      const snap = await client.startExecJob(agent.id, command, {
+        workingDir,
+        env,
+        timeoutMs,
+        stdin: opts?.stdin,
+      });
+      return snap;
+    }
+
+    const dockerId = await this.resolveDockerId(agent);
+    const job = await this.runtime.execJob(dockerId, command, {
+      agentId: agent.id,
+      workingDir,
+      env,
+      stdin: opts?.stdin,
+    });
+    this.shellJobs.add(job);
+    job.setOnOutput((snap) => {
+      opts?.onOutput?.(snap);
+      if (!snap.running) {
+        setTimeout(() => this.shellJobs.remove(job.id), 10 * 60 * 1000);
+      }
+    });
+    if (timeoutMs && timeoutMs > 0) {
+      setTimeout(() => {
+        if (job.snapshot().running) void job.kill();
+      }, timeoutMs);
+    }
+    return job.snapshot();
+  }
+
+  async waitShellJob(
+    agent: Agent,
+    jobId: string,
+    waitMs: number,
+    opts?: { stdin?: string; onOutput?: (snap: ShellJobSnapshot) => void },
+  ): Promise<ShellJobSnapshot> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      if (opts?.onOutput) {
+        void client
+          .getExecJob(agent.id, jobId)
+          .then((snap) => opts.onOutput?.(snap))
+          .catch(() => undefined);
+        const poll = setInterval(() => {
+          void client
+            .getExecJob(agent.id, jobId)
+            .then((snap) => opts.onOutput?.(snap))
+            .catch(() => undefined);
+        }, 400);
+        try {
+          return await client.waitExecJob(agent.id, jobId, waitMs, opts.stdin);
+        } finally {
+          clearInterval(poll);
+        }
+      }
+      return client.waitExecJob(agent.id, jobId, waitMs, opts?.stdin);
+    }
+    const job = this.shellJobs.getForAgent(agent.id, jobId);
+    if (!job) throw new Error("Shell job not found");
+    if (opts?.onOutput) {
+      opts.onOutput(job.snapshot());
+      job.setOnOutput((snap) => {
+        opts.onOutput?.(snap);
+        if (!snap.running) {
+          setTimeout(() => this.shellJobs.remove(job.id), 10 * 60 * 1000);
+        }
+      });
+    }
+    if (opts?.stdin) job.write(opts.stdin);
+    return job.wait(waitMs);
+  }
+
+  async getShellJob(agent: Agent, jobId: string): Promise<ShellJobSnapshot> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      return client.getExecJob(agent.id, jobId);
+    }
+    const job = this.shellJobs.getForAgent(agent.id, jobId);
+    if (!job) throw new Error("Shell job not found");
+    return job.snapshot();
+  }
+
+  async killShellJob(agent: Agent, jobId: string): Promise<ShellJobSnapshot> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      return client.killExecJob(agent.id, jobId);
+    }
+    const job = this.shellJobs.getForAgent(agent.id, jobId);
+    if (!job) throw new Error("Shell job not found");
+    await job.kill();
+    return job.snapshot();
   }
 }

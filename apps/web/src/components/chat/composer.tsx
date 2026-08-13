@@ -12,7 +12,8 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ArrowUp, Brain, File as FileIcon, Paperclip, Square, Upload, X } from "lucide-react";
+import { ArrowUp, Brain, File as FileIcon, Play, Square, Upload, X } from "lucide-react";
+import type { ComposerSkillOption, ComposerToolGroup } from "@zakura/shared";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -31,6 +32,7 @@ import {
   type ModelRouteSelectorItem,
 } from "@/components/models/model-route-selector";
 import { ContextWindowButton, type ContextWindowInfo } from "./context-window";
+import { ComposerPlusMenu, SkillRequestChip } from "./composer-plus-menu";
 
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
@@ -226,6 +228,12 @@ export function Composer({
   onAttachFiles,
   onRemoveAttachment,
   onCancelUpload,
+  skills,
+  selectedSkills,
+  onToggleSkill,
+  toolGroups,
+  disabledGroupIds,
+  onToggleGroup,
   models,
   model,
   modelRouteId,
@@ -243,6 +251,8 @@ export function Composer({
   onRecallQueued,
   editing,
   onCancelEdit,
+  showContinue,
+  onContinue,
   className,
 }: {
   value: string;
@@ -264,6 +274,12 @@ export function Composer({
   onAttachFiles: (files: File[]) => void;
   onRemoveAttachment: (path: string) => void;
   onCancelUpload: (id: string) => void;
+  skills: ComposerSkillOption[];
+  selectedSkills: string[];
+  onToggleSkill: (name: string) => void;
+  toolGroups: ComposerToolGroup[];
+  disabledGroupIds: string[];
+  onToggleGroup: (id: string) => void;
   models: ComposerModelItem[];
   model: string;
   modelRouteId?: string | null;
@@ -284,6 +300,9 @@ export function Composer({
   /** 编辑已发送消息：内容在 Composer 里改，发送后成兄弟分支 */
   editing?: boolean;
   onCancelEdit?: () => void;
+  /** 上次 Run 中途停止：在输入卡片左上角显示「继续」chip */
+  showContinue?: boolean;
+  onContinue?: () => void;
   className?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -417,13 +436,26 @@ export function Composer({
     if (files.length > 0) onAttachFiles(files);
   }
 
-  const showAttachmentRow = attachments.length > 0 || uploading;
+  const showAttachmentRow = attachments.length > 0 || uploading || selectedSkills.length > 0;
 
   return (
     <div className={cn("mx-auto w-full max-w-3xl", className)}>
       <div className="flex flex-col">
         {/* 排队区：输入卡片上方 */}
         {queueSlot}
+
+        <div className="relative">
+        {showContinue && !editing ? (
+          <button
+            type="button"
+            disabled={!routeReady}
+            onClick={() => onContinue?.()}
+            className="animate-pop absolute top-0 left-0 z-20 inline-flex h-7 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-full border border-border/70 bg-background/90 px-2.5 text-xs text-foreground/80 shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:bg-muted hover:text-foreground disabled:opacity-50"
+          >
+            <Play className="size-3 fill-current" />
+            继续
+          </button>
+        ) : null}
 
         <div
           onDragEnter={handleDragEnter}
@@ -473,6 +505,17 @@ export function Composer({
         <div className="disclosure" data-open={showAttachmentRow ? "" : undefined}>
           <div className="disclosure-inner">
             <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+              {selectedSkills.map((name) => {
+                const skill = skills.find((s) => s.name === name);
+                return (
+                  <SkillRequestChip
+                    key={name}
+                    name={name}
+                    title={skill?.title}
+                    onRemove={() => onToggleSkill(name)}
+                  />
+                );
+              })}
               {attachments.map((a) => (
                 <AttachmentChip
                   key={a.path}
@@ -520,7 +563,7 @@ export function Composer({
           )}
         />
 
-        {/* 工具行：附件 · 模型 ————— 发送 */}
+        {/* 工具行：添加 · 模型 ————— 发送 */}
         <div className="flex items-center gap-0.5 p-2 pl-2.5">
           <input
             ref={fileInputRef}
@@ -533,21 +576,17 @@ export function Composer({
               e.target.value = "";
             }}
           />
-          <Tooltip>
-            <TooltipTrigger render={<span className="inline-flex" />}>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label="添加附件"
-                className="size-8 rounded-full text-muted-foreground"
-                disabled={!canAttach}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{attachHint}</TooltipContent>
-          </Tooltip>
+          <ComposerPlusMenu
+            canAttach={canAttach}
+            attachHint={attachHint}
+            onUpload={() => fileInputRef.current?.click()}
+            skills={skills}
+            selectedSkills={selectedSkills}
+            onToggleSkill={onToggleSkill}
+            groups={toolGroups}
+            disabledGroupIds={disabledGroupIds}
+            onToggleGroup={onToggleGroup}
+          />
 
           <ModelRouteSelector
             items={models}
@@ -655,6 +694,7 @@ export function Composer({
                       : "发送 · Shift+Enter 换行"}
             </TooltipContent>
           </Tooltip>
+        </div>
         </div>
         </div>
       </div>

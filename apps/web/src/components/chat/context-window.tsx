@@ -24,7 +24,8 @@ export type ContextWindowInfo = {
   lastCompactedAt?: string;
   lastSavedTokens?: number;
   systemSessionId?: string;
-  source: "model" | "estimated";
+  /** measured=上游 prompt_tokens；model=有 contextLimit；estimated=纯估算 */
+  source: "model" | "estimated" | "measured";
 };
 
 function formatNumber(n: number): string {
@@ -108,7 +109,7 @@ export function ContextWindowButton({
           <SheetHeader>
             <SheetTitle>内容窗口</SheetTitle>
             <SheetDescription>
-              当前对话进入模型前的上下文估算。
+              当前对话进入模型前的上下文用量（CJK 感知估算；有上游 usage 时会校准）。
             </SheetDescription>
           </SheetHeader>
           <div className="space-y-4 px-4 pb-5 text-sm">
@@ -149,7 +150,11 @@ export function ContextWindowButton({
                   {formatNumber(info.usedTokens)} / {formatNumber(info.limitTokens)}
                 </div>
                 <div className="mt-1 text-muted-foreground">
-                  {info.source === "model" ? "使用模型元数据" : "使用默认窗口估算"}
+                  {info.source === "measured"
+                    ? "用量含上游 prompt 实测校准"
+                    : info.source === "model"
+                      ? "窗口来自模型元数据 · 用量为估算"
+                      : "默认窗口 · 用量为估算"}
                 </div>
               </div>
             </div>

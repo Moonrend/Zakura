@@ -17,6 +17,7 @@ import {
   Brain,
   ChevronRight,
   Eye,
+  Layers,
   File as FileIcon,
   FilePen,
   FileSearch,
@@ -42,10 +43,37 @@ import {
 } from "lucide-react";
 
 import { Disclosure } from "@/components/ui/disclosure";
+import { ProgressLinear } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
 import { formatSize } from "@/lib/agent-fs";
 import type { TimelineToolCall } from "@/lib/cloud-agent";
-import { isSilentAgentTool } from "@zakura/shared";
+import { foldPtyText, isSilentAgentTool } from "@zakura/shared";
+
+/** 思考 / 工具 / 上下文压缩共用一条活动时间轴 */
+export type ActivityStep =
+  | { kind: "tool"; call: TimelineToolCall }
+  | {
+      kind: "reasoning";
+      id: string;
+      content: string;
+      active: boolean;
+    }
+  | {
+      kind: "compaction";
+      id: string;
+      active: boolean;
+      summary: string;
+      beforeChars: number;
+      afterChars: number;
+      droppedMessages: number;
+      keptMessages: number;
+      source: string;
+      durationMs?: number;
+      model?: string;
+      phase?: "start" | "summarizing";
+      progress?: number;
+      failed?: boolean;
+    };
 import {
   hostOf,
   isBareAck,
@@ -137,11 +165,18 @@ function Block({
   text,
   tone,
   label,
+  follow,
 }: {
   text: string;
   tone?: "error" | "add" | "remove";
   label?: string;
+  follow?: boolean;
 }) {
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (!follow || !preRef.current) return;
+    preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [follow, text]);
   if (!text) return null;
   return (
     <div className="min-w-0">
@@ -149,6 +184,7 @@ function Block({
         <div className="pb-1 text-[11px] text-muted-foreground">{label}</div>
       ) : null}
       <pre
+        ref={preRef}
         className={cn(
           "max-h-56 overflow-auto rounded-lg bg-muted/40 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed break-all whitespace-pre-wrap text-muted-foreground",
           tone === "error" && "bg-destructive/5 text-destructive",
@@ -601,14 +637,25 @@ function describeCall(
       return { icon: Link2, label: <>列出分享链接</>, detail: detailOf(resultBlock) };
     case "shell_exec": {
       const cmd = str(args.command);
+      const jobArg = str(args.job_id);
       const shell = done ? parseShellResult(result) : null;
       const cmdBlock = cmd.length > 120 ? <Block text={cmd} label="命令" /> : null;
+      const liveOut = !done ? foldPtyText(call.liveStdout ?? "") : "";
+      const liveErr = !done ? foldPtyText(call.liveStderr ?? "") : "";
+      const stillRunning = shell?.status === "running";
       return {
         icon: Terminal,
-        runningLabel: "执行命令…",
-        label: <span className="font-mono">$ {truncate(cmd || "(空命令)", 120)}</span>,
-        trailing:
-          shell && shell.exitCode != null ? <ExitBadge code={shell.exitCode} /> : undefined,
+        runningLabel: jobArg && !cmd ? "等待命令输出…" : "执行命令…",
+        label: (
+          <span className="font-mono">
+            $ {truncate(cmd || (jobArg ? `job ${jobArg}` : "(空命令)"), 120)}
+          </span>
+        ),
+        trailing: stillRunning ? (
+          <span className="shrink-0 text-[11px] text-muted-foreground/60">仍在运行</span>
+        ) : shell && shell.exitCode != null ? (
+          <ExitBadge code={shell.exitCode} />
+        ) : undefined,
         detail: shell
           ? detailOf(
               cmdBlock,
@@ -620,8 +667,13 @@ function describeCall(
               ) : null,
               shell.stderr ? <Block text={shell.stderr} tone="error" label="stderr" /> : null,
               !shell.stdout && !shell.stderr ? <Meta>无输出</Meta> : null,
+              stillRunning && shell.jobId ? <Meta>job {shell.jobId}</Meta> : null,
             )
-          : detailOf(cmdBlock, resultBlock),
+          : detailOf(
+              cmdBlock,
+              liveOut ? <Block text={liveOut} follow /> : null,
+              liveErr ? <Block text={liveErr} tone="error" label="stderr" follow /> : null,
+            ),
       };
     }
     case "browser_action": {
@@ -838,15 +890,37 @@ function StatusIcon({
 function ToolRow({
   call,
   onOpenFile,
+  agentId,
+  sessionId,
 }: {
   call: TimelineToolCall;
   onOpenFile?: (path: string) => void;
+  agentId?: string | null;
+  sessionId?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   /** 展开过才真正挂载详情：抓回来的整篇正文不该在折叠状态下白渲染一遍 */
   const [mounted, setMounted] = useState(false);
+  const [hydrated, setHydrated] = useState<{
+    arguments?: string;
+    resultText?: string;
+  } | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   const running = call.status === "running";
   const elapsed = useElapsed(running);
+  const live = Boolean(call.liveStdout || call.liveStderr);
+  const effectiveCall = useMemo<TimelineToolCall>(
+    () =>
+      hydrated
+        ? {
+            ...call,
+            arguments: hydrated.arguments ?? call.arguments,
+            resultText: hydrated.resultText ?? call.resultText,
+            detailPending: false,
+          }
+        : call,
+    [call, hydrated],
+  );
   // 每条 SSE 事件都会重建 timeline，这里避免对同一份结果反复做 JSON 解析
   const {
     icon: Icon,
@@ -855,27 +929,58 @@ function ToolRow({
     trailing,
     detail,
   } = useMemo(
-    () => describeCall(call, onOpenFile),
+    () => describeCall(effectiveCall, onOpenFile),
     [
-      call.name,
-      call.arguments,
-      call.resultText,
-      call.status,
-      call.isError,
-      call.durationMs,
-      call.childSessionId,
-      call.childAgentId,
+      effectiveCall.name,
+      effectiveCall.arguments,
+      effectiveCall.resultText,
+      effectiveCall.status,
+      effectiveCall.isError,
+      effectiveCall.durationMs,
+      effectiveCall.childSessionId,
+      effectiveCall.childAgentId,
+      effectiveCall.liveStdout,
+      effectiveCall.liveStderr,
       // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖上面的具体字段而非对象身份
       onOpenFile,
     ],
   );
-  const expandable = detail != null && !running;
+  const needsFetch = Boolean(call.detailPending && !hydrated && agentId && sessionId);
+  const expandable = detail != null || needsFetch;
   const duration =
     running && elapsed > 400
       ? formatMs(elapsed)
       : call.durationMs != null && call.durationMs > 0
         ? formatMs(call.durationMs)
         : "";
+
+  useEffect(() => {
+    if (!running || !live) return;
+    setMounted(true);
+    setOpen(true);
+  }, [running, live]);
+
+  const ensureDetail = async () => {
+    if (!needsFetch || loadingDetail) return;
+    setLoadingDetail(true);
+    try {
+      const { getCloudToolDetails } = await import("@/lib/cloud-agent");
+      const res = await getCloudToolDetails(agentId!, sessionId!, [call.toolCallId]);
+      const row = res.tools[0];
+      if (row) {
+        setHydrated({
+          arguments: row.arguments,
+          resultText: row.resultText,
+        });
+      } else {
+        setHydrated({ arguments: call.arguments, resultText: call.resultText });
+      }
+    } catch {
+      setHydrated({ arguments: call.arguments, resultText: call.resultText });
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
 
   return (
     <div className="flex max-w-full min-w-0 flex-col items-start">
@@ -887,6 +992,7 @@ function ToolRow({
           if (!expandable) return;
           setMounted(true);
           setOpen((v) => !v);
+          if (!open) void ensureDetail();
         }}
         className={cn(
           "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
@@ -895,7 +1001,7 @@ function ToolRow({
           call.isError && "text-destructive/85 hover:text-destructive",
         )}
       >
-        <StatusIcon running={running} error={call.isError} Icon={Icon} />
+        <StatusIcon running={running || loadingDetail} error={call.isError} Icon={Icon} />
         <span
           className={cn("min-w-0 truncate", running && runningLabel && "text-shimmer")}
         >
@@ -919,7 +1025,11 @@ function ToolRow({
       {expandable ? (
         <Disclosure open={open} className={cn("max-w-full", DETAIL_WIDTH)}>
           <div className="min-w-0 space-y-1.5 py-1.5 pr-1 pl-[26px]">
-            {mounted ? detail : null}
+            {mounted ? (loadingDetail && !hydrated ? (
+              <span className="text-[12px] text-muted-foreground/70">加载详情…</span>
+            ) : (
+              detail
+            )) : null}
           </div>
         </Disclosure>
       ) : null}
@@ -964,52 +1074,187 @@ function MoreStepsRow({
 }
 
 /**
- * 工具活动：一条时间轴上的灰色文本行。
- * 每行宽度随内容、整体靠左，不占满正文宽度；展开后详情才铺开。
- * 内置工具显示人话而非 JSON；搜索类解析成来源 chip，抓取类按 Markdown 渲染正文。
+ * 工具/思考活动：一条时间轴上的灰色文本行。
+ * 思考与工具算同组步骤；正文开始后 autoCollapse 只露第一条，其余收进「还有 N 步」。
  */
 export function ToolActivity({
-  calls,
+  steps,
   onOpenFile,
+  autoCollapse = false,
+  agentId,
+  sessionId,
 }: {
-  calls: TimelineToolCall[];
+  steps: ActivityStep[];
   onOpenFile?: (path: string) => void;
+  /** 轮次结束后（开始输出正文）自动收成首条 */
+  autoCollapse?: boolean;
+  agentId?: string | null;
+  sessionId?: string | null;
 }) {
-  const visibleCalls = useMemo(
-    () => calls.filter((c) => !isSilentAgentTool(c.name)),
-    [calls],
-  );
+  const visibleSteps = useMemo(() => {
+    const out: ActivityStep[] = [];
+    for (const s of steps) {
+      if (s.kind === "tool") {
+        if (isSilentAgentTool(s.call.name)) continue;
+        out.push(s);
+      } else if (s.kind === "reasoning") {
+        if (!s.content.trim()) continue;
+        out.push(s);
+      } else if (s.kind === "compaction") {
+        out.push(s);
+      }
+    }
+    return out;
+  }, [steps]);
+
   const [showAll, setShowAll] = useState(false);
-  const hasRunning = visibleCalls.some((c) => c.status === "running");
+  const [expanded, setExpanded] = useState(!autoCollapse);
+  const [detailMap, setDetailMap] = useState<
+    Record<string, { arguments?: string; resultText?: string }>
+  >({});
+  const hasRunning = visibleSteps.some(
+    (s) =>
+      (s.kind === "tool" && s.call.status === "running") ||
+      (s.kind === "reasoning" && s.active) ||
+      (s.kind === "compaction" && s.active),
+  );
   /**
-   * 只折叠「历史记录」里的长工具链。本轮眼看着跑出来的步骤不折，
-   * 否则运行结束的一瞬间列表会突然缩掉一大截。
+   * 只折叠「历史记录」里的长链。本轮眼看着跑出来的步骤不折，
+   * 否则运行结束的一瞬间列表会突然缩掉一大截——但 autoCollapse 在正文出现后要折。
    */
   const streamedRef = useRef(false);
   useEffect(() => {
-    if (hasRunning) streamedRef.current = true;
-  }, [hasRunning]);
+    if (hasRunning) {
+      streamedRef.current = true;
+      setExpanded(true);
+    } else if (autoCollapse) {
+      setExpanded(false);
+    }
+  }, [hasRunning, autoCollapse]);
+
+  const hydratedSteps = useMemo(
+    () =>
+      visibleSteps.map((s) => {
+        if (s.kind !== "tool") return s;
+        const d = detailMap[s.call.toolCallId];
+        if (!d) return s;
+        return {
+          kind: "tool" as const,
+          call: {
+            ...s.call,
+            arguments: d.arguments ?? s.call.arguments,
+            resultText: d.resultText ?? s.call.resultText,
+            detailPending: false,
+          },
+        };
+      }),
+    [visibleSteps, detailMap],
+  );
+
+  const prefetchPending = async () => {
+    if (!agentId || !sessionId) return;
+    const pending = visibleSteps
+      .filter(
+        (s): s is Extract<ActivityStep, { kind: "tool" }> =>
+          s.kind === "tool" && Boolean(s.call.detailPending) && !detailMap[s.call.toolCallId],
+      )
+      .map((s) => s.call.toolCallId);
+    if (pending.length === 0) return;
+    try {
+      const { getCloudToolDetails } = await import("@/lib/cloud-agent");
+      const res = await getCloudToolDetails(agentId, sessionId, pending);
+      setDetailMap((prev) => {
+        const next = { ...prev };
+        for (const row of res.tools) {
+          next[row.toolCallId] = {
+            arguments: row.arguments,
+            resultText: row.resultText,
+          };
+        }
+        return next;
+      });
+    } catch {
+      /* 单行展开时还会再拉 */
+    }
+  };
+
+  const compact =
+    autoCollapse && !expanded && !hasRunning && hydratedSteps.length > 1;
 
   const collapsible =
-    visibleCalls.length > COLLAPSE_THRESHOLD && !hasRunning && !streamedRef.current;
+    !compact &&
+    hydratedSteps.length > COLLAPSE_THRESHOLD &&
+    !hasRunning &&
+    !streamedRef.current;
   const middle = useMemo(
     () =>
-      collapsible ? visibleCalls.slice(HEAD_ROWS, visibleCalls.length - TAIL_ROWS) : [],
-    [visibleCalls, collapsible],
+      collapsible
+        ? hydratedSteps.slice(HEAD_ROWS, hydratedSteps.length - TAIL_ROWS)
+        : [],
+    [hydratedSteps, collapsible],
   );
 
-  if (visibleCalls.length === 0) return null;
+  if (hydratedSteps.length === 0) return null;
 
-  const head = collapsible ? visibleCalls.slice(0, HEAD_ROWS) : visibleCalls;
-  const tail = collapsible ? visibleCalls.slice(visibleCalls.length - TAIL_ROWS) : [];
+  const row = (s: ActivityStep, i: number) => {
+    if (s.kind === "reasoning") {
+      return (
+        <ReasoningStepRow
+          key={`r-${s.id}-${i}`}
+          id={s.id}
+          content={s.content}
+          active={s.active}
+        />
+      );
+    }
+    if (s.kind === "compaction") {
+      return <CompactionStepRow key={`c-${s.id}-${i}`} step={s} />;
+    }
+    return (
+      <ToolRow
+        key={`${s.call.toolCallId}-${i}`}
+        call={s.call}
+        onOpenFile={onOpenFile}
+        agentId={agentId}
+        sessionId={sessionId}
+      />
+    );
+  };
 
-  const row = (c: TimelineToolCall, i: number) => (
-    <ToolRow key={`${c.toolCallId}-${i}`} call={c} onOpenFile={onOpenFile} />
-  );
+  if (compact) {
+    const first = hydratedSteps[0]!;
+    const rest = hydratedSteps.length - 1;
+    return (
+      <div className="relative flex w-full min-w-0 flex-col items-start">
+        <span
+          aria-hidden
+          className="animate-rail pointer-events-none absolute top-[15px] bottom-[15px] left-[9px] w-px bg-border/70"
+        />
+        {row(first, 0)}
+        <button
+          type="button"
+          onClick={() => {
+            setExpanded(true);
+            void prefetchPending();
+          }}
+          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:bg-muted/50 hover:text-foreground"
+        >
+          <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
+            <ChevronRight className="size-3 opacity-60" />
+          </span>
+          <span>还有 {rest} 步</span>
+        </button>
+      </div>
+    );
+  }
+
+  const head = collapsible ? hydratedSteps.slice(0, HEAD_ROWS) : hydratedSteps;
+  const tail = collapsible
+    ? hydratedSteps.slice(hydratedSteps.length - TAIL_ROWS)
+    : [];
 
   return (
     <div className="relative flex w-full min-w-0 flex-col items-start">
-      {/* 时间轴竖线：从首行图标中心贯到末行图标中心 */}
       <span
         aria-hidden
         className="animate-rail pointer-events-none absolute top-[15px] bottom-[15px] left-[9px] w-px bg-border/70"
@@ -1020,16 +1265,201 @@ export function ToolActivity({
           <MoreStepsRow
             count={middle.length}
             open={showAll}
-            onToggle={() => setShowAll((v) => !v)}
+            onToggle={() => {
+              setShowAll((v) => !v);
+              if (!showAll) void prefetchPending();
+            }}
           />
           <Disclosure open={showAll} className="w-full">
             <div className="flex flex-col items-start">
-              {middle.map((c, i) => row(c, i + HEAD_ROWS))}
+              {middle.map((s, i) => row(s, i + HEAD_ROWS))}
             </div>
           </Disclosure>
         </>
       )}
-          {tail.map((c, i) => row(c, i + visibleCalls.length - TAIL_ROWS))}
+      {tail.map((s, i) => row(s, i + hydratedSteps.length - TAIL_ROWS))}
+      {autoCollapse && expanded && hydratedSteps.length > 1 && !hasRunning && (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:bg-muted/50 hover:text-foreground"
+        >
+          <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
+            <ChevronRight className="size-3 rotate-90 opacity-60" />
+          </span>
+          <span>收起</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 上下文压缩：与工具同轨、更低调，不抢正文 */
+function CompactionStepRow({
+  step,
+}: {
+  step: Extract<ActivityStep, { kind: "compaction" }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = step.active;
+  const failed = Boolean(step.failed);
+  const saved = Math.max(0, step.beforeChars - step.afterChars);
+  const savedTokens = saved > 0 ? Math.round(saved / 4) : 0;
+  const sourceLabel =
+    step.source === "manual"
+      ? "手动"
+      : step.source === "soft"
+        ? "预压"
+        : step.source === "overflow"
+          ? "溢出恢复"
+          : step.source === "fork"
+            ? "派生"
+            : null;
+  const activeLabel =
+    step.phase === "summarizing" ? "生成摘要…" : "压缩上下文…";
+  const doneLabel = failed ? "压缩已降级" : "已压缩上下文";
+  const meta: string[] = [];
+  if (sourceLabel) meta.push(sourceLabel);
+  if (!active && savedTokens > 0 && !failed) {
+    meta.push(`约释放 ${savedTokens.toLocaleString("zh-CN")} tokens`);
+  }
+  if (!active && step.droppedMessages > 0) {
+    meta.push(`摘要 ${step.droppedMessages} 条`);
+  }
+  if (!active && step.durationMs != null && step.durationMs > 0) {
+    meta.push(formatMs(step.durationMs));
+  }
+  if (!active && step.model && step.model !== "default") {
+    meta.push(step.model);
+  }
+
+  return (
+    <div className="flex max-w-full min-w-0 flex-col items-start">
+      <button
+        type="button"
+        aria-expanded={open}
+        disabled={active && !step.summary}
+        onClick={() => {
+          if (active && !step.summary) return;
+          setOpen((v) => !v);
+        }}
+        className={cn(
+          "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/75",
+          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/40 hover:text-muted-foreground",
+          failed && "text-muted-foreground/65",
+        )}
+      >
+        <StatusIcon running={active} error={failed} Icon={Layers} />
+        <span className={cn("min-w-0 truncate", active && "text-shimmer")}>
+          {active ? activeLabel : doneLabel}
+        </span>
+        {meta.length > 0 ? (
+          <span className="min-w-0 truncate text-[12px] text-muted-foreground/50">
+            {meta.join(" · ")}
+          </span>
+        ) : null}
+        {step.summary ? (
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 text-muted-foreground/35 transition-transform duration-300 ease-overshoot",
+              open && "rotate-90",
+            )}
+          />
+        ) : null}
+      </button>
+      {active ? (
+        <div className="ml-[22px] w-[min(16rem,100%)] py-0.5">
+          <ProgressLinear
+            value={
+              typeof step.progress === "number"
+                ? Math.max(8, Math.min(92, step.progress))
+                : null
+            }
+            indeterminate={step.progress == null}
+            className="h-0.5 opacity-60"
+          />
+        </div>
+      ) : null}
+      {open && step.summary ? (
+        <div
+          className={cn(
+            DETAIL_WIDTH,
+            "ml-[22px] mt-0.5 max-h-40 overflow-auto rounded-md border border-border/40 bg-muted/15 px-2.5 py-1.5 text-[12px] leading-relaxed text-muted-foreground/80",
+          )}
+        >
+          <pre className="whitespace-pre-wrap break-words font-sans">{step.summary}</pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ReasoningStepRow({
+  id,
+  content,
+  active,
+}: {
+  id: string;
+  content: string;
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(active);
+  const wasActiveRef = useRef(active);
+
+  useEffect(() => {
+    const wasActive = wasActiveRef.current;
+    if (active && !wasActive) setOpen(true);
+    else if (!active && wasActive) setOpen(false);
+    wasActiveRef.current = active;
+  }, [active]);
+
+  return (
+    <div className="flex max-w-full min-w-0 flex-col items-start">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`reasoning-${id}`}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
+          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/50 hover:text-foreground",
+        )}
+      >
+        <span
+          className={cn(
+            "relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background",
+            active && "running-halo text-foreground/70",
+          )}
+        >
+          {active ? (
+            <span
+              className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+              aria-hidden
+            />
+          ) : (
+            <Brain className="animate-pop size-3.5 opacity-70" />
+          )}
+        </span>
+        <span className={cn("min-w-0 truncate", active && "text-shimmer")}>
+          {active ? "思考中…" : "思考过程"}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      <Disclosure open={open} className="w-full max-w-[min(100%,42rem)]">
+        <div id={`reasoning-${id}`} className="min-w-0 py-1 pr-1 pl-[26px]">
+          <ChatMarkdown
+            content={content}
+            final={!active}
+            fade={active}
+            variant="muted"
+          />
+        </div>
+      </Disclosure>
     </div>
   );
 }

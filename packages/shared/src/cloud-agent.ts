@@ -18,6 +18,28 @@ export function isSilentAgentTool(name: string): boolean {
   return (SILENT_AGENT_TOOL_NAMES as readonly string[]).includes(name);
 }
 
+/**
+ * 最近一次 Run 若以 cancelled 收尾，返回其 runId（可点「继续」）。
+ * 仍在跑、已完成、失败、或没有 Run → null。从尾部扫描，不依赖完整历史。
+ */
+export function lastCancelledRunId(
+  events: Array<{ type: string; runId?: string | null; payload?: unknown }>,
+): string | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i]!;
+    const p =
+      ev.payload && typeof ev.payload === "object" && !Array.isArray(ev.payload)
+        ? (ev.payload as Record<string, unknown>)
+        : {};
+    const rid = ev.runId ?? (typeof p.runId === "string" ? p.runId : null);
+    if (ev.type === "run_end") {
+      return rid && p.status === "cancelled" ? rid : null;
+    }
+    if (ev.type === "run_start") return null;
+  }
+  return null;
+}
+
 export const CLOUD_AGENT_EVENT_TYPES = [
   "user_message",
   "run_start",
@@ -27,6 +49,7 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "assistant_rollback",
   "tool_call_start",
   "tool_call_args",
+  "tool_call_progress",
   "tool_call_result",
   "run_status",
   "run_end",
@@ -35,6 +58,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "memory_updated",
   /** 系统为本轮回答注入的上下文来源（记忆召回、对话摘要等） */
   "context_sources",
+  /** 开始同步压缩上下文（UI 可展示进行中步骤） */
+  "context_compacting",
   /** 会话历史被压缩成可复用摘要（手动或自动触发） */
   "context_compacted",
   "session_update",
@@ -171,6 +196,10 @@ export type CloudAgentUserMessagePayload = {
    * 投影/UI 应把它挂在当前 Run 时间线上，而不是开新 ConversationTurn。
    */
   steer?: boolean;
+  /**
+   * 从上次中断的 Run 接着做。UI 不展示用户气泡；模型仍把它当作用户指令。
+   */
+  continue?: boolean;
 };
 
 /** 运行中收到用户消息时的默认策略 */
@@ -252,6 +281,16 @@ export type CloudAgentToolCallArgsPayload = {
   arguments: string;
 };
 
+/** 工具执行中的增量输出（shell 日志等）；不进入模型上下文 */
+export type CloudAgentToolCallProgressPayload = {
+  toolCallId: string;
+  message?: string;
+  stdout?: string;
+  stderr?: string;
+  jobId?: string;
+  running?: boolean;
+};
+
 export type CloudAgentToolCallResultPayload = {
   toolCallId: string;
   name: string;
@@ -263,6 +302,8 @@ export type CloudAgentToolCallResultPayload = {
   childSessionId?: string;
   /** 子会话所属 Agent（委派时为目标 Agent；缺省=当前 Agent） */
   childAgentId?: string;
+  /** UI 历史瘦身：完整 args/result 未下发，展开时再拉 */
+  detailPending?: boolean;
 };
 
 export type CloudAgentRunStatusPayload = {
@@ -325,19 +366,58 @@ export type CloudAgentContextSourcesPayload = {
   items: CloudAgentContextSourceItem[];
 };
 
+/** 压缩摘要附带的 coding 文件轨迹（确定性抽取 + 摘要合并，跨轮累积） */
+export type CloudAgentCompactionDetails = {
+  readFiles?: string[];
+  modifiedFiles?: string[];
+};
+
+/** 开始/推进同步压缩（时间线展示「压缩中」步骤） */
+export type CloudAgentContextCompactingPayload = {
+  runId?: string;
+  /** 与 context_compacted.source 对齐；soft 表示 Run 后预压缩 */
+  source: "manual" | "auto" | "soft" | "overflow";
+  /** start=已切分；summarizing=正在调模型 */
+  phase?: "start" | "summarizing";
+  /** 压缩前估算字符数 */
+  beforeChars?: number;
+  /** 压缩前估算 token（CJK 感知） */
+  beforeTokens?: number;
+  /** 将摘要的消息条数 */
+  olderMessages?: number;
+  /** 保留的最近消息条数 */
+  keepMessages?: number;
+  /** 0–100 示意进度（非精确） */
+  progress?: number;
+};
+
 /** 会话历史压缩摘要。旧事件仍保留在库中，后续上下文优先使用最新摘要。 */
 export type CloudAgentContextCompactedPayload = {
   summary: string;
-  /** manual=用户触发；auto=Run 前自动；fork=从其它会话派生 */
-  source: "manual" | "auto" | "fork";
+  /**
+   * manual=用户触发；auto=Run 内自动；fork=从其它会话派生；
+   * soft=Run 后预压；overflow=上游上下文超长后的恢复压缩
+   */
+  source: "manual" | "auto" | "fork" | "soft" | "overflow";
   beforeChars: number;
   afterChars: number;
+  /** CJK 感知 token 估算（优先用于 UI / 阈值） */
+  beforeTokens?: number;
+  afterTokens?: number;
   droppedMessages: number;
   keptMessages: number;
   /** 手动压缩时记录内部 system 会话，便于审计压缩过程。 */
   systemSessionId?: string;
   /** fork 时源会话 id */
   forkedFromSessionId?: string;
+  /** coding 向：已读/已改文件轨迹，供 UI 与下一轮摘要合并 */
+  details?: CloudAgentCompactionDetails;
+  /** 摘要耗时（毫秒） */
+  durationMs?: number;
+  /** 实际用于摘要的模型 alias / 路由（便于 UI 展示） */
+  model?: string;
+  /** 摘要是否失败后的降级结果 */
+  failed?: boolean;
 };
 
 /** 会话元数据变更（如自动标题），供多端实时同步 */
@@ -355,6 +435,7 @@ export type CloudAgentEventPayload =
   | CloudAgentAssistantRollbackPayload
   | CloudAgentToolCallStartPayload
   | CloudAgentToolCallArgsPayload
+  | CloudAgentToolCallProgressPayload
   | CloudAgentToolCallResultPayload
   | CloudAgentRunStatusPayload
   | CloudAgentRunEndPayload
@@ -362,6 +443,7 @@ export type CloudAgentEventPayload =
   | CloudAgentRunLogPayload
   | CloudAgentMemoryUpdatedPayload
   | CloudAgentContextSourcesPayload
+  | CloudAgentContextCompactingPayload
   | CloudAgentContextCompactedPayload
   | CloudAgentSessionUpdatePayload
   | CloudAgentQueueUpdatePayload;
@@ -384,6 +466,13 @@ export type CloudAgentConfig = {
   model?: string;
   /** 固定到某个模型路由；未设置时按 model alias 动态路由 */
   modelRouteId?: string;
+  /**
+   * 上下文压缩专用模型 alias（宜选便宜/快的小模型）。
+   * 未设置时回退到 model / modelRouteId / 租户默认 chat 路由。
+   */
+  compactModel?: string;
+  /** 压缩专用固定路由 id；优先于 compactModel */
+  compactModelRouteId?: string;
   /**
    * 可选：单次 Run 最大工具轮次。
    * 不设置则不限制，循环直到模型结束或用户取消。
@@ -408,13 +497,22 @@ export type CloudAgentConfig = {
   gatewayModelMap?: Record<string, string>;
   /**
    * 历史超长时自动 LLM 摘要压缩（默认 true）。
+   * 开启后摘要是 Run 执行的一部分：超硬阈值时**同步**压缩再继续对话；
+   * Run 结束后若仍超软阈值会预压缩，供下一轮使用。
    * 关闭后仅做工具结果就地截断，不调用模型生成摘要。
    */
   autoCompact?: boolean;
-  /** 触发摘要压缩的历史字符阈值（默认 60000，最小 8000） */
+  /** 硬阈值：达到则在本 Run 内同步摘要（默认 60000 字符，最小 8000） */
   compactThresholdChars?: number;
-  /** 压缩后保留的最近消息条数（默认 12，范围 4–48） */
+  /**
+   * 软阈值：Run 结束后预压缩（默认 hard×0.7）。
+   * 应 ≤ compactThresholdChars。
+   */
+  compactSoftThresholdChars?: number;
+  /** 压缩后保留的最近消息条数上限（默认 16，范围 4–64） */
   compactKeepRecent?: number;
+  /** 压缩后尽量保留的最近上下文字符量（默认 24000，按 user turn 边界切） */
+  compactKeepRecentChars?: number;
   /** 单条工具结果进入模型前的字符上限（默认 12000） */
   maxToolResultChars?: number;
   /**
@@ -427,6 +525,37 @@ export type CloudAgentConfig = {
 
 export type CloudAgentRunOptions = {
   reasoning?: import("./model-router.js").ModelReasoningOptions;
+  /**
+   * 用户在输入框显式指定本回合要使用的技能名（Composer 的 Skill 菜单）。
+   * 会写进 system prompt 要求 Agent 先读 SKILL.md 再执行。
+   */
+  skills?: string[];
+  /**
+   * 本回合禁用的工具，取模型可见的限定名（如 re_web_search）。
+   * 用户在 Composer 的「连接器」面板里关掉的连接器 / MCP / 内置工具会展开成具体工具名。
+   */
+  disabledTools?: string[];
+};
+
+/** Composer 加号菜单里可开关的一组工具（内置能力 / MCP 实例 / 连接器） */
+export type ComposerToolGroupKind = "builtin" | "mcp" | "connector";
+
+export type ComposerToolGroup = {
+  id: string;
+  kind: ComposerToolGroupKind;
+  label: string;
+  tools: string[];
+};
+
+export type ComposerSkillOption = {
+  name: string;
+  title: string;
+  description: string;
+};
+
+export type ComposerCapabilities = {
+  skills: ComposerSkillOption[];
+  groups: ComposerToolGroup[];
 };
 
 export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
@@ -441,6 +570,12 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.model === "string" && cloud.model.trim()) out.model = cloud.model.trim();
   if (typeof cloud.modelRouteId === "string" && cloud.modelRouteId.trim()) {
     out.modelRouteId = cloud.modelRouteId.trim();
+  }
+  if (typeof cloud.compactModel === "string" && cloud.compactModel.trim()) {
+    out.compactModel = cloud.compactModel.trim();
+  }
+  if (typeof cloud.compactModelRouteId === "string" && cloud.compactModelRouteId.trim()) {
+    out.compactModelRouteId = cloud.compactModelRouteId.trim();
   }
   if (typeof cloud.maxToolRounds === "number" && cloud.maxToolRounds > 0) {
     out.maxToolRounds = Math.floor(cloud.maxToolRounds);
@@ -470,8 +605,20 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   if (typeof cloud.compactThresholdChars === "number" && cloud.compactThresholdChars >= 8_000) {
     out.compactThresholdChars = Math.floor(cloud.compactThresholdChars);
   }
+  if (
+    typeof cloud.compactSoftThresholdChars === "number" &&
+    cloud.compactSoftThresholdChars >= 4_000
+  ) {
+    out.compactSoftThresholdChars = Math.floor(cloud.compactSoftThresholdChars);
+  }
   if (typeof cloud.compactKeepRecent === "number" && cloud.compactKeepRecent >= 4) {
-    out.compactKeepRecent = Math.min(Math.floor(cloud.compactKeepRecent), 48);
+    out.compactKeepRecent = Math.min(Math.floor(cloud.compactKeepRecent), 64);
+  }
+  if (
+    typeof cloud.compactKeepRecentChars === "number" &&
+    cloud.compactKeepRecentChars >= 4_000
+  ) {
+    out.compactKeepRecentChars = Math.min(Math.floor(cloud.compactKeepRecentChars), 200_000);
   }
   if (typeof cloud.maxToolResultChars === "number" && cloud.maxToolResultChars >= 1_000) {
     out.maxToolResultChars = Math.min(Math.floor(cloud.maxToolResultChars), 80_000);

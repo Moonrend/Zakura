@@ -5,7 +5,8 @@
  * 序号走 INCR，实时 PUBLISH，高频 delta 先推送再异步批落库。
  * 仅当 REDIS_URL=off 时回退为「每事件同步写库 + 进程内 fan-out」。
  */
-import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { getTelemetry, recordPlatformFault } from "@zakura/core";
 import type {
   CloudAgentEvent,
   CloudAgentEventPayload,
@@ -25,6 +26,8 @@ import {
   type CloudAgentSession,
 } from "../db/schema.js";
 import { platformEvents } from "./platform-events.js";
+import { recordUserUsage } from "./user-usage.js";
+import { sliceEventsPreferringUserMessage, slimToolEventsForUi } from "./cloud-agent/ui-history.js";
 import {
   REDIS_KEYS,
   createRedisSubscriber,
@@ -47,6 +50,7 @@ type SessionListener = (event: CloudAgentEvent) => void;
 const ASYNC_EVENT_TYPES = new Set<CloudAgentEventType>([
   "assistant_delta",
   "reasoning_delta",
+  "tool_call_progress",
 ]);
 
 type PendingRow = {
@@ -416,7 +420,7 @@ export class CloudAgentSessionStore {
       try {
         fn(event);
       } catch (err) {
-        console.warn("[cloud-agent] listener error:", err);
+        recordPlatformFault("cloud_agent.listener", err, { subsystem: "cloud_agent", dep: "redis" });
       }
     }
   }
@@ -447,7 +451,7 @@ export class CloudAgentSessionStore {
         if (msg.from === INSTANCE_ID) return;
         this.emit(msg.event);
       } catch (err) {
-        console.warn("[cloud-agent] redis message parse failed:", err);
+        recordPlatformFault("cloud_agent.redis_parse", err, { subsystem: "cloud_agent", dep: "redis" });
       }
     };
     await sub.subscribe(channel, onMessage);
@@ -641,7 +645,7 @@ export class CloudAgentSessionStore {
               .where(eq(cloudAgentSessions.id, sessionId));
           });
         } catch (err) {
-          console.warn("[cloud-agent] pending flush failed, re-queue:", err);
+          recordPlatformFault("cloud_agent.pending_flush", err, { subsystem: "cloud_agent", dep: "redis" });
           // ponytail: 整批重入队；升级路径可按条去重 / 死信
           if (rows.length) {
             await redis.rPush(
@@ -660,7 +664,7 @@ export class CloudAgentSessionStore {
       const msg: RedisFanoutMessage = { from: INSTANCE_ID, event };
       await redis.publish(REDIS_KEYS.channel(event.sessionId), JSON.stringify(msg));
     } catch (err) {
-      console.warn("[cloud-agent] redis publish failed:", err);
+      recordPlatformFault("cloud_agent.redis_publish", err, { subsystem: "cloud_agent", dep: "redis" });
     }
   }
 
@@ -700,6 +704,17 @@ export class CloudAgentSessionStore {
     });
     const row = await this.getSession(input.tenantId, input.agentId, id);
     if (!row) throw new Error("创建会话失败");
+    if (input.createdByUserId && (input.kind ?? "chat") === "chat") {
+      recordUserUsage({
+        tenantId: input.tenantId,
+        userId: input.createdByUserId,
+        category: "session",
+        action: "session_created",
+        agentId: input.agentId,
+        sessionId: id,
+        summary: "chat",
+      });
+    }
     this.rememberMeta(id, {
       tenantId: input.tenantId,
       agentId: input.agentId,
@@ -951,7 +966,12 @@ export class CloudAgentSessionStore {
           JSON.stringify({ from: INSTANCE_ID, event } satisfies RedisFanoutMessage),
         )
         .exec()
-        .catch((err) => console.warn("[cloud-agent] redis delta fanout failed:", err));
+        .catch((err) =>
+          recordPlatformFault("cloud_agent.delta_fanout", err, {
+            subsystem: "cloud_agent",
+            dep: "redis",
+          }),
+        );
       void writeSessionMeta(input.sessionId, {
         tenantId: meta.tenantId,
         agentId: meta.agentId,
@@ -987,9 +1007,7 @@ export class CloudAgentSessionStore {
     } catch (err) {
       if (!this.isSeqUniqueViolation(err)) throw err;
       // Redis 落后于 Postgres：抬升后换号重试一次
-      console.warn(
-        `[cloud-agent] seq conflict session=${input.sessionId} seq=${seq}, resync from db`,
-      );
+      getTelemetry().platformFaults.inc({ kind: "cloud_agent.seq_conflict" });
       const retrySeq = await this.nextSeqRedisAfterConflict(redis, input.sessionId);
       event = { ...event, seq: retrySeq };
       meta.lastSeq = retrySeq;
@@ -1268,13 +1286,214 @@ export class CloudAgentSessionStore {
       cursor = rows[rows.length - 1]!.seq;
       if (rows.length < pageSize) break;
       if (out.length >= hardCap) {
-        console.warn(
-          `[cloud-agent] listEventsForChain hit hardCap=${hardCap} session=${sessionId} afterSeq=${afterSeq}`,
-        );
+        getTelemetry().platformFaults.inc({ kind: "cloud_agent.event_chain_cap" });
         break;
       }
     }
     return out;
+  }
+
+  /**
+   * Web UI 会话历史：按最近 user_message 窗口回拉，避免 listEvents 默认 500 尾窗
+   * 在工具/delta 密集时截掉全部 user_message → 界面空欢迎页。
+   * hasMore=true 时客户端可用 beforeSeq 继续向上翻页。
+   */
+  async listEventsForUi(
+    sessionId: string,
+    opts?: { keepUserMessages?: number; maxEvents?: number },
+  ): Promise<{ events: CloudAgentEvent[]; hasMore: boolean }> {
+    await this.flushPending(sessionId);
+    // 首屏只要最近一段；更早历史靠 beforeSeq 动态加载
+    const keepUserMessages = Math.min(Math.max(opts?.keepUserMessages ?? 30, 1), 500);
+    const maxEvents = Math.min(Math.max(opts?.maxEvents ?? 5_000, 500), 50_000);
+
+    const userSeqs = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+        ),
+      )
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(keepUserMessages);
+
+    if (userSeqs.length === 0) {
+      const events = slimToolEventsForUi(
+        await this.listEvents(sessionId, {
+          limit: Math.min(maxEvents, 2000),
+          skipFlush: true,
+        }),
+      );
+      const oldest = events[0]?.seq ?? 0;
+      return { events, hasMore: await this.hasEventsBefore(sessionId, oldest) };
+    }
+
+    const fromSeq = userSeqs[userSeqs.length - 1]!.seq;
+    const events = slimToolEventsForUi(
+      sliceEventsPreferringUserMessage(
+        await this.listEventsForChain(sessionId, { afterSeq: fromSeq - 1 }),
+        maxEvents,
+      ),
+    );
+    const oldest = events[0]?.seq ?? fromSeq;
+    return { events, hasMore: await this.hasEventsBefore(sessionId, oldest) };
+  }
+
+  /**
+   * UI 向上翻页：取 beforeSeq 之前的一段历史（按 user_message 对齐）。
+   */
+  async listEventsBefore(
+    sessionId: string,
+    opts: { beforeSeq: number; keepUserMessages?: number; maxEvents?: number },
+  ): Promise<{ events: CloudAgentEvent[]; hasMore: boolean }> {
+    await this.flushPending(sessionId);
+    const beforeSeq = opts.beforeSeq;
+    if (!Number.isFinite(beforeSeq) || beforeSeq <= 1) {
+      return { events: [], hasMore: false };
+    }
+    const keepUserMessages = Math.min(Math.max(opts.keepUserMessages ?? 30, 1), 500);
+    const maxEvents = Math.min(Math.max(opts.maxEvents ?? 5_000, 500), 50_000);
+
+    const userSeqs = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+          lt(cloudAgentEvents.seq, beforeSeq),
+        ),
+      )
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(keepUserMessages);
+
+    if (userSeqs.length === 0) {
+      // 没有更早的用户消息：若还有非 user 事件也一并带上（极少见）
+      const rows = (
+        await this.db
+          .select()
+          .from(cloudAgentEvents)
+          .where(
+            and(eq(cloudAgentEvents.sessionId, sessionId), lt(cloudAgentEvents.seq, beforeSeq)),
+          )
+          .orderBy(desc(cloudAgentEvents.seq))
+          .limit(maxEvents)
+      ).reverse();
+      const events = slimToolEventsForUi(rows.map(toEvent));
+      const oldest = events[0]?.seq ?? 0;
+      return { events, hasMore: await this.hasEventsBefore(sessionId, oldest) };
+    }
+
+    const fromSeq = userSeqs[userSeqs.length - 1]!.seq;
+    const rows = await this.db
+      .select()
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          gt(cloudAgentEvents.seq, fromSeq - 1),
+          lt(cloudAgentEvents.seq, beforeSeq),
+        ),
+      )
+      .orderBy(asc(cloudAgentEvents.seq))
+      .limit(maxEvents);
+    const events = slimToolEventsForUi(
+      sliceEventsPreferringUserMessage(rows.map(toEvent), maxEvents),
+    );
+    const oldest = events[0]?.seq ?? fromSeq;
+    return { events, hasMore: await this.hasEventsBefore(sessionId, oldest) };
+  }
+
+  private async hasEventsBefore(sessionId: string, seq: number): Promise<boolean> {
+    if (!Number.isFinite(seq) || seq <= 1) return false;
+    const rows = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(and(eq(cloudAgentEvents.sessionId, sessionId), lt(cloudAgentEvents.seq, seq)))
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  /** 按需加载工具完整 args/result（UI 历史瘦身后展开用） */
+  async getToolCallDetails(
+    sessionId: string,
+    toolCallIds: string[],
+  ): Promise<
+    Array<{
+      toolCallId: string;
+      name?: string;
+      arguments?: string;
+      resultText?: string;
+      isError?: boolean;
+      durationMs?: number;
+      childSessionId?: string;
+      childAgentId?: string;
+    }>
+  > {
+    const ids = [...new Set(toolCallIds.map((id) => id.trim()).filter(Boolean))].slice(0, 40);
+    if (ids.length === 0) return [];
+    await this.flushPending(sessionId);
+
+    const rows = await this.db
+      .select()
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          inArray(cloudAgentEvents.type, [
+            "tool_call_start",
+            "tool_call_args",
+            "tool_call_result",
+          ]),
+          ids.length === 1
+            ? sql`${cloudAgentEvents.payloadJson}::jsonb->>'toolCallId' = ${ids[0]!}`
+            : or(
+                ...ids.map(
+                  (id) =>
+                    sql`${cloudAgentEvents.payloadJson}::jsonb->>'toolCallId' = ${id}`,
+                ),
+              ),
+        ),
+      )
+      .orderBy(asc(cloudAgentEvents.seq));
+
+    const byId = new Map<
+      string,
+      {
+        toolCallId: string;
+        name?: string;
+        arguments?: string;
+        resultText?: string;
+        isError?: boolean;
+        durationMs?: number;
+        childSessionId?: string;
+        childAgentId?: string;
+      }
+    >();
+    for (const row of rows) {
+      const ev = toEvent(row);
+      const p = ev.payload as Record<string, unknown>;
+      const id = typeof p.toolCallId === "string" ? p.toolCallId : "";
+      if (!id || !ids.includes(id)) continue;
+      const cur = byId.get(id) ?? { toolCallId: id };
+      if (ev.type === "tool_call_start") {
+        if (typeof p.name === "string") cur.name = p.name;
+      } else if (ev.type === "tool_call_args") {
+        if (typeof p.arguments === "string") cur.arguments = p.arguments;
+      } else if (ev.type === "tool_call_result") {
+        if (typeof p.name === "string") cur.name = p.name;
+        if (typeof p.resultText === "string") cur.resultText = p.resultText;
+        cur.isError = p.isError === true;
+        if (typeof p.durationMs === "number") cur.durationMs = p.durationMs;
+        if (typeof p.childSessionId === "string") cur.childSessionId = p.childSessionId;
+        if (typeof p.childAgentId === "string") cur.childAgentId = p.childAgentId;
+      }
+      byId.set(id, cur);
+    }
+    return ids.map((id) => byId.get(id)).filter((x): x is NonNullable<typeof x> => !!x);
   }
 
   /** 最近一次上下文压缩事件（摘要在 payload.summary） */
@@ -1391,7 +1610,12 @@ export class CloudAgentSessionStore {
         if (!redis) return;
         const msg: CancelFanoutMessage = { from: INSTANCE_ID, runId: targetId };
         return redis.publish(REDIS_KEYS.cancelChannel, JSON.stringify(msg));
-      }).catch((err) => console.warn("[cloud-agent] cancel publish failed:", err));
+      }).catch((err) =>
+        recordPlatformFault("cloud_agent.cancel_publish", err, {
+          subsystem: "cloud_agent",
+          dep: "redis",
+        }),
+      );
     }
     return true;
   }
@@ -1438,7 +1662,10 @@ export class CloudAgentSessionStore {
       try {
         fn();
       } catch (err) {
-        console.warn("[cloud-agent] cancel listener error:", err);
+        recordPlatformFault("cloud_agent.cancel_listener", err, {
+          subsystem: "cloud_agent",
+          dep: "redis",
+        });
       }
     }
   }
@@ -1461,7 +1688,10 @@ export class CloudAgentSessionStore {
         });
       })().catch((err) => {
         this.cancelSubReady = null;
-        console.warn("[cloud-agent] cancel channel subscribe failed:", err);
+        recordPlatformFault("cloud_agent.cancel_subscribe", err, {
+          subsystem: "cloud_agent",
+          dep: "redis",
+        });
       }) as Promise<void>;
     }
     return this.cancelSubReady;
@@ -1499,7 +1729,7 @@ export class CloudAgentSessionStore {
         });
       } catch (err) {
         // 会话已删除等：仍要把 Run 状态改掉，避免下次启动重复处理
-        console.warn(`[cloud-agent] recover run ${run.id} event failed:`, err);
+        recordPlatformFault("cloud_agent.recover_run", err, { subsystem: "cloud_agent" });
       }
       await this.finishRun(run.sessionId, run.id, "failed", message);
     }
@@ -1547,6 +1777,39 @@ export class CloudAgentSessionStore {
     // 会话队列跨 Run 存续（服务端权威）；只清理该 Run 的取消状态
     this.cancelledRuns.delete(runId);
     this.cancelListeners.delete(runId);
+    try {
+      const session = await this.db.query.cloudAgentSessions.findFirst({
+        where: eq(cloudAgentSessions.id, sessionId),
+      });
+      if (session?.createdByUserId) {
+        const started = await this.db.query.cloudAgentRuns.findFirst({
+          where: eq(cloudAgentRuns.id, runId),
+        });
+        const durationMs =
+          started?.startedAt != null
+            ? Math.max(0, now.getTime() - started.startedAt.getTime())
+            : 0;
+        recordUserUsage({
+          tenantId: session.tenantId,
+          userId: session.createdByUserId,
+          category: "run",
+          action:
+            status === "completed"
+              ? "run_completed"
+              : status === "cancelled"
+                ? "run_cancelled"
+                : "run_failed",
+          status: status === "completed" ? "ok" : "error",
+          durationMs,
+          agentId: session.agentId,
+          sessionId,
+          resourceKind: "run",
+          resourceId: runId,
+        });
+      }
+    } catch (err) {
+      recordPlatformFault("user_usage.finish_run", err, { subsystem: "user_usage" });
+    }
   }
 
   // —— 会话级后续消息队列（服务端权威，跨设备同步） ——
@@ -1589,7 +1852,10 @@ export class CloudAgentSessionStore {
           }
           return;
         } catch (err) {
-          console.warn("[cloud-agent] queue write failed:", err);
+          recordPlatformFault("cloud_agent.queue_write", err, {
+            subsystem: "cloud_agent",
+            dep: "redis",
+          });
         }
       }
     }
@@ -1630,7 +1896,10 @@ export class CloudAgentSessionStore {
         payload: { items },
       });
     } catch (err) {
-      console.warn("[cloud-agent] queue snapshot publish failed:", err);
+      recordPlatformFault("cloud_agent.queue_snapshot", err, {
+        subsystem: "cloud_agent",
+        dep: "redis",
+      });
     }
   }
 
@@ -1730,7 +1999,10 @@ export class CloudAgentSessionStore {
           if (!parsed?.messageId) return null;
           return normalizeQueuedMessage(parsed);
         } catch (err) {
-          console.warn("[cloud-agent] queue-next read failed:", err);
+          recordPlatformFault("cloud_agent.queue_next_read", err, {
+            subsystem: "cloud_agent",
+            dep: "redis",
+          });
           return null;
         }
       }
@@ -1753,7 +2025,10 @@ export class CloudAgentSessionStore {
           });
           return;
         } catch (err) {
-          console.warn("[cloud-agent] queue-next write failed:", err);
+          recordPlatformFault("cloud_agent.queue_next_write", err, {
+            subsystem: "cloud_agent",
+            dep: "redis",
+          });
         }
       }
     }

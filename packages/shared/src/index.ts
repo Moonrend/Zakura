@@ -324,6 +324,24 @@ export interface SetupPayload {
 /** Deployment edition — oss is single-account; saas adds multi-tenant + registration. */
 export type ZakuraEdition = "oss" | "saas";
 
+export {
+  USER_USAGE_CATEGORIES,
+  USER_USAGE_ACTIONS,
+  USER_USAGE_ACTOR_KINDS,
+  isUserUsageCategory,
+  isUserUsageAction,
+} from "./user-usage.js";
+export type {
+  UserUsageCategory,
+  UserUsageAction,
+  UserUsageActorKind,
+  UserUsageEventDto,
+  UserUsageDayDto,
+  UserUsageSummaryDto,
+  UserUsageTenantRowDto,
+  UserUsageSessionRowDto,
+} from "./user-usage.js";
+
 export interface PublicPlatformInfo {
   setupCompleted: boolean;
   version: string;
@@ -560,6 +578,8 @@ export type {
   SkillInstallResult,
 } from "./skills.js";
 
+export { PtyFolder, foldPtyText } from "./pty-text.js";
+
 export {
   CLOUD_AGENT_EVENT_TYPES,
   CLOUD_AGENT_SESSION_KINDS,
@@ -569,6 +589,7 @@ export {
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
   resolveFollowUpMode,
+  lastCancelledRunId,
 } from "./cloud-agent.js";
 export type {
   SilentAgentToolName,
@@ -589,6 +610,7 @@ export type {
   CloudAgentAttachment,
   CloudAgentToolCallStartPayload,
   CloudAgentToolCallArgsPayload,
+  CloudAgentToolCallProgressPayload,
   CloudAgentToolCallResultPayload,
   CloudAgentRunStatusPayload,
   CloudAgentRunEndPayload,
@@ -598,10 +620,39 @@ export type {
   CloudAgentContextSourceKind,
   CloudAgentContextSourceItem,
   CloudAgentContextSourcesPayload,
+  CloudAgentCompactionDetails,
+  CloudAgentContextCompactingPayload,
   CloudAgentContextCompactedPayload,
   CloudAgentSessionUpdatePayload,
   CloudAgentEventPayload,
   CloudAgentEvent,
   CloudAgentConfig,
   CloudAgentRunOptions,
+  ComposerToolGroupKind,
+  ComposerToolGroup,
+  ComposerSkillOption,
+  ComposerCapabilities,
 } from "./cloud-agent.js";
+
+export {
+  DEFAULT_CONTEXT_RESERVE_TOKENS,
+  DEFAULT_CONTEXT_LIMIT_TOKENS,
+  estimateTextTokens,
+  estimateTokensFromChars,
+  estimateCharsFromTokens,
+  estimateMessageTokens,
+  estimateMessagesTokens,
+  estimateToolDefinitionsTokens,
+  estimateRequestTokens,
+  applyTokenCalibration,
+  reportContextSize,
+  resolveContextWindowBudget,
+  estimateEventPayloadTokens,
+} from "./context-accounting.js";
+export type {
+  EstimableChatMessage,
+  EstimableToolDefinition,
+  TokenCalibration,
+  ContextSizeReport,
+  ContextWindowBudget,
+} from "./context-accounting.js";

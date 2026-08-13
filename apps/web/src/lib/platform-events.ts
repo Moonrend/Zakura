@@ -78,6 +78,15 @@ export type PlatformEvent =
       title: string;
       body?: string;
       url?: string;
+    }
+  | {
+      type: "connector_notice";
+      ts: number;
+      agentId: string;
+      bindingId?: string;
+      platform: string;
+      level: "info" | "warn" | "error" | "ok";
+      message: string;
     };
 
 type Subscriber = {

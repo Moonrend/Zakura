@@ -1,7 +1,14 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { log, observabilityHttpMiddleware, otlpExportEnabled } from "@zakura/core";
 import { loadConfig } from "./config.js";
+import {
+  initServerTelemetry,
+  mountPlatformProbes,
+  registerServerHealthChecks,
+  SERVER_VERSION,
+} from "./observability.js";
 import { createDb } from "./db/client.js";
 import { bindProviderRuntime, registerBuiltinProviders } from "./providers/index.js";
 import { registerBuiltinModelAdapters } from "./model-router/index.js";
@@ -56,6 +63,7 @@ import { MarketSyncService } from "./services/market-sync.js";
 
 async function main() {
   const config = loadConfig();
+  const telemetry = initServerTelemetry();
   registerBuiltinProviders();
   registerBuiltinModelAdapters();
 
@@ -82,19 +90,21 @@ async function main() {
   const platformServiceUsage = new PlatformServiceUsageService(db, config);
   bindPlatformServiceRuntime(platformServices, platformServiceUsage);
   await platformServices.ensureRows().catch((err) => {
-    console.warn("[platform-services] ensure rows:", err);
+    telemetry.recordFault("platform_services.ensure_rows", err, {
+      subsystem: "platform_services",
+    });
   });
   void platformServices
     .ensureDesired()
     .then((r) => {
       if (r.started || r.failed) {
-        console.log(
-          `[platform-services] ensure on boot: started=${r.started} failed=${r.failed}`,
-        );
+        log.info("boot.platform_services", { started: r.started, failed: r.failed });
       }
     })
     .catch((err) => {
-      console.warn("[platform-services] ensure on boot failed:", err);
+      telemetry.recordFault("platform_services.ensure_desired", err, {
+        subsystem: "platform_services",
+      });
     });
   const gateway = new McpGateway(db, orchestrator, runtime);
   const runtimeNodes = new RuntimeNodeService(db, config);
@@ -131,7 +141,7 @@ async function main() {
   );
   if (config.multiTenant) {
     await networkSettings.refreshPlatformHeadscale().catch((err) => {
-      console.warn("[headscale] load config failed:", err);
+      telemetry.recordFault("headscale.load_config", err, { subsystem: "headscale" });
     });
   }
   const exposures = new ExposureService(
@@ -148,28 +158,32 @@ async function main() {
   const defaultTenant = await getDefaultTenant(db);
   if (defaultTenant) {
     await runtimeNodes.ensureLocalNode(defaultTenant.id).catch((err) => {
-      console.warn("[runtime-nodes] seed local failed:", err);
+      telemetry.recordFault("runtime_nodes.seed_local", err, {
+        subsystem: "runtime_nodes",
+      });
     });
     await networkSettings.ensureTenantDefaults(defaultTenant.id).catch((err) => {
-      console.warn("[network] seed defaults failed:", err);
+      telemetry.recordFault("network.seed_defaults", err, { subsystem: "network" });
     });
   }
   const orphaned = await reconcileOrphanExposures(db).catch(() => 0);
   if (orphaned > 0) {
-    console.warn(`[network] marked ${orphaned} orphan exposure(s) after restart`);
+    log.warn("boot.orphan_exposures", { count: orphaned });
   }
   // MCP 服务器（含远程 HTTP）统一自动启动；远程无本地进程，status 表示启用
   void orchestrator
     .autoStartMcpInstances()
     .then((r) => {
       if (r.started || r.failed) {
-        console.log(
-          `[mcp] auto-start on boot: started=${r.started} failed=${r.failed} skipped=${r.skipped}`,
-        );
+        log.info("boot.mcp_autostart", {
+          started: r.started,
+          failed: r.failed,
+          skipped: r.skipped,
+        });
       }
     })
     .catch((err) => {
-      console.warn("[mcp] auto-start on boot failed:", err);
+      telemetry.recordFault("mcp.autostart", err, { subsystem: "mcp" });
     });
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
@@ -186,10 +200,10 @@ async function main() {
   void gateway
     .warmRunningInstanceTools()
     .then((n) => {
-      if (n > 0) console.log(`[mcp] warmed tools cache for ${n} running instance(s)`);
+      if (n > 0) log.info("boot.mcp_tools_warmed", { count: n });
     })
     .catch((err) => {
-      console.warn("[mcp] warm running tools failed:", err);
+      telemetry.recordFault("mcp.warm_tools", err, { subsystem: "mcp" });
     });
   gateway.setBrowserService(browserService);
   gateway.setMemoryStore(memoryStore);
@@ -239,6 +253,9 @@ async function main() {
   });
 
   const app = new Hono();
+  registerServerHealthChecks({ db, runtime });
+  mountPlatformProbes(app);
+  app.use("*", observabilityHttpMiddleware());
   app.use(
     "*",
     cors({
@@ -332,30 +349,30 @@ async function main() {
         register: "/oauth/register",
         oauthMetadata: "/.well-known/oauth-authorization-server",
         resourceMetadata: "/.well-known/oauth-protected-resource",
-        health: "/api/health",
+        health: "/livez",
+        ready: "/readyz",
+        metrics: "/metrics",
         cimd: "client_id_metadata_document_supported",
       },
     }),
   );
 
-  console.log(`Zakura listening on http://${config.host}:${config.port}`);
-  console.log(`  edition  : ${config.edition}${config.multiTenant ? " (multi-tenant)" : " (single-account)"}`);
-  console.log(`  data dir : ${config.dataDir}`);
-  console.log(`  database : ${config.databaseUrl} (${kind})`);
-  console.log(
-    `  redis    : ${config.redisUrl ? config.redisUrl.replace(/:[^:@/]+@/, ":***@") : "off"}`,
-  );
-  console.log(`  Agent MCP: ${config.publicBaseUrl}/mcp/agents/{slug}`);
-  console.log(`  Web UI   : ${config.webPublicUrl}`);
-  console.log(`  Authorize: ${config.publicBaseUrl}/authorize → ${config.webPublicUrl}/console/oauth/authorize`);
-  if (config.aptMirror) {
-    console.log(`  APT mirror: ${config.aptMirror}`);
-  }
-
   if (config.redisUrl) {
     const { requireRedis } = await import("./services/redis.js");
     await requireRedis();
   }
+
+  telemetry.health.setReady(true);
+  log.info("process.ready", {
+    edition: config.edition,
+    multi_tenant: config.multiTenant,
+    bind_host: config.host,
+    bind_port: config.port,
+    db_kind: kind,
+    redis: config.redisUrl ? "on" : "off",
+    otel: otlpExportEnabled() ? "on" : "off",
+    version: SERVER_VERSION,
+  });
 
   const server = serve({
     fetch: app.fetch,
@@ -372,6 +389,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err);
+  log.fatal("process.fatal", { err });
   process.exit(1);
 });
