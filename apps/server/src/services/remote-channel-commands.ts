@@ -111,7 +111,7 @@ export function formatWhoami(input: {
 export async function registerPlatformSlashCommands(
   platform: string,
   credentials: Record<string, unknown>,
-): Promise<{ ok: boolean; skipped?: boolean; detail?: string }> {
+): Promise<{ ok: boolean; skipped?: boolean; detail: string }> {
   const menu = REMOTE_SLASH_MENU.map((item) => ({
     command: item.name,
     description: item.description.slice(0, 100),

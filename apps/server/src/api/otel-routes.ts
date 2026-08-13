@@ -67,7 +67,7 @@ export function registerOtelRoutes(app: Hono<{ Variables: AppVariables }>): void
             : rec.event.startsWith("client.")
               ? rec.event.slice(0, 80)
               : "client.error";
-        const fields = {
+        const fields: Record<string, unknown> = {
           ...rec.fields,
           source: "web",
           err_message: rec.event,
