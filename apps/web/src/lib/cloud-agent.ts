@@ -1451,6 +1451,11 @@ export async function saveCloudConfig(
       | "compactModelRouteId"
       | "maxSubagentDepth"
       | "gatewayModelMap"
+      | "compactThresholdChars"
+      | "compactSoftThresholdChars"
+      | "compactKeepRecent"
+      | "compactKeepRecentChars"
+      | "maxToolResultChars"
     >
   > & {
     /** null 表示清除限制 */
