@@ -1121,17 +1121,22 @@ export class AgentWorkspaceService {
       : `${AGENT_WORKSPACE_ROOT}/${raw.replace(/^\/+/, "")}`.replace(/\/+/g, "/");
   }
 
-  private shellEnv(extra?: Record<string, string>): Record<string, string> {
-    return {
+  private shellEnv(extra?: Record<string, string>, interactive = false): Record<string, string> {
+    const env: Record<string, string> = {
       PATH: WORKSPACE_EXEC_PATH,
       HOME: AGENT_WORKSPACE_ROOT,
       TERM: "xterm-256color",
       PYTHONUNBUFFERED: "1",
-      CI: "1",
-      NO_COLOR: "1",
-      FORCE_COLOR: "0",
-      ...extra,
     };
+    if (interactive) {
+      env.COLORTERM = "truecolor";
+      env.FORCE_COLOR = "1";
+    } else {
+      env.CI = "1";
+      env.NO_COLOR = "1";
+      env.FORCE_COLOR = "0";
+    }
+    return { ...env, ...extra };
   }
 
   async startShellJob(
@@ -1143,10 +1148,11 @@ export class AgentWorkspaceService {
       timeoutMs?: number;
       stdin?: string;
       onOutput?: (snap: ShellJobSnapshot) => void;
+      interactive?: boolean;
     },
   ): Promise<ShellJobSnapshot> {
     const workingDir = this.shellCwd(opts?.workingDir);
-    const env = this.shellEnv(opts?.env);
+    const env = this.shellEnv(opts?.env, opts?.interactive);
     const timeoutMs = opts?.timeoutMs;
 
     if (this.isRemoteAgent(agent)) {

@@ -43,8 +43,13 @@ export function createDesktopProxyGateway(
         workingDir: "/",
       });
       const writer = bridge.writable.getWriter();
-      ws.on("message", (data, isBinary) => {
-        if (isBinary || data instanceof Buffer) void writer.write(new Uint8Array(data as Buffer)).catch(() => undefined);
+      ws.on("message", (data) => {
+        const bytes = Array.isArray(data)
+          ? Buffer.concat(data)
+          : data instanceof ArrayBuffer
+            ? Buffer.from(new Uint8Array(data))
+            : Buffer.from(data);
+        void writer.write(bytes).catch(() => undefined);
       });
       ws.on("close", () => {
         void writer.close().catch(() => undefined);
@@ -71,6 +76,7 @@ export function createDesktopProxyGateway(
     let outputCursor = 0;
     let poll: ReturnType<typeof setInterval> | undefined;
     let closed = false;
+    let pendingSize: { cols: number; rows: number } | undefined;
     const send = (value: unknown) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(value));
     };
@@ -93,13 +99,35 @@ export function createDesktopProxyGateway(
         ws.close(1000, "terminal exited");
       }
     };
+    ws.on("message", (raw) => {
+      let message: { type?: string; data?: string; cols?: number; rows?: number };
+      try {
+        message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number };
+      } catch {
+        message = { type: "input", data: raw.toString() };
+      }
+      if (message.type === "resize" && Number.isFinite(message.cols) && Number.isFinite(message.rows)) {
+        pendingSize = { cols: message.cols!, rows: message.rows! };
+        if (jobId) void deps.agentService.workspace.resizeShellJob(agent, jobId, pendingSize.cols, pendingSize.rows);
+      } else if (jobId && message.type === "input" && typeof message.data === "string") {
+        void deps.agentService.workspace.waitShellJob(agent, jobId, 1, { stdin: message.data });
+      }
+    });
+    ws.on("close", () => {
+      closed = true;
+      if (poll) clearInterval(poll);
+      if (jobId) void deps.agentService.workspace.killShellJob(agent, jobId).catch(() => undefined);
+    });
     try {
       const initial = await deps.agentService.workspace.startShellJob(
         agent,
         ["bash", "-l"],
-        { onOutput: pushSnapshot },
+        { onOutput: pushSnapshot, interactive: true },
       );
       jobId = initial.jobId;
+      if (pendingSize) {
+        await deps.agentService.workspace.resizeShellJob(agent, jobId, pendingSize.cols, pendingSize.rows);
+      }
       pushSnapshot(initial);
       send({ type: "ready", sessionId: jobId, command: "bash -l" });
       // Remote Runner callbacks cross an HTTP boundary, so keep a tight authoritative
@@ -108,27 +136,6 @@ export function createDesktopProxyGateway(
         if (!jobId || closed) return;
         void deps.agentService.workspace.getShellJob(agent, jobId).then(pushSnapshot).catch(() => undefined);
       }, 120);
-      ws.on("message", (raw) => {
-        if (!jobId) return;
-        let message: { type?: string; data?: string; cols?: number; rows?: number };
-        try {
-          message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number };
-        } catch {
-          message = { type: "input", data: raw.toString() };
-        }
-        if (message.type === "input" && typeof message.data === "string") {
-          // A one-millisecond wait still writes stdin for local PTY jobs; zero
-          // intentionally short-circuits before the write path in ShellJob.
-          void deps.agentService.workspace.waitShellJob(agent, jobId, 1, { stdin: message.data });
-        } else if (message.type === "resize" && Number.isFinite(message.cols) && Number.isFinite(message.rows)) {
-          void deps.agentService.workspace.resizeShellJob(agent, jobId, message.cols!, message.rows!);
-        }
-      });
-      ws.on("close", () => {
-        closed = true;
-        if (poll) clearInterval(poll);
-        if (jobId) void deps.agentService.workspace.killShellJob(agent, jobId).catch(() => undefined);
-      });
     } catch (err) {
       send({ type: "error", message: err instanceof Error ? err.message : String(err) });
       ws.close(1011, "terminal unavailable");

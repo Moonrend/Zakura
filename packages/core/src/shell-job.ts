@@ -67,6 +67,29 @@ export class DockerMuxParser {
   }
 }
 
+/** Binary-safe Docker multiplex parser for byte protocols such as VNC/RFB. */
+export class DockerMuxBinaryParser {
+  private pending: Buffer = Buffer.alloc(0);
+
+  push(chunk: Buffer): { stdout: Buffer[]; stderr: Buffer[] } {
+    this.pending = Buffer.concat([this.pending, chunk]);
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let offset = 0;
+    while (offset + 8 <= this.pending.length) {
+      const streamType = this.pending[offset]!;
+      const size = this.pending.readUInt32BE(offset + 4);
+      if (offset + 8 + size > this.pending.length) break;
+      const payload = Buffer.from(this.pending.subarray(offset + 8, offset + 8 + size));
+      offset += 8 + size;
+      if (streamType === 1) stdout.push(payload);
+      else if (streamType === 2) stderr.push(payload);
+    }
+    this.pending = Buffer.from(this.pending.subarray(offset));
+    return { stdout, stderr };
+  }
+}
+
 export class ShellJob {
   readonly id: string;
   readonly agentId: string;

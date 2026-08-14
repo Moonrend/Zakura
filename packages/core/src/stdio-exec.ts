@@ -2,7 +2,7 @@
  * 非 TTY、双向 stdin/stdout：给 ACP JSON-RPC 用。
  * stdout/stderr 走 Docker multiplex；stdin 可写。
  */
-import { DockerMuxParser } from "./shell-job.js";
+import { DockerMuxBinaryParser } from "./shell-job.js";
 
 export type StdioInspect = () => Promise<{ ExitCode?: number | null; Running?: boolean; Pid?: number }>;
 
@@ -13,7 +13,7 @@ export type StdioExecOptions = {
 
 export class StdioExec {
   readonly id: string;
-  private readonly mux = new DockerMuxParser();
+  private readonly mux = new DockerMuxBinaryParser();
   private readonly stdoutChunks: Uint8Array[] = [];
   private stdoutWaiters: Array<(chunk: Uint8Array | null) => void> = [];
   private exitCode: number | null = null;
@@ -29,9 +29,10 @@ export class StdioExec {
     this.id = id ?? `stdio_${Math.random().toString(36).slice(2, 12)}`;
     stream.on("data", (buf: Buffer) => {
       const { stdout, stderr } = this.mux.push(Buffer.from(buf));
-      if (stdout) this.pushStdout(Buffer.from(stdout, "utf8"));
-      if (stderr) {
-        for (const fn of this.stderrListeners) fn(stderr);
+      for (const chunk of stdout) this.pushStdout(chunk);
+      for (const chunk of stderr) {
+        const text = chunk.toString("utf8");
+        for (const fn of this.stderrListeners) fn(text);
       }
     });
     stream.on("end", () => void this.markExit());

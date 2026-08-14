@@ -3,10 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal as WTermTerminal, useTerminal } from "@wterm/react";
 import "@wterm/react/css";
-import { Loader2, Maximize2, PlugZap, RotateCcw, TerminalSquare, Unplug } from "lucide-react";
+import { Loader2, Maximize2, RotateCcw, Unplug } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +40,7 @@ export function WorkspaceTerminalDialog({
 }) {
   const { ref, write, focus } = useTerminal();
   const socketRef = useRef<WebSocket | null>(null);
+  const sizeRef = useRef({ cols: 80, rows: 24 });
   const generationRef = useRef(0);
   const [state, setState] = useState<State>("idle");
   const [detail, setDetail] = useState("等待建立动态会话");
@@ -64,7 +64,10 @@ export function WorkspaceTerminalDialog({
       if (generation !== generationRef.current) return;
       const socket = new WebSocket(runtimeSocketUrl(ticket.url));
       socketRef.current = socket;
-      socket.onopen = () => setDetail("凭据已验证，正在启动容器 PTY…");
+      socket.onopen = () => {
+        setDetail("凭据已验证，正在启动容器 PTY…");
+        socket.send(JSON.stringify({ type: "resize", ...sizeRef.current }));
+      };
       socket.onmessage = (event) => {
         let message: { type?: string; data?: string; message?: string; command?: string; code?: number | null };
         try {
@@ -76,6 +79,7 @@ export function WorkspaceTerminalDialog({
         if (message.type === "ready") {
           setState("connected");
           setDetail(message.command || "bash -l");
+          socket.send(JSON.stringify({ type: "resize", ...sizeRef.current }));
           focus();
         } else if (message.type === "output" && message.data) {
           write(message.data);
@@ -122,31 +126,25 @@ export function WorkspaceTerminalDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[calc(100vw-1rem)] gap-0 overflow-hidden border-zinc-800 bg-zinc-950 p-0 text-zinc-100 sm:max-w-6xl">
-        <DialogHeader className="flex-row items-center gap-3 border-b border-zinc-800 bg-zinc-950 px-4 py-3">
-          <span className="flex size-9 items-center justify-center rounded-md border border-zinc-700 bg-zinc-900">
-            <TerminalSquare className="size-4 text-emerald-400" />
-          </span>
+      <DialogContent className="max-w-[calc(100vw-1rem)] gap-0 overflow-hidden p-0 sm:max-w-6xl">
+        <DialogHeader className="flex-row items-center gap-3 border-b px-4 py-3">
           <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center gap-2">
-              <DialogTitle className="text-sm text-zinc-100">平台代理终端{request?.profileName ? ` · ${request.profileName}` : ""}</DialogTitle>
-              <Badge variant="outline" className="border-zinc-700 bg-zinc-900 text-[10px] text-zinc-300">
-                {state === "connected" ? "实时" : state === "connecting" ? "连接中" : state === "error" ? "异常" : "已断开"}
-              </Badge>
-            </div>
-            <DialogDescription className="truncate font-mono text-[11px] text-zinc-500">{detail}</DialogDescription>
+            <DialogTitle className="text-sm">平台代理终端{request?.profileName ? ` · ${request.profileName}` : ""}</DialogTitle>
+            <DialogDescription className="truncate text-xs">
+              {state === "connected" ? "已连接" : state === "connecting" ? "连接中" : state === "error" ? "连接失败" : "已断开"} · {detail}
+            </DialogDescription>
           </div>
-          {state === "connecting" ? <Loader2 className="size-4 animate-spin text-zinc-500" /> : null}
-          <Button type="button" variant="ghost" size="icon-sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => focus()}>
+          {state === "connecting" ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
+          <Button type="button" variant="ghost" size="icon-sm" onClick={() => focus()}>
             <Maximize2 /><span className="sr-only">聚焦终端</span>
           </Button>
           {state === "connected" ? (
-            <Button type="button" variant="ghost" size="sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => disconnect()}>
+            <Button type="button" variant="ghost" size="sm" onClick={() => disconnect()}>
               <Unplug />断开
             </Button>
           ) : (
-            <Button type="button" variant="ghost" size="sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => void connect()}>
-              {state === "error" ? <RotateCcw /> : <PlugZap />}重连
+            <Button type="button" variant="ghost" size="sm" onClick={() => void connect()}>
+              <RotateCcw />重连
             </Button>
           )}
         </DialogHeader>
@@ -158,6 +156,7 @@ export function WorkspaceTerminalDialog({
             cursorBlink
             onData={handleData}
             onResize={(cols, rows) => {
+              sizeRef.current = { cols, rows };
               const socket = socketRef.current;
               if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "resize", cols, rows }));
             }}

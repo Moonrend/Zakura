@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { StdioExec } from "../src/stdio-exec.js";
 
-function muxFrame(stream: 1 | 2, text: string): Buffer {
-  const payload = Buffer.from(text, "utf8");
+function muxFrame(stream: 1 | 2, text: string | Buffer): Buffer {
+  const payload = Buffer.isBuffer(text) ? text : Buffer.from(text, "utf8");
   const header = Buffer.alloc(8);
   header[0] = stream;
   header.writeUInt32BE(payload.length, 4);
@@ -45,5 +45,18 @@ describe("StdioExec non-TTY demux", () => {
     await new Promise((r) => setTimeout(r, 10));
     assert.match(Buffer.concat(received).toString("utf8"), /\{"id":1\}/);
     await exec.kill();
+  });
+
+  it("preserves arbitrary binary stdout bytes", async () => {
+    const stream = new PassThrough();
+    const exec = new StdioExec(stream as unknown as NodeJS.ReadWriteStream, {
+      inspect: async () => ({ ExitCode: 0, Running: false }),
+    });
+    const reader = exec.toWebStreams().readable.getReader();
+    const bytes = Buffer.from([0x52, 0x46, 0x42, 0x20, 0xff, 0x00, 0x80, 0x0a]);
+    stream.write(muxFrame(1, bytes));
+    const first = await reader.read();
+    assert.deepEqual(Buffer.from(first.value!), bytes);
+    stream.end();
   });
 });

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Expand, Loader2, MonitorOff, RefreshCw, Unplug } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 
 type Ticket = { url: string; ticket: string };
 
@@ -52,17 +51,15 @@ export function WorkspaceDesktop({ agentId, active }: { agentId: string; active:
     };
   }, [active, agentId, attempt]);
 
-  return <div className="overflow-hidden rounded-lg border bg-zinc-950 shadow-sm">
-    <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-950 px-3 py-2 text-zinc-300">
-      <span className={state === "connected" ? "size-2 rounded-full bg-emerald-400" : state === "error" ? "size-2 rounded-full bg-red-400" : "size-2 rounded-full bg-amber-400"} />
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{message}</span>
-      <Badge variant="outline" className="border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400">noVNC / RFB</Badge>
-      <Button type="button" variant="ghost" size="icon-sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => hostRef.current?.requestFullscreen()}>
+  return <div className="overflow-hidden rounded-md border">
+    <div className="flex items-center gap-2 border-b bg-muted/30 px-3 py-2">
+      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{message}</span>
+      <Button type="button" variant="ghost" size="icon-sm" onClick={() => hostRef.current?.requestFullscreen()}>
         <Expand /><span className="sr-only">全屏</span>
       </Button>
-      {state === "connected" ? <Button type="button" variant="ghost" size="icon-sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => rfbRef.current?.disconnect()}>
+      {state === "connected" ? <Button type="button" variant="ghost" size="icon-sm" onClick={() => rfbRef.current?.disconnect()}>
         <Unplug /><span className="sr-only">断开</span>
-      </Button> : <Button type="button" variant="ghost" size="icon-sm" className="text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" onClick={() => setAttempt((value) => value + 1)}>
+      </Button> : <Button type="button" variant="ghost" size="icon-sm" onClick={() => setAttempt((value) => value + 1)}>
         <RefreshCw /><span className="sr-only">重连</span>
       </Button>}
     </div>
