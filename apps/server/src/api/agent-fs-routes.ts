@@ -1,7 +1,33 @@
 import type { Hono } from "hono";
+import { and, eq } from "drizzle-orm";
 import { PathJailError, type WorkspaceFs } from "@zakura/core";
+import {
+  AGENT_PROJECTS_DIR,
+  isSafeGitRemoteUrl,
+  isValidProjectSlug,
+  normalizeHooksByEvent,
+  PROJECT_INSTRUCTION_FILES,
+  projectRelativePath,
+  projectSlugsFromList,
+  projectWorkspacePath,
+} from "@zakura/shared";
+import type { Db } from "../db/client.js";
+import { agentSchedules, cloudAgentSessions } from "../db/schema.js";
 import type { AgentService } from "../services/agents.js";
 import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provider.js";
+import { platformEvents } from "../services/platform-events.js";
+import {
+  createProjectSkill,
+  deleteProject,
+  deleteProjectSkill,
+  loadProjectConfig,
+  ProjectFsError,
+  readProjectSkillFile,
+  renameProject,
+  saveProjectHooks,
+  saveProjectInstructions,
+  saveProjectSkillFile,
+} from "../services/project-config.js";
 
 type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
@@ -67,6 +93,7 @@ export function registerAgentFsRoutes(
   app: Hono<{ Variables: SessionVars }>,
   agentService: AgentService,
   fsProvider: ServerWorkspaceFsProvider,
+  db: Db,
 ) {
   app.get("/api/agents/:id/fs", async (c) => {
     const session = c.get("session")!;
@@ -313,4 +340,417 @@ export function registerAgentFsRoutes(
       return c.json(e.body, e.status);
     }
   });
+
+  app.get("/api/agents/:id/projects", async (c) => {
+    const session = c.get("session")!;
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    try {
+      const projects = await listWorkspaceProjects(resolved.fs);
+      return c.json({ projects });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/api/agents/:id/projects", async (c) => {
+    const session = c.get("session")!;
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req
+      .json<{ name?: string; gitUrl?: string }>()
+      .catch(() => ({} as { name?: string; gitUrl?: string }));
+    const name = (body.name ?? "").trim();
+    if (!isValidProjectSlug(name)) {
+      return c.json({ error: "无效的项目名（字母数字开头，可含 . _ -）" }, 400);
+    }
+    const gitUrl = typeof body.gitUrl === "string" ? body.gitUrl.trim() : "";
+    if (gitUrl && !isSafeGitRemoteUrl(gitUrl)) {
+      return c.json({ error: "gitUrl 仅支持 https:// 或 git@host:path" }, 400);
+    }
+    const rel = projectRelativePath(name);
+    try {
+      if (await resolved.fs.exists(rel)) {
+        return c.json({ error: "项目已存在" }, 409);
+      }
+      if (!(await resolved.fs.exists(AGENT_PROJECTS_DIR))) {
+        await resolved.fs.mkdir(AGENT_PROJECTS_DIR);
+      }
+      await resolved.fs.mkdir(rel);
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: `/${rel}`,
+      });
+      let cloneError: string | undefined;
+      if (gitUrl) {
+        try {
+          const dest = projectWorkspacePath(name);
+          const started = await agentService.workspace.startShellJob(
+            resolved.agent,
+            ["git", "clone", "--depth", "1", "--", gitUrl, dest],
+            { timeoutMs: 120_000 },
+          );
+          const snap = await agentService.workspace.waitShellJob(
+            resolved.agent,
+            started.jobId,
+            120_000,
+          );
+          if (snap.exitCode !== 0) {
+            cloneError =
+              (snap.stderr || snap.stdout || `git clone exited ${snap.exitCode}`).slice(0, 800);
+          }
+        } catch (err) {
+          cloneError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      return c.json(
+        {
+          project: { name, path: projectWorkspacePath(name) },
+          ...(cloneError ? { cloneError } : {}),
+        },
+        201,
+      );
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.patch("/api/agents/:id/projects/:slug", async (c) => {
+    const session = c.get("session")!;
+    const from = c.req.param("slug");
+    if (!isValidProjectSlug(from)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req.json<{ name?: string }>().catch(() => ({} as { name?: string }));
+    const to = (body.name ?? "").trim();
+    try {
+      const project = await renameProject(resolved.fs, from, to);
+      if (from !== to) {
+        await rebindProjectRefs(db, resolved.agent.tenantId, resolved.agent.id, from, to);
+        platformEvents.publish(resolved.agent.tenantId, {
+          type: "agent_fs_changed",
+          agentId: resolved.agent.id,
+          path: `/${projectRelativePath(from)}`,
+        });
+        platformEvents.publish(resolved.agent.tenantId, {
+          type: "agent_fs_changed",
+          agentId: resolved.agent.id,
+          path: `/${projectRelativePath(to)}`,
+        });
+      }
+      return c.json({ project });
+    } catch (err) {
+      if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.delete("/api/agents/:id/projects/:slug", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    try {
+      const deleted = await deleteProject(resolved.fs, slug);
+      await rebindProjectRefs(db, resolved.agent.tenantId, resolved.agent.id, slug, null);
+      if (deleted) {
+        platformEvents.publish(resolved.agent.tenantId, {
+          type: "agent_fs_changed",
+          agentId: resolved.agent.id,
+          path: `/${projectRelativePath(slug)}`,
+        });
+      }
+      return c.json({ ok: true, deleted });
+    } catch (err) {
+      if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.get("/api/agents/:id/projects/:slug/config", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    try {
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ config });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.put("/api/agents/:id/projects/:slug/instructions", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req
+      .json<{ content?: string; file?: string }>()
+      .catch(() => ({} as { content?: string; file?: string }));
+    const file = PROJECT_INSTRUCTION_FILES.includes(
+      body.file as (typeof PROJECT_INSTRUCTION_FILES)[number],
+    )
+      ? (body.file as (typeof PROJECT_INSTRUCTION_FILES)[number])
+      : "AGENTS.md";
+    try {
+      if (!(await resolved.fs.exists(projectRelativePath(slug)))) {
+        return c.json({ error: "项目目录不存在" }, 404);
+      }
+      const saved = await saveProjectInstructions(resolved.fs, slug, body.content ?? "", file);
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: saved.path,
+      });
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ config, path: saved.path });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.put("/api/agents/:id/projects/:slug/hooks", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req
+      .json<{ events?: unknown; file?: string | null }>()
+      .catch(() => ({} as { events?: unknown; file?: string | null }));
+    try {
+      if (!(await resolved.fs.exists(projectRelativePath(slug)))) {
+        return c.json({ error: "项目目录不存在" }, 404);
+      }
+      const events = normalizeHooksByEvent(body.events);
+      const saved = await saveProjectHooks(resolved.fs, slug, events, body.file);
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: saved.path,
+      });
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ config, path: saved.path });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.post("/api/agents/:id/projects/:slug/skills", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req
+      .json<{ name?: string; description?: string; body?: string }>()
+      .catch(() => ({} as { name?: string; description?: string; body?: string }));
+    try {
+      if (!(await resolved.fs.exists(projectRelativePath(slug)))) {
+        return c.json({ error: "项目目录不存在" }, 404);
+      }
+      const skill = await createProjectSkill(resolved.fs, slug, {
+        name: body.name ?? "",
+        description: body.description ?? "",
+        body: body.body,
+      });
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: skill.path,
+      });
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ skill, config }, 201);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.get("/api/agents/:id/projects/:slug/skills/:name/file", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    const name = c.req.param("name");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    try {
+      const file = await readProjectSkillFile(resolved.fs, slug, name, c.req.query("path"));
+      if (!file) return c.json({ error: "技能不存在" }, 404);
+      return c.json(file);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.put("/api/agents/:id/projects/:slug/skills/:name", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    const name = c.req.param("name");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const body = await c.req.json<{ content?: string }>().catch(() => ({} as { content?: string }));
+    if (typeof body.content !== "string") return c.json({ error: "content 必填" }, 400);
+    try {
+      const saved = await saveProjectSkillFile(resolved.fs, slug, name, body.content);
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: saved.path,
+      });
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ config, path: saved.path });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+
+  app.delete("/api/agents/:id/projects/:slug/skills/:name", async (c) => {
+    const session = c.get("session")!;
+    const slug = c.req.param("slug");
+    const name = c.req.param("name");
+    if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
+    const resolved = await resolveAgentFs(
+      agentService,
+      fsProvider,
+      session.tenantId,
+      c.req.param("id"),
+    );
+    if (!resolved) return c.json({ error: "Not found" }, 404);
+    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    try {
+      const ok = await deleteProjectSkill(resolved.fs, slug, name);
+      if (!ok) return c.json({ error: "技能不存在" }, 404);
+      platformEvents.publish(resolved.agent.tenantId, {
+        type: "agent_fs_changed",
+        agentId: resolved.agent.id,
+        path: `/${projectRelativePath(slug)}/.agents/skills/${name}`,
+      });
+      const config = await loadProjectConfig(resolved.fs, slug);
+      return c.json({ config });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status);
+    }
+  });
+}
+
+async function listWorkspaceProjects(
+  fs: WorkspaceFs,
+): Promise<Array<{ name: string; path: string }>> {
+  if (!(await fs.exists(AGENT_PROJECTS_DIR))) {
+    await fs.mkdir(AGENT_PROJECTS_DIR);
+    return [];
+  }
+  const listed = await fs.list(AGENT_PROJECTS_DIR);
+  return projectSlugsFromList(listed.entries).map((name) => ({
+    name,
+    path: projectWorkspacePath(name),
+  }));
+}
+
+/** 目录改名/删除后，会话与定时任务上的 slug 跟着改（含子代理）。 */
+async function rebindProjectRefs(
+  db: Db,
+  tenantId: string,
+  agentId: string,
+  from: string,
+  to: string | null,
+) {
+  const now = new Date();
+  await db
+    .update(cloudAgentSessions)
+    .set({ project: to, updatedAt: now })
+    .where(
+      and(
+        eq(cloudAgentSessions.tenantId, tenantId),
+        eq(cloudAgentSessions.agentId, agentId),
+        eq(cloudAgentSessions.project, from),
+      ),
+    );
+  await db
+    .update(agentSchedules)
+    .set({ project: to, updatedAt: now })
+    .where(
+      and(
+        eq(agentSchedules.tenantId, tenantId),
+        eq(agentSchedules.agentId, agentId),
+        eq(agentSchedules.project, from),
+      ),
+    );
 }

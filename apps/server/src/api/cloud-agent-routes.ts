@@ -7,6 +7,7 @@ import {
   parseCloudAgentConfig,
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
+  parseProjectField,
   resolveFollowUpMode,
   type CloudAgentAttachment,
   type CloudAgentFollowUpMode,
@@ -31,6 +32,7 @@ function sessionDto(row: {
   title: string;
   status: string;
   kind: string;
+  project: string | null;
   originJson: string;
   model: string | null;
   modelRouteId: string | null;
@@ -53,6 +55,7 @@ function sessionDto(row: {
     title: row.title,
     status: row.status,
     kind: row.kind,
+    project: row.project,
     origin,
     model: row.model,
     modelRouteId: row.modelRouteId,
@@ -367,6 +370,9 @@ export function registerCloudAgentRoutes(
     const rows = await store.listSessions(session.tenantId, agentId, {
       includeArchived: c.req.query("all") === "1",
       kinds: parseKindsParam(c.req.query("kinds")),
+      ...(Number.isFinite(Number(c.req.query("limit")))
+        ? { limit: Number(c.req.query("limit")) }
+        : {}),
     });
     return c.json({ sessions: rows.map(sessionDto) });
   });
@@ -388,11 +394,23 @@ export function registerCloudAgentRoutes(
     const agent = await requireAgent(session.tenantId, agentId);
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     const body = await c.req
-      .json<{ title?: string; kind?: string; origin?: unknown }>()
-      .catch(() => ({}) as { title?: string; kind?: string; origin?: unknown });
+      .json<{ title?: string; kind?: string; origin?: unknown; project?: string | null }>()
+      .catch(
+        () =>
+          ({}) as {
+            title?: string;
+            kind?: string;
+            origin?: unknown;
+            project?: string | null;
+          },
+      );
     const kind = body.kind !== undefined ? parseCloudAgentSessionKind(body.kind) : null;
     if (body.kind !== undefined && !kind) {
       return c.json({ error: `无效的会话类型: ${String(body.kind)}` }, 400);
+    }
+    const projectField = parseProjectField(body.project);
+    if (projectField.status === "invalid") {
+      return c.json({ error: "无效的项目名" }, 400);
     }
     // API 创建的非 chat 会话默认标记 source=api（系统集成产生的对话历史）
     const origin = parseCloudAgentSessionOrigin(body.origin);
@@ -404,6 +422,7 @@ export function registerCloudAgentRoutes(
       createdByUserId: session.userId === "api-key" ? null : session.userId,
       ...(kind ? { kind } : {}),
       ...(Object.keys(origin).length ? { origin } : {}),
+      ...(projectField.status === "ok" ? { project: projectField.slug } : {}),
     });
     return c.json(sessionDto(created), 201);
   });
@@ -493,6 +512,7 @@ export function registerCloudAgentRoutes(
       title?: string;
       status?: "active" | "archived";
       kind?: string;
+      project?: string | null;
       model?: string | null;
       modelRouteId?: string | null;
       reasoning?: string | null;
@@ -502,6 +522,10 @@ export function registerCloudAgentRoutes(
     if (body.kind !== undefined && !kind) {
       return c.json({ error: `无效的会话类型: ${String(body.kind)}` }, 400);
     }
+    const projectField = parseProjectField(body.project);
+    if (body.project !== undefined && projectField.status === "invalid") {
+      return c.json({ error: "无效的项目名" }, 400);
+    }
     const updated = await store.updateSession(
       session.tenantId,
       c.req.param("id"),
@@ -510,6 +534,7 @@ export function registerCloudAgentRoutes(
         ...(body.title !== undefined ? { title: body.title } : {}),
         ...(body.status !== undefined ? { status: body.status } : {}),
         ...(kind ? { kind } : {}),
+        ...(projectField.status === "ok" ? { project: projectField.slug } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
         ...(body.modelRouteId !== undefined ? { modelRouteId: body.modelRouteId } : {}),
         ...(body.reasoning !== undefined ? { reasoning: body.reasoning } : {}),

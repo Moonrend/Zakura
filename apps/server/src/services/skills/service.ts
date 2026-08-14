@@ -10,10 +10,13 @@ import type { WorkspaceFs } from "@zakura/core";
 import {
   AGENT_SKILLS_DIR,
   CURATED_SKILL_REPOS,
+  PROJECT_SKILLS_WRITE_DIR,
   SKILL_MANIFEST_FILE,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
   SKILL_STORES,
+  isValidProjectSlug,
+  projectRelativePath,
   type AgentSkillRecord,
   type SkillAutoUpdateStatus,
   type SkillCacheStatus,
@@ -1179,26 +1182,38 @@ export class SkillsService {
   private async installToAgent(agent: Agent, row: SkillRow): Promise<AgentSkillRecord> {
     const files = parseFiles(row.filesJson);
     if (!files.length) throw new Error("技能内容为空");
+    const fs = await this.fsForAgent(agent);
+    const root = skillWorkspacePath(row.name);
+    await this.writeSkillFiles(fs, agent, root, files);
+    this.forgetPromptSummary(agent.tenantId, agent.id);
+    return this.recordInstall(agent, row, "installed", null);
+  }
 
-    const fs = await this.fsProvider.forAgentBinding({
+  private async fsForAgent(agent: Agent): Promise<WorkspaceFs> {
+    return this.fsProvider.forAgentBinding({
       id: agent.id,
       tenantId: agent.tenantId,
       runtimeNodeId: agent.runtimeNodeId,
     });
-    const root = skillWorkspacePath(row.name);
+  }
 
-    // 覆盖安装前清掉旧目录，避免残留上一版本的文件
+  private async writeSkillFiles(
+    fs: WorkspaceFs,
+    agent: Agent,
+    root: string,
+    files: SkillFile[],
+  ): Promise<void> {
+    const dest = root.replace(/\/+/g, "/");
     try {
-      if (await fs.exists(root)) await fs.delete(root, true);
+      if (await fs.exists(dest)) await fs.delete(dest, true);
     } catch {
       /* 目录不存在或无法删除时继续写入 */
     }
-    await fs.mkdir(root);
-
+    await fs.mkdir(dest);
     for (const file of files) {
-      const target = `${root}/${file.path}`.replace(/\/+/g, "/");
+      const target = `${dest}/${file.path}`.replace(/\/+/g, "/");
       const dir = target.slice(0, target.lastIndexOf("/"));
-      if (dir && dir !== root) {
+      if (dir && dir !== dest) {
         try {
           await fs.mkdir(dir);
         } catch {
@@ -1211,15 +1226,79 @@ export class SkillsService {
         await fs.write(target, file.content);
       }
     }
-
     platformEvents.publish(agent.tenantId, {
       type: "agent_fs_changed",
       agentId: agent.id,
-      path: root,
+      path: dest,
     });
+  }
 
-    this.forgetPromptSummary(agent.tenantId, agent.id);
-    return this.recordInstall(agent, row, "installed", null);
+  /**
+   * 把技能文件写到项目目录 `.agents/skills/<name>/`（不登记 agent_skills）。
+   * 只对绑定该项目的会话可见。
+   */
+  async installToProject(
+    agent: Agent,
+    slug: string,
+    opts: { source?: string; names?: string[]; path?: string },
+  ): Promise<{
+    skills: Array<{ name: string; description: string; path: string }>;
+    warnings: string[];
+  }> {
+    if (!isValidProjectSlug(slug)) throw new SkillSourceError("无效的项目名");
+    const fs = await this.fsForAgent(agent);
+    const projectRoot = projectRelativePath(slug);
+    if (!(await fs.exists(projectRoot))) {
+      throw new SkillSourceError(`项目目录不存在：/${projectRoot}`);
+    }
+
+    const warnings: string[] = [];
+    const rows: SkillRow[] = [];
+
+    if (opts.path?.trim()) {
+      const record = await this.registerFromWorkspace(agent.tenantId, agent, opts.path.trim());
+      const row = await this.findRow(agent.tenantId, record.id);
+      if (!row) throw new SkillSourceError("登记技能失败");
+      rows.push(row);
+      // registerFromWorkspace 会装到 /skills/；项目安装再抄一份到项目目录。
+      // 用户明确要项目级时，卸掉刚写的全局副本，避免两处各一份。
+      await this.uninstall(agent.tenantId, agent.id, row.name).catch(() => undefined);
+    } else if (opts.source?.trim()) {
+      const source = parseSkillSource(opts.source);
+      const scoped = opts.names?.length ? { ...source, skills: opts.names } : source;
+      const loaded = await this.loadPackages(scoped, { tenantId: agent.tenantId });
+      warnings.push(...loaded.warnings);
+      const wanted = opts.names?.length
+        ? loaded.packages.filter((p) =>
+            opts.names!.some((n) => normalizeSkillName(n) === p.name),
+          )
+        : loaded.packages;
+      if (!wanted.length) {
+        throw new SkillSourceError(`来源中没有匹配的技能：${opts.names?.join(", ") ?? ""}`);
+      }
+      for (const pkg of wanted) {
+        rows.push(await this.upsertPackage(agent.tenantId, pkg, pkg.source.kind === "builtin"));
+      }
+    } else {
+      throw new SkillSourceError("缺少 source 或 path");
+    }
+
+    const installed: Array<{ name: string; description: string; path: string }> = [];
+    for (const row of rows) {
+      const files = parseFiles(row.filesJson);
+      if (!files.length) {
+        warnings.push(`${row.name} 内容为空，已跳过`);
+        continue;
+      }
+      const dest = `/${projectRoot}/${PROJECT_SKILLS_WRITE_DIR}/${row.name}`.replace(/\/+/g, "/");
+      await this.writeSkillFiles(fs, agent, dest, files);
+      installed.push({
+        name: row.name,
+        description: row.description,
+        path: `${dest}/${SKILL_MANIFEST_FILE}`,
+      });
+    }
+    return { skills: installed, warnings };
   }
 
   private async recordInstall(

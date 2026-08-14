@@ -40,6 +40,8 @@ export type CloudSession = {
   status: string;
   /** 会话类型标记：chat（用户对话）| subagent（子代理）| delegate（委派）| system */
   kind: CloudAgentSessionKind;
+  /** 绑定的工作区项目 slug；空 = 未绑定 */
+  project: string | null;
   /** 来源链接：父会话/父 Run/调用方 Agent（非 chat 会话） */
   origin: CloudAgentSessionOrigin;
   model: string | null;
@@ -1017,12 +1019,13 @@ export function eventsToRunLogs(events: CloudAgentEvent[]): RunLogEntry[] {
 
 export async function listCloudSessions(
   agentId: string,
-  opts?: { kinds?: SessionKindsFilter },
+  opts?: { kinds?: SessionKindsFilter; limit?: number },
 ) {
   const params = new URLSearchParams();
   if (opts?.kinds) {
     params.set("kinds", opts.kinds === "all" ? "all" : opts.kinds.join(","));
   }
+  if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return api<{ sessions: CloudSession[] }>(
     `/api/agents/${agentId}/cloud/sessions${qs ? `?${qs}` : ""}`,
@@ -1037,10 +1040,14 @@ export async function listGatewaySessions(agentId: string) {
   );
 }
 
-export async function createCloudSession(agentId: string, title?: string) {
+export async function createCloudSession(
+  agentId: string,
+  title?: string,
+  opts?: { project?: string | null },
+) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions`, {
     method: "POST",
-    json: { title },
+    json: { title, ...(opts?.project !== undefined ? { project: opts.project } : {}) },
   });
 }
 
@@ -1265,6 +1272,7 @@ export async function updateCloudSession(
     modelRouteId?: string | null;
     reasoning?: string | null;
     draftText?: string;
+    project?: string | null;
   },
 ) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {

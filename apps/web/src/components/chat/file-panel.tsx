@@ -119,13 +119,16 @@ export function FilePanel({
   agentId,
   fsEnabled,
   openRequest,
+  projectPath,
   overlay = false,
   onClose,
 }: {
   agentId: string;
   fsEnabled: boolean;
-  /** 外部请求打开的文件：{path, nonce}；nonce 变化触发 */
-  openRequest?: { path: string; nonce: number } | null;
+  /** 外部请求打开的文件：{path, nonce}；nonce 变化触发。dir=true 时展开目录。 */
+  openRequest?: { path: string; nonce: number; dir?: boolean } | null;
+  /** 当前会话绑定的项目 slug，面板默认展开该目录 */
+  projectPath?: string | null;
   /** 移动端全屏覆盖模式 */
   overlay?: boolean;
   onClose: () => void;
@@ -192,6 +195,18 @@ export function FilePanel({
   dirCacheRef.current = dirCache;
   const loadDirRef = useRef(loadDir);
   loadDirRef.current = loadDir;
+
+  useEffect(() => {
+    if (!projectPath || !fsEnabled) return;
+    const paths = ["/", "/projects", `/projects/${projectPath}`];
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const p of paths) next.add(p);
+      return next;
+    });
+    for (const p of paths) void loadDirRef.current(p);
+  }, [projectPath, fsEnabled, agentId]);
+
   useEffect(() => {
     if (!fsEnabled) return;
     return subscribePlatformEvents((ev) => {
@@ -235,11 +250,28 @@ export function FilePanel({
     [agentId],
   );
 
-  // 外部打开请求（工具行点击文件路径）
+  // 外部打开请求（工具行点击文件路径；项目「打开目录」则展开树）
   useEffect(() => {
     if (!openRequest || !fsEnabled) return;
     if (openRequest.nonce === handledNonce.current) return;
     handledNonce.current = openRequest.nonce;
+    if (openRequest.dir) {
+      const p = normPath(openRequest.path);
+      const parts = p.split("/").filter(Boolean);
+      const paths = ["/"];
+      let acc = "";
+      for (const part of parts) {
+        acc += `/${part}`;
+        paths.push(acc);
+      }
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const d of paths) next.add(d);
+        return next;
+      });
+      for (const d of paths) void loadDirRef.current(d);
+      return;
+    }
     void openFile(openRequest.path);
   }, [openRequest, fsEnabled, openFile]);
 

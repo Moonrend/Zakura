@@ -3,15 +3,32 @@
 /**
  * Agent 设置 · 自动化
  */
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { SettingsHeader } from "@/components/settings-shell";
 import { AutomationPanel } from "@/components/chat/automation-panel";
 import { Skeleton } from "@/components/ui/skeleton";
+import { listAgentProjects } from "@/lib/agent-fs";
 
 export default function AgentAutomationPage() {
   const router = useRouter();
   const { id, agent, loading } = useAgentDetail();
+  const [projects, setProjects] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAgentProjects(id)
+      .then((res) => {
+        if (!cancelled) setProjects(res.projects.map((p) => p.name));
+      })
+      .catch(() => {
+        if (!cancelled) setProjects([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   if (loading || !agent) {
     return (
@@ -31,6 +48,7 @@ export default function AgentAutomationPage() {
       <div className="max-w-md overflow-hidden rounded-lg border border-border bg-card">
         <AutomationPanel
           agentId={id}
+          projects={projects}
           className="max-h-[min(70vh,36rem)]"
           onAskAgentCreate={(goal) => {
             const prompt = [

@@ -121,12 +121,16 @@ export type AgentLoopHooks = {
     call: ModelToolCall,
     args: Record<string, unknown>,
   ) => Promise<LoopToolOutcome | undefined>;
-  /** 工具成功/失败后回调（插件 PostToolUse / PostToolUseFailure） */
+  /** 工具成功/失败后回调（插件 PostToolUse / PostToolUseFailure）；返回文本则注入下一轮上下文 */
   afterToolCall?: (
     call: ModelToolCall,
     args: Record<string, unknown>,
     outcome: { resultText: string; isError: boolean },
-  ) => Promise<void>;
+  ) => Promise<string | void>;
+  /** 模型准备结束本回合（无工具调用）时；block 则注入上下文并继续循环 */
+  beforeStop?: (
+    lastText: string,
+  ) => Promise<{ block?: boolean; injectText?: string } | void>;
   /** tool_call_start 的展示标题（缺省 = qualified 名） */
   toolTitle?: (modelName: string, qualified: string) => string | undefined;
   /**
@@ -167,6 +171,10 @@ export type AgentLoopInput = {
    * 主循环用它把中途附件转成多模态 parts。
    */
   beforeModelRound?: (messages: ModelChatMessage[]) => Promise<void>;
+  /** 会话绑定项目时，shell 默认 cwd（调用方显式 working_dir 仍优先） */
+  defaultWorkingDir?: string;
+  /** 会话绑定的项目 slug，供技能工具读取项目级 SKILL.md */
+  projectSlug?: string;
 };
 
 export type AgentLoopResult = {
@@ -503,6 +511,7 @@ export async function runAgentLoop(
   try {
     let lastText = "";
     let round = 0;
+    let stopBlocks = 0;
     /** 用上游 prompt_tokens 校准后续体积判断 */
     let tokenCal: TokenCalibration | null = null;
     while (true) {
@@ -621,6 +630,26 @@ export async function runAgentLoop(
           round += 1;
           continue;
         }
+        let stop: { block?: boolean; injectText?: string } | void = undefined;
+        try {
+          stop = await input.hooks?.beforeStop?.(text);
+        } catch (err) {
+          recordPlatformFault("cloud_agent.before_stop", err, { subsystem: "cloud_agent" });
+        }
+        if (stop?.injectText?.trim()) {
+          messages.push({
+            role: "system",
+            content: `# Hooks · Stop\n${stop.injectText.trim()}`,
+          });
+        }
+        if (stop?.block && stopBlocks < 8) {
+          stopBlocks += 1;
+          await appendRunLog(store, sessionId, runId, "info", "Stop hook 拦住结束，继续本回合", {
+            blocks: stopBlocks,
+          });
+          round += 1;
+          continue;
+        }
         await store.appendEvent({
           sessionId,
           type: "run_end",
@@ -728,6 +757,10 @@ export async function runAgentLoop(
                 const outcome = resolved ?? {
                   result: await deps.gateway.callTool(tenantId, qualified, args, {
                     agentId: agent.id,
+                    ...(input.defaultWorkingDir
+                      ? { defaultWorkingDir: input.defaultWorkingDir }
+                      : {}),
+                    ...(input.projectSlug ? { projectSlug: input.projectSlug } : {}),
                     onProgress: (message, data) => {
                       const stdout =
                         data && typeof data.stdout === "string" ? data.stdout : undefined;
@@ -822,8 +855,9 @@ export async function runAgentLoop(
           },
         });
 
+        let hookInject = "";
         try {
-          await input.hooks?.afterToolCall?.(call, args, { resultText, isError });
+          hookInject = (await input.hooks?.afterToolCall?.(call, args, { resultText, isError })) ?? "";
         } catch (err) {
           recordPlatformFault("cloud_agent.after_tool_call", err, {
             subsystem: "cloud_agent",
@@ -836,6 +870,12 @@ export async function runAgentLoop(
           toolCallId: call.id,
           name: modelName,
         });
+        if (hookInject.trim()) {
+          messages.push({
+            role: "system",
+            content: `# Hooks · ${isError ? "PostToolUseFailure" : "PostToolUse"}\n${hookInject.trim()}`,
+          });
+        }
       }
 
       // Codex 式：工具批结束后注入排队的用户补充，再进下一轮模型

@@ -306,3 +306,130 @@ export function isArchiveFile(name: string): boolean {
   const ext = fileExt(name);
   return ARCHIVE_EXT.has(ext) || name.toLowerCase().endsWith(".tar.gz");
 }
+
+export type AgentProject = { name: string; path: string };
+
+export async function listAgentProjects(agentId: string) {
+  return api<{ projects: AgentProject[] }>(`/api/agents/${agentId}/projects`, {
+    cacheTtlMs: false,
+  });
+}
+
+export async function createAgentProject(
+  agentId: string,
+  body: { name: string; gitUrl?: string },
+) {
+  return api<{ project: AgentProject; cloneError?: string }>(
+    `/api/agents/${agentId}/projects`,
+    { method: "POST", json: body },
+  );
+}
+
+export async function renameAgentProject(agentId: string, slug: string, name: string) {
+  return api<{ project: AgentProject }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}`,
+    { method: "PATCH", json: { name } },
+  );
+}
+
+export async function deleteAgentProject(agentId: string, slug: string) {
+  return api<{ ok: true; deleted: boolean }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}`,
+    { method: "DELETE" },
+  );
+}
+
+export type ProjectSkillMeta = {
+  name: string;
+  path: string;
+  description: string;
+  title: string;
+};
+
+export type ProjectConfigSnapshot = {
+  slug: string;
+  exists: boolean;
+  instructions: {
+    file: "AGENTS.md" | "CLAUDE.md" | null;
+    content: string;
+    claudeFallback: boolean;
+  };
+  skills: ProjectSkillMeta[];
+  hooks: {
+    file: string | null;
+    events: import("@zakura/shared").AgentHooksByEvent;
+    sources: Array<{ file: string; events: import("@zakura/shared").AgentHooksByEvent }>;
+  };
+};
+
+export async function getProjectConfig(agentId: string, slug: string) {
+  return api<{ config: ProjectConfigSnapshot }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/config`,
+    { cacheTtlMs: false },
+  );
+}
+
+export async function saveProjectInstructions(
+  agentId: string,
+  slug: string,
+  body: { content: string; file?: "AGENTS.md" | "CLAUDE.md" },
+) {
+  return api<{ config: ProjectConfigSnapshot; path: string }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/instructions`,
+    { method: "PUT", json: body },
+  );
+}
+
+export async function saveProjectHooks(
+  agentId: string,
+  slug: string,
+  body: { events: import("@zakura/shared").AgentHooksByEvent; file?: string | null },
+) {
+  return api<{ config: ProjectConfigSnapshot; path: string }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/hooks`,
+    { method: "PUT", json: body },
+  );
+}
+
+export async function createProjectSkill(
+  agentId: string,
+  slug: string,
+  body: { name: string; description: string; body?: string },
+) {
+  return api<{ skill: ProjectSkillMeta; config: ProjectConfigSnapshot }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills`,
+    { method: "POST", json: body },
+  );
+}
+
+export async function readProjectSkillFile(
+  agentId: string,
+  slug: string,
+  name: string,
+  path?: string,
+) {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  return api<{ path: string; content: string }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}/file${qs}`,
+    { cacheTtlMs: false },
+  );
+}
+
+export async function saveProjectSkillFile(
+  agentId: string,
+  slug: string,
+  name: string,
+  content: string,
+) {
+  return api<{ config: ProjectConfigSnapshot; path: string }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    { method: "PUT", json: { content } },
+  );
+}
+
+export async function deleteProjectSkill(agentId: string, slug: string, name: string) {
+  return api<{ config: ProjectConfigSnapshot }>(
+    `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}/skills/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+}

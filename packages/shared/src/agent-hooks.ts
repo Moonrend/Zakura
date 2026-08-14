@@ -9,6 +9,9 @@ export const AGENT_HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
   "PostToolUseFailure",
+  "PreCommit",
+  "Stop",
+  "PreCompact",
 ] as const;
 
 export type AgentHookEvent = (typeof AGENT_HOOK_EVENTS)[number];
@@ -22,6 +25,8 @@ export type AgentHookAction = {
   /** 直接注入上下文的提示文本 */
   prompt?: string;
   timeoutMs?: number;
+  /** Claude permission-rule：如 Bash(git commit*)，只在工具事件上过滤 */
+  if?: string;
 };
 
 export type AgentHookMatcherGroup = {
@@ -65,38 +70,64 @@ export function parseAgentHookPackages(raw: unknown): AgentHookPackage[] {
   return out;
 }
 
+function canonicalHookEvent(key: string): AgentHookEvent | undefined {
+  if ((AGENT_HOOK_EVENTS as readonly string[]).includes(key)) return key as AgentHookEvent;
+  const lower = key.toLowerCase();
+  return AGENT_HOOK_EVENTS.find((event) => event.toLowerCase() === lower);
+}
+
+function parseHookAction(raw: unknown): AgentHookAction | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const action = raw as Record<string, unknown>;
+  const type: AgentHookActionType = action.type === "prompt" ? "prompt" : "command";
+  let timeoutMs: number | undefined;
+  if (typeof action.timeoutMs === "number" && Number.isFinite(action.timeoutMs)) {
+    timeoutMs = action.timeoutMs;
+  } else if (typeof action.timeout === "number" && Number.isFinite(action.timeout)) {
+    // Claude / VS Code / Cursor：timeout 单位是秒
+    timeoutMs = action.timeout * 1000;
+  }
+  return {
+    type,
+    command: typeof action.command === "string" ? action.command : undefined,
+    prompt: typeof action.prompt === "string" ? action.prompt : undefined,
+    timeoutMs,
+    if: typeof action.if === "string" ? action.if : undefined,
+  };
+}
+
+function parseMatcherGroup(raw: unknown): AgentHookMatcherGroup | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const group = raw as Record<string, unknown>;
+  const matcher = typeof group.matcher === "string" ? group.matcher : undefined;
+  if (Array.isArray(group.hooks)) {
+    const hooks: AgentHookAction[] = [];
+    for (const item of group.hooks) {
+      const action = parseHookAction(item);
+      if (action) hooks.push(action);
+    }
+    if (!hooks.length) return null;
+    return { matcher, hooks };
+  }
+  // VS Code / Copilot / Cursor：事件数组里直接放 { type, command }，没有 hooks[] 包一层
+  const action = parseHookAction(group);
+  if (!action || (!action.command?.trim() && !action.prompt?.trim())) return null;
+  return { matcher, hooks: [action] };
+}
+
 export function normalizeHooksByEvent(raw: unknown): AgentHooksByEvent {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const src = raw as Record<string, unknown>;
   const out: AgentHooksByEvent = {};
-  for (const event of AGENT_HOOK_EVENTS) {
-    const groups = src[event];
-    if (!Array.isArray(groups)) continue;
+  for (const [key, groups] of Object.entries(src)) {
+    const event = canonicalHookEvent(key);
+    if (!event || !Array.isArray(groups)) continue;
     const parsed: AgentHookMatcherGroup[] = [];
     for (const g of groups) {
-      if (!g || typeof g !== "object" || Array.isArray(g)) continue;
-      const group = g as Record<string, unknown>;
-      const hooksRaw = group.hooks;
-      if (!Array.isArray(hooksRaw)) continue;
-      const hooks: AgentHookAction[] = [];
-      for (const h of hooksRaw) {
-        if (!h || typeof h !== "object" || Array.isArray(h)) continue;
-        const action = h as Record<string, unknown>;
-        const type = action.type === "prompt" ? "prompt" : "command";
-        hooks.push({
-          type,
-          command: typeof action.command === "string" ? action.command : undefined,
-          prompt: typeof action.prompt === "string" ? action.prompt : undefined,
-          timeoutMs: typeof action.timeoutMs === "number" ? action.timeoutMs : undefined,
-        });
-      }
-      if (!hooks.length) continue;
-      parsed.push({
-        matcher: typeof group.matcher === "string" ? group.matcher : undefined,
-        hooks,
-      });
+      const group = parseMatcherGroup(g);
+      if (group) parsed.push(group);
     }
-    if (parsed.length) out[event] = parsed;
+    if (parsed.length) out[event] = [...(out[event] ?? []), ...parsed];
   }
   return out;
 }
@@ -123,11 +154,93 @@ export function mergeHookPackages(
   return next;
 }
 
+/** Claude Code 工具名 → 本平台工具（含 re_ 前缀与裸名） */
+const CLAUDE_TOOL_NAME: Record<string, string> = {
+  shell_exec: "Bash",
+  fs_write: "Write",
+  fs_edit: "Edit",
+  fs_read: "Read",
+  fs_list: "Glob",
+  fs_grep: "Grep",
+  apply_patch: "Edit",
+};
+
+export function hookToolBareName(toolName: string): string {
+  return toolName.startsWith("re_") ? toolName.slice(3) : toolName;
+}
+
+/** 写入 hook stdin 的 tool_name：能映射则用 Claude 名，方便现成脚本 */
+export function hookStdinToolName(toolName: string): string {
+  const bare = hookToolBareName(toolName);
+  return CLAUDE_TOOL_NAME[bare] ?? toolName;
+}
+
+/** matcher 要试的名字：re_shell_exec / shell_exec / Bash */
+export function hookMatchNames(toolName: string): string[] {
+  const bare = hookToolBareName(toolName);
+  const alias = CLAUDE_TOOL_NAME[bare];
+  return [...new Set([toolName, bare, alias].filter((n): n is string => !!n))];
+}
+
 export function matcherHits(matcher: string | undefined, toolName: string): boolean {
-  if (!matcher?.trim()) return true;
-  try {
-    return new RegExp(matcher).test(toolName);
-  } catch {
-    return toolName.includes(matcher);
+  if (!matcher?.trim() || matcher.trim() === "*") return true;
+  const names = hookMatchNames(toolName);
+  const parts = matcher.split(/[|,]/).map((p) => p.trim()).filter(Boolean);
+  const exactOnly = /^[A-Za-z0-9_ \-,|]+$/.test(matcher);
+  if (exactOnly && parts.length) {
+    return names.some((n) => parts.includes(n));
   }
+  try {
+    const re = new RegExp(matcher);
+    return names.some((n) => re.test(n));
+  } catch {
+    return names.some((n) => n.includes(matcher) || matcher.includes(n));
+  }
+}
+
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`);
+}
+
+function toolArgHaystack(toolName: string, toolArgs?: Record<string, unknown>): string {
+  const bare = hookToolBareName(toolName);
+  if (bare === "shell_exec" || hookStdinToolName(toolName) === "Bash") {
+    return typeof toolArgs?.command === "string" ? toolArgs.command : "";
+  }
+  if (typeof toolArgs?.path === "string") return toolArgs.path;
+  return "";
+}
+
+/** Claude `if`: Bash(git commit*) / Edit(*.ts) */
+export function hookIfHits(
+  rule: string | undefined,
+  toolName: string,
+  toolArgs?: Record<string, unknown>,
+): boolean {
+  if (!rule?.trim()) return true;
+  const m = rule.trim().match(/^([A-Za-z0-9_]+)\((.*)\)$/);
+  if (!m) return matcherHits(rule, toolName);
+  const tool = m[1]!;
+  const pattern = m[2] ?? "";
+  if (!matcherHits(tool, toolName)) return false;
+  if (!pattern.trim() || pattern.trim() === "*") return true;
+  const hay = toolArgHaystack(toolName, toolArgs).replace(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/,
+    "",
+  );
+  if (!hay) return false;
+  try {
+    return globToRegExp(pattern.trim()).test(hay.trim()) || globToRegExp(pattern.trim()).test(hay);
+  } catch {
+    return hay.includes(pattern.replace(/\*/g, ""));
+  }
+}
+
+const GIT_COMMIT_RE = /\bgit(?:\s+-[^\s]+)*\s+commit\b/;
+
+export function isGitCommitCommand(toolName: string, toolArgs?: Record<string, unknown>): boolean {
+  if (!matcherHits("Bash", toolName)) return false;
+  const cmd = typeof toolArgs?.command === "string" ? toolArgs.command : "";
+  return GIT_COMMIT_RE.test(cmd);
 }

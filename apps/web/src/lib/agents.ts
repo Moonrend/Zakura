@@ -201,6 +201,7 @@ export const AGENT_SUBNAV = [
   { href: "overview", label: "概况" },
   { href: "settings", label: "设置" },
   { href: "computer", label: "电脑" },
+  { href: "projects", label: "项目" },
   { href: "web", label: "网页" },
   { href: "memory", label: "记忆" },
   { href: "skills", label: "技能" },

@@ -2,7 +2,7 @@
  * Local Docker ops for agent workspace containers on the Runner host.
  */
 import Docker from "dockerode";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
@@ -12,6 +12,7 @@ import {
   ShellJob,
   ShellJobRegistry,
   bindExecStream,
+  ensureWorkspaceDir,
   type ShellJobSnapshot,
 } from "@zakura/core";
 import {
@@ -203,7 +204,7 @@ export class RunnerDockerWorkspace {
 
   async start(spec: WorkspaceStartSpec): Promise<WorkspaceInfo> {
     const root = this.workspacePath(spec.agentId);
-    mkdirSync(root, { recursive: true });
+    ensureWorkspaceDir(root);
 
     // Remove old containers for this agent
     const existing = await this.findByAgent(spec.agentId);
@@ -402,7 +403,7 @@ export class RunnerDockerWorkspace {
     // Host dir must exist; recreating after delete without container restart leaves a broken mount
     const root = this.workspacePath(agentId);
     if (!existsSync(root)) {
-      mkdirSync(root, { recursive: true });
+      ensureWorkspaceDir(root);
       throw new Error(
         `工作区主机目录丢失并已重建为空目录：${root}。请重启电脑环境以重新挂载 /workspace。`,
       );

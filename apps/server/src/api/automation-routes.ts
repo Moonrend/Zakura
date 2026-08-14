@@ -2,6 +2,7 @@
  * Agent 定时任务 REST API。
  */
 import type { Hono } from "hono";
+import { parseProjectField } from "@zakura/shared";
 import type { AppVariables } from "./routes.js";
 import type { AgentService } from "../services/agents.js";
 import type { AgentAutomationService } from "../services/agent-automation.js";
@@ -46,17 +47,23 @@ export function registerAutomationRoutes(
       description?: string;
       pattern?: string;
       prompt?: string;
+      project?: string | null;
       enabled?: boolean;
       maxRuns?: number | null;
       timezone?: string;
     };
     const body = (await c.req.json<CreateBody>().catch(() => ({} as CreateBody))) as CreateBody;
+    const projectField = parseProjectField(body.project);
+    if (body.project !== undefined && projectField.status === "invalid") {
+      return c.json({ error: "无效的项目名" }, 400);
+    }
     try {
       const schedule = await automation.createSchedule(session.tenantId, agent.id, {
         name: String(body.name ?? ""),
         description: body.description,
         pattern: String(body.pattern ?? ""),
         prompt: String(body.prompt ?? ""),
+        ...(projectField.status === "ok" ? { project: projectField.slug } : {}),
         enabled: body.enabled,
         maxRuns: body.maxRuns,
         timezone: body.timezone,
@@ -82,23 +89,30 @@ export function registerAutomationRoutes(
     const session = c.get("session")!;
     const agent = await requireAgent(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const body = await c.req
-      .json<{
-        name?: string;
-        description?: string;
-        pattern?: string;
-        prompt?: string;
-        enabled?: boolean;
-        maxRuns?: number | null;
-        timezone?: string;
-      }>()
-      .catch(() => ({}));
+    type PatchBody = {
+      name?: string;
+      description?: string;
+      pattern?: string;
+      prompt?: string;
+      project?: string | null;
+      enabled?: boolean;
+      maxRuns?: number | null;
+      timezone?: string;
+    };
+    const body = (await c.req.json<PatchBody>().catch(() => ({} as PatchBody))) as PatchBody;
+    const projectField = parseProjectField(body.project);
+    if (body.project !== undefined && projectField.status === "invalid") {
+      return c.json({ error: "无效的项目名" }, 400);
+    }
     try {
       const schedule = await automation.updateSchedule(
         session.tenantId,
         agent.id,
         c.req.param("sid"),
-        body,
+        {
+          ...body,
+          ...(projectField.status === "ok" ? { project: projectField.slug } : {}),
+        },
       );
       if (!schedule) return c.json({ error: "Not found" }, 404);
       return c.json({ schedule });

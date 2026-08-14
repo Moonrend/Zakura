@@ -266,7 +266,29 @@ export const DEFAULT_WORKSPACE_IMAGE = "sunwuyuan/zakura-workspace-dev:debian";
 /** Local / published workspace image (docker/workspace → Docker Hub *-dev). */
 export const WORKSPACE_IMAGE_LOCAL = "sunwuyuan/zakura-workspace-dev:debian";
 
-export const AGENT_WORKSPACE_ROOT = "/workspace";
+export {
+  AGENT_WORKSPACE_ROOT,
+  AGENT_PROJECTS_DIR,
+  AGENT_DATA_DIR,
+  AGENT_OUTPUTS_DIR,
+  AGENT_UPLOADS_DIR,
+  AGENT_WORKSPACE_LAYOUT_DIRS,
+  PROJECT_INSTRUCTION_FILES,
+  PROJECT_SKILL_DIRS,
+  PROJECT_SKILLS_WRITE_DIR,
+  PROJECT_HOOKS_FILES,
+  PROJECT_CLAUDE_SETTINGS_FILE,
+  PROJECT_HOOKS_WRITE_FILE,
+  isValidProjectSlug,
+  parseProjectField,
+  projectWorkspacePath,
+  projectRelativePath,
+  projectDefaultWorkingDir,
+  projectSlugsFromList,
+  isSafeGitRemoteUrl,
+  workspaceLayoutPromptBlock,
+  currentProjectPromptBlock,
+} from "./projects.js";
 
 /** Container ports for desktop / browser stack */
 export const AGENT_PORT_NOVNC = 6080;
@@ -496,6 +518,11 @@ export {
   parseHooksJson,
   mergeHookPackages,
   matcherHits,
+  hookMatchNames,
+  hookStdinToolName,
+  hookToolBareName,
+  hookIfHits,
+  isGitCommitCommand,
 } from "./agent-hooks.js";
 export type {
   AgentHookEvent,

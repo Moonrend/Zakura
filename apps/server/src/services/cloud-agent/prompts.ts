@@ -2,11 +2,15 @@
  * 系统提示词构建：主对话与子代理各一套结构化中文提示，
  * Agent 自定义指令（configJson.cloud.systemPrompt）在两者中均生效。
  */
-import type { CloudAgentConfig } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import { getAgentMcpMode, getAgentProviders } from "../agent-providers.js";
 import { SUBAGENT_TOOL_QUALIFIED } from "../mcp-gateway.js";
 import { DELEGATE_TOOL_NAME } from "./tools.js";
+import {
+  currentProjectPromptBlock,
+  workspaceLayoutPromptBlock,
+  type CloudAgentConfig,
+} from "@zakura/shared";
 
 /** 用户点「继续」时写入的用户消息（UI 隐藏气泡） */
 export const CONTINUE_TURN_PROMPT =
@@ -26,6 +30,10 @@ export function buildSystemPrompt(
     requestedSkills?: string[];
     /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_* 工具发帖 */
     remoteChannel?: string;
+    /** 会话绑定的项目 slug */
+    project?: string | null;
+    /** AGENTS.md / CLAUDE.md 正文 */
+    projectInstructions?: string;
   },
 ): string {
   const providers = getAgentProviders(agent);
@@ -45,7 +53,7 @@ export function buildSystemPrompt(
     "- 用户提到「上次 / 之前的对话 / 另一个会话」时，用 list_chat_sessions / search_chat_sessions 定位，再用 get_chat_messages 或 import_session_context 取上下文，不要假装记得。",
     "- 工作区内搜代码优先 re_fs_grep；多处改文件优先 re_apply_patch。",
     "- re_shell_exec 的输出会实时显示给用户。命令若停在提示符或长时间无输出，会先返回 status=running 和 job_id：用同一工具传 job_id 继续等待，stdin 回答提示（记得换行），kill=true 结束进程。",
-    "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。",
+    "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。产生文件的定时任务必须带 project。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
       : "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",
@@ -91,7 +99,7 @@ export function buildSystemPrompt(
       extra.skills,
       "",
       "- 当前任务命中某个技能的适用场景时，先用 re_read_skill 读取其 SKILL.md，再按它说的做；不要凭印象猜内容。",
-      "- 用户需要某项能力而现有技能都不覆盖时，可用 re_search_skills 搜索、re_install_skill 安装（安装会写入用户工作区，事先说明你要装什么）。",
+      "- 用户需要某项能力而现有技能都不覆盖时，可用 re_search_skills 搜索、re_install_skill 安装。装之前说明要装什么。当前会话已绑定项目时默认装进该项目（.agents/skills/）；只有用户明确要求全局/所有项目共用时才传 scope=agent（写入 /skills/）。未绑定项目时默认 scope=agent。",
     );
   }
   if (extra?.requestedSkills?.length) {
@@ -104,6 +112,10 @@ export function buildSystemPrompt(
   }
   if (extra?.remoteChannel) {
     lines.push("", extra.remoteChannel);
+  }
+  lines.push("", workspaceLayoutPromptBlock(), "", currentProjectPromptBlock(extra?.project));
+  if (extra?.projectInstructions?.trim()) {
+    lines.push("", extra.projectInstructions.trim());
   }
   lines.push(
     "",
@@ -149,6 +161,8 @@ export function buildSubagentPrompt(
     subagents?: boolean;
     /** 已启用技能清单（与主代理共享工作区，因此同样可用） */
     skills?: string;
+    project?: string | null;
+    projectInstructions?: string;
   },
 ): string {
   const lines = [
@@ -184,6 +198,10 @@ export function buildSubagentPrompt(
       "工作区已安装以下技能（任务相关时先用 re_read_skill 读取全文再执行）：",
       extra.skills,
     );
+  }
+  lines.push("", workspaceLayoutPromptBlock(), "", currentProjectPromptBlock(extra?.project));
+  if (extra?.projectInstructions?.trim()) {
+    lines.push("", extra.projectInstructions.trim());
   }
   if (cloud.systemPrompt?.trim()) {
     lines.push("", "# Agent 自定义指令（对你同样生效）", cloud.systemPrompt.trim());

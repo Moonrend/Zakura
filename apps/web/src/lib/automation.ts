@@ -11,6 +11,7 @@ export type AgentSchedule = {
   description: string;
   pattern: string;
   prompt: string;
+  project: string | null;
   enabled: boolean;
   maxRuns: number | null;
   runCount: number;
@@ -239,6 +240,7 @@ export async function createSchedule(
     description?: string;
     pattern: string;
     prompt: string;
+    project?: string | null;
     enabled?: boolean;
     maxRuns?: number | null;
   },
@@ -260,6 +262,7 @@ export async function updateSchedule(
     prompt: string;
     enabled: boolean;
     maxRuns: number | null;
+    project?: string | null;
   }>,
 ) {
   const res = await api<{ schedule: AgentSchedule }>(

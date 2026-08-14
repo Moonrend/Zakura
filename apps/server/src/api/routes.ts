@@ -2536,7 +2536,7 @@ export async function createApiApp(deps: {
 
   // Agent workspace filesystem — routes via WorkspaceFsProvider (local or remote)
   if (workspaceFsProvider) {
-    registerAgentFsRoutes(app, agentService, workspaceFsProvider);
+    registerAgentFsRoutes(app, agentService, workspaceFsProvider, db);
     if (fileShares) {
       registerFileShareRoutes(app, fileShares, agentService, workspaceFsProvider);
     }

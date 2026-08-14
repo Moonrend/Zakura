@@ -140,7 +140,7 @@ export function listAgentNativeTools(
     tool(
       "list_skills",
       [
-        "List Agent Skills installed in this agent's workspace (name, description, path, enabled).",
+        "List Agent Skills (workspace /skills plus current project .agents/skills or .claude/skills).",
         "Skills are reusable playbooks stored as SKILL.md files; read one with read_skill before doing the task it covers.",
       ].join(" "),
       {
@@ -195,10 +195,14 @@ export function listAgentNativeTools(
     tool(
       "install_skill",
       [
-        "Install a skill into this agent's workspace so it can be read later.",
+        "Install a skill either into the current project or globally for this agent.",
+        "Default: if this session is bound to a project, install into that project (.agents/skills/) unless the user explicitly asks for a global/agent-wide install.",
+        "If this session has no project, default is agent-global (/skills/).",
+        "scope=project: /workspace/projects/<slug>/.agents/skills/<name>/ — only sessions bound to that project. Uses the current session's project unless you pass project.",
+        "scope=agent: /skills/<name>/ — every session of this agent. Pass this only when the user explicitly wants it shared across projects.",
         "source accepts owner/repo, owner/repo@skill, a GitHub/GitLab URL, a SKILL.md link, builtin:<name>, or a whole `npx skills add …` command.",
-        "Alternatively pass path to register a skill directory you just authored in the workspace.",
-        "Tell the user what you are installing before calling this — it persists in their workspace.",
+        "Alternatively pass path to register a skill directory you just authored.",
+        "Tell the user what you are installing and whether it is project-local or agent-global before calling this.",
       ].join(" "),
       {
         type: "object",
@@ -212,7 +216,18 @@ export function listAgentNativeTools(
           path: {
             type: "string",
             description:
-              "Workspace directory containing a SKILL.md to register, e.g. /skills/my-skill",
+              "Workspace directory containing a SKILL.md to register, e.g. /skills/my-skill or a project skill dir",
+          },
+          scope: {
+            type: "string",
+            enum: ["agent", "project"],
+            description:
+              "Omit to use the default (project if this session is bound to a project, otherwise agent). Pass agent only when the user explicitly wants it shared across all projects.",
+          },
+          project: {
+            type: "string",
+            description:
+              "Project slug when installing into a project. Defaults to the current session's bound project.",
           },
         },
       },
@@ -449,7 +464,7 @@ export function listAgentNativeTools(
         "shell_exec",
         [
           `Run a shell command in the agent workspace via bash -lc (PTY, stdin attached).`,
-          `cwd defaults to ${AGENT_WORKSPACE_ROOT}. Output streams to the user live.`,
+          `cwd defaults to the current session project (/workspace/projects/<slug>) when bound, otherwise ${AGENT_WORKSPACE_ROOT}. Output streams to the user live.`,
           `If the process is still running when this call returns (prompt / idle / wait_ms), you get status=running and job_id.`,
           `Continue with the same tool: pass job_id to wait longer, stdin (include a trailing newline) to answer prompts, or kill=true to stop it.`,
           `Prefer noninteractive flags (-y, DEBIAN_FRONTEND=noninteractive) when you do not need a prompt.`,
@@ -888,7 +903,10 @@ export async function callAgentNativeTool(
   workspaceFsProvider?: WorkspaceFsProvider | null,
   exposures?: import("./port-exposures.js").ExposureService | null,
   fileShares?: import("./file-shares.js").FileShareService | null,
-  extra?: { onProgress?: (message: string, data?: Record<string, unknown>) => void },
+  extra?: {
+    onProgress?: (message: string, data?: Record<string, unknown>) => void;
+    defaultWorkingDir?: string;
+  },
 ): Promise<McpToolResult> {
   // 提升到 try 外，catch 里才能 scrub 宿主路径
   let fsOnce: WorkspaceFs | null = null;
@@ -1354,7 +1372,9 @@ export async function callAgentNativeTool(
           });
         };
         const workingDir =
-          typeof args.working_dir === "string" ? args.working_dir : undefined;
+          typeof args.working_dir === "string"
+            ? args.working_dir
+            : extra?.defaultWorkingDir;
         if (jobId) {
           if (kill) {
             const snap = await workspace.killShellJob(agent, jobId);

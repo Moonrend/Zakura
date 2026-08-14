@@ -9,9 +9,12 @@
  * 可经同一事件流 SSE 实时观看与回放；父会话 tool_call_result 携带
  * childSessionId 链接到派生会话。
  */
+import { loadProjectContext, type LoadedProjectContext } from "../project-config.js";
 import {
   lastCancelledRunId,
   parseCloudAgentConfig,
+  projectDefaultWorkingDir,
+  isGitCommitCommand,
   type CloudAgentAttachment,
   type CloudAgentConfig,
   type CloudAgentContextSourceItem,
@@ -283,6 +286,7 @@ export class CloudAgentRuntime {
     kind: "schedule" | "heartbeat";
     scheduleId?: string;
     scheduleName?: string;
+    project?: string | null;
   }): Promise<{ sessionId: string; runId: string }> {
     const prompt = input.prompt.trim();
     if (!prompt) throw new Error("automation prompt is empty");
@@ -294,6 +298,7 @@ export class CloudAgentRuntime {
       agentId: input.agentId,
       title: input.title.slice(0, 80) || "定时任务",
       kind: "system",
+      project: input.project ?? null,
       origin: {
         source: "system",
         callerAgentId: agent.id,
@@ -306,11 +311,15 @@ export class CloudAgentRuntime {
 
     // 标明自动触发，避免 Agent 当成用户实时对话去追问/寒暄
     const name = input.scheduleName?.trim();
+    const cwdHint = input.project
+      ? `请在 ${projectDefaultWorkingDir(input.project)} 内完成，产物不要写到工作区根。`
+      : "若任务会写文件，先在 /workspace/projects/<名>/ 下工作，不要写到工作区根。";
     const content =
       input.kind === "schedule"
         ? [
             `【定时任务】这是系统按计划自动触发的定时任务${name ? `「${name}」` : ""}，不是用户正在与你实时对话。`,
             "请直接执行下方任务内容，完成后简要汇报结果；不要反问「需要我做什么」或等待用户回复。",
+            cwdHint,
             "",
             "## 任务内容",
             prompt,
@@ -318,6 +327,7 @@ export class CloudAgentRuntime {
         : [
             "【心跳任务】这是系统自动触发的心跳检查，不是用户正在与你实时对话。",
             "请直接执行下方内容，完成后简要汇报；不要反问或等待用户回复。",
+            cwdHint,
             "",
             "## 任务内容",
             prompt,
@@ -1350,6 +1360,7 @@ export class CloudAgentRuntime {
       model: source.model,
       modelRouteId: source.modelRouteId,
       reasoning: source.reasoning,
+      project: source.project,
     });
 
     const copiedEvents = await this.store.appendEventsBulk(
@@ -1686,13 +1697,32 @@ export class CloudAgentRuntime {
       ? this.deps.skills.promptSummary(tenantId, agent.id)
       : Promise.resolve("");
 
+    const emptyProjectCtx: LoadedProjectContext = {
+      skillsSummary: "",
+      skills: [],
+      hookPackages: [],
+    };
+    const projectCtxPromise = sessionPreferences?.project
+      ? this.loadProjectContext(agent, sessionPreferences.project)
+      : Promise.resolve(emptyProjectCtx);
+    const projectHookOpts = async () => {
+      const ctx = await projectCtxPromise;
+      const slug = sessionPreferences?.project;
+      return {
+        extraPackages: ctx.hookPackages,
+        sessionId,
+        ...(slug ? { workingDir: projectDefaultWorkingDir(slug) } : {}),
+      };
+    };
+
     const hooksPromise = (async (): Promise<ModelChatMessage[]> => {
       const hooksSvc = this.deps.agentHooks;
       if (!hooksSvc) return [];
       const extra: ModelChatMessage[] = [];
+      const hookOpts = await projectHookOpts();
       try {
         if (input.isFirstTurn) {
-          const startResults = await hooksSvc.runEvent(agent, "SessionStart");
+          const startResults = await hooksSvc.runEvent(agent, "SessionStart", hookOpts);
           const inject = collectInjectText(startResults);
           if (inject) {
             extra.push({
@@ -1703,12 +1733,20 @@ export class CloudAgentRuntime {
         }
         const promptResults = await hooksSvc.runEvent(agent, "UserPromptSubmit", {
           userPrompt: lastUserContent,
+          ...hookOpts,
         });
         const promptInject = collectInjectText(promptResults);
-        if (promptInject) {
+        const promptDeny = firstDeny(promptResults);
+        if (promptInject || promptDeny?.reason) {
           extra.push({
             role: "system",
-            content: `# Hooks · UserPromptSubmit\n${promptInject}`,
+            content: `# Hooks · UserPromptSubmit\n${[promptInject, promptDeny?.reason].filter(Boolean).join("\n\n")}`,
+          });
+        }
+        if (extra.length) {
+          void this.log(sessionId, runId, "info", "hooks 已注入上下文", {
+            events: extra.map((m) => (m.content ?? "").split("\n")[0]),
+            packages: hookOpts.extraPackages?.length ?? 0,
           });
         }
       } catch (err) {
@@ -1729,16 +1767,13 @@ export class CloudAgentRuntime {
         setTimeout(() => resolve({ text: "", items: [], resolved: null }), 80),
       ),
     ]);
-    const hooksWithBudget = Promise.race([
-      hooksPromise,
-      new Promise<ModelChatMessage[]>((resolve) => setTimeout(() => resolve([]), 100)),
-    ]);
 
-    const [memoryBag, toolsBag, skillsSummary, hookMsgs] = await Promise.all([
+    const [memoryBag, toolsBag, skillsSummary, hookMsgs, projectCtx] = await Promise.all([
       memoryWithBudget,
       toolsPromise,
       skillsPromise,
-      hooksWithBudget,
+      hooksPromise,
+      projectCtxPromise,
     ]);
 
     const memoryContext = memoryBag.text;
@@ -1747,7 +1782,6 @@ export class CloudAgentRuntime {
     const resolvedMemory = memoryBag.resolved;
     sourceItems.push(...memoryBag.items);
     const { definitions, nameMap, peerAgents, peerAgentsDesc } = toolsBag;
-    const hooksSvc = this.deps.agentHooks;
 
     if (sourceItems.length > 0) {
       void this.store
@@ -1764,6 +1798,15 @@ export class CloudAgentRuntime {
         );
     }
 
+    const mergedSkills = [skillsSummary, projectCtx.skillsSummary].filter(Boolean).join("\n");
+    const projectHookRunOpts = {
+      extraPackages: projectCtx.hookPackages,
+      sessionId,
+      ...(sessionPreferences?.project
+        ? { workingDir: projectDefaultWorkingDir(sessionPreferences.project) }
+        : {}),
+    };
+    const hookFns = this.makeHookLoopFns(agent, projectHookRunOpts);
     const hasSubagent = definitions.some(
       (d) => d.function.name === SUBAGENT_TOOL_QUALIFIED,
     );
@@ -1772,9 +1815,11 @@ export class CloudAgentRuntime {
       historySummary: historySummary || undefined,
       peerAgents: peerAgentsDesc || undefined,
       subagents: hasSubagent,
-      skills: skillsSummary || undefined,
+      skills: mergedSkills || undefined,
       requestedSkills: input.options?.skills,
       remoteChannel: remoteHandle ? remoteChannelPromptBlock(remoteHandle) : undefined,
+      project: sessionPreferences?.project ?? null,
+      projectInstructions: projectCtx.instructions,
     });
     const messages: ModelChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -1793,6 +1838,9 @@ export class CloudAgentRuntime {
       memoryInjected: Boolean(memoryContext),
     });
 
+    const defaultWorkingDir = sessionPreferences?.project
+      ? projectDefaultWorkingDir(sessionPreferences.project)
+      : undefined;
     const result = await runAgentLoop(this.loopDeps, {
       tenantId,
       agent,
@@ -1804,20 +1852,26 @@ export class CloudAgentRuntime {
       nameMap,
       compactBudget: budget,
       beforeModelRound: (msgs) => this.resolveWorkspaceImages(agent, msgs),
+      ...(defaultWorkingDir ? { defaultWorkingDir } : {}),
+      ...(sessionPreferences?.project ? { projectSlug: sessionPreferences.project } : {}),
       ...(input.options ? { options: input.options } : {}),
       ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
       hooks: {
         ...(autoCompactOn
           ? {
-              compactInLoop: this.makeCompactInLoopHook({
-                tenantId,
+              compactInLoop: this.wrapCompactHook(
                 agent,
-                sessionId,
-                runId,
-                cloud,
-                budget,
-                parentTitle: sessionPreferences?.title,
-              }),
+                this.makeCompactInLoopHook({
+                  tenantId,
+                  agent,
+                  sessionId,
+                  runId,
+                  cloud,
+                  budget,
+                  parentTitle: sessionPreferences?.title,
+                }),
+                projectHookRunOpts,
+              ),
             }
           : {}),
         toolTitle: (modelName) => {
@@ -1851,29 +1905,12 @@ export class CloudAgentRuntime {
           parentSessionId: sessionId,
           parentRunId: runId,
           isCancelled: () => this.store.isCancelRequested(runId),
+          project: sessionPreferences?.project ?? null,
         }),
         // 远程通道 / 跨 Agent 委派 / 会话复用 + 插件 PreToolUse
         interceptCall: async (call, args) => {
-          if (hooksSvc) {
-            const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
-              toolName: call.function.name,
-              toolArgs: args,
-            });
-            const denied = firstDeny(pre);
-            if (denied) {
-              return {
-                result: {
-                  content: [
-                    {
-                      type: "text",
-                      text: denied.reason ?? "PreToolUse hook denied this tool call",
-                    },
-                  ],
-                  isError: true,
-                },
-              };
-            }
-          }
+          const hooked = await hookFns.interceptCall?.(call, args);
+          if (hooked) return hooked;
           if (isCrisisSupportToolName(call.function.name)) {
             const out = await callCrisisSupportTool(this.store, agent, sessionId);
             return {
@@ -1912,6 +1949,7 @@ export class CloudAgentRuntime {
               agent,
               call.function.name,
               args,
+              { defaultProject: sessionPreferences?.project ?? null },
             );
             return {
               result: {
@@ -1946,20 +1984,7 @@ export class CloudAgentRuntime {
             link: { sessionId: res.sessionId, agentId: res.agentId },
           };
         },
-        afterToolCall: hooksSvc
-          ? async (call, args, outcome) => {
-              await hooksSvc.runEvent(
-                agent,
-                outcome.isError ? "PostToolUseFailure" : "PostToolUse",
-                {
-                  toolName: call.function.name,
-                  toolArgs: args,
-                  toolResultText: outcome.resultText,
-                  isError: outcome.isError,
-                },
-              );
-            }
-          : undefined,
+        afterToolCall: hookFns.afterToolCall,
       },
     });
 
@@ -1990,6 +2015,123 @@ export class CloudAgentRuntime {
     })().catch((err) => {
       recordPlatformFault("cloud_agent.post_run", err, { subsystem: "cloud_agent" });
     });
+  }
+
+  private makeHookLoopFns(
+    agent: Agent,
+    hookOpts: {
+      extraPackages?: LoadedProjectContext["hookPackages"];
+      workingDir?: string;
+      sessionId?: string;
+    },
+  ): Pick<AgentLoopHooks, "interceptCall" | "afterToolCall" | "beforeStop"> {
+    const hooksSvc = this.deps.agentHooks;
+    if (!hooksSvc) return {};
+    const preInject = new Map<string, string>();
+    return {
+      interceptCall: async (call, args) => {
+        const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
+          toolName: call.function.name,
+          toolArgs: args,
+          ...hookOpts,
+        });
+        const commit = isGitCommitCommand(call.function.name, args)
+          ? await hooksSvc.runEvent(agent, "PreCommit", {
+              toolName: call.function.name,
+              toolArgs: args,
+              ...hookOpts,
+            })
+          : [];
+        const combined = [...pre, ...commit];
+        const inject = collectInjectText(combined);
+        if (inject) preInject.set(call.id, inject);
+        const denied = firstDeny(combined);
+        if (!denied) return undefined;
+        return {
+          result: {
+            content: [
+              {
+                type: "text",
+                text: denied.reason ?? "hook denied this tool call",
+              },
+            ],
+            isError: true,
+          },
+        };
+      },
+      afterToolCall: async (call, args, outcome) => {
+        const post = await hooksSvc.runEvent(
+          agent,
+          outcome.isError ? "PostToolUseFailure" : "PostToolUse",
+          {
+            toolName: call.function.name,
+            toolArgs: args,
+            toolResultText: outcome.resultText,
+            isError: outcome.isError,
+            ...hookOpts,
+          },
+        );
+        const parts = [preInject.get(call.id), collectInjectText(post)].filter(
+          (s): s is string => !!s?.trim(),
+        );
+        preInject.delete(call.id);
+        return parts.join("\n\n") || undefined;
+      },
+      beforeStop: async (lastText) => {
+        const results = await hooksSvc.runEvent(agent, "Stop", {
+          lastAssistantMessage: lastText,
+          ...hookOpts,
+        });
+        const inject = collectInjectText(results);
+        const denied = firstDeny(results);
+        return {
+          block: Boolean(denied),
+          injectText: [inject, denied?.reason].filter(Boolean).join("\n\n") || undefined,
+        };
+      },
+    };
+  }
+
+  private wrapCompactHook(
+    agent: Agent,
+    inner: NonNullable<AgentLoopHooks["compactInLoop"]> | undefined,
+    hookOpts: {
+      extraPackages?: LoadedProjectContext["hookPackages"];
+      workingDir?: string;
+      sessionId?: string;
+    },
+  ): AgentLoopHooks["compactInLoop"] | undefined {
+    if (!inner) return undefined;
+    return async (msgs, reason) => {
+      if (this.deps.agentHooks) {
+        const pre = await this.deps.agentHooks.runEvent(agent, "PreCompact", {
+          ...hookOpts,
+          userPrompt: reason,
+          matcherValue: "auto",
+        });
+        if (firstDeny(pre)) return false;
+      }
+      return inner(msgs, reason);
+    };
+  }
+
+  private async loadProjectContext(
+    agent: Agent,
+    slug: string,
+  ): Promise<LoadedProjectContext> {
+    const empty: LoadedProjectContext = { skillsSummary: "", skills: [], hookPackages: [] };
+    const provider = this.deps.workspaceFsProvider;
+    if (!provider) return empty;
+    try {
+      const fs = await provider.forAgentBinding({
+        id: agent.id,
+        tenantId: agent.tenantId,
+        runtimeNodeId: agent.runtimeNodeId,
+      });
+      return await loadProjectContext(fs, slug);
+    } catch {
+      return empty;
+    }
   }
 
   /**
@@ -2076,6 +2218,7 @@ export class CloudAgentRuntime {
     parentSessionId: string;
     parentRunId: string;
     isCancelled: () => Promise<boolean>;
+    project?: string | null;
   }): NonNullable<AgentLoopHooks["preResolveCalls"]> {
     const { tenantId, agent, nameMap } = input;
     return async (calls) => {
@@ -2103,6 +2246,7 @@ export class CloudAgentRuntime {
                 parentToolCallId: call.id,
                 depth: input.childDepth,
               },
+              project: input.project,
             },
           );
           outcomes.set(call.id, {
@@ -2143,6 +2287,7 @@ export class CloudAgentRuntime {
       origin?: CloudAgentSessionOrigin;
       /** 本子代理的嵌套深度；主循环 / 外部 MCP 派生 = 1（缺省） */
       depth?: number;
+      project?: string | null;
     },
   ): Promise<{ text: string; sessionId: string }> {
     const task = typeof args.task === "string" ? args.task.trim() : "";
@@ -2168,6 +2313,7 @@ export class CloudAgentRuntime {
       agentId: agent.id,
       title: `子任务：${task.slice(0, 40)}${task.length > 40 ? "…" : ""}`,
       kind: "subagent",
+      project: opts.project ?? null,
       origin: { source: "mcp", callerAgentId: agent.id, depth, ...opts.origin },
     });
     const run = await this.store.createRun(session.id);
@@ -2197,13 +2343,19 @@ export class CloudAgentRuntime {
     const subagentSkills = this.deps.skills
       ? await this.deps.skills.promptSummary(tenantId, agent.id)
       : "";
+    const projectCtx = opts.project
+      ? await this.loadProjectContext(agent, opts.project)
+      : { skillsSummary: "", skills: [], hookPackages: [] as LoadedProjectContext["hookPackages"] };
+    const mergedSkills = [subagentSkills, projectCtx.skillsSummary].filter(Boolean).join("\n");
     const messages: ModelChatMessage[] = [
       {
         role: "system",
         content: buildSubagentPrompt(agent, cloud, {
           expectedOutput: expected || undefined,
           subagents: canSpawn,
-          skills: subagentSkills || undefined,
+          skills: mergedSkills || undefined,
+          project: opts.project ?? null,
+          projectInstructions: projectCtx.instructions,
         }),
       },
       { role: "user", content: userContent },
@@ -2228,6 +2380,12 @@ export class CloudAgentRuntime {
             parentTitle: session.title,
           })
         : undefined;
+      const projectHookRunOpts = {
+        extraPackages: projectCtx.hookPackages,
+        sessionId: session.id,
+        ...(opts.project ? { workingDir: projectDefaultWorkingDir(opts.project) } : {}),
+      };
+      const hookFns = this.makeHookLoopFns(agent, projectHookRunOpts);
       const result = await runAgentLoop(this.loopDeps, {
         tenantId,
         agent,
@@ -2244,8 +2402,13 @@ export class CloudAgentRuntime {
             lastText ? `最后进展：${lastText.slice(0, 2000)}` : "建议缩小任务范围后重新派生。"
           }`,
         ...(opts.isCancelled ? { isCancelled: opts.isCancelled } : {}),
+        ...(opts.project ? { defaultWorkingDir: projectDefaultWorkingDir(opts.project) } : {}),
+        ...(opts.project ? { projectSlug: opts.project } : {}),
         hooks: {
-          ...(compactHook ? { compactInLoop: compactHook } : {}),
+          ...(compactHook
+            ? { compactInLoop: this.wrapCompactHook(agent, compactHook, projectHookRunOpts) }
+            : {}),
+          ...hookFns,
           ...(canSpawn
             ? {
                 preResolveCalls: this.spawnSubagentsHook({
@@ -2256,6 +2419,7 @@ export class CloudAgentRuntime {
                   parentSessionId: session.id,
                   parentRunId: run.id,
                   isCancelled: isCancelledChain,
+                  project: opts.project ?? null,
                 }),
               }
             : {}),
@@ -2371,6 +2535,7 @@ export class CloudAgentRuntime {
             parentTitle: session.title,
           })
         : undefined;
+      const hookFns = this.makeHookLoopFns(target, { sessionId: session.id });
       const result = await runAgentLoop(this.loopDeps, {
         tenantId,
         agent: target,
@@ -2386,7 +2551,14 @@ export class CloudAgentRuntime {
         isCancelled: opts.isCancelled,
         // 目标 Agent 在委派中派生子代理：同样并行执行、记录链接、传导取消
         hooks: {
-          ...(compactHook ? { compactInLoop: compactHook } : {}),
+          ...(compactHook
+            ? {
+                compactInLoop: this.wrapCompactHook(target, compactHook, {
+                  sessionId: session.id,
+                }),
+              }
+            : {}),
+          ...hookFns,
           preResolveCalls: this.spawnSubagentsHook({
             tenantId,
             agent: target,

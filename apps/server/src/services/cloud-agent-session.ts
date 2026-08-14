@@ -681,6 +681,7 @@ export class CloudAgentSessionStore {
     modelRouteId?: string | null;
     reasoning?: string | null;
     draftText?: string;
+    project?: string | null;
   }): Promise<CloudAgentSession> {
     const id = newId();
     const now = new Date();
@@ -691,6 +692,7 @@ export class CloudAgentSessionStore {
       title: input.title?.trim() || "新对话",
       status: "active",
       kind: input.kind ?? "chat",
+      project: input.project ?? null,
       originJson: JSON.stringify(input.origin ?? {}),
       model: input.model?.trim() || null,
       modelRouteId: input.modelRouteId?.trim() || null,
@@ -814,18 +816,23 @@ export class CloudAgentSessionStore {
       modelRouteId?: string | null;
       reasoning?: string | null;
       draftText?: string;
+      project?: string | null;
     },
   ): Promise<CloudAgentSession | null> {
     const existing = await this.getSession(tenantId, agentId, sessionId);
     if (!existing) return null;
     const hasSessionMetadataPatch =
-      patch.title !== undefined || patch.status !== undefined || patch.kind !== undefined;
+      patch.title !== undefined ||
+      patch.status !== undefined ||
+      patch.kind !== undefined ||
+      patch.project !== undefined;
     await this.db
       .update(cloudAgentSessions)
       .set({
         ...(patch.title !== undefined ? { title: patch.title.trim() || existing.title } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
         ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
+        ...(patch.project !== undefined ? { project: patch.project } : {}),
         ...(patch.model !== undefined ? { model: patch.model?.trim() || null } : {}),
         ...(patch.modelRouteId !== undefined
           ? { modelRouteId: patch.modelRouteId?.trim() || null }

@@ -10,15 +10,19 @@ import {
   Bot,
   Check,
   ChevronsUpDown,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   FileClock,
   FolderOpen,
+  FolderPlus,
   GitFork,
   LayoutDashboard,
   ListFilter,
   MoreHorizontal,
   PanelLeft,
   Pencil,
+  Plus,
   Search,
   Settings2,
   SquarePen,
@@ -49,8 +53,19 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Sheet,
   SheetContent,
@@ -102,8 +117,9 @@ import {
   type CloudAgentSessionKind,
   type CloudSearchHit,
   type CloudSession,
+  type SessionKindsFilter,
 } from "@/lib/cloud-agent";
-import { formatSize, fsUploadWithProgress } from "@/lib/agent-fs";
+import { formatSize, fsUploadWithProgress, listAgentProjects, createAgentProject, renameAgentProject, deleteAgentProject, type AgentProject } from "@/lib/agent-fs";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
@@ -120,10 +136,18 @@ import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
 import { AutomationPanel } from "./automation-panel";
 import { RunLogDrawer } from "./run-log-drawer";
+import { ProjectConfigPanel } from "./project-config-panel";
 
 const AGENT_KEY = "zakura_chat_agent";
 const REASONING_KEY = "zakura_chat_reasoning";
 const DRAFT_KEY_PREFIX = "zakura_chat_draft";
+
+/** 对话列表：chat 过滤时仍拉项目里的子代理/系统会话，方便归组。 */
+function kindsForSidebar(filter: CloudAgentSessionKind | "all"): SessionKindsFilter {
+  if (filter === "all") return "all";
+  if (filter === "chat") return ["chat", "subagent", "delegate", "system"];
+  return [filter];
+}
 
 
 /** 把当前 agent/session 写回地址栏，刷新后仍停在同一对话；新对话则清掉 session */
@@ -266,6 +290,13 @@ export function ChatApp() {
   const [agents, setAgents] = useState<AgentListItem[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CloudSession[]>([]);
+  const [projects, setProjects] = useState<AgentProject[]>([]);
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectGit, setNewProjectGit] = useState("");
+  const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [configProject, setConfigProject] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   /** 会话类型过滤：chat=日常对话；subagent/delegate/system=系统产生的对话记录 */
   const [kindFilter, setKindFilter] = useState<CloudAgentSessionKind | "all">("chat");
@@ -306,14 +337,18 @@ export function ChatApp() {
   const [hasChatRoute, setHasChatRoute] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renamingProject, setRenamingProject] = useState<string | null>(null);
+  const [renameProjectValue, setRenameProjectValue] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [searchHits, setSearchHits] = useState<CloudSearchHit[] | null>(null);
   const [variantByMessage, setVariantByMessage] = useState<Record<string, string>>({});
   const [branchByParent, setBranchByParent] = useState<Record<string, string>>({});
   const [filePanelOpen, setFilePanelOpen] = useState(false);
-  const [fileRequest, setFileRequest] = useState<{ path: string; nonce: number } | null>(
-    null,
-  );
+  const [fileRequest, setFileRequest] = useState<{
+    path: string;
+    nonce: number;
+    dir?: boolean;
+  } | null>(null);
   const [attachments, setAttachments] = useState<CloudAgentAttachment[]>([]);
   /** 待发送图片的本地预览地址（object URL），key 为工作区路径 */
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
@@ -416,7 +451,32 @@ export function ChatApp() {
     [events, currentModelItem],
   );
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
-  const grouped = useMemo(() => groupSessions(sessions), [sessions]);
+  const unboundGrouped = useMemo(
+    () =>
+      groupSessions(
+        sessions.filter(
+          (s) => !s.project && (kindFilter === "all" || s.kind === kindFilter),
+        ),
+      ),
+    [sessions, kindFilter],
+  );
+  const projectRows = useMemo(() => {
+    const by = new Map<string, CloudSession[]>();
+    for (const s of sessions) {
+      if (!s.project) continue;
+      const list = by.get(s.project) ?? [];
+      list.push(s);
+      by.set(s.project, list);
+    }
+    const names = new Set([...projects.map((p) => p.name), ...by.keys()]);
+    return [...names]
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({
+        name,
+        missing: !projects.some((p) => p.name === name),
+        sessions: by.get(name) ?? [],
+      }));
+  }, [projects, sessions]);
   const searching = searchQ.trim().length > 0;
   /**
    * 本地模糊命中：已经拉到的会话直接在前端 Fuse 一遍。
@@ -544,10 +604,20 @@ export function ChatApp() {
 
   const refreshSessions = useCallback(async () => {
     if (!agentId) return [];
-    const kinds = kindFilterRef.current === "all" ? ("all" as const) : [kindFilterRef.current];
-    const res = await listCloudSessions(agentId, { kinds });
+    const kinds = kindsForSidebar(kindFilterRef.current);
+    const res = await listCloudSessions(agentId, { kinds, limit: 200 });
     setSessions(res.sessions);
     return res.sessions;
+  }, [agentId]);
+
+  const refreshProjects = useCallback(async () => {
+    if (!agentId) return;
+    try {
+      const res = await listAgentProjects(agentId);
+      setProjects(res.projects);
+    } catch {
+      setProjects([]);
+    }
   }, [agentId]);
 
   const mergeEvent = useCallback(
@@ -704,13 +774,14 @@ export function ChatApp() {
     let cancelled = false;
     (async () => {
       try {
-        const [list, cfg, chatModels] = await Promise.all([
+        const [list, cfg, chatModels, projectRes] = await Promise.all([
           listCloudSessions(agentId, {
-            kinds:
-              kindFilterRef.current === "all" ? ("all" as const) : [kindFilterRef.current],
+            kinds: kindsForSidebar(kindFilterRef.current),
+            limit: 200,
           }).then((r) => r.sessions),
           getCloudConfig(agentId),
           listChatModels(),
+          listAgentProjects(agentId).catch(() => ({ projects: [] as AgentProject[] })),
         ]);
         if (cancelled) return;
         void fetchComposerCapabilities(agentId)
@@ -719,6 +790,7 @@ export function ChatApp() {
           })
           .catch(() => {});
         setSessions(list);
+        setProjects(projectRes.projects);
         setHasChatRoute(cfg.hasChatRoute);
         setSystemPrompt(cfg.cloud.systemPrompt ?? "");
         setModel(cfg.cloud.model ?? "");
@@ -852,15 +924,21 @@ export function ChatApp() {
     if (!agentId || !authed) return;
     return subscribePlatformEvents(
       (ev) => {
-        if (ev.type !== "cloud_session_changed") return;
-        if (ev.agentId !== agentId) return;
-        void refreshSessions();
+        if (ev.type === "cloud_session_changed" && ev.agentId === agentId) {
+          void refreshSessions();
+        }
+        if (ev.type === "agent_fs_changed" && ev.agentId === agentId) {
+          if (ev.path === "/projects" || ev.path.startsWith("/projects/")) {
+            void refreshProjects();
+          }
+        }
       },
       () => {
         void refreshSessions();
+        void refreshProjects();
       },
     );
-  }, [agentId, authed, refreshSessions]);
+  }, [agentId, authed, refreshSessions, refreshProjects]);
 
   // 新内容到达时跟随到底部（用户已向上翻阅时不打扰）
   useEffect(() => {
@@ -977,6 +1055,10 @@ export function ChatApp() {
     const prompt = [
       "请用 create_schedule 为我创建定时任务。",
       "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
+      "若任务会写文件，create_schedule 必须带 project（工作区项目 slug）。",
+      projects.length
+        ? `当前项目：${projects.map((p) => p.name).join("、")}`
+        : "还没有项目时，先在 /workspace/projects/<名>/ 建目录再绑 project。",
       "",
       goal.trim(),
     ].join("\n");
@@ -1082,6 +1164,130 @@ export function ChatApp() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function handleMoveSession(sid: string, project: string | null) {
+    if (!agentId) return;
+    try {
+      const updated = await updateCloudSession(agentId, sid, { project });
+      setSessions((prev) => prev.map((s) => (s.id === sid ? updated : s)));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleNewProjectSession(project: string) {
+    if (!agentId) return;
+    try {
+      const created = await createCloudSession(agentId, undefined, { project });
+      setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+      await loadSession(agentId, created.id);
+      closeNavOnMobile();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function toggleProjectCollapsed(name: string) {
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  async function submitNewProject() {
+    if (!agentId) return;
+    const name = newProjectName.trim();
+    if (!name) {
+      toast.error("请填写项目名");
+      return;
+    }
+    setNewProjectBusy(true);
+    try {
+      const res = await createAgentProject(agentId, {
+        name,
+        ...(newProjectGit.trim() ? { gitUrl: newProjectGit.trim() } : {}),
+      });
+      if (res.cloneError) toast.error(`项目已创建，克隆失败：${res.cloneError}`);
+      else toast.success("已创建项目");
+      setNewProjectOpen(false);
+      setNewProjectName("");
+      setNewProjectGit("");
+      await refreshProjects();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNewProjectBusy(false);
+    }
+  }
+
+  async function commitRenameProject() {
+    if (!agentId) return;
+    const from = renamingProject;
+    const to = renameProjectValue.trim();
+    setRenamingProject(null);
+    if (!from || !to || to === from) return;
+    try {
+      const res = await renameAgentProject(agentId, from, to);
+      setProjects((prev) =>
+        prev.map((p) => (p.name === from ? res.project : p)).sort((a, b) => a.name.localeCompare(b.name)),
+      );
+      setSessions((prev) => prev.map((s) => (s.project === from ? { ...s, project: to } : s)));
+      setCollapsedProjects((prev) => {
+        if (!prev.has(from)) return prev;
+        const next = new Set(prev);
+        next.delete(from);
+        next.add(to);
+        return next;
+      });
+      if (configProject === from) setConfigProject(to);
+      toast.success(`已重命名为 ${to}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+      await refreshProjects();
+    }
+  }
+
+  async function handleDeleteProject(slug: string) {
+    if (!agentId) return;
+    const ok = await confirm({
+      title: `删除项目 ${slug}？`,
+      description: `将删除工作区目录 /workspace/projects/${slug} 及其文件。该项目下的对话（含子代理）和定时任务会解绑，不会被删掉。`,
+      confirmLabel: "删除目录",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteAgentProject(agentId, slug);
+      setProjects((prev) => prev.filter((p) => p.name !== slug));
+      setSessions((prev) => prev.map((s) => (s.project === slug ? { ...s, project: null } : s)));
+      setCollapsedProjects((prev) => {
+        if (!prev.has(slug)) return prev;
+        const next = new Set(prev);
+        next.delete(slug);
+        return next;
+      });
+      if (configProject === slug) setConfigProject(null);
+      toast.success("已删除项目目录");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function openProjectDir(slug: string) {
+    setFilePanelOpen(true);
+    fileNonceRef.current += 1;
+    setFileRequest({ path: `/projects/${slug}`, nonce: fileNonceRef.current, dir: true });
+  }
+
+  function copyProjectPath(slug: string) {
+    const path = `/workspace/projects/${slug}`;
+    void navigator.clipboard.writeText(path).then(
+      () => toast.success("已复制路径"),
+      () => toast.error("复制失败"),
+    );
   }
 
   function parentForSend(): string | null | undefined {
@@ -1639,6 +1845,133 @@ export function ChatApp() {
     );
   }
 
+  function sessionRow(s: CloudSession) {
+    return (
+      <div
+        key={s.id}
+        className={cn(
+          "group animate-rise relative flex items-center rounded-lg text-sm",
+          "transition-colors duration-150 ease-fluid",
+          s.id === sessionId
+            ? "bg-muted text-foreground"
+            : "text-foreground/80 hover:bg-muted/60",
+        )}
+      >
+        {s.id === sessionId && (
+          <span
+            aria-hidden
+            className="animate-pop absolute top-1/2 left-0 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-foreground/60"
+          />
+        )}
+        {renamingId === s.id ? (
+          <Input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={() => void commitRename()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void commitRename();
+              if (e.key === "Escape") setRenamingId(null);
+            }}
+            className="mx-1 my-0.5 h-6 px-1 text-sm"
+          />
+        ) : (
+          <>
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
+              onClick={() => {
+                if (agentId) void loadSession(agentId, s.id);
+                closeNavOnMobile();
+              }}
+            >
+              <span className="truncate">{s.title}</span>
+              {s.kind && s.kind !== "chat" ? (
+                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                  {SESSION_KIND_LABELS[s.kind] ?? s.kind}
+                </span>
+              ) : null}
+              {s.origin.channel === "openai-gateway" ? (
+                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                  Gateway
+                </span>
+              ) : null}
+              {s.activeRunId ? (
+                <span
+                  aria-label="运行中"
+                  className="running-halo relative h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70 text-foreground/70"
+                />
+              ) : null}
+            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="会话操作"
+                    className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:data-[popup-open]:opacity-100"
+                  />
+                }
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-28">
+                {s.origin.channel === "openai-gateway" ? (
+                  <DropdownMenuItem onClick={() => void handleForkSession(s.id)}>
+                    <GitFork />
+                    Fork 后续聊
+                  </DropdownMenuItem>
+                ) : null}
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRenamingId(s.id);
+                    setRenameValue(s.title);
+                  }}
+                >
+                  <Pencil />
+                  重命名
+                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>移到项目</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="min-w-32">
+                    {projects.map((p) => (
+                      <DropdownMenuItem
+                        key={p.name}
+                        onClick={() => void handleMoveSession(s.id, p.name)}
+                      >
+                        {p.name}
+                        {s.project === p.name ? <Check className="h-3.5 w-3.5" /> : null}
+                      </DropdownMenuItem>
+                    ))}
+                    {s.project ? (
+                      <DropdownMenuItem onClick={() => void handleMoveSession(s.id, null)}>
+                        移出到其他对话
+                      </DropdownMenuItem>
+                    ) : null}
+                    {projects.length === 0 && !s.project ? (
+                      <DropdownMenuItem disabled>暂无项目</DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuItem onClick={() => void handleArchiveSession(s.id)}>
+                  <Archive />
+                  归档
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  onClick={() => void handleDeleteSession(s.id)}
+                >
+                  <Trash2 />
+                  删除
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="chat-shell flex h-svh bg-background text-foreground">
       {/* ===== 侧边栏（桌面内联收展；移动端覆盖式抽屉） ===== */}
@@ -1838,117 +2171,148 @@ export function ChatApp() {
             </div>
           ) : (
             <div className="flex flex-col gap-3 p-2 pt-0">
-              {grouped.map((g) => (
-                <div key={g.label}>
-                  <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
-                    {g.label}
-                  </div>
-                  <div className="flex flex-col">
-                    {g.items.map((s) => (
-                      <div
-                        key={s.id}
-                        className={cn(
-                          "group animate-rise relative flex items-center rounded-lg text-sm",
-                          "transition-colors duration-150 ease-fluid",
-                          s.id === sessionId
-                            ? "bg-muted text-foreground"
-                            : "text-foreground/80 hover:bg-muted/60",
-                        )}
-                      >
-                        {s.id === sessionId && (
-                          <span
-                            aria-hidden
-                            className="animate-pop absolute top-1/2 left-0 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-foreground/60"
-                          />
-                        )}
-                        {renamingId === s.id ? (
-                          <Input
-                            autoFocus
-                            value={renameValue}
-                            onChange={(e) => setRenameValue(e.target.value)}
-                            onBlur={() => void commitRename()}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") void commitRename();
-                              if (e.key === "Escape") setRenamingId(null);
-                            }}
-                            className="mx-1 my-0.5 h-6 px-1 text-sm"
-                          />
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
-                              onClick={() => {
-                                if (agentId) void loadSession(agentId, s.id);
-                                closeNavOnMobile();
+              <div>
+                <div className="flex items-center px-2 pb-0.5 pt-1">
+                  <div className="flex-1 text-[11px] text-muted-foreground/60">项目</div>
+                  <button
+                    type="button"
+                    title="新建项目"
+                    onClick={() => setNewProjectOpen(true)}
+                    className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {projectRows.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setNewProjectOpen(true)}
+                    className="w-full rounded-lg px-2 py-2 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  >
+                    暂无项目，点此创建
+                  </button>
+                ) : (
+                  projectRows.map((row) => {
+                    const collapsed = collapsedProjects.has(row.name);
+                    const renaming = renamingProject === row.name;
+                    return (
+                      <div key={row.name}>
+                        <div className="group flex items-center rounded-lg hover:bg-muted/50">
+                          {renaming ? (
+                            <Input
+                              autoFocus
+                              value={renameProjectValue}
+                              onChange={(e) => setRenameProjectValue(e.target.value)}
+                              onBlur={() => void commitRenameProject()}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void commitRenameProject();
+                                if (e.key === "Escape") setRenamingProject(null);
                               }}
-                            >
-                              <span className="truncate">{s.title}</span>
-                              {s.kind && s.kind !== "chat" ? (
-                                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                                  {SESSION_KIND_LABELS[s.kind] ?? s.kind}
-                                </span>
-                              ) : null}
-                              {s.origin.channel === "openai-gateway" ? (
-                                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                                  Gateway
-                                </span>
-                              ) : null}
-                              {s.activeRunId ? (
-                                <span
-                                  aria-label="运行中"
-                                  className="running-halo relative h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70 text-foreground/70"
+                              className="mx-1 my-0.5 h-6 px-1 text-sm"
+                            />
+                          ) : (
+                            <>
+                          <button
+                            type="button"
+                            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-sm"
+                            onClick={() => toggleProjectCollapsed(row.name)}
+                          >
+                            {collapsed ? (
+                              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            ) : (
+                              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            )}
+                            <span className="min-w-0 truncate font-medium">{row.name}</span>
+                            {row.missing ? (
+                              <span className="shrink-0 text-[10px] text-muted-foreground">
+                                目录已删
+                              </span>
+                            ) : null}
+                            <span className="shrink-0 text-[10px] text-muted-foreground">
+                              {row.sessions.length}
+                            </span>
+                          </button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              render={
+                                <button
+                                  type="button"
+                                  aria-label="项目操作"
+                                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:data-[popup-open]:opacity-100"
                                 />
-                              ) : null}
-                            </button>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger
-                                render={
-                                  <button
-                                    type="button"
-                                    aria-label="会话操作"
-                                    className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:data-[popup-open]:opacity-100"
-                                  />
-                                }
-                              >
-                                <MoreHorizontal className="h-3.5 w-3.5" />
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="start" className="min-w-28">
-                                {s.origin.channel === "openai-gateway" ? (
-                                  <DropdownMenuItem onClick={() => void handleForkSession(s.id)}>
-                                    <GitFork />
-                                    Fork 后续聊
-                                  </DropdownMenuItem>
-                                ) : null}
+                              }
+                            >
+                              <MoreHorizontal className="h-3.5 w-3.5" />
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start" className="min-w-32">
+                              <DropdownMenuItem onClick={() => setConfigProject(row.name)}>
+                                <Settings2 />
+                                配置
+                              </DropdownMenuItem>
+                              {row.missing ? null : (
+                                <DropdownMenuItem onClick={() => openProjectDir(row.name)}>
+                                  <FolderOpen />
+                                  打开目录
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuItem onClick={() => copyProjectPath(row.name)}>
+                                <ExternalLink />
+                                复制路径
+                              </DropdownMenuItem>
+                              {row.missing ? null : (
                                 <DropdownMenuItem
                                   onClick={() => {
-                                    setRenamingId(s.id);
-                                    setRenameValue(s.title);
+                                    setRenamingProject(row.name);
+                                    setRenameProjectValue(row.name);
                                   }}
                                 >
                                   <Pencil />
                                   重命名
                                 </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  onClick={() => void handleArchiveSession(s.id)}
-                                >
-                                  <Archive />
-                                  归档
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onClick={() => void handleDeleteSession(s.id)}
-                                >
-                                  <Trash2 />
-                                  删除
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </>
+                              )}
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onClick={() => void handleDeleteProject(row.name)}
+                              >
+                                <Trash2 />
+                                删除
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                          <button
+                            type="button"
+                            title="在此项目新对话"
+                            onClick={() => void handleNewProjectSession(row.name)}
+                            className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                            </>
+                          )}
+                        </div>
+                        {collapsed ? null : (
+                          <div className="flex flex-col pl-2">
+                            {row.sessions.length === 0 ? (
+                              <div className="px-2 py-1 text-[11px] text-muted-foreground">
+                                还没有对话
+                              </div>
+                            ) : (
+                              row.sessions.map((s) => sessionRow(s))
+                            )}
+                          </div>
                         )}
                       </div>
-                    ))}
+                    );
+                  })
+                )}
+              </div>
+              {unboundGrouped.map((g) => (
+                <div key={g.label}>
+                  <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
+                    {g.label === unboundGrouped[0]?.label ? `${g.label}` : g.label}
                   </div>
+                  <div className="flex flex-col">{g.items.map((s) => sessionRow(s))}</div>
                 </div>
               ))}
             </div>
@@ -1958,6 +2322,7 @@ export function ChatApp() {
         ) : (
           <AutomationPanel
             agentId={agentId}
+            projects={projects.map((p) => p.name)}
             className="min-h-0 flex-1"
             onAskAgentCreate={handleAskAgentCreateSchedule}
             onOpenSession={(sid) => {
@@ -2165,10 +2530,62 @@ export function ChatApp() {
           agentId={agentId}
           fsEnabled={Boolean(agent?.enableComputer)}
           openRequest={fileRequest}
+          projectPath={activeSession?.project ?? null}
           overlay={isMobile}
           onClose={() => setFilePanelOpen(false)}
         />
       )}
+
+      <Dialog open={newProjectOpen} onOpenChange={setNewProjectOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base">新建项目</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <Label htmlFor="np-name">名称</Label>
+            <Input
+              id="np-name"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              placeholder="my-app"
+            />
+            <Label htmlFor="np-git">Git 地址（可选）</Label>
+            <Input
+              id="np-git"
+              value={newProjectGit}
+              onChange={(e) => setNewProjectGit(e.target.value)}
+              placeholder="https://github.com/org/repo.git"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              会创建 /workspace/projects/名称；填写 Git 地址则克隆进去。
+            </p>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setNewProjectOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void submitNewProject()} disabled={newProjectBusy}>
+              {newProjectBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!configProject} onOpenChange={(open) => !open && setConfigProject(null)}>
+        <DialogContent className="flex max-h-[min(90vh,44rem)] flex-col sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base">项目 · {configProject}</DialogTitle>
+          </DialogHeader>
+          {agentId && configProject ? (
+            <ProjectConfigPanel
+              agentId={agentId}
+              slug={configProject}
+              className="min-h-0 flex-1 overflow-y-auto pr-1"
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       <RunLogDrawer open={logOpen} onOpenChange={setLogOpen} events={events} />
 

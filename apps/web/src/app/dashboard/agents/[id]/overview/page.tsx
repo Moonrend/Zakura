@@ -5,6 +5,7 @@ import {
   AlarmClock,
   Brain,
   Cable,
+  FolderKanban,
   Globe,
   HardDrive,
   MessageSquare,
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils";
 const QUICK_LINKS = [
   { href: "settings", label: "设置", icon: Settings2, hint: "模型与行为" },
   { href: "computer", label: "电脑", icon: HardDrive, hint: "工作区容器" },
+  { href: "projects", label: "项目", icon: FolderKanban, hint: "指令与技能" },
   { href: "web", label: "网页", icon: Globe, hint: "搜索与抓取" },
   { href: "memory", label: "记忆", icon: Brain, hint: "长期记忆" },
   { href: "skills", label: "技能", icon: Blocks, hint: "Skill 包" },

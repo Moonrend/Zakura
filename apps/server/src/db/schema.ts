@@ -1326,6 +1326,8 @@ export const cloudAgentSessions = pgTable(
     status: text("status").notNull().default("active"),
     /** 会话类型标记，见 CloudAgentSessionKind：chat | subagent | delegate | system */
     kind: text("kind").notNull().default("chat"),
+    /** 绑定的工作区项目 slug（/workspace/projects/<slug>）；空 = 未绑定 */
+    project: text("project"),
     /** 来源链接（CloudAgentSessionOrigin）：父会话/父 Run/调用方 Agent */
     originJson: text("origin_json").notNull().default("{}"),
     /** 输入框与模型选择等客户端会话状态；null 表示沿用 Agent 默认值 */
@@ -1774,6 +1776,8 @@ export const agentSchedules = pgTable(
     pattern: text("pattern").notNull(),
     /** 触发时注入的用户消息（任务指令） */
     prompt: text("prompt").notNull(),
+    /** 绑定的工作区项目 slug；空 = 在工作区根执行 */
+    project: text("project"),
     enabled: boolean("enabled").notNull().default(true),
     /** null = 不限次 */
     maxRuns: integer("max_runs"),

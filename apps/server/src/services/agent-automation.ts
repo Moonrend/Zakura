@@ -41,6 +41,7 @@ export type AutomationRunner = {
     kind: "schedule" | "heartbeat";
     scheduleId?: string;
     scheduleName?: string;
+    project?: string | null;
   }) => Promise<{ sessionId: string; runId: string }>;
 };
 
@@ -52,6 +53,7 @@ function scheduleDto(row: AgentSchedule) {
     description: row.description,
     pattern: row.pattern,
     prompt: row.prompt,
+    project: row.project,
     enabled: row.enabled,
     maxRuns: row.maxRuns,
     runCount: row.runCount,
@@ -143,6 +145,7 @@ export class AgentAutomationService {
       description?: string;
       pattern: string;
       prompt: string;
+      project?: string | null;
       enabled?: boolean;
       maxRuns?: number | null;
       timezone?: string;
@@ -172,6 +175,7 @@ export class AgentAutomationService {
       description: (input.description ?? "").trim(),
       pattern,
       prompt,
+      project: input.project ?? null,
       enabled,
       maxRuns:
         typeof input.maxRuns === "number" && input.maxRuns > 0
@@ -197,6 +201,7 @@ export class AgentAutomationService {
       description?: string;
       pattern?: string;
       prompt?: string;
+      project?: string | null;
       enabled?: boolean;
       maxRuns?: number | null;
       timezone?: string;
@@ -223,6 +228,7 @@ export class AgentAutomationService {
           : {}),
         ...(patch.pattern !== undefined ? { pattern } : {}),
         ...(patch.prompt !== undefined ? { prompt: patch.prompt.trim() || existing.prompt } : {}),
+        ...(patch.project !== undefined ? { project: patch.project } : {}),
         ...(patch.enabled !== undefined ? { enabled } : {}),
         ...(patch.maxRuns !== undefined
           ? {
@@ -399,6 +405,7 @@ export class AgentAutomationService {
         kind: "schedule",
         scheduleId: row.id,
         scheduleName: row.name,
+        project: row.project,
       });
       await this.db
         .update(agentAutomationRuns)

@@ -17,6 +17,7 @@ import { spawn } from "node:child_process";
 import { dirname, join, basename, resolve } from "node:path";
 import { createGunzip } from "node:zlib";
 import { pipeline } from "node:stream/promises";
+import { AGENT_WORKSPACE_LAYOUT_DIRS } from "@zakura/shared";
 import {
   PathJailError,
   resolveInRoot,
@@ -43,6 +44,9 @@ export function contentRevision(data: Buffer | string): string {
 /** 初始化工作区目录并写入默认 README（仅首次）。 */
 export function ensureWorkspaceDir(root: string): void {
   mkdirSync(root, { recursive: true });
+  for (const dir of AGENT_WORKSPACE_LAYOUT_DIRS) {
+    mkdirSync(join(root, dir), { recursive: true });
+  }
   const readme = join(root, "README.md");
   if (!existsSync(readme)) {
     writeFileSync(
@@ -51,6 +55,8 @@ export function ensureWorkspaceDir(root: string): void {
         "# Agent Workspace",
         "",
         "This directory is the isolated filesystem for one Zakura agent.",
+        "Projects live in `projects/<name>/`. Clone repos there, not at the workspace root.",
+        "Also: `data/` (inputs), `outputs/` (deliverables), `uploads/` (chat attachments), `skills/`.",
         "All `fs_*` and `shell_exec` tools share this directory (`/workspace` in the container).",
         "Preinstalled: python3, node/npm, gcc/g++. See /etc/zakura/capabilities.txt.",
         "",

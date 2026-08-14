@@ -69,6 +69,17 @@ import { callSkillTool, isSkillToolName } from "./skills/tools.js";
 import type { IntegrationCatalogService } from "./integration-catalog.js";
 import { applyConnectorCredentialsToConfig } from "../providers/credential-config.js";
 
+function extraOpts(opts?: {
+  onProgress?: (message: string, data?: Record<string, unknown>) => void;
+  defaultWorkingDir?: string;
+}) {
+  if (!opts?.onProgress && !opts?.defaultWorkingDir) return undefined;
+  return {
+    ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+    ...(opts.defaultWorkingDir ? { defaultWorkingDir: opts.defaultWorkingDir } : {}),
+  };
+}
+
 /** Provider ids that are tenant capability panels — not selected via MCP bindings */
 const CAPABILITY_PROVIDER_IDS = new Set(["web-search", "web-fetch"]);
 const DIRECT_CONNECTOR_PROVIDER_ID = "zakura-connector";
@@ -280,6 +291,8 @@ export interface CloudSubagentRunner {
       origin?: import("@zakura/shared").CloudAgentSessionOrigin;
       /** 嵌套深度（缺省 1；子代理再派生时逐级 +1，达配置上限后不可再派生） */
       depth?: number;
+      /** 父会话绑定的项目 slug；子代理会话继承 */
+      project?: string | null;
     },
   ): Promise<{ text: string; sessionId: string }>;
 }
@@ -1173,6 +1186,8 @@ export class McpGateway {
       apiKeyId?: string;
       agentId?: string | null;
       onProgress?: (message: string, data?: Record<string, unknown>) => void;
+      defaultWorkingDir?: string;
+      projectSlug?: string;
     },
   ): Promise<McpToolResult | McpCreateTaskResult> {
     const tools = await this.listToolsForTenant(tenantId, opts);
@@ -1246,6 +1261,8 @@ export class McpGateway {
       apiKeyId?: string;
       agentId?: string | null;
       onProgress?: (message: string, data?: Record<string, unknown>) => void;
+      defaultWorkingDir?: string;
+      projectSlug?: string;
     },
   ): Promise<McpToolResult | McpCreateTaskResult> {
     void opts;
@@ -1258,6 +1275,7 @@ export class McpGateway {
       if (!agent) return textResult("Agent not found", true);
       const answer = await this.subagentRunner.run(tenantId, agent, args, {
         origin: { source: "mcp" },
+        ...(opts?.projectSlug ? { project: opts.projectSlug } : {}),
       });
       return textResult(answer.text, false);
     }
@@ -1334,7 +1352,10 @@ export class McpGateway {
         });
       }
       if (isSkillToolName(tool.localName)) {
-        return callSkillTool(this.skillsService, agent, tool.localName, args);
+        return callSkillTool(this.skillsService, agent, tool.localName, args, {
+          projectSlug: opts?.projectSlug,
+          fsProvider: this.workspaceFsProvider,
+        });
       }
       return callAgentNativeTool(
         agent,
@@ -1347,7 +1368,7 @@ export class McpGateway {
         this.workspaceFsProvider,
         this.exposureService,
         this.fileShareService,
-        opts?.onProgress ? { onProgress: opts.onProgress } : undefined,
+        extraOpts(opts),
       );
     }
 

@@ -90,7 +90,12 @@ npx skills add owner/repo --skill x               # 整条 npx 命令直接粘�
 builtin:browser-automation                        # 内置技能
 ${F}
 
-安装后技能文件写入工作区 \`/${AGENT_SKILLS_DIR}/<技能名>/\`，你可以用 \`re_fs_read\` 直接查看，用户也能在控制台文件面板里看到。
+装到哪里用 \`scope\` 区分。**当前会话已绑定项目时，除非用户明确要求装到全局，否则默认 \`scope=project\`。**
+
+- \`scope=project\`（会话在项目中时的默认）：写入当前项目 \`projects/<slug>/.agents/skills/<技能名>/\`，只有绑定该项目的会话能看到。当前会话未绑项目时要传 \`project=<slug>\`。
+- \`scope=agent\`：写入 \`/${AGENT_SKILLS_DIR}/<技能名>/\`，这个 Agent 的所有会话、所有项目都能用。仅在用户明确说「全局」「所有项目都能用」「装到 Agent 上」时才用。未绑定项目的会话默认走这里。
+
+安装后用 \`re_read_skill\` 直接查看正文。用户也能在对话侧栏项目配置或控制台文件面板里看到。
 
 ### 6. 立刻用起来
 
@@ -181,18 +186,20 @@ ${F}
 
 ### 2. 写文件
 
-在工作区里建目录并写 SKILL.md：
+在工作区里建目录并写 SKILL.md。当前会话绑定了项目时写到项目目录：
 
 ${F}
-re_fs_mkdir  path=/${AGENT_SKILLS_DIR}/my-skill
-re_fs_write  path=/${AGENT_SKILLS_DIR}/my-skill/SKILL.md  content=...
+re_fs_mkdir  path=/projects/<项目>/.agents/skills/my-skill
+re_fs_write  path=/projects/<项目>/.agents/skills/my-skill/SKILL.md  content=...
 ${F}
+
+未绑定项目、或用户明确要求全局技能时，写到 \`/${AGENT_SKILLS_DIR}/my-skill/\`。
 
 需要参考资料就再写 \`references/*.md\`，并在 SKILL.md 里写明"处理 X 时读 references/x.md"。
 
 ### 3. 注册
 
-\`re_install_skill\` 传 \`path=/${AGENT_SKILLS_DIR}/my-skill\`，把工作区里的目录登记进技能注册表。注册后它才会出现在你的系统提示、\`re_list_skills\` 和控制台里，也才能被安装到其他 Agent。
+\`re_install_skill\` 传 \`path\`。当前会话在项目里时默认登记为项目技能（\`.agents/skills/\`）；只有用户明确要求全局时才加 \`scope=agent\` 写到 \`/${AGENT_SKILLS_DIR}/\`。注册后会出现在 \`re_list_skills\` 和项目配置里。
 
 ### 4. 验证触发
 
@@ -367,16 +374,23 @@ const WORKSPACE_PROJECTS: BuiltinSkillDef = {
 
 ## 目录约定
 
+平台会自动创建这些顶层目录。**一层 \`projects/<名>/\` 就是一个独立项目**；会话和定时任务绑到项目后，shell 默认 cwd 就是该目录。
+
 ${F}
 /workspace
-├── projects/<项目名>/    # 一个项目一个目录，别把文件都堆在根
+├── projects/<项目名>/    # 独立项目。clone、写代码、定时任务产物都放这里
 ├── data/                 # 输入数据
 ├── outputs/              # 交付产物（用户主要看这里）
 ├── uploads/              # 用户上传的附件
 └── ${AGENT_SKILLS_DIR}/  # 已安装技能
 ${F}
 
-缓存放 \`/workspace/.cache/{npm,pip}\`（已预设），不要污染项目目录。
+- 克隆仓库：\`git clone <url> /workspace/projects/<项目名>\`，禁止堆在 \`/workspace\` 根
+- 当前会话若已绑定项目，命令默认就在那个目录执行；跨项目用绝对路径
+- 缓存放 \`/workspace/.cache/{npm,pip}\`（已预设），不要污染项目目录
+- 项目根可放 \`AGENTS.md\`（或 \`CLAUDE.md\`），会自动注入本会话
+- 项目技能：\`<项目>/.agents/skills/<名>/SKILL.md\` 或 \`.claude/skills/\`，绑定该项目的会话会自动列入技能清单
+- 项目 hooks：\`<项目>/.agents/hooks.json\`（也读 \`.claude/hooks.json\` / \`.claude/settings.json\` 的 hooks）
 
 ## 执行命令
 

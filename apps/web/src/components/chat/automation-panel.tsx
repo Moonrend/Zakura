@@ -4,7 +4,7 @@
  * 对话侧栏 · 定时任务列表。
  * 新建走 Agent 对话创建；本面板只负责查看与管理。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Loader2,
@@ -60,15 +60,18 @@ type EditForm = {
   customPattern: string;
   prompt: string;
   enabled: boolean;
+  project: string;
 };
 
 export function AutomationPanel({
   agentId,
+  projects = [],
   onAskAgentCreate,
   onOpenSession,
   className,
 }: {
   agentId: string | null;
+  projects?: string[];
   /** 用自然语言描述，交给 Agent 创建定时任务 */
   onAskAgentCreate: (goal: string) => void;
   onOpenSession?: (sessionId: string) => void;
@@ -81,6 +84,7 @@ export function AutomationPanel({
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createGoal, setCreateGoal] = useState("");
+  const [createProject, setCreateProject] = useState("");
 
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<AgentSchedule | null>(null);
@@ -107,8 +111,25 @@ export function AutomationPanel({
     void load();
   }, [load]);
 
+  const groupedSchedules = useMemo(() => {
+    const by = new Map<string, AgentSchedule[]>();
+    const unbound: AgentSchedule[] = [];
+    for (const s of schedules) {
+      if (s.project) {
+        const list = by.get(s.project) ?? [];
+        list.push(s);
+        by.set(s.project, list);
+      } else {
+        unbound.push(s);
+      }
+    }
+    const named = [...by.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return { named, unbound };
+  }, [schedules]);
+
   function openCreate() {
     setCreateGoal("");
+    setCreateProject(projects[0] ?? "");
     setCreateOpen(true);
   }
 
@@ -118,8 +139,12 @@ export function AutomationPanel({
       toast.error("说一下要定时做什么");
       return;
     }
+    const bits = [goal];
+    if (createProject.trim()) {
+      bits.push(`请把 create_schedule 的 project 设为 ${createProject.trim()}。`);
+    }
     setCreateOpen(false);
-    onAskAgentCreate(goal);
+    onAskAgentCreate(bits.join("\n"));
   }
 
   function openEdit(s: AgentSchedule) {
@@ -131,6 +156,7 @@ export function AutomationPanel({
       customPattern: custom || s.pattern,
       prompt: s.prompt,
       enabled: s.enabled,
+      project: s.project ?? "",
     });
     setEditOpen(true);
   }
@@ -155,6 +181,7 @@ export function AutomationPanel({
         pattern,
         prompt,
         enabled: form.enabled,
+        project: form.project.trim() || null,
       });
       setEditOpen(false);
       await load();
@@ -255,20 +282,46 @@ export function AutomationPanel({
             暂无定时任务，点此让 Agent 创建
           </button>
         ) : (
-          <ul>
-            {schedules.map((s) => (
-              <li key={s.id}>
-                <TaskRow
-                  schedule={s}
-                  busy={busyId === s.id}
-                  onOpen={() => openEdit(s)}
-                  onToggle={(on) => void toggleSchedule(s, on)}
-                  onRun={() => void runSchedule(s)}
-                  onDelete={() => void removeSchedule(s)}
-                />
-              </li>
+          <div className="flex flex-col gap-3">
+            {groupedSchedules.named.map(([name, items]) => (
+              <div key={name}>
+                <div className="px-1 pb-0.5 text-[11px] text-muted-foreground/60">{name}</div>
+                <ul>
+                  {items.map((s) => (
+                    <li key={s.id}>
+                      <TaskRow
+                        schedule={s}
+                        busy={busyId === s.id}
+                        onOpen={() => openEdit(s)}
+                        onToggle={(on) => void toggleSchedule(s, on)}
+                        onRun={() => void runSchedule(s)}
+                        onDelete={() => void removeSchedule(s)}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ))}
-          </ul>
+            {groupedSchedules.unbound.length > 0 ? (
+              <div>
+                <div className="px-1 pb-0.5 text-[11px] text-muted-foreground/60">其他任务</div>
+                <ul>
+                  {groupedSchedules.unbound.map((s) => (
+                    <li key={s.id}>
+                      <TaskRow
+                        schedule={s}
+                        busy={busyId === s.id}
+                        onOpen={() => openEdit(s)}
+                        onToggle={(on) => void toggleSchedule(s, on)}
+                        onRun={() => void runSchedule(s)}
+                        onDelete={() => void removeSchedule(s)}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
         )}
       </div>
 
@@ -297,6 +350,34 @@ export function AutomationPanel({
             <p className="text-[11px] text-muted-foreground">
               Agent 会自行决定名称、周期和指令。⌘/Ctrl + Enter 发送
             </p>
+            {projects.length > 0 ? (
+              <div className="space-y-1.5">
+                <Label>项目</Label>
+                <Select
+                  value={createProject || "__none__"}
+                  onValueChange={(v) => {
+                    if (v == null || v === "__none__") setCreateProject("");
+                    else setCreateProject(v);
+                  }}
+                  items={[
+                    { value: "__none__", label: "不绑定" },
+                    ...projects.map((p) => ({ value: p, label: p })),
+                  ]}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">不绑定</SelectItem>
+                    {projects.map((p) => (
+                      <SelectItem key={p} value={p}>
+                        {p}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
           </div>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
@@ -370,6 +451,41 @@ export function AutomationPanel({
                     setForm((f) => (f ? { ...f, prompt: e.target.value } : f))
                   }
                 />
+              </div>
+              <div className="space-y-1.5">
+                <Label>项目</Label>
+                <Select
+                  value={form.project || "__none__"}
+                  onValueChange={(v) => {
+                    if (v == null || v === "__none__") {
+                      setForm((f) => (f ? { ...f, project: "" } : f));
+                    } else {
+                      setForm((f) => (f ? { ...f, project: v } : f));
+                    }
+                  }}
+                  items={[
+                    { value: "__none__", label: "不绑定" },
+                    ...projects.map((p) => ({ value: p, label: p })),
+                    ...(form.project && !projects.includes(form.project)
+                      ? [{ value: form.project, label: `${form.project}（目录已删）` }]
+                      : []),
+                  ]}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">不绑定</SelectItem>
+                    {projects.map((p) => (
+                      <SelectItem key={p} value={p}>
+                        {p}
+                      </SelectItem>
+                    ))}
+                    {form.project && !projects.includes(form.project) ? (
+                      <SelectItem value={form.project}>{form.project}（目录已删）</SelectItem>
+                    ) : null}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm">启用</span>

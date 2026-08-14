@@ -2,6 +2,7 @@
  * Agent 侧自动化工具：管理定时任务（主 chat 会话注入）。
  */
 import type { ModelToolDefinition } from "@zakura/shared";
+import { parseProjectField } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import type { AgentAutomationService } from "../agent-automation.js";
 import { CronParseError } from "../cron-next.js";
@@ -47,6 +48,7 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
           "`@hourly` / `@daily` / `@weekly`;",
           "`@every_30m` / `@every_2h`.",
           "prompt is the task instruction injected on each trigger.",
+          "If the task writes files, pass project (workspace project slug) so runs execute in /workspace/projects/<slug>/.",
         ].join(" "),
         parameters: {
           type: "object",
@@ -56,6 +58,11 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
             description: { type: "string" },
             pattern: { type: "string" },
             prompt: { type: "string" },
+            project: {
+              type: "string",
+              description:
+                "Workspace project slug. File-producing tasks must set this. Defaults to the current session's project.",
+            },
             enabled: { type: "boolean", default: true },
             max_runs: {
               type: "integer",
@@ -81,6 +88,10 @@ export function listAutomationToolDefinitions(): ModelToolDefinition[] {
             description: { type: "string" },
             pattern: { type: "string" },
             prompt: { type: "string" },
+            project: {
+              type: ["string", "null"],
+              description: "Workspace project slug; null to unbind",
+            },
             enabled: { type: "boolean" },
             max_runs: { type: ["integer", "null"] },
           },
@@ -133,6 +144,7 @@ export async function callAutomationTool(
   agent: Agent,
   name: string,
   args: Record<string, unknown>,
+  extra?: { defaultProject?: string | null },
 ): Promise<{ text: string; isError?: boolean }> {
   try {
     if (name === LIST_SCHEDULES_TOOL) {
@@ -140,11 +152,16 @@ export async function callAutomationTool(
       return { text: JSON.stringify({ schedules: items }, null, 2) };
     }
     if (name === CREATE_SCHEDULE_TOOL) {
+      const parsed = parseProjectField(args.project);
+      if (parsed.status === "invalid") {
+        return { text: "invalid project slug", isError: true };
+      }
       const created = await automation.createSchedule(agent.tenantId, agent.id, {
         name: String(args.name ?? ""),
         description: typeof args.description === "string" ? args.description : undefined,
         pattern: String(args.pattern ?? ""),
         prompt: String(args.prompt ?? ""),
+        project: parsed.status === "ok" ? parsed.slug : (extra?.defaultProject ?? null),
         enabled: typeof args.enabled === "boolean" ? args.enabled : undefined,
         maxRuns: typeof args.max_runs === "number" ? args.max_runs : undefined,
       });
@@ -153,6 +170,10 @@ export async function callAutomationTool(
     if (name === UPDATE_SCHEDULE_TOOL) {
       const id = String(args.schedule_id ?? "").trim();
       if (!id) return { text: "schedule_id is required", isError: true };
+      const parsed = parseProjectField(args.project);
+      if (parsed.status === "invalid") {
+        return { text: "invalid project slug", isError: true };
+      }
       const updated = await automation.updateSchedule(agent.tenantId, agent.id, id, {
         ...(args.name !== undefined ? { name: String(args.name) } : {}),
         ...(args.description !== undefined
@@ -160,6 +181,7 @@ export async function callAutomationTool(
           : {}),
         ...(args.pattern !== undefined ? { pattern: String(args.pattern) } : {}),
         ...(args.prompt !== undefined ? { prompt: String(args.prompt) } : {}),
+        ...(parsed.status === "ok" ? { project: parsed.slug } : {}),
         ...(typeof args.enabled === "boolean" ? { enabled: args.enabled } : {}),
         ...(args.max_runs === null
           ? { maxRuns: null }
