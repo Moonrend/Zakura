@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
-  ExternalLink,
   HardDrive,
   Loader2,
   Monitor,
   Play,
   Square,
+  Terminal,
   Trash2,
   ArrowRightLeft,
 } from "lucide-react";
@@ -55,6 +55,8 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { subscribePlatformEvents } from "@/lib/platform-events";
+import { WorkspaceTerminalDialog } from "@/components/workspace-terminal-dialog";
+import { WorkspaceDesktop } from "@/components/workspace-desktop";
 
 const LOCAL_VALUE = "__local__";
 
@@ -73,6 +75,7 @@ export default function AgentComputerPage() {
   const [migrateTarget, setMigrateTarget] = useState("");
   const [migrateBusy, setMigrateBusy] = useState(false);
   const [migrateStatus, setMigrateStatus] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -479,32 +482,36 @@ export default function AgentComputerPage() {
         </SettingsSection>
       ) : null}
 
+      <SettingsSection title="工作区访问">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">平台代理终端</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              通过 Zakura 与 Runner 的鉴权通道进入容器，不暴露 SSH 或桌面端口。
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!workspaceRunning}
+            onClick={() => setTerminalOpen(true)}
+          >
+            <Terminal />
+            打开终端
+          </Button>
+        </div>
+      </SettingsSection>
+
       <SettingsSection
         title={
           <div className="flex items-center justify-between gap-2">
             <span>桌面</span>
-            {agent.desktop?.novncUrl ? (
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                nativeButton={false}
-                render={
-                  <a href={agent.desktop.novncUrl} target="_blank" rel="noreferrer" />
-                }
-              >
-                <ExternalLink />
-              </Button>
-            ) : null}
           </div>
         }
       >
-        {agent.desktop?.novncUrl && workspaceRunning ? (
-          <iframe
-            title="desktop"
-            src={agent.desktop.novncUrl}
-            className="min-h-[280px] w-full rounded-md border bg-black"
-            allow="clipboard-read; clipboard-write"
-          />
+        {workspaceRunning ? (
+          <WorkspaceDesktop agentId={id} active={workspaceRunning} />
         ) : (
           <div className="flex min-h-[200px] items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
             {workspaceRunning ? "桌面准备中…" : "启动后可用"}
@@ -575,6 +582,11 @@ export default function AgentComputerPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <WorkspaceTerminalDialog
+        agentId={id}
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+      />
     </div>
   );
 }

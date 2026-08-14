@@ -101,6 +101,7 @@ const AGENT_ICONS: Record<string, IconComp> = {
   memory: Brain,
   skills: Blocks,
   mcp: Cable,
+  connect: Plug,
   gateway: Route,
   platforms: MessageSquare,
   automation: AlarmClock,

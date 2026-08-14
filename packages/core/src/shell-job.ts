@@ -12,6 +12,10 @@ export type ShellJobSnapshot = {
   stderr: string;
   timedOut: boolean;
   elapsedMs: number;
+  /** Append-only raw PTY stream for a real terminal emulator. */
+  terminalOutput?: string;
+  /** Absolute character offset of terminalOutput[0]. */
+  terminalOffset?: number;
 };
 
 export function newShellJobId(): string {
@@ -77,11 +81,14 @@ export class ShellJob {
   private waiters = new Set<() => void>();
   private writeFn: ((data: string) => void) | null = null;
   private killFn: (() => Promise<void>) | null = null;
+  private resizeFn: ((cols: number, rows: number) => Promise<void>) | null = null;
   private onOutput: ((snap: ShellJobSnapshot) => void) | null = null;
   private throttleMs = 400;
   private lastEmit = 0;
   private emitTimer: ReturnType<typeof setTimeout> | null = null;
   private finished = false;
+  private terminalOutput = "";
+  private terminalOffset = 0;
 
   constructor(opts: { id?: string; agentId: string }) {
     this.id = opts.id ?? newShellJobId();
@@ -97,6 +104,8 @@ export class ShellJob {
       stderr: this.stderrFold.text(),
       timedOut: this.timedOut,
       elapsedMs: Date.now() - this.startedAt,
+      terminalOutput: this.terminalOutput,
+      terminalOffset: this.terminalOffset,
     };
   }
 
@@ -105,6 +114,12 @@ export class ShellJob {
     const fold = stream === "stdout" ? this.stdoutFold : this.stderrFold;
     fold.push(text);
     fold.compact(OUTPUT_CAP, TRUNC_MARK);
+    this.terminalOutput += text;
+    if (this.terminalOutput.length > OUTPUT_CAP) {
+      const removed = this.terminalOutput.length - OUTPUT_CAP;
+      this.terminalOutput = this.terminalOutput.slice(removed);
+      this.terminalOffset += removed;
+    }
     this.lastOutputAt = Date.now();
     this.hasOutput = true;
     this.scheduleOutput();
@@ -129,9 +144,15 @@ export class ShellJob {
     this.timedOut = true;
   }
 
-  setIO(io: { write: (data: string) => void; kill: () => Promise<void> }): void {
+  setIO(io: { write: (data: string) => void; kill: () => Promise<void>; resize?: (cols: number, rows: number) => Promise<void> }): void {
     this.writeFn = io.write;
     this.killFn = io.kill;
+    this.resizeFn = io.resize ?? null;
+  }
+
+  async resize(cols: number, rows: number): Promise<void> {
+    if (!this.running || !this.resizeFn) return;
+    await this.resizeFn(Math.max(2, Math.min(500, Math.floor(cols))), Math.max(2, Math.min(300, Math.floor(rows))));
   }
 
   setOnOutput(cb: ((snap: ShellJobSnapshot) => void) | null, throttleMs = 400): void {
@@ -280,6 +301,7 @@ export function bindExecStream(
   opts: {
     inspect: () => Promise<{ ExitCode?: number | null; Pid?: number }>;
     killPid?: (pid: number) => Promise<void>;
+    resize?: (cols: number, rows: number) => Promise<void>;
   },
 ): void {
   const mux = new DockerMuxParser();
@@ -344,5 +366,6 @@ export function bindExecStream(
         /* ignore */
       }
     },
+    resize: opts.resize,
   });
 }

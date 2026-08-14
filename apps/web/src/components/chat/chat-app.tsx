@@ -39,9 +39,11 @@ import type {
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
+  conversationRuntimeSwitch,
   estimateEventPayloadTokens,
   estimateTextTokens,
   estimateTokensFromChars,
+  ZAKURA_RUNTIME_ID,
 } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -88,6 +90,7 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
+import { fetchAcpConfig, fetchAcpRuntime, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
 import {
   buildConversationTurns,
   cancelCloudRun,
@@ -145,7 +148,7 @@ const DRAFT_KEY_PREFIX = "zakura_chat_draft";
 /** 对话列表：chat 过滤时仍拉项目里的子代理/系统会话，方便归组。 */
 function kindsForSidebar(filter: CloudAgentSessionKind | "all"): SessionKindsFilter {
   if (filter === "all") return "all";
-  if (filter === "chat") return ["chat", "subagent", "delegate", "system"];
+  if (filter === "chat") return ["chat", "subagent", "delegate", "acp", "system"];
   return [filter];
 }
 
@@ -170,6 +173,7 @@ const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: 
   { value: "chat", label: SESSION_KIND_LABELS.chat },
   { value: "subagent", label: SESSION_KIND_LABELS.subagent },
   { value: "delegate", label: SESSION_KIND_LABELS.delegate },
+  { value: "acp", label: SESSION_KIND_LABELS.acp },
   { value: "system", label: SESSION_KIND_LABELS.system },
   { value: "all", label: "全部类型" },
 ];
@@ -358,6 +362,17 @@ export function ChatApp() {
     skills: [],
     groups: [],
   });
+  const [acpRuntimes, setAcpRuntimes] = useState<Array<{ id: string; label: string }>>([
+    { id: ZAKURA_RUNTIME_ID, label: "Zakura" },
+  ]);
+  const [draftRuntimeId, setDraftRuntimeId] = useState(ZAKURA_RUNTIME_ID);
+  const defaultRuntimeRef = useRef(ZAKURA_RUNTIME_ID);
+  const [acpRuntime, setAcpRuntime] = useState<{
+    modes?: { currentId?: string; available: Array<{ id: string; name: string }> };
+    availableCommands?: Array<{ name: string; description?: string }>;
+    models?: { currentId?: string; available: Array<{ id: string; name: string }>; configId?: string };
+    reasoning?: { current?: string; available: Array<{ id: string; name: string }>; configId?: string };
+  } | null>(null);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [disabledGroupIds, setDisabledGroupIds] = useState<string[]>([]);
   /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
@@ -635,6 +650,38 @@ export function ChatApp() {
           setQueue(Array.isArray(p.items) ? p.items : []);
         }
       }
+      if (ev.type === "session_update") {
+        const p = ev.payload as {
+          acpCommands?: Array<{ name: string; description?: string }>;
+          acpModeId?: string;
+          acpModels?: {
+            currentId?: string;
+            available: Array<{ id: string; name: string }>;
+            configId?: string;
+          };
+          acpReasoning?: {
+            current?: string;
+            available: Array<{ id: string; name: string }>;
+            configId?: string;
+          };
+        };
+        if (p.acpCommands || p.acpModeId || p.acpModels || p.acpReasoning) {
+          setAcpRuntime((prev) => ({
+            ...prev,
+            ...(p.acpCommands ? { availableCommands: p.acpCommands } : {}),
+            ...(p.acpModeId
+              ? {
+                  modes: {
+                    currentId: p.acpModeId,
+                    available: prev?.modes?.available ?? [],
+                  },
+                }
+              : {}),
+            ...(p.acpModels ? { models: p.acpModels } : {}),
+            ...(p.acpReasoning ? { reasoning: p.acpReasoning } : {}),
+          }));
+        }
+      }
       if (
         ev.type === "run_start" ||
         ev.type === "run_end" ||
@@ -676,6 +723,56 @@ export function ChatApp() {
         );
       }
       draftsRef.current.set(sid, res.session.draftText ?? "");
+      setDraftRuntimeId(
+        res.session.kind === "acp" && res.session.origin.acpProfileId
+          ? res.session.origin.acpProfileId
+          : ZAKURA_RUNTIME_ID,
+      );
+      if (res.session.kind === "acp") {
+        let commands: Array<{ name: string; description?: string }> | undefined;
+        let modeId: string | undefined;
+        let models: {
+          currentId?: string;
+          available: Array<{ id: string; name: string }>;
+          configId?: string;
+        } | undefined;
+        let reasoning: {
+          current?: string;
+          available: Array<{ id: string; name: string }>;
+          configId?: string;
+        } | undefined;
+        for (const ev of res.events) {
+          if (ev.type !== "session_update") continue;
+          const p = ev.payload as {
+            acpCommands?: Array<{ name: string; description?: string }>;
+            acpModeId?: string;
+            acpModels?: typeof models;
+            acpReasoning?: typeof reasoning;
+          };
+          if (p.acpCommands) commands = p.acpCommands;
+          if (p.acpModeId) modeId = p.acpModeId;
+          if (p.acpModels) models = p.acpModels;
+          if (p.acpReasoning) reasoning = p.acpReasoning;
+        }
+        setAcpRuntime({
+          availableCommands: commands,
+          modes: modeId ? { currentId: modeId, available: [] } : undefined,
+          models,
+          reasoning,
+        });
+        void fetchAcpRuntime(aid, sid)
+          .then((status) => {
+            setAcpRuntime((prev) => ({
+              availableCommands: status.availableCommands ?? prev?.availableCommands,
+              modes: status.modes ?? prev?.modes,
+              models: status.models ?? prev?.models,
+              reasoning: status.reasoning ?? prev?.reasoning,
+            }));
+          })
+          .catch(() => undefined);
+      } else {
+        setAcpRuntime(null);
+      }
       setVariantByMessage({});
       setBranchByParent({});
       setEditingTarget(null);
@@ -789,6 +886,28 @@ export function ChatApp() {
             if (!cancelled) setComposerCap(cap);
           })
           .catch(() => {});
+        void fetchAcpConfig(agentId)
+          .then((res) => {
+            if (cancelled) return;
+            const extras = Object.values(res.config.agents)
+              .filter((a) => a.enabled)
+              .map((a) => ({
+                id: a.id,
+                label:
+                  a.displayName ||
+                  res.profiles.find((p) => p.id === a.id)?.displayName ||
+                  a.id,
+              }));
+            setAcpRuntimes([{ id: ZAKURA_RUNTIME_ID, label: "Zakura" }, ...extras]);
+            const def = res.config.defaultRuntime || ZAKURA_RUNTIME_ID;
+            defaultRuntimeRef.current = extras.some((e) => e.id === def) || def === ZAKURA_RUNTIME_ID
+              ? def
+              : ZAKURA_RUNTIME_ID;
+            if (!sessionIdRef.current) setDraftRuntimeId(defaultRuntimeRef.current);
+          })
+          .catch(() => {
+            if (!cancelled) setAcpRuntimes([{ id: ZAKURA_RUNTIME_ID, label: "Zakura" }]);
+          });
         setSessions(list);
         setProjects(projectRes.projects);
         setHasChatRoute(cfg.hasChatRoute);
@@ -1044,6 +1163,8 @@ export function ChatApp() {
     queueSeqRef.current = 0;
     setQueue([]);
     setEditingTarget(null);
+    setAcpRuntime(null);
+    setDraftRuntimeId(defaultRuntimeRef.current);
     clearAttachments();
     setSelectedSkills([]);
     composerRef.current?.focus();
@@ -1533,7 +1654,18 @@ export function ChatApp() {
         sid = await forkToWritableSession(sid);
       }
       if (!sid) {
-        const created = await createCloudSession(agentId);
+        const acpProfile =
+          draftRuntimeId !== ZAKURA_RUNTIME_ID ? draftRuntimeId : undefined;
+        const created = await createCloudSession(
+          agentId,
+          undefined,
+          acpProfile
+            ? {
+                kind: "acp",
+                origin: { runtime: "acp", acpProfileId: acpProfile },
+              }
+            : undefined,
+        );
         setSessions((prev) => [created, ...prev]);
         await updateCloudSession(agentId, created.id, {
           model: model || null,
@@ -1558,6 +1690,18 @@ export function ChatApp() {
         sentAttachments,
         runOptions,
       );
+      if (draftRuntimeId !== ZAKURA_RUNTIME_ID) {
+        void fetchAcpRuntime(agentId, sid)
+          .then((status) =>
+            setAcpRuntime((prev) => ({
+              availableCommands: status.availableCommands ?? prev?.availableCommands,
+              modes: status.modes ?? prev?.modes,
+              models: status.models ?? prev?.models,
+              reasoning: status.reasoning ?? prev?.reasoning,
+            })),
+          )
+          .catch(() => undefined);
+      }
       // 服务端入队：乐观补一条占位，快照事件到达后全量对齐
       if (res.queued && res.messageId) {
         const mid = res.messageId;
@@ -1886,7 +2030,12 @@ export function ChatApp() {
               }}
             >
               <span className="truncate">{s.title}</span>
-              {s.kind && s.kind !== "chat" ? (
+              {s.kind === "acp" && s.origin.acpProfileId ? (
+                <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
+                  {acpRuntimes.find((r) => r.id === s.origin.acpProfileId)?.label ||
+                    s.origin.acpProfileId}
+                </span>
+              ) : s.kind && s.kind !== "chat" ? (
                 <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
                   {SESSION_KIND_LABELS[s.kind] ?? s.kind}
                 </span>
@@ -2362,6 +2511,11 @@ export function ChatApp() {
           <span className="truncate text-sm font-medium text-foreground/80">
             {agent?.name}
           </span>
+          {draftRuntimeId !== ZAKURA_RUNTIME_ID ? (
+            <span className="truncate text-xs text-muted-foreground">
+              {acpRuntimes.find((r) => r.id === draftRuntimeId)?.label || draftRuntimeId}
+            </span>
+          ) : null}
           <div className="flex-1" />
           {runActive && (
             <Button size="sm" variant="ghost" onClick={() => void handleCancel()}>
@@ -2420,7 +2574,7 @@ export function ChatApp() {
               agentName={agent?.name}
               agentId={agentId}
               sessionId={sessionId}
-              canAct={hasChatRoute && !runActive && !sending}
+              canAct={(hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID) && !runActive && !sending}
               editingMessageId={editingTarget?.messageId ?? null}
               onRegenerate={(mid) => void handleRegenerate(mid)}
               onEditStart={handleEditStart}
@@ -2431,6 +2585,26 @@ export function ChatApp() {
                 setBranchByParent((prev) => ({ ...prev, [parentKey]: mid }))
               }
               onOpenFile={openFileInPanel}
+              onPermission={(requestId, optionId, cancelled) => {
+                if (!agentId || !sessionId) return;
+                void resolveAcpPermission(agentId, sessionId, {
+                  requestId,
+                  optionId,
+                  cancelled,
+                }).catch((err) =>
+                  toast.error(err instanceof Error ? err.message : String(err)),
+                );
+              }}
+              onElicitation={(requestId, cancelled, content) => {
+                if (!agentId || !sessionId) return;
+                void resolveAcpElicitation(agentId, sessionId, {
+                  requestId,
+                  cancelled,
+                  content,
+                }).catch((err) =>
+                  toast.error(err instanceof Error ? err.message : String(err)),
+                );
+              }}
             />
           </div>
         </div>
@@ -2455,7 +2629,116 @@ export function ChatApp() {
             showContinue={canContinue}
             onContinue={() => void handleContinue()}
             textareaRef={composerRef}
-            routeReady={hasChatRoute}
+            routeReady={hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID}
+            runtimes={acpRuntimes}
+            runtimeId={draftRuntimeId}
+            onRuntimeChange={(id) => {
+              void (async () => {
+                const current = sessionId
+                  ? sessions.find((s) => s.id === sessionId)
+                  : undefined;
+                const currentRuntime =
+                  current?.kind === "acp" && current.origin.acpProfileId
+                    ? current.origin.acpProfileId
+                    : sessionId
+                      ? ZAKURA_RUNTIME_ID
+                      : draftRuntimeId;
+                const action = conversationRuntimeSwitch({
+                  currentRuntimeId: currentRuntime,
+                  nextRuntimeId: id,
+                  hasUserMessage: Boolean(sessionId) && !emptyConversation,
+                });
+                if (action === "new_session") {
+                  handleNewSession();
+                  setDraftRuntimeId(id);
+                  toast.message("已开新对话");
+                  return;
+                }
+                if (action === "rebind" && sessionId && agentId) {
+                  try {
+                    const nextKind = id === ZAKURA_RUNTIME_ID ? "chat" : "acp";
+                    const origin =
+                      id === ZAKURA_RUNTIME_ID
+                        ? {}
+                        : { runtime: "acp" as const, acpProfileId: id };
+                    const updated = await updateCloudSession(agentId, sessionId, {
+                      kind: nextKind,
+                      origin,
+                    });
+                    setSessions((prev) =>
+                      prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)),
+                    );
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : String(err));
+                    return;
+                  }
+                }
+                setDraftRuntimeId(id);
+                if (id === ZAKURA_RUNTIME_ID) {
+                  setAcpRuntime(null);
+                } else if (sessionId && agentId) {
+                  void fetchAcpRuntime(agentId, sessionId)
+                    .then((status) =>
+                      setAcpRuntime({
+                        availableCommands: status.availableCommands,
+                        modes: status.modes,
+                        models: status.models,
+                        reasoning: status.reasoning,
+                      }),
+                    )
+                    .catch(() => undefined);
+                }
+              })();
+            }}
+            hideZakuraModel={draftRuntimeId !== ZAKURA_RUNTIME_ID}
+            acpModes={acpRuntime?.modes}
+            acpCommands={acpRuntime?.availableCommands}
+            acpModels={acpRuntime?.models}
+            acpReasoning={acpRuntime?.reasoning}
+            onAcpModeChange={(modeId) => {
+              if (!agentId || !sessionId) return;
+              void setAcpMode(agentId, sessionId, modeId)
+                .then((status) =>
+                  setAcpRuntime((prev) => ({
+                    ...prev,
+                    modes: status.modes ?? prev?.modes,
+                    availableCommands: status.availableCommands ?? prev?.availableCommands,
+                    models: status.models ?? prev?.models,
+                    reasoning: status.reasoning ?? prev?.reasoning,
+                  })),
+                )
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+            }}
+            onAcpModelChange={(modelId) => {
+              if (!agentId || !sessionId) return;
+              void setAcpModel(agentId, sessionId, modelId)
+                .then((status) =>
+                  setAcpRuntime((prev) => ({
+                    ...prev,
+                    models: status.models ?? prev?.models,
+                    reasoning: status.reasoning ?? prev?.reasoning,
+                    modes: status.modes ?? prev?.modes,
+                    availableCommands: status.availableCommands ?? prev?.availableCommands,
+                  })),
+                )
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+            }}
+            onAcpReasoningChange={(value) => {
+              if (!agentId || !sessionId) return;
+              const configId = acpRuntime?.reasoning?.configId;
+              if (!configId) return;
+              void setAcpConfigOption(agentId, sessionId, configId, value)
+                .then((status) =>
+                  setAcpRuntime((prev) => ({
+                    ...prev,
+                    models: status.models ?? prev?.models,
+                    reasoning: status.reasoning ?? prev?.reasoning,
+                    modes: status.modes ?? prev?.modes,
+                    availableCommands: status.availableCommands ?? prev?.availableCommands,
+                  })),
+                )
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+            }}
             sending={sending}
             runActive={runActive}
             runSendHint={followUpMode === "steer" ? "注入当前回合" : "加入队列"}

@@ -817,6 +817,7 @@ export class CloudAgentSessionStore {
       reasoning?: string | null;
       draftText?: string;
       project?: string | null;
+      origin?: CloudAgentSessionOrigin;
     },
   ): Promise<CloudAgentSession | null> {
     const existing = await this.getSession(tenantId, agentId, sessionId);
@@ -841,6 +842,7 @@ export class CloudAgentSessionStore {
           ? { reasoning: patch.reasoning?.trim() || null }
           : {}),
         ...(patch.draftText !== undefined ? { draftText: patch.draftText } : {}),
+        ...(patch.origin !== undefined ? { originJson: JSON.stringify(patch.origin) } : {}),
         ...(hasSessionMetadataPatch ? { updatedAt: new Date() } : {}),
       })
       .where(eq(cloudAgentSessions.id, sessionId));

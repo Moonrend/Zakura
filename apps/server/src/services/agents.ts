@@ -468,6 +468,7 @@ export class AgentService {
         instanceSlug: componentInstances.slug,
         providerId: componentInstances.providerId,
         status: componentInstances.status,
+        endpointUrl: componentInstances.endpointUrl,
       })
       .from(agentBindings)
       .innerJoin(componentInstances, eq(agentBindings.instanceId, componentInstances.id))

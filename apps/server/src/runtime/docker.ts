@@ -378,6 +378,7 @@ export class DockerRuntime implements ContainerRuntime {
     const job = new ShellJob({ agentId: opts.agentId });
     bindExecStream(job, stream, {
       inspect: () => exec.inspect(),
+      resize: (cols, rows) => exec.resize({ w: cols, h: rows }),
       killPid: async (pid) => {
         try {
           const killer = await container.exec({
@@ -396,6 +397,48 @@ export class DockerRuntime implements ContainerRuntime {
       setTimeout(() => job.write(opts.stdin!), 30);
     }
     return job;
+  }
+
+  /**
+   * 非 TTY 双向 stdio（ACP JSON-RPC）。Caller 负责生命周期。
+   */
+  async execStdio(
+    containerId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<import("@zakura/core").StdioExec> {
+    const { StdioExec } = await import("@zakura/core");
+    const container = this.docker.getContainer(containerId);
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      WorkingDir: opts?.workingDir,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: false,
+    })) as unknown as NodeJS.ReadWriteStream;
+    return new StdioExec(stream, {
+      inspect: () => exec.inspect(),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch {
+          /* gone */
+        }
+      },
+    });
   }
 
   /**
@@ -510,18 +553,7 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  /**
-   * Pull image if missing. onProgress receives raw dockerode status lines
-   * (e.g. "abc123 Pulling fs layer", "Downloading [====>] 12MB/40MB").
-   */
-  async ensureImage(
-    image: string,
-    onProgress?: (line: string) => void,
-  ): Promise<void> {
-    if (await this.hasImage(image)) {
-      onProgress?.(`Image already present: ${image}`);
-      return;
-    }
+  async pullImage(image: string, onProgress?: (line: string) => void): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
         if (err) return reject(dockerErr(err));
@@ -547,6 +579,21 @@ export class DockerRuntime implements ContainerRuntime {
         );
       });
     });
+  }
+
+  /**
+   * Pull image if missing. onProgress receives raw dockerode status lines
+   * (e.g. "abc123 Pulling fs layer", "Downloading [====>] 12MB/40MB").
+   */
+  async ensureImage(
+    image: string,
+    onProgress?: (line: string) => void,
+  ): Promise<void> {
+    if (await this.hasImage(image)) {
+      onProgress?.(`Image already present: ${image}`);
+      return;
+    }
+    await this.pullImage(image, onProgress);
   }
 
   /** Build a local image from a Dockerfile context directory. */

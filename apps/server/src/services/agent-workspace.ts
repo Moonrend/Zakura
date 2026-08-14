@@ -37,6 +37,9 @@ import {
 } from "./agent-progress.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
 
+const WORKSPACE_EXEC_PATH =
+  "/opt/zakura/acp/bin:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase();
   return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "0.0.0.0";
@@ -728,6 +731,7 @@ export class AgentWorkspaceService {
             ZAKURA_DESKTOP_HEIGHT: String(AGENT_DESKTOP_HEIGHT),
             HOME: AGENT_WORKSPACE_ROOT,
             DISPLAY: ":99",
+            PATH: WORKSPACE_EXEC_PATH,
           },
           labels: {
             "zakura.agent": agent.id,
@@ -798,7 +802,6 @@ export class AgentWorkspaceService {
       return;
     }
 
-    // Registry pull first (future published images), then local docker build
     try {
       onLog?.(`尝试拉取 ${image}…`);
       await this.runtime.ensureImage(image);
@@ -818,9 +821,7 @@ export class AgentWorkspaceService {
     }
 
     onLog?.(`本地构建 ${image}（首次约数分钟）…`);
-    const mirror = (this.config.aptMirror || "http://mirrors.aliyun.com")
-      .replace(/\/$/, "")
-      .replace(/^https:\/\//i, "http://");
+    const mirror = (this.config.aptMirror || "https://mirrors.aliyun.com").replace(/\/$/, "");
     await this.runtime.buildImage({
       tag: image,
       contextDir,
@@ -1079,7 +1080,7 @@ export class AgentWorkspaceService {
     }
 
     const env = {
-      PATH: "/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      PATH: WORKSPACE_EXEC_PATH,
       HOME: AGENT_WORKSPACE_ROOT,
       ...opts?.env,
     };
@@ -1122,7 +1123,7 @@ export class AgentWorkspaceService {
 
   private shellEnv(extra?: Record<string, string>): Record<string, string> {
     return {
-      PATH: "/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      PATH: WORKSPACE_EXEC_PATH,
       HOME: AGENT_WORKSPACE_ROOT,
       TERM: "xterm-256color",
       PYTHONUNBUFFERED: "1",
@@ -1223,6 +1224,30 @@ export class AgentWorkspaceService {
     return job.wait(waitMs);
   }
 
+  async startStdio(
+    agent: Agent,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{
+    writable: WritableStream<Uint8Array>;
+    readable: ReadableStream<Uint8Array>;
+    kill: () => Promise<void>;
+  }> {
+    const workingDir = this.shellCwd(opts?.workingDir);
+    const env = this.shellEnv(opts?.env);
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      return client.startStdio(agent.id, command, { workingDir, env });
+    }
+    const dockerId = await this.resolveDockerId(agent);
+    const job = await this.runtime.execStdio(dockerId, command, { workingDir, env });
+    const streams = job.toWebStreams();
+    return {
+      ...streams,
+      kill: () => job.kill(),
+    };
+  }
+
   async getShellJob(agent: Agent, jobId: string): Promise<ShellJobSnapshot> {
     if (this.isRemoteAgent(agent)) {
       const { client } = await this.requireRunnerClient(agent);
@@ -1242,5 +1267,16 @@ export class AgentWorkspaceService {
     if (!job) throw new Error("Shell job not found");
     await job.kill();
     return job.snapshot();
+  }
+
+  async resizeShellJob(agent: Agent, jobId: string, cols: number, rows: number): Promise<void> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      await client.resizeExecJob(agent.id, jobId, cols, rows);
+      return;
+    }
+    const job = this.shellJobs.getForAgent(agent.id, jobId);
+    if (!job) throw new Error("Shell job not found");
+    await job.resize(cols, rows);
   }
 }

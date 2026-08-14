@@ -54,6 +54,7 @@ export function buildSystemPrompt(
     "- 工作区内搜代码优先 re_fs_grep；多处改文件优先 re_apply_patch。",
     "- re_shell_exec 的输出会实时显示给用户。命令若停在提示符或长时间无输出，会先返回 status=running 和 job_id：用同一工具传 job_id 继续等待，stdin 回答提示（记得换行），kill=true 结束进程。",
     "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。产生文件的定时任务必须带 project。",
+    "- 若工具列表中有 list_acp_agents / spawn_acp_agent：用户明确要 Claude Code、Codex 等第三方编码 Agent 时，用 spawn_acp_agent 开独立会话，不要假装已调用。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
       : "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",

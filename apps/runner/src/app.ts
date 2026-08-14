@@ -259,6 +259,91 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     }
   });
 
+  app.post("/v1/workspaces/:agentId/exec/jobs/:jobId/resize", async (c) => {
+    const job = dockerWs.getJob(c.req.param("agentId"), c.req.param("jobId"));
+    if (!job) {
+      return c.json({ error: "shell job not found" }, 404);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { cols?: number; rows?: number };
+    if (!Number.isFinite(body.cols) || !Number.isFinite(body.rows)) {
+      return c.json({ error: "cols and rows are required" }, 400);
+    }
+    await job.resize(body.cols!, body.rows!);
+    return c.json({ ok: true });
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/stdio", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      command?: string[];
+      workingDir?: string;
+      env?: Record<string, string>;
+    };
+    if (!body.command?.length) return c.json({ error: "command is required" }, 400);
+    try {
+      const job = await dockerWs.startStdio(c.req.param("agentId"), body.command, {
+        workingDir: body.workingDir,
+        env: body.env,
+      });
+      return c.json({ id: job.id });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 400);
+    }
+  });
+
+  app.get("/v1/workspaces/:agentId/exec/stdio/:stdioId", async (c) => {
+    const job = dockerWs.getStdio(c.req.param("stdioId"));
+    if (!job) return c.json({ error: "stdio session not found" }, 404);
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const enc = new TextEncoder();
+          const send = (obj: unknown) => {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+          };
+          const off = job.onStderr((d) => send({ t: "err", d }));
+          const { readable } = job.toWebStreams();
+          const reader = readable.getReader();
+          void (async () => {
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) send({ t: "out", d: Buffer.from(value).toString("base64") });
+              }
+            } finally {
+              off();
+              const code = await job.wait();
+              send({ t: "exit", code });
+              controller.close();
+            }
+          })();
+        },
+      }),
+      {
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+        },
+      },
+    );
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/stdio/:stdioId/stdin", async (c) => {
+    const job = dockerWs.getStdio(c.req.param("stdioId"));
+    if (!job) return c.json({ error: "stdio session not found" }, 404);
+    const buf = Buffer.from(await c.req.arrayBuffer());
+    job.write(buf);
+    return c.json({ ok: true });
+  });
+
+  app.post("/v1/workspaces/:agentId/exec/stdio/:stdioId/kill", async (c) => {
+    const job = dockerWs.getStdio(c.req.param("stdioId"));
+    if (!job) return c.json({ error: "stdio session not found" }, 404);
+    await job.kill();
+    return c.json({ ok: true });
+  });
+
   app.get("/v1/workspaces/:agentId/endpoints", async (c) => {
     try {
       const info = await dockerWs.findByAgent(c.req.param("agentId"));

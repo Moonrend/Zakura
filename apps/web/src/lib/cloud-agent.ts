@@ -38,7 +38,7 @@ export type CloudSession = {
   agentId: string;
   title: string;
   status: string;
-  /** 会话类型标记：chat（用户对话）| subagent（子代理）| delegate（委派）| system */
+  /** 会话类型标记：chat | subagent | delegate | acp | system */
   kind: CloudAgentSessionKind;
   /** 绑定的工作区项目 slug；空 = 未绑定 */
   project: string | null;
@@ -58,6 +58,7 @@ export const SESSION_KIND_LABELS: Record<CloudAgentSessionKind, string> = {
   chat: "对话",
   subagent: "子代理",
   delegate: "委派",
+  acp: "ACP",
   system: "系统",
 };
 
@@ -79,6 +80,7 @@ export type TimelineToolCall = {
   /** 执行中的 stdout 预览（shell 等） */
   liveStdout?: string;
   liveStderr?: string;
+  diffs?: Array<{ path: string; oldText?: string; newText: string }>;
 };
 
 export type TimelineMemoryItem = {
@@ -153,7 +155,33 @@ export type TimelineItem =
       seq: number;
       runId?: string | null;
     }
-  | { kind: "error"; id: string; message: string; seq: number };
+  | { kind: "error"; id: string; message: string; seq: number }
+  | {
+      kind: "permission";
+      id: string;
+      requestId: string;
+      title?: string;
+      options: Array<{ optionId: string; name: string; kind: string }>;
+      resolved?: { outcome: string; optionId?: string };
+      seq: number;
+    }
+  | {
+      kind: "elicitation";
+      id: string;
+      requestId: string;
+      mode: "form" | "url";
+      message?: string;
+      url?: string;
+      fields?: Array<{ id: string; type: string; title?: string; required?: boolean }>;
+      resolved?: { cancelled?: boolean };
+      seq: number;
+    }
+  | {
+      kind: "plan";
+      id: string;
+      entries: Array<{ content: string; status?: string; priority?: string }>;
+      seq: number;
+    };
 
 function parseTimelineAttachments(raw: unknown): CloudAgentAttachment[] {
   if (!Array.isArray(raw)) return [];
@@ -624,10 +652,19 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         call.isError = p.isError === true;
         call.resultText = typeof p.resultText === "string" ? p.resultText : "";
         call.durationMs = typeof p.durationMs === "number" ? p.durationMs : undefined;
-        if (typeof p.name === "string") call.name = p.name;
+        if (typeof p.name === "string" && p.name !== "tool") call.name = p.name;
         if (typeof p.childSessionId === "string") call.childSessionId = p.childSessionId;
         if (typeof p.childAgentId === "string") call.childAgentId = p.childAgentId;
         if (p.detailPending === true) call.detailPending = true;
+        if (Array.isArray(p.diffs)) {
+          call.diffs = (p.diffs as Array<{ path?: string; oldText?: string; newText?: string }>)
+            .filter((d) => typeof d.path === "string" && typeof d.newText === "string")
+            .map((d) => ({
+              path: String(d.path),
+              newText: String(d.newText),
+              ...(typeof d.oldText === "string" ? { oldText: d.oldText } : {}),
+            }));
+        }
       }
       continue;
     }
@@ -750,6 +787,93 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       } else {
         items.push(done);
       }
+      continue;
+    }
+    if (ev.type === "permission_request") {
+      flushReasoning();
+      flushAssistant();
+      items.push({
+        kind: "permission",
+        id: ev.id,
+        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        title: typeof p.title === "string" ? p.title : undefined,
+        options: Array.isArray(p.options)
+          ? (p.options as Array<{ optionId?: string; name?: string; kind?: string }>)
+              .filter((o) => typeof o.optionId === "string")
+              .map((o) => ({
+                optionId: String(o.optionId),
+                name: String(o.name ?? o.optionId),
+                kind: String(o.kind ?? ""),
+              }))
+          : [],
+        seq: ev.seq,
+      });
+      continue;
+    }
+    if (ev.type === "permission_resolved") {
+      const rid = typeof p.requestId === "string" ? p.requestId : "";
+      const card = items.find(
+        (it) => it.kind === "permission" && it.requestId === rid,
+      ) as Extract<TimelineItem, { kind: "permission" }> | undefined;
+      if (card) {
+        card.resolved = {
+          outcome: typeof p.outcome === "string" ? p.outcome : "cancelled",
+          optionId: typeof p.optionId === "string" ? p.optionId : undefined,
+        };
+      }
+      continue;
+    }
+    if (ev.type === "elicitation_request") {
+      flushReasoning();
+      flushAssistant();
+      items.push({
+        kind: "elicitation",
+        id: ev.id,
+        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        mode: p.mode === "url" ? "url" : "form",
+        message: typeof p.message === "string" ? p.message : undefined,
+        url: typeof p.url === "string" ? p.url : undefined,
+        fields: Array.isArray(p.fields)
+          ? (p.fields as Array<{ id?: string; type?: string; title?: string; required?: boolean }>)
+              .filter((f) => typeof f.id === "string")
+              .map((f) => ({
+                id: String(f.id),
+                type: String(f.type ?? "string"),
+                title: typeof f.title === "string" ? f.title : undefined,
+                required: f.required === true,
+              }))
+          : undefined,
+        seq: ev.seq,
+      });
+      continue;
+    }
+    if (ev.type === "elicitation_resolved") {
+      const rid = typeof p.requestId === "string" ? p.requestId : "";
+      const card = items.find(
+        (it) => it.kind === "elicitation" && it.requestId === rid,
+      ) as Extract<TimelineItem, { kind: "elicitation" }> | undefined;
+      if (card) {
+        card.resolved = { cancelled: p.cancelled === true };
+      }
+      continue;
+    }
+    if (ev.type === "acp_plan") {
+      flushReasoning();
+      flushAssistant();
+      items.push({
+        kind: "plan",
+        id: ev.id,
+        entries: Array.isArray(p.entries)
+          ? (p.entries as Array<{ content?: string; status?: string; priority?: string }>).map(
+              (e) => ({
+                content: String(e.content ?? ""),
+                status: e.status,
+                priority: e.priority,
+              }),
+            )
+          : [],
+        seq: ev.seq,
+      });
       continue;
     }
     if (ev.type === "run_error") {
@@ -1043,11 +1167,20 @@ export async function listGatewaySessions(agentId: string) {
 export async function createCloudSession(
   agentId: string,
   title?: string,
-  opts?: { project?: string | null },
+  opts?: {
+    project?: string | null;
+    kind?: CloudAgentSessionKind;
+    origin?: CloudAgentSessionOrigin;
+  },
 ) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions`, {
     method: "POST",
-    json: { title, ...(opts?.project !== undefined ? { project: opts.project } : {}) },
+    json: {
+      title,
+      ...(opts?.project !== undefined ? { project: opts.project } : {}),
+      ...(opts?.kind ? { kind: opts.kind } : {}),
+      ...(opts?.origin ? { origin: opts.origin } : {}),
+    },
   });
 }
 
@@ -1273,6 +1406,7 @@ export async function updateCloudSession(
     reasoning?: string | null;
     draftText?: string;
     project?: string | null;
+    origin?: CloudAgentSessionOrigin;
   },
 ) {
   return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {

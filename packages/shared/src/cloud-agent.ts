@@ -65,6 +65,14 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "session_update",
   /** 服务端后续消息队列快照（每次变更全量广播，多设备同步） */
   "queue_update",
+  /** ACP：第三方 Agent 请求工具授权 */
+  "permission_request",
+  "permission_resolved",
+  /** ACP：结构化表单 / URL 交互 */
+  "elicitation_request",
+  "elicitation_resolved",
+  /** ACP：执行计划 */
+  "acp_plan",
 ] as const;
 
 export type CloudAgentEventType = (typeof CLOUD_AGENT_EVENT_TYPES)[number];
@@ -85,12 +93,14 @@ export type CloudAgentSessionStatus = "active" | "archived";
  * - chat     用户直接对话（默认，聊天界面展示的类型）
  * - subagent 子代理运行记录（agent loop 或外部 MCP 客户端派生）
  * - delegate 跨 Agent 委派记录（落在目标 Agent 名下）
+ * - acp      第三方 ACP Agent 会话（Claude Code / Codex / 自定义）
  * - system   其他系统调用产生的对话（定时任务、API 集成等）
  */
 export const CLOUD_AGENT_SESSION_KINDS = [
   "chat",
   "subagent",
   "delegate",
+  "acp",
   "system",
 ] as const;
 
@@ -131,6 +141,14 @@ export type CloudAgentSessionOrigin = {
   connectionId?: string;
   externalThreadKey?: string;
   externalUserKey?: string;
+  /** 会话运行时：缺省 = Zakura loop；acp = 第三方 ACP Agent */
+  runtime?: "acp";
+  /** ACP profile id（claude-code / codex / 自定义） */
+  acpProfileId?: string;
+  /** 协议层 session id，用于 load / resume */
+  acpSessionId?: string;
+  /** 进程池 runtime id（不跨进程持久） */
+  acpRuntimeId?: string;
 };
 
 export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOrigin {
@@ -159,6 +177,9 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
     "connectionId",
     "externalThreadKey",
     "externalUserKey",
+    "acpProfileId",
+    "acpSessionId",
+    "acpRuntimeId",
   ] as const) {
     const v = o[key];
     if (typeof v === "string" && v) out[key] = v.slice(0, 200);
@@ -166,6 +187,7 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
   if (typeof o.depth === "number" && o.depth >= 1 && o.depth <= 10) {
     out.depth = Math.floor(o.depth);
   }
+  if (o.runtime === "acp") out.runtime = "acp";
   return out;
 }
 
@@ -304,6 +326,8 @@ export type CloudAgentToolCallResultPayload = {
   childAgentId?: string;
   /** UI 历史瘦身：完整 args/result 未下发，展开时再拉 */
   detailPending?: boolean;
+  /** ACP tool_call content 里的文件 diff */
+  diffs?: Array<{ path: string; oldText?: string; newText: string }>;
 };
 
 export type CloudAgentRunStatusPayload = {
@@ -424,6 +448,55 @@ export type CloudAgentContextCompactedPayload = {
 export type CloudAgentSessionUpdatePayload = {
   title?: string;
   status?: CloudAgentSessionStatus;
+  acpModeId?: string;
+  acpModelId?: string;
+  acpCommands?: Array<{ name: string; description?: string }>;
+  acpModels?: {
+    currentId?: string;
+    available: Array<{ id: string; name: string }>;
+    configId?: string;
+  };
+  acpReasoning?: {
+    current?: string;
+    available: Array<{ id: string; name: string }>;
+    configId?: string;
+  };
+};
+
+export type CloudAgentPermissionRequestPayload = {
+  requestId: string;
+  toolCallId?: string;
+  title?: string;
+  options: Array<{ optionId: string; name: string; kind: string }>;
+};
+
+export type CloudAgentPermissionResolvedPayload = {
+  requestId: string;
+  outcome: "selected" | "cancelled";
+  optionId?: string;
+};
+
+export type CloudAgentElicitationRequestPayload = {
+  requestId: string;
+  mode: "form" | "url";
+  message?: string;
+  url?: string;
+  fields?: Array<{ id: string; type: string; title?: string; required?: boolean }>;
+};
+
+export type CloudAgentElicitationResolvedPayload = {
+  requestId: string;
+  cancelled?: boolean;
+};
+
+export type CloudAgentAcpPlanEntry = {
+  content: string;
+  status?: string;
+  priority?: string;
+};
+
+export type CloudAgentAcpPlanPayload = {
+  entries: CloudAgentAcpPlanEntry[];
 };
 
 export type CloudAgentEventPayload =
@@ -446,7 +519,12 @@ export type CloudAgentEventPayload =
   | CloudAgentContextCompactingPayload
   | CloudAgentContextCompactedPayload
   | CloudAgentSessionUpdatePayload
-  | CloudAgentQueueUpdatePayload;
+  | CloudAgentQueueUpdatePayload
+  | CloudAgentPermissionRequestPayload
+  | CloudAgentPermissionResolvedPayload
+  | CloudAgentElicitationRequestPayload
+  | CloudAgentElicitationResolvedPayload
+  | CloudAgentAcpPlanPayload;
 
 export type CloudAgentEvent = {
   id: string;

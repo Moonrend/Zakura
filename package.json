@@ -11,7 +11,7 @@
     "dev:server": "pnpm --filter @zakura/server dev",
     "dev:web": "pnpm --filter @zakura/web dev",
     "build": "pnpm -r build",
-    "workspace:image": "docker build -t sunwuyuan/zakura-workspace-dev:debian --build-arg APT_MIRROR=http://mirrors.cloud.tencent.com docker/workspace",
+    "workspace:image": "docker build -t sunwuyuan/zakura-workspace-dev:debian --build-arg APT_MIRROR=https://mirrors.cloud.tencent.com docker/workspace",
     "workspace:image:cjk": "docker build -f docker/workspace/Dockerfile.cjk-fonts -t sunwuyuan/zakura-workspace-dev:debian docker/workspace",
     "db:generate": "pnpm --filter @zakura/server db:generate",
     "db:migrate": "pnpm --filter @zakura/server db:migrate",

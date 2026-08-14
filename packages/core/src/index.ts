@@ -71,6 +71,8 @@ export {
   tailText,
 } from "./shell-job.js";
 export type { ShellJobSnapshot } from "./shell-job.js";
+export { StdioExec, StdioExecRegistry } from "./stdio-exec.js";
+export type { StdioInspect, StdioExecOptions } from "./stdio-exec.js";
 export {
   resolveDockerContextSocketPath,
   type DockerContextSocketOptions,

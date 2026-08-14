@@ -60,6 +60,7 @@ import { ConnectionCatalogService } from "./services/connection-catalog.js";
 import { InstanceMigrationService } from "./services/instance-migration.js";
 import { StoreCatalogService } from "./services/store-catalog.js";
 import { MarketSyncService } from "./services/market-sync.js";
+import { createDesktopProxyGateway } from "./services/desktop-proxy.js";
 
 async function main() {
   const config = loadConfig();
@@ -385,6 +386,10 @@ async function main() {
     db,
     config,
     store: cloudSessionStore,
+  });
+  createDesktopProxyGateway(server as import("node:http").Server, {
+    config,
+    agentService,
   });
 }
 

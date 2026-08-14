@@ -117,6 +117,12 @@ import {
   listCrisisSupportToolDefinitions,
 } from "./crisis-support-tools.js";
 import type { AgentAutomationService } from "../agent-automation.js";
+import {
+  callAcpTool,
+  isAcpToolName,
+  listAcpToolDefinitions,
+} from "./acp-tools.js";
+import type { AcpSessionService } from "../acp/session.js";
 
 export type SessionCompactionResult = {
   summary: string;
@@ -187,6 +193,8 @@ export type CloudAgentRuntimeDeps = {
   remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
   /** 定时任务自动化（可选；主 chat 注入 schedule 工具） */
   automation?: AgentAutomationService | null;
+  /** 第三方 ACP Agent（可选；主 chat 注入 list/spawn_acp_agent） */
+  acp?: AcpSessionService | null;
 };
 
 export class CloudAgentRuntime {
@@ -1639,6 +1647,14 @@ export class CloudAgentRuntime {
             nameMap.set(def.function.name, def.function.name);
           }
         }
+        if (this.deps.acp) {
+          for (const def of listAcpToolDefinitions(agent)) {
+            if (!allow(def.function.name)) continue;
+            if (definitions.some((d) => d.function.name === def.function.name)) continue;
+            definitions.push(def);
+            nameMap.set(def.function.name, def.function.name);
+          }
+        }
       }
 
       for (const def of listCrisisSupportToolDefinitions()) {
@@ -1876,6 +1892,9 @@ export class CloudAgentRuntime {
           : {}),
         toolTitle: (modelName) => {
           if (modelName === DELEGATE_TOOL_NAME) return "委派 Agent";
+          if (isAcpToolName(modelName)) {
+            return modelName === "spawn_acp_agent" ? "调用 ACP Agent" : "列出 ACP Agent";
+          }
           if (isSessionToolName(modelName)) {
             if (modelName === "list_chat_sessions") return "列出会话";
             if (modelName === "search_chat_sessions") return "搜索会话";
@@ -1918,6 +1937,28 @@ export class CloudAgentRuntime {
                 content: [{ type: "text", text: out.text }],
                 isError: out.isError === true,
               },
+            };
+          }
+          if (this.deps.acp && isAcpToolName(call.function.name)) {
+            const out = await callAcpTool(
+              this.deps.acp,
+              agent,
+              tenantId,
+              call.function.name,
+              args,
+              {
+                parentSessionId: sessionId,
+                parentRunId: runId,
+                parentToolCallId: call.id,
+              },
+            );
+            return {
+              result: {
+                content: [{ type: "text", text: out.text }],
+              },
+              ...(out.link
+                ? { link: { sessionId: out.link.sessionId, agentId: out.link.agentId } }
+                : {}),
             };
           }
           if (isSessionToolName(call.function.name)) {

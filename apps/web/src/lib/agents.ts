@@ -206,6 +206,8 @@ export const AGENT_SUBNAV = [
   { href: "memory", label: "记忆" },
   { href: "skills", label: "技能" },
   { href: "mcp", label: "MCP" },
+  { href: "connect", label: "接入" },
+  { href: "acp", label: "ACP Agent" },
   { href: "gateway", label: "AI Gateway" },
   { href: "platforms", label: "消息平台" },
   { href: "automation", label: "自动化" },

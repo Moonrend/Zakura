@@ -1324,7 +1324,7 @@ export const cloudAgentSessions = pgTable(
     title: text("title").notNull().default("新对话"),
     /** active | archived */
     status: text("status").notNull().default("active"),
-    /** 会话类型标记，见 CloudAgentSessionKind：chat | subagent | delegate | system */
+    /** 会话类型标记，见 CloudAgentSessionKind：chat | subagent | delegate | acp | system */
     kind: text("kind").notNull().default("chat"),
     /** 绑定的工作区项目 slug（/workspace/projects/<slug>）；空 = 未绑定 */
     project: text("project"),

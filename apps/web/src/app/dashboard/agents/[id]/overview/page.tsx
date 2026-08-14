@@ -28,6 +28,7 @@ const QUICK_LINKS = [
   { href: "memory", label: "记忆", icon: Brain, hint: "长期记忆" },
   { href: "skills", label: "技能", icon: Blocks, hint: "Skill 包" },
   { href: "mcp", label: "MCP", icon: Cable, hint: "工具绑定" },
+  { href: "connect", label: "接入", icon: Plug, hint: "MCP 地址与凭据" },
   { href: "gateway", label: "AI Gateway", icon: Plug, hint: "模型代理与 Key" },
   { href: "platforms", label: "消息平台", icon: MessageSquare, hint: "外部渠道" },
   { href: "automation", label: "自动化", icon: AlarmClock, hint: "定时任务" },

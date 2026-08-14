@@ -125,9 +125,42 @@ export function registerCloudAgentRoutes(
     modelRouter?: ModelRouterService;
     gateway?: McpGateway;
     skills?: SkillsService;
+    acp?: import("../services/acp/session.js").AcpSessionService | null;
   },
 ) {
-  const { agentService, store, runtime, modelRouter, gateway, skills } = deps;
+  const { agentService, store, runtime, modelRouter, gateway, skills, acp } = deps;
+
+  async function startNextQueued(input: {
+    tenantId: string;
+    agentId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (acp) {
+      const session = await store.getSession(input.tenantId, input.agentId, input.sessionId);
+      if (session?.kind === "acp") {
+        if (session.activeRunId) return;
+        const taken =
+          (await store.takeQueueNext(input.sessionId)) ??
+          (await store.takeNextQueued(input.sessionId));
+        if (!taken) return;
+        try {
+          await acp.prompt({
+            tenantId: input.tenantId,
+            agentId: input.agentId,
+            sessionId: input.sessionId,
+            content: taken.content,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.includes("进行中的 Run")) {
+            await store.requeueFront(input.sessionId, taken);
+          }
+        }
+        return;
+      }
+    }
+    return runtime.startNextQueued(input);
+  }
 
   async function requireAgent(tenantId: string, agentId: string) {
     return agentService.get(tenantId, agentId);
@@ -455,7 +488,7 @@ export function registerCloudAgentRoutes(
         store.listQueued(sid),
       ]);
       if (queue.length > 0 && !row.activeRunId) {
-        void runtime.startNextQueued({
+        void startNextQueued({
           tenantId: session.tenantId,
           agentId,
           sessionId: sid,
@@ -475,7 +508,7 @@ export function registerCloudAgentRoutes(
     ]);
     // 自愈：队列只应在运行期存在；发现空闲残留（进程中断等）就继续出队
     if (queue.length > 0 && !row.activeRunId) {
-      void runtime.startNextQueued({
+      void startNextQueued({
         tenantId: session.tenantId,
         agentId,
         sessionId: sid,
@@ -517,6 +550,7 @@ export function registerCloudAgentRoutes(
       modelRouteId?: string | null;
       reasoning?: string | null;
       draftText?: string;
+      origin?: unknown;
     }>();
     const kind = body.kind !== undefined ? parseCloudAgentSessionKind(body.kind) : null;
     if (body.kind !== undefined && !kind) {
@@ -526,6 +560,9 @@ export function registerCloudAgentRoutes(
     if (body.project !== undefined && projectField.status === "invalid") {
       return c.json({ error: "无效的项目名" }, 400);
     }
+    const origin =
+      body.origin !== undefined ? parseCloudAgentSessionOrigin(body.origin) : undefined;
+    const existing = await store.getSession(session.tenantId, c.req.param("id"), c.req.param("sid"));
     const updated = await store.updateSession(
       session.tenantId,
       c.req.param("id"),
@@ -539,9 +576,15 @@ export function registerCloudAgentRoutes(
         ...(body.modelRouteId !== undefined ? { modelRouteId: body.modelRouteId } : {}),
         ...(body.reasoning !== undefined ? { reasoning: body.reasoning } : {}),
         ...(body.draftText !== undefined ? { draftText: body.draftText } : {}),
+        ...(origin !== undefined ? { origin } : {}),
       },
     );
     if (!updated) return c.json({ error: "Not found" }, 404);
+    const leftAcp =
+      existing?.kind === "acp" &&
+      (updated.kind !== "acp" ||
+        (origin && origin.acpProfileId && origin.acpProfileId !== parseCloudAgentSessionOrigin(JSON.parse(existing.originJson || "{}")).acpProfileId));
+    if (leftAcp && acp) await acp.release(c.req.param("sid")).catch(() => undefined);
     return c.json(sessionDto(updated));
   });
 
@@ -607,6 +650,17 @@ export function registerCloudAgentRoutes(
       const pending = await store.listQueued(sid);
       if (sourceSession.activeRunId || pending.length > 0) {
         return await enqueue();
+      }
+      if (sourceSession.kind === "acp") {
+        if (!acp) return c.json({ error: "ACP 未启用" }, 400);
+        const result = await acp.prompt({
+          tenantId: session.tenantId,
+          agentId,
+          sessionId: sid,
+          content: body.content ?? "",
+          ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
+        });
+        return c.json(result, 202);
       }
       const result = await runtime.startTurn({
         tenantId: session.tenantId,
@@ -771,6 +825,9 @@ export function registerCloudAgentRoutes(
     if (!row) return c.json({ error: "Not found" }, 404);
     const body = await c.req.json<{ runId?: string }>().catch(() => ({} as { runId?: string }));
     const ok = await store.requestCancel(sid, body.runId ?? row.activeRunId);
+    if (ok && row.kind === "acp" && acp) {
+      await acp.cancel(sid).catch(() => undefined);
+    }
     return c.json({ ok, runId: body.runId ?? row.activeRunId });
   });
 

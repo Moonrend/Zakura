@@ -35,7 +35,7 @@ const inflight = new Map<string, Promise<unknown>>();
 const responseCache = new Map<string, CacheEntry>();
 const DEFAULT_GET_TTL_MS = 2000;
 
-function getSession(): string | null {
+export function getSession(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("zakura_session");
 }

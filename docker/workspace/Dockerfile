@@ -2,14 +2,14 @@
 # Agent host dir is bind-mounted at /workspace (shared with fs_* tools).
 FROM debian:bookworm-slim
 
-ARG APT_MIRROR=http://mirrors.cloud.tencent.com
+ARG APT_MIRROR=https://mirrors.cloud.tencent.com
 ARG TARGETARCH
 ARG NODE_VERSION=22.14.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:99 \
     LANG=C.UTF-8 \
-    PATH=/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/opt/zakura/acp/bin:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     NPM_CONFIG_CACHE=/workspace/.cache/npm \
     PIP_CACHE_DIR=/workspace/.cache/pip \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -18,28 +18,34 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /workspace
 
-# --- apt: system + python + build + CLI (no recommends) ---
+# --- apt: certs first (HTTPS mirrors), then toolchain ---
 RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends ca-certificates; \
   m="${APT_MIRROR}"; \
   m="${m%/}"; \
-  m="${m#https://}"; \
-  m="http://${m#http://}"; \
-  if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-    printf '%s\n' \
-      'Types: deb' \
-      "URIs: ${m}/debian" \
-      'Suites: bookworm bookworm-updates' \
-      'Components: main contrib non-free non-free-firmware' \
-      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
-      '' \
-      'Types: deb' \
-      "URIs: ${m}/debian-security" \
-      'Suites: bookworm-security' \
-      'Components: main contrib non-free non-free-firmware' \
-      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
-      >/etc/apt/sources.list.d/debian.sources; \
+  if [ -n "$m" ]; then \
+    case "$m" in \
+      http://*|https://*) ;; \
+      *) m="https://${m}" ;; \
+    esac; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      printf '%s\n' \
+        'Types: deb' \
+        "URIs: ${m}/debian" \
+        'Suites: bookworm bookworm-updates' \
+        'Components: main contrib non-free non-free-firmware' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        '' \
+        'Types: deb' \
+        "URIs: ${m}/debian-security" \
+        'Suites: bookworm-security' \
+        'Components: main contrib non-free non-free-firmware' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        >/etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update; \
   fi; \
-  apt-get update; \
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget socat unzip zip gnupg procps \
     git openssh-client \
@@ -54,7 +60,7 @@ RUN set -eux; \
   ln -sf "$(command -v fdfind)" /usr/local/bin/fd; \
   ln -sf "$(command -v python3)" /usr/local/bin/python; \
   printf '%s\n' \
-    'export PATH="/usr/local/node/bin:$PATH"' \
+    'export PATH="/opt/zakura/acp/bin:/usr/local/node/bin:$PATH"' \
     'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-/workspace/.cache/npm}"' \
     'export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/workspace/.cache/pip}"' \
     'export PIP_BREAK_SYSTEM_PACKAGES=1' \
@@ -83,6 +89,41 @@ RUN set -eux; \
   ln -sf /usr/local/node/bin/npm /usr/local/bin/npm; \
   ln -sf /usr/local/node/bin/npx /usr/local/bin/npx; \
   node -v; npm -v
+
+# ACP adapters pinned into the default workspace image (no runtime npm i -g).
+# Versions are whatever the registry serves at image build; do not chase latest in the agent container.
+RUN set -eux; \
+  mkdir -p /opt/zakura/acp /tmp/npm-cache /tmp/pip-cache; \
+  NPM_CONFIG_CACHE=/tmp/npm-cache npm install -g --prefix /opt/zakura/acp \
+    @agentclientprotocol/codex-acp \
+    @agentclientprotocol/claude-agent-acp \
+    @google/gemini-cli \
+    opencode-ai \
+    @github/copilot \
+    @xai-official/grok \
+    @moonshot-ai/kimi-code \
+    @earendil-works/pi-coding-agent \
+    pi-acp \
+    @openai/codex; \
+  PIP_CACHE_DIR=/tmp/pip-cache pip3 install --no-cache-dir 'hermes-agent[acp]'; \
+  if command -v hermes >/dev/null 2>&1 && [ ! -x /opt/zakura/acp/bin/hermes-acp ]; then \
+    printf '%s\n' '#!/bin/sh' 'exec hermes acp "$@"' >/opt/zakura/acp/bin/hermes-acp; \
+    chmod +x /opt/zakura/acp/bin/hermes-acp; \
+  elif [ ! -x /opt/zakura/acp/bin/hermes-acp ]; then \
+    printf '%s\n' '#!/bin/sh' 'exec python3 -m hermes_acp "$@"' >/opt/zakura/acp/bin/hermes-acp; \
+    chmod +x /opt/zakura/acp/bin/hermes-acp; \
+  fi; \
+  command -v codex-acp; \
+  command -v claude-agent-acp; \
+  command -v gemini; \
+  command -v hermes-acp; \
+  command -v opencode; \
+  command -v copilot; \
+  command -v grok; \
+  command -v kimi; \
+  command -v pi; \
+  command -v pi-acp; \
+  rm -rf /tmp/npm-cache /tmp/pip-cache /root/.cache /root/.npm
 
 COPY entrypoint.sh /usr/local/bin/zakura-workspace
 COPY capabilities.txt /etc/zakura/capabilities.txt

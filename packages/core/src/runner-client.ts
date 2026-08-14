@@ -380,6 +380,116 @@ export class RunnerClient {
     return (await res.json()) as ShellJobSnapshot;
   }
 
+  async resizeExecJob(agentId: string, jobId: string, cols: number, rows: number): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/resize`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ cols, rows }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+  }
+
+  async startStdio(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{
+    writable: WritableStream<Uint8Array>;
+    readable: ReadableStream<Uint8Array>;
+    kill: () => Promise<void>;
+  }> {
+    const start = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          command,
+          workingDir: opts?.workingDir,
+          env: opts?.env,
+        }),
+      },
+    );
+    if (!start.ok) throw new Error(await start.text());
+    const { id } = (await start.json()) as { id: string };
+    const events = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}`,
+      { headers: this.headers({ Accept: "text/event-stream" }) },
+    );
+    if (!events.ok || !events.body) throw new Error(await events.text());
+
+    const readable = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const reader = events.body!.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            for (;;) {
+              const idx = buf.indexOf("\n\n");
+              if (idx < 0) break;
+              const block = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              const line = block
+                .split("\n")
+                .find((l) => l.startsWith("data: "));
+              if (!line) continue;
+              const msg = JSON.parse(line.slice(6)) as {
+                t?: string;
+                d?: string;
+                code?: number | null;
+              };
+              if (msg.t === "out" && msg.d) {
+                controller.enqueue(Uint8Array.from(Buffer.from(msg.d, "base64")));
+              }
+              if (msg.t === "exit") {
+                controller.close();
+                return;
+              }
+            }
+          }
+        } finally {
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        }
+      },
+    });
+
+    const writable = new WritableStream<Uint8Array>({
+      write: async (chunk) => {
+        const res = await this.fetchImpl(
+          `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}/stdin`,
+          {
+            method: "POST",
+            headers: this.headers({ "Content-Type": "application/octet-stream" }),
+            body: chunk,
+          },
+        );
+        if (!res.ok) throw new Error(await res.text());
+      },
+    });
+
+    return {
+      writable,
+      readable,
+      kill: async () => {
+        await this.fetchImpl(
+          `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}/kill`,
+          { method: "POST", headers: this.headers() },
+        ).catch(() => undefined);
+      },
+    };
+  }
+
   async listDetailed(agentId: string, path: string): Promise<ListDetailedResult> {
     const url = new URL(`${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/list`);
     url.searchParams.set("path", path || "/");

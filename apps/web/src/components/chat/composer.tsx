@@ -234,6 +234,9 @@ export function Composer({
   toolGroups,
   disabledGroupIds,
   onToggleGroup,
+  runtimes,
+  runtimeId,
+  onRuntimeChange,
   models,
   model,
   modelRouteId,
@@ -241,6 +244,14 @@ export function Composer({
   reasoning,
   reasoningItems,
   onReasoningChange,
+  acpModes,
+  onAcpModeChange,
+  acpCommands,
+  acpModels,
+  onAcpModelChange,
+  acpReasoning,
+  onAcpReasoningChange,
+  hideZakuraModel,
   contextWindow,
   contextWindowOpen,
   compactingContext,
@@ -280,6 +291,9 @@ export function Composer({
   toolGroups: ComposerToolGroup[];
   disabledGroupIds: string[];
   onToggleGroup: (id: string) => void;
+  runtimes?: Array<{ id: string; label: string }>;
+  runtimeId?: string;
+  onRuntimeChange?: (id: string) => void;
   models: ComposerModelItem[];
   model: string;
   modelRouteId?: string | null;
@@ -287,6 +301,14 @@ export function Composer({
   reasoning: ComposerReasoningValue;
   reasoningItems: Array<{ value: ComposerReasoningValue; label: string }>;
   onReasoningChange: (value: ComposerReasoningValue) => void;
+  acpModes?: { currentId?: string; available: Array<{ id: string; name: string }> };
+  onAcpModeChange?: (modeId: string) => void;
+  acpCommands?: Array<{ name: string; description?: string }>;
+  acpModels?: { currentId?: string; available: Array<{ id: string; name: string }> };
+  onAcpModelChange?: (modelId: string) => void;
+  acpReasoning?: { current?: string; available: Array<{ id: string; name: string }> };
+  onAcpReasoningChange?: (value: string) => void;
+  hideZakuraModel?: boolean;
   contextWindow: ContextWindowInfo;
   contextWindowOpen: boolean;
   compactingContext: boolean;
@@ -588,6 +610,144 @@ export function Composer({
             onToggleGroup={onToggleGroup}
           />
 
+          {runtimes && runtimes.length > 1 && onRuntimeChange ? (
+            <Select
+              value={runtimeId ?? "zakura"}
+              onValueChange={(v) => {
+                if (v) onRuntimeChange(v);
+              }}
+              items={runtimes.map((r) => ({ value: r.id, label: r.label }))}
+            >
+              <SelectTrigger
+                aria-label="对话 Agent"
+                className={cn(
+                  "h-8 max-w-36 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none",
+                  "transition-[background-color,color] duration-200 ease-fluid hover:bg-muted/70 hover:text-foreground",
+                )}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent side="top" align="start" sideOffset={8}>
+                {runtimes.map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+
+          {acpCommands && acpCommands.length > 0 ? (
+            <Select
+              value=""
+              onValueChange={(v) => {
+                if (!v) return;
+                onValueChange(value.trim() ? `${value.replace(/\s+$/, "")}\n/${v} ` : `/${v} `);
+              }}
+              items={acpCommands.map((c) => ({
+                value: c.name,
+                label: c.description ? `/${c.name} · ${c.description}` : `/${c.name}`,
+              }))}
+            >
+              <SelectTrigger
+                aria-label="斜杠命令"
+                className="h-8 max-w-28 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+              >
+                <SelectValue placeholder="/ 命令" />
+              </SelectTrigger>
+              <SelectContent side="top" align="start" sideOffset={8}>
+                {acpCommands.map((c) => (
+                  <SelectItem key={c.name} value={c.name}>
+                    /{c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+
+          {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
+            <Select
+              value={acpModes.currentId || acpModes.available[0]?.id}
+              onValueChange={(v) => {
+                if (v) onAcpModeChange(v);
+              }}
+              items={acpModes.available.map((m) => ({ value: m.id, label: m.name }))}
+            >
+              <SelectTrigger
+                aria-label="ACP 模式"
+                className="h-8 max-w-32 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent side="top" align="start" sideOffset={8}>
+                {acpModes.available.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+
+          {hideZakuraModel ? (
+            <>
+              <Select
+                value={
+                  acpModels?.available.length
+                    ? acpModels.currentId || acpModels.available[0]?.id
+                    : "_pending"
+                }
+                onValueChange={(v) => {
+                  if (v && v !== "_pending") onAcpModelChange?.(v);
+                }}
+                disabled={!acpModels?.available.length}
+                items={
+                  acpModels?.available.length
+                    ? acpModels.available.map((m) => ({ value: m.id, label: m.name }))
+                    : [{ value: "_pending", label: "模型" }]
+                }
+              >
+                <SelectTrigger
+                  aria-label="ACP 模型"
+                  className="h-8 max-w-40 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+                >
+                  <SelectValue placeholder="模型" />
+                </SelectTrigger>
+                <SelectContent side="top" align="start" sideOffset={8}>
+                  {(acpModels?.available ?? []).map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {acpReasoning && acpReasoning.available.length > 0 && onAcpReasoningChange ? (
+                <Select
+                  value={acpReasoning.current || acpReasoning.available[0]?.id}
+                  onValueChange={(v) => {
+                    if (v) onAcpReasoningChange(v);
+                  }}
+                  items={acpReasoning.available.map((m) => ({ value: m.id, label: m.name }))}
+                >
+                  <SelectTrigger
+                    aria-label="ACP 思考强度"
+                    className="h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+                  >
+                    <Brain className="size-3.5 opacity-60" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent side="top" align="start" sideOffset={8}>
+                    {acpReasoning.available.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+            </>
+          ) : (
+            <>
           <ModelRouteSelector
             items={models}
             value={model}
@@ -623,6 +783,8 @@ export function Composer({
               ))}
             </SelectContent>
           </Select>
+            </>
+          )}
 
           <div className="flex-1" />
 

@@ -447,6 +447,31 @@ function describeCall(
   call: TimelineToolCall,
   onOpenFile?: (path: string) => void,
 ): Described {
+  const inner = describeCallBody(call, onOpenFile);
+  if (!call.diffs?.length) return inner;
+  return {
+    ...inner,
+    detail: detailOf(
+      ...call.diffs.map((d) => (
+        <div key={d.path} className="space-y-1.5">
+          <Meta>
+            <FilePathButton path={d.path} onOpenFile={onOpenFile} />
+          </Meta>
+          {d.oldText ? (
+            <Block text={truncate(d.oldText, 4000)} tone="remove" label="替换前" />
+          ) : null}
+          <Block text={truncate(d.newText, 4000)} tone="add" label="替换后" />
+        </div>
+      )),
+      inner.detail,
+    ),
+  };
+}
+
+function describeCallBody(
+  call: TimelineToolCall,
+  onOpenFile?: (path: string) => void,
+): Described {
   const name = call.name.replace(/^re_/, "");
   const args = tryParseArgs(call.arguments);
   const result = call.resultText ?? "";
@@ -842,12 +867,13 @@ function describeCall(
   }
 
   // 通用回退：工具名 + 参数/结果
+  const displayName = call.title?.trim() || name;
   const argsText = call.arguments && call.arguments !== "{}" ? pretty(call.arguments) : "";
   const genericDocs = ok ? parseMarkdownDocs(result, 1) : [];
   return {
     icon: Wrench,
-    runningLabel: `调用 ${name}…`,
-    label: <span className="font-mono">{name}</span>,
+    runningLabel: `调用 ${displayName}…`,
+    label: <span className="font-mono">{displayName}</span>,
     detail: detailOf(
       argsText ? <Block text={truncate(argsText, 4000)} label="参数" /> : null,
       genericDocs.length > 0 ? <MarkdownDocBlock doc={genericDocs[0]!} /> : resultBlock,
@@ -932,6 +958,7 @@ function ToolRow({
     () => describeCall(effectiveCall, onOpenFile),
     [
       effectiveCall.name,
+      effectiveCall.title,
       effectiveCall.arguments,
       effectiveCall.resultText,
       effectiveCall.status,
@@ -941,6 +968,7 @@ function ToolRow({
       effectiveCall.childAgentId,
       effectiveCall.liveStdout,
       effectiveCall.liveStderr,
+      effectiveCall.diffs,
       // eslint-disable-next-line react-hooks/exhaustive-deps -- 依赖上面的具体字段而非对象身份
       onOpenFile,
     ],

@@ -14,6 +14,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
@@ -352,6 +353,111 @@ function AnswerToolbar({
   );
 }
 
+function elicitationContent(
+  fields: Array<{ id: string; type: string; required?: boolean }>,
+  values: Record<string, string>,
+): Record<string, unknown> {
+  const content: Record<string, unknown> = {};
+  for (const f of fields) {
+    const raw = values[f.id] ?? "";
+    if (f.type === "boolean") {
+      content[f.id] = raw === "true";
+      continue;
+    }
+    if ((f.type === "number" || f.type === "integer") && raw !== "") {
+      const n = Number(raw);
+      if (!Number.isNaN(n)) content[f.id] = n;
+      continue;
+    }
+    if (raw !== "" || f.required) content[f.id] = raw;
+  }
+  return content;
+}
+
+function ElicitationCard({
+  item,
+  onElicitation,
+}: {
+  item: Extract<TimelineItem, { kind: "elicitation" }>;
+  onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const fields = item.fields ?? [];
+  return (
+    <div className="my-2 space-y-2 rounded-lg border border-border bg-card px-3 py-2.5 text-sm">
+      <div className="font-medium">
+        {item.message || (item.mode === "url" ? "需要打开链接" : "需要补充信息")}
+      </div>
+      {item.url ? (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noreferrer"
+          className="block truncate text-xs text-primary underline"
+        >
+          {item.url}
+        </a>
+      ) : null}
+      {item.resolved ? (
+        <div className="text-xs text-muted-foreground">
+          {item.resolved.cancelled ? "已取消" : "已提交"}
+        </div>
+      ) : (
+        <>
+          {fields.map((f) => (
+            <label key={f.id} className="block space-y-1">
+              <span className="text-xs text-muted-foreground">
+                {f.title || f.id}
+                {f.required ? " *" : ""}
+              </span>
+              {f.type === "boolean" ? (
+                <input
+                  type="checkbox"
+                  className="ml-2 align-middle"
+                  checked={values[f.id] === "true"}
+                  onChange={(e) =>
+                    setValues((prev) => ({ ...prev, [f.id]: e.target.checked ? "true" : "false" }))
+                  }
+                />
+              ) : (
+                <Input
+                  type={f.type === "number" || f.type === "integer" ? "number" : "text"}
+                  className="max-w-72"
+                  value={values[f.id] ?? ""}
+                  onChange={(e) => setValues((prev) => ({ ...prev, [f.id]: e.target.value }))}
+                />
+              )}
+            </label>
+          ))}
+          <div className="flex flex-wrap gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() =>
+                onElicitation?.(
+                  item.requestId,
+                  false,
+                  fields.length ? elicitationContent(fields, values) : {},
+                )
+              }
+            >
+              {fields.length ? "提交" : "继续"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => onElicitation?.(item.requestId, true)}
+            >
+              取消
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** 把回合条目渲染为块序列：连续思考+工具合并为一组，正文开始后自动收成首条 */
 function renderRunItems(
   items: TimelineItem[],
@@ -362,6 +468,8 @@ function renderRunItems(
     onOpenFile?: (path: string) => void;
     agentId?: string | null;
     sessionId?: string | null;
+    onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
+    onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
   },
 ) {
   const blocks: ReactNode[] = [];
@@ -488,6 +596,65 @@ function renderRunItems(
           <ChatMarkdown content={it.content} final={it.final} fade={false} />
         </div>,
       );
+    } else if (it.kind === "plan") {
+      blocks.push(
+        <ol
+          key={`plan-${it.id}`}
+          className="my-2 space-y-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm"
+        >
+          {it.entries.map((e, i) => (
+            <li key={`${it.id}-${i}`} className="flex gap-2 text-muted-foreground">
+              <span className="shrink-0 text-xs uppercase">{e.status ?? "pending"}</span>
+              <span className="text-foreground">{e.content}</span>
+            </li>
+          ))}
+        </ol>,
+      );
+    } else if (it.kind === "permission") {
+      blocks.push(
+        <div
+          key={`perm-${it.id}`}
+          className="my-2 space-y-2 rounded-lg border border-border bg-card px-3 py-2.5 text-sm"
+        >
+          <div className="font-medium">{it.title || "需要授权"}</div>
+          {it.resolved ? (
+            <div className="text-xs text-muted-foreground">
+              {it.resolved.outcome === "selected" ? "已选择" : "已取消"}
+              {it.resolved.optionId ? ` · ${it.resolved.optionId}` : ""}
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {it.options.map((opt) => (
+                <Button
+                  key={opt.optionId}
+                  type="button"
+                  size="sm"
+                  variant={String(opt.kind).startsWith("allow") ? "default" : "outline"}
+                  onClick={() => opts.onPermission?.(it.requestId, opt.optionId)}
+                >
+                  {opt.name}
+                </Button>
+              ))}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => opts.onPermission?.(it.requestId, undefined, true)}
+              >
+                取消
+              </Button>
+            </div>
+          )}
+        </div>,
+      );
+    } else if (it.kind === "elicitation") {
+      blocks.push(
+        <ElicitationCard
+          key={`elic-${it.id}`}
+          item={it}
+          onElicitation={opts.onElicitation}
+        />,
+      );
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -598,6 +765,8 @@ export function ChatMessages({
   onSelectVariant,
   onSelectBranch,
   onOpenFile,
+  onPermission,
+  onElicitation,
 }: {
   turns: ConversationTurn[];
   runActive: boolean;
@@ -619,6 +788,8 @@ export function ChatMessages({
   onSelectVariant: (messageId: string, runId: string) => void;
   onSelectBranch: (parentKey: string, messageId: string) => void;
   onOpenFile?: (path: string) => void;
+  onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
+  onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
@@ -736,6 +907,8 @@ export function ChatMessages({
                 onOpenFile,
                 agentId,
                 sessionId,
+                onPermission,
+                onElicitation,
               })}
 
               {sharedFiles.length > 0 && (

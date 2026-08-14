@@ -11,6 +11,8 @@ import {
   toDockerHostPath,
   ShellJob,
   ShellJobRegistry,
+  StdioExec,
+  StdioExecRegistry,
   bindExecStream,
   ensureWorkspaceDir,
   type ShellJobSnapshot,
@@ -21,6 +23,7 @@ import {
   AGENT_WORKSPACE_ROOT,
   AGENT_DESKTOP_WIDTH,
   AGENT_DESKTOP_HEIGHT,
+  ACP_IMAGE_BIN_DIR,
 } from "@zakura/shared";
 
 function dockerErr(err: unknown): Error {
@@ -99,6 +102,7 @@ export type WorkspaceInfo = {
 export class RunnerDockerWorkspace {
   private readonly docker: Docker;
   private readonly jobs = new ShellJobRegistry();
+  private readonly stdio = new StdioExecRegistry();
 
   constructor(
     private readonly storageRoot: string,
@@ -262,6 +266,7 @@ export class RunnerDockerWorkspace {
       ZAKURA_DESKTOP_HEIGHT: String(AGENT_DESKTOP_HEIGHT),
       HOME: AGENT_WORKSPACE_ROOT,
       DISPLAY: ":99",
+      PATH: `${ACP_IMAGE_BIN_DIR}:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
       ...(spec.env ?? {}),
     };
 
@@ -440,6 +445,7 @@ export class RunnerDockerWorkspace {
     const job = new ShellJob({ agentId });
     bindExecStream(job, stream, {
       inspect: () => exec.inspect(),
+      resize: (cols, rows) => exec.resize({ w: cols, h: rows }),
       killPid: async (pid) => {
         try {
           const killer = await container.exec({
@@ -489,6 +495,54 @@ export class RunnerDockerWorkspace {
 
   async killAgentJobs(agentId: string): Promise<void> {
     await this.jobs.killAgent(agentId);
+  }
+
+  async startStdio(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ) {
+    const existing = await this.findByAgent(agentId);
+    if (!existing || existing.status !== "running") {
+      throw new Error("Workspace container not running on this runner");
+    }
+    const container = this.docker.getContainer(existing.dockerId);
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      WorkingDir: opts?.workingDir,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: false,
+    })) as unknown as NodeJS.ReadWriteStream;
+    const job = new StdioExec(stream, {
+      inspect: () => exec.inspect(),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch {
+          /* gone */
+        }
+      },
+    });
+    this.stdio.add(job);
+    return job;
+  }
+
+  getStdio(id: string) {
+    return this.stdio.get(id);
   }
 
   /**

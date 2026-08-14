@@ -85,6 +85,8 @@ import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
+import { registerAcpRoutes } from "./acp-routes.js";
+import { AcpSessionService } from "../services/acp/session.js";
 import { registerAutomationRoutes } from "./automation-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
@@ -105,6 +107,7 @@ import { registerSkillRoutes } from "./skill-routes.js";
 import { registerNetworkRoutes } from "./network-routes.js";
 import { registerConnectionRoutes } from "./connection-routes.js";
 import { registerOpenAiGatewayRoutes } from "./openai-gateway-routes.js";
+import { signWorkspaceConnectionTicket } from "../services/desktop-ticket.js";
 import { loadSaasServer } from "../saas-loader.js";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
 import type { MigrationService } from "../services/migration-service.js";
@@ -344,6 +347,19 @@ export type AppVariables = {
     isPlatformAdmin?: boolean;
   };
 };
+
+function workspaceSocketUrl(
+  publicBaseUrl: string,
+  agentId: string,
+  kind: "desktop" | "terminal",
+  ticket: string,
+): string {
+  const url = new URL(publicBaseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `/api/agents/${encodeURIComponent(agentId)}/${kind}-proxy`;
+  url.search = new URLSearchParams({ token: ticket }).toString();
+  return url.toString();
+}
 
 async function loadInstanceWithContainers(db: Db, tenantId: string, id: string) {
   const instance = await db.query.componentInstances.findFirst({
@@ -1999,6 +2015,39 @@ export async function createApiApp(deps: {
     return c.json(await agentService.workspace.getDesktopInfo(agent));
   });
 
+  app.post("/api/agents/:id/desktop-ticket", async (c) => {
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    if (!agent.enableComputer) return c.json({ error: "Desktop is disabled" }, 409);
+    const ticket = signWorkspaceConnectionTicket(
+      config.secret,
+      session.tenantId,
+      agent.id,
+      "desktop",
+    );
+    return c.json({
+      ticket,
+      url: workspaceSocketUrl(config.publicBaseUrl, agent.id, "desktop", ticket),
+    });
+  });
+
+  app.post("/api/agents/:id/terminal-ticket", async (c) => {
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    const ticket = signWorkspaceConnectionTicket(
+      config.secret,
+      session.tenantId,
+      agent.id,
+      "terminal",
+    );
+    return c.json({
+      ticket,
+      url: workspaceSocketUrl(config.publicBaseUrl, agent.id, "terminal", ticket),
+    });
+  });
+
   app.patch("/api/agents/:id", async (c) => {
     const session = c.get("session")!;
     const body = await c.req.json<{
@@ -2555,6 +2604,17 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = cloudSessionStore;
+    const acpSessions = new AcpSessionService({
+      agentService,
+      store: cloudStore,
+      workspace: agentService.workspace,
+      workspaceFs: workspaceFsProvider,
+    });
+    registerAcpRoutes(app, {
+      agentService,
+      acp: acpSessions,
+      publicBaseUrl: config.publicBaseUrl,
+    });
     remoteIngress = new RemoteAgentIngress(
       db,
       agentService,
@@ -2602,6 +2662,7 @@ export async function createApiApp(deps: {
         agentHooks,
         remoteChannels: remoteRuntime.sessions,
         automation,
+        acp: acpSessions,
       });
       cloudAgentRuntime = cloudRuntime;
       automation.setRunner({
@@ -2629,6 +2690,7 @@ export async function createApiApp(deps: {
         modelRouter,
         gateway,
         skills,
+        acp: acpSessions,
       });
       registerAutomationRoutes(app, { agentService, automation });
       emailInbound = new EmailInboundService(
@@ -2658,6 +2720,7 @@ export async function createApiApp(deps: {
         modelRouter,
         gateway,
         skills,
+        acp: acpSessions,
       });
       // 自动化 CRUD 仍可配置；触发会失败直至模型路由可用
       registerAutomationRoutes(app, { agentService, automation });

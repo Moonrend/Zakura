@@ -89,15 +89,12 @@ export function loadConfig(): AppConfig {
   const webPublicUrl =
     process.env.ZAKURA_WEB_URL ?? process.env.WEB_PUBLIC_URL ?? "http://127.0.0.1:3001";
 
-  // Default Aliyun HTTP; containers fall back across tuna/ustc/huawei/tencent/debian.
-  // Prefer HTTP: slim images lack ca-certificates until the first apt install.
+  // Default Aliyun; empty / off / none keeps the image's Debian sources.
   const aptMirrorRaw = process.env.ZAKURA_APT_MIRROR;
   const aptMirror =
     aptMirrorRaw === "" || aptMirrorRaw === "off" || aptMirrorRaw === "none"
       ? ""
-      : (aptMirrorRaw ?? "http://mirrors.aliyun.com")
-          .replace(/\/$/, "")
-          .replace(/^https:\/\//i, "http://");
+      : (aptMirrorRaw ?? "https://mirrors.aliyun.com").replace(/\/$/, "");
 
   const migrationDir = process.env.ZAKURA_MIGRATION_DIR
     ? resolve(process.env.ZAKURA_MIGRATION_DIR)
