@@ -9,6 +9,7 @@ import {
   describeNamespaceTools,
   fitNamespacesToRoom,
   packOpenAiChatTools,
+  sanitizeOpenAiToolSchema,
   semanticBucketForToolName,
   shardNamespaceGroups,
   shortToolLabel,
@@ -144,6 +145,46 @@ describe("fitNamespacesToRoom", () => {
 });
 
 describe("packOpenAiChatTools", () => {
+  it("removes unsupported regex lookaround from nested tool schemas", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        contact: {
+          type: "object",
+          properties: {
+            email: {
+              type: "string",
+              pattern: "^(?!.*\\.\\.)[^@]+@[^@]+$",
+              format: "email",
+            },
+            code: { type: "string", pattern: "^[A-Z]{2}$" },
+          },
+        },
+      },
+    };
+
+    const sanitized = sanitizeOpenAiToolSchema(schema) as typeof schema;
+    assert.equal(sanitized.properties.contact.properties.email.pattern, undefined);
+    assert.equal(sanitized.properties.contact.properties.email.format, "email");
+    assert.equal(sanitized.properties.contact.properties.code.pattern, "^[A-Z]{2}$");
+    assert.equal(schema.properties.contact.properties.email.pattern, "^(?!.*\\.\\.)[^@]+@[^@]+$");
+  });
+
+  it("sanitizes schemas in both chat and responses tool formats", () => {
+    const withLookbehind = tool("send_contact");
+    withLookbehind.function.parameters = {
+      type: "object",
+      properties: { value: { type: "string", pattern: "(?<=prefix)value" } },
+    };
+
+    for (const format of ["chat", "responses"] as const) {
+      const packed = packOpenAiChatTools([withLookbehind], "gpt-5.6-sol", { format });
+      const first = packed!.tools[0] as Record<string, any>;
+      const parameters = format === "chat" ? first.function.parameters : first.parameters;
+      assert.equal(parameters.properties.value.pattern, undefined);
+    }
+  });
+
   it("returns pack result object with usedToolSearch", () => {
     const deferred = Array.from({ length: TOOL_SEARCH_MIN_DEFERRED_TOOLS }, (_, i) =>
       tool(`list_${i}`, { defer: true, ns: "gmail" }),

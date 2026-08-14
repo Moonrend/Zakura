@@ -32,6 +32,29 @@ export type OpenAiToolsPackResult = {
   warning?: string;
 };
 
+/**
+ * OpenAI's tool-schema validator rejects regex lookaround even though MCP
+ * servers may legally expose it in their JSON Schema.  Keep the rest of the
+ * schema intact and let the tool provider perform its original validation.
+ */
+export function sanitizeOpenAiToolSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeOpenAiToolSchema);
+  if (!value || typeof value !== "object") return value;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      key === "pattern" &&
+      typeof child === "string" &&
+      /\(\?(?:[=!]|<[=!])/.test(child)
+    ) {
+      continue;
+    }
+    out[key] = sanitizeOpenAiToolSchema(child);
+  }
+  return out;
+}
+
 /** gpt-5.4 及更高（含 gpt-5.6-luna 等后缀） */
 export function supportsToolSearch(model: string | undefined | null): boolean {
   if (!model) return false;
@@ -57,7 +80,9 @@ function toChatFunctionTool(tool: ModelToolDefinition): Record<string, unknown> 
     function: {
       name: tool.function.name,
       ...(tool.function.description ? { description: tool.function.description } : {}),
-      ...(tool.function.parameters ? { parameters: tool.function.parameters } : {}),
+      ...(tool.function.parameters
+        ? { parameters: sanitizeOpenAiToolSchema(tool.function.parameters) }
+        : {}),
       ...(tool.function.strict != null ? { strict: tool.function.strict } : {}),
     },
   };
@@ -72,7 +97,9 @@ export function toFlatFunctionTool(
     type: "function",
     name: tool.function.name,
     ...(tool.function.description ? { description: tool.function.description } : {}),
-    ...(tool.function.parameters ? { parameters: tool.function.parameters } : {}),
+    ...(tool.function.parameters
+      ? { parameters: sanitizeOpenAiToolSchema(tool.function.parameters) }
+      : {}),
     ...(tool.function.strict != null ? { strict: tool.function.strict } : {}),
     ...(deferLoading ? { defer_loading: true } : {}),
   };
