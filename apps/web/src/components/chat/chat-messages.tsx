@@ -15,6 +15,14 @@ import {
 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
@@ -411,14 +419,32 @@ function ElicitationCard({
                 {f.required ? " *" : ""}
               </span>
               {f.type === "boolean" ? (
-                <input
-                  type="checkbox"
-                  className="ml-2 align-middle"
+                <Switch
                   checked={values[f.id] === "true"}
-                  onChange={(e) =>
-                    setValues((prev) => ({ ...prev, [f.id]: e.target.checked ? "true" : "false" }))
+                  onCheckedChange={(v) =>
+                    setValues((prev) => ({ ...prev, [f.id]: v ? "true" : "false" }))
                   }
+                  aria-label={f.title || f.id}
                 />
+              ) : f.options && f.options.length > 0 ? (
+                <Select
+                  value={values[f.id] ?? f.options[0] ?? ""}
+                  onValueChange={(v) => {
+                    if (v) setValues((prev) => ({ ...prev, [f.id]: v }));
+                  }}
+                  items={f.options.map((v) => ({ value: v, label: v }))}
+                >
+                  <SelectTrigger className="h-8 w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {f.options.map((v) => (
+                      <SelectItem key={v} value={v}>
+                        {v}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               ) : (
                 <Input
                   type={f.type === "number" || f.type === "integer" ? "number" : "text"}
@@ -620,7 +646,9 @@ function renderRunItems(
           {it.resolved ? (
             <div className="text-xs text-muted-foreground">
               {it.resolved.outcome === "selected" ? "已选择" : "已取消"}
-              {it.resolved.optionId ? ` · ${it.resolved.optionId}` : ""}
+              {it.resolved.optionName || it.resolved.optionId
+                ? ` · ${it.resolved.optionName || it.resolved.optionId}`
+                : ""}
             </div>
           ) : (
             <div className="flex flex-wrap gap-1.5">

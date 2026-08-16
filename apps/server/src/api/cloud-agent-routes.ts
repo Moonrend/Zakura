@@ -596,6 +596,7 @@ export function registerCloudAgentRoutes(
       c.req.param("sid"),
     );
     if (!ok) return c.json({ error: "Not found" }, 404);
+    if (acp) await acp.release(c.req.param("sid")).catch(() => undefined);
     return c.json({ ok: true });
   });
 

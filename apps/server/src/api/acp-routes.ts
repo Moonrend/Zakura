@@ -4,7 +4,6 @@
 import type { Hono } from "hono";
 import {
   isValidAcpProfileId,
-  acpManualSetupCommand,
   parseAcpAgentConfig,
   parseAcpAgentSetup,
   parseAcpPermissionPolicy,
@@ -13,6 +12,7 @@ import type { AppVariables } from "./routes.js";
 import type { AgentService } from "../services/agents.js";
 import {
   acpConfigResponse,
+  agentAcpConfigError,
   provisionAcpZakuraRoutes,
   readAgentAcpConfig,
   saveAgentAcpConfig,
@@ -33,7 +33,16 @@ export function registerAcpRoutes(
     const session = c.get("session")!;
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    return c.json(acpConfigResponse(readAgentAcpConfig(agent)));
+    // Older ACP settings may already select the Zakura provider but predate
+    // per-Agent Gateway key provisioning. Repair that state on read so an
+    // existing configuration cannot launch Hermes/Kimi without Authorization.
+    const provisioned = await provisionAcpConfigIfNeeded(
+      agentService,
+      session.tenantId,
+      agent,
+      publicBaseUrl,
+    );
+    return c.json(acpConfigResponse(provisioned, agentAcpConfigError(agent)));
   });
 
   app.put("/api/agents/:id/acp/config", async (c) => {
@@ -122,66 +131,6 @@ export function registerAcpRoutes(
     }
   });
 
-  app.post("/api/agents/:id/acp/workspace/terminal", async (c) => {
-    const session = c.get("session")!;
-    const agent = await agentService.get(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const body: { profileId?: string } = await c.req
-      .json<{ profileId?: string }>()
-      .catch(() => ({}));
-    try {
-      await agentService.workspace.start(agent);
-      const setup = body.profileId?.trim()
-        ? acpManualSetupCommand(body.profileId)
-        : { command: ["bash", "-l"], display: "bash -l" };
-      const snapshot = await agentService.workspace.startShellJob(agent, setup.command, {
-        stdin: setup.initialInput,
-      });
-      return c.json({ ...snapshot, command: setup.display });
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
-    }
-  });
-
-  app.get("/api/agents/:id/acp/workspace/terminal/:jobId", async (c) => {
-    const session = c.get("session")!;
-    const agent = await agentService.get(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    try {
-      return c.json(await agentService.workspace.getShellJob(agent, c.req.param("jobId")));
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 404);
-    }
-  });
-
-  app.post("/api/agents/:id/acp/workspace/terminal/:jobId/input", async (c) => {
-    const session = c.get("session")!;
-    const agent = await agentService.get(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    const body: { input?: string } = await c.req
-      .json<{ input?: string }>()
-      .catch(() => ({}));
-    if (typeof body.input !== "string") return c.json({ error: "input 必填" }, 400);
-    try {
-      return c.json(await agentService.workspace.waitShellJob(agent, c.req.param("jobId"), 1, {
-        stdin: body.input,
-      }));
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
-    }
-  });
-
-  app.delete("/api/agents/:id/acp/workspace/terminal/:jobId", async (c) => {
-    const session = c.get("session")!;
-    const agent = await agentService.get(session.tenantId, c.req.param("id"));
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-    try {
-      return c.json(await agentService.workspace.killShellJob(agent, c.req.param("jobId")));
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
-    }
-  });
-
   app.get("/api/agents/:id/sessions/:sid/acp-runtime", async (c) => {
     const session = c.get("session")!;
     if (!acp) return c.json({ error: "ACP 未启用" }, 400);
@@ -192,6 +141,29 @@ export function registerAcpRoutes(
         c.req.param("sid"),
       );
       return c.json(status);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/agents/:id/acp/draft", async (c) => {
+    const session = c.get("session")!;
+    if (!acp) return c.json({ error: "ACP 未启用" }, 400);
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const body: { profileId?: string; project?: string | null } = await c.req
+      .json<{ profileId?: string; project?: string | null }>()
+      .catch(() => ({} as { profileId?: string; project?: string | null }));
+    if (!body.profileId || !isValidAcpProfileId(body.profileId)) {
+      return c.json({ error: "profileId 必填或无效" }, 400);
+    }
+    try {
+      return c.json(await acp.prepareDraft({
+        tenantId: session.tenantId,
+        agentId: agent.id,
+        profileId: body.profileId,
+        project: body.project,
+      }));
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -365,4 +337,19 @@ export function registerAcpRoutes(
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });
+}
+
+async function provisionAcpConfigIfNeeded(
+  agentService: AgentService,
+  tenantId: string,
+  agent: NonNullable<Awaited<ReturnType<AgentService["get"]>>>,
+  publicBaseUrl: string,
+) {
+  return provisionAcpZakuraRoutes(
+    agentService,
+    tenantId,
+    agent,
+    readAgentAcpConfig(agent),
+    publicBaseUrl,
+  );
 }

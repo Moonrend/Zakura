@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -12,8 +13,16 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ArrowUp, Brain, File as FileIcon, Play, Square, Upload, X } from "lucide-react";
-import type { ComposerSkillOption, ComposerToolGroup } from "@zakura/shared";
+import {
+  ArrowUp,
+  Brain,
+  File as FileIcon,
+  Play,
+  Square,
+  Upload,
+  X,
+} from "lucide-react";
+import { ZAKURA_RUNTIME_ID, type ComposerSkillOption, type ComposerToolGroup } from "@zakura/shared";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -32,7 +41,19 @@ import {
   type ModelRouteSelectorItem,
 } from "@/components/models/model-route-selector";
 import { ContextWindowButton, type ContextWindowInfo } from "./context-window";
-import { ComposerPlusMenu, SkillRequestChip } from "./composer-plus-menu";
+import {
+  ComposerPlusMenu,
+  SkillRequestChip,
+  type ComposerSlashCommand,
+} from "./composer-plus-menu";
+import { SessionContextBar } from "./session-context-bar";
+import { SlashCommandPicker } from "./slash-command-picker";
+import {
+  applyComposerSlash,
+  filterComposerSlashItems,
+  parseComposerSlash,
+  type ComposerSlashItem,
+} from "@/lib/composer-slash";
 
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
@@ -236,7 +257,14 @@ export function Composer({
   onToggleGroup,
   runtimes,
   runtimeId,
+  runtimeDisabled,
+  runtimeLoading,
+  runtimeDisabledHint,
   onRuntimeChange,
+  projects,
+  project,
+  onProjectChange,
+  isNewSession,
   models,
   model,
   modelRouteId,
@@ -293,7 +321,14 @@ export function Composer({
   onToggleGroup: (id: string) => void;
   runtimes?: Array<{ id: string; label: string }>;
   runtimeId?: string;
+  runtimeDisabled?: boolean;
+  runtimeLoading?: boolean;
+  runtimeDisabledHint?: string;
   onRuntimeChange?: (id: string) => void;
+  projects?: string[];
+  project?: string | null;
+  onProjectChange?: (project: string | null) => void;
+  isNewSession?: boolean;
   models: ComposerModelItem[];
   model: string;
   modelRouteId?: string | null;
@@ -333,6 +368,51 @@ export function Composer({
   const dragDepthRef = useRef(0);
   const [dragging, setDragging] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+
+  const isAcpRuntime = Boolean(runtimeId && runtimeId !== ZAKURA_RUNTIME_ID);
+  const slashDraft = parseComposerSlash(value);
+  const slashItems = useMemo<ComposerSlashItem[]>(() => {
+    const commands: ComposerSlashItem[] = (acpCommands ?? []).map((c) => ({
+      id: `cmd:${c.name}`,
+      name: c.name,
+      description: c.description,
+      kind: "command",
+    }));
+    const skillItems: ComposerSlashItem[] = isAcpRuntime
+      ? []
+      : skills.map((s) => ({
+          id: `skill:${s.name}`,
+          name: s.name,
+          description: s.description || s.title,
+          kind: "skill",
+        }));
+    return filterComposerSlashItems([...commands, ...skillItems], slashDraft?.query ?? "");
+  }, [acpCommands, isAcpRuntime, skills, slashDraft?.query]);
+  const slashOpen = Boolean(slashDraft) && !slashDismissed && (slashItems.length > 0 || Boolean(slashDraft?.query));
+
+  useEffect(() => {
+    setSlashDismissed(false);
+    setSlashIndex(0);
+  }, [slashDraft?.query, slashDraft?.from]);
+
+  useEffect(() => {
+    if (slashIndex >= slashItems.length) setSlashIndex(0);
+  }, [slashIndex, slashItems.length]);
+
+  function applySlashItem(item: ComposerSlashItem) {
+    const draft = parseComposerSlash(value);
+    if (!draft) return;
+    if (item.kind === "skill") {
+      onToggleSkill(item.name);
+      onValueChange(value.slice(0, draft.from) + value.slice(draft.to));
+    } else {
+      onValueChange(applyComposerSlash(value, draft, item.name));
+    }
+    setSlashDismissed(true);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
 
   const uploading = uploads.length > 0;
   // 不因 sending 禁用：首条 POST 进行中也可把下一句入队
@@ -376,6 +456,41 @@ export function Composer({
   const showStop = runActive && !canSend;
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (slashItems.length ? (i + 1) % slashItems.length : 0));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex((i) =>
+          slashItems.length ? (i - 1 + slashItems.length) % slashItems.length : 0,
+        );
+        return;
+      }
+      if (e.key === "Tab") {
+        const item = slashItems[slashIndex];
+        if (item) {
+          e.preventDefault();
+          applySlashItem(item);
+        }
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const item = slashItems[slashIndex];
+        if (item) {
+          e.preventDefault();
+          applySlashItem(item);
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashDismissed(true);
+        return;
+      }
+    }
     if (e.key === "Escape") {
       if (editing) {
         e.preventDefault();
@@ -479,6 +594,33 @@ export function Composer({
           </button>
         ) : null}
 
+        {runtimes && runtimes.length > 0 && onRuntimeChange ? (
+          <SessionContextBar
+            isNew={Boolean(isNewSession)}
+            project={project ?? null}
+            projects={projects ?? []}
+            onProjectChange={(next) => onProjectChange?.(next)}
+            runtimes={runtimes}
+            runtimeId={runtimeId ?? "zakura"}
+            runtimeDisabled={runtimeDisabled}
+            runtimeLoading={runtimeLoading}
+            runtimeDisabledHint={runtimeDisabledHint}
+            onRuntimeChange={onRuntimeChange}
+          />
+        ) : null}
+
+        <div className="relative">
+        {slashOpen ? (
+          <div className="absolute inset-x-0 bottom-full z-30 mb-1.5">
+            <SlashCommandPicker
+              items={slashItems}
+              activeIndex={slashIndex}
+              onHover={setSlashIndex}
+              onSelect={applySlashItem}
+            />
+          </div>
+        ) : null}
+
         <div
           onDragEnter={handleDragEnter}
           onDragOver={(e) => {
@@ -566,7 +708,9 @@ export function Composer({
                 ? "编辑消息…"
                 : runActive
                   ? "发送后续…"
-                  : "发送消息…"
+                  : isNewSession
+                    ? "描述你的任务"
+                    : "发送消息…"
           }
           onChange={(e) => onValueChange(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -608,119 +752,41 @@ export function Composer({
             groups={toolGroups}
             disabledGroupIds={disabledGroupIds}
             onToggleGroup={onToggleGroup}
+            commands={acpCommands}
+            runtimeId={runtimeId}
+            onCommand={(name) => {
+              onValueChange(value.trim() ? `${value.replace(/\s+$/, "")}\n/${name} ` : `/${name} `);
+              requestAnimationFrame(() => textareaRef.current?.focus());
+            }}
           />
-
-          {runtimes && runtimes.length > 1 && onRuntimeChange ? (
-            <Select
-              value={runtimeId ?? "zakura"}
-              onValueChange={(v) => {
-                if (v) onRuntimeChange(v);
-              }}
-              items={runtimes.map((r) => ({ value: r.id, label: r.label }))}
-            >
-              <SelectTrigger
-                aria-label="对话 Agent"
-                className={cn(
-                  "h-8 max-w-36 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none",
-                  "transition-[background-color,color] duration-200 ease-fluid hover:bg-muted/70 hover:text-foreground",
-                )}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top" align="start" sideOffset={8}>
-                {runtimes.map((r) => (
-                  <SelectItem key={r.id} value={r.id}>
-                    {r.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
-
-          {acpCommands && acpCommands.length > 0 ? (
-            <Select
-              value=""
-              onValueChange={(v) => {
-                if (!v) return;
-                onValueChange(value.trim() ? `${value.replace(/\s+$/, "")}\n/${v} ` : `/${v} `);
-              }}
-              items={acpCommands.map((c) => ({
-                value: c.name,
-                label: c.description ? `/${c.name} · ${c.description}` : `/${c.name}`,
-              }))}
-            >
-              <SelectTrigger
-                aria-label="斜杠命令"
-                className="h-8 max-w-28 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
-              >
-                <SelectValue placeholder="/ 命令" />
-              </SelectTrigger>
-              <SelectContent side="top" align="start" sideOffset={8}>
-                {acpCommands.map((c) => (
-                  <SelectItem key={c.name} value={c.name}>
-                    /{c.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
-
-          {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
-            <Select
-              value={acpModes.currentId || acpModes.available[0]?.id}
-              onValueChange={(v) => {
-                if (v) onAcpModeChange(v);
-              }}
-              items={acpModes.available.map((m) => ({ value: m.id, label: m.name }))}
-            >
-              <SelectTrigger
-                aria-label="ACP 模式"
-                className="h-8 max-w-32 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top" align="start" sideOffset={8}>
-                {acpModes.available.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
 
           {hideZakuraModel ? (
             <>
-              <Select
-                value={
-                  acpModels?.available.length
-                    ? acpModels.currentId || acpModels.available[0]?.id
-                    : "_pending"
-                }
-                onValueChange={(v) => {
-                  if (v && v !== "_pending") onAcpModelChange?.(v);
-                }}
-                disabled={!acpModels?.available.length}
-                items={
-                  acpModels?.available.length
-                    ? acpModels.available.map((m) => ({ value: m.id, label: m.name }))
-                    : [{ value: "_pending", label: "模型" }]
-                }
-              >
-                <SelectTrigger
-                  aria-label="ACP 模型"
-                  className="h-8 max-w-40 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+              {/* 适配器未通过 session/new 公告模型列表时（如靠启动参数定模型的
+                  CLI），不渲染死占位；模型到设置页的 profile 里配置。 */}
+              {acpModels && acpModels.available.length > 0 && onAcpModelChange ? (
+                <Select
+                  value={acpModels.currentId || acpModels.available[0]?.id}
+                  onValueChange={(v) => {
+                    if (v) onAcpModelChange(v);
+                  }}
+                  items={acpModels.available.map((m) => ({ value: m.id, label: m.name }))}
                 >
-                  <SelectValue placeholder="模型" />
-                </SelectTrigger>
-                <SelectContent side="top" align="start" sideOffset={8}>
-                  {(acpModels?.available ?? []).map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      {m.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                  <SelectTrigger
+                    aria-label="ACP 模型"
+                    className="h-8 max-w-40 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+                  >
+                    <SelectValue placeholder="模型" />
+                  </SelectTrigger>
+                  <SelectContent side="top" align="start" sideOffset={8}>
+                    {acpModels.available.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
               {acpReasoning && acpReasoning.available.length > 0 && onAcpReasoningChange ? (
                 <Select
                   value={acpReasoning.current || acpReasoning.available[0]?.id}
@@ -858,6 +924,33 @@ export function Composer({
           </Tooltip>
         </div>
         </div>
+        </div>
+
+        {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
+          <div className="mt-1 flex items-center gap-1 px-0.5">
+            <Select
+              value={acpModes.currentId || acpModes.available[0]?.id}
+              onValueChange={(v) => {
+                if (v) onAcpModeChange(v);
+              }}
+              items={acpModes.available.map((m) => ({ value: m.id, label: m.name }))}
+            >
+              <SelectTrigger
+                aria-label="ACP 模式"
+                className="h-7 max-w-36 rounded-md border-0 px-1.5 text-[12px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent side="top" align="start" sideOffset={6}>
+                {acpModes.available.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
         </div>
       </div>
     </div>

@@ -5,6 +5,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import {
   AGENT_WORKSPACE_ROOT,
   acpApiKeyDotenv,
+  acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
   acpStageScript,
   acpStdioArgv,
@@ -16,6 +17,7 @@ import {
   pickGrantedOptionId,
   projectDefaultWorkingDir,
   parseAcpSessionModelState,
+  parseCloudAgentConfig,
   ACP_UNSTABLE_MODEL_CONFIG_ID,
   publicProfileForSetup,
   resolveAcpLaunch,
@@ -23,8 +25,31 @@ import {
   type AcpAgentSetup,
   type AcpPermissionGrant,
   type AcpRuntimeLayout,
+  type AcpRuntimeState,
   type AcpRuntimeStatus,
 } from "@zakura/shared";
+/** Zakura 路由下可用的网关模型别名；失败返回 undefined，由调用方回退。 */
+async function fetchAcpGatewayModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<string[] | undefined> {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
+    const ids = Array.isArray(body.data)
+      ? body.data
+          .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
+          .filter(Boolean)
+      : [];
+    return ids.length ? ids.slice(0, 64) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 import { newId } from "../../db/schema.js";
 import type { Agent } from "../../db/schema.js";
 import type { AgentService } from "../agents.js";
@@ -32,7 +57,11 @@ import type { AgentWorkspaceService } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import { AgentHooksService, firstDeny } from "../agent-hooks.js";
-import { readAgentAcpConfig, saveAgentAcpConfig } from "./config.js";
+import {
+  provisionAcpZakuraRoutes,
+  readAgentAcpConfig,
+  saveAgentAcpConfig,
+} from "./config.js";
 import { appendAcpUpdate, type AcpSessionUpdate } from "./events.js";
 import {
   settleAll,
@@ -57,7 +86,6 @@ type LiveRuntime = {
   kill: () => Promise<void>;
   connection: acp.ClientConnection;
   active?: acp.ActiveSession;
-  assistantText: string;
   assistantMessageId: string;
   thoughtMessageId: string;
   runId?: string;
@@ -72,13 +100,22 @@ type LiveRuntime = {
   elicitations: Map<string, PendingDecision<acp.CreateElicitationResponse>>;
   layout: AcpRuntimeLayout;
   agent: Agent;
+  /** Zakura 路由：模型目录与切换都以网关别名表达 */
+  zakuraRouted: boolean;
+  gatewayModels?: string[];
   authMethods: Array<{ id: string; name: string; description?: string }>;
   authRequired: boolean;
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
 };
 
+/** prompt() 拒绝并发回合时使用；drainQueued 按此常量识别「已被新回合抢占」。 */
+const RUN_BUSY_MESSAGE = "当前会话已有进行中的 Run，请先等待或取消";
+const DRAFT_BOOT_TIMEOUT_MS = 90_000;
+
 export class AcpSessionService {
   private readonly byChat = new Map<string, LiveRuntime>();
+  /** 使超时/切换后的迟到启动结果失效 */
+  private readonly draftEpoch = new Map<string, number>();
   private readonly reapTimer: ReturnType<typeof setInterval>;
 
   constructor(
@@ -87,6 +124,7 @@ export class AcpSessionService {
       store: CloudAgentSessionStore;
       workspace: AgentWorkspaceService;
       workspaceFs?: ServerWorkspaceFsProvider;
+      publicBaseUrl?: string;
     },
   ) {
     this.hooks = new AgentHooksService(deps.workspace);
@@ -98,6 +136,66 @@ export class AcpSessionService {
   readonly deviceAuth: CodexDeviceAuth;
   private readonly hooks: AgentHooksService;
   private readonly starting = new Map<string, Promise<LiveRuntime>>();
+
+  /** 立刻落库草稿，initialize / session/new 在后台跑；失败走 session_update.acpError。 */
+  async prepareDraft(input: {
+    tenantId: string;
+    agentId: string;
+    profileId: string;
+    project?: string | null;
+  }) {
+    const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const setup = requireSetup(agent, input.profileId);
+    const session = await this.deps.store.createSession({
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      title: `ACP · ${setup.displayName || setup.id}`,
+      kind: "acp",
+      project: input.project ?? null,
+      origin: { runtime: "acp", acpProfileId: setup.id },
+    });
+    void this.startDraftRuntime(agent, session.id, setup);
+    return {
+      session,
+      runtime: {
+        runtimeId: "",
+        sessionId: session.id,
+        profileId: setup.id,
+        state: "starting",
+      },
+    };
+  }
+
+  private async startDraftRuntime(agent: Agent, sessionId: string, setup: AcpAgentSetup) {
+    const epoch = (this.draftEpoch.get(sessionId) ?? 0) + 1;
+    this.draftEpoch.set(sessionId, epoch);
+    const boot = this.ensureRuntime(agent, sessionId, setup);
+    boot.catch(() => undefined);
+    try {
+      const live = await Promise.race([
+        boot,
+        sleep(DRAFT_BOOT_TIMEOUT_MS).then(() => {
+          throw new Error("Agent 启动超时");
+        }),
+      ]);
+      if (this.draftEpoch.get(sessionId) !== epoch) return;
+      await this.emitRuntimeSnapshot(sessionId, live);
+    } catch (err) {
+      if (this.draftEpoch.get(sessionId) !== epoch) return;
+      this.draftEpoch.set(sessionId, epoch + 1);
+      const live = this.byChat.get(sessionId);
+      if (live) await this.teardown(live).catch(() => undefined);
+      const message = describeAcpRpcError(err).message;
+      await this.deps.store
+        .appendEvent({
+          sessionId,
+          type: "session_update",
+          payload: { acpState: "closed", acpError: message },
+        })
+        .catch(() => undefined);
+    }
+  }
 
   async prompt(input: {
     tenantId: string;
@@ -113,7 +211,7 @@ export class AcpSessionService {
     );
     if (!session) throw new Error("会话不存在");
     if (session.kind !== "acp") throw new Error("不是 ACP 会话");
-    if (session.activeRunId) throw new Error("当前会话已有进行中的 Run，请先等待或取消");
+    if (session.activeRunId) throw new Error(RUN_BUSY_MESSAGE);
 
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
     if (!agent) throw new Error("Agent 不存在");
@@ -200,18 +298,71 @@ export class AcpSessionService {
     });
     live.runId = input.runId;
     live.lastUsedAt = Date.now();
-    live.assistantText = "";
     live.assistantMessageId = newId();
     live.thoughtMessageId = newId();
     if (!live.active) throw new Error("ACP session 未就绪");
+    const active = live.active;
     await emitRunStatus(this.deps.store, input.sessionId, input.runId, "thinking");
-    void live.active.prompt(input.content);
+
+    // prompt() 的 JSON-RPC 错误不能丢：适配器若在发出任何 update 前就报错
+    // （凭证无效、会话损坏），下一个 nextUpdate 永远不会 resolve，run 会
+    // 永久停在 running。这里把 rejection 记下来，由 tick 分支转成 run_error。
+    let promptFailed: unknown = null;
+    let promptSettledAt: number | null = null;
+    void active.prompt(input.content).then(
+      () => {
+        promptSettledAt = Date.now();
+      },
+      (err) => {
+        promptSettledAt = Date.now();
+        promptFailed = err;
+      },
+    );
+
+    let updateP = active.nextUpdate();
+    // race 输掉的分支依然可能 reject；先挂一个兜底避免 unhandledRejection。
+    updateP.catch(() => {});
+    const TICK = Symbol("tick");
+    const CLOSED = Symbol("closed");
+    const closedP = live.connection.closed.then(
+      () => CLOSED,
+      () => CLOSED,
+    );
     let lastStatus = "thinking";
+    let lastCancelCheck = 0;
     for (;;) {
-      if (await this.deps.store.isCancelRequested(input.runId)) {
-        await this.cancel(input.sessionId);
+      const winner = await Promise.race([
+        updateP,
+        closedP,
+        new Promise<typeof TICK>((resolve) => setTimeout(() => resolve(TICK), 250)),
+      ]);
+      if (winner === CLOSED) {
+        throw new Error("ACP Agent 进程意外退出");
       }
-      const msg = await live.active.nextUpdate();
+      if (winner === TICK) {
+        const now = Date.now();
+        if (promptFailed !== null) throw promptFailed;
+        // 无 update 时也要及时响应取消：session/cancel 只能在间隙发出。
+        if (now - lastCancelCheck >= 500) {
+          lastCancelCheck = now;
+          if (await this.deps.store.isCancelRequested(input.runId)) {
+            await this.cancel(input.sessionId);
+          }
+        }
+        // 正常顺序下 stop 通知先于 prompt 响应（同一条 FIFO 流）；
+        // 若适配器只回了响应没发 stop，宽限后按完成收尾，避免挂起。
+        if (promptSettledAt !== null && now - promptSettledAt > 2500) {
+          await this.finishAcpRun(input.sessionId, input.runId, "completed");
+          live.runId = undefined;
+          live.lastUsedAt = Date.now();
+          this.drainQueued(input.tenantId, input.agent.id, input.sessionId);
+          return;
+        }
+        continue;
+      }
+      const msg = winner as Awaited<ReturnType<typeof active.nextUpdate>>;
+      updateP = active.nextUpdate();
+      updateP.catch(() => {});
       if (msg.kind === "stop") {
         const cancelled = msg.stopReason === "cancelled";
         if (cancelled) this.cancelPending(live);
@@ -281,7 +432,7 @@ export class AcpSessionService {
         await this.prompt({ tenantId, agentId, sessionId, content: taken.content });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("进行中的 Run")) {
+        if (message === RUN_BUSY_MESSAGE) {
           await this.deps.store.requeueFront(sessionId, taken);
         }
       }
@@ -335,46 +486,54 @@ export class AcpSessionService {
     const session = await this.deps.store.getSession(tenantId, agentId, sessionId);
     if (!session) throw new Error("会话不存在");
     const origin = safeOrigin(session.originJson);
-    const profileId = origin.acpProfileId || "";
-    let live = this.byChat.get(sessionId);
-    if (!live && profileId) {
-      const agent = await this.deps.agentService.get(tenantId, agentId);
-      if (agent) {
-        try {
-          live = await this.ensureRuntime(agent, sessionId, requireSetup(agent, profileId), {
-            existingAcpSessionId: origin.acpSessionId,
-          });
-        } catch {
-          live = this.byChat.get(sessionId);
-        }
-      }
-    }
+    return this.snapshotRuntime(sessionId, origin.acpProfileId || "", origin);
+  }
+
+  private snapshotRuntime(
+    sessionId: string,
+    profileId: string,
+    origin: { acpSessionId?: string },
+  ): AcpRuntimeStatus {
+    const live = this.byChat.get(sessionId);
+    const starting = this.starting.has(sessionId);
     return {
       runtimeId: live?.id ?? "",
       sessionId,
       profileId,
-      state: live ? (live.runId ? "active" : "idle") : "closed",
+      state: acpSnapshotState({
+        hasLive: Boolean(live),
+        runActive: Boolean(live?.runId),
+        starting,
+        authRequired: Boolean(live?.authRequired),
+        sessionOpen: Boolean(live?.active),
+      }),
       acpSessionId: live?.acpSessionId ?? origin.acpSessionId,
       cwd: live?.cwd,
       models: live?.models,
       reasoning: live?.reasoning,
-      modes: live?.active?.modes
-        ? {
-            currentId:
-              live.currentModeId ||
-              String((live.active.modes as { currentModeId?: string }).currentModeId ?? ""),
-            available: (
-              ((live.active.modes as { availableModes?: Array<{ id: string; name?: string }> })
-                .availableModes ?? []) as Array<{ id: string; name?: string }>
-            ).map((m) => ({ id: m.id, name: m.name || m.id })),
-          }
-        : live?.currentModeId
-          ? { currentId: live.currentModeId, available: [] }
-          : undefined,
+      modes: snapshotModes(live),
       availableCommands: live?.availableCommands,
       authMethods: live?.authMethods,
       authRequired: live?.authRequired,
     };
+  }
+
+  private async emitRuntimeSnapshot(sessionId: string, live: LiveRuntime): Promise<void> {
+    const modes = snapshotModes(live);
+    await this.deps.store.appendEvent({
+      sessionId,
+      type: "session_update",
+      ...(live.runId ? { runId: live.runId } : {}),
+      payload: {
+        acpState: live.runId ? "active" : "idle",
+        ...(live.availableCommands.length ? { acpCommands: live.availableCommands } : {}),
+        ...(live.models ? { acpModels: live.models } : {}),
+        ...(live.reasoning ? { acpReasoning: live.reasoning } : {}),
+        ...(modes
+          ? { acpModes: modes, ...(modes.currentId ? { acpModeId: modes.currentId } : {}) }
+          : {}),
+      },
+    });
   }
 
   async setMode(
@@ -401,28 +560,34 @@ export class AcpSessionService {
   ): Promise<AcpRuntimeStatus> {
     const live = this.byChat.get(sessionId);
     if (!live?.active) throw new Error("ACP runtime 未启动");
-    const configId = live.models?.configId;
-    if (configId && configId !== ACP_UNSTABLE_MODEL_CONFIG_ID && !configId.startsWith("_")) {
-      return this.setConfigOption(tenantId, agentId, sessionId, configId, modelId);
+    if (live.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
+    await this.deps.store.updateSession(tenantId, agentId, sessionId, { model: modelId });
+    const configId = dynamicModelConfigId(live);
+    if (!configId) {
+      // Some ACP adapters expose a model list but no standard runtime setter
+      // (notably Codex and several community adapters). Restarting an idle
+      // draft runtime is the only way to apply the selected startup model.
+      const agent = await this.deps.agentService.get(tenantId, agentId);
+      if (!agent) throw new Error("Agent 不存在");
+      const setup = requireSetup(agent, live.profileId);
+      // 保留 ACP 侧会话：不下发 session/close，重启后走 session/load 恢复
+      // 上下文（Codex/OpenCode 等把会话持久化在自己的 state 目录里）。
+      const previousAcpSessionId = live.acpSessionId;
+      await this.teardown(live, { keepSession: true });
+      await this.ensureRuntime(agent, sessionId, setup, {
+        existingAcpSessionId: previousAcpSessionId,
+      });
+      return this.runtimeStatus(tenantId, agentId, sessionId);
     }
-    const params = { sessionId: live.active.sessionId, modelId };
-    try {
-      await live.connection.agent.request("unstable_setSessionModel", params);
-    } catch {
-      try {
-        await live.connection.agent.request("session/set_model", params);
-      } catch {
-        return this.setConfigOption(tenantId, agentId, sessionId, configId || "model", modelId);
-      }
-    }
-    if (live.models) live.models = { ...live.models, currentId: modelId };
-    await this.deps.store.appendEvent({
+    // setConfigOption 的取值用适配器协议 id（OpenCode 需要 zakura/ 前缀）；
+    // 展示与持久化始终用网关裸别名。
+    return this.setConfigOption(
+      tenantId,
+      agentId,
       sessionId,
-      type: "session_update",
-      ...(live.runId ? { runId: live.runId } : {}),
-      payload: { acpModels: live.models, acpModelId: modelId },
-    });
-    return this.runtimeStatus(tenantId, agentId, sessionId);
+      configId,
+      acpModelProtocolId(live, modelId),
+    );
   }
 
   async setConfigOption(
@@ -434,11 +599,11 @@ export class AcpSessionService {
   ): Promise<AcpRuntimeStatus> {
     const live = this.byChat.get(sessionId);
     if (!live?.active) throw new Error("ACP runtime 未启动");
-    const result = await live.connection.agent.request(acp.methods.agent.session.setConfigOption, {
-      sessionId: live.active.sessionId,
-      configId,
-      value,
-    } as never);
+    const payload =
+      typeof value === "boolean"
+        ? { sessionId: live.active.sessionId, configId, value, type: "boolean" as const }
+        : { sessionId: live.active.sessionId, configId, value };
+    const result = await live.connection.agent.request(acp.methods.agent.session.setConfigOption, payload);
     const options =
       result && typeof result === "object"
         ? (result as { configOptions?: unknown }).configOptions
@@ -541,6 +706,7 @@ export class AcpSessionService {
   }
 
   async release(sessionId: string): Promise<void> {
+    this.draftEpoch.set(sessionId, (this.draftEpoch.get(sessionId) ?? 0) + 1);
     const live = this.byChat.get(sessionId);
     if (live) await this.teardown(live).catch(() => undefined);
   }
@@ -652,23 +818,97 @@ export class AcpSessionService {
     const cwd = projectDefaultWorkingDir(session?.project);
     await this.deps.workspace.start(agent).catch(() => undefined);
 
-    const profile = publicProfileForSetup(setup);
-    const missing = missingRequiredAcpField(profile, setup);
+    // Repair legacy Zakura ACP profiles at the point of use as well as in the
+    // settings route. This closes the path where a user starts chat directly
+    // with an old profile that has no persisted Gateway key yet.
+    if (setup.modelProvider === "zakura" && this.deps.publicBaseUrl) {
+      const provisioned = await provisionAcpZakuraRoutes(
+        this.deps.agentService,
+        agent.tenantId,
+        agent,
+        readAgentAcpConfig(agent),
+        this.deps.publicBaseUrl,
+      );
+      setup = provisioned.agents[setup.id] ?? setup;
+    }
+    if (setup.modelProvider === "zakura" && !setup.managed.zakura_api_key?.trim()) {
+      throw new Error("Zakura 路由缺少 Agent Gateway API key，请重新保存 ACP 配置");
+    }
+
+    // Model selection made before the first prompt is stored on the chat
+    // session. Overlay it onto this launch only: it must not mutate the
+    // Agent-wide ACP profile, and it lets every adapter receive its own
+    // environment/startup model before session/new.
+    const launchSetup = withSessionModel(setup, session?.model);
+    const profile = publicProfileForSetup(launchSetup);
+    const missing = missingRequiredAcpField(profile, launchSetup);
     if (missing) throw new Error(`请先配置 ${profile.displayName} 的 ${missing.label}`);
-    const launch = resolveAcpLaunch(profile, setup);
+    const launch = resolveAcpLaunch(profile, launchSetup);
     const runtimeId = newId();
-    const layout = acpRuntimeLayout(setup.id, setup.setupMode, runtimeId);
+    // A Zakura route is API-key based even when the profile was previously
+    // saved as `self`. Do not stage the user's old OAuth/login home into this
+    // process: Kimi (and similar CLIs) inspect that state before environment
+    // variables and otherwise return `Authentication required`.
+    const runtimeSetupMode = setup.modelProvider === "zakura" ? "api_key" : setup.setupMode;
+    const layout = acpRuntimeLayout(setup.id, runtimeSetupMode, runtimeId);
+    // OpenCode/Codex 需要真正的配置文件（自定义 provider / base URL 不能
+    // 只靠 env 传递）。所有走 Zakura 路由的 profile 都拉取网关模型别名：
+    // 一是填充启动配置，二是运行时覆盖适配器自己公告的模型目录——
+    // codex/pi 等公告的内置模型在网关侧都是无效别名。
+    const gatewayModels =
+      launchSetup.modelProvider === "zakura" &&
+      launchSetup.managed.zakura_base_url?.trim() &&
+      launchSetup.managed.zakura_api_key?.trim()
+        ? await fetchAcpGatewayModels(
+            launchSetup.managed.zakura_base_url!,
+            launchSetup.managed.zakura_api_key!,
+          )
+        : undefined;
+    // 未显式选模型时优先沿用 Agent 的 Zakura 默认 chat 模型，
+    // 避免落到网关列表里排最前的免费模型。
+    let preferredModel: string | undefined;
+    try {
+      preferredModel =
+        parseCloudAgentConfig(JSON.parse(agent.configJson || "{}")).model?.trim() || undefined;
+    } catch {
+      preferredModel = undefined;
+    }
     try {
       await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", acpStageScript(layout)]);
-      const dotenv = setup.setupMode === "api_key" ? acpApiKeyDotenv(setup.id, setup.managed) : null;
-      if (dotenv) {
-        const dest = `${layout.stateDir}/.env`;
-        const b64 = Buffer.from(dotenv, "utf8").toString("base64");
-        await this.deps.workspace.execInWorkspace(agent, [
-          "bash",
-          "-lc",
-          `printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(dest)} && chmod 600 ${shellSingle(dest)}`,
-        ]);
+      // Hermes loads `$HOME/.env` before it builds its provider client.  A
+      // Zakura route is commonly configured as `self` (the route supplies the
+      // credential), so gating this only on api_key silently dropped the
+      // Gateway token and produced HTTP 401 Missing Authentication header.
+      const dotenv =
+        launchSetup.id === "hermes" &&
+        (launchSetup.setupMode === "api_key" || launchSetup.modelProvider === "zakura")
+          ? acpApiKeyDotenv(launchSetup.id, launchSetup.managed)
+          : null;
+      const generated = acpGeneratedRuntimeFiles({
+        layout,
+        keyMode: runtimeSetupMode,
+        routed: launchSetup.modelProvider === "zakura",
+        managed: launchSetup.managed,
+        gatewayModels,
+        preferredModel,
+      });
+      const writes = [
+        ...(dotenv
+          ? [{
+              dest: `${layout.env.HERMES_HOME || layout.stateDir}/.env`,
+              content: dotenv,
+            }]
+          : []),
+        ...generated,
+      ];
+      if (writes.length) {
+        const script = writes
+          .map((w) => {
+            const b64 = Buffer.from(w.content, "utf8").toString("base64");
+            return `mkdir -p ${shellSingle(dirnameSh(w.dest))} && printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(w.dest)} && chmod 600 ${shellSingle(w.dest)}`;
+          })
+          .join(" && ");
+        await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
       }
     } catch (err) {
       await this.deps.workspace
@@ -712,7 +952,6 @@ export class AcpSessionService {
       extraRoots: cwd === AGENT_WORKSPACE_ROOT ? [cwd] : [cwd, AGENT_WORKSPACE_ROOT],
       kill: stdio.kill,
       connection: null as unknown as acp.ClientConnection,
-      assistantText: "",
       assistantMessageId: newId(),
       thoughtMessageId: newId(),
       lastUsedAt: Date.now(),
@@ -723,6 +962,8 @@ export class AcpSessionService {
       elicitations: new Map(),
       layout,
       agent,
+      zakuraRouted: launchSetup.modelProvider === "zakura",
+      ...(gatewayModels?.length ? { gatewayModels } : {}),
       authMethods: [],
       authRequired: false,
       authWaiters: [],
@@ -851,6 +1092,11 @@ export class AcpSessionService {
       })
       .onRequest(acp.methods.client.terminal.waitForExit, async (ctx) => {
         const snap = await this.deps.workspace.waitShellJob(agent, ctx.params.terminalId, 120_000);
+        if (snap.running) {
+          // 命令仍在运行却返回 exitCode 会把失败伪装成成功，agent 会基于
+          // 假结果继续；报错让 agent 自行决定等待或终止。
+          throw new Error("terminal command still running after timeout");
+        }
         return { exitCode: snap.exitCode ?? 0, signal: null };
       })
       .onRequest(acp.methods.client.terminal.kill, async (ctx) => {
@@ -963,6 +1209,38 @@ export class AcpSessionService {
           chatSessionId,
           opts?.runId,
         );
+        // Zakura 路由下适配器公告的模型目录（codex 内置 gpt 系列、pi 自家
+        // 目录等）对网关无效——选了也只会以未知别名打到网关。统一改挂
+        // 网关模型别名，聊天框的模型列表与切换就都指向 Zakura。
+        if (live.zakuraRouted && gatewayModels?.length) {
+          const announced = live.models?.currentId?.replace(/^zakura\//, "");
+          const configured = launchSetup.managed.model?.trim();
+          const current =
+            (announced && gatewayModels.includes(announced) ? announced : undefined) ??
+            (configured && gatewayModels.includes(configured) ? configured : undefined) ??
+            (preferredModel && gatewayModels.includes(preferredModel) ? preferredModel : undefined) ??
+            gatewayModels[0]!;
+          live.models = {
+            currentId: current,
+            available: gatewayModels.map((id) => ({ id, name: id })),
+            configId: live.models?.configId,
+          };
+          await this.deps.store.appendEvent({
+            sessionId: chatSessionId,
+            type: "session_update",
+            ...(opts?.runId ? { runId: opts.runId } : {}),
+            payload: { acpModels: live.models },
+          });
+        }
+        // Apply the configured model before the first prompt.  ACP exposes
+        // model selection only after session/new, so waiting for the chat
+        // toolbar would otherwise make the first turn run on the adapter's
+        // implicit default.
+        const preferredModelId =
+          launchSetup.managed.model?.trim() || gatewayModels?.[0];
+        if (preferredModelId) {
+          await this.applyPreferredModel(live, preferredModelId);
+        }
       }
 
       await this.deps.store.updateSession(agent.tenantId, agent.id, chatSessionId, {
@@ -1015,14 +1293,37 @@ export class AcpSessionService {
     });
   }
 
-  private async teardown(live: LiveRuntime): Promise<void> {
+  private async applyPreferredModel(live: LiveRuntime, modelId: string): Promise<void> {
+    const configId = dynamicModelConfigId(live);
+    // Do not probe undocumented JSON-RPC extensions here.  Codex rejects
+    // them with `Invalid params`; launch env is the compatible path for ACP
+    // implementations that do not expose a selectable config option.
+    if (!configId) return;
+    try {
+      await live.connection.agent.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: live.active!.sessionId,
+        configId,
+        value: acpModelProtocolId(live, modelId),
+      });
+      if (live.models) live.models = { ...live.models, currentId: modelId };
+    } catch (err) {
+      console.warn("[acp] initial model config rejected", {
+        profileId: live.profileId,
+        method: acp.methods.agent.session.setConfigOption,
+        configId,
+        error: describeAcpRpcError(err),
+      });
+    }
+  }
+
+  private async teardown(live: LiveRuntime, opts?: { keepSession?: boolean }): Promise<void> {
     this.cancelPending(live);
-    if (live.active) {
+    if (live.active && !opts?.keepSession) {
       await live.connection.agent
         .request(acp.methods.agent.session.close, { sessionId: live.active.sessionId })
         .catch(() => undefined);
-      live.active.dispose();
     }
+    live.active?.dispose();
     await live.kill().catch(() => undefined);
     await this.deps.workspace
       .execInWorkspace(live.agent, ["bash", "-lc", acpSyncBackScript(live.layout)])
@@ -1066,6 +1367,78 @@ function requireSetup(agent: Agent, profileId: string, allowDisabled = false): A
   );
 }
 
+/** Only a config option announced by session/new is safe to set at runtime. */
+function dynamicModelConfigId(live: LiveRuntime): string | undefined {
+  const configId = live.models?.configId;
+  return configId && configId !== ACP_UNSTABLE_MODEL_CONFIG_ID && !configId.startsWith("_")
+    ? configId
+    : undefined;
+}
+
+/**
+ * ACP 模型取值的协议 id：内部与网关别名一律用裸名；只有 OpenCode 的
+ * 模型 id 是 provider/model 形式，Zakura 路由下要挂 zakura/ 前缀。
+ */
+function acpModelProtocolId(live: LiveRuntime, modelId: string): string {
+  return live.zakuraRouted && live.profileId === "opencode" ? `zakura/${modelId}` : modelId;
+}
+
+/** Apply a one-session model override without changing the persisted ACP profile. */
+function withSessionModel(setup: AcpAgentSetup, model: string | null | undefined): AcpAgentSetup {
+  // 旧会话可能存过带 zakura/ 前缀的 id（OpenCode 公告值直写）；剥掉前缀，
+  // 否则配置生成会叠出 zakura/zakura/xxx。
+  const value = model?.trim().replace(/^zakura\//, "");
+  if (!value) return setup;
+  return { ...setup, managed: { ...setup.managed, model: value } };
+}
+
+export function acpSnapshotState(input: {
+  hasLive: boolean;
+  runActive: boolean;
+  starting: boolean;
+  authRequired?: boolean;
+  sessionOpen?: boolean;
+}): AcpRuntimeState {
+  if (input.hasLive) {
+    if (input.runActive) return "active";
+    if (input.authRequired || !input.sessionOpen) return "starting";
+    return "idle";
+  }
+  return input.starting ? "starting" : "closed";
+}
+
+function snapshotModes(live?: LiveRuntime): AcpRuntimeStatus["modes"] {
+  if (!live) return undefined;
+  if (live.active?.modes) {
+    const modes = live.active.modes as {
+      currentModeId?: string;
+      availableModes?: Array<{ id: string; name?: string }>;
+    };
+    return {
+      currentId: live.currentModeId || String(modes.currentModeId ?? ""),
+      available: (modes.availableModes ?? []).map((m) => ({
+        id: m.id,
+        name: m.name || m.id,
+      })),
+    };
+  }
+  if (live.currentModeId) return { currentId: live.currentModeId, available: [] };
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** JSON-RPC errors can contain credentials in arbitrary data; log only stable diagnostics. */
+function describeAcpRpcError(err: unknown): { message: string; code?: unknown } {
+  const record = err && typeof err === "object" ? (err as Record<string, unknown>) : undefined;
+  return {
+    message: err instanceof Error ? err.message : String(err),
+    ...(record && "code" in record ? { code: record.code } : {}),
+  };
+}
+
 function safeOrigin(raw: string): {
   acpProfileId?: string;
   acpSessionId?: string;
@@ -1085,6 +1458,11 @@ function safeOrigin(raw: string): {
 
 function shellSingle(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function dirnameSh(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i <= 0 ? "/" : path.slice(0, i);
 }
 
 function isSafeInstallHint(hint: string): boolean {
@@ -1117,7 +1495,13 @@ function assertAcpFsPath(path: string, live: LiveRuntime): string {
 
 function elicitationFields(
   params: unknown,
-): Array<{ id: string; type: string; title?: string; required?: boolean }> | undefined {
+): Array<{
+  id: string;
+  type: string;
+  title?: string;
+  required?: boolean;
+  options?: string[];
+}> | undefined {
   const rec = params && typeof params === "object" ? (params as Record<string, unknown>) : {};
   const schema =
     rec.requestedSchema && typeof rec.requestedSchema === "object"
@@ -1137,6 +1521,10 @@ function elicitationFields(
     .slice(0, 16)
     .map(([id, raw]) => {
       const p = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+      // JSON Schema 的 enum（如选择登录方式）原样透传，前端渲染为下拉。
+      const options = Array.isArray(p.enum)
+        ? p.enum.filter((v): v is string => typeof v === "string" && v.length > 0)
+        : undefined;
       return {
         id,
         type: typeof p.type === "string" ? p.type : "string",
@@ -1147,6 +1535,7 @@ function elicitationFields(
               ? p.description
               : id,
         required: required.has(id),
+        ...(options?.length ? { options } : {}),
       };
     });
   return fields.length ? fields : undefined;
@@ -1243,7 +1632,7 @@ async function emitAuthElicitation(store: CloudAgentSessionStore, live: LiveRunt
       requestId,
       mode: "form",
       message: methods.length
-        ? `需要登录 ${live.profileId}。提交 methodId：${methods.map((m) => m.id).join(" / ")}`
+        ? `需要登录 ${live.profileId}，请选择登录方式：${methods.map((m) => m.name || m.id).join(" / ")}`
         : `需要登录 ${live.profileId}`,
       fields: [
         {
@@ -1251,6 +1640,8 @@ async function emitAuthElicitation(store: CloudAgentSessionStore, live: LiveRunt
           type: "string",
           title: "登录方式",
           required: true,
+          // enum 让前端渲染成下拉，避免用户手填内部 methodId。
+          ...(methods.length ? { options: methods.map((m) => m.id) } : {}),
         },
       ],
     },

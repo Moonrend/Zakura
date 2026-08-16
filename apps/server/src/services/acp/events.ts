@@ -291,19 +291,3 @@ export async function appendAcpUpdate(
   }
   return {};
 }
-
-export async function flushAssistantMessage(
-  store: CloudAgentSessionStore,
-  sessionId: string,
-  runId: string,
-  messageId: string,
-  content: string,
-): Promise<void> {
-  if (!content) return;
-  await store.appendEvent({
-    sessionId,
-    type: "assistant_message",
-    runId,
-    payload: { messageId, content },
-  });
-}

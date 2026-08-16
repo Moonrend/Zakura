@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   acpStdioArgv,
   acpManualSetupCommand,
+  acpConfigToJson,
   builtinAcpProfiles,
   isMaskedAcpSecret,
   maskAcpSecret,
@@ -19,6 +20,7 @@ import {
   parseAcpSessionModelState,
   ACP_UNSTABLE_MODEL_CONFIG_ID,
   scrubAcpConfigForResponse,
+  supportsAcpZakuraRoute,
   upsertAcpGrant,
 } from "@zakura/shared";
 
@@ -31,7 +33,7 @@ describe("ACP config", () => {
     });
     assert.equal(acpManualSetupCommand("kimi-code").display, "kimi → /login");
     assert.equal(acpManualSetupCommand("opencode").display, "opencode auth login");
-    assert.equal(acpManualSetupCommand("pi").display, "pi-acp --terminal-login");
+    assert.equal(acpManualSetupCommand("pi").display, "pi（在交互界面完成登录/配置）");
     assert.equal(acpManualSetupCommand("grok").display, "grok");
   });
 
@@ -108,8 +110,24 @@ describe("ACP config", () => {
     });
     assert.equal(launch.command, "claude-agent-acp");
     assert.equal(launch.env.ANTHROPIC_API_KEY, "sk-ant-x");
+    // 第三方 Anthropic 兼容端点普遍只认 Bearer，两个变量一起铺。
+    assert.equal(launch.env.ANTHROPIC_AUTH_TOKEN, "sk-ant-x");
     assert.equal(launch.env.ANTHROPIC_BASE_URL, "https://example.test");
     assert.equal(claude.sessionModeId, "default");
+    const claudeModelLaunch = resolveAcpLaunch(claude, {
+      id: "claude-code",
+      enabled: true,
+      setupMode: "api_key",
+      managed: {
+        api_key: "sk-ant-x",
+        base_url: "https://example.test",
+        model: "kimi-k2.7-code",
+      },
+    });
+    assert.equal(claudeModelLaunch.env.ANTHROPIC_MODEL, "kimi-k2.7-code");
+    assert.equal(claudeModelLaunch.env.ANTHROPIC_DEFAULT_SONNET_MODEL, "kimi-k2.7-code");
+    assert.equal(claudeModelLaunch.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "kimi-k2.7-code");
+    assert.equal(claudeModelLaunch.env.ANTHROPIC_DEFAULT_OPUS_MODEL, "kimi-k2.7-code");
     const oauthLaunch = resolveAcpLaunch(claude, {
       id: "claude-code",
       enabled: true,
@@ -170,6 +188,51 @@ describe("ACP config", () => {
     assert.equal(routed.env.OPENAI_API_KEY, "zk-agent-key");
     assert.equal(routed.env.OPENAI_BASE_URL, "https://zakura.example/v1");
     assert.equal(routed.env.OPENAI_MODEL, "gpt-code");
+    const kimiRouted = resolveAcpLaunch(kimi, {
+      id: "kimi-code",
+      enabled: true,
+      setupMode: "self",
+      modelProvider: "zakura",
+      managed: {
+        zakura_api_key: "zk-kimi-key",
+        zakura_base_url: "https://zakura.example/v1",
+        model: "kimi-k2.5",
+      },
+    });
+    assert.equal(kimiRouted.env.KIMI_API_KEY, "zk-kimi-key");
+    assert.equal(kimiRouted.env.KIMI_AUTH_TOKEN, "zk-kimi-key");
+    assert.equal(kimiRouted.env.KIMI_CODE_API_KEY, "zk-kimi-key");
+    assert.equal(kimiRouted.env.OPENAI_API_KEY, "zk-kimi-key");
+    assert.equal(kimiRouted.env.KIMI_BASE_URL, "https://zakura.example/v1");
+    assert.equal(kimiRouted.env.KIMI_API_BASE_URL, "https://zakura.example/v1");
+    assert.equal(kimiRouted.env.KIMI_CODE_BASE_URL, "https://zakura.example/v1");
+    const grok = builtinAcpProfiles().find((p) => p.id === "grok")!;
+    const grokLaunch = resolveAcpLaunch(grok, {
+      id: "grok",
+      enabled: true,
+      setupMode: "api_key",
+      managed: {
+        api_key: "xai-secret",
+        base_url: "https://api.x.ai/v1",
+        model: "grok-4-1-fast-reasoning",
+      },
+    });
+    assert.equal(grokLaunch.env.XAI_API_KEY, "xai-secret");
+    assert.equal(grokLaunch.env.OPENAI_API_KEY, "xai-secret");
+    assert.equal(grokLaunch.env.XAI_MODEL, "grok-4-1-fast-reasoning");
+    assert.deepEqual(grokLaunch.args, ["agent", "stdio", "--model", "grok-4-1-fast-reasoning"]);
+    const pi = builtinAcpProfiles().find((p) => p.id === "pi")!;
+    const piLaunch = resolveAcpLaunch(pi, {
+      id: "pi",
+      enabled: true,
+      setupMode: "api_key",
+      managed: { provider: "openai", model: "gpt-4.1", api_key: "sk-pi", base_url: "https://x" },
+    });
+    assert.equal(piLaunch.env.LLM_PROVIDER, "openai");
+    assert.equal(piLaunch.env.OPENAI_API_KEY, "sk-pi");
+    assert.equal(piLaunch.env.OPENAI_MODEL, "gpt-4.1");
+    assert.equal(supportsAcpZakuraRoute(grok), true);
+    assert.equal(supportsAcpZakuraRoute(claude), false);
     for (const profile of builtinAcpProfiles()) {
       assert.equal(profile.installHint, undefined, `${profile.id} must stay image-pinned`);
     }
@@ -199,6 +262,33 @@ describe("ACP config", () => {
     assert.equal(profile.builtin, false);
     assert.equal(profile.command, "my-cli");
     assert.deepEqual(profile.args, ["acp"]);
+  });
+
+  it("infers the Zakura provider for legacy zakura_* settings", () => {
+    const config = parseAcpAgentConfig({
+      acp: { agents: { hermes: { enabled: true, setupMode: "self", managed: {
+        zakura_api_key: "legacy-key",
+        zakura_base_url: "https://zakura.example/v1",
+      } } } },
+    });
+    assert.equal(config.agents.hermes?.modelProvider, "zakura");
+  });
+
+  it("keeps an explicit native choice even when zakura_* fields linger", () => {
+    // 切回「Agent 自身」时 managed 里仍残留网关凭证；显式 native 必须胜出，
+    // 否则解析端按 zakura_* 推断会把选择复活成 Zakura 路由。
+    const config = parseAcpAgentConfig({
+      acp: { agents: { codex: { enabled: true, setupMode: "oauth", modelProvider: "native", managed: {
+        zakura_api_key: "zak-old",
+        zakura_base_url: "https://zakura.example/v1",
+      } } } },
+    });
+    assert.equal(config.agents.codex?.modelProvider, "native");
+    // acpConfigToJson 必须持久化显式 native；省略该字段会让下次读取复活 zakura。
+    const json = acpConfigToJson(config);
+    assert.equal(json.agents.codex?.modelProvider, "native");
+    const roundTrip = parseAcpAgentConfig({ acp: { agents: json.agents } });
+    assert.equal(roundTrip.agents.codex?.modelProvider, "native");
   });
 
   it("parses always-allow grants and matches by kind + path prefix", () => {

@@ -74,7 +74,7 @@ export async function createDb(opts: {
     };
   }
 
-  const sql = postgres(opts.databaseUrl, { max: 10 });
+  const sql = postgres(opts.databaseUrl, { max: 10, connect_timeout: 10 });
   // Ensure pgvector is available on managed Postgres (no-op if already installed)
   await sql`CREATE EXTENSION IF NOT EXISTS vector`.catch(() => {
     log.warn("db.extension_unavailable", { extension: "vector" });

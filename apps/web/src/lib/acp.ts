@@ -8,6 +8,8 @@ import { api } from "@/lib/api";
 export type AcpConfigResponse = {
   config: AcpAgentConfig;
   profiles: AcpPublicProfile[];
+  /** configJson 解析失败时服务端透出的原因;保存一次即可修复为合法 JSON */
+  configError?: string;
 };
 
 export async function fetchAcpConfig(agentId: string) {
@@ -50,6 +52,16 @@ export async function setAcpConfigOption(
 export async function fetchAcpRuntime(agentId: string, sessionId: string) {
   return api<AcpRuntimeStatus>(`/api/agents/${agentId}/sessions/${sessionId}/acp-runtime`, {
     cacheTtlMs: false,
+  });
+}
+
+export async function prepareAcpDraft(agentId: string, profileId: string, project?: string | null) {
+  return api<{
+    session: import("./cloud-agent").CloudSession;
+    runtime: AcpRuntimeStatus;
+  }>(`/api/agents/${agentId}/acp/draft`, {
+    method: "POST",
+    json: { profileId, ...(project !== undefined ? { project } : {}) },
   });
 }
 
@@ -109,52 +121,4 @@ export async function cancelAcpDeviceLogin(agentId: string, profileId: string, l
     method: "POST",
     json: { loginId },
   });
-}
-
-export async function authenticateAcpSession(agentId: string, sessionId: string, methodId: string) {
-  return api<AcpRuntimeStatus>(`/api/agents/${agentId}/sessions/${sessionId}/acp/authenticate`, {
-    method: "POST",
-    json: { methodId },
-  });
-}
-
-export async function logoutAcpSession(agentId: string, sessionId: string) {
-  return api(`/api/agents/${agentId}/sessions/${sessionId}/acp/logout`, { method: "POST" });
-}
-
-export type AcpTerminalSnapshot = {
-  jobId: string;
-  running: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  command?: string;
-};
-
-export function startAcpWorkspaceTerminal(agentId: string, profileId?: string) {
-  return api<AcpTerminalSnapshot>(`/api/agents/${agentId}/acp/workspace/terminal`, {
-    method: "POST",
-    json: profileId ? { profileId } : {},
-  });
-}
-
-export function fetchAcpWorkspaceTerminal(agentId: string, jobId: string) {
-  return api<AcpTerminalSnapshot>(
-    `/api/agents/${agentId}/acp/workspace/terminal/${encodeURIComponent(jobId)}`,
-    { cacheTtlMs: false },
-  );
-}
-
-export function writeAcpWorkspaceTerminal(agentId: string, jobId: string, input: string) {
-  return api<AcpTerminalSnapshot>(
-    `/api/agents/${agentId}/acp/workspace/terminal/${encodeURIComponent(jobId)}/input`,
-    { method: "POST", json: { input } },
-  );
-}
-
-export function closeAcpWorkspaceTerminal(agentId: string, jobId: string) {
-  return api<AcpTerminalSnapshot>(
-    `/api/agents/${agentId}/acp/workspace/terminal/${encodeURIComponent(jobId)}`,
-    { method: "DELETE" },
-  );
 }

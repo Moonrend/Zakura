@@ -162,7 +162,7 @@ export type TimelineItem =
       requestId: string;
       title?: string;
       options: Array<{ optionId: string; name: string; kind: string }>;
-      resolved?: { outcome: string; optionId?: string };
+      resolved?: { outcome: string; optionId?: string; optionName?: string };
       seq: number;
     }
   | {
@@ -172,7 +172,13 @@ export type TimelineItem =
       mode: "form" | "url";
       message?: string;
       url?: string;
-      fields?: Array<{ id: string; type: string; title?: string; required?: boolean }>;
+      fields?: Array<{
+        id: string;
+        type: string;
+        title?: string;
+        required?: boolean;
+        options?: string[];
+      }>;
       resolved?: { cancelled?: boolean };
       seq: number;
     }
@@ -816,9 +822,14 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         (it) => it.kind === "permission" && it.requestId === rid,
       ) as Extract<TimelineItem, { kind: "permission" }> | undefined;
       if (card) {
+        const optionId = typeof p.optionId === "string" ? p.optionId : undefined;
         card.resolved = {
           outcome: typeof p.outcome === "string" ? p.outcome : "cancelled",
-          optionId: typeof p.optionId === "string" ? p.optionId : undefined,
+          optionId,
+          // 展示选项名而不是内部 optionId（往往是 allow_once 之类的机器值）。
+          optionName: optionId
+            ? card.options.find((o) => o.optionId === optionId)?.name
+            : undefined,
         };
       }
       continue;
@@ -834,13 +845,22 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         message: typeof p.message === "string" ? p.message : undefined,
         url: typeof p.url === "string" ? p.url : undefined,
         fields: Array.isArray(p.fields)
-          ? (p.fields as Array<{ id?: string; type?: string; title?: string; required?: boolean }>)
+          ? (p.fields as Array<{
+              id?: string;
+              type?: string;
+              title?: string;
+              required?: boolean;
+              options?: unknown;
+            }>)
               .filter((f) => typeof f.id === "string")
               .map((f) => ({
                 id: String(f.id),
                 type: String(f.type ?? "string"),
                 title: typeof f.title === "string" ? f.title : undefined,
                 required: f.required === true,
+                options: Array.isArray(f.options)
+                  ? f.options.filter((v): v is string => typeof v === "string")
+                  : undefined,
               }))
           : undefined,
         seq: ev.seq,

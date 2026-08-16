@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal as WTermTerminal, useTerminal } from "@wterm/react";
 import "@wterm/react/css";
 import { Loader2, Maximize2, RotateCcw, Unplug } from "lucide-react";
+import { acpManualSetupBootScript } from "@zakura/shared";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -44,6 +45,18 @@ export function WorkspaceTerminalDialog({
   const generationRef = useRef(0);
   const [state, setState] = useState<State>("idle");
   const [detail, setDetail] = useState("等待建立动态会话");
+  const bootRef = useRef(request?.profileId ? acpManualSetupBootScript(request.profileId) : null);
+
+  useEffect(() => {
+    bootRef.current = request?.profileId ? acpManualSetupBootScript(request.profileId) : null;
+  }, [request?.profileId]);
+
+  const sendInput = useCallback((data: string) => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "input", data }));
+    }
+  }, []);
 
   const disconnect = useCallback((next: State = "closed") => {
     generationRef.current += 1;
@@ -78,9 +91,18 @@ export function WorkspaceTerminalDialog({
         }
         if (message.type === "ready") {
           setState("connected");
-          setDetail(message.command || "bash -l");
+          const boot = bootRef.current;
+          setDetail(boot ? `登录命令：${boot.display}` : message.command || "bash -l");
           socket.send(JSON.stringify({ type: "resize", ...sizeRef.current }));
           focus();
+          // ACP 登录态写入 durable home：先导出与 ACP 运行时一致的 HOME
+          // 再启动官方登录命令，否则登录成功 agent 进程也读不到。
+          if (boot) {
+            sendInput(`${boot.commandLine}\n`);
+            if (boot.initialInput) {
+              window.setTimeout(() => sendInput(boot.initialInput!), 1500);
+            }
+          }
         } else if (message.type === "output" && message.data) {
           write(message.data);
         } else if (message.type === "reset") {
@@ -109,7 +131,7 @@ export function WorkspaceTerminalDialog({
       setState("error");
       setDetail(error instanceof Error ? error.message : String(error));
     }
-  }, [agentId, disconnect, focus, write]);
+  }, [agentId, disconnect, focus, sendInput, write]);
 
   useEffect(() => {
     if (open) void connect();
@@ -118,11 +140,8 @@ export function WorkspaceTerminalDialog({
   }, [connect, disconnect, open]);
 
   const handleData = useCallback((data: string) => {
-    const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "input", data }));
-    }
-  }, []);
+    sendInput(data);
+  }, [sendInput]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

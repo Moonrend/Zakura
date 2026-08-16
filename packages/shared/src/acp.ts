@@ -3,6 +3,8 @@
  * Zakura 是 Client；第三方编码 Agent 跑在 workspace 容器里。
  */
 
+import { acpManualSetupEnvironment } from "./acp-storage.js";
+
 export const ACP_PROTOCOL_VERSION = 1;
 
 export const ACP_SETUP_MODES = ["api_key", "oauth", "self"] as const;
@@ -64,6 +66,8 @@ export type AcpPublicProfile = {
   sessionModeId?: string;
   /** 不管 Agent 是否宣告 mcpCapabilities.http，都转发 HTTP MCP */
   forceHttpMcp?: boolean;
+  /** Zakura Gateway currently exposes the OpenAI-compatible protocol. */
+  supportsZakuraRoute?: boolean;
 };
 
 export type AcpManualSetupCommand = {
@@ -71,6 +75,28 @@ export type AcpManualSetupCommand = {
   initialInput?: string;
   display: string;
 };
+
+/**
+ * 交互终端里启动官方登录命令的完整脚本：先导出与 ACP 运行时相同的
+ * durable HOME（否则登录成功 agent 进程也看不到），再执行登录命令。
+ */
+export function acpManualSetupBootScript(profileId: string): {
+  commandLine: string;
+  initialInput?: string;
+  display: string;
+} {
+  const setup = acpManualSetupCommand(profileId);
+  const env = acpManualSetupEnvironment(normalizeAcpProfileId(profileId));
+  const exports = Object.entries(env)
+    .map(([k, v]) => `export ${k}=${shellEnvQuote(v)}`)
+    .join(" ");
+  const line = `${exports}; clear; echo "· ${setup.display} ·"; ${setup.command.join(" ")}`;
+  return { commandLine: line, initialInput: setup.initialInput, display: setup.display };
+}
+
+function shellEnvQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 /** Official login/config entry for the CLI version pinned in the workspace image. */
 export function acpManualSetupCommand(profileId: string): AcpManualSetupCommand {
@@ -82,7 +108,7 @@ export function acpManualSetupCommand(profileId: string): AcpManualSetupCommand 
     case "kimi-code":
       return { command: ["kimi"], initialInput: "/login\n", display: "kimi → /login" };
     case "pi":
-      return { command: ["pi-acp", "--terminal-login"], display: "pi-acp --terminal-login" };
+      return { command: ["pi"], display: "pi（在交互界面完成登录/配置）" };
     case "opencode":
       return { command: ["opencode", "auth", "login"], display: "opencode auth login" };
     case "codex":
@@ -157,6 +183,8 @@ export type AcpRuntimeStatus = {
   availableCommands?: Array<{ name: string; description?: string }>;
   authMethods?: Array<{ id: string; name: string; description?: string }>;
   authRequired?: boolean;
+  /** 后台启动失败时的可读原因；state 一般为 closed */
+  error?: string;
 };
 
 export type AcpPermissionOption = {
@@ -188,6 +216,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       args: [],
       setupModes: ["api_key", "oauth", "self"],
       sessionModeId: "default",
+      supportsZakuraRoute: false,
       managedFields: [
         {
           id: "api_key",
@@ -212,6 +241,13 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           type: "url",
           placeholder: "https://api.anthropic.com",
         },
+        {
+          id: "model",
+          label: "默认模型",
+          type: "text",
+          placeholder: "claude-sonnet-4-5",
+          help: "在创建 ACP 会话前写入 Agent 配置；若 Agent 同时提供协议模型列表，聊天框仍可切换。",
+        },
       ],
     },
     {
@@ -222,6 +258,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       command: "codex-acp",
       args: [],
       setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
         {
           id: "api_key",
@@ -238,6 +275,13 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           type: "url",
           placeholder: "https://api.openai.com/v1",
         },
+        {
+          id: "model",
+          label: "默认模型",
+          type: "text",
+          placeholder: "gpt-5.2-codex",
+          help: "写入 CODEX_HOME/config.toml 的 model；Codex 不读取 OPENAI_MODEL 环境变量。",
+        },
       ],
     },
     {
@@ -248,6 +292,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       command: "gemini",
       args: ["--acp"],
       setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: false,
       managedFields: [
         {
           id: "api_key",
@@ -275,6 +320,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       command: "hermes-acp",
       args: [],
       setupModes: ["api_key", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
         {
           id: "provider",
@@ -309,12 +355,34 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
     {
       id: "grok",
       displayName: "Grok Build",
-      description: "xAI Grok Build，按 ACP 官方 Registry 的 @xai-official/grok 入口接入",
+      description: "xAI Grok Build，支持 xAI API key 或 Agent 自身登录",
       builtin: true,
       command: "grok",
       args: ["agent", "stdio"],
-      setupModes: ["oauth", "self"],
+      setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
+        {
+          id: "api_key",
+          label: "xAI API key",
+          type: "password",
+          required: true,
+          sensitive: true,
+          placeholder: "xai-…",
+          help: "写入 XAI_API_KEY/GROK_API_KEY；使用 API key 模式时不会触发交互登录。",
+        },
+        {
+          id: "model",
+          label: "默认模型",
+          type: "text",
+          placeholder: "grok-4-1-fast-reasoning",
+        },
+        {
+          id: "base_url",
+          label: "xAI base URL",
+          type: "url",
+          placeholder: "https://api.x.ai/v1",
+        },
       ],
     },
     {
@@ -325,6 +393,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       command: "copilot",
       args: ["--acp"],
       setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: false,
       managedFields: [
         {
           id: "api_key",
@@ -344,7 +413,8 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       builtin: true,
       command: "kimi",
       args: ["acp"],
-      setupModes: ["oauth", "self"],
+      setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
         {
           id: "api_key",
@@ -355,6 +425,17 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           placeholder: "sk-...",
           help: "API key 模式下写入 KIMI_API_KEY。",
         },
+        {
+          id: "model",
+          label: "默认模型",
+          type: "text",
+          placeholder: "kimi-k2.5",
+        },
+        {
+          id: "base_url",
+          label: "Moonshot / OpenAI 兼容 Base URL",
+          type: "url",
+        },
       ],
     },
     {
@@ -364,7 +445,8 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       builtin: true,
       command: "pi-acp",
       args: [],
-      setupModes: ["oauth", "self"],
+      setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
         {
           id: "provider",
@@ -388,6 +470,12 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           required: true,
           sensitive: true,
         },
+        {
+          id: "base_url",
+          label: "OpenAI 兼容 Base URL",
+          type: "url",
+          placeholder: "https://api.openai.com/v1",
+        },
       ],
     },
     {
@@ -397,7 +485,8 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       builtin: true,
       command: "opencode",
       args: ["acp"],
-      setupModes: ["oauth", "self"],
+      setupModes: ["api_key", "oauth", "self"],
+      supportsZakuraRoute: true,
       managedFields: [
         {
           id: "api_key",
@@ -405,16 +494,22 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           type: "password",
           required: true,
           sensitive: true,
+          help: "OpenCode 通过生成的 opencode.json 接入该 key；sk-ant- 前缀走 Anthropic 协议，其余走 OpenAI 兼容协议。",
         },
         {
           id: "base_url",
           label: "OpenAI 兼容 Base URL",
           type: "url",
+          placeholder: "https://api.openai.com/v1",
+          help: "留空时按 key 前缀使用内置 Anthropic/OpenAI 供应商；填写后会生成自定义 provider 配置。",
         },
         {
           id: "model",
           label: "模型",
           type: "text",
+          required: true,
+          placeholder: "kimi-k2.5 / gpt-5.2 / claude-sonnet-4-5",
+          help: "OpenCode 需要显式默认模型才能启动；Zakura 路由下可留空（自动取网关模型列表）。",
         },
       ],
     },
@@ -467,6 +562,7 @@ export function parseAcpPermissionPolicy(raw: unknown): AcpPermissionPolicy {
 
 export function parseAcpAgentSetup(id: string, raw: unknown): AcpAgentSetup {
   const rec = asRecord(raw) ?? {};
+  const managed = asStringMap(rec.managed);
   const args = Array.isArray(rec.args)
     ? rec.args.filter((a): a is string => typeof a === "string").slice(0, 32)
     : undefined;
@@ -481,8 +577,20 @@ export function parseAcpAgentSetup(id: string, raw: unknown): AcpAgentSetup {
     ...(command ? { command } : {}),
     ...(args?.length ? { args } : {}),
     ...(env && Object.keys(env).length ? { env } : {}),
-    managed: asStringMap(rec.managed),
-    modelProvider: rec.modelProvider === "zakura" ? "zakura" : "native",
+    managed,
+    // Older ACP settings persisted only the zakura_* fields without
+    // modelProvider; infer the route so those profiles do not silently launch
+    // without Authorization.  An explicit choice always wins — otherwise
+    // switching back to native is impossible while old zakura_* credentials
+    // linger in managed.
+    modelProvider:
+      rec.modelProvider === "zakura"
+        ? "zakura"
+        : rec.modelProvider === "native"
+          ? "native"
+          : Boolean(managed.zakura_api_key?.trim() || managed.zakura_base_url?.trim())
+            ? "zakura"
+            : "native",
   };
 }
 
@@ -582,7 +690,7 @@ export function missingRequiredAcpField(
   profile: AcpPublicProfile,
   setup: AcpAgentSetup,
 ): AcpManagedField | null {
-  if (setup.modelProvider === "zakura") return null;
+  if (setup.modelProvider === "zakura" && profile.supportsZakuraRoute) return null;
   if (setup.setupMode === "self") return null;
   if (setup.setupMode === "oauth") {
     if (profile.id === "claude-code" && !setup.managed.oauth_token?.trim()) {
@@ -610,28 +718,20 @@ export function resolveAcpLaunch(
   setup: AcpAgentSetup,
 ): { command: string; args: string[]; env: Record<string, string> } {
   const command = setup.command?.trim() || profile.command;
-  const args = setup.args?.length ? setup.args : profile.args;
+  let args = setup.args?.length ? setup.args : profile.args;
   const env: Record<string, string> = { ...(setup.env ?? {}) };
   const key = setup.managed.api_key?.trim();
   const baseUrl = setup.managed.base_url?.trim();
+  const model = setup.managed.model?.trim();
   const oauthToken = setup.managed.oauth_token?.trim();
   if (setup.modelProvider === "zakura") {
     const zakuraKey = setup.managed.zakura_api_key?.trim();
     const zakuraBase = setup.managed.zakura_base_url?.trim();
     const zakuraModel = setup.managed.model?.trim();
-    if (zakuraKey) {
-      env.OPENAI_API_KEY = zakuraKey;
-      env.ZAKURA_API_KEY = zakuraKey;
-    }
-    if (zakuraBase) {
-      env.OPENAI_BASE_URL = zakuraBase;
-      env.ZAKURA_BASE_URL = zakuraBase;
-    }
+    applyZakuraRouteEnv(env, profile.id, zakuraKey, zakuraBase);
     if (zakuraModel) {
-      env.OPENAI_MODEL = zakuraModel;
+      applyModelEnv(env, profile.id, zakuraModel);
       env.ZAKURA_MODEL = zakuraModel;
-      env.GEMINI_MODEL = zakuraModel;
-      env.LLM_MODEL = zakuraModel;
     }
   }
   if (setup.setupMode === "oauth" && profile.id === "claude-code" && oauthToken) {
@@ -639,7 +739,10 @@ export function resolveAcpLaunch(
   }
   if (setup.modelProvider !== "zakura" && setup.setupMode === "api_key" && key) {
     if (profile.id === "claude-code") {
+      // 第三方 Anthropic 兼容端点（Kimi、镜像网关等）普遍只认 Bearer；
+      // 官方 API 两种头都接受。两个变量一起铺，避免按端点猜。
       env.ANTHROPIC_API_KEY = key;
+      env.ANTHROPIC_AUTH_TOKEN = key;
       if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
     } else if (profile.id === "codex") {
       env.OPENAI_API_KEY = key;
@@ -666,6 +769,7 @@ export function resolveAcpLaunch(
     } else if (profile.id === "grok") {
       env.XAI_API_KEY = key;
       env.GROK_API_KEY = key;
+      env.OPENAI_API_KEY = key;
       if (baseUrl) env.XAI_BASE_URL = baseUrl;
     } else if (profile.id === "copilot") {
       env.GH_TOKEN = key;
@@ -673,18 +777,125 @@ export function resolveAcpLaunch(
     } else if (profile.id === "kimi-code") {
       env.KIMI_API_KEY = key;
       env.MOONSHOT_API_KEY = key;
-      if (baseUrl) env.MOONSHOT_BASE_URL = baseUrl;
+      if (baseUrl) {
+        env.KIMI_BASE_URL = baseUrl;
+        env.KIMI_API_BASE_URL = baseUrl;
+        env.MOONSHOT_BASE_URL = baseUrl;
+      }
     } else if (profile.id === "pi") {
+      const provider = setup.managed.provider?.trim();
+      if (provider) env.LLM_PROVIDER = provider;
       env.OPENAI_API_KEY = key;
+      env.PI_API_KEY = key;
+      env.LLM_API_KEY = key;
       if (baseUrl) env.OPENAI_BASE_URL = baseUrl;
     } else {
       env.API_KEY = key;
       if (baseUrl) env.API_BASE_URL = baseUrl;
     }
   }
-  const geminiModel = setup.managed.model?.trim();
-  if (profile.id === "gemini-cli" && geminiModel) env.GEMINI_MODEL = geminiModel;
+  if (model) applyModelEnv(env, profile.id, model);
+  if (profile.id === "claude-code" && model && baseUrl && setup.modelProvider !== "zakura") {
+    // 第三方端点上，Claude Code 的后台/小模型调用仍走官方模型名会直接 404；
+    // cc-switch 的预设同样把三个默认档位一起指到所选模型。
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+  }
+  if (profile.id === "grok" && model && !args.some((arg) => arg === "--model" || arg === "-m")) {
+    args = [...args, "--model", model];
+  }
   return { command, args, env };
+}
+
+/** Attach the OpenAI-compatible Zakura gateway using each CLI's own names. */
+function applyZakuraRouteEnv(
+  env: Record<string, string>,
+  profileId: string,
+  key: string | undefined,
+  baseUrl: string | undefined,
+): void {
+  if (key) {
+    env.ZAKURA_API_KEY = key;
+    env.OPENAI_API_KEY = key;
+    if (profileId === "grok") {
+      env.XAI_API_KEY = key;
+      env.GROK_API_KEY = key;
+    } else if (profileId === "kimi-code") {
+      env.KIMI_API_KEY = key;
+      env.MOONSHOT_API_KEY = key;
+      env.KIMI_AUTH_TOKEN = key;
+      env.KIMI_CODE_API_KEY = key;
+      env.OPENAI_API_KEY = key;
+      env.LLM_API_KEY = key;
+    } else if (profileId === "hermes") {
+      env.LLM_PROVIDER = "openai";
+      env.LLM_API_KEY = key;
+      env.HERMES_API_KEY = key;
+      env.OPENAI_API_TOKEN = key;
+      env.API_KEY = key;
+    } else if (profileId === "pi") {
+      env.LLM_PROVIDER = "openai";
+      env.PI_API_KEY = key;
+      env.LLM_API_KEY = key;
+    } else if (profileId === "opencode") {
+      env.OPENCODE_API_KEY = key;
+    }
+  }
+  if (!baseUrl) return;
+  env.ZAKURA_BASE_URL = baseUrl;
+  env.OPENAI_BASE_URL = baseUrl;
+  if (profileId === "grok") {
+    env.XAI_BASE_URL = baseUrl;
+    env.XAI_API_BASE_URL = baseUrl;
+  }
+  else if (profileId === "kimi-code") {
+    env.KIMI_BASE_URL = baseUrl;
+    env.KIMI_API_BASE_URL = baseUrl;
+    env.KIMI_CODE_BASE_URL = baseUrl;
+    env.MOONSHOT_API_BASE_URL = baseUrl;
+    env.MOONSHOT_BASE_URL = baseUrl;
+    env.API_BASE_URL = baseUrl;
+  }
+  else if (profileId === "hermes") {
+    env.LLM_BASE_URL = baseUrl;
+    env.OPENAI_API_BASE = baseUrl;
+    env.OPENAI_API_BASE_URL = baseUrl;
+    env.LLM_API_BASE = baseUrl;
+    env.LLM_API_BASE_URL = baseUrl;
+    env.HERMES_BASE_URL = baseUrl;
+  }
+}
+
+export function supportsAcpZakuraRoute(profile: AcpPublicProfile): boolean {
+  return profile.supportsZakuraRoute === true;
+}
+
+/**
+ * ACP agents do not agree on one model variable.  Keep the public setting
+ * profile-scoped, but export the variables each bundled adapter actually
+ * reads.  Generic aliases are intentionally retained for custom wrappers.
+ */
+function applyModelEnv(env: Record<string, string>, profileId: string, model: string): void {
+  env.LLM_MODEL = model;
+  if (profileId === "claude-code") {
+    env.ANTHROPIC_MODEL = model;
+  } else if (profileId === "gemini-cli") {
+    env.GEMINI_MODEL = model;
+  } else if (profileId === "grok") {
+    env.XAI_MODEL = model;
+    env.GROK_MODEL = model;
+    env.OPENAI_MODEL = model;
+  } else if (profileId === "kimi-code") {
+    env.KIMI_MODEL = model;
+    env.MOONSHOT_MODEL = model;
+    env.OPENAI_MODEL = model;
+  } else if (profileId === "hermes") {
+    env.HERMES_MODEL = model;
+    env.OPENAI_MODEL = model;
+  } else {
+    env.OPENAI_MODEL = model;
+  }
 }
 
 export function publicProfileForSetup(
@@ -923,7 +1134,9 @@ export function acpConfigToJson(config: AcpAgentConfig): Record<string, unknown>
       enabled: setup.enabled,
       setupMode: setup.setupMode,
       managed: setup.managed,
-      ...(setup.modelProvider === "zakura" ? { modelProvider: "zakura" } : {}),
+      // 显式持久化两个值：省略 native 会让解析端落回 zakura_* 推断，
+      // 导致「切回 Agent 自身」在下次读取时被复活。
+      modelProvider: setup.modelProvider ?? "native",
     };
     if (setup.displayName) row.displayName = setup.displayName;
     if (setup.command) row.command = setup.command;

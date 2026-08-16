@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Blocks, FileUp, Plus, Unplug, X } from "lucide-react";
-import type { ComposerSkillOption, ComposerToolGroup } from "@zakura/shared";
+import { Blocks, FileUp, Plus, SquareTerminal, Unplug, X } from "lucide-react";
+import { ZAKURA_RUNTIME_ID, type ComposerSkillOption, type ComposerToolGroup } from "@zakura/shared";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +12,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -26,6 +27,8 @@ const KIND_LABEL: Record<ComposerToolGroup["kind"], string> = {
   connector: "连接器",
   mcp: "MCP",
 };
+
+export type ComposerSlashCommand = { name: string; description?: string };
 
 function ConnectorGroups({
   groups,
@@ -94,6 +97,9 @@ export function ComposerPlusMenu({
   groups,
   disabledGroupIds,
   onToggleGroup,
+  commands,
+  onCommand,
+  runtimeId,
 }: {
   canAttach: boolean;
   attachHint: string;
@@ -104,10 +110,17 @@ export function ComposerPlusMenu({
   groups: ComposerToolGroup[];
   disabledGroupIds: readonly string[];
   onToggleGroup: (id: string) => void;
+  /** ACP Agent 通过 session/update 公告的斜杠命令；仅 ACP 执行方显示 */
+  commands?: readonly ComposerSlashCommand[];
+  onCommand?: (name: string) => void;
+  /** 当前执行方：zakura 或 ACP profile id。技能/连接器是 Zakura 运行时的概念 */
+  runtimeId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const disabledCount = disabledGroupIds.length;
   const marked = selectedSkills.length > 0 || disabledCount > 0;
+  const isAcpRuntime = Boolean(runtimeId && runtimeId !== ZAKURA_RUNTIME_ID);
+  const showCommands = isAcpRuntime && (commands?.length ?? 0) > 0 && Boolean(onCommand);
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -141,7 +154,7 @@ export function ComposerPlusMenu({
         <TooltipContent>添加</TooltipContent>
       </Tooltip>
 
-      <DropdownMenuContent side="top" align="start" sideOffset={8} className="w-56">
+      <DropdownMenuContent side="top" align="start" sideOffset={8} className="w-64">
         <DropdownMenuItem disabled={!canAttach} onClick={onUpload}>
           <FileUp />
           <span className="min-w-0 flex-1 truncate">上传文件</span>
@@ -150,59 +163,114 @@ export function ComposerPlusMenu({
           ) : null}
         </DropdownMenuItem>
 
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <Blocks />
-            <span className="min-w-0 flex-1 truncate">技能</span>
-            {selectedSkills.length ? (
-              <span className="text-[11px] text-muted-foreground">{selectedSkills.length}</span>
-            ) : null}
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-56 max-h-[min(18rem,var(--available-height))]">
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>要求本回合使用</DropdownMenuLabel>
-              {skills.length === 0 ? (
-                <DropdownMenuItem disabled>还没有安装技能</DropdownMenuItem>
-              ) : (
-                skills.map((skill) => (
-                  <DropdownMenuCheckboxItem
-                    key={skill.name}
-                    checked={selectedSkills.includes(skill.name)}
-                    onCheckedChange={() => onToggleSkill(skill.name)}
-                    className="items-start"
-                  >
-                    <span className="min-w-0 flex-1 pr-1">
-                      <span className="block truncate">{skill.title || skill.name}</span>
-                      {skill.description ? (
-                        <span className="mt-0.5 line-clamp-2 text-[11px] font-normal text-muted-foreground">
-                          {skill.description}
-                        </span>
-                      ) : null}
-                    </span>
-                  </DropdownMenuCheckboxItem>
-                ))
-              )}
-            </DropdownMenuGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>命令</DropdownMenuLabel>
+          {showCommands ? (
+            <div className="max-h-[min(16rem,var(--available-height))] overflow-y-auto">
+              {commands!.map((command) => (
+                <DropdownMenuItem
+                  key={command.name}
+                  onClick={() => onCommand?.(command.name)}
+                  className="items-start gap-2"
+                >
+                  <SquareTerminal />
+                  <span className="min-w-0 flex-1 pr-1">
+                    <span className="block truncate font-mono text-[13px]">/{command.name}</span>
+                    {command.description ? (
+                      <span className="mt-0.5 line-clamp-2 text-[11px] font-normal text-muted-foreground">
+                        {command.description}
+                      </span>
+                    ) : null}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </div>
+          ) : !isAcpRuntime && skills.length > 0 ? (
+            <div className="max-h-[min(16rem,var(--available-height))] overflow-y-auto">
+              {skills.map((skill) => (
+                <DropdownMenuItem
+                  key={skill.name}
+                  onClick={() => onToggleSkill(skill.name)}
+                  className="items-start gap-2"
+                >
+                  <Blocks />
+                  <span className="min-w-0 flex-1 pr-1">
+                    <span className="block truncate font-mono text-[13px]">/{skill.name}</span>
+                    {skill.description || skill.title ? (
+                      <span className="mt-0.5 line-clamp-2 text-[11px] font-normal text-muted-foreground">
+                        {skill.description || skill.title}
+                      </span>
+                    ) : null}
+                  </span>
+                </DropdownMenuItem>
+              ))}
+            </div>
+          ) : (
+            <DropdownMenuItem disabled>
+              <SquareTerminal />
+              <span className="min-w-0 flex-1">输入 / 插入命令</span>
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuGroup>
 
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <Unplug />
-            <span className="min-w-0 flex-1 truncate">连接器</span>
-            {disabledCount ? (
-              <span className="text-[11px] text-muted-foreground">关 {disabledCount}</span>
-            ) : null}
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-64 max-h-[min(20rem,var(--available-height))]">
-            <p className="px-1.5 py-1 text-xs text-muted-foreground">本对话可用的工具</p>
-            <ConnectorGroups
-              groups={groups}
-              disabledIds={disabledGroupIds}
-              onToggle={onToggleGroup}
-            />
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
+        {isAcpRuntime ? null : (
+          <>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Blocks />
+                <span className="min-w-0 flex-1 truncate">技能</span>
+                {selectedSkills.length ? (
+                  <span className="text-[11px] text-muted-foreground">{selectedSkills.length}</span>
+                ) : null}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-56 max-h-[min(18rem,var(--available-height))]">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>要求本回合使用</DropdownMenuLabel>
+                  {skills.length === 0 ? (
+                    <DropdownMenuItem disabled>还没有安装技能</DropdownMenuItem>
+                  ) : (
+                    skills.map((skill) => (
+                      <DropdownMenuCheckboxItem
+                        key={skill.name}
+                        checked={selectedSkills.includes(skill.name)}
+                        onCheckedChange={() => onToggleSkill(skill.name)}
+                        className="items-start"
+                      >
+                        <span className="min-w-0 flex-1 pr-1">
+                          <span className="block truncate">{skill.title || skill.name}</span>
+                          {skill.description ? (
+                            <span className="mt-0.5 line-clamp-2 text-[11px] font-normal text-muted-foreground">
+                              {skill.description}
+                            </span>
+                          ) : null}
+                        </span>
+                      </DropdownMenuCheckboxItem>
+                    ))
+                  )}
+                </DropdownMenuGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Unplug />
+                <span className="min-w-0 flex-1 truncate">连接器</span>
+                {disabledCount ? (
+                  <span className="text-[11px] text-muted-foreground">关 {disabledCount}</span>
+                ) : null}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-64 max-h-[min(20rem,var(--available-height))]">
+                <p className="px-1.5 py-1 text-xs text-muted-foreground">本对话可用的工具</p>
+                <ConnectorGroups
+                  groups={groups}
+                  disabledIds={disabledGroupIds}
+                  onToggle={onToggleGroup}
+                />
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

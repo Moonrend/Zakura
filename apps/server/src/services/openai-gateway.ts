@@ -138,13 +138,21 @@ function parseMessages(raw: unknown): ModelChatMessage[] {
   const messages: ModelChatMessage[] = [];
   for (const item of raw) {
     const record = asRecord(item);
+    // `developer` is part of the current OpenAI Chat Completions contract.
+    // The internal router deliberately has one instruction role (`system`), so
+    // preserve its ordering and semantics by normalising it at the boundary.
+    // In particular Hermes sends developer messages when talking to an
+    // OpenAI-compatible endpoint; rejecting them here made Zakura routing
+    // fail before a model request was ever attempted.
     const role =
-      record.role === "system" ||
-      record.role === "user" ||
-      record.role === "assistant" ||
-      record.role === "tool"
-        ? record.role
-        : null;
+      record.role === "developer"
+        ? "system"
+        : record.role === "system" ||
+            record.role === "user" ||
+            record.role === "assistant" ||
+            record.role === "tool"
+          ? record.role
+          : null;
     if (!role) throw new Error("messages 中存在无效 role");
     const parsed = parseContent(record.content);
     messages.push({

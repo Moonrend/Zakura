@@ -2609,6 +2609,7 @@ export async function createApiApp(deps: {
       store: cloudStore,
       workspace: agentService.workspace,
       workspaceFs: workspaceFsProvider,
+      publicBaseUrl: config.publicBaseUrl,
     });
     registerAcpRoutes(app, {
       agentService,

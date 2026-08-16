@@ -74,11 +74,13 @@ async function main() {
     databaseUrl: config.databaseUrl,
     dataDir: config.dataDir,
   });
+  log.info("boot.db_open", { db_kind: kind });
   bindProviderRuntime(db, config);
   const integrationCatalogBootstrap = new IntegrationCatalogService(db, config);
   await integrationCatalogBootstrap.sync();
   await integrationCatalogBootstrap.migrateLegacyEmailProfiles();
   await integrationCatalogBootstrap.migrateConfiguredEmailProfiles();
+  log.info("boot.catalog_sync");
   await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
   if (config.multiTenant) {
     await ensureSaasPlatformAdmin(db);
@@ -290,6 +292,7 @@ async function main() {
 
   app.route("/", createOauthApp({ db, config, oauth }));
 
+  log.info("boot.api_app");
   app.route(
     "/",
     await createApiApp({
@@ -324,6 +327,7 @@ async function main() {
       cloudSessionStore,
     }),
   );
+  log.info("boot.api_app_ok");
 
   const mcpHandler = createMcpHandler({
     db,
@@ -359,6 +363,7 @@ async function main() {
   );
 
   if (config.redisUrl) {
+    log.info("boot.redis_connect");
     const { requireRedis } = await import("./services/redis.js");
     await requireRedis();
   }

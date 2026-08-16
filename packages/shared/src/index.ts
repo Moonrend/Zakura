@@ -617,6 +617,7 @@ export {
   ACP_IMAGE_BIN_DIR,
   acpStdioArgv,
   acpManualSetupCommand,
+  acpManualSetupBootScript,
   normalizeAcpProfileId,
   isValidAcpProfileId,
   isBuiltinAcpProfileId,
@@ -636,6 +637,7 @@ export {
   isPathUnderRoots,
   missingRequiredAcpField,
   resolveAcpLaunch,
+  supportsAcpZakuraRoute,
   publicProfileForSetup,
   listEnabledAcpSetups,
   maskAcpSecret,
@@ -657,9 +659,16 @@ export {
   acpStageScript,
   acpSyncBackScript,
   acpApiKeyDotenv,
+  acpManualSetupEnvironment,
+  acpGeneratedRuntimeFiles,
   buildCodexAuthJson,
 } from "./acp-storage.js";
-export type { AcpArtifactSync, AcpRuntimeArtifact, AcpRuntimeLayout } from "./acp-storage.js";
+export type {
+  AcpArtifactSync,
+  AcpRuntimeArtifact,
+  AcpRuntimeLayout,
+  AcpRuntimeConfigFile,
+} from "./acp-storage.js";
 export type {
   AcpSetupMode,
   AcpPermissionPolicy,

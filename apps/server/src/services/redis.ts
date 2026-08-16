@@ -48,7 +48,10 @@ export async function requireRedis(): Promise<ZakuraRedis> {
 
   connecting = (async () => {
     try {
-      const c = createClient({ url }) as ZakuraRedis;
+      const c = createClient({
+        url,
+        socket: { connectTimeout: 5_000 },
+      }) as ZakuraRedis;
       c.on("error", (err) => {
         if (!warned) {
           warned = true;
@@ -78,7 +81,10 @@ export async function createRedisSubscriber(): Promise<ZakuraRedis | null> {
   const url = redisUrlFromEnv();
   if (!url) return null;
   try {
-    const c = createClient({ url }) as ZakuraRedis;
+    const c = createClient({
+      url,
+      socket: { connectTimeout: 5_000 },
+    }) as ZakuraRedis;
     c.on("error", (err) => {
       recordPlatformFault("redis.subscriber", err, { dep: "redis" });
     });

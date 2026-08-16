@@ -450,6 +450,12 @@ export type CloudAgentSessionUpdatePayload = {
   status?: CloudAgentSessionStatus;
   acpModeId?: string;
   acpModelId?: string;
+  acpState?: "starting" | "idle" | "active" | "closed";
+  acpError?: string;
+  acpModes?: {
+    currentId?: string;
+    available: Array<{ id: string; name: string }>;
+  };
   acpCommands?: Array<{ name: string; description?: string }>;
   acpModels?: {
     currentId?: string;

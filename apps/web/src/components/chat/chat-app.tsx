@@ -39,11 +39,11 @@ import type {
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
-  conversationRuntimeSwitch,
   estimateEventPayloadTokens,
   estimateTextTokens,
   estimateTokensFromChars,
   ZAKURA_RUNTIME_ID,
+  type AcpRuntimeState,
 } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -90,7 +90,7 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
-import { fetchAcpConfig, fetchAcpRuntime, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
+import { fetchAcpConfig, fetchAcpRuntime, prepareAcpDraft, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
 import {
   buildConversationTurns,
   cancelCloudRun,
@@ -366,13 +366,21 @@ export function ChatApp() {
     { id: ZAKURA_RUNTIME_ID, label: "Zakura" },
   ]);
   const [draftRuntimeId, setDraftRuntimeId] = useState(ZAKURA_RUNTIME_ID);
+  const [draftProject, setDraftProject] = useState<string | null>(null);
+  const [acpPreparingProfileId, setAcpPreparingProfileId] = useState<string | null>(null);
+  /** 实时事件流断开（正在自动重连）；收到任何事件即恢复 */
+  const [realtimeOffline, setRealtimeOffline] = useState(false);
   const defaultRuntimeRef = useRef(ZAKURA_RUNTIME_ID);
   const [acpRuntime, setAcpRuntime] = useState<{
+    state?: AcpRuntimeState;
+    error?: string;
     modes?: { currentId?: string; available: Array<{ id: string; name: string }> };
     availableCommands?: Array<{ name: string; description?: string }>;
     models?: { currentId?: string; available: Array<{ id: string; name: string }>; configId?: string };
     reasoning?: { current?: string; available: Array<{ id: string; name: string }>; configId?: string };
   } | null>(null);
+  const acpPreparingProfileIdRef = useRef<string | null>(null);
+  acpPreparingProfileIdRef.current = acpPreparingProfileId;
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [disabledGroupIds, setDisabledGroupIds] = useState<string[]>([]);
   /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
@@ -420,7 +428,9 @@ export function ChatApp() {
   const isMobile = useIsMobile();
   const agent = agents.find((a) => a.id === agentId) ?? null;
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
-  const isGatewaySession = activeSession?.origin.channel === "openai-gateway";
+  // Older cloud sessions may have a null/undefined origin after schema
+  // migrations. Treat those as ordinary sessions instead of crashing render.
+  const isGatewaySession = activeSession?.origin?.channel === "openai-gateway";
   /**
    * 活跃 Run 优先从事件流推导（有序、无请求竞态）。
    * 引导/出队是「run_end(cancelled) → 立刻 run_start 新回合」的连续事件；
@@ -518,6 +528,8 @@ export function ChatApp() {
   }, [searching, localSessionHits, searchHits, agent?.name, agent?.slug]);
   /** 尚未开始的对话：输入框上浮到视觉中线，首条消息发出后再流动回底部 */
   const emptyConversation = turns.length === 0;
+  const isNewSession = !events.some((ev) => ev.type === "user_message");
+  const sessionProject = activeSession?.project ?? draftProject;
   const {
     scrollRef,
     contentRef,
@@ -637,7 +649,11 @@ export function ChatApp() {
 
   const mergeEvent = useCallback(
     (ev: CloudAgentEvent) => {
+      setRealtimeOffline(false);
       setEvents((prev) => {
+        // 事件基本按 seq 顺序到达：尾部追加是 O(1)，只有乱序才走排序兜底。
+        const last = prev[prev.length - 1];
+        if (!last || ev.seq > last.seq) return [...prev, ev];
         if (prev.some((e) => e.id === ev.id || e.seq === ev.seq)) return prev;
         return [...prev, ev].sort((a, b) => a.seq - b.seq);
       });
@@ -652,8 +668,11 @@ export function ChatApp() {
       }
       if (ev.type === "session_update") {
         const p = ev.payload as {
+          acpState?: AcpRuntimeState;
+          acpError?: string;
           acpCommands?: Array<{ name: string; description?: string }>;
           acpModeId?: string;
+          acpModes?: { currentId?: string; available: Array<{ id: string; name: string }> };
           acpModels?: {
             currentId?: string;
             available: Array<{ id: string; name: string }>;
@@ -665,29 +684,49 @@ export function ChatApp() {
             configId?: string;
           };
         };
-        if (p.acpCommands || p.acpModeId || p.acpModels || p.acpReasoning) {
+        if (
+          p.acpState ||
+          p.acpError ||
+          p.acpCommands ||
+          p.acpModeId ||
+          p.acpModes ||
+          p.acpModels ||
+          p.acpReasoning
+        ) {
           setAcpRuntime((prev) => ({
             ...prev,
+            ...(p.acpState ? { state: p.acpState } : {}),
+            ...(p.acpError ? { error: p.acpError, state: "closed" as const } : {}),
             ...(p.acpCommands ? { availableCommands: p.acpCommands } : {}),
-            ...(p.acpModeId
-              ? {
-                  modes: {
-                    currentId: p.acpModeId,
-                    available: prev?.modes?.available ?? [],
-                  },
-                }
-              : {}),
+            ...(p.acpModes
+              ? { modes: p.acpModes }
+              : p.acpModeId
+                ? {
+                    modes: {
+                      currentId: p.acpModeId,
+                      available: prev?.modes?.available ?? [],
+                    },
+                  }
+                : {}),
             ...(p.acpModels ? { models: p.acpModels } : {}),
             ...(p.acpReasoning ? { reasoning: p.acpReasoning } : {}),
           }));
         }
+        if (p.acpError) {
+          setAcpPreparingProfileId(null);
+          toast.error(`Agent 启动失败：${p.acpError}`);
+        } else if (p.acpState === "idle" || p.acpState === "active") {
+          if (acpPreparingProfileIdRef.current) toast.success("Agent 已就绪");
+          setAcpPreparingProfileId(null);
+        }
       }
+      // session_update 不触发列表刷新：ACP 会话里模型/命令更新频繁，
+      // 且列表元数据变化已有 platform cloud_session_changed 事件覆盖。
       if (
         ev.type === "run_start" ||
         ev.type === "run_end" ||
         ev.type === "run_error" ||
-        ev.type === "user_message" ||
-        ev.type === "session_update"
+        ev.type === "user_message"
       ) {
         void refreshSessions();
       }
@@ -706,10 +745,18 @@ export function ChatApp() {
       hasMoreHistoryRef.current = hasMore;
       oldestSeqRef.current = res.events[0]?.seq ?? 0;
       const sessionHasModel = Boolean(res.session.model);
-      setModel(sessionHasModel ? res.session.model! : agentDefaultsRef.current.model);
-      setModelRouteId(
-        sessionHasModel ? res.session.modelRouteId : agentDefaultsRef.current.modelRouteId,
-      );
+      // ACP models belong to the selected adapter. Keep them out of the
+      // Zakura catalog state so a later render cannot show the wrong list.
+      setModel(res.session.kind === "acp"
+        ? ""
+        : sessionHasModel
+          ? res.session.model!
+          : agentDefaultsRef.current.model);
+      setModelRouteId(res.session.kind === "acp"
+        ? null
+        : sessionHasModel
+          ? res.session.modelRouteId
+          : agentDefaultsRef.current.modelRouteId);
       if (res.session.reasoning) {
         setReasoning(res.session.reasoning as ComposerReasoningValue);
       } else {
@@ -724,13 +771,14 @@ export function ChatApp() {
       }
       draftsRef.current.set(sid, res.session.draftText ?? "");
       setDraftRuntimeId(
-        res.session.kind === "acp" && res.session.origin.acpProfileId
+        res.session.kind === "acp" && res.session.origin?.acpProfileId
           ? res.session.origin.acpProfileId
           : ZAKURA_RUNTIME_ID,
       );
       if (res.session.kind === "acp") {
         let commands: Array<{ name: string; description?: string }> | undefined;
         let modeId: string | undefined;
+        let modes: { currentId?: string; available: Array<{ id: string; name: string }> } | undefined;
         let models: {
           currentId?: string;
           available: Array<{ id: string; name: string }>;
@@ -741,35 +789,58 @@ export function ChatApp() {
           available: Array<{ id: string; name: string }>;
           configId?: string;
         } | undefined;
+        let acpState: AcpRuntimeState | undefined;
+        let acpError: string | undefined;
         for (const ev of res.events) {
           if (ev.type !== "session_update") continue;
           const p = ev.payload as {
+            acpState?: AcpRuntimeState;
+            acpError?: string;
             acpCommands?: Array<{ name: string; description?: string }>;
             acpModeId?: string;
+            acpModes?: { currentId?: string; available: Array<{ id: string; name: string }> };
             acpModels?: typeof models;
             acpReasoning?: typeof reasoning;
           };
           if (p.acpCommands) commands = p.acpCommands;
+          if (p.acpModes) modes = p.acpModes;
           if (p.acpModeId) modeId = p.acpModeId;
           if (p.acpModels) models = p.acpModels;
           if (p.acpReasoning) reasoning = p.acpReasoning;
+          if (p.acpState) acpState = p.acpState;
+          if (p.acpError) acpError = p.acpError;
         }
         setAcpRuntime({
+          state: acpError ? "closed" : acpState,
+          error: acpError,
           availableCommands: commands,
-          modes: modeId ? { currentId: modeId, available: [] } : undefined,
+          modes: modes ?? (modeId ? { currentId: modeId, available: [] } : undefined),
           models,
           reasoning,
         });
         void fetchAcpRuntime(aid, sid)
           .then((status) => {
             setAcpRuntime((prev) => ({
+              ...prev,
+              state: status.state,
+              error: status.error,
               availableCommands: status.availableCommands ?? prev?.availableCommands,
               modes: status.modes ?? prev?.modes,
               models: status.models ?? prev?.models,
               reasoning: status.reasoning ?? prev?.reasoning,
             }));
+            if (status.state === "idle" || status.state === "active") {
+              setAcpPreparingProfileId(null);
+            }
+            if (status.error) toast.error(`Agent 启动失败：${status.error}`);
           })
-          .catch(() => undefined);
+          .catch((err) => {
+            console.warn("[acp runtime]", err);
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!/^HTTP 5\d\d$/.test(msg)) {
+              toast.error(`Agent 状态获取失败：${msg}`);
+            }
+          });
       } else {
         setAcpRuntime(null);
       }
@@ -1034,7 +1105,10 @@ export function ChatApp() {
     if (!sessionId || !agentId) return;
     return subscribeCloudEvents(agentId, sessionId, seqRef.current, {
       onEvent: mergeEvent,
-      onError: (msg) => console.warn("[chat realtime]", msg),
+      onError: (msg) => {
+        console.warn("[chat realtime]", msg);
+        setRealtimeOffline(true);
+      },
     });
   }, [agentId, sessionId, mergeEvent]);
 
@@ -1097,6 +1171,11 @@ export function ChatApp() {
     return () => window.clearTimeout(timer);
   }, [agentId, input, sessionId]);
 
+  useEffect(() => {
+    if (!sessionId) return;
+    setDraftProject(activeSession?.project ?? null);
+  }, [sessionId, activeSession?.project]);
+
   // 切换会话时把当前草稿存起来，并恢复目标会话的草稿
   useEffect(() => {
     const nextKey = sessionId ?? "__new__";
@@ -1154,6 +1233,13 @@ export function ChatApp() {
   /** 进入「新对话」草稿态：不落库，发消息时再创建会话 */
   function handleNewSession() {
     if (!agentId) return;
+    const sid = sessionIdRef.current;
+    const current = sessions.find((s) => s.id === sid);
+    // prepareAcpDraft 预创建的会话若始终没有发过消息，视为未使用直接删掉，
+    // 避免侧栏堆积一堆「ACP · xxx」空会话。
+    if (sid && current?.kind === "acp" && !events.some((e) => e.type === "user_message")) {
+      void discardUnusedAcpDraft(agentId, sid);
+    }
     setSessionId(null);
     sessionIdRef.current = null;
     resetConversationEvents();
@@ -1165,9 +1251,19 @@ export function ChatApp() {
     setEditingTarget(null);
     setAcpRuntime(null);
     setDraftRuntimeId(defaultRuntimeRef.current);
+    setDraftProject(null);
     clearAttachments();
     setSelectedSkills([]);
     composerRef.current?.focus();
+  }
+
+  async function discardUnusedAcpDraft(aid: string, sid: string) {
+    try {
+      await deleteCloudSession(aid, sid);
+      setSessions((prev) => prev.filter((s) => s.id !== sid));
+    } catch {
+      // 删除失败就保留，用户仍可手动删除。
+    }
   }
 
   /** 新建定时任务：开新对话，让 Agent 用 create_schedule 创建 */
@@ -1295,6 +1391,40 @@ export function ChatApp() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function handleSessionProjectChange(next: string | null) {
+    setDraftProject(next);
+    const sid = sessionIdRef.current;
+    if (!agentId || !sid) return;
+    const current = sessions.find((s) => s.id === sid);
+    const unusedAcp =
+      current?.kind === "acp" && !events.some((e) => e.type === "user_message");
+    if (unusedAcp && draftRuntimeId !== ZAKURA_RUNTIME_ID) {
+      try {
+        setAcpPreparingProfileId(draftRuntimeId);
+        await discardUnusedAcpDraft(agentId, sid);
+        const prepared = await prepareAcpDraft(agentId, draftRuntimeId, next);
+        const created = prepared.session;
+        setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+        setSessionId(created.id);
+        sessionIdRef.current = created.id;
+        draftKeyRef.current = created.id;
+        setAcpRuntime(prepared.runtime);
+        resetConversationEvents();
+        seqRef.current = 0;
+        queueSeqRef.current = 0;
+        setQueue([]);
+        if (prepared.runtime.state !== "starting") {
+          setAcpPreparingProfileId(null);
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+        setAcpPreparingProfileId(null);
+      }
+      return;
+    }
+    await handleMoveSession(sid, next);
   }
 
   async function handleNewProjectSession(project: string) {
@@ -1650,7 +1780,7 @@ export function ChatApp() {
     setSending(true);
     try {
       let sid = sessionIdRef.current;
-      if (sid && sessions.find((s) => s.id === sid)?.origin.channel === "openai-gateway") {
+      if (sid && sessions.find((s) => s.id === sid)?.origin?.channel === "openai-gateway") {
         sid = await forkToWritableSession(sid);
       }
       if (!sid) {
@@ -1659,18 +1789,21 @@ export function ChatApp() {
         const created = await createCloudSession(
           agentId,
           undefined,
-          acpProfile
-            ? {
-                kind: "acp",
-                origin: { runtime: "acp", acpProfileId: acpProfile },
-              }
-            : undefined,
+          {
+            ...(draftProject ? { project: draftProject } : {}),
+            ...(acpProfile
+              ? {
+                  kind: "acp" as const,
+                  origin: { runtime: "acp" as const, acpProfileId: acpProfile },
+                }
+              : {}),
+          },
         );
         setSessions((prev) => [created, ...prev]);
         await updateCloudSession(agentId, created.id, {
-          model: model || null,
-          modelRouteId,
-          reasoning,
+          // ACP 会话的模型/思考强度由所选 Agent 自己管理，
+          // 写入 Zakura 的值会在下次加载时误导 composer。
+          ...(acpProfile ? {} : { model: model || null, modelRouteId, reasoning }),
           draftText: "",
         });
         draftKeyRef.current = created.id;
@@ -1694,13 +1827,18 @@ export function ChatApp() {
         void fetchAcpRuntime(agentId, sid)
           .then((status) =>
             setAcpRuntime((prev) => ({
+              ...prev,
+              state: status.state,
+              error: status.error,
               availableCommands: status.availableCommands ?? prev?.availableCommands,
               modes: status.modes ?? prev?.modes,
               models: status.models ?? prev?.models,
               reasoning: status.reasoning ?? prev?.reasoning,
             })),
           )
-          .catch(() => undefined);
+          .catch((err) => {
+            console.warn("[acp runtime]", err);
+          });
       }
       // 服务端入队：乐观补一条占位，快照事件到达后全量对齐
       if (res.queued && res.messageId) {
@@ -2030,17 +2168,17 @@ export function ChatApp() {
               }}
             >
               <span className="truncate">{s.title}</span>
-              {s.kind === "acp" && s.origin.acpProfileId ? (
+              {s.kind === "acp" && s.origin?.acpProfileId ? (
                 <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                  {acpRuntimes.find((r) => r.id === s.origin.acpProfileId)?.label ||
-                    s.origin.acpProfileId}
+                  {acpRuntimes.find((r) => r.id === s.origin?.acpProfileId)?.label ||
+                    s.origin?.acpProfileId}
                 </span>
               ) : s.kind && s.kind !== "chat" ? (
                 <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
                   {SESSION_KIND_LABELS[s.kind] ?? s.kind}
                 </span>
               ) : null}
-              {s.origin.channel === "openai-gateway" ? (
+              {s.origin?.channel === "openai-gateway" ? (
                 <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
                   Gateway
                 </span>
@@ -2065,7 +2203,7 @@ export function ChatApp() {
                 <MoreHorizontal className="h-3.5 w-3.5" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-28">
-                {s.origin.channel === "openai-gateway" ? (
+                {s.origin?.channel === "openai-gateway" ? (
                   <DropdownMenuItem onClick={() => void handleForkSession(s.id)}>
                     <GitFork />
                     Fork 后续聊
@@ -2511,9 +2649,14 @@ export function ChatApp() {
           <span className="truncate text-sm font-medium text-foreground/80">
             {agent?.name}
           </span>
-          {draftRuntimeId !== ZAKURA_RUNTIME_ID ? (
-            <span className="truncate text-xs text-muted-foreground">
-              {acpRuntimes.find((r) => r.id === draftRuntimeId)?.label || draftRuntimeId}
+          {realtimeOffline ? (
+            <span
+              role="status"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/50 px-2 py-0.5 text-xs text-muted-foreground"
+              title="实时事件流已断开，正在自动重连；重连后会从断点继续同步"
+            >
+              <Loader2 className="size-3 animate-spin" />
+              重连中…
             </span>
           ) : null}
           <div className="flex-1" />
@@ -2632,64 +2775,80 @@ export function ChatApp() {
             routeReady={hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID}
             runtimes={acpRuntimes}
             runtimeId={draftRuntimeId}
+            runtimeDisabled={
+              Boolean(sessionId && !isNewSession) || Boolean(acpPreparingProfileId)
+            }
+            runtimeLoading={
+              Boolean(acpPreparingProfileId) || acpRuntime?.state === "starting"
+            }
+            runtimeDisabledHint={
+              acpPreparingProfileId
+                ? "正在启动 Agent…"
+                : "对话已绑定执行方，不能切换；请新建对话后再选"
+            }
+            projects={projects.map((p) => p.name)}
+            project={sessionProject}
+            isNewSession={isNewSession}
+            onProjectChange={(next) => void handleSessionProjectChange(next)}
             onRuntimeChange={(id) => {
               void (async () => {
-                const current = sessionId
-                  ? sessions.find((s) => s.id === sessionId)
-                  : undefined;
-                const currentRuntime =
-                  current?.kind === "acp" && current.origin.acpProfileId
-                    ? current.origin.acpProfileId
-                    : sessionId
-                      ? ZAKURA_RUNTIME_ID
-                      : draftRuntimeId;
-                const action = conversationRuntimeSwitch({
-                  currentRuntimeId: currentRuntime,
-                  nextRuntimeId: id,
-                  hasUserMessage: Boolean(sessionId) && !emptyConversation,
-                });
-                if (action === "new_session") {
-                  handleNewSession();
-                  setDraftRuntimeId(id);
-                  toast.message("已开新对话");
+                if (sessionId && !isNewSession) {
+                  toast.message("当前对话已绑定 Agent，不能切换；请新建对话");
                   return;
                 }
-                if (action === "rebind" && sessionId && agentId) {
-                  try {
-                    const nextKind = id === ZAKURA_RUNTIME_ID ? "chat" : "acp";
-                    const origin =
-                      id === ZAKURA_RUNTIME_ID
-                        ? {}
-                        : { runtime: "acp" as const, acpProfileId: id };
-                    const updated = await updateCloudSession(agentId, sessionId, {
-                      kind: nextKind,
-                      origin,
-                    });
-                    setSessions((prev) =>
-                      prev.map((s) => (s.id === sessionId ? { ...s, ...updated } : s)),
-                    );
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : String(err));
-                    return;
-                  }
-                }
+                const previousSessionId = sessionIdRef.current;
+                const previousUnused =
+                  previousSessionId &&
+                  sessions.find((s) => s.id === previousSessionId)?.kind === "acp" &&
+                  !events.some((e) => e.type === "user_message");
                 setDraftRuntimeId(id);
                 if (id === ZAKURA_RUNTIME_ID) {
                   setAcpRuntime(null);
-                } else if (sessionId && agentId) {
-                  void fetchAcpRuntime(agentId, sessionId)
-                    .then((status) =>
-                      setAcpRuntime({
-                        availableCommands: status.availableCommands,
-                        modes: status.modes,
-                        models: status.models,
-                        reasoning: status.reasoning,
-                      }),
-                    )
-                    .catch(() => undefined);
+                  if (agentId && previousSessionId && previousUnused) {
+                    await discardUnusedAcpDraft(agentId, previousSessionId);
+                    setSessionId(null);
+                    sessionIdRef.current = null;
+                    resetConversationEvents();
+                    seqRef.current = 0;
+                    queueSeqRef.current = 0;
+                    setQueue([]);
+                    setEditingTarget(null);
+                  }
+                  return;
+                }
+                if (agentId) {
+                  setAcpPreparingProfileId(id);
+                  try {
+                    const prepared = await prepareAcpDraft(agentId, id, draftProject);
+                    const created = prepared.session;
+                    setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+                    setSessionId(created.id);
+                    sessionIdRef.current = created.id;
+                    draftKeyRef.current = created.id;
+                    setAcpRuntime(prepared.runtime);
+                    resetConversationEvents();
+                    // 新会话 seq 从 1 开始；游标不重置会让订阅按旧 seq 续传，
+                    // 服务端回放会跳过新会话的首批事件（首条消息不显示）。
+                    seqRef.current = 0;
+                    queueSeqRef.current = 0;
+                    setQueue([]);
+                    if (previousSessionId && previousUnused) {
+                      await discardUnusedAcpDraft(agentId, previousSessionId);
+                    }
+                    if (prepared.runtime.state !== "starting") {
+                      setAcpPreparingProfileId(null);
+                    }
+                  } catch (err) {
+                    setDraftRuntimeId(ZAKURA_RUNTIME_ID);
+                    setAcpRuntime(null);
+                    setAcpPreparingProfileId(null);
+                    toast.error(err instanceof Error ? err.message : String(err));
+                  }
                 }
               })();
             }}
+            // ACP model selection must come from the selected Agent's
+            // session/new response. Never fall back to Zakura's own catalog.
             hideZakuraModel={draftRuntimeId !== ZAKURA_RUNTIME_ID}
             acpModes={acpRuntime?.modes}
             acpCommands={acpRuntime?.availableCommands}

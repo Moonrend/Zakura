@@ -9,6 +9,7 @@ import {
   parseAcpAgentConfig,
   publicProfileForSetup,
   scrubAcpConfigForResponse,
+  supportsAcpZakuraRoute,
   type AcpAgentConfig,
   type AcpPublicProfile,
 } from "@zakura/shared";
@@ -19,6 +20,20 @@ export function readAgentAcpConfig(agent: Agent): AcpAgentConfig {
     return parseAcpAgentConfig(JSON.parse(agent.configJson || "{}"));
   } catch {
     return parseAcpAgentConfig({});
+  }
+}
+
+/**
+ * configJson 整体损坏时 readAgentAcpConfig 会静默降级为空配置——页面看起来
+ * 像“所有 Agent 都未配置”，用户一旦保存就覆盖掉残留数据。把解析错误显式
+ * 透出给前端提示，保存一次即可自动修复为合法 JSON。
+ */
+export function agentAcpConfigError(agent: Agent): string | null {
+  try {
+    JSON.parse(agent.configJson || "{}");
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
   }
 }
 
@@ -67,6 +82,16 @@ export async function provisionAcpZakuraRoutes(
   let changed = false;
   for (const setup of Object.values(config.agents)) {
     if (setup.modelProvider !== "zakura") continue;
+    const profile = publicProfileForSetup(setup);
+    if (!supportsAcpZakuraRoute(profile)) {
+      // Do not leave an unusable route selection persisted for native-only
+      // adapters such as Claude Code, Gemini CLI and Copilot.
+      setup.modelProvider = "native";
+      delete setup.managed.zakura_base_url;
+      delete setup.managed.zakura_api_key;
+      changed = true;
+      continue;
+    }
     const baseUrl = `${publicBaseUrl.replace(/\/$/, "")}/v1`;
     if (setup.managed.zakura_base_url !== baseUrl) {
       setup.managed.zakura_base_url = baseUrl;
@@ -88,9 +113,10 @@ export async function provisionAcpZakuraRoutes(
     : config;
 }
 
-export function acpConfigResponse(config: AcpAgentConfig) {
+export function acpConfigResponse(config: AcpAgentConfig, configError?: string | null) {
   return {
     config: scrubAcpConfigForResponse(config),
     profiles: catalogForConfig(config),
+    ...(configError ? { configError } : {}),
   };
 }
