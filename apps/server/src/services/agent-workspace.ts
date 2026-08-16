@@ -170,6 +170,8 @@ export class AgentWorkspaceService {
   /** agentId:containerPort → host tunnel (survives Docker Desktop port-publish failures) */
   private readonly tunnels = new Map<string, TcpTunnel>();
   private readonly shellJobs = new ShellJobRegistry();
+  /** Serialize start/ensure so ACP draft + UI Start 不会互相拆掉对方刚拉起的容器 */
+  private readonly startLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly db: Db,
@@ -177,6 +179,36 @@ export class AgentWorkspaceService {
     private readonly config: AppConfig,
     private readonly nodes?: RuntimeNodeService,
   ) {}
+
+  private withStartLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.startLocks.get(agentId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    this.startLocks.set(agentId, next);
+    void next.finally(() => {
+      if (this.startLocks.get(agentId) === next) this.startLocks.delete(agentId);
+    });
+    return next;
+  }
+
+  async isWorkspaceRunning(agent: Agent): Promise<boolean> {
+    try {
+      await this.resolveDockerId(agent);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 工作区已在跑就直接复用。ACP / exec 热路径必须走这里：
+   * `start()` 会停掉并重建整个电脑环境（含桌面就绪等待）。
+   */
+  async ensureStarted(agent: Agent): Promise<Agent> {
+    return this.withStartLock(agent.id, async () => {
+      if (await this.isWorkspaceRunning(agent)) return agent;
+      return this.startUnlocked(agent);
+    });
+  }
 
   hostRoot(agent: Agent): string {
     return agentWorkspaceHostPath(this.config, agent.id);
@@ -592,6 +624,10 @@ export class AgentWorkspaceService {
   }
 
   async start(agent: Agent): Promise<Agent> {
+    return this.withStartLock(agent.id, () => this.startUnlocked(agent));
+  }
+
+  private async startUnlocked(agent: Agent): Promise<Agent> {
     const mode = resolveStackMode(agent);
     const log = (step: string, message: string, percent?: number, phase?: string) =>
       logAgentProgress(agent.id, step, message, { percent, phase });

@@ -562,6 +562,9 @@ export class AcpSessionService {
     if (!live?.active) throw new Error("ACP runtime 未启动");
     if (live.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
     await this.deps.store.updateSession(tenantId, agentId, sessionId, { model: modelId });
+    // Pin before setConfigOption: Codex 回包会带官方模型目录，overlay 要以
+    // 用户刚选的网关别名为准，不能被适配器 currentId 盖掉。
+    if (live.models) live.models = { ...live.models, currentId: modelId };
     const configId = dynamicModelConfigId(live);
     if (!configId) {
       // Some ACP adapters expose a model list but no standard runtime setter
@@ -734,7 +737,7 @@ export class AcpSessionService {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
     const launch = resolveAcpLaunch(profile, setup);
-    await this.deps.workspace.start(agent).catch(() => undefined);
+    await this.deps.workspace.ensureStarted(agent).catch(() => undefined);
     const result = await this.deps.workspace.execInWorkspace(agent, [
       "bash",
       "-lc",
@@ -761,7 +764,7 @@ export class AcpSessionService {
     if (!isSafeInstallHint(profile.installHint)) {
       throw new Error("安装命令不在允许列表内，请用 self 模式自行安装");
     }
-    await this.deps.workspace.start(agent);
+    await this.deps.workspace.ensureStarted(agent);
     const result = await this.deps.workspace.execInWorkspace(
       agent,
       ["bash", "-lc", profile.installHint],
@@ -816,7 +819,8 @@ export class AcpSessionService {
 
     const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
     const cwd = projectDefaultWorkingDir(session?.project);
-    await this.deps.workspace.start(agent).catch(() => undefined);
+    // 已在跑的电脑环境必须复用：`start()` 会拆掉重建整个容器（含桌面就绪等待）。
+    const workspaceReady = this.deps.workspace.ensureStarted(agent).catch(() => undefined);
 
     // Repair legacy Zakura ACP profiles at the point of use as well as in the
     // settings route. This closes the path where a user starts chat directly
@@ -855,15 +859,15 @@ export class AcpSessionService {
     // 只靠 env 传递）。所有走 Zakura 路由的 profile 都拉取网关模型别名：
     // 一是填充启动配置，二是运行时覆盖适配器自己公告的模型目录——
     // codex/pi 等公告的内置模型在网关侧都是无效别名。
-    const gatewayModels =
+    const gatewayModelsP =
       launchSetup.modelProvider === "zakura" &&
       launchSetup.managed.zakura_base_url?.trim() &&
       launchSetup.managed.zakura_api_key?.trim()
-        ? await fetchAcpGatewayModels(
+        ? fetchAcpGatewayModels(
             launchSetup.managed.zakura_base_url!,
             launchSetup.managed.zakura_api_key!,
           )
-        : undefined;
+        : Promise.resolve(undefined);
     // 未显式选模型时优先沿用 Agent 的 Zakura 默认 chat 模型，
     // 避免落到网关列表里排最前的免费模型。
     let preferredModel: string | undefined;
@@ -873,8 +877,9 @@ export class AcpSessionService {
     } catch {
       preferredModel = undefined;
     }
+    await workspaceReady;
+    const gatewayModels = await gatewayModelsP;
     try {
-      await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", acpStageScript(layout)]);
       // Hermes loads `$HOME/.env` before it builds its provider client.  A
       // Zakura route is commonly configured as `self` (the route supplies the
       // credential), so gating this only on api_key silently dropped the
@@ -901,15 +906,16 @@ export class AcpSessionService {
           : []),
         ...generated,
       ];
-      if (writes.length) {
-        const script = writes
-          .map((w) => {
-            const b64 = Buffer.from(w.content, "utf8").toString("base64");
-            return `mkdir -p ${shellSingle(dirnameSh(w.dest))} && printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(w.dest)} && chmod 600 ${shellSingle(w.dest)}`;
-          })
-          .join(" && ");
-        await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
-      }
+      const writeScript = writes
+        .map((w) => {
+          const b64 = Buffer.from(w.content, "utf8").toString("base64");
+          return `mkdir -p ${shellSingle(dirnameSh(w.dest))} && printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(w.dest)} && chmod 600 ${shellSingle(w.dest)}`;
+        })
+        .join(" && ");
+      const prep = writeScript
+        ? `${acpStageScript(layout)}\n${writeScript}`
+        : acpStageScript(layout);
+      await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", prep]);
     } catch (err) {
       await this.deps.workspace
         .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
@@ -1208,30 +1214,8 @@ export class AcpSessionService {
           live.active.newSessionResponse,
           chatSessionId,
           opts?.runId,
+          [launchSetup.managed.model, preferredModel],
         );
-        // Zakura 路由下适配器公告的模型目录（codex 内置 gpt 系列、pi 自家
-        // 目录等）对网关无效——选了也只会以未知别名打到网关。统一改挂
-        // 网关模型别名，聊天框的模型列表与切换就都指向 Zakura。
-        if (live.zakuraRouted && gatewayModels?.length) {
-          const announced = live.models?.currentId?.replace(/^zakura\//, "");
-          const configured = launchSetup.managed.model?.trim();
-          const current =
-            (announced && gatewayModels.includes(announced) ? announced : undefined) ??
-            (configured && gatewayModels.includes(configured) ? configured : undefined) ??
-            (preferredModel && gatewayModels.includes(preferredModel) ? preferredModel : undefined) ??
-            gatewayModels[0]!;
-          live.models = {
-            currentId: current,
-            available: gatewayModels.map((id) => ({ id, name: id })),
-            configId: live.models?.configId,
-          };
-          await this.deps.store.appendEvent({
-            sessionId: chatSessionId,
-            type: "session_update",
-            ...(opts?.runId ? { runId: opts.runId } : {}),
-            payload: { acpModels: live.models },
-          });
-        }
         // Apply the configured model before the first prompt.  ACP exposes
         // model selection only after session/new, so waiting for the chat
         // toolbar would otherwise make the first turn run on the adapter's
@@ -1277,17 +1261,27 @@ export class AcpSessionService {
     raw: unknown,
     sessionId: string,
     runId?: string,
+    preferredModels?: Array<string | undefined>,
   ): Promise<void> {
     const parsed = parseAcpSessionModelState(raw);
-    if (parsed.models) live.models = parsed.models;
+    const models = parsed.models
+      ? overlayAcpGatewayModels({
+          zakuraRouted: live.zakuraRouted,
+          gatewayModels: live.gatewayModels,
+          incoming: parsed.models,
+          previous: live.models,
+          preferred: preferredModels,
+        })
+      : undefined;
+    if (models) live.models = models;
     if (parsed.reasoning) live.reasoning = parsed.reasoning;
-    if (!parsed.models && !parsed.reasoning) return;
+    if (!models && !parsed.reasoning) return;
     await this.deps.store.appendEvent({
       sessionId,
       type: "session_update",
       ...(runId ? { runId } : {}),
       payload: {
-        ...(parsed.models ? { acpModels: parsed.models } : {}),
+        ...(models ? { acpModels: models } : {}),
         ...(parsed.reasoning ? { acpReasoning: parsed.reasoning } : {}),
       },
     });
@@ -1365,6 +1359,36 @@ function requireSetup(agent: Agent, profileId: string, allowDisabled = false): A
       ? `ACP agent「${profileId}」未启用`
       : "尚未启用任何 ACP agent，请到 Agent 设置里配置",
   );
+}
+
+type AcpModelsBlock = NonNullable<AcpRuntimeStatus["models"]>;
+
+/**
+ * Zakura 路由下适配器公告的目录（Codex 内置 gpt、pi 自家目录等）对网关无效。
+ * 列表始终挂网关别名；currentId 优先保留已选网关模型，避免 setConfigOption
+ * （例如改思考强度）把官方 current 写回来。
+ */
+export function overlayAcpGatewayModels(input: {
+  zakuraRouted: boolean;
+  gatewayModels?: string[];
+  incoming: AcpModelsBlock;
+  previous?: AcpModelsBlock;
+  preferred?: Array<string | undefined>;
+}): AcpModelsBlock {
+  const gateway = input.gatewayModels;
+  if (!input.zakuraRouted || !gateway?.length) return input.incoming;
+  const candidates = [
+    input.previous?.currentId,
+    ...((input.preferred ?? []).map((id) => id?.trim())),
+    input.incoming.currentId,
+  ].map((id) => id?.replace(/^zakura\//, ""));
+  const current =
+    candidates.find((id): id is string => Boolean(id && gateway.includes(id))) ?? gateway[0]!;
+  return {
+    currentId: current,
+    available: gateway.map((id) => ({ id, name: id })),
+    configId: input.incoming.configId ?? input.previous?.configId,
+  };
 }
 
 /** Only a config option announced by session/new is safe to set at runtime. */

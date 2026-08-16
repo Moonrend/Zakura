@@ -765,27 +765,14 @@ export function Composer({
               {/* 适配器未通过 session/new 公告模型列表时（如靠启动参数定模型的
                   CLI），不渲染死占位；模型到设置页的 profile 里配置。 */}
               {acpModels && acpModels.available.length > 0 && onAcpModelChange ? (
-                <Select
+                <ModelRouteSelector
+                  items={acpModels.available.map((m) => ({ value: m.id, label: m.name }))}
                   value={acpModels.currentId || acpModels.available[0]?.id}
-                  onValueChange={(v) => {
+                  onSelectionChange={(v) => {
                     if (v) onAcpModelChange(v);
                   }}
-                  items={acpModels.available.map((m) => ({ value: m.id, label: m.name }))}
-                >
-                  <SelectTrigger
-                    aria-label="ACP 模型"
-                    className="h-8 max-w-40 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
-                  >
-                    <SelectValue placeholder="模型" />
-                  </SelectTrigger>
-                  <SelectContent side="top" align="start" sideOffset={8}>
-                    {acpModels.available.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  side="top"
+                />
               ) : null}
               {acpReasoning && acpReasoning.available.length > 0 && onAcpReasoningChange ? (
                 <Select
@@ -854,14 +841,16 @@ export function Composer({
 
           <div className="flex-1" />
 
-          <ContextWindowButton
-            info={contextWindow}
-            open={contextWindowOpen}
-            disabled={!routeReady}
-            compacting={compactingContext}
-            onOpenChange={onContextWindowOpenChange}
-            onCompact={onCompactContext}
-          />
+          {!hideZakuraModel ? (
+            <ContextWindowButton
+              info={contextWindow}
+              open={contextWindowOpen}
+              disabled={!routeReady}
+              compacting={compactingContext}
+              onOpenChange={onContextWindowOpenChange}
+              onCompact={onCompactContext}
+            />
+          ) : null}
 
           <Tooltip>
             <TooltipTrigger render={<span className="inline-flex" />}>
