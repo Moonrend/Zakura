@@ -56,6 +56,106 @@ export class RunnerClient {
     };
   }
 
+  async systemVersion(): Promise<{
+    version: string;
+    image: string;
+    containerId: string | null;
+  }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/version`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as {
+      version: string;
+      image: string;
+      containerId: string | null;
+    };
+  }
+
+  /**
+   * Trigger a Runner self-update: pull `image`, then recreate the Runner
+   * container with it. Returns once the recreation is scheduled; the Runner
+   * will briefly disconnect while the container swaps.
+   */
+  async updateRunner(body: {
+    image: string;
+    recreateDelayMs?: number;
+  }): Promise<{ image: string; scheduled: true }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/update`, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { image: string; scheduled: true };
+  }
+
+  /**
+   * Pull (refresh) a workspace image on the Runner, optionally recreating every
+   * currently-running workspace container that uses it so the new image takes
+   * effect immediately.
+   */
+  async refreshWorkspaceImage(body: {
+    image: string;
+    recreateRunning?: boolean;
+  }): Promise<{
+    image: string;
+    status: string;
+    recreated: Array<{ agentId: string; dockerId: string; name: string }>;
+  }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/system/workspace-image/refresh`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as {
+      image: string;
+      status: string;
+      recreated: Array<{ agentId: string; dockerId: string; name: string }>;
+    };
+  }
+
+  /**
+   * Probe the Runner's local image digests against their remote registry
+   * digests (no pull). Returns one entry per image with `updateAvailable`
+   * when the remote digest differs from the local one. The Server uses
+   * this to show "镜像有更新" hints in the runner detail page.
+   */
+  async checkImageUpdates(body: {
+    images: string[];
+  }): Promise<{
+    images: Array<{
+      image: string;
+      localDigest: string | null;
+      remoteDigest: string | null;
+      updateAvailable: boolean;
+      error: string | null;
+    }>;
+  }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/system/image-updates`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as {
+      images: Array<{
+        image: string;
+        localDigest: string | null;
+        remoteDigest: string | null;
+        updateAvailable: boolean;
+        error: string | null;
+      }>;
+    };
+  }
+
   async startWorkspace(body: {
     agentId: string;
     agentSlug: string;

@@ -206,6 +206,89 @@ export async function patchRuntimeNode(
   return res.node;
 }
 
+/** Live Runner version + image + container id (probes the runner over its API). */
+export type RunnerVersionInfo = {
+  version: string | null;
+  image: string | null;
+  containerId: string | null;
+  /** True when the value came from a live probe (false = DB fallback / offline). */
+  live: boolean;
+  /** Last version the runner reported via heartbeat. */
+  reportedVersion: string | null;
+};
+
+export async function fetchRunnerVersion(
+  id: string,
+): Promise<RunnerVersionInfo> {
+  return api(`/api/runtime-nodes/${id}/version`);
+}
+
+/** Trigger a remote Runner self-update to `image`. */
+export async function updateRunner(
+  id: string,
+  body: { image: string; recreateDelayMs?: number },
+): Promise<{ image: string; scheduled: true }> {
+  return api(`/api/runtime-nodes/${id}/update-runner`, {
+    method: "POST",
+    json: body,
+  });
+}
+
+/** Pull (refresh) a workspace image on the runner, optionally recreating runnings. */
+export async function refreshWorkspaceImage(
+  id: string,
+  body: { image: string; recreateRunning?: boolean },
+): Promise<{
+  image: string;
+  status: string;
+  recreated: Array<{ agentId: string; dockerId: string; name: string }>;
+}> {
+  return api(`/api/runtime-nodes/${id}/refresh-workspace-image`, {
+    method: "POST",
+    json: body,
+  });
+}
+
+/** Probe the runner's local image digests against remote registries. */
+export type ImageUpdateEntry = {
+  image: string;
+  localDigest: string | null;
+  remoteDigest: string | null;
+  updateAvailable: boolean;
+  error: string | null;
+};
+
+export async function fetchImageUpdates(
+  id: string,
+): Promise<{ images: ImageUpdateEntry[] }> {
+  return api(`/api/runtime-nodes/${id}/image-updates`);
+}
+
+/** Global image update status (aggregated across all nodes). */
+export type GlobalImageUpdateStatus = {
+  hasUpdates: boolean;
+  nodes: Array<{
+    nodeId: string;
+    checkedAt: number;
+    entries: ImageUpdateEntry[];
+    hasUpdates: boolean;
+    error: string | null;
+  }>;
+};
+
+export async function fetchGlobalImageUpdates(): Promise<GlobalImageUpdateStatus> {
+  return api("/api/system/image-updates", { cacheTtlMs: 60_000 });
+}
+
+export async function checkNodeImageUpdates(
+  nodeId: string,
+): Promise<{ nodeId: string; checkedAt: number; entries: ImageUpdateEntry[]; hasUpdates: boolean; error: string | null }> {
+  return api("/api/system/image-updates/check", {
+    method: "POST",
+    json: { nodeId },
+  });
+}
+
 export async function deleteRuntimeNode(id: string): Promise<void> {
   await api(`/api/runtime-nodes/${id}`, { method: "DELETE" });
 }

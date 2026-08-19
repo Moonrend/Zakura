@@ -55,6 +55,12 @@ export interface AppConfig {
   edition: ZakuraEdition;
   /** True when edition === "saas". */
   multiTenant: boolean;
+  /**
+   * Max simultaneous ACP runtimes (running + booting) per tenant. Caps docker
+   * exec / container pressure a single tenant can create on a shared node so
+   * one tenant cannot starve the rest. 0 = unlimited.
+   */
+  maxConcurrentAcpPerTenant: number;
 }
 
 function loadOrCreateSecret(dataDir: string): string {
@@ -116,6 +122,7 @@ export function loadConfig(): AppConfig {
     migrationDir,
     runnerHeartbeatTimeoutSec: Number(process.env.ZAKURA_RUNNER_HEARTBEAT_TIMEOUT_SEC ?? 60),
     migrationRetentionDays: Number(process.env.ZAKURA_MIGRATION_RETENTION_DAYS ?? 7),
+    maxConcurrentAcpPerTenant: Number(process.env.ZAKURA_ACP_MAX_CONCURRENT_PER_TENANT ?? 8),
     ...(() => {
       const edition = resolveEdition();
       return { edition, multiTenant: edition === "saas" } as const;

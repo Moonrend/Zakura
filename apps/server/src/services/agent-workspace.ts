@@ -172,6 +172,14 @@ export class AgentWorkspaceService {
   private readonly shellJobs = new ShellJobRegistry();
   /** Serialize start/ensure so ACP draft + UI Start 不会互相拆掉对方刚拉起的容器 */
   private readonly startLocks = new Map<string, Promise<unknown>>();
+  /**
+   * dockerId → mount-validity cache. execInWorkspace used to run a `test -d
+   * /workspace` probe before *every* command, adding a full docker exec round
+   * trip to each call. Once a container's bind mount is confirmed valid it stays
+   * valid for the container's lifetime, so cache it and only invalidate on
+   * stop/remove.
+   */
+  private readonly mountValid = new Set<string>();
 
   constructor(
     private readonly db: Db,
@@ -202,11 +210,21 @@ export class AgentWorkspaceService {
   /**
    * 工作区已在跑就直接复用。ACP / exec 热路径必须走这里：
    * `start()` 会停掉并重建整个电脑环境（含桌面就绪等待）。
+   *
+   * `require` 控制冷启动时阻塞到哪种就绪程度：
+   * - "shell"（默认）：只等 .shell-ready，容器内 /workspace 挂载 + 工具链可用即可。
+   *   ACP 编码 agent 走 stdio，不需要浏览器，不必为 Chrome 启动多等数十秒。
+   * - "display"：额外等 .display-ready（Chrome CDP / VNC）。computer-use、
+   *   desktop-proxy 等真正消费桌面的路径才需要。
    */
-  async ensureStarted(agent: Agent): Promise<Agent> {
+  async ensureStarted(
+    agent: Agent,
+    opts?: { require?: "shell" | "display" },
+  ): Promise<Agent> {
+    const require = opts?.require ?? "shell";
     return this.withStartLock(agent.id, async () => {
       if (await this.isWorkspaceRunning(agent)) return agent;
-      return this.startUnlocked(agent);
+      return this.startUnlocked(agent, { require });
     });
   }
 
@@ -624,10 +642,14 @@ export class AgentWorkspaceService {
   }
 
   async start(agent: Agent): Promise<Agent> {
-    return this.withStartLock(agent.id, () => this.startUnlocked(agent));
+    return this.withStartLock(agent.id, () => this.startUnlocked(agent, { require: "display" }));
   }
 
-  private async startUnlocked(agent: Agent): Promise<Agent> {
+  private async startUnlocked(
+    agent: Agent,
+    opts: { require: "shell" | "display" } = { require: "display" },
+  ): Promise<Agent> {
+    const require = opts.require;
     const mode = resolveStackMode(agent);
     const log = (step: string, message: string, percent?: number, phase?: string) =>
       logAgentProgress(agent.id, step, message, { percent, phase });
@@ -695,6 +717,7 @@ export class AgentWorkspaceService {
       log("cleanup", "清理旧容器…", 22, "cleanup");
       const existing = await this.getWorkspaceContainer(agent.id);
       if (existing?.dockerId) {
+        this.mountValid.delete(existing.dockerId);
         try {
           await this.runtime.stop(existing.dockerId);
           await this.runtime.remove(existing.dockerId, true);
@@ -797,8 +820,18 @@ export class AgentWorkspaceService {
       });
       log("container", `工作区容器已启动 ${running.name.slice(0, 24)}…`, 65);
 
-      if (mode === "display") {
-        log("packages", "等待显示/浏览器就绪…", 70, "packages");
+      // Split readiness: every stack signals .shell-ready once /workspace is
+      // mounted and the toolchain is usable. Only callers that actually
+      // consume the desktop (computer-use, noVNC proxy) block on display-ready.
+      // ACP coding agents (claude-code, codex, opencode, …) go through stdio
+      // and pass require:"shell" so they start as soon as the toolchain is
+      // up; Chrome keeps booting in the background.
+      log("packages", "等待工作区就绪…", 70, "packages");
+      await this.waitWorkspaceReady(running.id, 30_000, "shell-ready", (p, msg) =>
+        log("packages", msg, p),
+      );
+      if (mode === "display" && require === "display") {
+        log("packages", "等待显示/浏览器就绪…", 75, "packages");
         await this.waitDesktopReady(running.id, agent, 90_000, (p, msg) =>
           log("packages", msg, p),
         );
@@ -874,6 +907,42 @@ export class AgentWorkspaceService {
     onLog?.("本地构建完成");
   }
 
+  private async waitWorkspaceReady(
+    dockerId: string,
+    timeoutMs: number,
+    marker: "shell-ready" | "display-ready",
+    onTick?: (percent: number, message: string) => void,
+  ) {
+    const start = Date.now();
+    let ticks = 0;
+    // Prefer the readiness marker touched by entrypoint.sh (fast, one exec per
+    // poll). Fall back to /workspace existence so older images without the
+    // marker still resolve instead of timing out.
+    const file = marker === "display-ready" ? ".display-ready" : ".shell-ready";
+    while (Date.now() - start < timeoutMs) {
+      ticks += 1;
+      const pct = Math.min(95, 40 + Math.floor(((Date.now() - start) / timeoutMs) * 55));
+      try {
+        const check = await this.runtime.exec(dockerId, [
+          "bash",
+          "-lc",
+          `[ -e /var/lib/zakura-features/${file} ] && echo ready || { [ -d ${AGENT_WORKSPACE_ROOT} ] && echo legacy; }`,
+        ]);
+        if (check.stdout.includes("ready")) {
+          onTick?.(98, marker === "display-ready" ? "桌面就绪" : "工作区就绪");
+          return;
+        }
+        if (ticks % 3 === 0) onTick?.(pct, "等待工作区就绪…");
+      } catch {
+        if (ticks % 3 === 0) onTick?.(pct, "探测中…");
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    // Timeout is non-fatal: the container keeps running and may still become
+    // ready in the background. Bail out so callers proceed rather than hang.
+    onTick?.(96, "工作区就绪探测超时，容器可能仍在后台继续");
+  }
+
   private async waitDesktopReady(
     dockerId: string,
     _agent: Agent,
@@ -885,15 +954,17 @@ export class AgentWorkspaceService {
     while (Date.now() - start < timeoutMs) {
       ticks += 1;
       const elapsed = Date.now() - start;
-      const pct = Math.min(95, 70 + Math.floor((elapsed / timeoutMs) * 25));
+      const pct = Math.min(95, 75 + Math.floor((elapsed / timeoutMs) * 20));
       try {
-        // 电脑环境自带浏览器：以 CDP 就绪为准
+        // Prefer the entrypoint's .display-ready marker (touched right after
+        // the Chrome CDP loop). Fall back to a direct CDP probe so images
+        // built before the marker still resolve.
         const check = await this.runtime.exec(dockerId, [
           "bash",
           "-lc",
-          "curl -sf -m 2 http://127.0.0.1:9222/json/version >/dev/null && echo ok",
+          `[ -e /var/lib/zakura-features/.display-ready ] && echo ready || { curl -sf -m 2 http://127.0.0.1:9222/json/version >/dev/null && echo ok; }`,
         ]);
-        if (check.stdout.includes("ok")) {
+        if (check.stdout.includes("ready") || check.stdout.includes("ok")) {
           onTick?.(98, "浏览器 CDP 就绪");
           return;
         }
@@ -1054,6 +1125,7 @@ export class AgentWorkspaceService {
     } else {
       const row = await this.getWorkspaceContainer(agent.id);
       if (row?.dockerId) {
+        this.mountValid.delete(row.dockerId);
         try {
           await this.runtime.stop(row.dockerId);
           if (opts?.removeContainer !== false) {
@@ -1134,13 +1206,19 @@ export class AgentWorkspaceService {
         `工作区主机目录丢失并已重建为空目录。请重启电脑环境以重新挂载 ${AGENT_WORKSPACE_ROOT}。`,
       );
     }
-    const probe = await this.runtime.exec(dockerId, ["test", "-d", AGENT_WORKSPACE_ROOT], {
-      workingDir: "/",
-    });
-    if (probe.exitCode !== 0) {
-      throw new Error(
-        `工作区挂载已失效（无法访问 ${AGENT_WORKSPACE_ROOT}）。主机目录可能被删除，请在控制台重启电脑环境。`,
-      );
+    // Skip the per-call mount probe when we already validated this container:
+    // the bind mount cannot vanish while the same container keeps running.
+    // This removes one docker exec round trip from every execInWorkspace call.
+    if (!this.mountValid.has(dockerId)) {
+      const probe = await this.runtime.exec(dockerId, ["test", "-d", AGENT_WORKSPACE_ROOT], {
+        workingDir: "/",
+      });
+      if (probe.exitCode !== 0) {
+        throw new Error(
+          `工作区挂载已失效（无法访问 ${AGENT_WORKSPACE_ROOT}）。主机目录可能被删除，请在控制台重启电脑环境。`,
+        );
+      }
+      this.mountValid.add(dockerId);
     }
     return this.runtime.exec(dockerId, command, {
       workingDir,

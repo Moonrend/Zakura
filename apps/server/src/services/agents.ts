@@ -167,11 +167,25 @@ export class AgentService {
     }
 
     // MCP 默认对全部 Agent 可用（mode=all）；需要隔离时再切 selected + bindings
+    // fx 默认启用并走 Zakura 路由（supportsZakuraRoute=true），开箱即用无需手动 login。
+    // provisionAcpZakuraRoutes 会在首次会话启动时自动注入 Gateway key。
     const defaultConfig =
       input.config ??
       ({
         providers: {
           mcp: { mode: "all", instanceIds: [] },
+        },
+        acp: {
+          permissionPolicy: "ask",
+          defaultRuntime: "zakura",
+          agents: {
+            fx: {
+              enabled: true,
+              setupMode: "api_key",
+              managed: {},
+              modelProvider: "zakura",
+            },
+          },
         },
       } satisfies Record<string, unknown>);
 

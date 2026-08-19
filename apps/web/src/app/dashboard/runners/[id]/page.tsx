@@ -14,25 +14,33 @@ import {
   Save,
   Square,
   Trash2,
+  AlertCircle,
+  CheckCircle2,
 } from "lucide-react";
 import {
   allocateNodeContainer,
   deleteRuntimeNode,
   fetchRunnerDetail,
   fetchRunnerInstall,
+  fetchRunnerVersion,
+  fetchImageUpdates,
   formatBytes,
   isRunnerHostInfo,
   kindLabel,
   listNodeContainers,
   patchRuntimeNode,
   pickInstallPackage,
+  refreshWorkspaceImage,
   statusLabel,
   statusVariant,
   stopContainer,
+  updateRunner,
   type ManagedContainerRow,
   type RunnerHostInfo,
   type RunnerInstallBundle,
   type RunnerInstallPackage,
+  type RunnerVersionInfo,
+  type ImageUpdateEntry,
   type RuntimeNode,
 } from "@/lib/runners";
 import { RunnerInstallPanel } from "@/components/runner-install-panel";
@@ -85,6 +93,12 @@ export default function RunnerDetailPage() {
     purpose: "ephemeral",
     allocatedTo: "",
   });
+  const [versionInfo, setVersionInfo] = useState<RunnerVersionInfo | null>(null);
+  const [versionBusy, setVersionBusy] = useState(false);
+  const [runnerImageInput, setRunnerImageInput] = useState("");
+  const [workspaceImageInput, setWorkspaceImageInput] = useState("");
+  const [imageUpdates, setImageUpdates] = useState<ImageUpdateEntry[] | null>(null);
+  const [imageUpdatesBusy, setImageUpdatesBusy] = useState(false);
 
   const loadInstall = useCallback(async () => {
     setInstallBusy(true);
@@ -119,6 +133,34 @@ export default function RunnerDetailPage() {
     }
   }, [id]);
 
+  const loadVersion = useCallback(async () => {
+    if (!node || node.kind === "local") return;
+    if (node.access === "shared") return;
+    setVersionBusy(true);
+    try {
+      const info = await fetchRunnerVersion(id);
+      setVersionInfo(info);
+      if (!runnerImageInput && info.image) setRunnerImageInput(info.image);
+    } catch {
+      /* offline / unavailable */
+    } finally {
+      setVersionBusy(false);
+    }
+  }, [id, node, runnerImageInput]);
+
+  const loadImageUpdates = useCallback(async () => {
+    if (!node || node.kind === "local" || node.access === "shared") return;
+    setImageUpdatesBusy(true);
+    try {
+      const res = await fetchImageUpdates(id);
+      setImageUpdates(res.images ?? []);
+    } catch {
+      setImageUpdates(null);
+    } finally {
+      setImageUpdatesBusy(false);
+    }
+  }, [id, node]);
+
   const load = useCallback(async () => {
     try {
       setLoading(true);
@@ -139,12 +181,17 @@ export default function RunnerDetailPage() {
       } else {
         setInstallBundle(null);
       }
+      // Probe live Runner version/image for the update panel (remote only)
+      if (res.node.kind !== "local") {
+        void loadVersion();
+        void loadImageUpdates();
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [id, loadInstall]);
+  }, [id, loadInstall, loadVersion, loadImageUpdates]);
 
   useEffect(() => {
     void load();
@@ -168,6 +215,51 @@ export default function RunnerDetailPage() {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  const isRemoteUpdatable = node?.kind !== "local" && node?.access !== "shared";
+
+  async function handleUpdateRunner() {
+    if (!node) return;
+    const image = runnerImageInput.trim();
+    if (!image) {
+      toast.error("请输入目标 Runner 镜像");
+      return;
+    }
+    setVersionBusy(true);
+    try {
+      const result = await updateRunner(node.id, { image });
+      toast.success(`已调度更新到 ${result.image}，Runner 将短暂重连`);
+      // Runner will drop + reconnect; re-probe after a delay
+      setTimeout(() => void loadVersion(), 8_000);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVersionBusy(false);
+    }
+  }
+
+  async function handleRefreshWorkspaceImage() {
+    if (!node) return;
+    const image = workspaceImageInput.trim();
+    if (!image) {
+      toast.error("请输入要刷新的工作区镜像");
+      return;
+    }
+    setVersionBusy(true);
+    try {
+      const result = await refreshWorkspaceImage(node.id, {
+        image,
+        recreateRunning: true,
+      });
+      toast.success(
+        `镜像已刷新${result.recreated.length ? `，已重建 ${result.recreated.length} 个工作区` : ""}`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVersionBusy(false);
     }
   }
 
@@ -332,6 +424,149 @@ export default function RunnerDetailPage() {
           </SettingsField>
         </div>
       </SettingsSection>
+
+      {isRemoteUpdatable ? (
+        <SettingsSection title="版本与镜像">
+          <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={versionBusy}
+              onClick={() => void loadVersion()}
+            >
+              {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              重新探测
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={imageUpdatesBusy}
+              onClick={() => void loadImageUpdates()}
+            >
+              {imageUpdatesBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              检查镜像更新
+            </Button>
+          </div>
+          <div className="space-y-0 divide-y divide-border/60">
+            <SettingsField label="Runner 版本">
+              <div className="flex items-center gap-2">
+                {node.agentVersion ? (
+                  <Badge variant="secondary">v{node.agentVersion}</Badge>
+                ) : (
+                  <span className="text-xs text-muted-foreground">未上报</span>
+                )}
+                {versionInfo?.live && versionInfo.version ? (
+                  <span className="text-xs text-muted-foreground">
+                    实时 v{versionInfo.version}
+                  </span>
+                ) : versionInfo ? (
+                  <span className="text-[11px] text-muted-foreground">
+                    {versionInfo.live === false ? "Runner 离线或不可达" : ""}
+                  </span>
+                ) : null}
+              </div>
+            </SettingsField>
+            <SettingsField label="Runner 镜像">
+              <code className="text-[11px] text-muted-foreground break-all">
+                {versionInfo?.image || "—"}
+              </code>
+            </SettingsField>
+            <SettingsField label="容器 ID">
+              <code className="text-[11px] text-muted-foreground">
+                {versionInfo?.containerId?.slice(0, 12) || "—"}
+              </code>
+            </SettingsField>
+          </div>
+          {imageUpdates && imageUpdates.length > 0 ? (
+            <div className="mt-3 space-y-2">
+              {imageUpdates.some((e) => e.updateAvailable) ? (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+                  <div className="text-xs text-amber-600 dark:text-amber-400">
+                    检测到镜像有新版本可用。建议在低峰期更新：
+                    <strong>更新 Runner</strong> 会重建 Runner 容器（连接短暂中断）；
+                    <strong>刷新工作区镜像</strong> 会重建运行中的工作区（进行中会话将重启）。
+                    若主机目录挂载异常导致工作区不可用，可能需要重启电脑环境以恢复 /workspace 挂载。
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
+                  <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
+                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                    所有镜像均为最新版本
+                  </span>
+                </div>
+              )}
+              <div className="space-y-1">
+                {imageUpdates.map((entry) => (
+                  <div
+                    key={entry.image}
+                    className="flex items-center justify-between gap-2 rounded border border-border/50 px-3 py-1.5"
+                  >
+                    <code className="text-[11px] text-muted-foreground break-all">
+                      {entry.image}
+                    </code>
+                    {entry.updateAvailable ? (
+                      <Badge variant="warn" className="shrink-0 text-[10px]">
+                        有更新
+                      </Badge>
+                    ) : entry.error ? (
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {entry.error}
+                      </span>
+                    ) : (
+                      <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="rn-runner-image">更新 Runner 到镜像</Label>
+              <Input
+                id="rn-runner-image"
+                value={runnerImageInput}
+                onChange={(e) => setRunnerImageInput(e.target.value)}
+                placeholder="sunwuyuan/zakura-runner-dev:latest"
+              />
+              <Button
+                size="sm"
+                className="w-full"
+                disabled={versionBusy || !runnerImageInput.trim()}
+                onClick={() => void handleUpdateRunner()}
+              >
+                {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                更新 Runner（拉取并重建）
+              </Button>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="rn-ws-image">刷新工作区镜像</Label>
+              <Input
+                id="rn-ws-image"
+                value={workspaceImageInput}
+                onChange={(e) => setWorkspaceImageInput(e.target.value)}
+                placeholder="sunwuyuan/zakura-workspace-dev:debian"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                disabled={versionBusy || !workspaceImageInput.trim()}
+                onClick={() => void handleRefreshWorkspaceImage()}
+              >
+                {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                刷新并重建在跑工作区
+              </Button>
+            </div>
+          </div>
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            更新 Runner 会拉取新镜像并重建当前容器，期间连接会短暂中断（数秒）。
+            刷新工作区镜像会重建所有使用该镜像的运行中工作区，进行中的会话将被重启。
+          </p>
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection
         title={

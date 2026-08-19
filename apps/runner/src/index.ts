@@ -5,8 +5,9 @@ import { initTelemetry, log } from "@zakura/core";
 import { createAuthConfig } from "./auth.js";
 import { createRunnerApp } from "./app.js";
 import { startServerSync } from "./server-sync.js";
+import { resolveRunnerVersion } from "./version.js";
 
-const VERSION = "0.1.0";
+const VERSION = resolveRunnerVersion();
 
 export type RunnerLaunchOptions = {
   port?: number;

@@ -113,6 +113,11 @@ RUN set -eux; \
     printf '%s\n' '#!/bin/sh' 'exec python3 -m hermes_acp "$@"' >/opt/zakura/acp/bin/hermes-acp; \
     chmod +x /opt/zakura/acp/bin/hermes-acp; \
   fi; \
+  curl -fsSL https://fx.sh/setup.sh | FX_INSTALL_DIR=/opt/zakura/acp/bin bash; \
+  command -v fx >/dev/null 2>&1 || { \
+    echo "ERROR: fx install failed — fx is a default ACP runtime, aborting build"; \
+    exit 1; \
+  }; \
   command -v codex-acp; \
   command -v claude-agent-acp; \
   command -v gemini; \
@@ -123,6 +128,7 @@ RUN set -eux; \
   command -v kimi; \
   command -v pi; \
   command -v pi-acp; \
+  fx --version 2>/dev/null || true; \
   rm -rf /tmp/npm-cache /tmp/pip-cache /root/.cache /root/.npm
 
 COPY entrypoint.sh /usr/local/bin/zakura-workspace

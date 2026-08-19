@@ -146,6 +146,7 @@ describe("ACP config", () => {
       "kimi-code",
       "pi",
       "opencode",
+      "fx",
     ]);
     const gemini = builtinAcpProfiles().find((p) => p.id === "gemini-cli")!;
     assert.deepEqual(gemini.args, ["--acp"]);
@@ -233,6 +234,39 @@ describe("ACP config", () => {
     assert.equal(piLaunch.env.OPENAI_MODEL, "gpt-4.1");
     assert.equal(supportsAcpZakuraRoute(grok), true);
     assert.equal(supportsAcpZakuraRoute(claude), false);
+    const fx = builtinAcpProfiles().find((p) => p.id === "fx")!;
+    assert.deepEqual(fx.args, ["acp"]);
+    assert.equal(supportsAcpZakuraRoute(fx), true);
+    const fxLaunch = resolveAcpLaunch(fx, {
+      id: "fx",
+      enabled: true,
+      setupMode: "api_key",
+      managed: {
+        api_key: "vck-fx-key",
+        base_url: "https://ai-gateway.vercel.sh/v1",
+        model: "zai/glm-5.2-fast",
+      },
+    });
+    assert.equal(fxLaunch.command, "fx");
+    assert.equal(fxLaunch.env.AI_GATEWAY_API_KEY, "vck-fx-key");
+    assert.equal(fxLaunch.env.OPENAI_API_KEY, "vck-fx-key");
+    assert.equal(fxLaunch.env.AI_GATEWAY_BASE_URL, "https://ai-gateway.vercel.sh/v1");
+    assert.equal(fxLaunch.env.FX_MODEL, "zai/glm-5.2-fast");
+    const fxRouted = resolveAcpLaunch(fx, {
+      id: "fx",
+      enabled: true,
+      setupMode: "self",
+      modelProvider: "zakura",
+      managed: {
+        zakura_api_key: "zk-fx-key",
+        zakura_base_url: "https://zakura.example/v1",
+        model: "kimi-k2.5",
+      },
+    });
+    assert.equal(fxRouted.env.AI_GATEWAY_API_KEY, "zk-fx-key");
+    assert.equal(fxRouted.env.OPENAI_BASE_URL, "https://zakura.example/v1");
+    assert.equal(fxRouted.env.AI_GATEWAY_BASE_URL, "https://zakura.example/v1");
+    assert.equal(fxRouted.env.FX_MODEL, "kimi-k2.5");
     for (const profile of builtinAcpProfiles()) {
       assert.equal(profile.installHint, undefined, `${profile.id} must stay image-pinned`);
     }

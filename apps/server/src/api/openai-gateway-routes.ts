@@ -19,6 +19,37 @@ function sse(data: unknown): string {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
+/**
+ * /v1/models 透出的模型元数据子集。字段名沿用 ModelCatalogEntry
+ * （contextLimit / outputLimit / reasoning / toolCall / attachment），
+ * 由 ACP 适配器侧映射进 opencode.json 的 limit / reasoning。仅在字段
+ * 为有限数 / 布尔时写入，避免把空值塞给客户端。
+ */
+type GatewayModelMetadata = {
+  contextLimit?: number;
+  outputLimit?: number;
+  reasoning?: boolean;
+  toolCall?: boolean;
+  attachment?: boolean;
+};
+
+function pickModelMetadata(
+  meta: Record<string, unknown> | undefined,
+): { metadata?: GatewayModelMetadata } {
+  if (!meta) return {};
+  const out: GatewayModelMetadata = {};
+  if (typeof meta.contextLimit === "number" && Number.isFinite(meta.contextLimit) && meta.contextLimit > 0) {
+    out.contextLimit = meta.contextLimit;
+  }
+  if (typeof meta.outputLimit === "number" && Number.isFinite(meta.outputLimit) && meta.outputLimit > 0) {
+    out.outputLimit = meta.outputLimit;
+  }
+  if (typeof meta.reasoning === "boolean") out.reasoning = meta.reasoning;
+  if (typeof meta.toolCall === "boolean") out.toolCall = meta.toolCall;
+  if (typeof meta.attachment === "boolean") out.attachment = meta.attachment;
+  return Object.keys(out).length ? { metadata: out } : {};
+}
+
 function asRecordBody(raw: unknown): Record<string, unknown> {
   return raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as Record<string, unknown>)
@@ -110,11 +141,21 @@ export function registerOpenAiGatewayRoutes(
       ? await deps.upstreamModels.list(auth.keyed.tenant.id, { capability: "chat" })
       : [];
     const names = new Set<string>();
+    // 按 canonicalModel 索引模型目录元数据，供 /v1/models 透出给 ACP 适配器
+    // （OpenCode 据此填充 opencode.json 的 limit.context / reasoning，避免
+    // "Model metadata for ... not found" 回退告警）。metaJson 存的是
+    // ModelCatalogEntry 形状，含 contextLimit / outputLimit / reasoning 等。
+    const metaById = new Map<string, Record<string, unknown>>();
+    for (const row of configured) {
+      const id = row.canonicalModel.trim();
+      if (id && !metaById.has(id)) metaById.set(id, row.meta ?? {});
+    }
     const data: Array<{
       id: string;
       object: "model";
       created: number;
       owned_by: string;
+      metadata?: GatewayModelMetadata;
     }> = [];
     for (const row of configured) {
       const id = row.canonicalModel.trim();
@@ -126,6 +167,7 @@ export function registerOpenAiGatewayRoutes(
         object: "model",
         created: Number.isFinite(createdAt.getTime()) ? Math.floor(createdAt.getTime() / 1000) : 0,
         owned_by: "zakura",
+        ...pickModelMetadata(metaById.get(id)),
       });
     }
     if (data.length === 0) {
@@ -144,7 +186,16 @@ export function registerOpenAiGatewayRoutes(
         for (const id of Object.keys(map)) {
           if (!id || names.has(id)) continue;
           names.add(id);
-          data.push({ id, object: "model", created: 0, owned_by: "zakura" });
+          // forward alias：解析到目标 canonical 再取其元数据；解析不到则不带
+          const targetCanonical = map[id]?.trim();
+          const metaRecord = targetCanonical ? metaById.get(targetCanonical) : undefined;
+          data.push({
+            id,
+            object: "model",
+            created: 0,
+            owned_by: "zakura",
+            ...pickModelMetadata(metaRecord),
+          });
         }
       }
     } catch {

@@ -23,29 +23,52 @@ import {
   resolveAcpLaunch,
   upsertAcpGrant,
   type AcpAgentSetup,
+  type AcpGatewayModel,
   type AcpPermissionGrant,
   type AcpRuntimeLayout,
   type AcpRuntimeState,
   type AcpRuntimeStatus,
 } from "@zakura/shared";
-/** Zakura 路由下可用的网关模型别名；失败返回 undefined，由调用方回退。 */
+/** Zakura 路由下可用的网关模型别名（带元数据）；失败返回 undefined，由调用方回退。 */
 async function fetchAcpGatewayModels(
   baseUrl: string,
   apiKey: string,
-): Promise<string[] | undefined> {
+): Promise<AcpGatewayModel[] | undefined> {
   try {
     const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return undefined;
-    const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
-    const ids = Array.isArray(body.data)
+    const body = (await res.json()) as {
+      data?: Array<{
+        id?: unknown;
+        name?: unknown;
+        metadata?: Record<string, unknown> | null;
+      }>;
+    };
+    const items = Array.isArray(body.data)
       ? body.data
-          .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
-          .filter(Boolean)
+          .map((m): AcpGatewayModel | null => {
+            const id = typeof m?.id === "string" ? m.id.trim() : "";
+            if (!id) return null;
+            const meta = m?.metadata;
+            const isNum = (v: unknown): v is number =>
+              typeof v === "number" && Number.isFinite(v) && v > 0;
+            const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+            return {
+              id,
+              ...(typeof m?.name === "string" && m.name.trim() ? { name: m.name.trim() } : {}),
+              ...(meta && isNum(meta.contextLimit) ? { contextLimit: meta.contextLimit } : {}),
+              ...(meta && isNum(meta.outputLimit) ? { outputLimit: meta.outputLimit } : {}),
+              ...(meta && isBool(meta.reasoning) ? { reasoning: meta.reasoning } : {}),
+              ...(meta && isBool(meta.toolCall) ? { toolCall: meta.toolCall } : {}),
+              ...(meta && isBool(meta.attachment) ? { attachment: meta.attachment } : {}),
+            };
+          })
+          .filter((m): m is AcpGatewayModel => m !== null)
       : [];
-    return ids.length ? ids.slice(0, 64) : undefined;
+    return items.length ? items.slice(0, 64) : undefined;
   } catch {
     return undefined;
   }
@@ -102,7 +125,7 @@ type LiveRuntime = {
   agent: Agent;
   /** Zakura 路由：模型目录与切换都以网关别名表达 */
   zakuraRouted: boolean;
-  gatewayModels?: string[];
+  gatewayModels?: AcpGatewayModel[];
   authMethods: Array<{ id: string; name: string; description?: string }>;
   authRequired: boolean;
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
@@ -117,6 +140,15 @@ export class AcpSessionService {
   /** 使超时/切换后的迟到启动结果失效 */
   private readonly draftEpoch = new Map<string, number>();
   private readonly reapTimer: ReturnType<typeof setInterval>;
+  /**
+   * Per-tenant concurrent ACP runtime cap. Each running (or starting)
+   * LiveRuntime counts against the tenant that owns its agent. Drafts over
+   * the cap are rejected with a clear message so a single tenant cannot
+   * exhaust host docker/exec capacity and starve everyone else on a shared
+   * multi-tenant node.
+   */
+  private readonly maxConcurrentPerTenant: number;
+  private readonly tenantInflight = new Map<string, number>();
 
   constructor(
     private readonly deps: {
@@ -125,10 +157,12 @@ export class AcpSessionService {
       workspace: AgentWorkspaceService;
       workspaceFs?: ServerWorkspaceFsProvider;
       publicBaseUrl?: string;
+      maxConcurrentAcpPerTenant?: number;
     },
   ) {
     this.hooks = new AgentHooksService(deps.workspace);
     this.deviceAuth = new CodexDeviceAuth(deps.workspace);
+    this.maxConcurrentPerTenant = Math.max(1, deps.maxConcurrentAcpPerTenant ?? 8);
     this.reapTimer = setInterval(() => void this.reapIdle(), 60_000);
     this.reapTimer.unref?.();
   }
@@ -147,6 +181,11 @@ export class AcpSessionService {
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
     if (!agent) throw new Error("Agent 不存在");
     const setup = requireSetup(agent, input.profileId);
+    if (this.countTenantActive(input.tenantId) >= this.maxConcurrentPerTenant) {
+      throw new Error(
+        `已达到该租户的最大并发 ACP 会话数（${this.maxConcurrentPerTenant}），请等待已有会话结束或回收后再试`,
+      );
+    }
     const session = await this.deps.store.createSession({
       tenantId: input.tenantId,
       agentId: input.agentId,
@@ -155,7 +194,14 @@ export class AcpSessionService {
       project: input.project ?? null,
       origin: { runtime: "acp", acpProfileId: setup.id },
     });
-    void this.startDraftRuntime(agent, session.id, setup);
+    // Reserve a booting slot so concurrent prepareDraft calls for the same
+    // tenant are capped even before any runtime reaches byChat. The slot is
+    // released when startDraftRuntime settles (success or failure); the
+    // running runtime itself is then tracked via byChat + countTenantActive.
+    this.tenantInflightInc(input.tenantId);
+    void this.startDraftRuntime(agent, session.id, setup).finally(() =>
+      this.tenantInflightDec(input.tenantId),
+    );
     return {
       session,
       runtime: {
@@ -165,6 +211,30 @@ export class AcpSessionService {
         state: "starting",
       },
     };
+  }
+
+  /**
+   * Running runtimes in byChat plus booting drafts tracked by tenantInflight.
+   * Both count against the per-tenant concurrency cap so a tenant cannot
+   * exhaust host capacity via either running agents or a flood of parallel
+   * cold starts.
+   */
+  private countTenantActive(tenantId: string): number {
+    let n = this.tenantInflight.get(tenantId) ?? 0;
+    for (const live of this.byChat.values()) {
+      if (live.agent.tenantId === tenantId) n += 1;
+    }
+    return n;
+  }
+
+  private tenantInflightInc(tenantId: string): void {
+    this.tenantInflight.set(tenantId, (this.tenantInflight.get(tenantId) ?? 0) + 1);
+  }
+
+  private tenantInflightDec(tenantId: string): void {
+    const cur = (this.tenantInflight.get(tenantId) ?? 0) - 1;
+    if (cur <= 0) this.tenantInflight.delete(tenantId);
+    else this.tenantInflight.set(tenantId, cur);
   }
 
   private async startDraftRuntime(agent: Agent, sessionId: string, setup: AcpAgentSetup) {
@@ -179,7 +249,12 @@ export class AcpSessionService {
           throw new Error("Agent 启动超时");
         }),
       ]);
-      if (this.draftEpoch.get(sessionId) !== epoch) return;
+      if (this.draftEpoch.get(sessionId) !== epoch) {
+        // Superseded by a newer turn — the draft that won the race is no longer
+        // wanted, so tear it down and release its concurrency slot.
+        if (live) await this.teardown(live).catch(() => undefined);
+        return;
+      }
       await this.emitRuntimeSnapshot(sessionId, live);
     } catch (err) {
       if (this.draftEpoch.get(sessionId) !== epoch) return;
@@ -542,10 +617,9 @@ export class AcpSessionService {
     sessionId: string,
     modeId: string,
   ): Promise<AcpRuntimeStatus> {
-    const live = this.byChat.get(sessionId);
-    if (!live?.active) throw new Error("ACP runtime 未启动");
+    const live = await this.requireLive(tenantId, agentId, sessionId);
     await live.connection.agent.request(acp.methods.agent.session.setMode, {
-      sessionId: live.active.sessionId,
+      sessionId: live.active!.sessionId,
       modeId,
     });
     live.currentModeId = modeId;
@@ -558,39 +632,47 @@ export class AcpSessionService {
     sessionId: string,
     modelId: string,
   ): Promise<AcpRuntimeStatus> {
-    const live = this.byChat.get(sessionId);
-    if (!live?.active) throw new Error("ACP runtime 未启动");
-    if (live.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
+    const session = await this.deps.store.getSession(tenantId, agentId, sessionId);
+    if (!session) throw new Error("会话不存在");
+    if (session.kind !== "acp") throw new Error("不是 ACP 会话");
     await this.deps.store.updateSession(tenantId, agentId, sessionId, { model: modelId });
+
+    const inflight = this.starting.get(sessionId);
+    if (inflight) await inflight.catch(() => undefined);
+
+    let live = this.byChat.get(sessionId);
+    if (live?.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
     // Pin before setConfigOption: Codex 回包会带官方模型目录，overlay 要以
     // 用户刚选的网关别名为准，不能被适配器 currentId 盖掉。
-    if (live.models) live.models = { ...live.models, currentId: modelId };
-    const configId = dynamicModelConfigId(live);
-    if (!configId) {
-      // Some ACP adapters expose a model list but no standard runtime setter
-      // (notably Codex and several community adapters). Restarting an idle
-      // draft runtime is the only way to apply the selected startup model.
-      const agent = await this.deps.agentService.get(tenantId, agentId);
-      if (!agent) throw new Error("Agent 不存在");
-      const setup = requireSetup(agent, live.profileId);
-      // 保留 ACP 侧会话：不下发 session/close，重启后走 session/load 恢复
-      // 上下文（Codex/OpenCode 等把会话持久化在自己的 state 目录里）。
-      const previousAcpSessionId = live.acpSessionId;
-      await this.teardown(live, { keepSession: true });
-      await this.ensureRuntime(agent, sessionId, setup, {
-        existingAcpSessionId: previousAcpSessionId,
-      });
-      return this.runtimeStatus(tenantId, agentId, sessionId);
+    if (live?.models) live.models = { ...live.models, currentId: modelId };
+
+    const configId = live ? dynamicModelConfigId(live) : undefined;
+    if (live?.active && configId) {
+      // setConfigOption 的取值用适配器协议 id（OpenCode 需要 zakura/ 前缀）；
+      // 展示与持久化始终用网关裸别名。
+      return this.setConfigOption(
+        tenantId,
+        agentId,
+        sessionId,
+        configId,
+        acpModelProtocolId(live, modelId),
+      );
     }
-    // setConfigOption 的取值用适配器协议 id（OpenCode 需要 zakura/ 前缀）；
-    // 展示与持久化始终用网关裸别名。
-    return this.setConfigOption(
-      tenantId,
-      agentId,
-      sessionId,
-      configId,
-      acpModelProtocolId(live, modelId),
-    );
+
+    // 无热切换（Codex/Grok 等不认网关别名）或进程已不在：走启动参数。
+    // 进程未起来时不要抛「未启动」——刷新/回收后再改模型是正常路径。
+    const origin = safeOrigin(session.originJson);
+    const previousAcpSessionId = live?.acpSessionId ?? origin.acpSessionId;
+    const profileId = live?.profileId ?? origin.acpProfileId;
+    if (!profileId) throw new Error("会话未绑定 ACP profile");
+    if (live) await this.teardown(live, { keepSession: true });
+    const agent = await this.deps.agentService.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const setup = requireSetup(agent, profileId);
+    await this.ensureRuntime(agent, sessionId, setup, {
+      existingAcpSessionId: previousAcpSessionId,
+    });
+    return this.runtimeStatus(tenantId, agentId, sessionId);
   }
 
   async setConfigOption(
@@ -600,12 +682,11 @@ export class AcpSessionService {
     configId: string,
     value: string | boolean,
   ): Promise<AcpRuntimeStatus> {
-    const live = this.byChat.get(sessionId);
-    if (!live?.active) throw new Error("ACP runtime 未启动");
+    const live = await this.requireLive(tenantId, agentId, sessionId);
     const payload =
       typeof value === "boolean"
-        ? { sessionId: live.active.sessionId, configId, value, type: "boolean" as const }
-        : { sessionId: live.active.sessionId, configId, value };
+        ? { sessionId: live.active!.sessionId, configId, value, type: "boolean" as const }
+        : { sessionId: live.active!.sessionId, configId, value };
     const result = await live.connection.agent.request(acp.methods.agent.session.setConfigOption, payload);
     const options =
       result && typeof result === "object"
@@ -737,7 +818,7 @@ export class AcpSessionService {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
     const launch = resolveAcpLaunch(profile, setup);
-    await this.deps.workspace.ensureStarted(agent).catch(() => undefined);
+    await this.deps.workspace.ensureStarted(agent, { require: "shell" }).catch(() => undefined);
     const result = await this.deps.workspace.execInWorkspace(agent, [
       "bash",
       "-lc",
@@ -764,7 +845,7 @@ export class AcpSessionService {
     if (!isSafeInstallHint(profile.installHint)) {
       throw new Error("安装命令不在允许列表内，请用 self 模式自行安装");
     }
-    await this.deps.workspace.ensureStarted(agent);
+    await this.deps.workspace.ensureStarted(agent, { require: "shell" });
     const result = await this.deps.workspace.execInWorkspace(
       agent,
       ["bash", "-lc", profile.installHint],
@@ -776,6 +857,35 @@ export class AcpSessionService {
       command: profile.installHint,
       output: output.slice(0, 8000),
     };
+  }
+
+  /** 改模型/思考/模式时进程可能已被回收或尚未拉起；先等到可用再 RPC。 */
+  private async requireLive(
+    tenantId: string,
+    agentId: string,
+    sessionId: string,
+  ): Promise<LiveRuntime> {
+    const inflight = this.starting.get(sessionId);
+    if (inflight) {
+      const live = await inflight;
+      if (live.active) return live;
+    }
+    const existing = this.byChat.get(sessionId);
+    if (existing?.active) return existing;
+
+    const session = await this.deps.store.getSession(tenantId, agentId, sessionId);
+    if (!session) throw new Error("会话不存在");
+    if (session.kind !== "acp") throw new Error("不是 ACP 会话");
+    const origin = safeOrigin(session.originJson);
+    if (!origin.acpProfileId) throw new Error("会话未绑定 ACP profile");
+    const agent = await this.deps.agentService.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent 不存在");
+    const setup = requireSetup(agent, origin.acpProfileId);
+    const live = await this.ensureRuntime(agent, sessionId, setup, {
+      existingAcpSessionId: origin.acpSessionId,
+    });
+    if (!live.active) throw new Error("ACP runtime 未启动");
+    return live;
   }
 
   private async ensureRuntime(
@@ -820,21 +930,63 @@ export class AcpSessionService {
     const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
     const cwd = projectDefaultWorkingDir(session?.project);
     // 已在跑的电脑环境必须复用：`start()` 会拆掉重建整个容器（含桌面就绪等待）。
-    const workspaceReady = this.deps.workspace.ensureStarted(agent).catch(() => undefined);
+    // ACP 编码 agent 走 stdio，只需要 shell 就绪（/workspace 挂载 + 工具链可用），
+    // 不必为 Chrome / VNC 启动多等数十秒——桌面在容器后台并行补起。
+    const workspaceReady = this.deps.workspace
+      .ensureStarted(agent, { require: "shell" })
+      .catch(() => undefined);
 
     // Repair legacy Zakura ACP profiles at the point of use as well as in the
     // settings route. This closes the path where a user starts chat directly
     // with an old profile that has no persisted Gateway key yet.
-    if (setup.modelProvider === "zakura" && this.deps.publicBaseUrl) {
-      const provisioned = await provisionAcpZakuraRoutes(
-        this.deps.agentService,
-        agent.tenantId,
-        agent,
-        readAgentAcpConfig(agent),
-        this.deps.publicBaseUrl,
-      );
-      setup = provisioned.agents[setup.id] ?? setup;
+    //
+    // Provisioning (DB read + write), the workspace container start, and the
+    // gateway model list fetch are all independent — run them concurrently so
+    // container warm-up overlaps with both instead of stacking serially.
+    // Auto-migrate legacy fx agents: older defaults used setupMode="self" +
+    // modelProvider="native" with no managed key, which causes fx to fail at
+    // initialize ("ACP connection closed"). fx supports Zakura route, so flip
+    // it to zakura routing automatically when no native credential is present.
+    if (
+      setup.id === "fx" &&
+      setup.modelProvider === "native" &&
+      setup.setupMode === "self" &&
+      !setup.managed.api_key?.trim() &&
+      this.deps.publicBaseUrl
+    ) {
+      const config = readAgentAcpConfig(agent);
+      const fxSetup = config.agents["fx"];
+      if (fxSetup) {
+        fxSetup.modelProvider = "zakura";
+        fxSetup.setupMode = "api_key";
+        await saveAgentAcpConfig(this.deps.agentService, agent.tenantId, agent, config);
+        setup = fxSetup;
+      }
     }
+
+    const provisionP =
+      setup.modelProvider === "zakura" && this.deps.publicBaseUrl
+        ? provisionAcpZakuraRoutes(
+            this.deps.agentService,
+            agent.tenantId,
+            agent,
+            readAgentAcpConfig(agent),
+            this.deps.publicBaseUrl,
+          )
+        : Promise.resolve(null);
+    // Fetch the gateway model alias list in parallel with the container boot;
+    // it only needs the Gateway endpoint, never the workspace.
+    const gatewayModelsP =
+      setup.modelProvider === "zakura" &&
+      setup.managed.zakura_base_url?.trim() &&
+      setup.managed.zakura_api_key?.trim()
+        ? fetchAcpGatewayModels(
+            setup.managed.zakura_base_url!,
+            setup.managed.zakura_api_key!,
+          )
+        : Promise.resolve(undefined);
+    const [provisioned] = await Promise.all([provisionP, workspaceReady]);
+    if (provisioned) setup = provisioned.agents[setup.id] ?? setup;
     if (setup.modelProvider === "zakura" && !setup.managed.zakura_api_key?.trim()) {
       throw new Error("Zakura 路由缺少 Agent Gateway API key，请重新保存 ACP 配置");
     }
@@ -859,15 +1011,6 @@ export class AcpSessionService {
     // 只靠 env 传递）。所有走 Zakura 路由的 profile 都拉取网关模型别名：
     // 一是填充启动配置，二是运行时覆盖适配器自己公告的模型目录——
     // codex/pi 等公告的内置模型在网关侧都是无效别名。
-    const gatewayModelsP =
-      launchSetup.modelProvider === "zakura" &&
-      launchSetup.managed.zakura_base_url?.trim() &&
-      launchSetup.managed.zakura_api_key?.trim()
-        ? fetchAcpGatewayModels(
-            launchSetup.managed.zakura_base_url!,
-            launchSetup.managed.zakura_api_key!,
-          )
-        : Promise.resolve(undefined);
     // 未显式选模型时优先沿用 Agent 的 Zakura 默认 chat 模型，
     // 避免落到网关列表里排最前的免费模型。
     let preferredModel: string | undefined;
@@ -877,65 +1020,61 @@ export class AcpSessionService {
     } catch {
       preferredModel = undefined;
     }
-    await workspaceReady;
+    // gatewayModelsP was started alongside the container boot above.
     const gatewayModels = await gatewayModelsP;
+    // Hermes loads `$HOME/.env` before it builds its provider client.  A
+    // Zakura route is commonly configured as `self` (the route supplies the
+    // credential), so gating this only on api_key silently dropped the
+    // Gateway token and produced HTTP 401 Missing Authentication header.
+    const dotenv =
+      launchSetup.id === "hermes" &&
+      (launchSetup.setupMode === "api_key" || launchSetup.modelProvider === "zakura")
+        ? acpApiKeyDotenv(launchSetup.id, launchSetup.managed)
+        : null;
+    const generated = acpGeneratedRuntimeFiles({
+      layout,
+      keyMode: runtimeSetupMode,
+      routed: launchSetup.modelProvider === "zakura",
+      managed: launchSetup.managed,
+      gatewayModels,
+      preferredModel,
+    });
+    const writes = [
+      ...(dotenv
+        ? [{
+            dest: `${layout.env.HERMES_HOME || layout.stateDir}/.env`,
+            content: dotenv,
+          }]
+        : []),
+      ...generated,
+    ];
+    const writeScript = writes
+      .map((w) => {
+        const b64 = Buffer.from(w.content, "utf8").toString("base64");
+        return `mkdir -p ${shellSingle(dirnameSh(w.dest))} && printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(w.dest)} && chmod 600 ${shellSingle(w.dest)}`;
+      })
+      .join(" && ");
+    // Fold the `command -v <adapter>` check into the staging exec so the whole
+    // prep — durable copy + generated config files + binary presence check —
+    // is a single docker exec round trip instead of two.
+    const whichCheck = `command -v ${shellSingle(launch.command)} >/dev/null 2>&1 || { echo "ZAKURA_BIN_MISSING:${launch.command}" >&2; exit 127; }`;
+    const prep = writeScript
+      ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
+      : `${acpStageScript(layout)}\n${whichCheck}`;
     try {
-      // Hermes loads `$HOME/.env` before it builds its provider client.  A
-      // Zakura route is commonly configured as `self` (the route supplies the
-      // credential), so gating this only on api_key silently dropped the
-      // Gateway token and produced HTTP 401 Missing Authentication header.
-      const dotenv =
-        launchSetup.id === "hermes" &&
-        (launchSetup.setupMode === "api_key" || launchSetup.modelProvider === "zakura")
-          ? acpApiKeyDotenv(launchSetup.id, launchSetup.managed)
-          : null;
-      const generated = acpGeneratedRuntimeFiles({
-        layout,
-        keyMode: runtimeSetupMode,
-        routed: launchSetup.modelProvider === "zakura",
-        managed: launchSetup.managed,
-        gatewayModels,
-        preferredModel,
-      });
-      const writes = [
-        ...(dotenv
-          ? [{
-              dest: `${layout.env.HERMES_HOME || layout.stateDir}/.env`,
-              content: dotenv,
-            }]
-          : []),
-        ...generated,
-      ];
-      const writeScript = writes
-        .map((w) => {
-          const b64 = Buffer.from(w.content, "utf8").toString("base64");
-          return `mkdir -p ${shellSingle(dirnameSh(w.dest))} && printf '%s' ${shellSingle(b64)} | base64 -d > ${shellSingle(w.dest)} && chmod 600 ${shellSingle(w.dest)}`;
-        })
-        .join(" && ");
-      const prep = writeScript
-        ? `${acpStageScript(layout)}\n${writeScript}`
-        : acpStageScript(layout);
       await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", prep]);
     } catch (err) {
       await this.deps.workspace
         .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("ZAKURA_BIN_MISSING")) {
+        throw new Error(`工作区里找不到 ${launch.command}`);
+      }
       throw err;
     }
 
     const env: Record<string, string> = { ...launch.env, ...layout.env };
-
-    const which = await this.deps.workspace.execInWorkspace(agent, [
-      "bash",
-      "-lc",
-      `command -v ${shellSingle(launch.command)}`,
-    ]);
-    if (which.exitCode !== 0) {
-      await this.deps.workspace
-        .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
-        .catch(() => undefined);
-      throw new Error(`工作区里找不到 ${launch.command}`);
-    }
 
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {
@@ -1221,7 +1360,7 @@ export class AcpSessionService {
         // toolbar would otherwise make the first turn run on the adapter's
         // implicit default.
         const preferredModelId =
-          launchSetup.managed.model?.trim() || gatewayModels?.[0];
+          launchSetup.managed.model?.trim() || gatewayModels?.[0]?.id;
         if (preferredModelId) {
           await this.applyPreferredModel(live, preferredModelId);
         }
@@ -1238,7 +1377,7 @@ export class AcpSessionService {
       });
 
       void live.connection.closed.then(() => {
-        if (this.byChat.get(chatSessionId) === live) this.byChat.delete(chatSessionId);
+        this.byChat.delete(chatSessionId);
       });
       return live;
     } catch (err) {
@@ -1370,7 +1509,7 @@ type AcpModelsBlock = NonNullable<AcpRuntimeStatus["models"]>;
  */
 export function overlayAcpGatewayModels(input: {
   zakuraRouted: boolean;
-  gatewayModels?: string[];
+  gatewayModels?: AcpGatewayModel[];
   incoming: AcpModelsBlock;
   previous?: AcpModelsBlock;
   preferred?: Array<string | undefined>;
@@ -1383,20 +1522,35 @@ export function overlayAcpGatewayModels(input: {
     input.incoming.currentId,
   ].map((id) => id?.replace(/^zakura\//, ""));
   const current =
-    candidates.find((id): id is string => Boolean(id && gateway.includes(id))) ?? gateway[0]!;
+    candidates.find((id): id is string => Boolean(id && gateway.some((m) => m.id === id))) ??
+    gateway[0]!.id;
   return {
     currentId: current,
-    available: gateway.map((id) => ({ id, name: id })),
+    available: gateway.map((m) => ({ id: m.id, name: m.name || m.id })),
     configId: input.incoming.configId ?? input.previous?.configId,
   };
 }
 
-/** Only a config option announced by session/new is safe to set at runtime. */
-function dynamicModelConfigId(live: LiveRuntime): string | undefined {
+/**
+ * 运行时热切换模型的 configId。Zakura 路由下列表是网关别名，只有
+ * OpenCode 认 `zakura/<alias>`；Codex/Grok 等拿网关 id 去 setConfigOption
+ * 会 Invalid params，必须走启动参数 / config.toml。
+ */
+export function acpHotModelConfigId(live: {
+  zakuraRouted: boolean;
+  profileId: string;
+  models?: { configId?: string };
+}): string | undefined {
+  if (live.zakuraRouted && live.profileId !== "opencode") return undefined;
   const configId = live.models?.configId;
   return configId && configId !== ACP_UNSTABLE_MODEL_CONFIG_ID && !configId.startsWith("_")
     ? configId
     : undefined;
+}
+
+/** Only a config option announced by session/new is safe to set at runtime. */
+function dynamicModelConfigId(live: LiveRuntime): string | undefined {
+  return acpHotModelConfigId(live);
 }
 
 /**
@@ -1615,7 +1769,13 @@ export function isAuthRequiredError(err: unknown): boolean {
   const data = rec?.data && typeof rec.data === "object" ? (rec.data as Record<string, unknown>) : null;
   if (data && (data.code === "auth_required" || data.error === "auth_required")) return true;
   const msg = err instanceof Error ? err.message : String(err);
-  return /auth[_ ]?required/i.test(msg);
+  if (/auth[_ ]?required/i.test(msg)) return true;
+  // fx (and similar native agents) fail initialize with code -32600 when no
+  // AI Gateway credential is configured. Treat this as auth-required so the
+  // elicitation flow can guide the user through `fx login` / `fx setup`.
+  if (data && (data.code === -32600 || data.error === -32600)) return true;
+  if (/fx needs access|AI_GATEWAY_API_KEY|run fx login/i.test(msg)) return true;
+  return false;
 }
 
 function settleAuthWaiters(live: LiveRuntime, err?: Error) {

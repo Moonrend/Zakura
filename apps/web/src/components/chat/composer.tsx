@@ -771,6 +771,7 @@ export function Composer({
                   onSelectionChange={(v) => {
                     if (v) onAcpModelChange(v);
                   }}
+                  disabled={runtimeLoading}
                   side="top"
                 />
               ) : null}
@@ -780,6 +781,7 @@ export function Composer({
                   onValueChange={(v) => {
                     if (v) onAcpReasoningChange(v);
                   }}
+                  disabled={runtimeLoading}
                   items={acpReasoning.available.map((m) => ({ value: m.id, label: m.name }))}
                 >
                   <SelectTrigger

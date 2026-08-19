@@ -45,6 +45,13 @@ describe("ACP runtime storage", () => {
     assert.equal(grok.artifacts[0]?.durableRel, "home");
     assert.equal(acpManualSetupEnvironment("grok").HOME, "/workspace/data/acp/grok/home");
     assert.equal(acpManualSetupEnvironment("pi").HOME, "/workspace/data/acp/pi/home");
+    const fx = acpRuntimeLayout("fx", "self", "f1");
+    assert.ok(fx.env.HOME?.startsWith("/tmp/zakura-acp/"));
+    assert.equal(fx.artifacts[0]?.durableRel, ".fx");
+    assert.equal(fx.artifacts[0]?.sync, "exit");
+    const fxKey = acpRuntimeLayout("fx", "api_key", "f2");
+    assert.equal(fxKey.artifacts.length, 0);
+    assert.equal(acpManualSetupEnvironment("fx").HOME, "/workspace/data/acp/fx/home");
   });
 
   it("prefers the Codex auth.json with the newer last_refresh", () => {
@@ -147,7 +154,7 @@ describe("ACP generated runtime config files", () => {
         zakura_api_key: "zk-key",
         zakura_base_url: "https://zakura.example/v1",
       },
-      gatewayModels: ["gpt-5.2", "kimi-k2.5"],
+      gatewayModels: [{ id: "gpt-5.2" }, { id: "kimi-k2.5" }],
     });
     const config = JSON.parse(files[0]!.content) as {
       model: string;
@@ -156,6 +163,56 @@ describe("ACP generated runtime config files", () => {
     assert.equal(config.model, "zakura/gpt-5.2");
     assert.equal(config.provider.zakura.options.baseURL, "https://zakura.example/v1");
     assert.ok(config.provider.zakura.models["kimi-k2.5"]);
+  });
+
+  it("writes model metadata (limit + reasoning) into OpenCode config", () => {
+    const layout = acpRuntimeLayout("opencode", "api_key", "oc3-meta");
+    const files = acpGeneratedRuntimeFiles({
+      layout,
+      keyMode: "api_key",
+      routed: true,
+      managed: {
+        zakura_api_key: "zk-key",
+        zakura_base_url: "https://zakura.example/v1",
+      },
+      gatewayModels: [
+        {
+          id: "zai/glm-5.2-fast",
+          name: "GLM 5.2 Fast",
+          contextLimit: 128_000,
+          outputLimit: 8_000,
+          reasoning: true,
+          toolCall: true,
+          attachment: true,
+        },
+        { id: "kimi-k2.5", contextLimit: 200_000 },
+      ],
+    });
+    const config = JSON.parse(files[0]!.content) as {
+      model: string;
+      provider: {
+        zakura: {
+          models: Record<
+            string,
+            {
+              name: string;
+              limit?: { context?: number; output?: number };
+              reasoning?: boolean;
+            }
+          >;
+        };
+      };
+    };
+    const glm = config.provider.zakura.models["zai/glm-5.2-fast"]!;
+    assert.equal(glm.name, "GLM 5.2 Fast");
+    assert.equal(glm.limit?.context, 128_000);
+    assert.equal(glm.limit?.output, 8_000);
+    assert.equal(glm.reasoning, true);
+    // 仅 context 的模型也写了 limit，且无 output / reasoning
+    const kimi = config.provider.zakura.models["kimi-k2.5"]!;
+    assert.equal(kimi.limit?.context, 200_000);
+    assert.equal(kimi.limit?.output, undefined);
+    assert.equal(kimi.reasoning, undefined);
   });
 
   it("keeps builtin OpenCode defaults (model only) without a base URL", () => {
@@ -204,7 +261,7 @@ describe("ACP generated runtime config files", () => {
         zakura_api_key: "zk-codex",
         zakura_base_url: "https://zakura.example/v1",
       },
-      gatewayModels: ["gpt-5.2-codex", "gpt-5.2"],
+      gatewayModels: [{ id: "gpt-5.2-codex" }, { id: "gpt-5.2" }],
     });
     assert.equal(files.length, 2);
     const toml = files[0]!;
@@ -216,6 +273,23 @@ describe("ACP generated runtime config files", () => {
     assert.match(toml.content, /wire_api = "responses"/);
     const auth = JSON.parse(files[1]!.content) as { OPENAI_API_KEY: string };
     assert.equal(auth.OPENAI_API_KEY, "zk-codex");
+  });
+
+  it("writes a non-OpenAI gateway model into Codex config.toml", () => {
+    const layout = acpRuntimeLayout("codex", "api_key", "cx-kimi");
+    const files = acpGeneratedRuntimeFiles({
+      layout,
+      keyMode: "api_key",
+      routed: true,
+      managed: {
+        zakura_api_key: "zk-codex",
+        zakura_base_url: "https://zakura.example/v1",
+        model: "kimi-k2.5",
+      },
+      gatewayModels: [{ id: "kimi-k2.5" }, { id: "gpt-5.2" }],
+    });
+    assert.match(files[0]!.content, /model = "kimi-k2.5"/);
+    assert.match(files[0]!.content, /model_provider = "zakura"/);
   });
 
   it("writes a model-only Codex config for plain OpenAI keys", () => {

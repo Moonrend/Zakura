@@ -266,6 +266,9 @@ export const DEFAULT_WORKSPACE_IMAGE = "sunwuyuan/zakura-workspace-dev:debian";
 /** Local / published workspace image (docker/workspace → Docker Hub *-dev). */
 export const WORKSPACE_IMAGE_LOCAL = "sunwuyuan/zakura-workspace-dev:debian";
 
+/** Default remote Runner Agent image (docker/runner → Docker Hub *-dev). */
+export const DEFAULT_RUNNER_IMAGE = "sunwuyuan/zakura-runner-dev:latest";
+
 export {
   AGENT_WORKSPACE_ROOT,
   AGENT_PROJECTS_DIR,
@@ -668,6 +671,7 @@ export type {
   AcpRuntimeArtifact,
   AcpRuntimeLayout,
   AcpRuntimeConfigFile,
+  AcpGatewayModel,
 } from "./acp-storage.js";
 export type {
   AcpSetupMode,

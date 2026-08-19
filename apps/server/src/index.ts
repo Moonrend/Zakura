@@ -60,6 +60,7 @@ import { ConnectionCatalogService } from "./services/connection-catalog.js";
 import { InstanceMigrationService } from "./services/instance-migration.js";
 import { StoreCatalogService } from "./services/store-catalog.js";
 import { MarketSyncService } from "./services/market-sync.js";
+import { ImageUpdateChecker } from "./services/image-update-checker.js";
 import { createDesktopProxyGateway } from "./services/desktop-proxy.js";
 
 async function main() {
@@ -241,6 +242,8 @@ async function main() {
   );
   const marketSync = new MarketSyncService(mcpStore, storeCatalog, skillsService);
   marketSync.start();
+  const imageUpdateChecker = new ImageUpdateChecker(db, runtimeNodes);
+  imageUpdateChecker.start();
   orchestrator.setRuntimeNodes(runtimeNodes);
   const instanceMigrations = new InstanceMigrationService(
     db,
@@ -325,6 +328,7 @@ async function main() {
       connections: connectionCatalog,
       instanceMigrations,
       cloudSessionStore,
+      imageUpdateChecker,
     }),
   );
   log.info("boot.api_app_ok");

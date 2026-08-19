@@ -15,6 +15,8 @@ import { collectHostInfo, resolveEndpointPublicHost } from "./host-info.js";
 import { RunnerDockerWorkspace } from "./docker-workspace.js";
 import { RunnerDockerComponents } from "./docker-components.js";
 import { TunnelManager } from "./tunnel/manager.js";
+import { updateRunnerSelf } from "./system-update.js";
+import { checkImageUpdates } from "./image-update-check.js";
 
 export type RunnerConfig = {
   storageRoot: string;
@@ -115,6 +117,81 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
 
   // All other /v1/* require auth
   app.use("/v1/*", requireRunnerAuth(cfg.auth));
+
+  // --- System: version / self-update / image refresh ---
+  app.get("/v1/system/version", (c) => {
+    const img = process.env.ZAKURA_RUNNER_IMAGE?.trim() || "";
+    return c.json({
+      version: cfg.version,
+      image: img,
+      containerId: process.env.HOSTNAME?.trim() || null,
+    });
+  });
+
+  app.post("/v1/system/update", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      image?: string;
+      recreateDelayMs?: number;
+    };
+    const image = body.image?.trim();
+    if (!image) return c.json({ error: "image is required" }, 400);
+    try {
+      const result = await updateRunnerSelf(dockerWs.client, image, {
+        recreateDelayMs: body.recreateDelayMs,
+      });
+      return c.json(result);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 500);
+    }
+  });
+
+  app.post("/v1/system/workspace-image/refresh", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      image?: string;
+      recreateRunning?: boolean;
+    };
+    const image = body.image?.trim();
+    if (!image) return c.json({ error: "image is required" }, 400);
+    try {
+      await dockerWs.pullImage(image);
+      let recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+      if (body.recreateRunning !== false) {
+        recreated = await dockerWs.recreateWorkspaces(image);
+      }
+      return c.json({ image, status: "updated", recreated });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, e.status === 404 ? 404 : 500);
+    }
+  });
+
+  app.post("/v1/system/image-updates", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      images?: string[];
+    };
+    const images = (body.images ?? []).map((s) => s.trim()).filter(Boolean);
+    if (!images.length) return c.json({ error: "images is required" }, 400);
+    try {
+      const results = await checkImageUpdates(dockerWs.client, images);
+      const payload = results.map((r) => ({
+        image: r.image,
+        localDigest: r.localDigest,
+        remoteDigest: r.remoteDigest,
+        updateAvailable: r.updateAvailable,
+        error: r.error,
+      })) as Array<{
+        image: string;
+        localDigest: string | null;
+        remoteDigest: string | null;
+        updateAvailable: boolean;
+        error: string | null;
+      }>;
+      return c.json({ images: payload });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
 
   // --- Workspace lifecycle ---
   app.post("/v1/workspaces", async (c) => {

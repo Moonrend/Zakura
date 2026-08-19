@@ -116,6 +116,18 @@ export function acpRuntimeLayout(
       artifacts: [file("home", "home", sync)],
     };
   }
+  if (id === "fx") {
+    const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
+    return {
+      profileId,
+      durableDir,
+      runtimeDir,
+      stateDir,
+      env: { HOME: `${stateDir}/home` },
+      // fx 在 ~/.fx/ 下保存登录态、settings、sessions 等私有状态。
+      artifacts: sync === "exit" ? [file(".fx", ".fx", sync)] : [],
+    };
+  }
   if (id === "grok" || id === "copilot" || id === "kimi-code" || id === "pi") {
     const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
     return {
@@ -158,6 +170,9 @@ export function acpManualSetupEnvironment(profileId: string): Record<string, str
   }
   if (profileId === "opencode" || profileId === "grok" || profileId === "copilot" || profileId === "kimi-code" || profileId === "pi") {
     return { HOME: home, XDG_CONFIG_HOME: `${home}/.config`, XDG_DATA_HOME: `${home}/.local/share` };
+  }
+  if (profileId === "fx") {
+    return { HOME: home };
   }
   // Codex/Claude 的 durable 凭证在 `<durable>/.codex`、`<durable>/.claude`
   // （与 acpRuntimeLayout 的 staging 路径一致）；指向 home/ 会导致
@@ -304,6 +319,22 @@ export type AcpRuntimeConfigFile = {
   content: string;
 };
 
+/**
+ * 网关模型 + 可选元数据。元数据来自模型目录（models.dev / llm-metadata），
+ * 经网关 /v1/models 透出，最终写入 OpenCode 的 opencode.json，避免适配器
+ * 因找不到模型 context window / 能力而回退到默认值（"Model metadata not found"）。
+ * 无元数据时只保留 id，保持与裸字符串等价的回退行为。
+ */
+export type AcpGatewayModel = {
+  id: string;
+  name?: string;
+  contextLimit?: number;
+  outputLimit?: number;
+  reasoning?: boolean;
+  toolCall?: boolean;
+  attachment?: boolean;
+};
+
 function tomlStr(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
@@ -326,8 +357,8 @@ export function acpGeneratedRuntimeFiles(input: {
   keyMode: "api_key" | "oauth" | "self";
   routed: boolean;
   managed: Record<string, string>;
-  /** Zakura 路由下从网关 /v1/models 拉到的模型别名 */
-  gatewayModels?: string[];
+  /** Zakura 路由下从网关 /v1/models 拉到的模型别名（可带元数据） */
+  gatewayModels?: AcpGatewayModel[];
   /** 未显式选模型时优先使用的别名（如 Agent 的 Zakura 默认 chat 模型） */
   preferredModel?: string;
 }): AcpRuntimeConfigFile[] {
@@ -351,8 +382,8 @@ export function acpGeneratedRuntimeFiles(input: {
   }
   if (layout.profileId === "codex") {
     const fallback =
-      input.gatewayModels?.find((id) => id === input.preferredModel?.trim()) ??
-      input.gatewayModels?.[0];
+      input.gatewayModels?.find((m) => m.id === input.preferredModel?.trim())?.id ??
+      input.gatewayModels?.[0]?.id;
     return codexConfigFiles(layout, key, baseUrl, model, routed, fallback);
   }
   return [];
@@ -364,7 +395,7 @@ function opencodeConfigFile(
   baseUrl: string,
   model: string,
   routed: boolean,
-  gatewayModels?: string[],
+  gatewayModels?: AcpGatewayModel[],
   preferredModel?: string,
 ): AcpRuntimeConfigFile | null {
   const configHome = layout.env.XDG_CONFIG_HOME;
@@ -377,7 +408,12 @@ function opencodeConfigFile(
     const anthropic = !routed && key.startsWith("sk-ant-");
     const providerId = routed ? "zakura" : anthropic ? "anthropic-compatible" : "openai-compatible";
     // 网关模型全量注册（聊天框可切换）；默认取显式选择 > Agent 默认 > 首个。
-    const modelIds = gatewayModels?.length ? gatewayModels : model ? [model] : [];
+    // 无网关列表时用 managed.model 造一个裸条目，保持旧行为。
+    const models: AcpGatewayModel[] = gatewayModels?.length
+      ? gatewayModels
+      : model
+        ? [{ id: model }]
+        : [];
     config.provider = {
       [providerId]: {
         npm: routed || !anthropic ? "@ai-sdk/openai-compatible" : "@ai-sdk/anthropic",
@@ -387,19 +423,34 @@ function opencodeConfigFile(
             ? "Anthropic Compatible"
             : "OpenAI Compatible",
         options: { apiKey: key, baseURL: baseUrl },
-        ...(modelIds.length
+        ...(models.length
           ? {
               models: Object.fromEntries(
-                modelIds.map((id) => [id, { name: id }]),
+                models.map((m) => [
+                  m.id,
+                  {
+                    name: m.name || m.id,
+                    ...((m.contextLimit || m.outputLimit)
+                      ? {
+                          limit: {
+                            ...(m.contextLimit ? { context: m.contextLimit } : {}),
+                            ...(m.outputLimit ? { output: m.outputLimit } : {}),
+                          },
+                        }
+                      : {}),
+                    ...(m.reasoning ? { reasoning: true } : {}),
+                  },
+                ]),
               ),
             }
           : {}),
       },
     };
+    const ids = models.map((m) => m.id);
     const preferred =
       model ||
-      (preferredModel && modelIds.includes(preferredModel) ? preferredModel : undefined) ||
-      modelIds[0];
+      (preferredModel && ids.includes(preferredModel) ? preferredModel : undefined) ||
+      ids[0];
     if (preferred) config.model = `${providerId}/${preferred}`;
   } else if (model && key) {
     // 没有 base URL：挂到内置供应商，key 走 env（ANTHROPIC_API_KEY / OPENAI_API_KEY）。

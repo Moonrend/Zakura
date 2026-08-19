@@ -9,6 +9,7 @@ import {
   Sparkle,
   Terminal,
   Zap,
+  Feather,
 } from "lucide-react";
 import { ZAKURA_RUNTIME_ID } from "@zakura/shared";
 
@@ -24,6 +25,7 @@ const LUCIDE_BY_ID: Record<string, LucideIcon> = {
   "kimi-code": Moon,
   pi: CircleDot,
   opencode: Code2,
+  fx: Feather,
 };
 
 export function RuntimeIcon({

@@ -113,6 +113,11 @@ export class RunnerDockerWorkspace {
     this.docker = new Docker(socketPath ? { socketPath } : dockerOpts);
   }
 
+  /** Shared Docker client (used by system-update self-recreate). */
+  get client(): Docker {
+    return this.docker;
+  }
+
   workspacePath(agentId: string): string {
     return join(this.storageRoot, "agents", agentId, "workspace");
   }
@@ -163,6 +168,66 @@ export class RunnerDockerWorkspace {
     const info = await this.docker.getContainer(list[0]!.Id).inspect();
     return this.toInfo(agentId, info);
   }
+
+  /** Always pull the image (refresh), unlike start() which only pulls when missing. */
+  async pullImage(image: string): Promise<{ image: string; status: string }> {
+    await new Promise<void>((resolve, reject) => {
+      this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+        if (err) return reject(dockerErr(err));
+        this.docker.modem.followProgress(stream, (e: Error | null) =>
+          e ? reject(dockerErr(e)) : resolve(),
+        );
+      });
+    });
+    const info = await this.docker.getImage(image).inspect();
+    return { image, status: info.Id ? "updated" : "unknown" };
+  }
+
+  /**
+   * Force-recreate every running workspace container that matches `image` (or
+   * all workspaces when image is null) on this Runner host. Used by the
+   * workspace-image refresh flow so freshly pulled images take effect.
+   * Returns the agents whose workspace was recreated.
+   */
+  async recreateWorkspaces(image?: string | null): Promise<
+    Array<{ agentId: string; dockerId: string; name: string }>
+  > {
+    const list = await this.docker.listContainers({
+      all: false,
+      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
+    });
+    const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+    for (const c of list) {
+      const matchesImage = !image || c.Image === image;
+      if (!matchesImage) continue;
+      const agentId = (c.Labels ?? {})["zakura.agent"];
+      const agentSlug = (c.Labels ?? {})["zakura.agent_slug"];
+      const tenantSlug = (c.Labels ?? {})["zakura.tenant"];
+      if (!agentId || !agentSlug) continue;
+      // Recreate: stop+remove the old container, then start a fresh one with the
+      // same image/env (workspacePath is bind-mounted host state, preserved).
+      try {
+        await this.docker.getContainer(c.Id).stop({ t: 5 }).catch(() => undefined);
+        await this.docker.getContainer(c.Id).remove({ force: true });
+      } catch {
+        /* best-effort */
+      }
+      const info = await this.start({
+        agentId,
+        agentSlug,
+        tenantSlug,
+        image: c.Image,
+        env: undefined,
+        labels: undefined,
+        network: (c.HostConfig?.NetworkMode ?? "").startsWith("bridge")
+          ? undefined
+          : (c.HostConfig?.NetworkMode ?? undefined),
+      });
+      recreated.push({ agentId, dockerId: info.dockerId, name: info.name });
+    }
+    return recreated;
+  }
+
 
   private toInfo(agentId: string, info: Docker.ContainerInspectInfo): WorkspaceInfo {
     const ports: WorkspaceInfo["ports"] = [];

@@ -10,6 +10,11 @@ import type { DockerRuntime } from "../runtime/docker.js";
 import { hashRunnerToken } from "@zakura/core";
 import { platformEvents } from "../services/platform-events.js";
 import type { RunnerHostInfo, RunnerInstallPackage } from "@zakura/shared";
+import {
+  DEFAULT_RUNNER_IMAGE,
+  DEFAULT_WORKSPACE_IMAGE,
+  WORKSPACE_IMAGE_LOCAL,
+} from "@zakura/shared";
 import { rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
@@ -594,6 +599,163 @@ export function registerRuntimeNodeRoutes(
       return c.json({ container: row }, 201);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.get("/api/runtime-nodes/:id/version", async (c) => {
+    const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    if (node.kind === "local" || node.slug === "local") {
+      return c.json({
+        version: node.agentVersion ?? "embedded",
+        image: null,
+        containerId: null,
+        live: false,
+        reportedVersion: node.agentVersion ?? null,
+      });
+    }
+    const { client } = await nodes.requireRunnerClient(
+      session.tenantId,
+      node.id,
+      { allowOffline: true },
+    );
+    try {
+      const live = await client.systemVersion();
+      return c.json({
+        version: live.version,
+        image: live.image || null,
+        containerId: live.containerId,
+        live: true,
+        reportedVersion: node.agentVersion ?? null,
+      });
+    } catch {
+      return c.json({
+        version: node.agentVersion ?? null,
+        image: null,
+        containerId: null,
+        live: false,
+        reportedVersion: node.agentVersion ?? null,
+      });
+    }
+  });
+
+  app.post("/api/runtime-nodes/:id/update-runner", async (c) => {
+    const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    if (node.kind === "local" || node.slug === "local") {
+      return c.json({ error: "本机 Runner 无需远程更新" }, 400);
+    }
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
+    const body = await c.req
+      .json<{ image?: string; recreateDelayMs?: number }>()
+      .catch(() => ({} as { image?: string; recreateDelayMs?: number }));
+    const target = body.image?.trim();
+    if (!target) {
+      return c.json({ error: "image is required" }, 400);
+    }
+    const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
+    try {
+      const result = await client.updateRunner({
+        image: target,
+        recreateDelayMs: body.recreateDelayMs,
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        502,
+      );
+    }
+  });
+
+  app.post("/api/runtime-nodes/:id/refresh-workspace-image", async (c) => {
+    const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    if (node.kind === "local" || node.slug === "local") {
+      return c.json({ error: "本机 Runner 无需远程刷新" }, 400);
+    }
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) {
+        return c.json({ error: err.message }, err.status);
+      }
+      throw err;
+    }
+    const body = await c.req
+      .json<{ image?: string; recreateRunning?: boolean }>()
+      .catch(() => ({} as { image?: string; recreateRunning?: boolean }));
+    const target = body.image?.trim();
+    if (!target) {
+      return c.json({ error: "image is required" }, 400);
+    }
+    const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
+    try {
+      const result = await client.refreshWorkspaceImage({
+        image: target,
+        recreateRunning: body.recreateRunning,
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        502,
+      );
+    }
+  });
+
+  app.get("/api/runtime-nodes/:id/image-updates", async (c) => {
+    const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    if (node.kind === "local" || node.slug === "local") {
+      return c.json({ error: "本机 Runner 无需远程探测" }, 400);
+    }
+    const { client } = await nodes.requireRunnerClient(
+      session.tenantId,
+      node.id,
+      { allowOffline: true },
+    );
+
+    // Collect images to probe: runner image + distinct workspace images of
+    // agents bound to this node (plus the default workspace image).
+    const imageSet = new Set<string>();
+    const runnerImage =
+      c.req.query("runnerImage")?.trim() || DEFAULT_RUNNER_IMAGE;
+    imageSet.add(runnerImage);
+    const bound = await db
+      .select({ workspaceImage: agents.workspaceImage })
+      .from(agents)
+      .where(eq(agents.runtimeNodeId, node.id));
+    for (const row of bound) {
+      const img = row.workspaceImage?.trim();
+      if (img) imageSet.add(img);
+    }
+    imageSet.add(WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE);
+
+    try {
+      const result = await client.checkImageUpdates({
+        images: [...imageSet],
+      });
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          images: [],
+        },
+        502,
+      );
     }
   });
 

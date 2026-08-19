@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { acpSnapshotState, overlayAcpGatewayModels } from "../src/services/acp/session.js";
+import {
+  acpHotModelConfigId,
+  acpSnapshotState,
+  overlayAcpGatewayModels,
+} from "../src/services/acp/session.js";
 
 describe("ACP runtime snapshot", () => {
   it("does not treat a missing process as idle", () => {
@@ -59,7 +63,12 @@ describe("ACP runtime snapshot", () => {
 });
 
 describe("overlayAcpGatewayModels", () => {
-  const gateway = ["kimi-k2.5", "gpt-5.2", "claude-sonnet-4"];
+  const gateway = [
+    { id: "kimi-k2.5", name: "Kimi K2.5" },
+    { id: "gpt-5.2" },
+    { id: "claude-sonnet-4" },
+  ];
+  const gatewayIds = gateway.map((m) => m.id);
   const official = {
     currentId: "gpt-5.2-codex",
     available: [
@@ -86,13 +95,13 @@ describe("overlayAcpGatewayModels", () => {
       incoming: official,
       previous: {
         currentId: "kimi-k2.5",
-        available: gateway.map((id) => ({ id, name: id })),
+        available: gateway.map((m) => ({ id: m.id, name: m.name || m.id })),
         configId: "model",
       },
     });
     assert.deepEqual(
       out.available.map((m) => m.id),
-      gateway,
+      gatewayIds,
     );
     assert.equal(out.currentId, "kimi-k2.5");
     assert.equal(out.configId, "model");
@@ -105,9 +114,57 @@ describe("overlayAcpGatewayModels", () => {
       incoming: { ...official, currentId: "gpt-5.2" },
       previous: {
         currentId: "kimi-k2.5",
-        available: gateway.map((id) => ({ id, name: id })),
+        available: gateway.map((m) => ({ id: m.id, name: m.name || m.id })),
       },
     });
     assert.equal(out.currentId, "kimi-k2.5");
+  });
+});
+
+describe("acpHotModelConfigId", () => {
+  it("refuses Codex/Grok gateway aliases (Invalid params)", () => {
+    assert.equal(
+      acpHotModelConfigId({
+        zakuraRouted: true,
+        profileId: "codex",
+        models: { configId: "model" },
+      }),
+      undefined,
+    );
+    assert.equal(
+      acpHotModelConfigId({
+        zakuraRouted: true,
+        profileId: "grok",
+        models: { configId: "model" },
+      }),
+      undefined,
+    );
+  });
+
+  it("keeps OpenCode and native Codex setters", () => {
+    assert.equal(
+      acpHotModelConfigId({
+        zakuraRouted: true,
+        profileId: "opencode",
+        models: { configId: "model" },
+      }),
+      "model",
+    );
+    assert.equal(
+      acpHotModelConfigId({
+        zakuraRouted: false,
+        profileId: "codex",
+        models: { configId: "model" },
+      }),
+      "model",
+    );
+    assert.equal(
+      acpHotModelConfigId({
+        zakuraRouted: false,
+        profileId: "codex",
+        models: { configId: "_unstable_model" },
+      }),
+      undefined,
+    );
   });
 });

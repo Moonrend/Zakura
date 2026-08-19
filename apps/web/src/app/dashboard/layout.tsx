@@ -12,6 +12,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ImageUpdateBanner } from "@/components/image-update-banner";
 
 type MeResponse = MeInfo & {
   user?: { id: string };
@@ -131,6 +132,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
         </SidebarInset>
       </SidebarProvider>
+      <ImageUpdateBanner />
     </MeProvider>
   );
 }

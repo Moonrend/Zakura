@@ -23,6 +23,7 @@ export const ACP_BUILTIN_PROFILE_IDS = [
   "kimi-code",
   "pi",
   "opencode",
+  "fx",
 ] as const;
 export type AcpBuiltinProfileId = (typeof ACP_BUILTIN_PROFILE_IDS)[number];
 
@@ -111,6 +112,8 @@ export function acpManualSetupCommand(profileId: string): AcpManualSetupCommand 
       return { command: ["pi"], display: "pi（在交互界面完成登录/配置）" };
     case "opencode":
       return { command: ["opencode", "auth", "login"], display: "opencode auth login" };
+    case "fx":
+      return { command: ["fx", "login"], display: "fx login" };
     case "codex":
       return { command: ["codex", "login", "--device-auth"], display: "codex login --device-auth" };
     case "gemini-cli":
@@ -478,41 +481,76 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
         },
       ],
     },
-    {
-      id: "opencode",
-      displayName: "OpenCode",
-      description: "OpenCode 原生 ACP（ACP 官方 Registry 入口 opencode acp）",
-      builtin: true,
-      command: "opencode",
-      args: ["acp"],
-      setupModes: ["api_key", "oauth", "self"],
-      supportsZakuraRoute: true,
-      managedFields: [
         {
-          id: "api_key",
-          label: "API key",
-          type: "password",
-          required: true,
-          sensitive: true,
-          help: "OpenCode 通过生成的 opencode.json 接入该 key；sk-ant- 前缀走 Anthropic 协议，其余走 OpenAI 兼容协议。",
+          id: "opencode",
+          displayName: "OpenCode",
+          description: "OpenCode 原生 ACP（ACP 官方 Registry 入口 opencode acp）",
+          builtin: true,
+          command: "opencode",
+          args: ["acp"],
+          setupModes: ["api_key", "oauth", "self"],
+          supportsZakuraRoute: true,
+          managedFields: [
+            {
+              id: "api_key",
+              label: "API key",
+              type: "password",
+              required: true,
+              sensitive: true,
+              help: "OpenCode 通过生成的 opencode.json 接入该 key；sk-ant- 前缀走 Anthropic 协议，其余走 OpenAI 兼容协议。",
+            },
+            {
+              id: "base_url",
+              label: "OpenAI 兼容 Base URL",
+              type: "url",
+              placeholder: "https://api.openai.com/v1",
+              help: "留空时按 key 前缀使用内置 Anthropic/OpenAI 供应商；填写后会生成自定义 provider 配置。",
+            },
+            {
+              id: "model",
+              label: "模型",
+              type: "text",
+              required: true,
+              placeholder: "kimi-k2.5 / gpt-5.2 / claude-sonnet-4-5",
+              help: "OpenCode 需要显式默认模型才能启动；Zakura 路由下可留空（自动取网关模型列表）。",
+            },
+          ],
         },
         {
-          id: "base_url",
-          label: "OpenAI 兼容 Base URL",
-          type: "url",
-          placeholder: "https://api.openai.com/v1",
-          help: "留空时按 key 前缀使用内置 Anthropic/OpenAI 供应商；填写后会生成自定义 provider 配置。",
+          id: "fx",
+          displayName: "fx",
+          description: "Vercel fx — 轻量原生编码 Agent（fx acp）",
+          builtin: true,
+          command: "fx",
+          args: ["acp"],
+          setupModes: ["api_key", "oauth", "self"],
+          supportsZakuraRoute: true,
+          managedFields: [
+            {
+              id: "api_key",
+              label: "AI Gateway API key",
+              type: "password",
+              required: true,
+              sensitive: true,
+              placeholder: "vck_…",
+              help: "写入 AI_GATEWAY_API_KEY。fx 通过 Vercel AI Gateway 路由到各家模型。",
+            },
+            {
+              id: "base_url",
+              label: "Gateway Base URL",
+              type: "url",
+              placeholder: "https://ai-gateway.vercel.sh/v1",
+              help: "留空时使用 fx 默认 Gateway 端点。",
+            },
+            {
+              id: "model",
+              label: "默认模型",
+              type: "text",
+              placeholder: "zai/glm-5.2-fast",
+              help: "写入 FX_MODEL，作为会话默认模型。",
+            },
+          ],
         },
-        {
-          id: "model",
-          label: "模型",
-          type: "text",
-          required: true,
-          placeholder: "kimi-k2.5 / gpt-5.2 / claude-sonnet-4-5",
-          help: "OpenCode 需要显式默认模型才能启动；Zakura 路由下可留空（自动取网关模型列表）。",
-        },
-      ],
-    },
   ];
 }
 
@@ -789,6 +827,13 @@ export function resolveAcpLaunch(
       env.PI_API_KEY = key;
       env.LLM_API_KEY = key;
       if (baseUrl) env.OPENAI_BASE_URL = baseUrl;
+    } else if (profile.id === "fx") {
+      env.AI_GATEWAY_API_KEY = key;
+      env.OPENAI_API_KEY = key;
+      if (baseUrl) {
+        env.OPENAI_BASE_URL = baseUrl;
+        env.AI_GATEWAY_BASE_URL = baseUrl;
+      }
     } else {
       env.API_KEY = key;
       if (baseUrl) env.API_BASE_URL = baseUrl;
@@ -840,6 +885,9 @@ function applyZakuraRouteEnv(
       env.LLM_API_KEY = key;
     } else if (profileId === "opencode") {
       env.OPENCODE_API_KEY = key;
+    } else if (profileId === "fx") {
+      env.AI_GATEWAY_API_KEY = key;
+      env.OPENAI_API_KEY = key;
     }
   }
   if (!baseUrl) return;
@@ -864,6 +912,9 @@ function applyZakuraRouteEnv(
     env.LLM_API_BASE = baseUrl;
     env.LLM_API_BASE_URL = baseUrl;
     env.HERMES_BASE_URL = baseUrl;
+  }
+  else if (profileId === "fx") {
+    env.AI_GATEWAY_BASE_URL = baseUrl;
   }
 }
 
@@ -895,6 +946,9 @@ function applyModelEnv(env: Record<string, string>, profileId: string, model: st
     env.OPENAI_MODEL = model;
   } else {
     env.OPENAI_MODEL = model;
+  }
+  if (profileId === "fx") {
+    env.FX_MODEL = model;
   }
 }
 

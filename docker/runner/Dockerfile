@@ -9,6 +9,11 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# Runner version is resolved at runtime from package.json (see apps/runner/src/version.ts),
+# unless overridden by build arg ZAKURA_RUNNER_VERSION.
+ARG ZAKURA_RUNNER_VERSION
+ENV ZAKURA_RUNNER_VERSION=${ZAKURA_RUNNER_VERSION}
+
 # Monorepo subset — build context should be repo root
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages ./packages

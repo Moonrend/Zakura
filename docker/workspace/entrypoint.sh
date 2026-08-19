@@ -71,6 +71,12 @@ start_chrome() {
 
 log "workspace ready cwd=$(pwd) python=$(command -v python3) node=$(command -v node)"
 
+# Shell readiness: /workspace is mounted and the toolchain is usable. ACP / exec
+# / shell jobs only need this — they never touch the browser — so signal it
+# immediately instead of blocking on Chrome for the whole display stack.
+touch /var/lib/zakura-features/.shell-ready
+log "shell-ready"
+
 needs_display=0
 if [ "$BROWSER" = "1" ] || [ "$BROWSER" = "true" ] || [ "$COMPUTER" = "1" ] || [ "$COMPUTER" = "true" ]; then
   needs_display=1
@@ -111,6 +117,10 @@ if [ "$BROWSER" = "1" ] || [ "$BROWSER" = "true" ]; then
   start_chrome || true
 fi
 
+# Display readiness: the full browser/desktop stack is up (or best-effort).
+# Touched *after* the Chrome CDP loop so ACP computer-use paths can wait for it
+# without blocking pure coding agents on .shell-ready.
+touch /var/lib/zakura-features/.display-ready
 touch /var/lib/zakura-features/.ready
 log "ready"
 

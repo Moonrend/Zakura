@@ -448,6 +448,7 @@ export async function createApiApp(deps: {
    * INSTANCE_ID 自过滤）。实时网关与本模块共用同一个实例。
    */
   cloudSessionStore: CloudAgentSessionStore;
+  imageUpdateChecker?: import("../services/image-update-checker.js").ImageUpdateChecker;
 }) {
   const {
     db,
@@ -479,6 +480,7 @@ export async function createApiApp(deps: {
     connections,
     instanceMigrations,
     cloudSessionStore,
+    imageUpdateChecker,
   } = deps;
   const mcpStore = new McpStoreService(db, config);
   const upstreamOauth = new McpUpstreamOauthService(config);
@@ -2610,6 +2612,7 @@ export async function createApiApp(deps: {
       workspace: agentService.workspace,
       workspaceFs: workspaceFsProvider,
       publicBaseUrl: config.publicBaseUrl,
+      maxConcurrentAcpPerTenant: config.maxConcurrentAcpPerTenant || 8,
     });
     registerAcpRoutes(app, {
       agentService,
@@ -5151,6 +5154,29 @@ export async function createApiApp(deps: {
       .returning();
     return c.json({ key: row.key, value: JSON.parse(row.value) });
   });
+
+  // ── Global image update status (for banners across UI) ──────────────
+  if (imageUpdateChecker) {
+    app.get("/api/system/image-updates", (c) => {
+      const statuses = imageUpdateChecker.getAllStatuses();
+      const hasUpdates = statuses.some((s) => s.hasUpdates);
+      return c.json({ hasUpdates, nodes: statuses });
+    });
+
+    app.post("/api/system/image-updates/check", async (c) => {
+      const body = await c.req.json().catch(() => ({})) as { nodeId?: string };
+      if (!body.nodeId?.trim()) return c.json({ error: "nodeId is required" }, 400);
+      try {
+        const status = await imageUpdateChecker.checkNode(body.nodeId.trim());
+        return c.json(status);
+      } catch (err) {
+        return c.json(
+          { error: err instanceof Error ? err.message : String(err) },
+          502,
+        );
+      }
+    });
+  }
 
   return app;
 }
