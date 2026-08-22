@@ -33,7 +33,7 @@ type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
 };
 
-function fsError(err: unknown): { status: 400 | 403 | 404 | 409 | 500; body: { error: string } } {
+function fsError(err: unknown): { status: 400 | 403 | 404 | 409 | 500 | 503; body: { error: string } } {
   if (err instanceof PathJailError) {
     return { status: 403, body: { error: err.message } };
   }
@@ -53,6 +53,10 @@ function fsError(err: unknown): { status: 400 | 403 | 404 | 409 | 500; body: { e
   }
   if (code === "ENOENT" || message.includes("ENOENT") || message.includes("no such file")) {
     return { status: 404, body: { error: message } };
+  }
+  // 节点掉线 / 排空 / 未注册 / 鉴权失效：503 让前端提示迁移，而非裸 500
+  if (/当前离线|正在排空|尚未完成注册|鉴权信息失效|节点已不存在|需要远程运行节点/.test(message)) {
+    return { status: 503, body: { error: message } };
   }
   return { status: 400, body: { error: message } };
 }

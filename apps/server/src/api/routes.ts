@@ -489,6 +489,29 @@ export async function createApiApp(deps: {
   const connectorAuth = new ConnectorAuthService(db, config);
   const tenantService = new TenantService(db);
   const app = new Hono<{ Variables: AppVariables }>();
+
+  // 全局错误兜底：未在路由内 try/catch 的异常统一转结构化 JSON。
+  // 节点掉线 / 排空 / 未注册 / 鉴权失效映射到 503，让前端能区分"上游暂时不可用"
+  // 与"代码缺陷"，且 OpenAI 兼容客户端会按 503 重试；其余返回 500 并记 fault。
+  app.onError((err, c) => {
+    const message = err instanceof Error ? err.message : String(err);
+    const offline = /当前离线|正在排空|尚未完成注册|鉴权信息失效|节点已不存在|需要远程运行节点/.test(
+      message,
+    );
+    const status = offline ? 503 : 500;
+    // 503 是预期的节点不可用，记 warn 即可；只有真正的 500 才记 fault。
+    if (status >= 500 && !offline) {
+      recordPlatformFault(
+        "api.unhandled_error",
+        err instanceof Error ? err : new Error(message),
+        { subsystem: "api" },
+      );
+    }
+    if (offline) log.warn("api.node_unavailable", { path: c.req.path, err_message: message });
+    else log.error("api.unhandled_error", { path: c.req.path, status, err_message: message });
+    return c.json({ error: message }, status);
+  });
+
   bindTransactionalEmail({ db, secret: config.secret });
   let emailInbound: EmailInboundService | null = null;
   let remoteIngress: RemoteAgentIngress | null = null;

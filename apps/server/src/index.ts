@@ -1,7 +1,12 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { log, observabilityHttpMiddleware, otlpExportEnabled } from "@zakura/core";
+import {
+  log,
+  observabilityHttpMiddleware,
+  otlpExportEnabled,
+  recordPlatformFault,
+} from "@zakura/core";
 import { loadConfig } from "./config.js";
 import {
   initServerTelemetry,
@@ -66,6 +71,20 @@ import { createDesktopProxyGateway } from "./services/desktop-proxy.js";
 async function main() {
   const config = loadConfig();
   const telemetry = initServerTelemetry();
+
+  // 全局兜底：任何逃逸的 promise rejection / 同步异常都记录为 fault，
+  // 绝不让单个请求或后台任务把整个服务进程拖垮。Node 22 默认对 unhandled
+  // rejection 执行 process.exit，正是 fx 节点掉线时反复 502 重启的根因。
+  process.on("unhandledRejection", (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    recordPlatformFault("process.unhandled_rejection", err, { subsystem: "process" });
+    log.error("process.unhandled_rejection", { err_message: err.message });
+  });
+  process.on("uncaughtException", (err) => {
+    recordPlatformFault("process.uncaught_exception", err, { subsystem: "process" });
+    log.error("process.uncaught_exception", { err_message: err.message });
+  });
+
   registerBuiltinProviders();
   registerBuiltinModelAdapters();
 
