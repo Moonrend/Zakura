@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import {
   resolveDockerContextSocketPath,
   toDockerHostPath,
+  normalizeImageRef,
   ShellJob,
   ShellJobRegistry,
   StdioExec,
@@ -232,8 +233,14 @@ export class RunnerDockerWorkspace {
     }
     const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
     for (const c of list) {
+      // Match by normalized ref (handles docker.io / registry-1.docker.io /
+      // bare prefixes) and fall back to image id. The image-id guard alone
+      // misses the "just pulled a new tag" case (new id ≠ old running id), so
+      // the normalized string match is what actually triggers the recreate.
       const matchesImage =
-        !image || c.Image === image || (targetImageId !== null && c.ImageID === targetImageId);
+        !image ||
+        normalizeImageRef(c.Image) === normalizeImageRef(image) ||
+        (targetImageId !== null && c.ImageID === targetImageId);
       if (!matchesImage) continue;
       const agentId = (c.Labels ?? {})["zakura.agent"];
       const agentSlug = (c.Labels ?? {})["zakura.agent_slug"];

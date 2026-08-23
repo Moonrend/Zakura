@@ -63,6 +63,7 @@ export type { RunnerClientOptions } from "./runner-client.js";
 export { toDockerHostPath, unwrapShellCommand } from "./docker-path.js";
 export {
   parseImageRef,
+  normalizeImageRef,
   checkImageUpdate,
   checkImageUpdates,
 } from "./image-update-check.js";

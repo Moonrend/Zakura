@@ -7,6 +7,7 @@ import {
   ShellJob,
   bindExecStream,
   checkImageUpdates as checkImagesCore,
+  normalizeImageRef,
   log,
   type ContainerRuntime,
   type CreateContainerOptions,
@@ -580,10 +581,14 @@ export class DockerRuntime implements ContainerRuntime {
     });
     const runningByRef = new Map<string, Set<string>>();
     for (const c of running) {
-      let set = runningByRef.get(c.Image);
+      // Normalize: Docker reports `c.Image` with `docker.io/` or
+      // `registry-1.docker.io/` prefixes (or bare), but the server probes the
+      // bare `user/repo:tag` — normalizeImageRef aligns the lookup keys.
+      const key = normalizeImageRef(c.Image);
+      let set = runningByRef.get(key);
       if (!set) {
         set = new Set();
-        runningByRef.set(c.Image, set);
+        runningByRef.set(key, set);
       }
       if (c.ImageID) set.add(c.ImageID);
     }
@@ -662,8 +667,14 @@ export class DockerRuntime implements ContainerRuntime {
     }
     const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
     for (const c of list) {
+      // Match by normalized ref (handles docker.io / registry-1.docker.io /
+      // bare prefixes) and fall back to image id. The image-id guard alone
+      // misses the "just pulled a new tag" case (new id ≠ old running id), so
+      // the normalized string match is what actually triggers the recreate.
       const matchesImage =
-        !image || c.Image === image || (targetImageId !== null && c.ImageID === targetImageId);
+        !image ||
+        normalizeImageRef(c.Image) === normalizeImageRef(image) ||
+        (targetImageId !== null && c.ImageID === targetImageId);
       if (!matchesImage) continue;
       const agentId = (c.Labels ?? {})["zakura.agent"];
       if (!agentId) continue;

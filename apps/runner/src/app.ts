@@ -16,7 +16,7 @@ import { RunnerDockerWorkspace } from "./docker-workspace.js";
 import { RunnerDockerComponents } from "./docker-components.js";
 import { TunnelManager } from "./tunnel/manager.js";
 import { updateRunnerSelf } from "./system-update.js";
-import { checkImageUpdates } from "./image-update-check.js";
+import { checkImageUpdates, normalizeImageRef } from "./image-update-check.js";
 
 export type RunnerConfig = {
   storageRoot: string;
@@ -175,13 +175,17 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     try {
       // Group running workspace containers by their image ref so each probed
       // image can report whether its running containers lag the current tag.
+      // Key by the normalized ref: Docker reports `c.Image` as `docker.io/...`
+      // or `registry-1.docker.io/...` (or bare), and the server probes the
+      // bare `user/repo:tag`, so normalizeImageRef aligns the keys.
       const running = await dockerWs.listRunningImages();
       const runningByRef = new Map<string, Set<string>>();
       for (const r of running) {
-        let set = runningByRef.get(r.imageRef);
+        const key = normalizeImageRef(r.imageRef);
+        let set = runningByRef.get(key);
         if (!set) {
           set = new Set();
-          runningByRef.set(r.imageRef, set);
+          runningByRef.set(key, set);
         }
         set.add(r.imageId);
       }

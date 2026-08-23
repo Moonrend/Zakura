@@ -98,6 +98,27 @@ function splitRegistryRepo(s: string): [string, string] {
   return [DOCKER_HUB_REGISTRY, repo];
 }
 
+/**
+ * Canonical hostname for Docker Hub. Docker reports container `Image` refs
+ * with either `docker.io` or `registry-1.docker.io` (and bare for Hub images),
+ * so normalizing to the one host lets callers group + match running
+ * containers against the bare refs the server probes.
+ */
+function canonicalRegistry(registry: string): string {
+  return registry === "docker.io" ? DOCKER_HUB_REGISTRY : registry;
+}
+
+/**
+ * Canonical comparison key for an image ref: `<canonical-registry>/<repo>:<ref>`.
+ * Use this to key the running-container map and to look it up by the probed
+ * ref string, so a container reported as `docker.io/...` or
+ * `registry-1.docker.io/...` matches a probe for the bare `user/repo:tag`.
+ */
+export function normalizeImageRef(image: string): string {
+  const { registry, repository, reference } = parseImageRef(image);
+  return `${canonicalRegistry(registry)}/${repository}:${reference}`;
+}
+
 export type ImageDigestInfo = {
   image: string;
   /** Local image id (sha256:...) from `docker inspect`. */
@@ -277,7 +298,11 @@ export async function checkImageUpdates(
 ): Promise<ImageDigestInfo[]> {
   const out: ImageDigestInfo[] = [];
   for (const image of images) {
-    out.push(await checkImageUpdate(docker, image, runningImageIds?.get(image)));
+    // Look up running ids by the normalized ref so a container reported as
+    // `docker.io/...` or `registry-1.docker.io/...` matches a probe for the
+    // bare `user/repo:tag`. Callers key the map with normalizeImageRef too.
+    const runningIds = runningImageIds?.get(normalizeImageRef(image));
+    out.push(await checkImageUpdate(docker, image, runningIds));
   }
   return out;
 }
