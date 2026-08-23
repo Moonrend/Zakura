@@ -159,6 +159,8 @@ export type ImageDigestInfo = {
  * Minimal structural view of a dockerode-like client. We only need
  * `getImage(image).inspect()` returning `{ Id, RepoDigests }`, so we accept
  * any object that satisfies this shape and avoid a hard `dockerode` dep here.
+ * `info()` is optional — used to discover the daemon's configured registry
+ * mirrors so a host behind a China mirror can still probe for updates.
  */
 export interface ImageInspectLike {
   Id: string | null;
@@ -166,41 +168,88 @@ export interface ImageInspectLike {
 }
 export interface DockerLike {
   getImage(image: string): { inspect(): Promise<ImageInspectLike> };
+  info?(): Promise<DockerInfoLike>;
+  /**
+   * Last-resort remote-digest source: ask the daemon to pull `image` and
+   * return its resulting RepoDigest. The daemon honors its own registry
+   * mirrors, HTTP proxies and registry auth — every path the in-process fetch
+   * probe can't see. Implemented by callers that hold a real dockerode client
+   * (the runner); omitted by callers that only probe in-process. Used only
+   * when the manifest probe already failed, so the happy path costs one HEAD,
+   * not a full pull.
+   */
+  pullToDigest?(image: string): Promise<string | null>;
+}
+export interface DockerInfoLike {
+  RegistryConfig?: {
+    Mirrors?: string[];
+    IndexConfigs?: Record<string, { Mirrors?: string[]; Name?: string; Secure?: boolean }>;
+  };
+  /** Some daemon versions surface mirrors at the top level instead. */
+  Mirrors?: string[];
 }
 
 /**
- * Discover Docker registry mirror hosts the daemon is configured to use, so a
- * host that can reach its mirror but not registry-1.docker.io directly (common
- * behind a China mirror like mirror.ccs.tencentyun.com) can still probe for
- * image updates. Reads `registry-mirrors` from the Docker daemon config and
- * the docker CLI config; returns bare hosts (no scheme). Cached for the
- * process lifetime — mirrors don't change without a daemon restart.
+ * Discover the Docker daemon's configured registry-mirror hosts by querying
+ * the daemon itself over the socket (the same socket the runner already uses).
+ * This is the only reliable source inside the runner container: the host's
+ * `/etc/docker/daemon.json` is NOT mounted into the container, so reading it
+ * from the filesystem always came back empty. The daemon's `info` endpoint
+ * returns `RegistryConfig.Mirrors` (the parsed `registry-mirrors` list) —
+ * `docker pull` honors these, and we honor them for the manifest probe too.
+ * Returns bare hosts (no scheme), cached for the process lifetime (mirrors
+ * don't change without a daemon restart, and a re-check is one socket call).
  *
- * ponytail: this is best-effort discovery; if neither file is readable or
- * lists no mirrors, callers fall back to probing the upstream registry
- * (the previous behavior). No schema/env wiring needed — the host's existing
- * daemon config is the source of truth.
+ * ponytail: best-effort. If the daemon is unreachable or reports no mirrors,
+ * callers fall back to probing the upstream registry directly.
  */
 let discoveredMirrors: string[] | null = null;
-export async function discoverDockerRegistryMirrors(): Promise<string[]> {
+/** Reset the mirror cache (test-only — mirrors don't change in production). */
+export function _resetMirrorCacheForTests(): void {
+  discoveredMirrors = null;
+}
+export async function discoverDockerRegistryMirrors(
+  docker?: DockerLike,
+): Promise<string[]> {
   if (discoveredMirrors) return discoveredMirrors;
   const hosts = new Set<string>();
-  // Daemon config: /etc/docker/daemon.json (Linux) — `registry-mirrors` array.
-  // Also check ~/.docker/daemon.json and DOCKER_CONFIG for completeness.
+  if (docker?.info) {
+    try {
+      const info = await docker.info();
+      const mirrors = [
+        ...(info.RegistryConfig?.Mirrors ?? []),
+        ...(info.Mirrors ?? []),
+      ];
+      for (const m of mirrors) {
+        if (typeof m === "string" && m.trim()) hosts.add(m.trim());
+      }
+      // IndexConfigs is the older map form; some daemons put mirrors per-index.
+      const idx = info.RegistryConfig?.IndexConfigs;
+      if (idx) {
+        for (const v of Object.values(idx)) {
+          for (const m of v?.Mirrors ?? []) {
+            if (typeof m === "string" && m.trim()) hosts.add(m.trim());
+          }
+        }
+      }
+    } catch {
+      /* daemon query failed — fall back to upstream (file fallback below) */
+    }
+  }
+  // Filesystem fallback for setups where the daemon socket isn't the same host
+  // as the config (rare): /etc/docker/daemon.json etc. No-op inside containers
+  // that don't mount it, but cheap and harmless.
   const daemonPaths = [
     "/etc/docker/daemon.json",
-    `${process.env.HOME ?? ""}/.docker/daemon.json`,
     `${process.env.DOCKER_CONFIG ?? ""}/daemon.json`,
+    `${process.env.HOME ?? ""}/.docker/daemon.json`,
   ].filter(Boolean);
   for (const p of daemonPaths) {
     await readMirrorsFromJsonFile(p, "registry-mirrors", hosts);
   }
-  // CLI config: ~/.docker/config.json — `credsStore`/`auths` aside, the daemon
-  // mirror list lives in daemon.json, but some setups (rootless, colima) put a
-  // `registry-mirrors` key in the CLI config too.
-  const cliPath = `${process.env.DOCKER_CONFIG ?? `${process.env.HOME ?? ""}/.docker`}/config.json`;
-  await readMirrorsFromJsonFile(cliPath, "registry-mirrors", hosts);
-  discoveredMirrors = [...hosts].map(stripScheme).filter((h) => h && h !== DOCKER_HUB_REGISTRY && h !== "docker.io");
+  discoveredMirrors = [...hosts]
+    .map(stripScheme)
+    .filter((h) => h && h !== DOCKER_HUB_REGISTRY && h !== "docker.io");
   return discoveredMirrors;
 }
 
@@ -393,6 +442,13 @@ export async function checkImageUpdate(
   let error: string | null = null;
   try {
     remoteDigest = await probeRemoteDigest(ref, probeOptions);
+    if (remoteDigest === null && docker.pullToDigest) {
+      // In-process probe couldn't reach the registry (proxy / private registry /
+      // no configured mirror surfaced). Let the daemon pull — it honors its own
+      // mirrors, proxies and auth, the same path `docker pull` uses. Returns the
+      // image's RepoDigest after pulling, or null if the daemon can't either.
+      remoteDigest = await docker.pullToDigest(image);
+    }
     if (remoteDigest === null && local.digest === null) {
       error = "registry_probe_unavailable";
     }

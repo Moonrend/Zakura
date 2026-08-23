@@ -191,10 +191,22 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       }
       // The host's Docker daemon may be configured with a registry mirror
       // (e.g. a China pull-through cache) because it cannot reach
-      // registry-1.docker.io directly. Probe the mirror first so the update
-      // check works on those hosts; the upstream registry is the fallback.
-      const registryMirrors = await discoverDockerRegistryMirrors();
-      const results = await checkImageUpdates(dockerWs.client, images, runningByRef, {
+      // registry-1.docker.io directly. Discover the mirrors from the daemon
+      // itself over the socket (the host's daemon.json isn't mounted into the
+      // container, so a filesystem read comes back empty). Probe the mirror
+      // first so the update check works on those hosts; the upstream registry
+      // is the fallback.
+      const registryMirrors = await discoverDockerRegistryMirrors(dockerWs.client);
+      // Wrap the dockerode client with a daemon-pull fallback so that when the
+      // in-process manifest probe can't reach the registry (proxy / private
+      // registry / no surfaced mirror), the daemon — which honors its own
+      // mirrors, proxies and auth — pulls and reports the real remote digest.
+      const dockerLike = {
+        getImage: (img: string) => dockerWs.client.getImage(img),
+        info: () => dockerWs.client.info(),
+        pullToDigest: (img: string) => dockerWs.pullToDigest(img),
+      };
+      const results = await checkImageUpdates(dockerLike, images, runningByRef, {
         registryMirrors,
       });
       const payload = results.map((r) => ({

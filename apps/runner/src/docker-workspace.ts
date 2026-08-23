@@ -207,6 +207,31 @@ export class RunnerDockerWorkspace {
   }
 
   /**
+   * Daemon-pulled remote digest: pull `image` (the daemon honors its registry
+   * mirrors, HTTP proxies and auth — every path the in-process fetch probe
+   * can't see) and return the resulting RepoDigest. Used as the last-resort
+   * fallback when the manifest HEAD probe can't reach the registry. Returns
+   * null when the daemon can't pull either (offline / no auth).
+   */
+  async pullToDigest(image: string): Promise<string | null> {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+          if (err) return reject(dockerErr(err));
+          this.docker.modem.followProgress(stream, (e: Error | null) =>
+            e ? reject(dockerErr(e)) : resolve(),
+          );
+        });
+      });
+      const info = await this.docker.getImage(image).inspect();
+      const digests = info.RepoDigests ?? [];
+      return digests.length ? (digests[0]!.split("@")[1] ?? null) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Force-recreate every running workspace container that matches `image` (or
    * all workspaces when image is null) on this Runner host. Used by the
    * workspace-image refresh flow so freshly pulled images take effect.

@@ -5,12 +5,16 @@ import {
   normalizeImageRef,
   checkImageUpdates,
   discoverDockerRegistryMirrors,
+  _resetMirrorCacheForTests,
   type DockerLike,
   type ImageInspectLike,
 } from "../src/image-update-check.js";
 
 /** Minimal fake docker client: holds a map of image-ref → inspect result. */
-function fakeDocker(images: Record<string, ImageInspectLike>): DockerLike {
+function fakeDocker(
+  images: Record<string, ImageInspectLike>,
+  opts?: { info?: () => Promise<unknown>; pullToDigest?: (image: string) => Promise<string | null> },
+): DockerLike {
   return {
     getImage(image: string) {
       return {
@@ -21,6 +25,8 @@ function fakeDocker(images: Record<string, ImageInspectLike>): DockerLike {
         },
       };
     },
+    ...(opts?.info ? { info: opts.info as DockerLike["info"] } : {}),
+    ...(opts?.pullToDigest ? { pullToDigest: opts.pullToDigest } : {}),
   };
 }
 
@@ -155,13 +161,75 @@ function mockFetch(
   }) as unknown as typeof fetch;
 }
 
-test("discoverDockerRegistryMirrors: reads registry-mirrors from a daemon.json", async () => {
-  // The discovery function reads /etc/docker/daemon.json etc.; on a test host
-  // those files won't exist, so it returns []. We assert the no-config case is
-  // a clean empty array (no throw), which is the fallback path.
-  const mirrors = await discoverDockerRegistryMirrors();
+test("discoverDockerRegistryMirrors: reads RegistryConfig.Mirrors from the daemon info", async () => {
+  _resetMirrorCacheForTests();
+  const docker = fakeDocker(
+    {},
+    {
+      info: async () => ({
+        RegistryConfig: { Mirrors: ["https://mirror.ccs.tencentyun.com"] },
+      }),
+    },
+  );
+  const mirrors = await discoverDockerRegistryMirrors(docker);
+  assert.deepEqual(mirrors, ["mirror.ccs.tencentyun.com"]);
+});
+
+test("discoverDockerRegistryMirrors: empty when daemon reports no mirrors (filesystem fallback)", async () => {
+  _resetMirrorCacheForTests();
+  // No info() and no daemon.json on the test host → clean empty array, no throw.
+  const mirrors = await discoverDockerRegistryMirrors(fakeDocker({}));
   assert.ok(Array.isArray(mirrors));
-  assert.ok(mirrors.every((m) => !m.includes("://")), "mirrors are bare hosts");
+  assert.equal(mirrors.length, 0);
+});
+
+test("discoverDockerRegistryMirrors: strips scheme and trailing slash from mirror URLs", async () => {
+  _resetMirrorCacheForTests();
+  const docker = fakeDocker(
+    {},
+    {
+      info: async () => ({
+        RegistryConfig: { Mirrors: ["https://mirror.example.com/"] },
+      }),
+    },
+  );
+  const mirrors = await discoverDockerRegistryMirrors(docker);
+  assert.deepEqual(mirrors, ["mirror.example.com"]);
+});
+
+/**
+ * When the in-process manifest probe can't reach the registry AND the daemon
+ * has no surfaced mirror, the pullToDigest fallback asks the daemon to pull
+ * (which honors the host's proxies/auth) and reports the real remote digest.
+ * Without this fallback, the check silently reported "unavailable" on proxy
+ * / private-registry hosts.
+ */
+test("checkImageUpdates: falls back to pullToDigest when manifest probe fails", async () => {
+  _resetMirrorCacheForTests();
+  const docker = fakeDocker(
+    {
+      "sunwuyuan/zakura-runner-dev:latest": {
+        Id: "sha256:localid",
+        RepoDigests: ["sunwuyuan/zakura-runner-dev@sha256:aaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee"],
+      },
+    },
+    {
+      // daemon reports no mirrors so the manifest probe runs (and fails via 404);
+      // pullToDigest is the real fallback.
+      info: async () => ({ RegistryConfig: {} }),
+      pullToDigest: async () => "sha256:bbbb1111222233334444555566667777888899990000aaaabbbbccccddddeeee",
+    },
+  );
+  const fetchImpl = mockFetch({}); // all probes 404 → manifest probe fails
+  const results = await checkImageUpdates(
+    docker,
+    ["sunwuyuan/zakura-runner-dev:latest"],
+    undefined,
+    { fetchImpl },
+  );
+  assert.equal(results[0]!.remoteDigest, "sha256:bbbb1111222233334444555566667777888899990000aaaabbbbccccddddeeee");
+  assert.equal(results[0]!.updateAvailable, true);
+  assert.equal(results[0]!.error, null);
 });
 
 /**

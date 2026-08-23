@@ -8,6 +8,7 @@ import {
   bindExecStream,
   checkImageUpdates as checkImagesCore,
   normalizeImageRef,
+  discoverDockerRegistryMirrors,
   log,
   type ContainerRuntime,
   type CreateContainerOptions,
@@ -592,7 +593,40 @@ export class DockerRuntime implements ContainerRuntime {
       }
       if (c.ImageID) set.add(c.ImageID);
     }
-    return checkImagesCore(this.docker, images, runningByRef);
+    return checkImagesCore(
+      {
+        getImage: (img: string) => this.docker.getImage(img),
+        info: () => this.docker.info(),
+        pullToDigest: (img: string) => this.pullToDigest(img),
+      },
+      images,
+      runningByRef,
+      { registryMirrors: await discoverDockerRegistryMirrors(this.docker) },
+    );
+  }
+
+  /**
+   * Daemon-pulled remote digest (local-node fallback): pull `image` and return
+   * the resulting RepoDigest, so the update check works on a server host that
+   * reaches its registry through a mirror/proxy/auth the in-process probe
+   * can't see. Mirrors the runner's pullToDigest. Returns null on failure.
+   */
+  async pullToDigest(image: string): Promise<string | null> {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+          if (err) return reject(dockerErr(err));
+          this.docker.modem.followProgress(stream, (e: Error | null) =>
+            e ? reject(dockerErr(e)) : resolve(),
+          );
+        });
+      });
+      const info = await this.docker.getImage(image).inspect();
+      const digests = info.RepoDigests ?? [];
+      return digests.length ? (digests[0]!.split("@")[1] ?? null) : null;
+    } catch {
+      return null;
+    }
   }
 
   async pullImage(image: string, onProgress?: (line: string) => void): Promise<void> {
