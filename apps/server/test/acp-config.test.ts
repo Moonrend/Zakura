@@ -4,6 +4,7 @@ import {
   acpStdioArgv,
   acpManualSetupCommand,
   acpConfigToJson,
+  ACP_IMAGE_BIN_DIR,
   builtinAcpProfiles,
   isMaskedAcpSecret,
   maskAcpSecret,
@@ -247,7 +248,7 @@ describe("ACP config", () => {
         model: "zai/glm-5.2-fast",
       },
     });
-    assert.equal(fxLaunch.command, "fx");
+    assert.equal(fxLaunch.command, `${ACP_IMAGE_BIN_DIR}/fx`);
     assert.equal(fxLaunch.env.AI_GATEWAY_API_KEY, "vck-fx-key");
     assert.equal(fxLaunch.env.OPENAI_API_KEY, "vck-fx-key");
     assert.equal(fxLaunch.env.AI_GATEWAY_BASE_URL, "https://ai-gateway.vercel.sh/v1");

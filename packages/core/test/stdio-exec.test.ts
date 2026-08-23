@@ -59,4 +59,33 @@ describe("StdioExec non-TTY demux", () => {
     assert.deepEqual(Buffer.from(first.value!), bytes);
     stream.end();
   });
+
+  // Regression: fx (and other ACP agents) write multi-line startup errors to
+  // stderr. startStdio must surface every stderr frame, not just the first,
+  // so bootRuntime can attach the real cause to acpError instead of the vague
+  // "ACP connection closed".
+  it("accumulates multi-frame stderr verbatim and in order", async () => {
+    const stream = new PassThrough();
+    const stderr: string[] = [];
+    const exec = new StdioExec(stream as unknown as NodeJS.ReadWriteStream, {
+      inspect: async () => ({ ExitCode: 0, Running: false }),
+    });
+    exec.onStderr((c) => stderr.push(c));
+    const { readable } = exec.toWebStreams();
+    const reader = readable.getReader();
+
+    stream.write(Buffer.concat([
+      muxFrame(2, "Error: fx needs access to AI Gateway\n"),
+      muxFrame(1, '{"jsonrpc":"2.0","method":"initialize"}\n'),
+      muxFrame(2, "Run `fx login` to configure AI_GATEWAY_API_KEY\n"),
+    ]));
+
+    const first = await reader.read();
+    assert.equal(Buffer.from(first.value!).toString("utf8"), '{"jsonrpc":"2.0","method":"initialize"}\n');
+    assert.equal(
+      stderr.join(""),
+      "Error: fx needs access to AI Gateway\nRun `fx login` to configure AI_GATEWAY_API_KEY\n",
+    );
+    stream.end();
+  });
 });

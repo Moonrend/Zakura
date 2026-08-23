@@ -1062,7 +1062,20 @@ export class AcpSessionService {
       ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
       : `${acpStageScript(layout)}\n${whichCheck}`;
     try {
-      await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", prep]);
+      // execInWorkspace (local docker exec / remote runner) only throws on a
+      // daemon or transport error — a non-zero process exit comes back as
+      // { exitCode, stderr } and does NOT throw. The whichCheck below exits 127
+      // when the adapter binary is missing; without checking exitCode that
+      // failure was swallowed and startStdio ran anyway, surfacing the vague
+      // "ACP connection closed" instead of "binary missing".
+      const result = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", prep]);
+      if (result.exitCode !== 0) {
+        const stderr = (result.stderr ?? "").trim();
+        if (stderr.includes("ZAKURA_BIN_MISSING")) {
+          throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
+        }
+        throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
+      }
     } catch (err) {
       await this.deps.workspace
         .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
@@ -1088,6 +1101,19 @@ export class AcpSessionService {
         .catch(() => undefined);
       throw err;
     }
+
+    // Capture the agent process's stderr. Until now these bytes were silently
+    // discarded (startStdio only forwarded stdout for JSON-RPC), so every fx
+    // startup failure surfaced as the vague "ACP connection closed" with no
+    // real cause. The Docker mux stream separates stderr cleanly; we keep a
+    // bounded tail so bootRuntime's catch path can attach it to the error.
+    let stderrTail = "";
+    stdio.onStderr((chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-4096);
+      // Live stderr is also the fastest signal when fx/codex/etc. misbehave;
+      // surface it on the server log for offline diagnosis.
+      process.stderr.write(`[acp:${setup.id}] ${chunk}`);
+    });
 
     const live: LiveRuntime = {
       id: runtimeId,
@@ -1382,10 +1408,10 @@ export class AcpSessionService {
       await this.deps.workspace
         .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
-      // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错，
-      // 几乎都是工作区镜像过旧（未预装 CLI / 版本不兼容）。转成可操作提示，
-      // 让用户知道该去重建工作区，而不是面对一个看不出原因的 connection closed。
-      throw toAcpConnectionHint(err);
+      // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错。
+      // 现在有了 stderr 尾部就优先用它——fx 缺凭证/版本不兼容等真正的退出原因都在
+      // stderr 里；只有真的没有 stderr 时才回退到「镜像过旧」的猜测提示。
+      throw toAcpConnectionHint(err, stderrTail);
     }
   }
 
@@ -1790,10 +1816,20 @@ export function isAcpConnectionClosed(err: unknown): boolean {
 }
 
 /** 把 connection-closed 类错误转成可操作提示。非此类错误原样返回。 */
-function toAcpConnectionHint(err: unknown): unknown {
-  if (!isAcpConnectionClosed(err)) return err;
+function toAcpConnectionHint(err: unknown, stderrTail?: string): unknown {
+  if (!isAcpConnectionClosed(err)) {
+    if (stderrTail?.trim()) return new Error(`${describeAcpRpcError(err).message}\n${stderrTail.trim()}`);
+    return err;
+  }
+  // 有 stderr 时优先暴露真实原因（fx 缺凭证、版本不兼容、fx needs access 等），
+  // 不再只猜测「镜像过旧」。stderr 尾部足以定位绝大多数启动失败。
+  if (stderrTail?.trim()) {
+    return new Error(
+      `Agent 进程在初始化时退出。进程 stderr 尾部：\n${stderrTail.trim()}`,
+    );
+  }
   return new Error(
-    "Agent 进程在初始化时退出。这通常是工作区镜像过旧（未预装该 Agent 的 CLI 或版本不兼容），请到 Runner 详情页检查镜像更新并重建工作区后重试。",
+    "Agent 进程在初始化时退出且未输出 stderr。这通常是工作区镜像过旧（未预装该 Agent 的 CLI 或版本不兼容），请到 Runner 详情页检查镜像更新并重建工作区后重试。",
   );
 }
 

@@ -755,7 +755,15 @@ export function resolveAcpLaunch(
   profile: AcpPublicProfile,
   setup: AcpAgentSetup,
 ): { command: string; args: string[]; env: Record<string, string> } {
-  const command = setup.command?.trim() || profile.command;
+  let command = setup.command?.trim() || profile.command;
+  // fx.sh installs to FX_INSTALL_DIR and only adds it to PATH via ~/.bashrc
+  // (HOME-dependent). ACP runs the child process with HOME pointing at an empty
+  // state dir, so that .bashrc injection never applies — `exec fx` fails with
+  // "fx: not found". Pin to the absolute path we install at (ACP_IMAGE_BIN_DIR)
+  // so launch no longer depends on any PATH/login-shell sourcing.
+  if (profile.id === "fx" && (command === "fx" || !command)) {
+    command = `${ACP_IMAGE_BIN_DIR}/fx`;
+  }
   let args = setup.args?.length ? setup.args : profile.args;
   const env: Record<string, string> = { ...(setup.env ?? {}) };
   const key = setup.managed.api_key?.trim();

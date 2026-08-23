@@ -1352,6 +1352,8 @@ export class AgentWorkspaceService {
     writable: WritableStream<Uint8Array>;
     readable: ReadableStream<Uint8Array>;
     kill: () => Promise<void>;
+    /** 订阅子进程 stderr；ACP 用它诊断 fx 等启动失败（Docker mux 解复用出的 stderr）。 */
+    onStderr: (fn: (chunk: string) => void) => () => void;
   }> {
     const workingDir = this.shellCwd(opts?.workingDir);
     const env = this.shellEnv(opts?.env);
@@ -1365,6 +1367,7 @@ export class AgentWorkspaceService {
     return {
       ...streams,
       kill: () => job.kill(),
+      onStderr: (fn) => job.onStderr(fn),
     };
   }
 

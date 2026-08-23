@@ -502,6 +502,8 @@ export class RunnerClient {
     writable: WritableStream<Uint8Array>;
     readable: ReadableStream<Uint8Array>;
     kill: () => Promise<void>;
+    /** 订阅子进程 stderr（runner SSE 的 `t:"err"` 帧）。 */
+    onStderr: (fn: (chunk: string) => void) => () => void;
   }> {
     const start = await this.fetchImpl(
       `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio`,
@@ -523,6 +525,7 @@ export class RunnerClient {
     );
     if (!events.ok || !events.body) throw new Error(await events.text());
 
+    const stderrListeners = new Set<(chunk: string) => void>();
     const readable = new ReadableStream<Uint8Array>({
       async start(controller) {
         const reader = events.body!.getReader();
@@ -549,6 +552,8 @@ export class RunnerClient {
               };
               if (msg.t === "out" && msg.d) {
                 controller.enqueue(Uint8Array.from(Buffer.from(msg.d, "base64")));
+              } else if (msg.t === "err" && msg.d) {
+                for (const fn of stderrListeners) fn(msg.d);
               }
               if (msg.t === "exit") {
                 controller.close();
@@ -588,6 +593,12 @@ export class RunnerClient {
           `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}/kill`,
           { method: "POST", headers: this.headers() },
         ).catch(() => undefined);
+      },
+      onStderr: (fn) => {
+        stderrListeners.add(fn);
+        return () => {
+          stderrListeners.delete(fn);
+        };
       },
     };
   }
