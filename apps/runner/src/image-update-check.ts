@@ -9,8 +9,10 @@ export {
   normalizeImageRef,
   checkImageUpdate,
   checkImageUpdates,
+  discoverDockerRegistryMirrors,
   type ImageRef,
   type ImageDigestInfo,
   type DockerLike,
   type ImageInspectLike,
+  type ImageUpdateProbeOptions,
 } from "@zakura/core";

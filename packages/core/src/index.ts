@@ -66,12 +66,14 @@ export {
   normalizeImageRef,
   checkImageUpdate,
   checkImageUpdates,
+  discoverDockerRegistryMirrors,
 } from "./image-update-check.js";
 export type {
   ImageRef,
   ImageDigestInfo,
   DockerLike,
   ImageInspectLike,
+  ImageUpdateProbeOptions,
 } from "./image-update-check.js";
 export {
   ShellJob,

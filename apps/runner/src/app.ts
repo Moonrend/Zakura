@@ -16,7 +16,7 @@ import { RunnerDockerWorkspace } from "./docker-workspace.js";
 import { RunnerDockerComponents } from "./docker-components.js";
 import { TunnelManager } from "./tunnel/manager.js";
 import { updateRunnerSelf } from "./system-update.js";
-import { checkImageUpdates, normalizeImageRef } from "./image-update-check.js";
+import { checkImageUpdates, normalizeImageRef, discoverDockerRegistryMirrors } from "./image-update-check.js";
 
 export type RunnerConfig = {
   storageRoot: string;
@@ -189,7 +189,14 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
         }
         set.add(r.imageId);
       }
-      const results = await checkImageUpdates(dockerWs.client, images, runningByRef);
+      // The host's Docker daemon may be configured with a registry mirror
+      // (e.g. a China pull-through cache) because it cannot reach
+      // registry-1.docker.io directly. Probe the mirror first so the update
+      // check works on those hosts; the upstream registry is the fallback.
+      const registryMirrors = await discoverDockerRegistryMirrors();
+      const results = await checkImageUpdates(dockerWs.client, images, runningByRef, {
+        registryMirrors,
+      });
       const payload = results.map((r) => ({
         image: r.image,
         localDigest: r.localDigest,
