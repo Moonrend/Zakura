@@ -5179,25 +5179,106 @@ export async function createApiApp(deps: {
   });
 
   // ── Global image update status (for banners across UI) ──────────────
-  if (imageUpdateChecker) {
-    app.get("/api/system/image-updates", (c) => {
-      const statuses = imageUpdateChecker.getAllStatuses();
-      const hasUpdates = statuses.some((s) => s.hasUpdates);
-      return c.json({ hasUpdates, nodes: statuses });
+  if (imageUpdateChecker && runtimeNodes) {
+    // 按 tenantId 过滤缓存中的节点状态，并附加节点元数据（name/status/kind/access），
+    // 避免跨租户泄露 nodeId —— checker 后台轮询是跨租户的，缓存含所有节点。
+    const decorate = (
+      s: import("../services/image-update-checker.js").NodeImageUpdateStatus,
+      meta: { name: string; status: string; kind: string; access: "owned" | "shared" },
+    ) => ({
+      ...s,
+      nodeName: meta.name,
+      nodeStatus: meta.status,
+      nodeKind: meta.kind,
+      access: meta.access,
+    });
+
+    app.get("/api/system/image-updates", async (c) => {
+      const session = c.get("session")!;
+      const accessible = await runtimeNodes.listAccessible(session.tenantId);
+      const metaMap = new Map(
+        accessible.map((n) => [
+          n.id,
+          {
+            name: n.name,
+            status: n.status,
+            kind: n.kind,
+            access: n.access,
+          },
+        ]),
+      );
+      const nodes = imageUpdateChecker
+        .getAllStatuses()
+        .filter((s) => metaMap.has(s.nodeId))
+        .map((s) => decorate(s, metaMap.get(s.nodeId)!));
+      const hasUpdates = nodes.some((s) => s.hasUpdates);
+      const hasRunningStale = nodes.some((s) => s.hasRunningStale);
+      return c.json({ hasUpdates, hasRunningStale, nodes });
     });
 
     app.post("/api/system/image-updates/check", async (c) => {
-      const body = await c.req.json().catch(() => ({})) as { nodeId?: string };
+      const session = c.get("session")!;
+      const body = (await c.req.json().catch(() => ({}))) as { nodeId?: string };
       if (!body.nodeId?.trim()) return c.json({ error: "nodeId is required" }, 400);
+      const nodeId = body.nodeId.trim();
+      const node = await runtimeNodes.getAccessible(session.tenantId, nodeId);
+      if (!node) return c.json({ error: "Not found" }, 404);
       try {
-        const status = await imageUpdateChecker.checkNode(body.nodeId.trim());
-        return c.json(status);
+        const status = await imageUpdateChecker.checkNode(nodeId);
+        return c.json(
+          decorate(status, {
+            name: node.name,
+            status: node.status,
+            kind: node.kind,
+            access:
+              node.isShared && node.tenantId !== session.tenantId
+                ? "shared"
+                : "owned",
+          }),
+        );
       } catch (err) {
         return c.json(
           { error: err instanceof Error ? err.message : String(err) },
           502,
         );
       }
+    });
+
+    app.post("/api/system/image-updates/check-all", async (c) => {
+      const session = c.get("session")!;
+      const accessible = await runtimeNodes.listAccessible(session.tenantId);
+      // 检查所有在线节点（local + 远程 runner），串行避免突发负载。
+      const toCheck = accessible.filter((n) => n.status === "online");
+      const nodes = [];
+      for (const node of toCheck) {
+        try {
+          const status = await imageUpdateChecker.checkNode(node.id);
+          nodes.push(
+            decorate(status, {
+              name: node.name,
+              status: node.status,
+              kind: node.kind,
+              access: node.access,
+            }),
+          );
+        } catch (err) {
+          nodes.push({
+            nodeId: node.id,
+            nodeName: node.name,
+            nodeStatus: node.status,
+            nodeKind: node.kind,
+            access: node.access,
+            checkedAt: Date.now(),
+            entries: [],
+            hasUpdates: false,
+            hasRunningStale: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      const hasUpdates = nodes.some((s) => s.hasUpdates);
+      const hasRunningStale = nodes.some((s) => s.hasRunningStale);
+      return c.json({ hasUpdates, hasRunningStale, nodes });
     });
   }
 

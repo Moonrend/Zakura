@@ -1274,16 +1274,22 @@ export class AcpSessionService {
     live.connection = app.connect(stream);
     this.byChat.set(chatSessionId, live);
     try {
-      const init = await live.connection.agent.request(acp.methods.agent.initialize, {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: { readTextFile: true, writeTextFile: true },
-          terminal: true,
-          elicitation: { form: {}, url: {} },
-          session: { configOptions: { boolean: {} } },
-        },
-        clientInfo: { name: "zakura", title: "Zakura", version: "0.1.0" },
-      });
+      // initialize 也可能在缺凭证时返回 auth-required（fx 无 AI_GATEWAY_API_KEY
+      // 时返回 code -32600）。把它和 openSession 一样纳入 auth-elicitation 重试，
+      // 否则 initialize 的 auth 错误会落到外层 catch 被当成普通崩溃抛出。
+      // withAuthRetry 保持内联 request 的原始推断类型，不抽成闭包（会丢重载类型）。
+      const init = await withAuthRetry(this.deps.store, live, () =>
+        live.connection.agent.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+            terminal: true,
+            elicitation: { form: {}, url: {} },
+            session: { configOptions: { boolean: {} } },
+          },
+          clientInfo: { name: "zakura", title: "Zakura", version: "0.1.0" },
+        }),
+      );
       live.authMethods = (init.authMethods ?? []).map((m) => ({
         id: String(m.id),
         name: String(m.name || m.id),
@@ -1325,16 +1331,7 @@ export class AcpSessionService {
         live.acpSessionId = live.active.sessionId;
       };
 
-      try {
-        await openSession();
-      } catch (err) {
-        if (!isAuthRequiredError(err)) throw err;
-        live.authRequired = true;
-        await emitAuthElicitation(this.deps.store, live);
-        await waitForAuth(live);
-        live.authRequired = false;
-        await openSession();
-      }
+      await withAuthRetry(this.deps.store, live, openSession);
 
       const modeId = profile.sessionModeId;
       if (modeId && live.active) {
@@ -1385,7 +1382,10 @@ export class AcpSessionService {
       await this.deps.workspace
         .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
-      throw err;
+      // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错，
+      // 几乎都是工作区镜像过旧（未预装 CLI / 版本不兼容）。转成可操作提示，
+      // 让用户知道该去重建工作区，而不是面对一个看不出原因的 connection closed。
+      throw toAcpConnectionHint(err);
     }
   }
 
@@ -1776,6 +1776,47 @@ export function isAuthRequiredError(err: unknown): boolean {
   if (data && (data.code === -32600 || data.error === -32600)) return true;
   if (/fx needs access|AI_GATEWAY_API_KEY|run fx login/i.test(msg)) return true;
   return false;
+}
+
+/**
+ * Agent 进程在握持 stdio 阶段（initialize 或之前）就退出，导致 ACP SDK 把
+ * pending request reject 成 "ACP connection closed"。最常见原因是工作区
+ * 镜像过旧——里面没装该 Agent 的 CLI（如 fx），或版本过旧不兼容当前协议。
+ * 识别后转成可操作提示，而不是把含糊的 "ACP connection closed" 原样抛给用户。
+ */
+export function isAcpConnectionClosed(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ACP connection closed|ACP Agent 进程意外退出|connection closed/i.test(msg);
+}
+
+/** 把 connection-closed 类错误转成可操作提示。非此类错误原样返回。 */
+function toAcpConnectionHint(err: unknown): unknown {
+  if (!isAcpConnectionClosed(err)) return err;
+  return new Error(
+    "Agent 进程在初始化时退出。这通常是工作区镜像过旧（未预装该 Agent 的 CLI 或版本不兼容），请到 Runner 详情页检查镜像更新并重建工作区后重试。",
+  );
+}
+
+/**
+ * 执行一个 ACP RPC；若抛出 auth-required（fx 无凭证时 initialize 返回 -32600），
+ * 触发登录 elicitation、等待用户登录后重试一次。initialize 与 openSession 共用。
+ * 泛型 T 保留 thunk 的精确返回类型（含 SDK 方法重载推断）。
+ */
+async function withAuthRetry<T>(
+  store: CloudAgentSessionStore,
+  live: LiveRuntime,
+  op: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    if (!isAuthRequiredError(err)) throw err;
+    live.authRequired = true;
+    await emitAuthElicitation(store, live);
+    await waitForAuth(live);
+    live.authRequired = false;
+    return op();
+  }
 }
 
 function settleAuthWaiters(live: LiveRuntime, err?: Error) {

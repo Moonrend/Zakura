@@ -62,6 +62,17 @@ export { RunnerClient } from "./runner-client.js";
 export type { RunnerClientOptions } from "./runner-client.js";
 export { toDockerHostPath, unwrapShellCommand } from "./docker-path.js";
 export {
+  parseImageRef,
+  checkImageUpdate,
+  checkImageUpdates,
+} from "./image-update-check.js";
+export type {
+  ImageRef,
+  ImageDigestInfo,
+  DockerLike,
+  ImageInspectLike,
+} from "./image-update-check.js";
+export {
   ShellJob,
   ShellJobRegistry,
   DockerMuxParser,

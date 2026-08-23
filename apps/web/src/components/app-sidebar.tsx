@@ -7,6 +7,7 @@ import {
   Activity,
   AlarmClock,
   ArrowLeft,
+  ArrowUpCircle,
   Bot,
   Brain,
   Cable,
@@ -158,6 +159,18 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
       href: "/dashboard/runners",
       label: "设备",
       icon: HardDrive,
+      isActive: (path) =>
+        path === "/dashboard/runners" ||
+        (path.startsWith("/dashboard/runners/") &&
+          !path.startsWith("/dashboard/runners/upgrades")),
+    },
+    {
+      href: "/dashboard/runners/upgrades",
+      label: "升级中心",
+      icon: ArrowUpCircle,
+      isActive: (path) =>
+        path === "/dashboard/runners/upgrades" ||
+        path.startsWith("/dashboard/runners/upgrades/"),
     },
     {
       href: "/dashboard/network",

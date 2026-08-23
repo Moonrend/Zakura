@@ -173,18 +173,32 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     const images = (body.images ?? []).map((s) => s.trim()).filter(Boolean);
     if (!images.length) return c.json({ error: "images is required" }, 400);
     try {
-      const results = await checkImageUpdates(dockerWs.client, images);
+      // Group running workspace containers by their image ref so each probed
+      // image can report whether its running containers lag the current tag.
+      const running = await dockerWs.listRunningImages();
+      const runningByRef = new Map<string, Set<string>>();
+      for (const r of running) {
+        let set = runningByRef.get(r.imageRef);
+        if (!set) {
+          set = new Set();
+          runningByRef.set(r.imageRef, set);
+        }
+        set.add(r.imageId);
+      }
+      const results = await checkImageUpdates(dockerWs.client, images, runningByRef);
       const payload = results.map((r) => ({
         image: r.image,
         localDigest: r.localDigest,
         remoteDigest: r.remoteDigest,
         updateAvailable: r.updateAvailable,
+        runningStale: r.runningStale,
         error: r.error,
       })) as Array<{
         image: string;
         localDigest: string | null;
         remoteDigest: string | null;
         updateAvailable: boolean;
+        runningStale: boolean;
         error: string | null;
       }>;
       return c.json({ images: payload });

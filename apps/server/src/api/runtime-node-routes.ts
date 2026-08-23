@@ -681,9 +681,6 @@ export function registerRuntimeNodeRoutes(
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
-      return c.json({ error: "本机 Runner 无需远程刷新" }, 400);
-    }
     try {
       assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
     } catch (err) {
@@ -699,6 +696,29 @@ export function registerRuntimeNodeRoutes(
     if (!target) {
       return c.json({ error: "image is required" }, 400);
     }
+
+    // Local node: pull + recreate in-process via the Docker adapter.
+    if (node.kind === "local" || node.slug === "local") {
+      if (!runtime) return c.json({ error: "本地 Docker 不可用" }, 503);
+      try {
+        // Force a pull, not ensureImage: the local tag may already exist but
+        // point at a stale manifest. ensureImage short-circuits on "tag present"
+        // and never fetches the new layers, so recreateWorkspaces rebuilds on the
+        // same old image id and the refresh silently does nothing.
+        await runtime.pullImage(target);
+        let recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+        if (body.recreateRunning !== false) {
+          recreated = await runtime.recreateWorkspaces(target);
+        }
+        return c.json({ image: target, status: "updated", recreated });
+      } catch (err) {
+        return c.json(
+          { error: err instanceof Error ? err.message : String(err) },
+          502,
+        );
+      }
+    }
+
     const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
     try {
       const result = await client.refreshWorkspaceImage({
@@ -718,21 +738,14 @@ export function registerRuntimeNodeRoutes(
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
-      return c.json({ error: "本机 Runner 无需远程探测" }, 400);
-    }
-    const { client } = await nodes.requireRunnerClient(
-      session.tenantId,
-      node.id,
-      { allowOffline: true },
-    );
 
-    // Collect images to probe: runner image + distinct workspace images of
-    // agents bound to this node (plus the default workspace image).
+    const isLocal = node.kind === "local" || node.slug === "local";
+    // Collect images to probe: runner image (remote nodes only) + distinct
+    // workspace images of agents bound to this node (plus the default).
     const imageSet = new Set<string>();
     const runnerImage =
       c.req.query("runnerImage")?.trim() || DEFAULT_RUNNER_IMAGE;
-    imageSet.add(runnerImage);
+    if (!isLocal) imageSet.add(runnerImage);
     const bound = await db
       .select({ workspaceImage: agents.workspaceImage })
       .from(agents)
@@ -742,11 +755,21 @@ export function registerRuntimeNodeRoutes(
       if (img) imageSet.add(img);
     }
     imageSet.add(WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE);
+    const images = [...imageSet];
 
     try {
-      const result = await client.checkImageUpdates({
-        images: [...imageSet],
-      });
+      if (isLocal) {
+        // Local node: probe in-process via the Docker adapter.
+        if (!runtime) return c.json({ error: "本地 Docker 不可用", images: [] }, 503);
+        const result = await runtime.checkImageUpdates(images);
+        return c.json({ images: result });
+      }
+      const { client } = await nodes.requireRunnerClient(
+        session.tenantId,
+        node.id,
+        { allowOffline: true },
+      );
+      const result = await client.checkImageUpdates({ images });
       return c.json(result);
     } catch (err) {
       return c.json(

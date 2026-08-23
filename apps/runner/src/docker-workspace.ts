@@ -169,6 +169,28 @@ export class RunnerDockerWorkspace {
     return this.toInfo(agentId, info);
   }
 
+  /**
+   * List running workspace containers with their agent id + image id. Used by
+   * the image-update checker to detect "running container is on an older image
+   * than the current tag" (image pulled but container not recreated). Returns
+   * only running containers (all:false already filters exited).
+   */
+  async listRunningImages(): Promise<
+    Array<{ agentId: string; imageId: string; imageRef: string }>
+  > {
+    const list = await this.docker.listContainers({
+      all: false,
+      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
+    });
+    const out: Array<{ agentId: string; imageId: string; imageRef: string }> = [];
+    for (const c of list) {
+      const agentId = (c.Labels ?? {})["zakura.agent"];
+      if (!agentId) continue;
+      out.push({ agentId, imageId: c.ImageID, imageRef: c.Image });
+    }
+    return out;
+  }
+
   /** Always pull the image (refresh), unlike start() which only pulls when missing. */
   async pullImage(image: string): Promise<{ image: string; status: string }> {
     await new Promise<void>((resolve, reject) => {
@@ -196,9 +218,22 @@ export class RunnerDockerWorkspace {
       all: false,
       filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
     });
+    // Match by image id, not just ref string: the update checker flags
+    // `runningStale` by image id, but a container's reported `Image` ref may
+    // differ from the canonical ref passed in (registry prefix, default tag),
+    // so an exact-string match silently matched nothing and the refresh no-op'd.
+    let targetImageId: string | null = null;
+    if (image) {
+      try {
+        targetImageId = (await this.docker.getImage(image).inspect()).Id ?? null;
+      } catch {
+        targetImageId = null;
+      }
+    }
     const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
     for (const c of list) {
-      const matchesImage = !image || c.Image === image;
+      const matchesImage =
+        !image || c.Image === image || (targetImageId !== null && c.ImageID === targetImageId);
       if (!matchesImage) continue;
       const agentId = (c.Labels ?? {})["zakura.agent"];
       const agentSlug = (c.Labels ?? {})["zakura.agent_slug"];

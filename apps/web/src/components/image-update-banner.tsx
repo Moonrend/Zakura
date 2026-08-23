@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, AlertCircle, X } from "lucide-react";
+import { RefreshCw, AlertCircle } from "lucide-react";
 import {
   fetchGlobalImageUpdates,
   type GlobalImageUpdateStatus,
@@ -64,14 +64,11 @@ export function ImageUpdateBanner() {
 
   return (
     <div className="fixed bottom-4 right-4 z-50 max-w-sm animate-in slide-in-from-bottom-4 duration-300">
-      <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 shadow-lg backdrop-blur-sm">
-        <AlertCircle className="mt-0.5 size-5 shrink-0 text-amber-500" />
+      <div className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 shadow-lg">
+        <AlertCircle className="mt-0.5 size-5 shrink-0 text-warning-foreground" />
         <div className="flex-1 space-y-1">
-          <p className="text-sm font-medium text-amber-700 dark:text-amber-300">
-            镜像有新版本可用
-          </p>
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            {updateableNodes.length} 个节点有可更新的镜像（runner / workspace）。
+          <p className="text-sm font-medium text-warning-foreground">
+            {updateableNodes.length} 个节点有镜像更新可用
           </p>
           <div className="flex gap-2 pt-1">
             <Button
@@ -81,7 +78,7 @@ export function ImageUpdateBanner() {
               disabled={busy}
               onClick={() => {
                 setBusy(true);
-                router.push("/dashboard/runners");
+                router.push("/dashboard/runners/upgrades");
               }}
             >
               去更新
@@ -96,13 +93,6 @@ export function ImageUpdateBanner() {
             </Button>
           </div>
         </div>
-        <button
-          className="shrink-0 rounded-sm p-0.5 text-amber-500/60 hover:text-amber-500"
-          onClick={dismiss}
-          aria-label="关闭"
-        >
-          <X className="size-4" />
-        </button>
       </div>
     </div>
   );

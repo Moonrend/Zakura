@@ -6,6 +6,8 @@ import {
   toDockerHostPath,
   ShellJob,
   bindExecStream,
+  checkImageUpdates as checkImagesCore,
+  log,
   type ContainerRuntime,
   type CreateContainerOptions,
   type RunningContainer,
@@ -553,6 +555,41 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
+  /**
+   * Probe a set of local images against their remote registry digests (no pull),
+   * reporting `updateAvailable` and `runningStale` per image. Mirrors the Runner
+   * remote probe so local Docker nodes get the same update hints. Running
+   * workspace containers are grouped by image ref so each entry's `runningStale`
+   * reflects whether those containers lag the current tag.
+   */
+  async checkImageUpdates(
+    images: string[],
+  ): Promise<
+    Array<{
+      image: string;
+      localDigest: string | null;
+      remoteDigest: string | null;
+      updateAvailable: boolean;
+      runningStale: boolean;
+      error: string | null;
+    }>
+  > {
+    const running = await this.docker.listContainers({
+      all: false,
+      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
+    });
+    const runningByRef = new Map<string, Set<string>>();
+    for (const c of running) {
+      let set = runningByRef.get(c.Image);
+      if (!set) {
+        set = new Set();
+        runningByRef.set(c.Image, set);
+      }
+      if (c.ImageID) set.add(c.ImageID);
+    }
+    return checkImagesCore(this.docker, images, runningByRef);
+  }
+
   async pullImage(image: string, onProgress?: (line: string) => void): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
@@ -594,6 +631,67 @@ export class DockerRuntime implements ContainerRuntime {
       return;
     }
     await this.pullImage(image, onProgress);
+  }
+
+  /**
+   * Recreate every running workspace container matching `image` (or all
+   * workspaces when image is null) on this local Docker host. The container
+   * config is preserved from the existing container's inspect (same env,
+   * mounts, labels, network), only the image ref stays as-is so a freshly
+   * pulled image takes effect. Used by the local workspace-image refresh flow.
+   */
+  async recreateWorkspaces(image?: string | null): Promise<
+    Array<{ agentId: string; dockerId: string; name: string }>
+  > {
+    const list = await this.docker.listContainers({
+      all: false,
+      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
+    });
+    // Resolve the target image's id (sha256:...) once so we can match running
+    // containers by image id, not just by ref string. The update checker flags
+    // `runningStale` by image id, but a container's reported `Image` ref may
+    // differ from the canonical ref we pass in (registry prefix, tag default),
+    // so an exact-string match silently matched nothing and the refresh no-op'd.
+    let targetImageId: string | null = null;
+    if (image) {
+      try {
+        targetImageId = (await this.docker.getImage(image).inspect()).Id ?? null;
+      } catch {
+        targetImageId = null;
+      }
+    }
+    const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+    for (const c of list) {
+      const matchesImage =
+        !image || c.Image === image || (targetImageId !== null && c.ImageID === targetImageId);
+      if (!matchesImage) continue;
+      const agentId = (c.Labels ?? {})["zakura.agent"];
+      if (!agentId) continue;
+      try {
+        const info = await this.docker.getContainer(c.Id).inspect();
+        // Reuse the full create config so env/mounts/labels/network are preserved.
+        const createOpts = {
+          ...info.Config,
+          HostConfig: info.HostConfig,
+          NetworkingConfig: info.NetworkSettings
+            ? { EndpointsConfig: info.NetworkSettings.Networks }
+            : undefined,
+        };
+        // Keep the same name so bind-mounted workspace state lines up.
+        const name = info.Name?.replace(/^\//, "") ?? c.Names?.[0]?.replace(/^\//, "") ?? c.Id.slice(0, 12);
+        await this.docker.getContainer(c.Id).stop({ t: 5 }).catch(() => undefined);
+        await this.docker.getContainer(c.Id).remove({ force: true });
+        const newContainer = await this.docker.createContainer({ ...createOpts, name });
+        await newContainer.start();
+        recreated.push({ agentId, dockerId: newContainer.id, name });
+      } catch (err) {
+        log.warn("image_update.local_recreate_failed", {
+          agentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return recreated;
   }
 
   /** Build a local image from a Dockerfile context directory. */

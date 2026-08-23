@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { DEFAULT_RUNNER_IMAGE } from "@zakura/shared";
 
 export type RunnerNetworkInterface = {
   name: string;
@@ -255,6 +256,8 @@ export type ImageUpdateEntry = {
   localDigest: string | null;
   remoteDigest: string | null;
   updateAvailable: boolean;
+  /** Running workspace container is on an older image than the current tag. */
+  runningStale: boolean;
   error: string | null;
 };
 
@@ -265,15 +268,25 @@ export async function fetchImageUpdates(
 }
 
 /** Global image update status (aggregated across all nodes). */
+export type ImageUpdateNode = {
+  nodeId: string;
+  checkedAt: number;
+  entries: ImageUpdateEntry[];
+  hasUpdates: boolean;
+  hasRunningStale: boolean;
+  error: string | null;
+  // 节点元数据（后端 GET/POST/check-all 均附加）
+  nodeName: string | null;
+  nodeStatus: string | null;
+  nodeKind: string | null;
+  access: "owned" | "shared" | null;
+};
+
 export type GlobalImageUpdateStatus = {
   hasUpdates: boolean;
-  nodes: Array<{
-    nodeId: string;
-    checkedAt: number;
-    entries: ImageUpdateEntry[];
-    hasUpdates: boolean;
-    error: string | null;
-  }>;
+  /** True when at least one node has a running workspace on an older image than its tag. */
+  hasRunningStale: boolean;
+  nodes: ImageUpdateNode[];
 };
 
 export async function fetchGlobalImageUpdates(): Promise<GlobalImageUpdateStatus> {
@@ -282,11 +295,42 @@ export async function fetchGlobalImageUpdates(): Promise<GlobalImageUpdateStatus
 
 export async function checkNodeImageUpdates(
   nodeId: string,
-): Promise<{ nodeId: string; checkedAt: number; entries: ImageUpdateEntry[]; hasUpdates: boolean; error: string | null }> {
+): Promise<ImageUpdateNode> {
   return api("/api/system/image-updates/check", {
     method: "POST",
     json: { nodeId },
   });
+}
+
+/** 主动检查当前租户可见的全部在线 runner，返回与 GET 一致的结构。 */
+export async function checkAllImageUpdates(): Promise<GlobalImageUpdateStatus> {
+  return api("/api/system/image-updates/check-all", {
+    method: "POST",
+  });
+}
+
+/** 判断镜像条目是否为 Runner 镜像（走 updateRunner 而非 refreshWorkspaceImage）。 */
+export function isRunnerImage(image: string): boolean {
+  return image === DEFAULT_RUNNER_IMAGE;
+}
+
+/**
+ * 统一升级入口：runner 镜像走 updateRunner（重建 Runner 容器），
+ * 工作区镜像走 refreshWorkspaceImage（重建运行中工作区）。返回 kind 以便调用方给出针对性的 toast 文案。
+ */
+export async function upgradeNodeImage(
+  nodeId: string,
+  image: string,
+): Promise<{ kind: "runner" | "workspace"; result: unknown }> {
+  if (isRunnerImage(image)) {
+    const result = await updateRunner(nodeId, { image });
+    return { kind: "runner", result };
+  }
+  const result = await refreshWorkspaceImage(nodeId, {
+    image,
+    recreateRunning: true,
+  });
+  return { kind: "workspace", result };
 }
 
 export async function deleteRuntimeNode(id: string): Promise<void> {

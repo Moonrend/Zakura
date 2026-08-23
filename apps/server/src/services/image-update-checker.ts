@@ -1,11 +1,14 @@
 /**
- * Background image-update checker: periodically polls all online remote
- * runners to detect whether their local images (runner + workspace) have
- * newer versions available on the registry. Results are cached in-memory
- * and exposed via the API for the UI to show update banners.
+ * Background image-update checker: periodically polls all online nodes
+ * (remote runners AND local Docker) to detect whether their local images
+ * (runner + workspace) have newer versions available on the registry.
+ * Remote runners are probed over their API; local Docker is probed in-process
+ * via the DockerRuntime adapter. Results are cached in-memory and exposed via
+ * the API for the UI to show update banners.
  */
 import { log } from "@zakura/core";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
+import type { DockerRuntime } from "../runtime/docker.js";
 import type { RuntimeNodeService } from "./runtime-nodes.js";
 import type { Db } from "../db/client.js";
 import { runtimeNodes, agents } from "../db/schema.js";
@@ -19,6 +22,8 @@ export type ImageUpdateEntry = {
   localDigest: string | null;
   remoteDigest: string | null;
   updateAvailable: boolean;
+  /** True when a running workspace container is on an older image than the current tag. */
+  runningStale: boolean;
   error: string | null;
 };
 
@@ -27,6 +32,8 @@ export type NodeImageUpdateStatus = {
   checkedAt: number;
   entries: ImageUpdateEntry[];
   hasUpdates: boolean;
+  /** True when at least one running workspace container lags its current tag image. */
+  hasRunningStale: boolean;
   error: string | null;
 };
 
@@ -37,6 +44,7 @@ export class ImageUpdateChecker {
   constructor(
     private readonly db: Db,
     private readonly nodes: RuntimeNodeService,
+    private readonly docker?: DockerRuntime,
   ) {}
 
   start(): void {
@@ -83,11 +91,15 @@ export class ImageUpdateChecker {
 
   private async tick(): Promise<void> {
     try {
-      const onlineRunners = await this.db.query.runtimeNodes.findMany({
-        where: eq(runtimeNodes.kind, "runner"),
+      // Poll every online node — remote runners via their API, local Docker
+      // in-process (when a DockerRuntime adapter is wired up).
+      const nodes = await this.db.query.runtimeNodes.findMany({
+        where: inArray(runtimeNodes.kind, ["runner", "local"]),
       });
-      for (const node of onlineRunners) {
+      for (const node of nodes) {
         if (node.status !== "online") continue;
+        // Local probe needs a DockerRuntime adapter; skip when absent (e.g. tests).
+        if (node.kind === "local" && !this.docker) continue;
         try {
           const status = await this.probeNode(node.id);
           this.cache.set(node.id, status);
@@ -105,39 +117,56 @@ export class ImageUpdateChecker {
     }
   }
 
+  /** Collect the image refs to probe for a node: runner + workspace defaults + bound agent images.
+   *  Local nodes have no runner container, so the runner image is skipped. */
+  private async collectNodeImages(nodeId: string, isLocal: boolean): Promise<string[]> {
+    const imageSet = new Set<string>();
+    if (!isLocal) imageSet.add(DEFAULT_RUNNER_IMAGE);
+    imageSet.add(WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE);
+    const bound = await this.db
+      .select({ workspaceImage: agents.workspaceImage })
+      .from(agents)
+      .where(eq(agents.runtimeNodeId, nodeId));
+    for (const row of bound) {
+      const img = row.workspaceImage?.trim();
+      if (img) imageSet.add(img);
+    }
+    return [...imageSet];
+  }
+
   private async probeNode(nodeId: string): Promise<NodeImageUpdateStatus> {
     try {
-      const { client } = await this.nodes.requireRunnerClient(
-        // tenantId is not known here; use the node's tenantId from DB
-        // (requireRunnerClient accepts tenantId for access control)
-        await this.getNodeTenantId(nodeId),
-        nodeId,
-        { allowOffline: true, skipHeartbeatRefresh: true },
-      );
+      const node = await this.db.query.runtimeNodes.findFirst({
+        where: eq(runtimeNodes.id, nodeId),
+      });
+      if (!node) throw new Error(`runtime node ${nodeId} not found`);
 
-      // Collect images to probe
-      const imageSet = new Set<string>();
-      imageSet.add(DEFAULT_RUNNER_IMAGE);
-      imageSet.add(WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE);
+      const isLocal = node.kind === "local";
+      const images = await this.collectNodeImages(nodeId, isLocal);
+      let entries: ImageUpdateEntry[];
 
-      // Add workspace images from agents bound to this node
-      const bound = await this.db
-        .select({ workspaceImage: agents.workspaceImage })
-        .from(agents)
-        .where(eq(agents.runtimeNodeId, nodeId));
-      for (const row of bound) {
-        const img = row.workspaceImage?.trim();
-        if (img) imageSet.add(img);
+      if (isLocal) {
+        // Local Docker: probe in-process via the adapter (no HTTP hop).
+        if (!this.docker) throw new Error("local image probe requires a Docker runtime");
+        entries = await this.docker.checkImageUpdates(images);
+      } else {
+        const { client } = await this.nodes.requireRunnerClient(
+          node.tenantId,
+          nodeId,
+          { allowOffline: true, skipHeartbeatRefresh: true },
+        );
+        const result = await client.checkImageUpdates({ images });
+        entries = result.images ?? [];
       }
 
-      const result = await client.checkImageUpdates({ images: [...imageSet] });
-      const entries = result.images ?? [];
       const hasUpdates = entries.some((e) => e.updateAvailable);
+      const hasRunningStale = entries.some((e) => e.runningStale);
       return {
         nodeId,
         checkedAt: Date.now(),
         entries,
         hasUpdates,
+        hasRunningStale,
         error: null,
       };
     } catch (err) {
@@ -146,16 +175,9 @@ export class ImageUpdateChecker {
         checkedAt: Date.now(),
         entries: [],
         hasUpdates: false,
+        hasRunningStale: false,
         error: err instanceof Error ? err.message : String(err),
       };
     }
-  }
-
-  private async getNodeTenantId(nodeId: string): Promise<string> {
-    const node = await this.db.query.runtimeNodes.findFirst({
-      where: eq(runtimeNodes.id, nodeId),
-    });
-    if (!node) throw new Error(`runtime node ${nodeId} not found`);
-    return node.tenantId;
   }
 }

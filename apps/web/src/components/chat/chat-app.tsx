@@ -47,6 +47,7 @@ import {
 } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
+import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -715,6 +716,9 @@ export function ChatApp() {
         if (p.acpError) {
           setAcpPreparingProfileId(null);
           toast.error(`Agent 启动失败：${p.acpError}`);
+          // Agent 启动失败常因工作区镜像过旧（未预装 CLI）。触发一次镜像
+          // 检查，若有落后镜像则弹出升级对话框引导用户去刷新重建。
+          notifyAcpStartFailed();
         } else if (p.acpState === "idle" || p.acpState === "active") {
           if (acpPreparingProfileIdRef.current) toast.success("Agent 已就绪");
           setAcpPreparingProfileId(null);
@@ -832,7 +836,10 @@ export function ChatApp() {
             if (status.state === "idle" || status.state === "active") {
               setAcpPreparingProfileId(null);
             }
-            if (status.error) toast.error(`Agent 启动失败：${status.error}`);
+            if (status.error) {
+              toast.error(`Agent 启动失败：${status.error}`);
+              notifyAcpStartFailed();
+            }
           })
           .catch((err) => {
             console.warn("[acp runtime]", err);

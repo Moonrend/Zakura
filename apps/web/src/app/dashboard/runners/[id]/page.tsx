@@ -480,9 +480,9 @@ export default function RunnerDetailPage() {
           {imageUpdates && imageUpdates.length > 0 ? (
             <div className="mt-3 space-y-2">
               {imageUpdates.some((e) => e.updateAvailable) ? (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
-                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-500" />
-                  <div className="text-xs text-amber-600 dark:text-amber-400">
+                <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
+                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
+                  <div className="text-xs text-warning-foreground">
                     检测到镜像有新版本可用。建议在低峰期更新：
                     <strong>更新 Runner</strong> 会重建 Runner 容器（连接短暂中断）；
                     <strong>刷新工作区镜像</strong> 会重建运行中的工作区（进行中会话将重启）。
@@ -490,9 +490,9 @@ export default function RunnerDetailPage() {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2">
-                  <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
-                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/5 px-3 py-2">
+                  <CheckCircle2 className="size-4 shrink-0 text-success" />
+                  <span className="text-xs text-success">
                     所有镜像均为最新版本
                   </span>
                 </div>
@@ -506,7 +506,11 @@ export default function RunnerDetailPage() {
                     <code className="text-[11px] text-muted-foreground break-all">
                       {entry.image}
                     </code>
-                    {entry.updateAvailable ? (
+                    {entry.runningStale ? (
+                      <Badge variant="danger" className="shrink-0 text-[10px]">
+                        运行容器落后
+                      </Badge>
+                    ) : entry.updateAvailable ? (
                       <Badge variant="warn" className="shrink-0 text-[10px]">
                         有更新
                       </Badge>

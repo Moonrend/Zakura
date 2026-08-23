@@ -133,6 +133,7 @@ export class RunnerClient {
       localDigest: string | null;
       remoteDigest: string | null;
       updateAvailable: boolean;
+      runningStale: boolean;
       error: string | null;
     }>;
   }> {
@@ -151,6 +152,7 @@ export class RunnerClient {
         localDigest: string | null;
         remoteDigest: string | null;
         updateAvailable: boolean;
+        runningStale: boolean;
         error: string | null;
       }>;
     };

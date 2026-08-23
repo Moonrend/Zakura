@@ -261,7 +261,7 @@ async function main() {
   );
   const marketSync = new MarketSyncService(mcpStore, storeCatalog, skillsService);
   marketSync.start();
-  const imageUpdateChecker = new ImageUpdateChecker(db, runtimeNodes);
+  const imageUpdateChecker = new ImageUpdateChecker(db, runtimeNodes, runtime);
   imageUpdateChecker.start();
   orchestrator.setRuntimeNodes(runtimeNodes);
   const instanceMigrations = new InstanceMigrationService(
