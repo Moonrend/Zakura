@@ -72,6 +72,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { ImageUpdateIndicator } from "@/components/image-update-status";
 import { BrandMark } from "@/components/brand-mark";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -82,6 +83,8 @@ type SubNavItem = {
   label: string;
   icon: IconComp;
   isActive?: (pathname: string) => boolean;
+  /** Render the image-update count next to this item (see ImageUpdateIndicator). */
+  showImageUpdates?: boolean;
 };
 
 type NavEntry = {
@@ -171,6 +174,7 @@ function buildServerChildren(showPlatformServices: boolean): SubNavItem[] {
       isActive: (path) =>
         path === "/dashboard/runners/upgrades" ||
         path.startsWith("/dashboard/runners/upgrades/"),
+      showImageUpdates: true,
     },
     {
       href: "/dashboard/network",
@@ -262,6 +266,7 @@ function NavFlyout({
                 >
                   <ChildIcon />
                   <span>{child.label}</span>
+                  {child.showImageUpdates ? <ImageUpdateIndicator /> : null}
                 </DropdownMenuItem>
               );
             })}
@@ -359,6 +364,7 @@ const ExpandableNavItem = memo(function ExpandableNavItem({
                   >
                     <ChildIcon />
                     <span>{child.label}</span>
+                    {child.showImageUpdates ? <ImageUpdateIndicator /> : null}
                   </SidebarMenuSubButton>
                 </SidebarMenuSubItem>
               );
@@ -466,7 +472,9 @@ function TenantHeader({
               ))}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => router.push("/dashboard/settings/teams")}>
+            {/* A navigation item, so render it as a link like every other one
+                in this file — a router.push here loses copy-link / new-tab. */}
+            <DropdownMenuItem render={<Link href="/dashboard/settings/teams" />}>
               管理团队…
             </DropdownMenuItem>
           </DropdownMenuContent>

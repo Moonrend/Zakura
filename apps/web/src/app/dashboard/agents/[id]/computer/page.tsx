@@ -473,8 +473,10 @@ export default function AgentComputerPage() {
           </div>
           {progress?.running ? (
             <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              {/* 只过渡 width：这里唯一会变的就是宽度，transition-all 会顺带把
+                  颜色、边框等一并纳入过渡，属于「没决定该动什么」。 */}
               <div
-                className="h-full bg-primary transition-all duration-300"
+                className="h-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none"
                 style={{ width: `${progress.percent}%` }}
               />
             </div>

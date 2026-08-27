@@ -309,7 +309,7 @@ export default function AgentMcpPage() {
               </div>
             </div>
           ) : (
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <div>
               <Table>
                 <TableHeader>
                   <TableRow>

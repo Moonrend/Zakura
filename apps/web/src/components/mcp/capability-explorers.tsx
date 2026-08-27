@@ -105,7 +105,7 @@ export function McpToolsExplorer({
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="space-y-2">
         <h2 className="text-sm font-medium">工具 · {tools.length}</h2>
-        <div className="max-h-[520px] overflow-auto rounded-lg border border-border bg-card">
+        <div className="max-h-[520px] overflow-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -210,7 +210,7 @@ export function McpResourcesExplorer({
       <div className="grid gap-4 lg:grid-cols-2">
         <section className="space-y-2">
           <h2 className="text-sm font-medium">Resources · {resources.length}</h2>
-          <div className="max-h-[420px] overflow-auto rounded-lg border border-border bg-card">
+          <div className="max-h-[420px] overflow-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -287,7 +287,7 @@ export function McpResourcesExplorer({
       {templates.length > 0 ? (
         <section className="space-y-2">
           <h2 className="text-sm font-medium">Resource Templates · {templates.length}</h2>
-          <div className="overflow-auto rounded-lg border border-border bg-card">
+          <div className="overflow-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -382,7 +382,7 @@ export function McpPromptsExplorer({
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="space-y-2">
         <h2 className="text-sm font-medium">Prompts · {prompts.length}</h2>
-        <div className="max-h-[520px] overflow-auto rounded-lg border border-border bg-card">
+        <div className="max-h-[520px] overflow-auto">
           <Table>
             <TableHeader>
               <TableRow>

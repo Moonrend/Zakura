@@ -17,7 +17,7 @@ export default function AppError({
 
   return (
     <div className="mx-auto flex min-h-[40vh] max-w-lg flex-col items-start justify-center gap-3 px-6">
-      <h1 className="text-lg font-medium">页面出错了</h1>
+      <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">页面出错了</h1>
       <p className="text-sm text-muted-foreground">{error.message || "未知错误"}</p>
       <Button type="button" onClick={() => reset()}>
         重试

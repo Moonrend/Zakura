@@ -101,7 +101,7 @@ export default function OauthClientsPage() {
             暂无接入客户端
           </p>
         ) : (
-          <div className="overflow-hidden rounded-lg border border-border">
+          <div>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -151,7 +151,7 @@ export default function OauthClientsPage() {
             暂无上游 DCR 记录
           </p>
         ) : (
-          <div className="overflow-hidden rounded-lg border border-border">
+          <div>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -199,7 +199,7 @@ export default function OauthClientsPage() {
             暂无自备客户端
           </p>
         ) : (
-          <div className="overflow-hidden rounded-lg border border-border">
+          <div>
             <Table>
               <TableHeader>
                 <TableRow>

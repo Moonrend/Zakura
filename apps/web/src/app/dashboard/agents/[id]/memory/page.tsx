@@ -416,7 +416,7 @@ export default function AgentMemoryPage() {
             )}
           </div>
 
-          <div className="rounded-lg border border-border bg-card">
+          <div>
             <Table>
               <TableHeader>
                 <TableRow>

@@ -248,7 +248,7 @@ export default function PlatformServicesPage() {
   if (forbidden || (me.multiTenant && !me.isPlatformAdmin)) {
     return (
       <div className="space-y-2 p-1">
-        <h1 className="text-lg font-semibold">自托管服务</h1>
+        <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">自托管服务</h1>
         <p className="text-sm text-muted-foreground">
           仅主机管理员可管理 Docker 服务。团队成员请在「网页」中选用已托管的能力。
         </p>

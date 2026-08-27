@@ -70,7 +70,7 @@ function CallbackInner() {
           <X className="size-5" />
         )}
       </div>
-      <h1 className="font-heading text-lg font-semibold">上游 MCP OAuth</h1>
+      <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">上游 MCP OAuth</h1>
       <p className="text-sm text-muted-foreground">{msg}</p>
       {fromPopup && status !== "loading" ? (
         <p className="text-xs text-muted-foreground">
