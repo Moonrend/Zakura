@@ -41,23 +41,31 @@ describe("integration catalog credentials", () => {
     assert.equal(await catalog.matchConnectorCapability("https://api.githubcopilot.com/mcp/"), null);
     assert.equal(await catalog.matchConnectorCapability("https://gmailmcp.googleapis.com/mcp/v1"), null);
     const packages = await catalog.list("tenant-catalog");
-    assert.deepEqual(
-      packages.map((item) => item.slug).sort(),
-      [
-        "browser-notifications",
-        "discord",
-        "feishu",
-        "github",
-        "gitlab",
-        "google-workspace",
-        "jira",
-        "linear",
-        "microsoft-365",
-        "notion",
-        "slack",
-      ],
+    const slugs = new Set(packages.map((item) => item.slug));
+
+    // 目录会随新连接器增长，所以只断言「该在的都在」，不冻结整份清单。
+    for (const expected of [
+      "browser-notifications",
+      "discord",
+      "feishu",
+      "github",
+      "gitlab",
+      "google-workspace",
+      "jira",
+      "linear",
+      "microsoft-365",
+      "notion",
+      "slack",
+    ]) {
+      assert.ok(slugs.has(expected), `目录缺少内置连接器 ${expected}`);
+    }
+
+    // 本用例真正要守的不变式：外部 MCP 不进连接器目录。
+    assert.equal(
+      packages.some((item) => item.components.some((component) => component.kind === "mcp")),
+      false,
+      "连接器目录不应包含 mcp 组件",
     );
-    assert.equal(packages.some((item) => item.components.some((component) => component.kind === "mcp")), false);
   });
 
   it("resolves connector capabilities from catalog metadata", async () => {
@@ -135,23 +143,40 @@ describe("integration catalog credentials", () => {
     );
     assert.equal(ghHost?.clientId, "gh-client");
     assert.equal(ghHost?.source, "platform");
+
+    // 拆掉平台档案：它是全站生效的，留着会让后续租户级用例全部撞上
+    // 「管理员已预配」而测不到本来要测的东西。
+    for (const profileKey of ["google-workspace", "github"]) {
+      await catalog.deleteProfile("platform", profileKey);
+    }
+    const unlocked = (await catalog.listConnectors("tenant-lock")).find(
+      (item) => item.ref === "google-workspace",
+    )!;
+    assert.equal(unlocked.lockedByPlatform, false, "平台档案应已拆除");
   });
 
   it("rejects undeclared and missing required credential fields", async () => {
-    const google = (await catalog.listConnectors("tenant-b")).find(
-      (item) => item.ref === "google-workspace",
+    // 用 linear：platform 作用域是全站的，前面的用例已经把 google-workspace 和 github
+    // 预配成平台档案，对它们再做租户级保存会先撞上「管理员已预配」而走不到字段校验。
+    const linear = (await catalog.listConnectors("tenant-b")).find(
+      (item) => item.ref === "linear",
     )!;
+    assert.ok(linear, "目录里应有 linear 连接器");
+    assert.equal(linear.lockedByPlatform, false, "linear 不该被平台预配，否则本用例失去意义");
+
     await assert.rejects(
-      () => catalog.saveCredentials("tenant-b", google.id, {
-        values: { arbitraryToken: "not-in-schema" },
-      }),
+      () =>
+        catalog.saveCredentials("tenant-b", linear.id, {
+          values: { arbitraryToken: "not-in-schema" },
+        }),
       /未知凭据字段/,
     );
     await assert.rejects(
-      () => catalog.saveCredentials("tenant-b", google.id, {
-        enabled: true,
-        values: { clientId: "only-id" },
-      }),
+      () =>
+        catalog.saveCredentials("tenant-b", linear.id, {
+          enabled: true,
+          values: { clientId: "only-id" },
+        }),
       /Client Secret/,
     );
   });

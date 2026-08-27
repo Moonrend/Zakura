@@ -7,6 +7,7 @@ import {
   acpApiKeyDotenv,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
+  acpCommandResolveExpr,
   acpStageScript,
   acpStdioArgv,
   acpSyncBackScript,
@@ -822,7 +823,8 @@ export class AcpSessionService {
     const result = await this.deps.workspace.execInWorkspace(agent, [
       "bash",
       "-lc",
-      `command -v ${shellSingle(launch.command)} && ${shellSingle(launch.command)} --version`,
+      `${acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE")}; ` +
+        `printf '%s\\n' "$ZAKURA_ACP_PROBE"; exec "$ZAKURA_ACP_PROBE" --version`,
     ]);
     const output = `${result.stdout}${result.stderr}`.trim();
     return {
@@ -1057,7 +1059,11 @@ export class AcpSessionService {
     // Fold the `command -v <adapter>` check into the staging exec so the whole
     // prep — durable copy + generated config files + binary presence check —
     // is a single docker exec round trip instead of two.
-    const whichCheck = `command -v ${shellSingle(launch.command)} >/dev/null 2>&1 || { echo "ZAKURA_BIN_MISSING:${launch.command}" >&2; exit 127; }`;
+    // Must use the exact same resolution the real launch uses (ACP bin dir before
+    // PATH), or this check and `acpStdioArgv` can disagree: the probe says
+    // "not installed" while the binary is sitting in /opt/zakura/acp/bin, or vice
+    // versa. Both now go through `acpCommandResolveExpr`.
+    const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
     const prep = writeScript
       ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
       : `${acpStageScript(layout)}\n${whichCheck}`;

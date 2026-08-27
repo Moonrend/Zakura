@@ -619,6 +619,7 @@ export {
   ZAKURA_RUNTIME_ID,
   ACP_IMAGE_BIN_DIR,
   acpStdioArgv,
+  acpCommandResolveExpr,
   acpManualSetupCommand,
   acpManualSetupBootScript,
   normalizeAcpProfileId,

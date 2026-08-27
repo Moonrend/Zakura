@@ -195,26 +195,41 @@ describe("内置技能自动安装与更新", () => {
     }
   });
 
-  it("自动更新开关默认开启，可关闭并记录上次运行", async () => {
+  // 自动更新已从「租户级全局开关」改为「每个第三方技能一个开关」。
+  // autoUpdateStatus().enabled 现在是派生值：是否至少有一个第三方技能开着自动更新
+  // （留给旧 UI 用）。内置技能不参与，所以只装了内置技能的租户读出来就是 false。
+  it("autoUpdateStatus.enabled 由第三方技能的单项开关派生", async () => {
     const initial = await service.autoUpdateStatus(tenantId);
-    assert.equal(initial.enabled, true);
+    // 这个租户此刻只有内置技能，而内置技能不支持自动更新开关
+    assert.equal(initial.enabled, false, "没有第三方技能时应为 false");
     assert.equal(initial.lastRunAt, null);
+    assert.equal(typeof initial.pendingCount, "number");
+
+    // 旧的全局 setter 仍要能用：它会批量改写第三方技能的单项开关。
+    // 这里没有第三方技能，所以开关打开后派生值依然是 false。
+    const on = await service.setAutoUpdate(tenantId, true);
+    assert.equal(on.enabled, false, "无第三方技能可开时派生值保持 false");
 
     const off = await service.setAutoUpdate(tenantId, false);
     assert.equal(off.enabled, false);
-    assert.equal(await service.autoUpdateEnabled(tenantId), false);
 
+    // 一次巡检：没有第三方技能就没有可更新项，但必须留下运行痕迹
     const summary = await service.autoUpdateTenant(tenantId);
     assert.deepEqual(summary.updated, []);
     assert.deepEqual(summary.failed, []);
 
-    // 关掉开关不影响手动/内置同步，但状态要留痕
     const after = await service.autoUpdateStatus(tenantId);
-    assert.equal(after.enabled, false);
-    assert.ok(after.lastRunAt);
+    assert.ok(after.lastRunAt, "巡检后应记录 lastRunAt");
     assert.equal(after.lastResult?.updated.length, 0);
+  });
 
-    await service.setAutoUpdate(tenantId, true);
+  it("内置技能不接受单项自动更新开关", async () => {
+    const builtin = (await service.list(tenantId)).find((s) => s.builtin);
+    assert.ok(builtin, "应至少装有一个内置技能");
+    await assert.rejects(
+      () => service.setSkillAutoUpdate(tenantId, builtin!.name, true),
+      /内置技能不支持自动更新开关/,
+    );
   });
 });
 

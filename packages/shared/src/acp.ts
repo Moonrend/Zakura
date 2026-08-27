@@ -31,12 +31,47 @@ export const ZAKURA_RUNTIME_ID = "zakura";
 
 export const ACP_IMAGE_BIN_DIR = "/opt/zakura/acp/bin";
 
+const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Shell expression that resolves an ACP adapter command to an absolute path,
+ * writing `ZAKURA_BIN_MISSING:<command>` to stderr and exiting 127 when it is
+ * genuinely absent.
+ *
+ * Bare names get looked up in our own install dir *before* PATH. That matters
+ * because we launch adapters with `HOME` pointed at a throwaway state dir, so any
+ * PATH that an installer appended to `~/.bashrc` or `~/.profile` is not in
+ * effect. `fx` is installed by `fx.sh`, which does exactly that — which is why
+ * `exec fx` used to fail with "fx: not found" even though the binary was in the
+ * image. Preferring `ACP_IMAGE_BIN_DIR` fixes fx and every npm-installed adapter
+ * (they all land in the same prefix) without hardcoding a profile id, while the
+ * PATH fallback keeps user-supplied commands working.
+ */
+export function acpCommandResolveExpr(command: string, varName = "ZAKURA_ACP_BIN"): string {
+  if (command.includes("/")) {
+    // Already a path: use verbatim, but still fail loudly rather than exec'ing nothing.
+    return (
+      `${varName}=${shq(command)}; ` +
+      `[ -x "$${varName}" ] || command -v "$${varName}" >/dev/null 2>&1 || ` +
+      `{ echo ${shq(`ZAKURA_BIN_MISSING:${command}`)} >&2; exit 127; }`
+    );
+  }
+  const pinned = `${ACP_IMAGE_BIN_DIR}/${command}`;
+  return (
+    `${varName}="$({ [ -x ${shq(pinned)} ] && printf %s ${shq(pinned)}; } || command -v ${shq(command)} || true)"; ` +
+    `[ -n "$${varName}" ] || { echo ${shq(`ZAKURA_BIN_MISSING:${command}`)} >&2; exit 127; }`
+  );
+}
+
 /** docker exec 的 argv[0] 按容器 PATH 查找；先起 bash 再 exec 适配器。 */
 export function acpStdioArgv(command: string, args: string[] = []): string[] {
-  const quoted = [command, ...args]
-    .map((v) => `'${v.replace(/'/g, `'\\''`)}'`)
-    .join(" ");
-  return ["/bin/bash", "-lc", `exec ${quoted}`];
+  const quotedArgs = args.map(shq).join(" ");
+  const resolve = acpCommandResolveExpr(command);
+  return [
+    "/bin/bash",
+    "-lc",
+    `${resolve}; exec "$ZAKURA_ACP_BIN"${quotedArgs ? ` ${quotedArgs}` : ""}`,
+  ];
 }
 
 export const ACP_PROFILE_ID_RE = /^[a-z0-9][a-z0-9._-]{0,47}$/;
@@ -755,15 +790,10 @@ export function resolveAcpLaunch(
   profile: AcpPublicProfile,
   setup: AcpAgentSetup,
 ): { command: string; args: string[]; env: Record<string, string> } {
-  let command = setup.command?.trim() || profile.command;
-  // fx.sh installs to FX_INSTALL_DIR and only adds it to PATH via ~/.bashrc
-  // (HOME-dependent). ACP runs the child process with HOME pointing at an empty
-  // state dir, so that .bashrc injection never applies — `exec fx` fails with
-  // "fx: not found". Pin to the absolute path we install at (ACP_IMAGE_BIN_DIR)
-  // so launch no longer depends on any PATH/login-shell sourcing.
-  if (profile.id === "fx" && (command === "fx" || !command)) {
-    command = `${ACP_IMAGE_BIN_DIR}/fx`;
-  }
+  // Kept as authored (usually a bare name). Resolution to an absolute path happens
+  // in the container via `acpCommandResolveExpr`, which prefers ACP_IMAGE_BIN_DIR
+  // over PATH — see the comment there for why PATH alone is not enough.
+  const command = setup.command?.trim() || profile.command;
   let args = setup.args?.length ? setup.args : profile.args;
   const env: Record<string, string> = { ...(setup.env ?? {}) };
   const key = setup.managed.api_key?.trim();

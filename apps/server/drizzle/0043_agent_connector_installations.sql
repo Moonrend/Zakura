@@ -10,10 +10,12 @@ CREATE TABLE IF NOT EXISTS "agent_connector_installations" (
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
-
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_connector_installations_agent_ref"
   ON "agent_connector_installations" ("agent_id", "connector_ref");
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_connector_installations_tenant"
   ON "agent_connector_installations" ("tenant_id");
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "agent_connector_installations_tenant_connector"
   ON "agent_connector_installations" ("tenant_id", "connector_ref");

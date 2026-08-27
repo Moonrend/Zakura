@@ -36,6 +36,12 @@ services:
       # Redis 默认强制；请在 env 配置地址（见 docs/deployment.md）
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       ZAKURA_DATA_DIR: /data
+      # 本机运行工作区容器时，bind 源必须是宿主机路径：容器创建请求发给宿主机
+      # docker 守护进程，它按宿主机根解析 /data，会新建一个空目录，导致
+      # 「文件浏览看到的工作区」与「Agent 实际写入的工作区」分叉（浏览目录报 ENOENT）。
+      # 默认的 zakura-data 命名卷没有宿主机路径，所以本机工作区默认关闭；
+      # 需要本机工作区时，把 zakura-data 换成 bind 挂载并把这里设成同一路径。
+      ZAKURA_HOST_DATA_DIR: ${ZAKURA_HOST_DATA_DIR:-}
       ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://zakura-local-api.190823.xyz}
       ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://zakura-local.190823.xyz}
       HOST: 0.0.0.0

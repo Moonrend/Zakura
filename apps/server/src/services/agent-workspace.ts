@@ -5,6 +5,7 @@ import {
   RunnerClient,
   ShellJobRegistry,
   ensureWorkspaceDir,
+  mapContainerPathToHost,
   recordPlatformFault,
   type ShellJobSnapshot,
 } from "@zakura/core";
@@ -100,6 +101,23 @@ export function agentWorkspaceHostPath(config: AppConfig, agentId: string): stri
   return join(agentDataDir(config, agentId), "workspace");
 }
 
+/**
+ * Bind-mount source for an agent workspace, in host-filesystem terms.
+ *
+ * `agentWorkspaceHostPath` is *our* view of the directory (`<dataDir>/agents/…`).
+ * Under compose the server is a container with `ZAKURA_DATA_DIR=/data`, while the
+ * workspace container is created on the host daemon — so the bind source has to be
+ * translated, or the host silently mounts a different, empty directory and the
+ * workspace splits in two. See `mapContainerPathToHost`.
+ */
+export function agentWorkspaceBindSource(config: AppConfig, agentId: string): string {
+  return mapContainerPathToHost(
+    agentWorkspaceHostPath(config, agentId),
+    config.dataDir,
+    config.hostDataDir ?? undefined,
+  );
+}
+
 function workspaceContainerName(tenantSlug: string, agentSlug: string): string {
   return `zakura-ws-${tenantSlug}-${agentSlug}`
     .toLowerCase()
@@ -192,9 +210,16 @@ export class AgentWorkspaceService {
     const prev = this.startLocks.get(agentId) ?? Promise.resolve();
     const next = prev.then(fn, fn);
     this.startLocks.set(agentId, next);
-    void next.finally(() => {
+    // Release the slot with `then(cb, cb)` rather than `void next.finally(cb)`.
+    // `.finally()` returns a *new* promise that re-throws the original rejection;
+    // nothing awaits that derivative, so every failed start (offline Runner, bad
+    // image, …) surfaced as an unhandledRejection and could take the process down.
+    // Passing the same callback to both arms keeps the bookkeeping while leaving
+    // the rejection to be observed by our caller, who owns `next`.
+    const release = () => {
       if (this.startLocks.get(agentId) === next) this.startLocks.delete(agentId);
-    });
+    };
+    next.then(release, release);
     return next;
   }
 
@@ -777,7 +802,7 @@ export class AgentWorkspaceService {
           ports,
           volumes: [
             {
-              hostPath: root,
+              hostPath: agentWorkspaceBindSource(this.config, agent.id),
               containerPath: AGENT_WORKSPACE_ROOT,
             },
           ],

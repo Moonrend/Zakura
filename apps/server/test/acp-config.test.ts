@@ -248,7 +248,13 @@ describe("ACP config", () => {
         model: "zai/glm-5.2-fast",
       },
     });
-    assert.equal(fxLaunch.command, `${ACP_IMAGE_BIN_DIR}/fx`);
+    // The command stays as authored; resolution to an absolute path happens in the
+    // container, where ACP_IMAGE_BIN_DIR is preferred over PATH (the adapter runs
+    // with an empty HOME, so installer-appended PATH entries never apply).
+    assert.equal(fxLaunch.command, "fx");
+    const launchScript = acpStdioArgv(fxLaunch.command, fxLaunch.args)[2]!;
+    assert.ok(launchScript.includes(`${ACP_IMAGE_BIN_DIR}/fx`));
+    assert.ok(launchScript.includes(`exec "$ZAKURA_ACP_BIN"`));
     assert.equal(fxLaunch.env.AI_GATEWAY_API_KEY, "vck-fx-key");
     assert.equal(fxLaunch.env.OPENAI_API_KEY, "vck-fx-key");
     assert.equal(fxLaunch.env.AI_GATEWAY_BASE_URL, "https://ai-gateway.vercel.sh/v1");
@@ -271,12 +277,22 @@ describe("ACP config", () => {
     for (const profile of builtinAcpProfiles()) {
       assert.equal(profile.installHint, undefined, `${profile.id} must stay image-pinned`);
     }
-    assert.deepEqual(acpStdioArgv("codex-acp", []), ["/bin/bash", "-lc", "exec 'codex-acp'"]);
-    assert.deepEqual(acpStdioArgv("gemini", ["--acp"]), [
-      "/bin/bash",
-      "-lc",
-      "exec 'gemini' '--acp'",
-    ]);
+    // Every adapter resolves through the install dir first, then PATH, and execs
+    // the resolved absolute path — never a bare name.
+    for (const [command, args, expectedTail] of [
+      ["codex-acp", [], `exec "$ZAKURA_ACP_BIN"`],
+      ["gemini", ["--acp"], `exec "$ZAKURA_ACP_BIN" '--acp'`],
+    ] as const) {
+      const argv = acpStdioArgv(command, [...args]);
+      assert.deepEqual(argv.slice(0, 2), ["/bin/bash", "-lc"]);
+      const script = argv[2]!;
+      assert.ok(
+        script.includes(`${ACP_IMAGE_BIN_DIR}/${command}`),
+        `${command} must probe the ACP bin dir`,
+      );
+      assert.ok(script.includes(`command -v '${command}'`), `${command} must fall back to PATH`);
+      assert.ok(script.endsWith(expectedTail), `${command} tail: ${script}`);
+    }
   });
 
   it("accepts custom command profiles", () => {

@@ -33,11 +33,27 @@ type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
 };
 
+/**
+ * Rewrite absolute storage paths that leak out of Node's fs errors into their
+ * `/workspace/...` equivalent.
+ *
+ * `ENOENT: … stat '/var/lib/zakura/agents/<id>/workspace/projects/x'` tells the
+ * user nothing they can act on, exposes the deployment's layout, and — when a
+ * model reads it — invites a retry against a host path that doesn't exist in the
+ * sandbox.
+ */
+function scrubFsMessage(message: string): string {
+  return message.replace(
+    /(['"]?)((?:\/[^\s'"]*)?\/agents\/[A-Za-z0-9_-]+\/workspace)(\/[^\s'"]*)?\1?/g,
+    (_all, _q, _root, rest) => `'/workspace${rest ?? ""}'`,
+  );
+}
+
 function fsError(err: unknown): { status: 400 | 403 | 404 | 409 | 500 | 503; body: { error: string } } {
   if (err instanceof PathJailError) {
-    return { status: 403, body: { error: err.message } };
+    return { status: 403, body: { error: scrubFsMessage(err.message) } };
   }
-  const message = err instanceof Error ? err.message : String(err);
+  const message = scrubFsMessage(err instanceof Error ? err.message : String(err));
   const code =
     err && typeof err === "object" && "code" in err
       ? String((err as { code: unknown }).code)
