@@ -24,6 +24,7 @@ export const ACP_BUILTIN_PROFILE_IDS = [
   "pi",
   "opencode",
   "fx",
+  "kiro",
 ] as const;
 export type AcpBuiltinProfileId = (typeof ACP_BUILTIN_PROFILE_IDS)[number];
 
@@ -149,6 +150,9 @@ export function acpManualSetupCommand(profileId: string): AcpManualSetupCommand 
       return { command: ["opencode", "auth", "login"], display: "opencode auth login" };
     case "fx":
       return { command: ["fx", "login"], display: "fx login" };
+    case "kiro":
+      // Device-code flow: prints a URL + code, then polls. Nothing to paste back.
+      return { command: ["kiro-cli", "login"], display: "kiro-cli login" };
     case "codex":
       return { command: ["codex", "login", "--device-auth"], display: "codex login --device-auth" };
     case "gemini-cli":
@@ -550,6 +554,19 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
               help: "OpenCode 需要显式默认模型才能启动；Zakura 路由下可留空（自动取网关模型列表）。",
             },
           ],
+        },
+        {
+          id: "kiro",
+          displayName: "Kiro CLI",
+          description: "AWS Kiro CLI（kiro-cli acp）— 支持 AGENTS.md、Skills 与 MCP",
+          builtin: true,
+          command: "kiro-cli",
+          args: ["acp"],
+          // Kiro 只支持自身的设备码登录，没有可注入的 API key，
+          // 也就无法走 Zakura 网关路由（模型由 Kiro 侧决定）。
+          setupModes: ["self"],
+          supportsZakuraRoute: false,
+          managedFields: [],
         },
         {
           id: "fx",

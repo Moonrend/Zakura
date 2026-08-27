@@ -90,46 +90,32 @@ RUN set -eux; \
   ln -sf /usr/local/node/bin/npx /usr/local/bin/npx; \
   node -v; npm -v
 
-# ACP adapters pinned into the default workspace image (no runtime npm i -g).
-# Versions are whatever the registry serves at image build; do not chase latest in the agent container.
+# --- ACP: install the *toolchain*, not the adapters ---
+#
+# Adapters used to be baked in here: ~10 npm packages, a pip package and a
+# `curl | bash` installer, all in one layer. That made the image large for everyone
+# (you carried every adapter whether you used one or none), and it coupled two
+# unrelated lifecycles — bumping a single adapter meant rebuilding and re-pulling a
+# multi-GB image, and because it was one layer, nothing could be reused.
+#
+# Adapters are now provisioned on demand into /workspace/.zakura/acp/<id>/<version>/
+# (see packages/shared/src/acp-provision.ts). /workspace is the bind mount, so
+# installs survive container recreation: refreshing the image no longer discards
+# adapters, and updating an adapter no longer touches the image. The catalogue comes
+# from the upstream ACP registry, so new agents need no image release at all.
+#
+# What must be present for that to work: node/npm (npx distributions), uv (uvx
+# distributions), plus curl/unzip/tar and sha256sum for signed binaries — all of
+# which the layers above already provide except uv.
 RUN set -eux; \
-  mkdir -p /opt/zakura/acp /tmp/npm-cache /tmp/pip-cache; \
-  NPM_CONFIG_CACHE=/tmp/npm-cache npm install -g --prefix /opt/zakura/acp \
-    @agentclientprotocol/codex-acp \
-    @agentclientprotocol/claude-agent-acp \
-    @google/gemini-cli \
-    opencode-ai \
-    @github/copilot \
-    @xai-official/grok \
-    @moonshot-ai/kimi-code \
-    @earendil-works/pi-coding-agent \
-    pi-acp \
-    @openai/codex; \
-  PIP_CACHE_DIR=/tmp/pip-cache pip3 install --no-cache-dir 'hermes-agent[acp]'; \
-  if command -v hermes >/dev/null 2>&1 && [ ! -x /opt/zakura/acp/bin/hermes-acp ]; then \
-    printf '%s\n' '#!/bin/sh' 'exec hermes acp "$@"' >/opt/zakura/acp/bin/hermes-acp; \
-    chmod +x /opt/zakura/acp/bin/hermes-acp; \
-  elif [ ! -x /opt/zakura/acp/bin/hermes-acp ]; then \
-    printf '%s\n' '#!/bin/sh' 'exec python3 -m hermes_acp "$@"' >/opt/zakura/acp/bin/hermes-acp; \
-    chmod +x /opt/zakura/acp/bin/hermes-acp; \
-  fi; \
-  curl -fsSL https://fx.sh/setup.sh | FX_INSTALL_DIR=/opt/zakura/acp/bin bash; \
-  command -v fx >/dev/null 2>&1 || { \
-    echo "ERROR: fx install failed — fx is a default ACP runtime, aborting build"; \
-    exit 1; \
-  }; \
-  command -v codex-acp; \
-  command -v claude-agent-acp; \
-  command -v gemini; \
-  command -v hermes-acp; \
-  command -v opencode; \
-  command -v copilot; \
-  command -v grok; \
-  command -v kimi; \
-  command -v pi; \
-  command -v pi-acp; \
-  fx --version 2>/dev/null || true; \
-  rm -rf /tmp/npm-cache /tmp/pip-cache /root/.cache /root/.npm
+  mkdir -p /opt/zakura/acp/bin; \
+  curl -fsSL https://astral.sh/uv/install.sh | \
+    env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh; \
+  uv --version; \
+  # Verified once at build time so a broken base image fails here, not on a
+  # user's first ACP launch.
+  command -v node; command -v npm; command -v sha256sum; command -v unzip; \
+  rm -rf /root/.cache /root/.npm
 
 COPY entrypoint.sh /usr/local/bin/zakura-workspace
 COPY capabilities.txt /etc/zakura/capabilities.txt

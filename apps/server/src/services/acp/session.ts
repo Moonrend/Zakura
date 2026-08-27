@@ -7,7 +7,10 @@ import {
   acpApiKeyDotenv,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
+  acpAdapterSource,
   acpCommandResolveExpr,
+  acpCustomCommand,
+  acpCustomProvisionScript,
   acpStageScript,
   acpStdioArgv,
   acpSyncBackScript,
@@ -80,6 +83,7 @@ import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
+import type { AcpRegistryService } from "./registry.js";
 import { AgentHooksService, firstDeny } from "../agent-hooks.js";
 import {
   provisionAcpZakuraRoutes,
@@ -159,6 +163,8 @@ export class AcpSessionService {
       workspaceFs?: ServerWorkspaceFsProvider;
       publicBaseUrl?: string;
       maxConcurrentAcpPerTenant?: number;
+      /** Registry-backed on-demand adapter provisioning. */
+      acpRegistry?: AcpRegistryService;
     },
   ) {
     this.hooks = new AgentHooksService(deps.workspace);
@@ -912,6 +918,67 @@ export class AcpSessionService {
     }
   }
 
+  /**
+   * Make sure the adapter for `profileId` exists in the workspace, returning its
+   * absolute path.
+   *
+   * Adapters used to be baked into the workspace image. They are now installed on
+   * demand under `/workspace/.zakura/acp/<id>/<version>/`, which decouples adapter
+   * updates from image releases and keeps unused adapters off disk entirely.
+   *
+   * Returns null when there is nothing to provision — a user-supplied custom
+   * command, or an older image that still ships the adapter — so those paths keep
+   * resolving through `ACP_IMAGE_BIN_DIR`/PATH exactly as before.
+   */
+  private async provisionAdapter(
+    agent: Agent,
+    profileId: string,
+    currentCommand: string,
+  ): Promise<{ command: string; args: string[] } | null> {
+    // An absolute command is either already provisioned or explicitly chosen by the
+    // user; either way it is not ours to manage.
+    if (currentCommand.includes("/")) return null;
+
+    const source = acpAdapterSource(profileId);
+    if (source.kind === "image") return null;
+
+    try {
+      if (source.kind === "custom") {
+        await this.deps.workspace.ensureStarted(agent, { require: "shell" });
+        const script = acpCustomProvisionScript(source);
+        const res = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
+        if (res.exitCode !== 0) {
+          throw new Error(this.describeProvisionFailure(profileId, res.stderr));
+        }
+        return { command: acpCustomCommand(source), args: [] };
+      }
+
+      const registry = this.deps.acpRegistry;
+      if (!registry) return null;
+      const result = await registry.ensureInstalled(agent, source.registryId);
+      return { command: result.command, args: result.args };
+    } catch (err) {
+      // Surface the install failure rather than letting the launch fail later with
+      // a generic "binary not found", which says nothing about why.
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`无法安装 ${profileId} 适配器：${detail}`);
+    }
+  }
+
+  private describeProvisionFailure(profileId: string, stderr: string): string {
+    const tail = stderr.trim().slice(-800);
+    if (stderr.includes("ZAKURA_ACP_NEED_UV")) {
+      return `${profileId} 需要 uv（Python 工具链），当前工作区镜像未提供。请更新工作区镜像后重试。`;
+    }
+    if (stderr.includes("ZAKURA_ACP_UNSUPPORTED_ARCH")) {
+      return `${profileId} 不支持该 Runner 的 CPU 架构。`;
+    }
+    if (stderr.includes("ZAKURA_ACP_BIN_NOT_FOUND")) {
+      return `${profileId} 安装完成但没找到可执行文件（上游包结构可能已变化）：\n${tail}`;
+    }
+    return `${profileId} 安装失败：\n${tail}`;
+  }
+
   private async bootRuntime(
     agent: Agent,
     chatSessionId: string,
@@ -1063,6 +1130,18 @@ export class AcpSessionService {
     // PATH), or this check and `acpStdioArgv` can disagree: the probe says
     // "not installed" while the binary is sitting in /opt/zakura/acp/bin, or vice
     // versa. Both now go through `acpCommandResolveExpr`.
+    // Adapters are no longer baked into the workspace image; make sure this one is
+    // present (a no-op once installed) and take the resolved absolute path. Older
+    // images that still carry pre-baked adapters keep working: `provision` returns
+    // null for them and we fall back to the profile's own command.
+    const adapterBin = await this.provisionAdapter(agent, setup.id, launch.command);
+    if (adapterBin) {
+      launch.command = adapterBin.command;
+      if (adapterBin.args.length && !setup.args?.length) {
+        launch.args = adapterBin.args;
+      }
+    }
+
     const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
     const prep = writeScript
       ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`

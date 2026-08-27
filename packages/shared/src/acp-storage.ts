@@ -128,6 +128,22 @@ export function acpRuntimeLayout(
       artifacts: sync === "exit" ? [file(".fx", ".fx", sync)] : [],
     };
   }
+  if (id === "kiro") {
+    // Kiro 的设备码登录态在 $HOME 下（~/.kiro、~/.aws）。它只有 self 模式，
+    // 所以必须把整个 home 同步回 durable，否则每次会话都要重新登录。
+    return {
+      profileId,
+      durableDir,
+      runtimeDir,
+      stateDir,
+      env: {
+        HOME: `${stateDir}/home`,
+        XDG_CONFIG_HOME: `${stateDir}/home/.config`,
+        XDG_DATA_HOME: `${stateDir}/home/.local/share`,
+      },
+      artifacts: [file("home", "home", "exit")],
+    };
+  }
   if (id === "grok" || id === "copilot" || id === "kimi-code" || id === "pi") {
     const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
     return {
@@ -168,7 +184,14 @@ export function acpManualSetupEnvironment(profileId: string): Record<string, str
   if (profileId === "hermes") {
     return { HOME: home, HERMES_HOME: home, XDG_CONFIG_HOME: `${home}/.config`, XDG_DATA_HOME: `${home}/.local/share` };
   }
-  if (profileId === "opencode" || profileId === "grok" || profileId === "copilot" || profileId === "kimi-code" || profileId === "pi") {
+  if (
+    profileId === "opencode" ||
+    profileId === "grok" ||
+    profileId === "copilot" ||
+    profileId === "kimi-code" ||
+    profileId === "pi" ||
+    profileId === "kiro"
+  ) {
     return { HOME: home, XDG_CONFIG_HOME: `${home}/.config`, XDG_DATA_HOME: `${home}/.local/share` };
   }
   if (profileId === "fx") {

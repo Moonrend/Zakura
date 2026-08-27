@@ -147,8 +147,15 @@ describe("ACP config", () => {
       "kimi-code",
       "pi",
       "opencode",
+      "kiro",
       "fx",
     ]);
+    // Kiro 只有自身的设备码登录，没有可注入的 key，因此不能走 Zakura 网关路由。
+    const kiro = builtinAcpProfiles().find((p) => p.id === "kiro")!;
+    assert.deepEqual(kiro.args, ["acp"]);
+    assert.deepEqual(kiro.setupModes, ["self"]);
+    assert.equal(kiro.managedFields.length, 0);
+    assert.notEqual(kiro.supportsZakuraRoute, true);
     const gemini = builtinAcpProfiles().find((p) => p.id === "gemini-cli")!;
     assert.deepEqual(gemini.args, ["--acp"]);
     const geminiLaunch = resolveAcpLaunch(gemini, {

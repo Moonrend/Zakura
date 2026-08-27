@@ -86,6 +86,7 @@ import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerAcpRoutes } from "./acp-routes.js";
+import { AcpRegistryService } from "../services/acp/registry.js";
 import { AcpSessionService } from "../services/acp/session.js";
 import { registerAutomationRoutes } from "./automation-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
@@ -2629,6 +2630,10 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = cloudSessionStore;
+    // Registry-backed adapter catalogue + on-demand install. Shared by the ACP
+    // session boot (to provision before launch) and the ACP routes (to browse the
+    // catalogue and report per-adapter disk usage / updates).
+    const acpRegistry = new AcpRegistryService(agentService.workspace);
     const acpSessions = new AcpSessionService({
       agentService,
       store: cloudStore,
@@ -2636,10 +2641,12 @@ export async function createApiApp(deps: {
       workspaceFs: workspaceFsProvider,
       publicBaseUrl: config.publicBaseUrl,
       maxConcurrentAcpPerTenant: config.maxConcurrentAcpPerTenant || 8,
+      acpRegistry,
     });
     registerAcpRoutes(app, {
       agentService,
       acp: acpSessions,
+      acpRegistry,
       publicBaseUrl: config.publicBaseUrl,
     });
     remoteIngress = new RemoteAgentIngress(

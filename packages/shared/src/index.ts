@@ -438,6 +438,50 @@ export type {
 } from "./runner.js";
 
 export { hasImageProbeErrors } from "./image-updates.js";
+
+export {
+  ACP_REGISTRY_URL,
+  acpPlatformTarget,
+  acpWorkspacePlatform,
+  resolveAcpDistribution,
+  acpDistributionUnavailableReason,
+  acpRequiresUnverifiedOptIn,
+  parseAcpRegistryIndex,
+  isValidSha256,
+} from "./acp-registry.js";
+export type {
+  AcpRegistryPlatform,
+  AcpBinaryDist,
+  AcpRegistryDistribution,
+  AcpRegistryAgent,
+  AcpRegistryIndex,
+  AcpDistKind,
+  AcpResolvedDist,
+  AcpDistributionOptions,
+} from "./acp-registry.js";
+
+export {
+  ACP_PROVISION_ROOT,
+  ACP_PROVISION_CACHE,
+  acpAgentRoot,
+  acpVersionDir,
+  acpInstallMarker,
+  acpProvisionedCommand,
+  acpProvisionScript,
+  acpInstalledVersionsScript,
+  acpGcScript,
+  acpDiskUsageScript,
+} from "./acp-provision.js";
+export type { AcpProvisionPlan } from "./acp-provision.js";
+
+export {
+  acpAdapterSource,
+  acpRegistryIdForProfile,
+  acpProfileIdsWithRegistrySource,
+  acpCustomProvisionScript,
+  acpCustomCommand,
+} from "./acp-sources.js";
+export type { AcpAdapterSource } from "./acp-sources.js";
 export type {
   ImageUpdateKind,
   ImageUpdateEntry,
