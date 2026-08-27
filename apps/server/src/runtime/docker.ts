@@ -9,13 +9,14 @@ import {
   checkImageUpdates as checkImagesCore,
   normalizeImageRef,
   discoverDockerRegistryMirrors,
+  groupRunningImageIds,
   log,
   type ContainerRuntime,
   type CreateContainerOptions,
   type RunningContainer,
   recordPlatformFault,
 } from "@zakura/core";
-import type { ContainerSpec } from "@zakura/shared";
+import type { ContainerSpec, ImageUpdateEntry } from "@zakura/shared";
 
 export { toDockerHostPath };
 
@@ -566,42 +567,28 @@ export class DockerRuntime implements ContainerRuntime {
    */
   async checkImageUpdates(
     images: string[],
-  ): Promise<
-    Array<{
-      image: string;
-      localDigest: string | null;
-      remoteDigest: string | null;
-      updateAvailable: boolean;
-      runningStale: boolean;
-      error: string | null;
-    }>
-  > {
+    opts?: { allowPullFallback?: boolean },
+  ): Promise<ImageUpdateEntry[]> {
     const running = await this.docker.listContainers({
       all: false,
       filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
     });
-    const runningByRef = new Map<string, Set<string>>();
-    for (const c of running) {
-      // Normalize: Docker reports `c.Image` with `docker.io/` or
-      // `registry-1.docker.io/` prefixes (or bare), but the server probes the
-      // bare `user/repo:tag` — normalizeImageRef aligns the lookup keys.
-      const key = normalizeImageRef(c.Image);
-      let set = runningByRef.get(key);
-      if (!set) {
-        set = new Set();
-        runningByRef.set(key, set);
-      }
-      if (c.ImageID) set.add(c.ImageID);
-    }
+    // Grouping lives in core so the server and the Runner cannot drift.
+    const runningByRef = groupRunningImageIds(running);
+    const allowPullFallback = opts?.allowPullFallback === true;
     return checkImagesCore(
       {
         getImage: (img: string) => this.docker.getImage(img),
         info: () => this.docker.info(),
-        pullToDigest: (img: string) => this.pullToDigest(img),
+        // Only wired in on explicit opt-in: it runs a real `docker pull`.
+        ...(allowPullFallback ? { pullToDigest: (img: string) => this.pullToDigest(img) } : {}),
       },
       images,
       runningByRef,
-      { registryMirrors: await discoverDockerRegistryMirrors(this.docker) },
+      {
+        registryMirrors: await discoverDockerRegistryMirrors(this.docker),
+        allowPullFallback,
+      },
     );
   }
 

@@ -437,6 +437,13 @@ export type {
   RunnerInstallPackage,
 } from "./runner.js";
 
+export { hasImageProbeErrors } from "./image-updates.js";
+export type {
+  ImageUpdateKind,
+  ImageUpdateEntry,
+  NodeImageUpdateStatus,
+} from "./image-updates.js";
+
 export {
   TUNNEL_PROVIDER_IDS,
   TUNNEL_PROVIDER_META,

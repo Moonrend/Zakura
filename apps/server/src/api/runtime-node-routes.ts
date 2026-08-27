@@ -7,14 +7,10 @@ import {
 import type { NetworkSettingsService } from "../services/network-settings.js";
 import type { Orchestrator } from "../services/orchestrator.js";
 import type { DockerRuntime } from "../runtime/docker.js";
+import type { ImageUpdateChecker } from "../services/image-update-checker.js";
 import { hashRunnerToken } from "@zakura/core";
 import { platformEvents } from "../services/platform-events.js";
 import type { RunnerHostInfo, RunnerInstallPackage } from "@zakura/shared";
-import {
-  DEFAULT_RUNNER_IMAGE,
-  DEFAULT_WORKSPACE_IMAGE,
-  WORKSPACE_IMAGE_LOCAL,
-} from "@zakura/shared";
 import { rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
@@ -146,9 +142,10 @@ export function registerRuntimeNodeRoutes(
     network?: NetworkSettingsService;
     orchestrator?: Orchestrator;
     runtime?: DockerRuntime;
+    imageUpdateChecker?: ImageUpdateChecker;
   },
 ) {
-  const { nodes, db, config, network, orchestrator, runtime } = deps;
+  const { nodes, db, config, network, orchestrator, runtime, imageUpdateChecker } = deps;
 
   // Agent self-register — authenticated by rnr_ token, not session
   app.post("/api/runtime-nodes/register", async (c) => {
@@ -739,44 +736,23 @@ export function registerRuntimeNodeRoutes(
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
 
-    const isLocal = node.kind === "local" || node.slug === "local";
-    // Collect images to probe: runner image (remote nodes only) + distinct
-    // workspace images of agents bound to this node (plus the default).
-    const imageSet = new Set<string>();
-    const runnerImage =
-      c.req.query("runnerImage")?.trim() || DEFAULT_RUNNER_IMAGE;
-    if (!isLocal) imageSet.add(runnerImage);
-    const bound = await db
-      .select({ workspaceImage: agents.workspaceImage })
-      .from(agents)
-      .where(eq(agents.runtimeNodeId, node.id));
-    for (const row of bound) {
-      const img = row.workspaceImage?.trim();
-      if (img) imageSet.add(img);
+    if (!imageUpdateChecker) {
+      return c.json({ error: "镜像更新检查未启用", images: [] }, 503);
     }
-    imageSet.add(WORKSPACE_IMAGE_LOCAL || DEFAULT_WORKSPACE_IMAGE);
-    const images = [...imageSet];
-
     try {
-      if (isLocal) {
-        // Local node: probe in-process via the Docker adapter.
-        if (!runtime) return c.json({ error: "本地 Docker 不可用", images: [] }, 503);
-        const result = await runtime.checkImageUpdates(images);
-        return c.json({ images: result });
-      }
-      const { client } = await nodes.requireRunnerClient(
-        session.tenantId,
-        node.id,
-        { allowOffline: true },
-      );
-      const result = await client.checkImageUpdates({ images });
-      return c.json(result);
+      // Route through the same checker the global indicator reads, so a check
+      // started here updates that view too. This endpoint previously ran its own
+      // parallel copy of the collection + probe logic and never touched the cache,
+      // so the node page and the indicator could disagree about the same node, and
+      // "check" here appeared to do nothing globally.
+      const status = await imageUpdateChecker.checkNode(node.id, {
+        allowPullFallback: true,
+      });
+      if (status.error) return c.json({ error: status.error, images: [] }, 502);
+      return c.json({ images: status.entries, checkedAt: status.checkedAt });
     } catch (err) {
       return c.json(
-        {
-          error: err instanceof Error ? err.message : String(err),
-          images: [],
-        },
+        { error: err instanceof Error ? err.message : String(err), images: [] },
         502,
       );
     }

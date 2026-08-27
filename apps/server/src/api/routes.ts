@@ -80,7 +80,7 @@ import { resolveAgentMemory } from "../services/memory-runtime.js";
 import type { ToolCallStore } from "../services/tool-call-store.js";
 import { OauthError, isRedirectUriRegistered, type OauthService } from "../services/oauth.js";
 import { isCimdClientId } from "../services/oauth-cimd.js";
-import { PROVIDER_CATEGORY_META } from "@zakura/shared";
+import { PROVIDER_CATEGORY_META, hasImageProbeErrors } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
@@ -3106,6 +3106,7 @@ export async function createApiApp(deps: {
       network: networkSettings,
       orchestrator,
       runtime,
+      imageUpdateChecker,
     });
   }
   if (migrations) {
@@ -5213,7 +5214,9 @@ export async function createApiApp(deps: {
         .map((s) => decorate(s, metaMap.get(s.nodeId)!));
       const hasUpdates = nodes.some((s) => s.hasUpdates);
       const hasRunningStale = nodes.some((s) => s.hasRunningStale);
-      return c.json({ hasUpdates, hasRunningStale, nodes });
+      // 探测失败 ≠ 已是最新：前端要能把「未知」和「最新」区分开。
+      const hasErrors = nodes.some((s) => hasImageProbeErrors(s));
+      return c.json({ hasUpdates, hasRunningStale, hasErrors, nodes });
     });
 
     app.post("/api/system/image-updates/check", async (c) => {
@@ -5224,7 +5227,10 @@ export async function createApiApp(deps: {
       const node = await runtimeNodes.getAccessible(session.tenantId, nodeId);
       if (!node) return c.json({ error: "Not found" }, 404);
       try {
-        const status = await imageUpdateChecker.checkNode(nodeId);
+        // 用户点的「检查」允许最后退回 docker pull 取摘要（后台巡检永远不会）。
+        const status = await imageUpdateChecker.checkNode(nodeId, {
+          allowPullFallback: true,
+        });
         return c.json(
           decorate(status, {
             name: node.name,
@@ -5278,7 +5284,8 @@ export async function createApiApp(deps: {
       }
       const hasUpdates = nodes.some((s) => s.hasUpdates);
       const hasRunningStale = nodes.some((s) => s.hasRunningStale);
-      return c.json({ hasUpdates, hasRunningStale, nodes });
+      const hasErrors = nodes.some((s) => hasImageProbeErrors(s));
+      return c.json({ hasUpdates, hasRunningStale, hasErrors, nodes });
     });
   }
 

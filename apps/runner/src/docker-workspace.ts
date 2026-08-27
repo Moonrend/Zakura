@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
 import {
+  log,
   resolveDockerContextSocketPath,
   toDockerHostPath,
   mapContainerPathToHost,
@@ -32,6 +33,29 @@ function dockerErr(err: unknown): Error {
   if (!err || typeof err !== "object") return new Error(String(err));
   const e = err as { message?: string; json?: { message?: string } };
   return new Error(e.json?.message || e.message || String(err));
+}
+
+/** `["K=V", …]` (docker's merged image+runtime env) → record. */
+function parseEnvPairs(pairs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) continue;
+    out[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return out;
+}
+
+/**
+ * Keep a custom network, drop Docker's implicit defaults.
+ * A `startsWith("bridge")` test (the previous form) also swallowed real user
+ * networks named e.g. `bridge-internal`.
+ */
+function resolveNetworkMode(mode: string | undefined): string | undefined {
+  const m = mode?.trim();
+  if (!m) return undefined;
+  if (m === "bridge" || m === "default" || m === "host" || m === "none") return undefined;
+  return m;
 }
 
 async function findFreePort(): Promise<number> {
@@ -283,6 +307,8 @@ export class RunnerDockerWorkspace {
       }
     }
     const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+    const failed: Array<{ agentId: string; error: string }> = [];
+
     for (const c of list) {
       // Match by normalized ref (handles docker.io / registry-1.docker.io /
       // bare prefixes) and fall back to image id. The image-id guard alone
@@ -297,26 +323,72 @@ export class RunnerDockerWorkspace {
       const agentSlug = (c.Labels ?? {})["zakura.agent_slug"];
       const tenantSlug = (c.Labels ?? {})["zakura.tenant"];
       if (!agentId || !agentSlug) continue;
-      // Recreate: stop+remove the old container, then start a fresh one with the
-      // same image/env (workspacePath is bind-mounted host state, preserved).
+
+      // Preserve the original env and labels. Passing `undefined` (as this used
+      // to) silently dropped any per-agent env injected at first start.
+      let priorEnv: Record<string, string> | undefined;
+      let priorLabels: Record<string, string> | undefined;
+      try {
+        const inspected = await this.docker.getContainer(c.Id).inspect();
+        priorEnv = parseEnvPairs(inspected.Config?.Env ?? []);
+        priorLabels = inspected.Config?.Labels ?? undefined;
+      } catch {
+        /* fall back to defaults reconstructed by start() */
+      }
+
+      // Park the old container under a temporary name instead of deleting it.
+      // Removing first and hoping `start()` succeeds means a failure (bad image,
+      // port clash) leaves the agent with **no** workspace at all.
+      const parkedName = `${c.Names[0]?.replace(/^\//, "") ?? agentSlug}-old-${Date.now()}`.slice(
+        0,
+        63,
+      );
+      let parked = false;
       try {
         await this.docker.getContainer(c.Id).stop({ t: 5 }).catch(() => undefined);
-        await this.docker.getContainer(c.Id).remove({ force: true });
+        await this.docker.getContainer(c.Id).rename({ name: parkedName });
+        parked = true;
       } catch {
-        /* best-effort */
+        // Rename unavailable: fall back to the old destructive path.
+        await this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined);
       }
-      const info = await this.start({
-        agentId,
-        agentSlug,
-        tenantSlug,
-        image: c.Image,
-        env: undefined,
-        labels: undefined,
-        network: (c.HostConfig?.NetworkMode ?? "").startsWith("bridge")
-          ? undefined
-          : (c.HostConfig?.NetworkMode ?? undefined),
+
+      try {
+        const info = await this.start({
+          agentId,
+          agentSlug,
+          tenantSlug,
+          image: image || c.Image,
+          env: priorEnv,
+          labels: priorLabels,
+          network: resolveNetworkMode(c.HostConfig?.NetworkMode),
+        });
+        recreated.push({ agentId, dockerId: info.dockerId, name: info.name });
+        if (parked) {
+          await this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.error("runner.workspace_recreate_failed", { agent_id: agentId, error: message });
+        if (parked) {
+          // Roll back: put the original container back and restart it.
+          await this.docker
+            .getContainer(c.Id)
+            .rename({ name: parkedName.replace(/-old-\d+$/, "") })
+            .catch(() => undefined);
+          await this.docker.getContainer(c.Id).start().catch(() => undefined);
+        }
+        // Keep going: one broken agent must not abort the whole refresh and
+        // leave the remaining containers silently unprocessed.
+        failed.push({ agentId, error: message });
+      }
+    }
+
+    if (failed.length) {
+      log.warn("runner.workspace_recreate_partial", {
+        recreated: recreated.length,
+        failed: failed.length,
       });
-      recreated.push({ agentId, dockerId: info.dockerId, name: info.name });
     }
     return recreated;
   }

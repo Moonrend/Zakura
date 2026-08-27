@@ -68,9 +68,12 @@ export {
 export {
   parseImageRef,
   normalizeImageRef,
+  sameImageRepository,
   checkImageUpdate,
   checkImageUpdates,
   discoverDockerRegistryMirrors,
+  groupRunningImageIds,
+  _resetMirrorCacheForTests,
 } from "./image-update-check.js";
 export type {
   ImageRef,
