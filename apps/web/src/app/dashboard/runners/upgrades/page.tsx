@@ -15,7 +15,7 @@ import {
   checkAllImageUpdates,
   checkNodeImageUpdates,
   fetchGlobalImageUpdates,
-  isRunnerImage,
+  resolveImageUpdateKind,
   kindLabel,
   listRuntimeNodes,
   statusLabel,
@@ -59,10 +59,11 @@ function isActionable(entry: ImageUpdateEntry): boolean {
 }
 
 /** 节点能否操作（非 manage 的 shared 不可；local 可刷新工作区镜像）。 */
-function canUpgradeImage(node: RuntimeNode, image: string): boolean {
+function canUpgradeImage(node: RuntimeNode, entry: ImageUpdateEntry): boolean {
   if (node.access === "shared") return false;
   if (node.status !== "online") return false;
-  if (isRunnerImage(image)) return node.kind !== "local";
+  // 本机节点没有 Runner 容器可重建。
+  if (resolveImageUpdateKind(entry) === "runner") return node.kind !== "local";
   return true;
 }
 
@@ -165,7 +166,7 @@ export default function UpgradesPage() {
       const key = entryKey(node.id, entry.image);
       setUpgrading((prev) => ({ ...prev, [key]: true }));
       try {
-        const { kind, result } = await upgradeNodeImage(node.id, entry.image);
+        const { kind, result } = await upgradeNodeImage(node.id, entry);
         if (kind === "runner") {
           toast.success(`${node.name} 的 Runner 镜像已调度更新，Runner 将短暂重连`);
         } else {
@@ -200,7 +201,7 @@ export default function UpgradesPage() {
       if (!img) continue;
       for (const entry of img.entries) {
         if (!isActionable(entry)) continue;
-        if (!canUpgradeImage(node, entry.image)) continue;
+        if (!canUpgradeImage(node, entry)) continue;
         const key = entryKey(node.id, entry.image);
         if (upgraded[key] || upgrading[key]) continue;
         pending.push({ node, entry, key });
@@ -216,7 +217,7 @@ export default function UpgradesPage() {
     await Promise.allSettled(
       pending.map(async (p) => {
         try {
-          const { kind } = await upgradeNodeImage(p.node.id, p.entry.image);
+          const { kind } = await upgradeNodeImage(p.node.id, p.entry);
           setUpgraded((prev) => ({ ...prev, [p.key]: true }));
           okCount += 1;
           setTimeout(() => void handleCheckNode(p.node.id), kind === "runner" ? 3000 : 1500);
@@ -246,7 +247,7 @@ export default function UpgradesPage() {
       sum +
       img.entries.filter((e) => {
         if (!isActionable(e)) return false;
-        if (!canUpgradeImage(node, e.image)) return false;
+        if (!canUpgradeImage(node, e)) return false;
         const key = entryKey(node.id, e.image);
         return !upgraded[key] && !upgrading[key];
       }).length
@@ -434,9 +435,9 @@ function EntryRow({
   upgraded: boolean;
   onUpgrade: () => void;
 }) {
-  const runnerImage = isRunnerImage(entry.image);
+  const runnerImage = resolveImageUpdateKind(entry) === "runner";
   const actionable = isActionable(entry);
-  const upgradeable = canUpgradeImage(node, entry.image);
+  const upgradeable = canUpgradeImage(node, entry);
   const disabled = !upgradeable || upgrading;
 
   let disabledReason: string | undefined;

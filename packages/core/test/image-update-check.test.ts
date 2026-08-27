@@ -198,38 +198,66 @@ test("discoverDockerRegistryMirrors: strips scheme and trailing slash from mirro
 });
 
 /**
- * When the in-process manifest probe can't reach the registry AND the daemon
- * has no surfaced mirror, the pullToDigest fallback asks the daemon to pull
- * (which honors the host's proxies/auth) and reports the real remote digest.
- * Without this fallback, the check silently reported "unavailable" on proxy
- * / private-registry hosts.
+ * The daemon-pull fallback still exists for hosts whose registry is only
+ * reachable through a proxy/auth the in-process probe cannot see — but it is
+ * **opt-in**, because pulling mutates the host: the pull installs the new image,
+ * so the very next check reports "up to date" even though nothing was recreated.
+ * The background sweep therefore never passes the flag; only an explicit,
+ * user-initiated check does.
  */
-test("checkImageUpdates: falls back to pullToDigest when manifest probe fails", async () => {
-  _resetMirrorCacheForTests();
-  const docker = fakeDocker(
+const REMOTE_DIGEST =
+  "sha256:bbbb1111222233334444555566667777888899990000aaaabbbbccccddddeeee";
+const LOCAL_DIGEST =
+  "sha256:aaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee";
+
+function pullFallbackDocker(pulls: string[]) {
+  return fakeDocker(
     {
       "sunwuyuan/zakura-runner-dev:latest": {
         Id: "sha256:localid",
-        RepoDigests: ["sunwuyuan/zakura-runner-dev@sha256:aaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee"],
+        RepoDigests: [`sunwuyuan/zakura-runner-dev@${LOCAL_DIGEST}`],
       },
     },
     {
-      // daemon reports no mirrors so the manifest probe runs (and fails via 404);
-      // pullToDigest is the real fallback.
+      // No mirrors surfaced, so the manifest probe runs and fails via 404.
       info: async () => ({ RegistryConfig: {} }),
-      pullToDigest: async () => "sha256:bbbb1111222233334444555566667777888899990000aaaabbbbccccddddeeee",
+      pullToDigest: async (image: string) => {
+        pulls.push(image);
+        return REMOTE_DIGEST;
+      },
     },
   );
-  const fetchImpl = mockFetch({}); // all probes 404 → manifest probe fails
+}
+
+test("checkImageUpdates: uses pullToDigest only when allowPullFallback is set", async () => {
+  _resetMirrorCacheForTests();
+  const pulls: string[] = [];
   const results = await checkImageUpdates(
-    docker,
+    pullFallbackDocker(pulls),
     ["sunwuyuan/zakura-runner-dev:latest"],
     undefined,
-    { fetchImpl },
+    { fetchImpl: mockFetch({}), allowPullFallback: true },
   );
-  assert.equal(results[0]!.remoteDigest, "sha256:bbbb1111222233334444555566667777888899990000aaaabbbbccccddddeeee");
+  assert.deepEqual(pulls, ["sunwuyuan/zakura-runner-dev:latest"]);
+  assert.equal(results[0]!.remoteDigest, REMOTE_DIGEST);
   assert.equal(results[0]!.updateAvailable, true);
   assert.equal(results[0]!.error, null);
+});
+
+test("checkImageUpdates: never pulls during a default (background) check", async () => {
+  _resetMirrorCacheForTests();
+  const pulls: string[] = [];
+  const results = await checkImageUpdates(
+    pullFallbackDocker(pulls),
+    ["sunwuyuan/zakura-runner-dev:latest"],
+    undefined,
+    { fetchImpl: mockFetch({}) },
+  );
+  assert.deepEqual(pulls, [], "a read-only check must not pull");
+  assert.equal(results[0]!.remoteDigest, null);
+  assert.equal(results[0]!.updateAvailable, false);
+  // "unknown" must be distinguishable from "up to date".
+  assert.equal(results[0]!.error, "registry_probe_unavailable");
 });
 
 /**

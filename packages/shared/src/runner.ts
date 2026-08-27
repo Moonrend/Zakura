@@ -253,6 +253,10 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
+      # 工作区容器由宿主机 docker 守护进程创建，bind 源必须是宿主机路径。
+      # 少了这一项，守护进程会在宿主机上新建一个同名空目录，
+      # 于是「Runner 看到的工作区」和「Agent 真正写入的工作区」变成两个目录。
+      ZAKURA_RUNNER_HOST_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -310,6 +314,10 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
+      # 工作区容器由宿主机 docker 守护进程创建，bind 源必须是宿主机路径。
+      # 少了这一项，守护进程会在宿主机上新建一个同名空目录，
+      # 于是「Runner 看到的工作区」和「Agent 真正写入的工作区」变成两个目录。
+      ZAKURA_RUNNER_HOST_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
       # 避免继承宿主机 HTTP 代理；控制面走 Tailscale / 直连
       HTTP_PROXY: ""
@@ -345,6 +353,7 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
       `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
       `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
       `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
+      `  -e ZAKURA_RUNNER_HOST_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
       "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
       "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
       '  -e NO_PROXY=* -e no_proxy=* \\',
@@ -392,6 +401,7 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
     `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
     `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
     `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
+    `  -e ZAKURA_RUNNER_HOST_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
     "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
     "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
     '  -e NO_PROXY=* -e no_proxy=* \\',

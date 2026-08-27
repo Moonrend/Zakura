@@ -18,16 +18,90 @@ import {
   saveAgentAcpConfig,
 } from "../services/acp/config.js";
 import type { AcpSessionService } from "../services/acp/session.js";
+import type { AcpRegistryService } from "../services/acp/registry.js";
 
 export function registerAcpRoutes(
   app: Hono<{ Variables: AppVariables }>,
   deps: {
     agentService: AgentService;
     acp?: AcpSessionService | null;
+    acpRegistry?: AcpRegistryService;
     publicBaseUrl: string;
   },
 ) {
-  const { agentService, acp, publicBaseUrl } = deps;
+  const { agentService, acp, acpRegistry, publicBaseUrl } = deps;
+
+  /**
+   * Browse the upstream ACP registry.
+   *
+   * Adapters are no longer limited to the set baked into the workspace image — the
+   * catalogue is data fetched from the registry, so newly published agents show up
+   * without an image release or a code change.
+   */
+  app.get("/api/acp/registry", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const force = c.req.query("refresh") === "1";
+    try {
+      const entries = await acpRegistry.catalog({ force });
+      return c.json({
+        agents: entries,
+        // Distinguish "registry unreachable" from "registry says nothing": an empty
+        // catalogue must not read as "no agents exist".
+        stale: entries.length === 0,
+      });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err), agents: [] },
+        502,
+      );
+    }
+  });
+
+  /** Installed adapters for one agent: versions, disk usage, available updates. */
+  app.get("/api/agents/:id/acp/adapters", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    try {
+      return c.json({ adapters: await acpRegistry.status(agent) });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err), adapters: [] },
+        502,
+      );
+    }
+  });
+
+  /** Install / update one adapter now, instead of lazily at first launch. */
+  app.post("/api/agents/:id/acp/adapters/:registryId/install", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    try {
+      const result = await acpRegistry.ensureInstalled(agent, c.req.param("registryId"));
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  });
+
+  /**
+   * Reclaim disk: drop every adapter version except the currently pinned one.
+   * Without this an adapter update would leave its predecessor behind forever.
+   */
+  app.post("/api/agents/:id/acp/adapters/gc", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    try {
+      return c.json(await acpRegistry.collectGarbage(agent));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  });
 
   app.get("/api/agents/:id/acp/config", async (c) => {
     const session = c.get("session")!;

@@ -18,9 +18,16 @@ Shell
   No command allowlist — any command the container user can run is allowed.
   Prefer writing outputs under /workspace so the console file browser can see them.
 
+ACP adapters (installed on demand, not baked into the image)
+  /workspace/.zakura/acp/<agent-id>/<version>/
+  Installed the first time you enable an adapter, then reused.
+  Lives under /workspace, so it survives image updates and container recreation.
+  Toolchain available for installs: node/npm (npx), uv (uvx), curl+unzip+sha256sum (binaries).
+
 Caches (under /workspace so they persist with the volume)
   npm:  /workspace/.cache/npm
   pip:  /workspace/.cache/pip
+  acp:  /workspace/.zakura/cache
 
 Display (when browser/desktop enabled)
   Chromium CDP :9222

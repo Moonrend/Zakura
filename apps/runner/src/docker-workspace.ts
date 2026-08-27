@@ -2,13 +2,15 @@
  * Local Docker ops for agent workspace containers on the Runner host.
  */
 import Docker from "dockerode";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
 import {
+  log,
   resolveDockerContextSocketPath,
   toDockerHostPath,
+  mapContainerPathToHost,
   normalizeImageRef,
   ShellJob,
   ShellJobRegistry,
@@ -31,6 +33,29 @@ function dockerErr(err: unknown): Error {
   if (!err || typeof err !== "object") return new Error(String(err));
   const e = err as { message?: string; json?: { message?: string } };
   return new Error(e.json?.message || e.message || String(err));
+}
+
+/** `["K=V", …]` (docker's merged image+runtime env) → record. */
+function parseEnvPairs(pairs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) continue;
+    out[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return out;
+}
+
+/**
+ * Keep a custom network, drop Docker's implicit defaults.
+ * A `startsWith("bridge")` test (the previous form) also swallowed real user
+ * networks named e.g. `bridge-internal`.
+ */
+function resolveNetworkMode(mode: string | undefined): string | undefined {
+  const m = mode?.trim();
+  if (!m) return undefined;
+  if (m === "bridge" || m === "default" || m === "host" || m === "none") return undefined;
+  return m;
 }
 
 async function findFreePort(): Promise<number> {
@@ -105,13 +130,38 @@ export class RunnerDockerWorkspace {
   private readonly jobs = new ShellJobRegistry();
   private readonly stdio = new StdioExecRegistry();
 
+  /**
+   * Host-side spelling of `storageRoot`. Only differs from `storageRoot` when the
+   * Runner itself runs in a container: the generated compose maps the host's
+   * `/var/zakura/<slug>/data` to `/var/lib/zakura` inside us, but the workspace
+   * containers we create are created on the *host* daemon and must be given the
+   * host path. See `mapContainerPathToHost`.
+   */
+  private readonly hostStorageRoot: string;
+
   constructor(
     private readonly storageRoot: string,
     private readonly publicHost: string,
     dockerOpts?: Docker.DockerOptions,
+    hostStorageRoot?: string,
   ) {
     const socketPath = dockerOpts ? undefined : resolveDockerContextSocketPath();
     this.docker = new Docker(socketPath ? { socketPath } : dockerOpts);
+    this.hostStorageRoot =
+      hostStorageRoot?.trim() ||
+      process.env.ZAKURA_RUNNER_HOST_STORAGE_ROOT?.trim() ||
+      storageRoot;
+  }
+
+  /** Bind-mount source for an agent workspace, in host-filesystem terms. */
+  private workspaceHostPath(agentId: string): string {
+    return toDockerHostPath(
+      mapContainerPathToHost(
+        this.workspacePath(agentId),
+        this.storageRoot,
+        this.hostStorageRoot,
+      ),
+    );
   }
 
   /** Shared Docker client (used by system-update self-recreate). */
@@ -257,6 +307,8 @@ export class RunnerDockerWorkspace {
       }
     }
     const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+    const failed: Array<{ agentId: string; error: string }> = [];
+
     for (const c of list) {
       // Match by normalized ref (handles docker.io / registry-1.docker.io /
       // bare prefixes) and fall back to image id. The image-id guard alone
@@ -271,26 +323,72 @@ export class RunnerDockerWorkspace {
       const agentSlug = (c.Labels ?? {})["zakura.agent_slug"];
       const tenantSlug = (c.Labels ?? {})["zakura.tenant"];
       if (!agentId || !agentSlug) continue;
-      // Recreate: stop+remove the old container, then start a fresh one with the
-      // same image/env (workspacePath is bind-mounted host state, preserved).
+
+      // Preserve the original env and labels. Passing `undefined` (as this used
+      // to) silently dropped any per-agent env injected at first start.
+      let priorEnv: Record<string, string> | undefined;
+      let priorLabels: Record<string, string> | undefined;
+      try {
+        const inspected = await this.docker.getContainer(c.Id).inspect();
+        priorEnv = parseEnvPairs(inspected.Config?.Env ?? []);
+        priorLabels = inspected.Config?.Labels ?? undefined;
+      } catch {
+        /* fall back to defaults reconstructed by start() */
+      }
+
+      // Park the old container under a temporary name instead of deleting it.
+      // Removing first and hoping `start()` succeeds means a failure (bad image,
+      // port clash) leaves the agent with **no** workspace at all.
+      const parkedName = `${c.Names[0]?.replace(/^\//, "") ?? agentSlug}-old-${Date.now()}`.slice(
+        0,
+        63,
+      );
+      let parked = false;
       try {
         await this.docker.getContainer(c.Id).stop({ t: 5 }).catch(() => undefined);
-        await this.docker.getContainer(c.Id).remove({ force: true });
+        await this.docker.getContainer(c.Id).rename({ name: parkedName });
+        parked = true;
       } catch {
-        /* best-effort */
+        // Rename unavailable: fall back to the old destructive path.
+        await this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined);
       }
-      const info = await this.start({
-        agentId,
-        agentSlug,
-        tenantSlug,
-        image: c.Image,
-        env: undefined,
-        labels: undefined,
-        network: (c.HostConfig?.NetworkMode ?? "").startsWith("bridge")
-          ? undefined
-          : (c.HostConfig?.NetworkMode ?? undefined),
+
+      try {
+        const info = await this.start({
+          agentId,
+          agentSlug,
+          tenantSlug,
+          image: image || c.Image,
+          env: priorEnv,
+          labels: priorLabels,
+          network: resolveNetworkMode(c.HostConfig?.NetworkMode),
+        });
+        recreated.push({ agentId, dockerId: info.dockerId, name: info.name });
+        if (parked) {
+          await this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.error("runner.workspace_recreate_failed", { agent_id: agentId, error: message });
+        if (parked) {
+          // Roll back: put the original container back and restart it.
+          await this.docker
+            .getContainer(c.Id)
+            .rename({ name: parkedName.replace(/-old-\d+$/, "") })
+            .catch(() => undefined);
+          await this.docker.getContainer(c.Id).start().catch(() => undefined);
+        }
+        // Keep going: one broken agent must not abort the whole refresh and
+        // leave the remaining containers silently unprocessed.
+        failed.push({ agentId, error: message });
+      }
+    }
+
+    if (failed.length) {
+      log.warn("runner.workspace_recreate_partial", {
+        recreated: recreated.length,
+        failed: failed.length,
       });
-      recreated.push({ agentId, dockerId: info.dockerId, name: info.name });
     }
     return recreated;
   }
@@ -402,7 +500,10 @@ export class RunnerDockerWorkspace {
       ...(spec.env ?? {}),
     };
 
-    const hostPath = toDockerHostPath(root);
+    // NOT `toDockerHostPath(root)`: `root` is our own view of the directory. The
+    // container is created on the host daemon, so the bind source has to be the
+    // host's spelling of the same directory.
+    const hostPath = this.workspaceHostPath(spec.agentId);
     const createOpts: Docker.ContainerCreateOptions = {
       name,
       Image: spec.image,
@@ -469,7 +570,21 @@ export class RunnerDockerWorkspace {
   }
 
   /** Probe that /workspace is a readable bind mount (host dir not deleted). */
-  async probeWorkspaceMount(dockerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  /**
+   * Verify that `/workspace` inside the container really is the directory the FS
+   * API reads and writes — not merely *a* directory.
+   *
+   * `test -d /workspace` is not enough: when the bind source was given in our own
+   * container-internal spelling, the host daemon happily created an empty
+   * directory at that path and mounted it. The check passes, both sides look
+   * healthy, and the split only shows up later as `ENOENT` when the user browses
+   * a folder the agent just created. So we write a sentinel through our own
+   * filesystem and require the container to see it.
+   */
+  async probeWorkspaceMount(
+    dockerId: string,
+    agentId?: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     try {
       const result = await this.execRaw(dockerId, ["test", "-d", AGENT_WORKSPACE_ROOT], {
         workingDir: "/",
@@ -478,6 +593,38 @@ export class RunnerDockerWorkspace {
         return {
           ok: false,
           error: `工作区挂载已失效（无法访问 ${AGENT_WORKSPACE_ROOT}）。主机目录可能被删除，请重启电脑环境。`,
+        };
+      }
+
+      if (!agentId) return { ok: true };
+
+      const root = this.workspacePath(agentId);
+      const sentinelName = ".zakura-mount-check";
+      const token = `${process.pid}-${Date.now()}`;
+      try {
+        writeFileSync(join(root, sentinelName), token, "utf8");
+      } catch {
+        // Can't write our side; the -d check above already covers the useful case.
+        return { ok: true };
+      }
+      const seen = await this.execRaw(
+        dockerId,
+        ["cat", `${AGENT_WORKSPACE_ROOT}/${sentinelName}`],
+        { workingDir: "/" },
+      );
+      try {
+        rmSync(join(root, sentinelName), { force: true });
+      } catch {
+        /* best effort */
+      }
+      if (seen.exitCode !== 0 || !seen.stdout.includes(token)) {
+        return {
+          ok: false,
+          error:
+            `工作区挂载指向了另一个目录：Runner 看到的是 ${root}，` +
+            `但容器里的 ${AGENT_WORKSPACE_ROOT} 是别的目录，两边内容不同步。` +
+            `Runner 跑在容器里时，请把 ZAKURA_RUNNER_HOST_STORAGE_ROOT 设为` +
+            `宿主机上对应 ${this.storageRoot} 的真实路径（compose 里挂载的那个），然后重建电脑环境。`,
         };
       }
       return { ok: true };
@@ -545,7 +692,7 @@ export class RunnerDockerWorkspace {
         `工作区主机目录丢失并已重建为空目录：${root}。请重启电脑环境以重新挂载 /workspace。`,
       );
     }
-    const probe = await this.probeWorkspaceMount(existing.dockerId);
+    const probe = await this.probeWorkspaceMount(existing.dockerId, agentId);
     if (!probe.ok) throw new Error(probe.error);
     return this.execRaw(existing.dockerId, command, opts);
   }

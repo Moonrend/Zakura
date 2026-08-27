@@ -37,6 +37,45 @@ function resolveDockerHostMountPrefix(): string {
   return process.platform === "win32" ? "/mnt/host" : "/mnt";
 }
 
+const toPosixPath = (p: string): string =>
+  p.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/(.)\/+$/, "$1");
+
+/**
+ * Translate a path we can see *inside this process* into the path the Docker
+ * daemon must be given as a bind-mount source.
+ *
+ * Why this exists: when Zakura (server or Runner) runs in a container that
+ * mounts the host's docker.sock, it manages the *host's* daemon. A bind source
+ * is therefore resolved against the host filesystem, not ours. Handing the
+ * daemon our own container-internal path (e.g. `/var/lib/zakura/agents/x/workspace`
+ * or `/data/agents/x/workspace`) makes it silently create a brand-new empty
+ * directory on the host at that same spelling. The workspace then exists twice:
+ * what the FS API reads, and what the agent's shell actually writes to. Browsing
+ * a directory the agent created fails with a confusing
+ * `ENOENT … stat '<same looking path>'`.
+ *
+ * `containerRoot` is where the data lives for us; `hostRoot` is where that same
+ * directory lives on the host (from `ZAKURA_RUNNER_HOST_STORAGE_ROOT` /
+ * `ZAKURA_HOST_DATA_DIR`). When `hostRoot` is unset or equal, this is the
+ * identity mapping, which is correct for bare-metal installs.
+ */
+export function mapContainerPathToHost(
+  absPath: string,
+  containerRoot: string | undefined,
+  hostRoot: string | undefined,
+): string {
+  const target = toPosixPath(absPath);
+  const from = containerRoot ? toPosixPath(containerRoot) : "";
+  const to = hostRoot ? toPosixPath(hostRoot) : "";
+  if (!from || !to || from === to) return target;
+  if (target === from) return to;
+  if (target.startsWith(`${from}/`)) {
+    return `${to}${target.slice(from.length)}`;
+  }
+  // Outside the mapped root: nothing sensible to rewrite, pass through.
+  return target;
+}
+
 /**
  * Strip a single layer of wrapping quotes from a shell command when the entire
  * string is quoted. Common when users paste `command: "..."` from tool UIs.

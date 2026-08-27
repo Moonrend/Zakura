@@ -114,10 +114,7 @@ export function WorkspaceImageUpgradeDialog() {
       const key = entryKey(node.nodeId, entry.image);
       setUpgrading((prev) => ({ ...prev, [key]: true }));
       try {
-        const { kind, result } = await upgradeNodeImage(
-          node.nodeId,
-          entry.image,
-        );
+        const { kind, result } = await upgradeNodeImage(node.nodeId, entry);
         if (kind === "runner") {
           setTimeout(() => void refreshNode(node.nodeId), 3000);
         } else {
@@ -146,7 +143,7 @@ export function WorkspaceImageUpgradeDialog() {
       setUpgrading((prev) => ({ ...prev, [p.key]: true })),
     );
     const settled = await Promise.allSettled(
-      pending.map((p) => upgradeNodeImage(p.node.nodeId, p.entry.image)),
+      pending.map((p) => upgradeNodeImage(p.node.nodeId, p.entry)),
     );
     const nextResults = { ...results };
     settled.forEach((s, i) => {

@@ -13,10 +13,12 @@ CREATE TABLE IF NOT EXISTS "upstream_oauth_clients" (
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
-
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "upstream_oauth_clients_tenant_host_client"
   ON "upstream_oauth_clients" ("tenant_id", "host", "client_id");
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "upstream_oauth_clients_tenant"
   ON "upstream_oauth_clients" ("tenant_id");
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "upstream_oauth_clients_source"
   ON "upstream_oauth_clients" ("source");

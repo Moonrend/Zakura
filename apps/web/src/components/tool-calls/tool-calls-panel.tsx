@@ -331,7 +331,7 @@ export function ToolCallsPanel({
 
   return (
     <div className="space-y-5">
-      <h1 className="font-heading text-lg font-semibold tracking-tight">{title}</h1>
+      <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">{title}</h1>
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard

@@ -19,8 +19,24 @@ function resolveDataDir(): string {
   return resolve(repoRoot, "data");
 }
 
+/**
+ * Host-side spelling of `dataDir`, used only as a Docker bind-mount source.
+ *
+ * When the server runs in a container against the host's docker.sock, `dataDir`
+ * (`/data` under compose) is *our* path; the host daemon resolves bind sources
+ * against the host filesystem. Set `ZAKURA_HOST_DATA_DIR` to the host directory
+ * that backs `ZAKURA_DATA_DIR` so workspace containers mount the same bytes the
+ * FS API serves. Unset = identity mapping (correct for bare-metal).
+ */
+function resolveHostDataDir(): string | null {
+  const fromEnv = process.env.ZAKURA_HOST_DATA_DIR?.trim();
+  return fromEnv ? resolve(fromEnv) : null;
+}
+
 export interface AppConfig {
   dataDir: string;
+  /** Host path backing `dataDir`; null when they are the same. */
+  hostDataDir: string | null;
   databaseUrl: string;
   /** Redis 连接串；null 表示 REDIS_URL=off 显式关闭 */
   redisUrl: string | null;
@@ -109,6 +125,7 @@ export function loadConfig(): AppConfig {
 
   return {
     dataDir,
+    hostDataDir: resolveHostDataDir(),
     databaseUrl,
     redisUrl: redisUrlFromEnv(),
     secret: loadOrCreateSecret(dataDir),

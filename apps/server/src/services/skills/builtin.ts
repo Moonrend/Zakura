@@ -679,19 +679,37 @@ const SLACK: BuiltinSkillDef = {
   tags: ["Slack", "协作", "消息"],
   body: `# Slack
 
-用最少的频道与消息调用完成沟通任务。发送前确认目标频道与最终文案。
+\`post_message\` 会立刻对真人可见且无法撤回。它和其它工具不是一个风险等级，
+对待方式也不该一样。
 
-## 能力
+## 工具
 
-- Channels：列出与定位频道
-- Messages：读取历史、发送或回复
-- Users：按姓名或邮箱消歧成员
+- \`list_channels\` / \`get_channel\` — 频道，channel id 从这里来
+- \`history\` — 频道消息历史
+- \`list_users\` / \`get_user\` — 成员消歧
+- \`post_message\` — 发送（唯一写操作，不可撤回）
 
-## 工作流
+## 解析目标
 
-1. 先确认可用 Slack 工具与权限范围。
-2. 发送消息前展示频道与正文，除非用户已明确授权该动作。
-3. 不要泄露 token；遇到权限不足时说明缺少的 scope。
+- 频道名 → \`list_channels\` 换 id。\`#general\` 这种字面名不能直接当 id 用。
+- 提到人 → \`list_users\` 拿 user id，用 \`<@Uxxxx>\` 格式 mention；直接写名字不会真的 @ 到人。
+- 私信/私有频道可能不在列表里（取决于授权范围）；找不到就说明，不要换个频道发。
+
+## 发送前
+
+1. 把**目标频道名**和**完整正文**一起给用户看。
+2. 除非用户在本轮已明确说了「发到 X」并给出内容，否则等确认。
+3. 发完回报频道与时间戳。
+
+## 读历史
+
+\`history\` 按频道拉取，默认量就不小。先限定条数，只在确有必要时往前翻页；
+不要为了「看看有什么」而整频道倒灌进上下文。
+
+## 边界
+
+不能编辑或删除已发消息、不能建频道、不能传文件。权限不足时报出缺少的 scope，不要重试。
+不回显 token。
 `,
 };
 
@@ -703,20 +721,46 @@ const GITHUB: BuiltinSkillDef = {
   tags: ["GitHub", "开发", "PR", "Issue"],
   body: `# GitHub
 
-把仓库、Issue 与 Pull Request 当作关联工作面。先确认 owner/repo，再执行写操作。
+所有调用都要 owner + repo。用户通常只说仓库名，先解析清楚再动手。
 
-## 能力
+## 工具
 
-- Repositories：列出仓库、查看分支
-- Issues：搜索、创建、评论
-- Pull Requests：列出、创建、查看详情
-- Search：跨仓库搜索代码与 Issue
+- \`list_repos\` / \`get_repo\` / \`list_branches\` — 仓库与分支
+- \`search_repositories\` / \`search_code\` / \`search_issues\` — 跨仓库搜索
+- \`list_issues\` / \`get_issue\` / \`create_issue\` / \`create_issue_comment\`
+- \`list_pulls\` / \`get_pull\` / \`create_pull\`
 
-## 工作流
+## 先搜后读
 
-1. 先用搜索或 list 工具缩小范围，再读取详情。
-2. 创建 Issue/PR 前确认仓库、标题与目标分支。
-3. 不展示 OAuth token；权限不足时说明需要的 scope。
+搜索返回的是摘要，不是正文。定位到目标后再用 \`get_issue\` / \`get_pull\` 取详情，
+不要把搜索结果当完整内容回答。
+
+\`search_code\` 走 GitHub 代码搜索语法，务必带限定符收窄：
+
+\`\`\`
+repo:owner/name path:src extension:ts "functionName"
+\`\`\`
+
+无限定符的关键词搜索会跨全站返回噪音。
+
+## 创建 PR
+
+\`create_pull\` 需要 head 与 base 两个分支。开之前：
+
+1. \`list_branches\` 确认两个分支都真实存在（拼错分支名只会得到一个含糊的 422）。
+2. 确认方向：head 是改动来源，base 是合入目标 —— 反了就是一个反向 PR。
+3. 默认分支不一定是 \`main\`，用 \`get_repo\` 读，别假设。
+
+## 写操作
+
+创建 Issue/PR、发评论前，把仓库、标题、目标分支和正文一并给用户确认。
+写完回报编号与链接。同一件事不要重复创建 —— 先 \`search_issues\` 查有没有已存在的单。
+
+## 边界
+
+不能合并 PR、不能推送代码、不能改仓库设置。需要提交代码时用工作区里的 \`git\` 与
+\`gh\` 命令，而不是这些工具。
+不回显 OAuth token；403 时报出缺少的 scope。
 `,
 };
 
@@ -728,19 +772,38 @@ const NOTION: BuiltinSkillDef = {
   tags: ["Notion", "知识库", "文档"],
   body: `# Notion
 
-先搜索再读取，避免无边界遍历工作区。写操作前确认父页面/数据库与最终内容。
+Notion 的内容在**块**里，不在页面对象里。\`get_page\` 只给属性和元信息 ——
+要正文必须 \`list_children\`。这是最容易答错的一点。
 
-## 能力
+## 工具
 
-- Pages：搜索、读取、创建页面，追加内容块
-- Databases：读取 schema 与查询记录
-- Users：列出工作区成员
+- \`search\` — 按关键词跨工作区定位页面/数据库
+- \`get_page\` — 页面属性（**不含正文**）
+- \`list_children\` — 页面的块，正文在这里
+- \`get_database\` / \`query_database\` — schema 与记录
+- \`create_page\` / \`append_blocks\` — 两个写操作
+- \`get_me\` / \`list_users\` — 账号与成员
 
-## 工作流
+## 读取顺序
 
-1. 用 search 定位目标，再 get_page / query_database。
-2. 创建或追加内容前展示摘要并取得确认（除非用户已明确授权）。
-3. 不展示 OAuth token。
+1. \`search\` 定位，拿到 id 和它是 page 还是 database。
+2. 页面：\`get_page\` 看属性 → \`list_children\` 读正文。嵌套块要按需再展开子块，
+   不要一次递归整棵树。
+3. 数据库：先 \`get_database\` 读 schema，再 \`query_database\` —— 属性名和类型必须
+   跟 schema 完全一致，否则过滤条件会被拒。
+
+## 写操作
+
+- \`create_page\` 必须有 parent（页面或数据库 id）。往数据库里建页时，properties
+  要匹配 schema，必填属性不能省。
+- \`append_blocks\` 追加到末尾，不能改写已有块。
+- 建页/追加前把父级位置和内容摘要给用户确认。写完回报页面链接。
+
+## 边界
+
+不能删除页面或块、不能改已有块、不能改数据库 schema。
+只能看到集成被授权的页面 —— 搜不到时先怀疑没共享给集成，而不是不存在。
+不回显 OAuth token。
 `,
 };
 
@@ -752,19 +815,32 @@ const LINEAR_SKILL: BuiltinSkillDef = {
   tags: ["Linear", "Issue", "项目管理"],
   body: `# Linear
 
-先确认 teamId / issue id，再执行写操作。用 list_teams 消歧团队。
+Linear 的写操作都要求 teamId，而用户几乎只会说团队名。先解析 ID，再动手。
 
-## 能力
+## 工具
 
-- Issues：列表、详情、创建、评论
-- Projects：浏览项目
-- Teams：列出团队与当前用户
+- \`list_teams\` — 团队及其 id、key
+- \`list_issues\` / \`get_issue\` — 按团队/状态筛列表，取单条详情
+- \`list_projects\` / \`get_project\` — 项目与进度
+- \`create_issue\` / \`create_comment\` — 唯一两个写操作
+- \`viewer\` — 当前账号，用于「分配给我」这类指代
 
-## 工作流
+## 解析顺序
 
-1. 创建 Issue 前确认 teamId、标题与优先级。
-2. 评论前确认目标 Issue。
-3. 不展示 token。
+1. 团队名 → \`list_teams\` 取 id。名称重复或模糊时列出候选让用户选，不要猜。
+2. 「我的」「分给我」→ \`viewer\` 取当前用户 id，不要用邮箱猜。
+3. Issue 标识符（\`ENG-123\`）可直接给 \`get_issue\`；只有标题时先 \`list_issues\` 定位。
+
+## 写操作
+
+创建 Issue 前必须齐备 teamId + 标题；优先级、负责人、项目缺失就用默认值，不要虚构。
+评论前先 \`get_issue\` 确认是目标那条 —— 编号相近的单据很容易搞错。
+写完回报 Issue 标识符与链接，方便用户核对。
+
+## 边界
+
+- 没有删除或状态流转工具；用户要求关单/改状态时说明只能评论，并给出 Issue 链接。
+- 不回显 token。权限不足时报出缺少的 scope，而不是重试。
 `,
 };
 
@@ -776,19 +852,37 @@ const FEISHU_SKILL: BuiltinSkillDef = {
   tags: ["飞书", "文档", "消息"],
   body: `# 飞书
 
-用最少权限完成任务。发消息前确认会话与正文。
+唯一的写操作是发消息，而且发出去不能撤回。发之前必须确认收件会话和正文。
 
-## 能力
+## 工具
 
-- 文档：读取文档与内容块
-- 多维表格：列表与检索记录
-- 消息：列出会话、发送文本
+- \`get_current_user\` — 当前账号
+- \`list_chats\` — 会话列表（chat_id 从这里来）
+- \`get_document\` / \`get_raw_content\` / \`list_blocks\` — 文档
+- \`list_tables\` / \`search_records\` — 多维表格
+- \`send_message\` — 发送文本（唯一写操作）
 
-## 工作流
+## 读文档
 
-1. 先用 get_current_user / list_chats 确认身份与目标。
-2. 写操作前确认 receive_id 与文案。
-3. 不展示 token。
+- 要通读全文用 \`get_raw_content\`（纯文本，最省 token）。
+- 要按结构定位或引用某段用 \`list_blocks\`。
+- \`get_document\` 只给标题与元信息，不含正文。
+先判断需要哪种粒度，不要三个都调一遍。
+
+## 多维表格
+
+\`list_tables\` 拿 table_id，再 \`search_records\` 带条件查。不要无条件拉全表。
+
+## 发消息
+
+1. \`list_chats\` 解析出 chat_id —— 不要用群名当 receive_id。
+2. 群名重复时列候选让用户确认发哪个。
+3. 把最终文案原样回给用户确认后再发；发完回报目标会话名。
+
+## 边界
+
+不能编辑文档、不能改表格记录、不能撤回消息。用户要求这些时说明限制。
+不回显 token。
 `,
 };
 
@@ -800,17 +894,29 @@ const DISCORD_SKILL: BuiltinSkillDef = {
   tags: ["Discord", "社区"],
   body: `# Discord
 
-用户 OAuth 可读取服务器列表与资料；发送频道消息通常需要 Bot Token，本连接器聚焦读取。
+这是**只读**连接器，走用户 OAuth。发频道消息、读消息历史、管理成员都需要 Bot Token
+加上 guild 内授权，这里没有 —— 先认清边界，别去尝试不存在的操作。
 
-## 能力
+## 工具
 
-- Guilds：列出/查看服务器
-- User：当前用户与连接账号
+- \`list_guilds\` — 当前用户加入的服务器（id、名称、权限位）
+- \`get_guild\` — 单个服务器详情
+- \`get_me\` — 当前 Discord 账号
+- \`list_connections\` — 该账号关联的外部账号（Steam、GitHub 等）
 
 ## 工作流
 
-1. 先 list_guilds 再按需 get_guild。
-2. 不展示 token。
+1. \`list_guilds\` 拿到 id，再按需 \`get_guild\`；不要对每个服务器都展开详情。
+2. 用户说服务器名时在 \`list_guilds\` 结果里匹配；重名就列候选。
+3. \`list_connections\` 属于敏感个人数据，只在用户明确要求时调用。
+
+## 边界
+
+用户要求「发消息到某频道」「看聊天记录」「踢人/改权限」时，直接说明本连接器只读、
+需要配置 Bot 才能做，并停下 —— 不要转而去猜别的工具。
+需要发消息的场景可以改用 Slack 或飞书连接器。
+
+不回显 token。
 `,
 };
 
@@ -822,18 +928,31 @@ const GITLAB_SKILL: BuiltinSkillDef = {
   tags: ["GitLab", "开发", "Issue"],
   body: `# GitLab
 
-先定位 project_id（数字 id 或 path），再操作 Issues。
+每个调用都要 project 标识，且 GitLab 接受两种写法 —— 挑错会得到 404 而不是报错提示。
 
-## 能力
+## 工具
 
-- Projects：列出/查看项目
-- Issues：列出与创建
+- \`list_projects\` / \`get_project\` — 项目，返回数字 id 与 \`path_with_namespace\`
+- \`list_issues\` / \`create_issue\` — Issues
+- \`get_current_user\` — 当前账号
+
+## project 标识
+
+- 数字 id（如 \`1234\`）最稳，优先用它。
+- 路径必须是完整的 \`group/subgroup/project\`，不能只给项目名。
+- 用户给的是名字时先 \`list_projects\` 换 id；同名跨 group 很常见，列候选让用户确认，别挑第一个。
 
 ## 工作流
 
-1. list_projects 缩小范围后再 create_issue。
-2. 写操作前确认标题与描述。
-3. 不展示 token。
+1. 解析 project → 拿到数字 id。
+2. 读：\`list_issues\` 先筛（state、labels），需要正文再逐条取。
+3. 写：\`create_issue\` 需要 project + 标题；描述用 Markdown。写完回报 issue iid 与链接。
+
+## 边界
+
+- 只能创建 Issue，不能改/关/评论，也没有 MR 工具。用户要求这些时说明限制并给链接。
+- 自建实例的地址由连接器配置决定；报 404 时先怀疑 project 标识，再怀疑权限。
+- 不回显 token。
 `,
 };
 
@@ -845,18 +964,38 @@ const JIRA_SKILL: BuiltinSkillDef = {
   tags: ["Jira", "Issue", "项目管理"],
   body: `# Jira
 
-优先用窄 JQL 搜索。创建 Issue 前确认 project_key 与 issuetype。
+搜索走 JQL，所以查询的精度完全取决于你写的 JQL。宽查询会拉回上千条并挤掉上下文。
 
-## 能力
+## 工具
 
-- Issues：JQL 搜索、详情、创建、评论
-- Projects：列出项目与当前用户
+- \`search_issues\` — JQL 查询
+- \`get_issue\` — 单条详情（含描述与评论）
+- \`list_projects\` — 项目及其 key
+- \`get_myself\` — 当前账号
+- \`create_issue\` / \`add_comment\` — 唯一两个写操作
 
-## 工作流
+## 写 JQL
 
-1. search_issues 定位，再 get_issue。
-2. 写操作前确认关键字段。
-3. 不展示 token。
+始终带上 project 和排序，并限制条数：
+
+\`\`\`
+project = ENG AND status != Done ORDER BY updated DESC
+\`\`\`
+
+- 「我的」用 \`assignee = currentUser()\`，不要拼邮箱。
+- 项目名 → 先 \`list_projects\` 换成 key（用户说的是名字，JQL 要 key）。
+- 只有关键词时用 \`text ~ "..."\`，拿到候选后再 \`get_issue\` 读详情，别把搜索结果当完整内容。
+
+## 写操作
+
+\`create_issue\` 需要 project key + issuetype + summary。issuetype 名称各站点不同
+（\`Task\`/\`任务\`/\`Story\`），失败时读回错误里的可选值再重试一次，不要连续盲试。
+评论前先 \`get_issue\` 确认目标。写完回报 issue key。
+
+## 边界
+
+- 没有状态流转、附件、删除工具；用户要求转状态时说明限制并给出链接。
+- 不回显 token；403/401 时报出缺失权限而不是重试。
 `,
 };
 

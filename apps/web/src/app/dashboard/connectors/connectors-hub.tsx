@@ -14,6 +14,7 @@ import { SettingsHeader } from "@/components/settings-shell";
 import { SearchField } from "@/components/ui/search-field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
+import { shouldLetBrowserHandleClick } from "@/lib/nav";
 
 type IntegrationPackage = {
   slug: string;
@@ -145,12 +146,14 @@ export default function ConnectorsHub() {
     if (selectedSlug === "email") router.replace("/dashboard/connectors");
   }, [router, selectedSlug]);
 
+  /** Canonical URL for a connector row, so each row can be a real anchor. */
+  function connectorHref(slug: string): string {
+    if (slug === "agent-remote") return "/dashboard/agents";
+    return `/dashboard/connectors?connector=${encodeURIComponent(slug)}`;
+  }
+
   function openConnector(slug: string) {
-    if (slug === "agent-remote") {
-      router.push("/dashboard/agents");
-      return;
-    }
-    router.push(`/dashboard/connectors?connector=${encodeURIComponent(slug)}`, { scroll: false });
+    router.push(connectorHref(slug), { scroll: false });
   }
 
   function closeConnector(open: boolean) {
@@ -221,10 +224,17 @@ export default function ConnectorsHub() {
                 (capability) => capability.kind === "tool" && capability.installed,
               ).length;
               return (
-                <button
+                <a
                   key={pkg.slug}
-                  type="button"
-                  onClick={() => openConnector(pkg.slug)}
+                  href={connectorHref(pkg.slug)}
+                  onClick={(e) => {
+                    // Keep the in-place sheet for plain clicks; let the browser
+                    // handle cmd/ctrl/middle-click so rows open in a new tab and
+                    // right-click / long-press can copy the link.
+                    if (shouldLetBrowserHandleClick(e)) return;
+                    e.preventDefault();
+                    openConnector(pkg.slug);
+                  }}
                   className="group flex w-full items-center gap-3 rounded-lg px-1 py-4 text-left surface-interactive sm:px-2"
                 >
                   <BrandIcon
@@ -254,7 +264,7 @@ export default function ConnectorsHub() {
                     </div>
                   </div>
                   <span className="shrink-0 text-muted-foreground transition-opacity duration-150 group-hover:text-foreground">→</span>
-                </button>
+                </a>
               );
             })}
       </div>

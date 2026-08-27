@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
 import { toast } from "sonner";
 import {
   Archive,
@@ -50,6 +51,7 @@ import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -311,6 +313,18 @@ export function ChatApp() {
   const hasMoreHistoryRef = useRef(false);
   const loadingOlderRef = useRef(false);
   const oldestSeqRef = useRef(0);
+  /**
+   * Session currently being fetched, for UI only.
+   *
+   * Switching sessions awaits a full round trip. Without this the previous
+   * conversation stayed on screen the whole time and the clicked row was not even
+   * highlighted, so a slow load was indistinguishable from a frozen app — then the
+   * content swapped in one jump. `sessionId` itself is still assigned only after
+   * the fetch resolves, so the SSE subscription and draft effects keep their
+   * existing ordering guarantees.
+   */
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
+  const pendingSessionRequestRef = useRef(0);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
@@ -529,6 +543,12 @@ export function ChatApp() {
   }, [searching, localSessionHits, searchHits, agent?.name, agent?.slug]);
   /** 尚未开始的对话：输入框上浮到视觉中线，首条消息发出后再流动回底部 */
   const emptyConversation = turns.length === 0;
+  /**
+   * True while switching to a *different* session. Re-loading the session already
+   * on screen (fork, compact, boot restore) keeps the transcript visible so the
+   * view does not flash placeholders over content the user is already reading.
+   */
+  const switchingSession = pendingSessionId !== null && pendingSessionId !== sessionId;
   const isNewSession = !events.some((ev) => ev.type === "user_message");
   const sessionProject = activeSession?.project ?? draftProject;
   const {
@@ -738,7 +758,7 @@ export function ChatApp() {
     [refreshSessions],
   );
 
-  const loadSession = useCallback(
+  const loadSessionInner = useCallback(
     async (aid: string, sid: string) => {
       const res = await getCloudSession(aid, sid, 0);
       setSessionId(sid);
@@ -869,6 +889,35 @@ export function ChatApp() {
     [],
   );
 
+  /**
+   * Session switch with a visible pending state and a real failure path.
+   *
+   * Callers used to `void loadSession(...)`, so a rejected fetch was an unhandled
+   * promise: the old transcript simply stayed on screen with no error and no way to
+   * tell it had failed. The request counter drops stale responses when the user
+   * clicks through several sessions quickly.
+   */
+  const loadSession = useCallback(
+    async (aid: string, sid: string) => {
+      const requestId = ++pendingSessionRequestRef.current;
+      setPendingSessionId(sid);
+      try {
+        await loadSessionInner(aid, sid);
+      } catch (err) {
+        if (requestId === pendingSessionRequestRef.current) {
+          toast.error(
+            `会话加载失败：${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      } finally {
+        if (requestId === pendingSessionRequestRef.current) {
+          setPendingSessionId(null);
+        }
+      }
+    },
+    [loadSessionInner],
+  );
+
   const loadOlderMessages = useCallback(async () => {
     const aid = agentId;
     const sid = sessionIdRef.current;
@@ -928,10 +977,21 @@ export function ChatApp() {
   // 首屏未撑满视口时继续回拉，避免「还有历史但滚不到顶」
   useEffect(() => {
     if (!scrollEl || !hasMoreHistory || loadingOlder) return;
+    // 切换会话期间跳过：此时视口里是骨架屏，高度必然「没撑满」，
+    // 会立刻对着上一个会话的 hasMoreHistory 再发一次回拉请求，
+    // 和正在进行的切换抢带宽、抢渲染。
+    if (switchingSession) return;
     if (scrollEl.scrollHeight <= scrollEl.clientHeight + 48) {
       void loadOlderMessages();
     }
-  }, [scrollEl, hasMoreHistory, loadingOlder, events.length, loadOlderMessages]);
+  }, [
+    scrollEl,
+    hasMoreHistory,
+    loadingOlder,
+    switchingSession,
+    events.length,
+    loadOlderMessages,
+  ]);
 
   // —— 切换 Agent：加载会话/配置/模型 ——
   useEffect(() => {
@@ -2138,15 +2198,18 @@ export function ChatApp() {
     return (
       <div
         key={s.id}
+        aria-busy={s.id === pendingSessionId || undefined}
         className={cn(
           "group animate-rise relative flex items-center rounded-lg text-sm",
           "transition-colors duration-150 ease-fluid",
-          s.id === sessionId
+          // Highlight the clicked row immediately, before its content arrives —
+          // otherwise the click has no visible effect at all until the fetch lands.
+          s.id === sessionId || s.id === pendingSessionId
             ? "bg-muted text-foreground"
             : "text-foreground/80 hover:bg-muted/60",
         )}
       >
-        {s.id === sessionId && (
+        {(s.id === sessionId || s.id === pendingSessionId) && (
           <span
             aria-hidden
             className="animate-pop absolute top-1/2 left-0 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-foreground/60"
@@ -2166,11 +2229,20 @@ export function ChatApp() {
           />
         ) : (
           <>
-            <button
-              type="button"
+            {/*
+              A real anchor, not a button: the session already has a deep link
+              (syncChatUrl writes /chat?agent=…&session=…), so making the row an
+              <a href> is what enables right-click "copy link", long-press on
+              mobile, and cmd/middle-click into a new tab. The onClick keeps the
+              fast in-place load for plain clicks and steps aside otherwise.
+            */}
+            <a
+              href={agentId ? chatSessionHref(agentId, s.id) : undefined}
               className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
-              onClick={() => {
-                if (agentId) void loadSession(agentId, s.id);
+              onClick={(e) => {
+                if (!agentId || shouldLetBrowserHandleClick(e)) return;
+                e.preventDefault();
+                void loadSession(agentId, s.id);
                 closeNavOnMobile();
               }}
             >
@@ -2190,13 +2262,18 @@ export function ChatApp() {
                   Gateway
                 </span>
               ) : null}
-              {s.activeRunId ? (
+              {s.id === pendingSessionId ? (
+                <Loader2
+                  aria-label="加载中"
+                  className="size-3 shrink-0 animate-spin text-muted-foreground"
+                />
+              ) : s.activeRunId ? (
                 <span
                   aria-label="运行中"
                   className="running-halo relative h-1.5 w-1.5 shrink-0 rounded-full bg-foreground/70 text-foreground/70"
                 />
               ) : null}
-            </button>
+            </a>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -2631,14 +2708,13 @@ export function ChatApp() {
 
         {/* 底部 */}
         <div className="border-t border-border/50 p-2">
-          <button
-            type="button"
-            onClick={() => router.push("/dashboard/agents")}
+          <Link
+            href="/dashboard/agents"
             className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           >
             <LayoutDashboard className="h-4 w-4" />
             控制台
-          </button>
+          </Link>
         </div>
       </aside>
 
@@ -2705,6 +2781,26 @@ export function ChatApp() {
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
           <div ref={contentRef} className="flex min-h-full flex-col">
+            {switchingSession ? (
+              // Show placeholders rather than the *previous* session's messages:
+              // leaving the old transcript up while a different session loads reads
+              // as a frozen app, and then the content jumps.
+              <div
+                aria-busy
+                aria-label="正在加载会话"
+                className="flex flex-col gap-6 px-4 py-6 md:px-6"
+              >
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="flex flex-col gap-2">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-4 w-[72%]" />
+                    <Skeleton className="h-4 w-[54%]" />
+                    {i === 1 ? <Skeleton className="h-4 w-[38%]" /> : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
             {(loadingOlder || hasMoreHistory) && !emptyConversation && (
               <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
                 {loadingOlder ? (
@@ -2756,6 +2852,8 @@ export function ChatApp() {
                 );
               }}
             />
+              </>
+            )}
           </div>
         </div>
 

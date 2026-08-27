@@ -1,5 +1,10 @@
 import { api } from "@/lib/api";
 import { DEFAULT_RUNNER_IMAGE } from "@zakura/shared";
+import type {
+  ImageUpdateEntry,
+  ImageUpdateKind,
+  NodeImageUpdateStatus,
+} from "@zakura/shared";
 
 export type RunnerNetworkInterface = {
   name: string;
@@ -250,32 +255,17 @@ export async function refreshWorkspaceImage(
   });
 }
 
-/** Probe the runner's local image digests against remote registries. */
-export type ImageUpdateEntry = {
-  image: string;
-  localDigest: string | null;
-  remoteDigest: string | null;
-  updateAvailable: boolean;
-  /** Running workspace container is on an older image than the current tag. */
-  runningStale: boolean;
-  error: string | null;
-};
+// 镜像更新的线上结构统一由 @zakura/shared 定义（此前 6 处各写一份，已经互相漂移）。
+export type { ImageUpdateEntry, ImageUpdateKind } from "@zakura/shared";
 
 export async function fetchImageUpdates(
   id: string,
-): Promise<{ images: ImageUpdateEntry[] }> {
+): Promise<{ images: ImageUpdateEntry[]; checkedAt?: number }> {
   return api(`/api/runtime-nodes/${id}/image-updates`);
 }
 
-/** Global image update status (aggregated across all nodes). */
-export type ImageUpdateNode = {
-  nodeId: string;
-  checkedAt: number;
-  entries: ImageUpdateEntry[];
-  hasUpdates: boolean;
-  hasRunningStale: boolean;
-  error: string | null;
-  // 节点元数据（后端 GET/POST/check-all 均附加）
+/** 单节点状态 + 后端附加的节点元数据。 */
+export type ImageUpdateNode = NodeImageUpdateStatus & {
   nodeName: string | null;
   nodeStatus: string | null;
   nodeKind: string | null;
@@ -284,8 +274,10 @@ export type ImageUpdateNode = {
 
 export type GlobalImageUpdateStatus = {
   hasUpdates: boolean;
-  /** True when at least one node has a running workspace on an older image than its tag. */
+  /** 至少一个节点有运行中的工作区落后于其 tag。 */
   hasRunningStale: boolean;
+  /** 至少一次探测失败 —— 「未知」不能当成「已是最新」显示。 */
+  hasErrors?: boolean;
   nodes: ImageUpdateNode[];
 };
 
@@ -309,9 +301,22 @@ export async function checkAllImageUpdates(): Promise<GlobalImageUpdateStatus> {
   });
 }
 
-/** 判断镜像条目是否为 Runner 镜像（走 updateRunner 而非 refreshWorkspaceImage）。 */
-export function isRunnerImage(image: string): boolean {
-  return image === DEFAULT_RUNNER_IMAGE;
+/**
+ * 条目该走哪条升级路径。
+ *
+ * 优先用后端给的 `kind` —— 只有服务端知道每个节点实际的 Runner 镜像。
+ * 之前这里拿 image 和硬编码的 DEFAULT_RUNNER_IMAGE 做全等比较，于是任何
+ * 用别的 tag / 别的 registry / 自建镜像部署的 Runner 都会被判成工作区镜像，
+ * 走进 refreshWorkspaceImage：它匹配到 0 个工作区容器，返回成功，
+ * 而 Runner 根本没升级。仅在后端没带 kind 时才按仓库名兜底（不比 tag）。
+ */
+export function resolveImageUpdateKind(entry: {
+  image: string;
+  kind?: ImageUpdateKind;
+}): ImageUpdateKind {
+  if (entry.kind) return entry.kind;
+  const repo = (ref: string) => ref.split("@")[0]!.replace(/:[^/:]+$/, "");
+  return repo(entry.image) === repo(DEFAULT_RUNNER_IMAGE) ? "runner" : "workspace";
 }
 
 /**
@@ -320,17 +325,20 @@ export function isRunnerImage(image: string): boolean {
  */
 export async function upgradeNodeImage(
   nodeId: string,
-  image: string,
-): Promise<{ kind: "runner" | "workspace"; result: unknown }> {
-  if (isRunnerImage(image)) {
-    const result = await updateRunner(nodeId, { image });
-    return { kind: "runner", result };
+  entry: string | { image: string; kind?: ImageUpdateKind },
+): Promise<{ kind: ImageUpdateKind; result: unknown }> {
+  const target = typeof entry === "string" ? { image: entry } : entry;
+  const kind = resolveImageUpdateKind(target);
+  if (kind === "runner") {
+    return { kind, result: await updateRunner(nodeId, { image: target.image }) };
   }
-  const result = await refreshWorkspaceImage(nodeId, {
-    image,
-    recreateRunning: true,
-  });
-  return { kind: "workspace", result };
+  return {
+    kind,
+    result: await refreshWorkspaceImage(nodeId, {
+      image: target.image,
+      recreateRunning: true,
+    }),
+  };
 }
 
 export async function deleteRuntimeNode(id: string): Promise<void> {

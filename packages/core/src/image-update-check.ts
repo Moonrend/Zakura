@@ -1,22 +1,27 @@
 /**
- * Image update detection: compare local image digest against the remote
- * registry digest to decide whether a newer image is available.
+ * Image update detection: compare the local image digest against the registry
+ * digest to decide whether a newer image is available.
  *
- * Works for Docker Hub and any registry that serves the v2 manifest API.
- * We do NOT pull the image — only fetch the manifest digest via a HEAD
- * request (Accept: application/vnd.docker.distribution.manifest.v2+json),
- * which returns the `Docker-Content-Digest` header. For multi-arch images
- * the manifest list digest is used (stable across architectures).
+ * The probe is **read-only**. It issues a HEAD (falling back to GET) against the
+ * v2 manifest API and reads `Docker-Content-Digest`; it never pulls. That matters
+ * more than it sounds: an earlier version fell back to `docker pull` whenever the
+ * manifest probe failed, which meant the "check" mutated the host — the pull
+ * installed the new image, so the *next* check reported "up to date" even though
+ * no container had been recreated. The update silently consumed itself, and every
+ * 10-minute background sweep could pull multi-GB images on every node. Pulling is
+ * now opt-in per call (`allowPullFallback`) and never enabled for a background sweep.
  *
- * Shared between the server (local Docker probe) and the runner (remote
- * probe over its API). Uses a minimal structural interface instead of the
- * `dockerode` type so this module stays dependency-free; any client whose
- * `getImage(image).inspect()` returns `{ Id, RepoDigests }` satisfies it.
+ * Shared between the server (in-process probe against local Docker) and the
+ * runner (probe on the runner host). Uses a minimal structural interface rather
+ * than dockerode's types so this module stays dependency-free.
  */
 import { log } from "./observability/index.js";
 
 export type ImageRef = {
-  /** Full registry domain, e.g. "registry-1.docker.io" or "ghcr.io". Empty for Docker Hub implicit. */
+  /**
+   * Registry host **including port** when one was given, e.g.
+   * "registry-1.docker.io", "ghcr.io", "localhost:5000", "harbor.corp:8443".
+   */
   registry: string;
   /** Repository (namespace/name), e.g. "sunwuyuan/zakura-workspace-dev". */
   repository: string;
@@ -26,32 +31,63 @@ export type ImageRef = {
   isDigest: boolean;
 };
 
-/**
- * Per-probe options. `registryMirrors` lets a caller on a host whose Docker
- * daemon is configured with registry mirrors (e.g. behind a corporate proxy or
- * a China mirror like mirror.ccs.tencentyun.com) probe the mirror instead of
- * the real upstream — the host can reach the mirror but not registry-1.docker.io,
- * so probing upstream always timed out and the update check silently failed.
- * Each mirror is tried in order; the upstream registry is always the final
- * fallback so a misconfigured mirror never hides a real update. `fetchImpl`
- * lets the runner inject a proxy-aware fetch (it otherwise strips HTTP(S)_PROXY).
- */
 export type ImageUpdateProbeOptions = {
+  /**
+   * Docker Hub pull-through mirrors from the daemon config. A host behind a
+   * corporate proxy or a regional mirror can reach the mirror but not
+   * registry-1.docker.io, so probing upstream only would always time out. Each
+   * mirror is tried first, upstream last, so a broken mirror can never mask a
+   * real update.
+   */
   registryMirrors?: string[];
+  /** Proxy-aware fetch (the runner strips HTTP(S)_PROXY from its own env). */
   fetchImpl?: typeof fetch;
+  /** Per-request timeout. Without one, a blackholed registry stalls the sweep. */
+  timeoutMs?: number;
+  /**
+   * Allow `docker pull` as a last-resort digest source when the manifest probe
+   * fails. Off by default: it mutates the host and makes the reported update
+   * disappear on the next check. Only enable for an explicit, user-initiated check.
+   */
+  allowPullFallback?: boolean;
 };
 
-/** Canonical Docker Hub registry host used when no registry is specified. */
 const DOCKER_HUB_REGISTRY = "registry-1.docker.io";
 const DOCKER_HUB_OFFICIAL = "library";
+const DEFAULT_TIMEOUT_MS = 10_000;
+const USER_AGENT = "zakura/1.0";
+
+/** Registry hosts reached over plain HTTP: loopback and explicitly-marked local names. */
+function isInsecureRegistryHost(host: string): boolean {
+  const name = host.split(":")[0] ?? "";
+  return (
+    name === "localhost" ||
+    name === "127.0.0.1" ||
+    name === "::1" ||
+    name.endsWith(".local") ||
+    name.endsWith(".localhost")
+  );
+}
+
+function registryBaseUrl(host: string): string {
+  return `${isInsecureRegistryHost(host) ? "http" : "https"}://${host}`;
+}
+
+/** A leading component is a registry when it has a dot, a port, or is localhost. */
+function looksLikeRegistry(head: string): boolean {
+  if (!head) return false;
+  if (!/^[A-Za-z0-9._-]+(:\d+)?$/.test(head)) return false;
+  return head.includes(".") || head.includes(":") || head === "localhost";
+}
 
 /**
- * Parse a docker image reference into registry / repository / reference.
- * Mirrors Docker's own reference parsing rules:
- *   - first component with '.' or ':' or is "localhost" → registry
- *   - remaining (minus tag) → repository (official images get "library/" prefix on Hub)
- *   - last component after ':' (when not a port) → tag
- *   - '@sha256:...' → digest reference
+ * Parse a docker image reference into registry / repository / reference,
+ * following Docker's own rules.
+ *
+ * The registry's **port is preserved**. Dropping it (an earlier bug) meant
+ * `localhost:5000/app:v1` was probed at `https://localhost/v2/...`, which always
+ * failed — so every private or insecure registry with an explicit port fell
+ * through to the pull fallback.
  */
 export function parseImageRef(image: string): ImageRef {
   const raw = image.trim();
@@ -61,32 +97,13 @@ export function parseImageRef(image: string): ImageRef {
   const atIdx = raw.indexOf("@");
   if (atIdx >= 0) {
     const digest = raw.slice(atIdx + 1);
-    const rest = raw.slice(0, atIdx);
-    const [registry, repository] = splitRegistryRepo(rest);
+    const [registry, repository] = splitRegistryRepo(raw.slice(0, atIdx));
     return { registry, repository, reference: digest, isDigest: true };
   }
 
-  // tag form: possibly registry/repo:tag — but ':' may also be a registry port.
-  // Heuristic: split on first '/' to detect registry, then split the tail on last ':'.
-  const slashIdx = raw.indexOf("/");
-  let head = "";
-  let tail = raw;
-  if (slashIdx > 0) {
-    head = raw.slice(0, slashIdx);
-    tail = raw.slice(slashIdx + 1);
-  }
-  const hasRegistry =
-    head && (/^[a-z0-9.-]+(:\d+)?$/.test(head) && (head.includes(".") || head.includes(":") || head === "localhost"));
+  const [registry, repoPath] = splitRegistryRepo(raw);
 
-  let registry = "";
-  let repoPath = raw;
-  if (hasRegistry) {
-    registry = head.split(":")[0] ?? "";
-    repoPath = tail;
-  }
-
-  // strip tag from repoPath (last ':' that's not part of a port-like component is hard,
-  // but image tags never contain '/', so find the last ':' after the final '/').
+  // Tags never contain '/', so the tag separator is the last ':' after the last '/'.
   const lastSlash = repoPath.lastIndexOf("/");
   const lastColon = repoPath.lastIndexOf(":");
   let reference = "latest";
@@ -95,73 +112,64 @@ export function parseImageRef(image: string): ImageRef {
     reference = repoPath.slice(lastColon + 1) || "latest";
     repository = repoPath.slice(0, lastColon);
   }
-  if (!registry) {
-    registry = DOCKER_HUB_REGISTRY;
-    if (!repository.includes("/")) repository = `${DOCKER_HUB_OFFICIAL}/${repository}`;
+  if (registry === DOCKER_HUB_REGISTRY && !repository.includes("/")) {
+    repository = `${DOCKER_HUB_OFFICIAL}/${repository}`;
   }
   return { registry, repository, reference, isDigest: false };
 }
 
-function splitRegistryRepo(s: string): [string, string] {
+/** Split "[registry/]rest" keeping any registry port intact. */
+function splitRegistryRepo(s: string): [registry: string, rest: string] {
   const slashIdx = s.indexOf("/");
-  const head = s.slice(0, slashIdx);
-  if (slashIdx > 0 && head && (head.includes(".") || head.includes(":") || head === "localhost")) {
-    return [head.split(":")[0] ?? "", s.slice(slashIdx + 1)];
+  if (slashIdx > 0) {
+    const head = s.slice(0, slashIdx);
+    if (looksLikeRegistry(head)) return [head, s.slice(slashIdx + 1)];
   }
-  // no explicit registry → Docker Hub
-  const repo = slashIdx > 0 ? s : `${DOCKER_HUB_OFFICIAL}/${s}`;
+  const repo = s.includes("/") ? s : `${DOCKER_HUB_OFFICIAL}/${s}`;
   return [DOCKER_HUB_REGISTRY, repo];
 }
 
 /**
- * Canonical hostname for Docker Hub. Docker reports container `Image` refs
- * with either `docker.io` or `registry-1.docker.io` (and bare for Hub images),
- * so normalizing to the one host lets callers group + match running
- * containers against the bare refs the server probes.
+ * Canonical hostname for Docker Hub. Docker reports container `Image` refs as
+ * `docker.io/...`, `registry-1.docker.io/...` or bare, so normalizing lets
+ * callers match running containers against the refs we probe.
  */
 function canonicalRegistry(registry: string): string {
-  return registry === "docker.io" ? DOCKER_HUB_REGISTRY : registry;
+  return registry === "docker.io" || registry === "index.docker.io"
+    ? DOCKER_HUB_REGISTRY
+    : registry;
 }
 
-/**
- * Canonical comparison key for an image ref: `<canonical-registry>/<repo>:<ref>`.
- * Use this to key the running-container map and to look it up by the probed
- * ref string, so a container reported as `docker.io/...` or
- * `registry-1.docker.io/...` matches a probe for the bare `user/repo:tag`.
- */
+/** Canonical comparison key: `<canonical-registry>/<repo>:<ref>`. */
 export function normalizeImageRef(image: string): string {
   const { registry, repository, reference } = parseImageRef(image);
   return `${canonicalRegistry(registry)}/${repository}:${reference}`;
 }
 
+/** True when two refs name the same repository, ignoring tag and Hub aliases. */
+export function sameImageRepository(a: string, b: string): boolean {
+  try {
+    const x = parseImageRef(a);
+    const y = parseImageRef(b);
+    return (
+      canonicalRegistry(x.registry) === canonicalRegistry(y.registry) &&
+      x.repository === y.repository
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type ImageDigestInfo = {
   image: string;
-  /** Local image id (sha256:...) from `docker inspect`. */
   localId: string | null;
-  /** Local RepoDigest (registry/repo@sha256:...) when available. */
   localDigest: string | null;
-  /** Remote registry digest (sha256:...) when probeable. */
   remoteDigest: string | null;
-  /** True when remote digest differs from local (or local is missing). */
   updateAvailable: boolean;
-  /**
-   * True when a running workspace container uses an image id that differs from
-   * the current tag's image id — i.e. the image was pulled but the container
-   * was never recreated, so it's still on an older image. The user must
-   * "refresh workspace image" (recreate) to pick up the new image.
-   */
   runningStale: boolean;
-  /** Reason when the probe could not complete (offline / private registry / auth). */
   error: string | null;
 };
 
-/**
- * Minimal structural view of a dockerode-like client. We only need
- * `getImage(image).inspect()` returning `{ Id, RepoDigests }`, so we accept
- * any object that satisfies this shape and avoid a hard `dockerode` dep here.
- * `info()` is optional — used to discover the daemon's configured registry
- * mirrors so a host behind a China mirror can still probe for updates.
- */
 export interface ImageInspectLike {
   Id: string | null;
   RepoDigests?: string[];
@@ -170,13 +178,10 @@ export interface DockerLike {
   getImage(image: string): { inspect(): Promise<ImageInspectLike> };
   info?(): Promise<DockerInfoLike>;
   /**
-   * Last-resort remote-digest source: ask the daemon to pull `image` and
-   * return its resulting RepoDigest. The daemon honors its own registry
-   * mirrors, HTTP proxies and registry auth — every path the in-process fetch
-   * probe can't see. Implemented by callers that hold a real dockerode client
-   * (the runner); omitted by callers that only probe in-process. Used only
-   * when the manifest probe already failed, so the happy path costs one HEAD,
-   * not a full pull.
+   * Ask the daemon to pull `image` and return the resulting RepoDigest. The
+   * daemon honors its own mirrors, proxies and credentials — paths an in-process
+   * fetch cannot see. Only invoked when `allowPullFallback` is set, because it
+   * changes host state.
    */
   pullToDigest?(image: string): Promise<string | null>;
 }
@@ -189,92 +194,69 @@ export interface DockerInfoLike {
   Mirrors?: string[];
 }
 
-/**
- * Discover the Docker daemon's configured registry-mirror hosts by querying
- * the daemon itself over the socket (the same socket the runner already uses).
- * This is the only reliable source inside the runner container: the host's
- * `/etc/docker/daemon.json` is NOT mounted into the container, so reading it
- * from the filesystem always came back empty. The daemon's `info` endpoint
- * returns `RegistryConfig.Mirrors` (the parsed `registry-mirrors` list) —
- * `docker pull` honors these, and we honor them for the manifest probe too.
- * Returns bare hosts (no scheme), cached for the process lifetime (mirrors
- * don't change without a daemon restart, and a re-check is one socket call).
- *
- * ponytail: best-effort. If the daemon is unreachable or reports no mirrors,
- * callers fall back to probing the upstream registry directly.
- */
-let discoveredMirrors: string[] | null = null;
-/** Reset the mirror cache (test-only — mirrors don't change in production). */
+// —— registry mirror discovery ——
+
+let mirrorCache: string[] | null = null;
+let mirrorInFlight: Promise<string[]> | null = null;
+
+/** Reset the mirror cache (test-only). */
 export function _resetMirrorCacheForTests(): void {
-  discoveredMirrors = null;
-}
-export async function discoverDockerRegistryMirrors(
-  docker?: DockerLike,
-): Promise<string[]> {
-  if (discoveredMirrors) return discoveredMirrors;
-  const hosts = new Set<string>();
-  if (docker?.info) {
-    try {
-      const info = await docker.info();
-      const mirrors = [
-        ...(info.RegistryConfig?.Mirrors ?? []),
-        ...(info.Mirrors ?? []),
-      ];
-      for (const m of mirrors) {
-        if (typeof m === "string" && m.trim()) hosts.add(m.trim());
-      }
-      // IndexConfigs is the older map form; some daemons put mirrors per-index.
-      const idx = info.RegistryConfig?.IndexConfigs;
-      if (idx) {
-        for (const v of Object.values(idx)) {
-          for (const m of v?.Mirrors ?? []) {
-            if (typeof m === "string" && m.trim()) hosts.add(m.trim());
-          }
-        }
-      }
-    } catch {
-      /* daemon query failed — fall back to upstream (file fallback below) */
-    }
-  }
-  // Filesystem fallback for setups where the daemon socket isn't the same host
-  // as the config (rare): /etc/docker/daemon.json etc. No-op inside containers
-  // that don't mount it, but cheap and harmless.
-  const daemonPaths = [
-    "/etc/docker/daemon.json",
-    `${process.env.DOCKER_CONFIG ?? ""}/daemon.json`,
-    `${process.env.HOME ?? ""}/.docker/daemon.json`,
-  ].filter(Boolean);
-  for (const p of daemonPaths) {
-    await readMirrorsFromJsonFile(p, "registry-mirrors", hosts);
-  }
-  discoveredMirrors = [...hosts]
-    .map(stripScheme)
-    .filter((h) => h && h !== DOCKER_HUB_REGISTRY && h !== "docker.io");
-  return discoveredMirrors;
+  mirrorCache = null;
+  mirrorInFlight = null;
 }
 
-async function readMirrorsFromJsonFile(
-  path: string,
-  key: string,
-  into: Set<string>,
-): Promise<void> {
-  try {
-    const { readFileSync } = await import("node:fs");
-    let raw: string;
+/**
+ * Discover the daemon's configured Docker Hub mirrors by asking the daemon over
+ * the socket. That is the only reliable source from inside a container: the
+ * host's `/etc/docker/daemon.json` is not mounted, so the old filesystem
+ * fallback could never match anything and has been dropped.
+ *
+ * Only a **successful, non-empty** result is cached. Caching a failure (which the
+ * previous version did, since `[]` is truthy) meant one transient error while the
+ * daemon was still starting permanently disabled mirror probing for the process
+ * lifetime — on a mirror-only host that silently broke update detection until
+ * restart. Concurrent callers share one in-flight query.
+ */
+export async function discoverDockerRegistryMirrors(docker?: DockerLike): Promise<string[]> {
+  if (mirrorCache) return mirrorCache;
+  if (mirrorInFlight) return mirrorInFlight;
+  if (!docker?.info) return [];
+
+  mirrorInFlight = (async () => {
+    const hosts = new Set<string>();
     try {
-      raw = readFileSync(path, "utf8");
-    } catch {
-      return;
-    }
-    const json = JSON.parse(raw) as Record<string, unknown>;
-    const val = json[key];
-    if (Array.isArray(val)) {
-      for (const h of val) {
-        if (typeof h === "string") into.add(h.trim());
+      const info = await docker.info!();
+      for (const m of [...(info.RegistryConfig?.Mirrors ?? []), ...(info.Mirrors ?? [])]) {
+        if (typeof m === "string" && m.trim()) hosts.add(m.trim());
       }
+      // IndexConfigs is the older per-index map form.
+      for (const v of Object.values(info.RegistryConfig?.IndexConfigs ?? {})) {
+        for (const m of v?.Mirrors ?? []) {
+          if (typeof m === "string" && m.trim()) hosts.add(m.trim());
+        }
+      }
+    } catch (err) {
+      // Do not cache: the daemon may simply not be up yet. Log it — a silent
+      // failure here is the single hardest-to-diagnose mode of this feature.
+      log.warn("image.mirror_discovery_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
     }
-  } catch {
-    /* ignore unreadable/invalid config — fall back to upstream */
+    const resolved = [...hosts]
+      .map(stripScheme)
+      .filter((h) => h && h !== DOCKER_HUB_REGISTRY && h !== "docker.io");
+    if (resolved.length > 0) {
+      mirrorCache = resolved;
+      log.info("image.mirrors_discovered", { mirrors: resolved.join(",") });
+    }
+    return resolved;
+  })();
+
+  try {
+    return await mirrorInFlight;
+  } finally {
+    mirrorInFlight = null;
   }
 }
 
@@ -282,134 +264,217 @@ function stripScheme(host: string): string {
   return host.replace(/^https?:\/\//, "").replace(/\/+$/, "");
 }
 
-/** Inspect a local image and extract its digest + image id. */
+// —— local inspect ——
+
+/**
+ * Inspect a local image and extract its id plus the RepoDigest **for this
+ * repository**.
+ *
+ * Picking `RepoDigests[0]` blindly (the previous behaviour) returns a digest
+ * from an unrelated repo whenever the image is tagged more than once — e.g.
+ * present under both `docker.io/x` and a mirror prefix — which then never
+ * matches the remote digest and reports a permanent phantom update.
+ */
 async function inspectLocalImage(
   docker: DockerLike,
   image: string,
   mirrors?: string[],
 ): Promise<{ id: string | null; digest: string | null }> {
-  // The host may have pulled the image through a registry mirror, in which case
-  // the image is tagged with the mirror prefix (e.g.
-  // `mirror.ccs.tencentyun.com/sunwuyuan/...`) and the bare ref inspect fails.
-  // Try the bare ref first, then each mirror-prefixed ref so the local digest
-  // is found and the update comparison is correct (otherwise it stays null and
-  // every image falsely reports "update available").
-  const candidates = [image];
   const ref = parseImageRef(image);
-  if (mirrors && ref.registry === DOCKER_HUB_REGISTRY) {
-    for (const m of mirrors) {
-      candidates.push(`${m}/${ref.repository}:${ref.reference}`);
-    }
+  const candidates = [image];
+  // A host that pulled through a mirror may have the image tagged with the
+  // mirror prefix, in which case the bare ref does not resolve.
+  if (mirrors && canonicalRegistry(ref.registry) === DOCKER_HUB_REGISTRY) {
+    for (const m of mirrors) candidates.push(`${m}/${ref.repository}:${ref.reference}`);
   }
+
   for (const candidate of candidates) {
+    let info: ImageInspectLike;
     try {
-      const info = await docker.getImage(candidate).inspect();
-      const id = info.Id ?? null;
-      const digests = info.RepoDigests ?? [];
-      const digest = digests.length ? (digests[0]!.split("@")[1] ?? null) : null;
-      return { id, digest };
+      info = await docker.getImage(candidate).inspect();
     } catch {
-      /* try next candidate / fall through to null */
+      continue;
     }
+    return { id: info.Id ?? null, digest: pickRepoDigest(info.RepoDigests ?? [], ref) };
   }
   return { id: null, digest: null };
 }
 
 /**
- * Fetch the remote registry manifest digest for `ref` without pulling.
- * Uses an anonymous (unauthenticated) HEAD against the v2 manifest API.
- * Returns null when the registry requires auth or is unreachable.
+ * Choose the RepoDigest that actually belongs to `ref`.
  *
- * When `mirrors` is non-empty, each mirror host is probed first (the host can
- * reach its configured mirror but not registry-1.docker.io directly — common
- * behind a China registry mirror). The upstream registry is always the last
- * attempt so a misconfigured mirror can never mask a real update.
+ * Preference order matters: an image pulled through a mirror carries *both*
+ * `mirror.host/acme/app@sha256:…` and `acme/app@sha256:…`, and only the one whose
+ * registry matches the ref we probed is comparable to the digest the registry
+ * reports. Matching on repository alone would pick whichever came first.
  */
+function pickRepoDigest(repoDigests: string[], ref: ImageRef): string | null {
+  const parsed: Array<{ digest: string; registry: string; repository: string }> = [];
+  for (const entry of repoDigests) {
+    const at = entry.lastIndexOf("@");
+    if (at < 0) continue;
+    const digest = entry.slice(at + 1);
+    if (!digest) continue;
+    try {
+      const p = parseImageRef(entry.slice(0, at));
+      parsed.push({ digest, registry: canonicalRegistry(p.registry), repository: p.repository });
+    } catch {
+      /* unparseable entry — ignore */
+    }
+  }
+  if (parsed.length === 0) return null;
+
+  const wantRegistry = canonicalRegistry(ref.registry);
+  return (
+    parsed.find((p) => p.registry === wantRegistry && p.repository === ref.repository)?.digest ??
+    parsed.find((p) => p.repository === ref.repository)?.digest ??
+    parsed[0]!.digest
+  );
+}
+
+// —— remote probe ——
+
 async function probeRemoteDigest(
   ref: ImageRef,
   opts?: ImageUpdateProbeOptions,
 ): Promise<string | null> {
   const fetchImpl = opts?.fetchImpl ?? fetch;
-  // Mirror hosts are only valid for Docker Hub images (a mirror is a Hub
-  // pull-through cache). For ghcr.io / private registries, probe upstream only.
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Mirrors are Hub pull-through caches; they are meaningless for ghcr.io or a
+  // private registry, so only Hub images consult them.
   const mirrors =
-    ref.registry === DOCKER_HUB_REGISTRY ? opts?.registryMirrors ?? [] : [];
-  const hosts = [...mirrors, ref.registry];
-  for (const host of hosts) {
-    const digest = await probeDigestOnHost(ref, host, fetchImpl);
+    canonicalRegistry(ref.registry) === DOCKER_HUB_REGISTRY
+      ? (opts?.registryMirrors ?? [])
+      : [];
+  for (const host of [...mirrors, ref.registry]) {
+    const digest = await probeDigestOnHost(ref, host, fetchImpl, timeoutMs);
     if (digest) return digest;
   }
   return null;
 }
 
+const MANIFEST_ACCEPT = [
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.v2+json",
+].join(", ");
+
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
 async function probeDigestOnHost(
   ref: ImageRef,
   host: string,
   fetchImpl: typeof fetch,
+  timeoutMs: number,
 ): Promise<string | null> {
   const { repository, reference } = ref;
-  const accept =
-    "application/vnd.oci.image.index.v1+json, " +
-    "application/vnd.docker.distribution.manifest.list.v2+json, " +
-    "application/vnd.oci.image.manifest.v1+json, " +
-    "application/vnd.docker.distribution.manifest.v2+json";
-  const refPath = ref.isDigest
-    ? `/v2/${encodeURIComponent(repository).replace(/%2F/g, "/")}/manifests/${reference}`
-    : `/v2/${encodeURIComponent(repository).replace(/%2F/g, "/")}/manifests/${encodeURIComponent(reference)}`;
-  const url = `https://${host}${refPath}`;
-  try {
-    const res = await fetchImpl(url, {
-      method: "HEAD",
-      headers: { Accept: accept, "User-Agent": "zakura-runner/1.0" },
-      redirect: "follow",
-    });
-    if (!res.ok && res.status !== 401) return null;
-    const digest = res.headers.get("Docker-Content-Digest");
-    if (digest && /^sha256:[0-9a-f]{64}$/.test(digest)) return digest;
-    // Docker Hub (and Hub mirrors) require a bearer token for anonymous reads.
-    if (res.status === 401) {
-      const token = await fetchAnonymousToken(host, repository, fetchImpl);
-      if (!token) return null;
-      const retry = await fetchImpl(url, {
-        method: "HEAD",
-        headers: { Accept: accept, Authorization: `Bearer ${token}`, "User-Agent": "zakura-runner/1.0" },
+  const encodedRepo = repository
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  const refPath = `/v2/${encodedRepo}/manifests/${
+    ref.isDigest ? reference : encodeURIComponent(reference)
+  }`;
+  const url = `${registryBaseUrl(host)}${refPath}`;
+
+  const request = async (method: "HEAD" | "GET", token?: string): Promise<Response | null> => {
+    try {
+      return await fetchImpl(url, {
+        method,
+        headers: {
+          Accept: MANIFEST_ACCEPT,
+          "User-Agent": USER_AGENT,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         redirect: "follow",
+        signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!retry.ok) return null;
-      const d2 = retry.headers.get("Docker-Content-Digest");
-      return d2 && /^sha256:[0-9a-f]{64}$/.test(d2) ? d2 : null;
+    } catch (err) {
+      log.debug("image.remote_digest_probe_failed", {
+        image: `${host}/${repository}:${reference}`,
+        method,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
     }
-    return null;
-  } catch (err) {
-    log.debug("image.remote_digest_probe_failed", {
-      image: `${host}/${repository}:${reference}`,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  };
+
+  let res = await request("HEAD");
+  if (!res) return null;
+
+  let token: string | undefined;
+  if (res.status === 401) {
+    const challenge = res.headers.get("WWW-Authenticate") ?? res.headers.get("Www-Authenticate");
+    const got = await fetchRegistryToken(challenge, host, repository, fetchImpl, timeoutMs);
+    if (!got) return null;
+    token = got;
+    res = await request("HEAD", token);
+    if (!res) return null;
+  }
+  if (!res.ok) return null;
+
+  const head = res.headers.get("Docker-Content-Digest");
+  if (head && DIGEST_RE.test(head)) return head;
+
+  // Some caching proxies and pull-through mirrors answer 200 to HEAD without the
+  // digest header. Fall back to GET, which lets us read the header (or compute
+  // the digest from the body, which is exactly what the header would contain).
+  const got = await request("GET", token);
+  if (!got || !got.ok) return null;
+  const viaGet = got.headers.get("Docker-Content-Digest");
+  if (viaGet && DIGEST_RE.test(viaGet)) return viaGet;
+  try {
+    const body = new Uint8Array(await got.arrayBuffer());
+    const { createHash } = await import("node:crypto");
+    return `sha256:${createHash("sha256").update(body).digest("hex")}`;
+  } catch {
     return null;
   }
 }
 
-/** Docker Hub / OCI anonymous token bootstrap for 401 responses. */
-async function fetchAnonymousToken(
+/**
+ * Obtain a bearer token for a 401'd registry by honoring the `WWW-Authenticate`
+ * challenge, which carries the realm/service/scope to use.
+ *
+ * The previous implementation guessed instead: any host that was not ghcr.io was
+ * assumed to be a Docker Hub mirror and handed a Hub token for a repository that
+ * does not exist on Hub. That wasted a round trip against quay.io, ECR, Harbor
+ * and GitLab, and it discarded the very header that says what to do.
+ */
+async function fetchRegistryToken(
+  challenge: string | null,
   host: string,
   repository: string,
   fetchImpl: typeof fetch,
+  timeoutMs: number,
 ): Promise<string | null> {
+  let realm: string | null = null;
+  let service: string | null = null;
+  let scope: string | null = null;
+
+  if (challenge && /^\s*bearer/i.test(challenge)) {
+    realm = matchAuthParam(challenge, "realm");
+    service = matchAuthParam(challenge, "service");
+    scope = matchAuthParam(challenge, "scope");
+  }
+  if (!realm && canonicalRegistry(host) === DOCKER_HUB_REGISTRY) {
+    // Hub always uses this realm; keep it as a fallback for mirrors that 401
+    // without a challenge header.
+    realm = "https://auth.docker.io/token";
+    service = "registry.docker.io";
+  }
+  if (!realm) return null;
+
+  const url = new URL(realm);
+  if (service) url.searchParams.set("service", service);
+  url.searchParams.set("scope", scope ?? `repository:${repository}:pull`);
+
   try {
-    let authUrl: string;
-    if (host === DOCKER_HUB_REGISTRY) {
-      authUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`;
-    } else {
-      // A Hub mirror serves the same token realm as Hub. For other generic OCI
-      // registries the 401 carries a Www-Authenticate realm we don't parse here
-      // (private images are rare here) — skip so the upstream fallback tries.
-      if (isDockerHubMirror(host)) {
-        authUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`;
-      } else {
-        return null;
-      }
-    }
-    const res = await fetchImpl(authUrl, { headers: { "User-Agent": "zakura-runner/1.0" } });
+    const res = await fetchImpl(url.toString(), {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) return null;
     const json = (await res.json()) as { token?: string; access_token?: string };
     return json.token ?? json.access_token ?? null;
@@ -418,18 +483,13 @@ async function fetchAnonymousToken(
   }
 }
 
-/** Heuristic: a registry host that is a Docker Hub pull-through mirror. */
-function isDockerHubMirror(host: string): boolean {
-  return host !== DOCKER_HUB_REGISTRY && !host.includes("ghcr.io");
+function matchAuthParam(challenge: string, key: string): string | null {
+  const m = new RegExp(`${key}="([^"]+)"`, "i").exec(challenge);
+  return m?.[1] ?? null;
 }
 
-/**
- * Compare local and remote digests for one image ref.
- * `updateAvailable` is true only when the remote digest is known and differs
- * from the local one (or the local image is missing).
- * `runningStale` is true when a running container's image id differs from the
- * current tag's image id (image pulled but container not recreated).
- */
+// —— comparison ——
+
 export async function checkImageUpdate(
   docker: DockerLike,
   image: string,
@@ -440,31 +500,29 @@ export async function checkImageUpdate(
   const local = await inspectLocalImage(docker, image, probeOptions?.registryMirrors);
   let remoteDigest: string | null = null;
   let error: string | null = null;
+
   try {
     remoteDigest = await probeRemoteDigest(ref, probeOptions);
-    if (remoteDigest === null && docker.pullToDigest) {
-      // In-process probe couldn't reach the registry (proxy / private registry /
-      // no configured mirror surfaced). Let the daemon pull — it honors its own
-      // mirrors, proxies and auth, the same path `docker pull` uses. Returns the
-      // image's RepoDigest after pulling, or null if the daemon can't either.
+    if (remoteDigest === null && probeOptions?.allowPullFallback && docker.pullToDigest) {
       remoteDigest = await docker.pullToDigest(image);
     }
-    if (remoteDigest === null && local.digest === null) {
+    if (remoteDigest === null) {
+      // Report the failure even when a local digest exists. Otherwise a failed
+      // probe is indistinguishable from "you are up to date".
       error = "registry_probe_unavailable";
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
   }
+
   const updateAvailable =
-    remoteDigest !== null &&
-    (local.digest === null || local.digest !== remoteDigest);
-  // A running container on a different (older) image id than the current tag
-  // means the image was refreshed but the container was never recreated.
+    remoteDigest !== null && (local.digest === null || local.digest !== remoteDigest);
   const runningStale =
     local.id !== null &&
     runningImageIds !== undefined &&
     runningImageIds.size > 0 &&
     ![...runningImageIds].every((rid) => rid === local.id);
+
   return {
     image,
     localId: local.id,
@@ -476,28 +534,61 @@ export async function checkImageUpdate(
   };
 }
 
-/**
- * Batch-check a set of images. Used by the Runner heartbeat so the Server
- * gets a concise "which images have updates" snapshot per node.
- * `runningImageIds` (when provided) maps each workspace image to the set of
- * image ids of running containers that started from that image ref, so each
- * entry's `runningStale` reflects whether those containers lag the tag.
- * `probeOptions.registryMirrors` is tried first for each Docker Hub image so
- * a host behind a registry mirror can still detect updates.
- */
+/** Bounded-concurrency map so one slow registry cannot serialize the whole sweep. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]!, i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export async function checkImageUpdates(
   docker: DockerLike,
   images: string[],
   runningImageIds?: Map<string, Set<string>>,
   probeOptions?: ImageUpdateProbeOptions,
 ): Promise<ImageDigestInfo[]> {
-  const out: ImageDigestInfo[] = [];
-  for (const image of images) {
-    // Look up running ids by the normalized ref so a container reported as
-    // `docker.io/...` or `registry-1.docker.io/...` matches a probe for the
-    // bare `user/repo:tag`. Callers key the map with normalizeImageRef too.
-    const runningIds = runningImageIds?.get(normalizeImageRef(image));
-    out.push(await checkImageUpdate(docker, image, runningIds, probeOptions));
+  return mapWithConcurrency(images, 4, (image) =>
+    // Look up running ids by normalized ref so a container reported as
+    // `docker.io/...` matches a probe for the bare `user/repo:tag`.
+    checkImageUpdate(docker, image, runningImageIds?.get(normalizeImageRef(image)), probeOptions),
+  );
+}
+
+/**
+ * Group running containers by the normalized ref of the image they were started
+ * from. Shared so the runner and the server cannot drift (they previously had
+ * near-identical copies, one of which forgot to skip empty image ids and so
+ * inserted `""` into the set, making `runningStale` spuriously true).
+ */
+export function groupRunningImageIds(
+  containers: Array<{ Image?: string | null; ImageID?: string | null }>,
+): Map<string, Set<string>> {
+  const byRef = new Map<string, Set<string>>();
+  for (const c of containers) {
+    const image = c.Image?.trim();
+    const imageId = c.ImageID?.trim();
+    if (!image || !imageId) continue;
+    let key: string;
+    try {
+      key = normalizeImageRef(image);
+    } catch {
+      continue;
+    }
+    const set = byRef.get(key) ?? new Set<string>();
+    set.add(imageId);
+    byRef.set(key, set);
   }
-  return out;
+  return byRef;
 }

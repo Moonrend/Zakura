@@ -80,12 +80,13 @@ import { resolveAgentMemory } from "../services/memory-runtime.js";
 import type { ToolCallStore } from "../services/tool-call-store.js";
 import { OauthError, isRedirectUriRegistered, type OauthService } from "../services/oauth.js";
 import { isCimdClientId } from "../services/oauth-cimd.js";
-import { PROVIDER_CATEGORY_META } from "@zakura/shared";
+import { PROVIDER_CATEGORY_META, hasImageProbeErrors } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerAcpRoutes } from "./acp-routes.js";
+import { AcpRegistryService } from "../services/acp/registry.js";
 import { AcpSessionService } from "../services/acp/session.js";
 import { registerAutomationRoutes } from "./automation-routes.js";
 import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
@@ -2629,6 +2630,10 @@ export async function createApiApp(deps: {
   // Cloud Agent：持久会话 + MCP 工具注入推理循环
   {
     const cloudStore = cloudSessionStore;
+    // Registry-backed adapter catalogue + on-demand install. Shared by the ACP
+    // session boot (to provision before launch) and the ACP routes (to browse the
+    // catalogue and report per-adapter disk usage / updates).
+    const acpRegistry = new AcpRegistryService(agentService.workspace);
     const acpSessions = new AcpSessionService({
       agentService,
       store: cloudStore,
@@ -2636,10 +2641,12 @@ export async function createApiApp(deps: {
       workspaceFs: workspaceFsProvider,
       publicBaseUrl: config.publicBaseUrl,
       maxConcurrentAcpPerTenant: config.maxConcurrentAcpPerTenant || 8,
+      acpRegistry,
     });
     registerAcpRoutes(app, {
       agentService,
       acp: acpSessions,
+      acpRegistry,
       publicBaseUrl: config.publicBaseUrl,
     });
     remoteIngress = new RemoteAgentIngress(
@@ -3106,6 +3113,7 @@ export async function createApiApp(deps: {
       network: networkSettings,
       orchestrator,
       runtime,
+      imageUpdateChecker,
     });
   }
   if (migrations) {
@@ -5213,7 +5221,9 @@ export async function createApiApp(deps: {
         .map((s) => decorate(s, metaMap.get(s.nodeId)!));
       const hasUpdates = nodes.some((s) => s.hasUpdates);
       const hasRunningStale = nodes.some((s) => s.hasRunningStale);
-      return c.json({ hasUpdates, hasRunningStale, nodes });
+      // 探测失败 ≠ 已是最新：前端要能把「未知」和「最新」区分开。
+      const hasErrors = nodes.some((s) => hasImageProbeErrors(s));
+      return c.json({ hasUpdates, hasRunningStale, hasErrors, nodes });
     });
 
     app.post("/api/system/image-updates/check", async (c) => {
@@ -5224,7 +5234,10 @@ export async function createApiApp(deps: {
       const node = await runtimeNodes.getAccessible(session.tenantId, nodeId);
       if (!node) return c.json({ error: "Not found" }, 404);
       try {
-        const status = await imageUpdateChecker.checkNode(nodeId);
+        // 用户点的「检查」允许最后退回 docker pull 取摘要（后台巡检永远不会）。
+        const status = await imageUpdateChecker.checkNode(nodeId, {
+          allowPullFallback: true,
+        });
         return c.json(
           decorate(status, {
             name: node.name,
@@ -5278,7 +5291,8 @@ export async function createApiApp(deps: {
       }
       const hasUpdates = nodes.some((s) => s.hasUpdates);
       const hasRunningStale = nodes.some((s) => s.hasRunningStale);
-      return c.json({ hasUpdates, hasRunningStale, nodes });
+      const hasErrors = nodes.some((s) => hasImageProbeErrors(s));
+      return c.json({ hasUpdates, hasRunningStale, hasErrors, nodes });
     });
   }
 

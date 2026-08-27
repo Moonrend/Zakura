@@ -100,7 +100,18 @@ export async function startRunner(opts?: RunnerLaunchOptions): Promise<{
         close: () =>
           new Promise<void>((res, rej) => {
             stopSync?.();
+            // `server.close()` only stops accepting new connections; it then waits
+            // for existing keep-alive sockets to drain. The control plane talks to
+            // us over a pooled fetch agent that holds sockets open indefinitely, so
+            // without force-closing them shutdown never completes.
+            // (`ServerType` is a union that may be an Http2Server, hence the guard.)
+            const forceable = server as {
+              closeIdleConnections?: () => void;
+              closeAllConnections?: () => void;
+            };
+            forceable.closeIdleConnections?.();
             server.close((err) => (err ? rej(err) : res()));
+            forceable.closeAllConnections?.();
           }),
       });
     });

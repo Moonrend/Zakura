@@ -75,7 +75,7 @@ export default function InviteAcceptPage() {
       </div>
       <div className="w-full max-w-[380px] space-y-5 animate-in-page">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight">加入团队</h1>
+          <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">加入团队</h1>
           <p className="mt-1 text-sm text-muted-foreground">接受邀请成为团队成员</p>
         </div>
 

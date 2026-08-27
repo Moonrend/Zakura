@@ -19,13 +19,28 @@ describe("Runner auth + FS + migration HTTP", () => {
     version: "0.1.0-test",
   });
 
-  it("GET /v1/ping works without auth", async () => {
+  // /v1/ping reports storageRoot, host info and the Docker version. A privileged
+  // service must not hand that to unauthenticated callers, so it sits behind the
+  // same bearer check as the rest of /v1/*. Liveness probes use public /health.
+  it("GET /v1/ping requires auth", async () => {
     const res = await app.request("/v1/ping");
+    assert.equal(res.status, 401);
+  });
+
+  it("GET /v1/ping returns host info with a valid token", async () => {
+    const res = await app.request("/v1/ping", {
+      headers: { authorization: `Bearer ${token}` },
+    });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { ok: boolean; version: string; storageRoot: string };
     assert.equal(body.ok, true);
     assert.ok(body.version);
     assert.equal(body.storageRoot, storageRoot);
+  });
+
+  it("GET /health stays public for liveness probes", async () => {
+    const res = await app.request("/health");
+    assert.equal(res.status, 200);
   });
 
   it("rejects protected FS without token", async () => {
@@ -158,7 +173,9 @@ describe("Runner process launch (real entrypoint)", () => {
     });
 
     try {
-      const ping1 = await fetch(`http://127.0.0.1:${r1.port}/v1/ping`);
+      const ping1 = await fetch(`http://127.0.0.1:${r1.port}/v1/ping`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
       assert.equal(ping1.status, 200);
       const body1 = (await ping1.json()) as { ok: boolean; storageRoot: string };
       assert.equal(body1.ok, true);
@@ -178,7 +195,9 @@ describe("Runner process launch (real entrypoint)", () => {
         token,
       });
       try {
-        const ping2 = await fetch(`http://127.0.0.1:${r2.port}/v1/ping`);
+        const ping2 = await fetch(`http://127.0.0.1:${r2.port}/v1/ping`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
         assert.equal(ping2.status, 200);
         const body2 = (await ping2.json()) as { ok: boolean };
         assert.equal(body2.ok, true);

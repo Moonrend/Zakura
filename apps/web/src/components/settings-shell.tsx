@@ -15,7 +15,14 @@ export function PageShell({
   return <div className={cn("page-shell", className)}>{children}</div>;
 }
 
-/** 设置页顶栏：标题 + 右侧操作，无说明文案 */
+/**
+ * 页面顶栏：标题 + 右侧操作。
+ *
+ * 标题用 text-xl/2xl 而不是原来的 text-lg。原先几乎所有字号都挤在 14–18px 之间，
+ * h1 只比正文大一点点、小标签又只小一点点，层级全靠灰度区分 —— 结果每块内容都在
+ * 同一个音量上喊，页面显得又吵又不稳。跟正文拉开一档真实的字号差，
+ * 眼睛才能一眼找到「这一页是关于什么的」。
+ */
 export function SettingsHeader({
   title,
   description,
@@ -30,14 +37,16 @@ export function SettingsHeader({
   return (
     <div
       className={cn(
-        "flex flex-wrap items-start justify-between gap-2",
+        "flex flex-wrap items-start justify-between gap-x-3 gap-y-2",
         className,
       )}
     >
-      <div className="min-w-0 space-y-0.5">
-        <h1 className="font-heading text-lg font-semibold tracking-tight">{title}</h1>
+      <div className="min-w-0 space-y-1">
+        <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">
+          {title}
+        </h1>
         {description ? (
-          <p className="text-xs text-muted-foreground">{description}</p>
+          <p className="max-w-prose text-sm text-muted-foreground">{description}</p>
         ) : null}
       </div>
       {actions ? (

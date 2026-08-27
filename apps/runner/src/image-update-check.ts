@@ -1,15 +1,17 @@
 /**
- * Image update detection is now shared from @zakura/core so both the server
- * (local Docker probe) and the runner use a single implementation.
- * Re-exported here to keep existing import paths (`./image-update-check.js`)
- * stable; new code should import from `@zakura/core` directly.
+ * Re-export of the shared image-update probe.
+ *
+ * The implementation lives in `@zakura/core` so the server (probing local Docker
+ * in-process) and the Runner (probing its own host) cannot drift apart.
  */
 export {
   parseImageRef,
   normalizeImageRef,
+  sameImageRepository,
   checkImageUpdate,
   checkImageUpdates,
   discoverDockerRegistryMirrors,
+  groupRunningImageIds,
   type ImageRef,
   type ImageDigestInfo,
   type DockerLike,

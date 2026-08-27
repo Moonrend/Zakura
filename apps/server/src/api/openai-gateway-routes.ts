@@ -14,6 +14,23 @@ import {
   translateResponsesRequest,
 } from "../services/openai-gateway-responses.js";
 import type { UpstreamModelsService } from "../services/upstream-models.js";
+import {
+  anthropicBlockStop,
+  anthropicErrorBody,
+  anthropicMessageId,
+  anthropicSse,
+  anthropicStopReason,
+  anthropicStreamEnd,
+  anthropicStreamStart,
+  anthropicTextBlockStart,
+  anthropicTextDelta,
+  anthropicThinkingBlockStart,
+  anthropicThinkingDelta,
+  anthropicToolUseEvents,
+  translateAnthropicRequest,
+  translateAnthropicResponse,
+  type AnthropicSseEvent,
+} from "../services/anthropic-gateway.js";
 
 function sse(data: unknown): string {
   return `data: ${JSON.stringify(data)}\n\n`;
@@ -738,6 +755,166 @@ export function registerOpenAiGatewayRoutes(
               type: "server_error",
               param: null,
             },
+          });
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        "X-Zakura-Session-Id": context.sessionId,
+      },
+    });
+  });
+
+  /**
+   * Anthropic Messages API.
+   *
+   * A lot of tooling only speaks Messages — the Anthropic SDKs, Claude Code, and
+   * anything pointed at `ANTHROPIC_BASE_URL` — so exposing it here removes the need
+   * for a client-side shim. Auth accepts `x-api-key` (Anthropic's header) as well as
+   * `Authorization: Bearer`, which `authenticateGatewayRequest` already handles.
+   *
+   * Translation lives in services/anthropic-gateway.ts; this route only wires it to
+   * the same prepare/invoke pipeline the other two protocols use, so all three share
+   * session handling, tool injection and routing.
+   */
+  app.post("/v1/messages", async (c) => {
+    const auth = await authenticateGatewayRequest(c, deps.db);
+    if ("response" in auth) return auth.response;
+
+    let raw: unknown;
+    try {
+      raw = await c.req.json<unknown>();
+    } catch {
+      return c.json(anthropicErrorBody("请求体必须是 JSON"), 400);
+    }
+    const incoming = (raw ?? {}) as { stream?: unknown; model?: unknown; max_tokens?: unknown };
+    // max_tokens is required by the Messages spec; rejecting here gives a clearer
+    // error than letting an upstream complain about a missing limit.
+    if (typeof incoming.max_tokens !== "number") {
+      return c.json(anthropicErrorBody("max_tokens 是必填字段"), 400);
+    }
+
+    const body = translateAnthropicRequest(raw);
+    if (!auth.keyed.apiKey.agentId) {
+      return c.json(anthropicErrorBody("该 API Key 未绑定 Agent", "permission_error"), 403);
+    }
+
+    let context;
+    try {
+      context = await deps.gateway.prepare(
+        auth.keyed.tenant.id,
+        auth.keyed.apiKey.agentId,
+        body,
+        {
+          clientSessionKey: resolveClientSessionKey(c.req.raw.headers, body),
+          apiKeyId: auth.keyed.apiKey.id,
+        },
+      );
+    } catch (err) {
+      return c.json(
+        anthropicErrorBody(err instanceof Error ? err.message : String(err)),
+        400,
+      );
+    }
+    c.header("X-Zakura-Session-Id", context.sessionId);
+
+    const messageId = anthropicMessageId();
+    const model = context.model ?? "zakura";
+
+    if (incoming.stream !== true) {
+      try {
+        const result = await deps.gateway.invoke(auth.keyed.tenant.id, context);
+        return c.json(
+          translateAnthropicResponse(result, {
+            id: messageId,
+            model: result.model || model,
+          }),
+        );
+      } catch (err) {
+        return c.json(
+          anthropicErrorBody(err instanceof Error ? err.message : String(err)),
+          400,
+        );
+      }
+    }
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start: async (controller) => {
+        const send = (event: AnthropicSseEvent) =>
+          controller.enqueue(encoder.encode(anthropicSse(event)));
+        // Anthropic's stream is a strict sequence with a monotonic block index, so
+        // track it here and open/close each block exactly once.
+        let index = 0;
+        let textOpen = false;
+        let thinkingOpen = false;
+        const closeOpenBlock = () => {
+          if (thinkingOpen || textOpen) {
+            send(anthropicBlockStop(index));
+            index += 1;
+            textOpen = false;
+            thinkingOpen = false;
+          }
+        };
+        try {
+          for (const event of anthropicStreamStart(messageId, model)) send(event);
+
+          const result = await deps.gateway.invoke(auth.keyed.tenant.id, context, {
+            onDelta: (text) => {
+              if (!text) return;
+              // Reasoning and answer are different block types; switching from one
+              // to the other has to close the previous block first.
+              if (thinkingOpen) closeOpenBlock();
+              if (!textOpen) {
+                send(anthropicTextBlockStart(index));
+                textOpen = true;
+              }
+              send(anthropicTextDelta(index, text));
+            },
+            onReasoningDelta: (text) => {
+              if (!text) return;
+              if (textOpen) closeOpenBlock();
+              if (!thinkingOpen) {
+                send(anthropicThinkingBlockStart(index));
+                thinkingOpen = true;
+              }
+              send(anthropicThinkingDelta(index, text));
+            },
+            signal: c.req.raw.signal,
+          });
+
+          closeOpenBlock();
+
+          for (const call of result.toolCalls ?? []) {
+            for (const event of anthropicToolUseEvents(index, call)) send(event);
+            index += 1;
+          }
+
+          for (const event of anthropicStreamEnd(
+            anthropicStopReason(result.finishReason, Boolean(result.toolCalls?.length)),
+            {
+              inputTokens: result.usage?.promptTokens ?? 0,
+              outputTokens: result.usage?.completionTokens ?? 0,
+            },
+          )) {
+            send(event);
+          }
+          controller.close();
+        } catch (err) {
+          // Mid-stream failures must arrive as an Anthropic `error` event; a bare
+          // close looks to the SDK like a truncated-but-successful message.
+          send({
+            event: "error",
+            data: anthropicErrorBody(
+              err instanceof Error ? err.message : String(err),
+              "api_error",
+            ),
           });
           controller.close();
         }

@@ -131,7 +131,7 @@ export default function OauthAuthorizePage() {
     <div className="grid min-h-screen place-items-center bg-background p-6">
       <div className="w-full max-w-[400px] space-y-5">
         <div>
-          <h1 className="text-lg font-semibold tracking-tight">授权接入 MCP</h1>
+          <h1 className="font-heading text-xl font-semibold tracking-tight sm:text-2xl">授权接入 MCP</h1>
         </div>
 
         {infoError ? (

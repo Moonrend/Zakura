@@ -19,6 +19,41 @@ import { closeRedis } from "../src/services/redis.js";
 const SECRET = "test-secret";
 const TENANT = "tenant-1";
 
+/**
+ * 握手鉴权会调 checkSessionSuspended(db, …)，它要读 users / tenants。
+ * 之前这里传的是 `{}`，于是校验一抛异常就被兜底成 unauthorized——所有「合法 token」
+ * 的用例都拿不到 connect 事件，而它们又在无超时的 Promise 上等，于是整个文件挂死。
+ * 给一个最小可用的 db 桩：两张表都返回未封禁。
+ */
+function makeFakeDb(overrides?: { userSuspended?: boolean; tenantSuspended?: boolean }) {
+  const user = { id: "u1", suspendedAt: overrides?.userSuspended ? new Date() : null };
+  const tenant = { id: TENANT, suspendedAt: overrides?.tenantSuspended ? new Date() : null };
+  return {
+    query: {
+      users: { findFirst: async () => user },
+      tenants: { findFirst: async () => tenant },
+    },
+  } as never;
+}
+
+/** 等一个 socket 事件，超时就失败——绝不无限等待 */
+function waitForEvent(socket: ClientSocket, event: string, timeoutMs = 5000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`等待 socket 事件 "${event}" 超时（${timeoutMs}ms）`)),
+      timeoutMs,
+    );
+    socket.once("connect_error", (err: Error) => {
+      clearTimeout(timer);
+      reject(new Error(`握手失败：${err.message}`));
+    });
+    socket.once(event, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 function makeEvent(seq: number, sessionId = "s1"): CloudAgentEvent {
   return {
     id: `e${seq}`,
@@ -86,7 +121,7 @@ async function startGateway(store: SocketGatewayStore, app?: Hono): Promise<Harn
   }
 
   const gw = createSocketGateway(server, {
-    db: {} as never,
+    db: makeFakeDb(),
     config: { secret: SECRET } as never,
     store,
   });
@@ -198,7 +233,7 @@ describe("socket gateway", () => {
     const fake = makeFakeStore({ sessionExists: false });
     const h = await startGateway(fake.store);
     const c = track(connect(h.url, validToken()));
-    await new Promise<void>((r) => c.on("connect", () => r()));
+    await waitForEvent(c, "connect");
 
     const ack = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       c.emit("subscribe:session", { agentId: "a1", sessionId: "s1", afterSeq: 0 }, resolve);
@@ -221,7 +256,7 @@ describe("socket gateway", () => {
     });
     const h = await startGateway(fake.store);
     const c = track(connect(h.url, validToken()));
-    await new Promise<void>((r) => c.on("connect", () => r()));
+    await waitForEvent(c, "connect");
 
     const seen: number[] = [];
     c.on("cloud", (ev: CloudAgentEvent) => seen.push(ev.seq));
@@ -242,7 +277,7 @@ describe("socket gateway", () => {
     const fake = makeFakeStore({ backlog: [makeEvent(5)] });
     const h = await startGateway(fake.store);
     const c = track(connect(h.url, validToken()));
-    await new Promise<void>((r) => c.on("connect", () => r()));
+    await waitForEvent(c, "connect");
 
     const seen: number[] = [];
     c.on("cloud", (ev: CloudAgentEvent) => seen.push(ev.seq));
@@ -266,7 +301,7 @@ describe("socket gateway", () => {
     const fake = makeFakeStore();
     const h = await startGateway(fake.store);
     const c = track(connect(h.url, validToken()));
-    await new Promise<void>((r) => c.on("connect", () => r()));
+    await waitForEvent(c, "connect");
 
     for (const sid of ["s1", "s2"]) {
       await new Promise<void>((resolve) => {
@@ -291,7 +326,7 @@ describe("socket gateway", () => {
     const fake = makeFakeStore();
     const h = await startGateway(fake.store);
     const c = track(connect(h.url, validToken()));
-    await new Promise<void>((r) => c.on("connect", () => r()));
+    await waitForEvent(c, "connect");
 
     for (let i = 0; i < 2; i += 1) {
       await new Promise<void>((resolve) => {

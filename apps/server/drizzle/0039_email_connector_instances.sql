@@ -9,8 +9,9 @@ CREATE TABLE IF NOT EXISTS "email_connector_instances" (
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "email_connector_instances_tenant"
   ON "email_connector_instances" ("tenant_id");
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "email_connector_instances_tenant_product"
   ON "email_connector_instances" ("tenant_id", "product");

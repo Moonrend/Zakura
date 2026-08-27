@@ -60,13 +60,20 @@ export type {
 export { generateRunnerToken, hashRunnerToken, isRunnerToken } from "./runner-token.js";
 export { RunnerClient } from "./runner-client.js";
 export type { RunnerClientOptions } from "./runner-client.js";
-export { toDockerHostPath, unwrapShellCommand } from "./docker-path.js";
+export {
+  toDockerHostPath,
+  unwrapShellCommand,
+  mapContainerPathToHost,
+} from "./docker-path.js";
 export {
   parseImageRef,
   normalizeImageRef,
+  sameImageRepository,
   checkImageUpdate,
   checkImageUpdates,
   discoverDockerRegistryMirrors,
+  groupRunningImageIds,
+  _resetMirrorCacheForTests,
 } from "./image-update-check.js";
 export type {
   ImageRef,

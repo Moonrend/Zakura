@@ -16,7 +16,27 @@ import { RunnerDockerWorkspace } from "./docker-workspace.js";
 import { RunnerDockerComponents } from "./docker-components.js";
 import { TunnelManager } from "./tunnel/manager.js";
 import { updateRunnerSelf } from "./system-update.js";
-import { checkImageUpdates, normalizeImageRef, discoverDockerRegistryMirrors } from "./image-update-check.js";
+import {
+  checkImageUpdates,
+  discoverDockerRegistryMirrors,
+  groupRunningImageIds,
+  sameImageRepository,
+} from "./image-update-check.js";
+import { DEFAULT_RUNNER_IMAGE, type ImageUpdateEntry } from "@zakura/shared";
+
+/**
+ * `POST /v1/system/update` recreates the privileged Runner container from the
+ * supplied ref, so restrict it to the repository we already run. Compared by
+ * repository (not exact string) so upgrading `:v1.2` → `:v1.3` or a digest still
+ * works, while a token leak cannot point us at an unrelated image.
+ */
+function isAllowedRunnerImage(image: string): boolean {
+  const current = process.env.ZAKURA_RUNNER_IMAGE?.trim();
+  const allowed = [current, DEFAULT_RUNNER_IMAGE].filter(
+    (v): v is string => Boolean(v),
+  );
+  return allowed.some((ref) => sameImageRepository(ref, image));
+}
 
 export type RunnerConfig = {
   storageRoot: string;
@@ -100,6 +120,14 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     }),
   );
 
+  // Auth for every /v1/* route. Registered before the routes so it actually runs:
+  // Hono composes handlers in registration order, so middleware added *after* a
+  // route never executes for it. `/v1/ping` used to sit above this line and so was
+  // effectively public — it reports storageRoot, host info and the Docker version,
+  // which a privileged service should not hand to unauthenticated callers.
+  // (`RunnerClient` always sends the bearer token, including for ping.)
+  app.use("/v1/*", requireRunnerAuth(cfg.auth));
+
   app.get("/v1/ping", async (c) => {
     const hostInfo = collectHostInfo(cfg.storageRoot, cfg.publicUrl);
     const docker = await dockerWs.ping();
@@ -115,8 +143,6 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     });
   });
 
-  // All other /v1/* require auth
-  app.use("/v1/*", requireRunnerAuth(cfg.auth));
 
   // --- System: version / self-update / image refresh ---
   app.get("/v1/system/version", (c) => {
@@ -135,14 +161,29 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     };
     const image = body.image?.trim();
     if (!image) return c.json({ error: "image is required" }, 400);
+    // This endpoint recreates the privileged, docker.sock-mounted Runner container
+    // from `image`. An unrestricted ref would turn a leaked token into arbitrary
+    // privileged code on the host, so only accept refs from the same repository as
+    // the image we are currently running.
+    if (!isAllowedRunnerImage(image)) {
+      return c.json(
+        {
+          error:
+            "拒绝该镜像：只允许升级到当前 Runner 镜像所在的同一仓库。" +
+            "如需切换仓库，请在宿主机手动重建容器。",
+        },
+        403,
+      );
+    }
     try {
       const result = await updateRunnerSelf(dockerWs.client, image, {
         recreateDelayMs: body.recreateDelayMs,
       });
       return c.json(result);
     } catch (err) {
-      const e = fsError(err);
-      return c.json(e.body, e.status === 404 ? 404 : 500);
+      // Not a filesystem error: routing it through fsError turned "cannot locate
+      // container" into a bare 500 and a 403 PathJailError into a 500 as well.
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 
@@ -169,6 +210,8 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
   app.post("/v1/system/image-updates", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as {
       images?: string[];
+      /** Explicit opt-in to the `docker pull` fallback (mutates host state). */
+      allowPullFallback?: boolean;
     };
     const images = (body.images ?? []).map((s) => s.trim()).filter(Boolean);
     if (!images.length) return c.json({ error: "images is required" }, 400);
@@ -179,16 +222,9 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       // or `registry-1.docker.io/...` (or bare), and the server probes the
       // bare `user/repo:tag`, so normalizeImageRef aligns the keys.
       const running = await dockerWs.listRunningImages();
-      const runningByRef = new Map<string, Set<string>>();
-      for (const r of running) {
-        const key = normalizeImageRef(r.imageRef);
-        let set = runningByRef.get(key);
-        if (!set) {
-          set = new Set();
-          runningByRef.set(key, set);
-        }
-        set.add(r.imageId);
-      }
+      const runningByRef = groupRunningImageIds(
+        running.map((r) => ({ Image: r.imageRef, ImageID: r.imageId })),
+      );
       // The host's Docker daemon may be configured with a registry mirror
       // (e.g. a China pull-through cache) because it cannot reach
       // registry-1.docker.io directly. Discover the mirrors from the daemon
@@ -197,34 +233,22 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       // first so the update check works on those hosts; the upstream registry
       // is the fallback.
       const registryMirrors = await discoverDockerRegistryMirrors(dockerWs.client);
-      // Wrap the dockerode client with a daemon-pull fallback so that when the
-      // in-process manifest probe can't reach the registry (proxy / private
-      // registry / no surfaced mirror), the daemon — which honors its own
-      // mirrors, proxies and auth — pulls and reports the real remote digest.
+      // `pullToDigest` is only wired in when the caller explicitly asks for it:
+      // it performs a real `docker pull`, so leaving it always-on turned a
+      // read-only check into a state-mutating one (see image-update-check.ts).
+      const allowPullFallback = body.allowPullFallback === true;
       const dockerLike = {
         getImage: (img: string) => dockerWs.client.getImage(img),
         info: () => dockerWs.client.info(),
-        pullToDigest: (img: string) => dockerWs.pullToDigest(img),
+        ...(allowPullFallback
+          ? { pullToDigest: (img: string) => dockerWs.pullToDigest(img) }
+          : {}),
       };
-      const results = await checkImageUpdates(dockerLike, images, runningByRef, {
+      const images_ = await checkImageUpdates(dockerLike, images, runningByRef, {
         registryMirrors,
+        allowPullFallback,
       });
-      const payload = results.map((r) => ({
-        image: r.image,
-        localDigest: r.localDigest,
-        remoteDigest: r.remoteDigest,
-        updateAvailable: r.updateAvailable,
-        runningStale: r.runningStale,
-        error: r.error,
-      })) as Array<{
-        image: string;
-        localDigest: string | null;
-        remoteDigest: string | null;
-        updateAvailable: boolean;
-        runningStale: boolean;
-        error: string | null;
-      }>;
-      return c.json({ images: payload });
+      return c.json({ images: images_ satisfies ImageUpdateEntry[] });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

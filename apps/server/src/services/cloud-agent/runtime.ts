@@ -2437,10 +2437,13 @@ export class CloudAgentRuntime {
         definitions,
         nameMap,
         compactBudget: budget,
-        maxRounds: 16,
+        // 不额外给子代理设上限：硬编码的 16 轮会在用户毫不知情的情况下把任务截断，
+        // 而父代理只会收到一段「可能未完成」的文字，看起来就像子代理自己放弃了。
+        // 只有用户在 Agent 设置里显式配了 maxToolRounds 才限制，否则跑到模型收手为止。
+        ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
         maxRoundsNote: (max, lastText) =>
-          `子代理达到轮次上限（${max}），任务可能未完成。${
-            lastText ? `最后进展：${lastText.slice(0, 2000)}` : "建议缩小任务范围后重新派生。"
+          `子代理达到你配置的轮次上限（${max}），任务可能未完成。${
+            lastText ? `最后进展：${lastText.slice(0, 2000)}` : "可在 Agent 设置里调高或清空「最大工具轮次」。"
           }`,
         ...(opts.isCancelled ? { isCancelled: opts.isCancelled } : {}),
         ...(opts.project ? { defaultWorkingDir: projectDefaultWorkingDir(opts.project) } : {}),
@@ -2587,8 +2590,10 @@ export class CloudAgentRuntime {
         definitions,
         nameMap,
         compactBudget: budget,
-        maxRounds: 12,
-        maxRoundsNote: (max) => `达到委派轮次上限（${max}），任务可能未完成。`,
+        // 同上：委派不再硬编码 12 轮，只认目标 Agent 自己配置的上限。
+        ...(targetCloud.maxToolRounds != null ? { maxRounds: targetCloud.maxToolRounds } : {}),
+        maxRoundsNote: (max) =>
+          `委派目标达到其配置的轮次上限（${max}），任务可能未完成。`,
         isCancelled: opts.isCancelled,
         // 目标 Agent 在委派中派生子代理：同样并行执行、记录链接、传导取消
         hooks: {

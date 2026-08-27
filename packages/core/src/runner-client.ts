@@ -1,7 +1,7 @@
 /**
  * Server-side HTTP client for a remote Runner Agent.
  */
-import type { MigrationManifest, RunnerHostInfo } from "@zakura/shared";
+import type { ImageUpdateEntry, MigrationManifest, RunnerHostInfo } from "@zakura/shared";
 import type {
   ListDetailedResult,
   ReadTextResult,
@@ -127,35 +127,19 @@ export class RunnerClient {
    */
   async checkImageUpdates(body: {
     images: string[];
-  }): Promise<{
-    images: Array<{
-      image: string;
-      localDigest: string | null;
-      remoteDigest: string | null;
-      updateAvailable: boolean;
-      runningStale: boolean;
-      error: string | null;
-    }>;
-  }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/system/image-updates`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-    );
+    /** Opt in to the daemon-pull digest fallback (mutates the Runner host). */
+    allowPullFallback?: boolean;
+  }): Promise<{ images: ImageUpdateEntry[] }> {
+    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/image-updates`, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+      // A probe that pulls can legitimately take minutes; a plain one must not
+      // hang forever on an unreachable Runner.
+      signal: AbortSignal.timeout(body.allowPullFallback ? 10 * 60_000 : 90_000),
+    });
     if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as {
-      images: Array<{
-        image: string;
-        localDigest: string | null;
-        remoteDigest: string | null;
-        updateAvailable: boolean;
-        runningStale: boolean;
-        error: string | null;
-      }>;
-    };
+    return (await res.json()) as { images: ImageUpdateEntry[] };
   }
 
   async startWorkspace(body: {
