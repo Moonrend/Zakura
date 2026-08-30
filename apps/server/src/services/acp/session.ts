@@ -1058,19 +1058,24 @@ export class AcpSessionService {
     const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
     const cwd = projectDefaultWorkingDir(session?.project);
 
-    // ACP adapters always run in a dedicated sidecar container: smaller image,
-    // independent lifecycle from the workspace, and isolated resource usage.
-    // The workspace container handles terminal/fs callbacks only.
-    const useSidecar = true;
+    // Try to use a dedicated ACP sidecar container for the adapter process.
+    // If the sidecar image is not available (not yet built/pushed), fall back
+    // to running the adapter inside the workspace container — identical to the
+    // pre-sidecar behavior and always works.
+    let useSidecar = true;
 
     // Workspace container is always needed for terminal/fs callbacks.
-    // ACP sidecar (when enabled) runs the adapter binary separately.
     const workspaceReady = this.deps.workspace
       .ensureStarted(agent, { require: "shell" })
       .catch(() => undefined);
-    const sidecarReady = useSidecar
-      ? this.deps.workspace.ensureAcpSidecar(agent).catch(() => undefined)
-      : Promise.resolve(undefined);
+    const sidecarReady = this.deps.workspace
+      .ensureAcpSidecar(agent)
+      .catch((err) => {
+        // Sidecar unavailable — gracefully degrade to in-workspace mode.
+        useSidecar = false;
+        console.warn(`[acp] sidecar 不可用，回退到 workspace 模式：${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      });
 
     // Repair legacy Zakura ACP profiles at the point of use as well as in the
     // settings route. This closes the path where a user starts chat directly

@@ -163,7 +163,13 @@ export function resolveImageForMode(
   configured: string | null | undefined,
 ): string {
   if (mode === "display") return resolveWorkspaceImage(configured);
-  return resolveWorkspaceLiteImage();
+  // Lite image may not exist yet (not built/pushed). Attempt to use it, but
+  // resolveWorkspaceImage is a safe fallback — full image is a superset.
+  const lite = resolveWorkspaceLiteImage();
+  // If the user explicitly configured a workspace image, honor it regardless
+  // of mode — they know what they want.
+  if (configured?.trim()) return resolveWorkspaceImage(configured);
+  return lite;
 }
 
 /** 旧版本地构建标签（docker build -t zakura/workspace:debian） */
@@ -751,7 +757,7 @@ export class AgentWorkspaceService {
       log("network", "确保网络…", 18, "network");
       await this.runtime.ensureNetwork(this.config.dockerNetwork);
 
-      const image = resolveImageForMode(mode, agent.workspaceImage);
+      let image = resolveImageForMode(mode, agent.workspaceImage);
       const name = workspaceContainerName(tenant.slug, agent.slug);
 
       if (agent.workspaceImage !== image) {
@@ -791,9 +797,8 @@ export class AgentWorkspaceService {
       }
 
       mkdirSync(root, { recursive: true });
-      // Always use prebaked image for display; shell-only keeps a tiny keepalive Cmd.
       log("image", `确保工作区镜像 ${image}…`, 30, "image");
-      await this.ensurePrebakedWorkspaceImage(image, (msg) =>
+      image = await this.ensurePrebakedWorkspaceImage(image, (msg) =>
         log("image", msg, 35, "image"),
       );
       log("image", "镜像就绪", 45);
@@ -921,20 +926,30 @@ export class AgentWorkspaceService {
   private async ensurePrebakedWorkspaceImage(
     image: string,
     onLog?: (msg: string) => void,
-  ): Promise<void> {
+  ): Promise<string> {
     if (await this.runtime.hasImage(image)) {
       onLog?.("本地镜像已存在");
-      return;
+      return image;
     }
 
     try {
       onLog?.(`尝试拉取 ${image}…`);
       await this.runtime.ensureImage(image);
-      return;
+      return image;
     } catch (err) {
       onLog?.(
-        `拉取失败，改为本地构建（${err instanceof Error ? err.message : String(err)}）`,
+        `拉取失败（${err instanceof Error ? err.message : String(err)}）`,
       );
+    }
+
+    // If this is a lite or sidecar image that doesn't exist yet, fall back to
+    // the full workspace image which is always available (it's a superset).
+    const isLiteOrSidecar =
+      /workspace-lite|acp-sidecar/i.test(image);
+    if (isLiteOrSidecar) {
+      const fallback = resolveWorkspaceImage(null);
+      onLog?.(`${image} 不可用，回退到 ${fallback}`);
+      return this.ensurePrebakedWorkspaceImage(fallback, onLog);
     }
 
     const contextDir = resolveWorkspaceDockerContext();
@@ -961,6 +976,7 @@ export class AgentWorkspaceService {
       throw new Error(`本地构建完成但未找到镜像 ${image}`);
     }
     onLog?.("本地构建完成");
+    return image;
   }
 
   private async waitWorkspaceReady(
@@ -1066,7 +1082,14 @@ export class AgentWorkspaceService {
       }
 
       const mode = resolveStackMode(agent);
-      const image = resolveImageForMode(mode, agent.workspaceImage);
+      // Remote runner pulls images itself; if the lite image isn't available on
+      // the registry yet, fall back to the full image which always exists.
+      let image = resolveImageForMode(mode, agent.workspaceImage);
+      // Quick fallback: if mode is shell and we're requesting a lite image that
+      // might not exist, send the full image reference to the runner instead.
+      if (mode === "shell" && /workspace-lite/i.test(image)) {
+        image = resolveWorkspaceImage(agent.workspaceImage);
+      }
       log("container", `在远程 Runner 启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
 
       const ws = await client.startWorkspace({
@@ -1514,8 +1537,8 @@ export class AgentWorkspaceService {
       }
     }
 
-    const image = this.resolveAcpSidecarImage();
-    await this.ensurePrebakedWorkspaceImage(image, () => {});
+    const requestedImage = this.resolveAcpSidecarImage();
+    const image = await this.ensurePrebakedWorkspaceImage(requestedImage, () => {});
 
     const result = await this.runtime.createAndStart({
       tenantId: agent.tenantId,

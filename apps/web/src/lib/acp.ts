@@ -122,3 +122,34 @@ export async function cancelAcpDeviceLogin(agentId: string, profileId: string, l
     json: { loginId },
   });
 }
+
+export async function probeAcpAdapter(
+  agentId: string,
+  profileId: string,
+): Promise<{ installed: boolean; command: string; output: string }> {
+  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/probe`, {
+    method: "POST",
+  });
+}
+
+export async function installAcpAdapter(
+  agentId: string,
+  profileId: string,
+): Promise<{ ok: boolean; command: string; output: string }> {
+  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/install`, {
+    method: "POST",
+  });
+}
+
+export type AcpAdapterStatus = {
+  id: string;
+  installed: string[];
+  latest: string | null;
+  updateAvailable: boolean;
+  diskKb: Record<string, number>;
+};
+
+export async function fetchAcpAdapterStatus(agentId: string): Promise<AcpAdapterStatus[]> {
+  const res = await api<{ adapters: AcpAdapterStatus[] }>(`/api/agents/${agentId}/acp/adapters`);
+  return res.adapters;
+}
