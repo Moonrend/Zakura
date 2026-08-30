@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SkillMarkdown } from "@/components/skills/skill-markdown";
 import { cn } from "@/lib/utils";
+import { PageLoading } from "@/components/ui/progress-linear";
 import type { AgentListItem } from "@/lib/agents";
 import {
   deleteSkill,
@@ -340,13 +341,7 @@ export function SkillRegistryPanel({
   }
 
   if (loading) {
-    return (
-      <div className="space-y-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-16 animate-pulse rounded-xl bg-muted/60" />
-        ))}
-      </div>
-    );
+    return <PageLoading />;
   }
 
   if (!skills.length) {

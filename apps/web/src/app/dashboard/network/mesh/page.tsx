@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkMeshPage() {
@@ -212,7 +212,7 @@ export default function NetworkMeshPage() {
     return (
       <div className="space-y-5">
         <SettingsHeader title="Runner 组网" />
-        <Skeleton className="h-40 w-full" />
+        <PageLoading />
       </div>
     );
   }

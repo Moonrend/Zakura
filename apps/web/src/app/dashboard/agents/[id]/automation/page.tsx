@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { SettingsHeader } from "@/components/settings-shell";
 import { AutomationPanel } from "@/components/chat/automation-panel";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { listAgentProjects } from "@/lib/agent-fs";
 
 export default function AgentAutomationPage() {
@@ -31,19 +31,14 @@ export default function AgentAutomationPage() {
   }, [id]);
 
   if (loading || !agent) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-7 w-28" />
-        <Skeleton className="h-64 w-full max-w-md rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   return (
     <div className="space-y-4">
       <SettingsHeader
         title="自动化"
-        description="到点让 Agent 自己做事。也可在对话侧栏「任务」里管理。"
+        description="定时任务"
       />
       <div className="max-w-md overflow-hidden rounded-lg border border-border bg-card">
         <AutomationPanel

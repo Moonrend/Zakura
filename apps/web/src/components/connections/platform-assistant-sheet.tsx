@@ -45,7 +45,6 @@ async function ensurePlatformAgent(): Promise<AgentListItem | null> {
   if (existing) return existing;
 
   try {
-    // slug 由名称生成；先用 platform 拿到稳定 slug，再改显示名
     const created = await api<AgentListItem>("/api/agents", {
       method: "POST",
       json: {

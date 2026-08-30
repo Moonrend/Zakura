@@ -161,10 +161,16 @@ export class RuntimeNodeService {
       createdByUserId?: string | null;
     },
   ): Promise<{ node: RuntimeNode; token: string }> {
-    // Internal unique handle (not shown as "slug" in UI) — also used for Tailscale hostname
+    // Derive slug from user-provided name for readable container/hostname names.
+    const base = input.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "runner";
     let slug = "";
-    for (let i = 0; i < 12; i++) {
-      const candidate = `rn${newId().replace(/[^a-z0-9]/gi, "").slice(0, 14).toLowerCase()}`;
+    for (let suffix = 0; suffix < 20; suffix++) {
+      const candidate = suffix === 0 ? base : `${base}-${suffix + 1}`;
       const existing = await this.db.query.runtimeNodes.findFirst({
         where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.slug, candidate)),
       });
@@ -174,7 +180,7 @@ export class RuntimeNodeService {
       }
     }
     if (!slug) {
-      slug = `rn${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      slug = `${base}-${Date.now().toString(36)}`;
     }
 
     const { raw, hash } = generateRunnerToken();
@@ -352,11 +358,13 @@ export class RuntimeNodeService {
       return { error: "Cannot delete local runtime node" };
     }
     const bound = await this.db.query.agents.findFirst({
-      where: eq(agents.runtimeNodeId, id),
+      where: and(eq(agents.runtimeNodeId, id), eq(agents.tenantId, tenantId)),
     });
     if (bound) return { error: "Node still has bound agents" };
 
-    await this.db.delete(runtimeNodes).where(eq(runtimeNodes.id, id));
+    await this.db
+      .delete(runtimeNodes)
+      .where(and(eq(runtimeNodes.id, id), eq(runtimeNodes.tenantId, tenantId)));
     return { ok: true };
   }
 

@@ -5,14 +5,14 @@ import { Cable, ShieldCheck } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { AgentConnectPanel } from "@/components/agent-connect-panel";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 export default function AgentConnectPage() {
   const { id } = useParams<{ id: string }>();
   const { agent, loading } = useAgentDetail();
 
   if (loading) {
-    return <div className="space-y-5"><Skeleton className="h-8 w-32" /><Skeleton className="h-96 w-full rounded-lg" /></div>;
+    return <PageLoading />;
   }
   if (!agent) return <p className="text-sm text-muted-foreground">Agent 不存在或无权访问。</p>;
 
@@ -20,9 +20,9 @@ export default function AgentConnectPage() {
     <div className="max-w-3xl space-y-5">
       <SettingsHeader
         title="接入"
-        description="将此 Agent 作为 MCP 服务接入 Claude、Cursor、Codex 等支持远程 MCP 的客户端。"
+        description="作为远程 MCP 服务接入外部客户端"
       />
-      <SettingsSection title="MCP 接入信息" description="地址和访问凭据用于连接此 Agent，请妥善保管。">
+      <SettingsSection title="MCP 接入信息">
         <AgentConnectPanel agentId={id} agentSlug={agent.slug} mcpAgentUrl={agent.mcpAgentUrl} />
       </SettingsSection>
       <div className="grid gap-3 sm:grid-cols-2">

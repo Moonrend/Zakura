@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Table,
   TableBody,
@@ -95,7 +95,7 @@ export default function OauthClientsPage() {
 
       <SettingsSection title="接入客户端（CIMD / DCR）">
         {loading ? (
-          <Skeleton className="h-32 w-full rounded-lg" />
+          <PageLoading />
         ) : inboundSorted.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
             暂无接入客户端
@@ -145,7 +145,7 @@ export default function OauthClientsPage() {
 
       <SettingsSection title="上游动态注册（DCR）">
         {loading ? (
-          <Skeleton className="h-24 w-full rounded-lg" />
+          <PageLoading />
         ) : dcr.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
             暂无上游 DCR 记录
@@ -193,7 +193,7 @@ export default function OauthClientsPage() {
 
       <SettingsSection title="用户配置（BYO）">
         {loading ? (
-          <Skeleton className="h-24 w-full rounded-lg" />
+          <PageLoading />
         ) : byo.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
             暂无自备客户端

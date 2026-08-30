@@ -485,7 +485,7 @@ export default function WebPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="网页"
-        description="搜索与抓取；多凭据时轮询调用"
+        description="配置搜索引擎与网页抓取"
         actions={
           <Button size="sm" disabled={saving || !loaded} onClick={() => void saveAll()}>
             <Save className="size-3.5" />
@@ -663,7 +663,7 @@ export default function WebPage() {
 
                 {editRow.slot.usePlatform ? (
                   <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                    我们希望为您提供优质的体验。
+                    由平台托管，无需额外配置。
                   </p>
                 ) : (
                   <>
@@ -887,7 +887,7 @@ function ServiceSection({
             return (
               <div
                 key={`${row.serviceId}:${row.slot.id}`}
-                className="flex items-center gap-3 px-3 py-2.5"
+                className="flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
               >
                 <button
                   type="button"

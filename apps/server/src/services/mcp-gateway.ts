@@ -596,7 +596,7 @@ export class McpGateway {
     const mcpMode = getAgentMcpMode(agent);
     const boundIds =
       mcpMode === "selected"
-        ? new Set(await this.agentService.boundInstanceIds(agent.id))
+        ? new Set(await this.agentService.boundInstanceIds(agent.tenantId, agent.id))
         : null;
 
     const all = await this.db

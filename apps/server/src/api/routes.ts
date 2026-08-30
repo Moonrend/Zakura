@@ -2199,7 +2199,7 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
-    return c.json(await agentService.listBindings(agent.id));
+    return c.json(await agentService.listBindings(session.tenantId, agent.id));
   });
 
   app.post("/api/agents/:id/bindings", async (c) => {

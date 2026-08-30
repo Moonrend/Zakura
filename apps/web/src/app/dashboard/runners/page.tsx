@@ -45,7 +45,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { SearchField } from "@/components/ui/search-field";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { cn } from "@/lib/utils";
@@ -167,26 +167,26 @@ export default function RunnersPage() {
       />
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
           <div className="text-xs text-muted-foreground">节点总数</div>
-          <div className="mt-1 text-2xl font-semibold tracking-tight">{rows.length}</div>
+          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{rows.length}</div>
         </div>
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
           <div className="text-xs text-muted-foreground">在线</div>
-          <div className="mt-1 text-2xl font-semibold tracking-tight text-success">
+          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-success">
             {onlineCount}
           </div>
         </div>
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
           <div className="text-xs text-muted-foreground">远程 Runner</div>
-          <div className="mt-1 text-2xl font-semibold tracking-tight">
+          <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
             {rows.filter((r) => r.kind === "runner").length}
           </div>
         </div>
       </div>
 
       {loading ? (
-        <Skeleton className="h-48 w-full rounded-lg" />
+        <PageLoading />
       ) : (
         <>
           {rows.length > 5 ? (

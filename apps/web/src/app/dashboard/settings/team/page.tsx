@@ -43,7 +43,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 type TeamInfo = {
   id: string;
@@ -100,28 +100,38 @@ export default function TeamSettingsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const current = await api<TeamInfo>("/api/tenant/current");
+      // Use me.role to decide upfront whether to fire admin-only calls in
+      // parallel with the tenant/current fetch, avoiding a sequential waterfall.
+      const needAdmin =
+        (me.role === "owner" || me.role === "admin") &&
+        (me.multiTenant || me.edition === "saas");
+
+      const [current, memberResult, inviteResult, teamsResult] =
+        await Promise.all([
+          api<TeamInfo>("/api/tenant/current"),
+          needAdmin
+            ? api<{ members: Member[] }>("/api/tenant/members")
+            : null,
+          needAdmin
+            ? api<{ invites: Invite[] }>("/api/tenant/invites")
+            : null,
+          needAdmin
+            ? api<{ tenants: unknown[] }>("/api/tenants")
+            : null,
+        ]);
+
       setTeam(current);
       setName(current.name);
 
-      if (current.role === "owner" || current.role === "admin") {
-        if (me.multiTenant || me.edition === "saas") {
-          const [memberResult, inviteResult, teamsResult] = await Promise.all([
-            api<{ members: Member[] }>("/api/tenant/members"),
-            api<{ invites: Invite[] }>("/api/tenant/invites"),
-            api<{ tenants: unknown[] }>("/api/tenants"),
-          ]);
-          setMembers(memberResult.members);
-          setInvites(inviteResult.invites);
-          setTeamCount(teamsResult.tenants.length);
-        }
-      }
+      if (memberResult) setMembers(memberResult.members);
+      if (inviteResult) setInvites(inviteResult.invites);
+      if (teamsResult) setTeamCount(teamsResult.tenants.length);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
-  }, [me.edition, me.multiTenant]);
+  }, [me.role, me.edition, me.multiTenant]);
 
   useEffect(() => {
     void load();
@@ -215,7 +225,7 @@ export default function TeamSettingsPage() {
   const memberSummary = `${members.length} 位成员${invites.length ? ` · ${invites.length} 个待接受邀请` : ""}`;
 
   if (loading || !team) {
-    return <div className="space-y-4"><Skeleton className="h-8 w-36" /><Skeleton className="h-52 w-full" /><Skeleton className="h-52 w-full" /></div>;
+    return <PageLoading />;
   }
 
   return (
@@ -314,7 +324,7 @@ export default function TeamSettingsPage() {
         </SettingsSection>
       )}
 
-      <SettingsSection title="危险操作" className="border-destructive/35">
+      <SettingsSection title="危险操作" className="border-destructive/30">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium">删除这个团队</div>

@@ -288,7 +288,7 @@ export function SkillRequestChip({
   return (
     <span
       title={name}
-      className="animate-pop flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/40 py-1 pr-1 pl-2"
+      className="animate-pop flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/40 py-1 pr-1 pl-2"
     >
       <Blocks className="size-3.5 text-muted-foreground" />
       <span className="max-w-36 truncate text-xs">{title || name}</span>

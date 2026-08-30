@@ -15,7 +15,9 @@ import {
   AGENT_PORT_CDP,
   AGENT_PORT_NOVNC,
   AGENT_WORKSPACE_ROOT,
+  DEFAULT_ACP_SIDECAR_IMAGE,
   DEFAULT_WORKSPACE_IMAGE,
+  DEFAULT_WORKSPACE_LITE_IMAGE,
   LOCAL_RUNTIME_NODE_ID,
   WORKSPACE_IMAGE_LOCAL,
   type RunnerHostInfo,
@@ -129,7 +131,12 @@ export type StackMode = "none" | "shell" | "display";
 
 export function resolveStackMode(agent: Agent): StackMode {
   if (agent.enableComputer) return "display";
-  return "none";
+  // All agents get at least a shell container (lite image) for ACP / MCP / exec.
+  // Agents that genuinely need no container stay at "none" only when no
+  // workspace-backed capability is in use — but since ACP and cloud-agent
+  // sessions always call ensureStarted, defaulting to "shell" avoids the
+  // "no container" failure path.
+  return "shell";
 }
 
 /** Prefer env override, then published / local prebaked workspace image. */
@@ -142,6 +149,29 @@ export function resolveWorkspaceImage(configured: string | null | undefined): st
   return raw;
 }
 
+/** Lite workspace image for shell-only / ACP coding workloads. */
+export function resolveWorkspaceLiteImage(): string {
+  return (
+    process.env.ZAKURA_WORKSPACE_LITE_IMAGE?.trim() ||
+    DEFAULT_WORKSPACE_LITE_IMAGE
+  );
+}
+
+/** Pick the image based on stack mode: full for display, lite for shell-only. */
+export function resolveImageForMode(
+  mode: StackMode,
+  configured: string | null | undefined,
+): string {
+  if (mode === "display") return resolveWorkspaceImage(configured);
+  // Lite image may not exist yet (not built/pushed). Attempt to use it, but
+  // resolveWorkspaceImage is a safe fallback — full image is a superset.
+  const lite = resolveWorkspaceLiteImage();
+  // If the user explicitly configured a workspace image, honor it regardless
+  // of mode — they know what they want.
+  if (configured?.trim()) return resolveWorkspaceImage(configured);
+  return lite;
+}
+
 /** 旧版本地构建标签（docker build -t zakura/workspace:debian） */
 export function isLegacyWorkspaceImage(image: string): boolean {
   return /^zakura\/workspace(?::|$)/i.test(image.trim());
@@ -151,7 +181,8 @@ export function isPrebakedWorkspaceImage(image: string): boolean {
   const t = image.trim();
   return (
     isLegacyWorkspaceImage(t) ||
-    /(?:^|\/)zakura-workspace(?:-dev)?(?::|$)/i.test(t)
+    /(?:^|\/)zakura-workspace(?:-lite)?(?:-dev)?(?::|$)/i.test(t) ||
+    /(?:^|\/)zakura-acp-sidecar(?:-dev)?(?::|$)/i.test(t)
   );
 }
 
@@ -726,7 +757,7 @@ export class AgentWorkspaceService {
       log("network", "确保网络…", 18, "network");
       await this.runtime.ensureNetwork(this.config.dockerNetwork);
 
-      const image = resolveWorkspaceImage(agent.workspaceImage);
+      let image = resolveImageForMode(mode, agent.workspaceImage);
       const name = workspaceContainerName(tenant.slug, agent.slug);
 
       if (agent.workspaceImage !== image) {
@@ -766,9 +797,8 @@ export class AgentWorkspaceService {
       }
 
       mkdirSync(root, { recursive: true });
-      // Always use prebaked image for display; shell-only keeps a tiny keepalive Cmd.
       log("image", `确保工作区镜像 ${image}…`, 30, "image");
-      await this.ensurePrebakedWorkspaceImage(image, (msg) =>
+      image = await this.ensurePrebakedWorkspaceImage(image, (msg) =>
         log("image", msg, 35, "image"),
       );
       log("image", "镜像就绪", 45);
@@ -785,7 +815,24 @@ export class AgentWorkspaceService {
             ]
           : [];
 
-      log("container", "启动电脑环境（文件 + Shell + 浏览器 + 桌面）…", 55, "container");
+      log("container", mode === "display"
+        ? "启动电脑环境（文件 + Shell + 浏览器 + 桌面）…"
+        : "启动精简工作区（文件 + Shell）…", 55, "container");
+
+      const isDisplay = mode === "display";
+      const containerEnv: Record<string, string> = {
+        ZAKURA_AGENT_ID: agent.id,
+        ZAKURA_AGENT_SLUG: agent.slug,
+        HOME: AGENT_WORKSPACE_ROOT,
+        PATH: WORKSPACE_EXEC_PATH,
+      };
+      if (isDisplay) {
+        containerEnv.ZAKURA_ENABLE_BROWSER = "1";
+        containerEnv.ZAKURA_ENABLE_COMPUTER = "1";
+        containerEnv.ZAKURA_DESKTOP_WIDTH = String(AGENT_DESKTOP_WIDTH);
+        containerEnv.ZAKURA_DESKTOP_HEIGHT = String(AGENT_DESKTOP_HEIGHT);
+        containerEnv.DISPLAY = ":99";
+      }
 
       const running = await this.runtime.createAndStart({
         tenantId: agent.tenantId,
@@ -795,7 +842,6 @@ export class AgentWorkspaceService {
           name,
           image,
           purpose: "workspace",
-          // Always use image ENTRYPOINT (languages + optional display)
           workingDir: AGENT_WORKSPACE_ROOT,
           network: this.config.dockerNetwork,
           restartPolicy: "unless-stopped",
@@ -806,22 +852,12 @@ export class AgentWorkspaceService {
               containerPath: AGENT_WORKSPACE_ROOT,
             },
           ],
-          env: {
-            ZAKURA_AGENT_ID: agent.id,
-            ZAKURA_AGENT_SLUG: agent.slug,
-            ZAKURA_ENABLE_BROWSER: "1",
-            ZAKURA_ENABLE_COMPUTER: "1",
-            ZAKURA_DESKTOP_WIDTH: String(AGENT_DESKTOP_WIDTH),
-            ZAKURA_DESKTOP_HEIGHT: String(AGENT_DESKTOP_HEIGHT),
-            HOME: AGENT_WORKSPACE_ROOT,
-            DISPLAY: ":99",
-            PATH: WORKSPACE_EXEC_PATH,
-          },
+          env: containerEnv,
           labels: {
             "zakura.agent": agent.id,
             "zakura.agent_slug": agent.slug,
             "zakura.stack": mode,
-            "zakura.feat.computer": "true",
+            ...(isDisplay ? { "zakura.feat.computer": "true" } : {}),
           },
         },
       });
@@ -890,20 +926,30 @@ export class AgentWorkspaceService {
   private async ensurePrebakedWorkspaceImage(
     image: string,
     onLog?: (msg: string) => void,
-  ): Promise<void> {
+  ): Promise<string> {
     if (await this.runtime.hasImage(image)) {
       onLog?.("本地镜像已存在");
-      return;
+      return image;
     }
 
     try {
       onLog?.(`尝试拉取 ${image}…`);
       await this.runtime.ensureImage(image);
-      return;
+      return image;
     } catch (err) {
       onLog?.(
-        `拉取失败，改为本地构建（${err instanceof Error ? err.message : String(err)}）`,
+        `拉取失败（${err instanceof Error ? err.message : String(err)}）`,
       );
+    }
+
+    // If this is a lite or sidecar image that doesn't exist yet, fall back to
+    // the full workspace image which is always available (it's a superset).
+    const isLiteOrSidecar =
+      /workspace-lite|acp-sidecar/i.test(image);
+    if (isLiteOrSidecar) {
+      const fallback = resolveWorkspaceImage(null);
+      onLog?.(`${image} 不可用，回退到 ${fallback}`);
+      return this.ensurePrebakedWorkspaceImage(fallback, onLog);
     }
 
     const contextDir = resolveWorkspaceDockerContext();
@@ -930,6 +976,7 @@ export class AgentWorkspaceService {
       throw new Error(`本地构建完成但未找到镜像 ${image}`);
     }
     onLog?.("本地构建完成");
+    return image;
   }
 
   private async waitWorkspaceReady(
@@ -1034,8 +1081,16 @@ export class AgentWorkspaceService {
           .where(eq(managedContainers.id, existing.id));
       }
 
-      const image = resolveWorkspaceImage(agent.workspaceImage);
-      log("container", `在远程 Runner 启动电脑环境（${image}）…`, 40, "container");
+      const mode = resolveStackMode(agent);
+      // Remote runner pulls images itself; if the lite image isn't available on
+      // the registry yet, fall back to the full image which always exists.
+      let image = resolveImageForMode(mode, agent.workspaceImage);
+      // Quick fallback: if mode is shell and we're requesting a lite image that
+      // might not exist, send the full image reference to the runner instead.
+      if (mode === "shell" && /workspace-lite/i.test(image)) {
+        image = resolveWorkspaceImage(agent.workspaceImage);
+      }
+      log("container", `在远程 Runner 启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
 
       const ws = await client.startWorkspace({
         agentId: agent.id,
@@ -1426,5 +1481,150 @@ export class AgentWorkspaceService {
     const job = this.shellJobs.getForAgent(agent.id, jobId);
     if (!job) throw new Error("Shell job not found");
     await job.resize(cols, rows);
+  }
+
+  // ── ACP Sidecar ────────────────────────────────────────────────────────────
+
+  private acpSidecarName(agentId: string): string {
+    return `zakura-acp-${agentId}`.slice(0, 63);
+  }
+
+  private resolveAcpSidecarImage(): string {
+    return (
+      process.env.ZAKURA_ACP_SIDECAR_IMAGE?.trim() ||
+      DEFAULT_ACP_SIDECAR_IMAGE
+    );
+  }
+
+  /**
+   * Ensure an ACP sidecar container is running for this agent.
+   *
+   * The sidecar shares the same /workspace bind mount as the workspace
+   * container but uses a minimal image (node + adapter toolchain only).
+   * ACP adapter processes run inside the sidecar via docker exec, keeping
+   * the adapter lifecycle independent of the workspace container.
+   */
+  async ensureAcpSidecar(
+    agent: Agent,
+  ): Promise<{ dockerId: string; image: string }> {
+    const name = this.acpSidecarName(agent.id);
+
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      const image = this.resolveAcpSidecarImage();
+      const result = await client.ensureAcpSidecar({
+        agentId: agent.id,
+        image,
+        network: this.config.dockerNetwork,
+      });
+      return { dockerId: result.dockerId, image };
+    }
+
+    // Check if sidecar is already running
+    const existing = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-sidecar",
+    });
+    const running = existing.find(
+      (c) => c.labels["zakura.agent"] === agent.id && c.status === "running",
+    );
+    if (running) return { dockerId: running.id, image: running.image };
+
+    // Clean up any stopped sidecars
+    for (const c of existing) {
+      if (c.labels["zakura.agent"] === agent.id) {
+        await this.runtime.remove(c.id, true).catch(() => undefined);
+      }
+    }
+
+    const requestedImage = this.resolveAcpSidecarImage();
+    const image = await this.ensurePrebakedWorkspaceImage(requestedImage, () => {});
+
+    const result = await this.runtime.createAndStart({
+      tenantId: agent.tenantId,
+      purpose: "acp-sidecar",
+      allocatedTo: agent.id,
+      spec: {
+        name,
+        image,
+        purpose: "acp-sidecar",
+        workingDir: AGENT_WORKSPACE_ROOT,
+        network: this.config.dockerNetwork,
+        restartPolicy: "unless-stopped",
+        ports: [],
+        volumes: [
+          {
+            hostPath: agentWorkspaceBindSource(this.config, agent.id),
+            containerPath: AGENT_WORKSPACE_ROOT,
+          },
+        ],
+        env: {
+          ZAKURA_AGENT_ID: agent.id,
+          HOME: AGENT_WORKSPACE_ROOT,
+          PATH: WORKSPACE_EXEC_PATH,
+        },
+        labels: {
+          "zakura.agent": agent.id,
+          "zakura.purpose": "acp-sidecar",
+          "zakura.managed": "true",
+        },
+      },
+    });
+
+    return { dockerId: result.id, image: result.image };
+  }
+
+  /** Execute a command inside the ACP sidecar container. */
+  async execInSidecar(
+    agent: Agent,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
+  ) {
+    const { dockerId } = await this.ensureAcpSidecar(agent);
+    const workingDir = this.shellCwd(opts?.workingDir);
+    const env = this.shellEnv(opts?.env);
+    return this.runtime.exec(dockerId, command, {
+      workingDir,
+      env,
+      timeoutMs: opts?.timeoutMs,
+    });
+  }
+
+  /** Start an ACP adapter stdio session inside the sidecar. */
+  async startStdioInSidecar(
+    agent: Agent,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{
+    writable: WritableStream<Uint8Array>;
+    readable: ReadableStream<Uint8Array>;
+    kill: () => Promise<void>;
+    onStderr: (fn: (chunk: string) => void) => () => void;
+  }> {
+    const { dockerId } = await this.ensureAcpSidecar(agent);
+    const workingDir = this.shellCwd(opts?.workingDir);
+    const env = this.shellEnv(opts?.env);
+    const job = await this.runtime.execStdio(dockerId, command, { workingDir, env });
+    const streams = job.toWebStreams();
+    return {
+      ...streams,
+      kill: () => job.kill(),
+      onStderr: (fn) => job.onStderr(fn),
+    };
+  }
+
+  /** Tear down the ACP sidecar for an agent. */
+  async stopAcpSidecar(agent: Agent): Promise<void> {
+    if (this.isRemoteAgent(agent)) return;
+    const existing = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-sidecar",
+    });
+    for (const c of existing) {
+      if (c.labels["zakura.agent"] === agent.id) {
+        await this.runtime.stop(c.id).catch(() => undefined);
+        await this.runtime.remove(c.id, true).catch(() => undefined);
+      }
+    }
   }
 }

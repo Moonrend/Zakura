@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 /** 统一连接中心已拆回 MCP / Skills / 凭据独立入口 */
 function ConnectionsRedirectInner() {
@@ -34,16 +34,16 @@ function ConnectionsRedirectInner() {
       router.replace("/dashboard/mcp/store?tab=community");
       return;
     }
-    // 旧「统一连接中心」默认入口 → 平台连接器（MCP 请走 /dashboard/mcp）
-    router.replace("/dashboard/connectors");
+    // 旧「统一连接中心」默认入口 → agents（连接器已移入 agent 级）
+    router.replace("/dashboard/agents");
   }, [router, searchParams]);
 
-  return <Skeleton className="h-48 w-full rounded-lg" />;
+  return <PageLoading />;
 }
 
 export default function LegacyConnectionsPage() {
   return (
-    <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+    <Suspense fallback={<PageLoading />}>
       <ConnectionsRedirectInner />
     </Suspense>
   );

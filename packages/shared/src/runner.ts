@@ -253,14 +253,11 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
-      # 工作区容器由宿主机 docker 守护进程创建，bind 源必须是宿主机路径。
-      # 少了这一项，守护进程会在宿主机上新建一个同名空目录，
-      # 于是「Runner 看到的工作区」和「Agent 真正写入的工作区」变成两个目录。
-      ZAKURA_RUNNER_HOST_STORAGE_ROOT: ${dirs.data}
+      ZAKURA_RUNNER_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${dirs.data}:/var/lib/zakura
+      - ${dirs.data}:${dirs.data}
       - /tmp/.X11-unix:/tmp/.X11-unix
 `;
   }
@@ -314,10 +311,7 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
-      # 工作区容器由宿主机 docker 守护进程创建，bind 源必须是宿主机路径。
-      # 少了这一项，守护进程会在宿主机上新建一个同名空目录，
-      # 于是「Runner 看到的工作区」和「Agent 真正写入的工作区」变成两个目录。
-      ZAKURA_RUNNER_HOST_STORAGE_ROOT: ${dirs.data}
+      ZAKURA_RUNNER_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
       # 避免继承宿主机 HTTP 代理；控制面走 Tailscale / 直连
       HTTP_PROXY: ""
@@ -328,7 +322,7 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       no_proxy: "*"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${dirs.data}:/var/lib/zakura
+      - ${dirs.data}:${dirs.data}
       - /tmp/.X11-unix:/tmp/.X11-unix
 `;
 }
@@ -353,12 +347,12 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
       `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
       `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
       `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
-      `  -e ZAKURA_RUNNER_HOST_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
+      `  -e ZAKURA_RUNNER_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
       "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
       "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
       '  -e NO_PROXY=* -e no_proxy=* \\',
       "  -v /var/run/docker.sock:/var/run/docker.sock \\",
-      `  -v ${dirs.data}:/var/lib/zakura \\`,
+      `  -v ${dirs.data}:${dirs.data} \\`,
       "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",
       `  ${runnerImage}`,
     ].join("\n");
@@ -401,12 +395,12 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
     `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
     `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
     `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
-    `  -e ZAKURA_RUNNER_HOST_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
+    `  -e ZAKURA_RUNNER_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
     "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
     "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
     '  -e NO_PROXY=* -e no_proxy=* \\',
     "  -v /var/run/docker.sock:/var/run/docker.sock \\",
-    `  -v ${dirs.data}:/var/lib/zakura \\`,
+    `  -v ${dirs.data}:${dirs.data} \\`,
     "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",
     `  ${runnerImage}`,
   ].join("\n");
@@ -419,9 +413,10 @@ function buildInstallScript(opts: {
   tsDir: string;
   enableTailscale: boolean;
   compose: string;
+  dockerRun: string;
   tsHostname: string | null;
 }): string {
-  const { slug, installDir, dataDir, tsDir, enableTailscale, compose, tsHostname } = opts;
+  const { slug, installDir, dataDir, tsDir, enableTailscale, compose, dockerRun, tsHostname } = opts;
   const mkdirs = enableTailscale
     ? `need_sudo mkdir -p ${installDir} ${dataDir} ${tsDir}`
     : `need_sudo mkdir -p ${installDir} ${dataDir}`;
@@ -435,24 +430,52 @@ need_sudo() {
   else echo "Need root" >&2; exit 1; fi
 }
 
+log() { echo "[zakura] $*"; }
+
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "Installing Docker…"
+  log "Installing Docker…"
   curl -fsSL https://get.docker.com | need_sudo sh
   command -v systemctl >/dev/null 2>&1 && need_sudo systemctl enable --now docker || true
 fi
 
 ${mkdirs}
+
+# Save compose file for management (docker compose logs, etc.)
 need_sudo tee ${installDir}/docker-compose.yml >/dev/null <<'ZAKURA_EOF'
 ${compose}ZAKURA_EOF
 
-if docker compose version >/dev/null 2>&1; then
-  need_sudo docker compose -f ${installDir}/docker-compose.yml up -d
-elif command -v docker-compose >/dev/null 2>&1; then
-  need_sudo docker-compose -f ${installDir}/docker-compose.yml up -d
-else
-  echo "docker compose missing" >&2; exit 1
-fi
-echo "OK · ${installDir}/docker-compose.yml"
+# Pull images (retry once on failure)
+pull_image() {
+  local img=\$1
+  log "Pulling $img …"
+  if ! need_sudo docker pull "$img"; then
+    log "Pull failed, retrying in 5s…"
+    sleep 5
+    need_sudo docker pull "$img"
+  fi
+}
+
+pull_image sunwuyuan/zakura-runner-dev:latest
+${enableTailscale ? "pull_image tailscale/tailscale:latest" : ""}
+
+# Deploy via docker run
+${dockerRun}
+
+# Health check: wait up to 30s for runner container to be running
+RUNNER_CT=zakura-runner-${slug}
+log "Waiting for $RUNNER_CT …"
+for i in $(seq 1 15); do
+  STATE=$(need_sudo docker inspect --format '{{.State.Running}}' "$RUNNER_CT" 2>/dev/null || echo "false")
+  if [ "$STATE" = "true" ]; then
+    log "OK · $RUNNER_CT is running"
+    exit 0
+  fi
+  sleep 2
+done
+
+log "ERROR: $RUNNER_CT did not start within 30s"
+need_sudo docker logs --tail 30 "$RUNNER_CT" 2>&1 || true
+exit 1
 `;
 }
 
@@ -472,6 +495,7 @@ export function buildRunnerInstallPackage(opts: RunnerComposeOpts): RunnerInstal
     tsHostname: tsHostname ?? undefined,
   };
   const compose = buildRunnerComposeSnippet(composeOpts);
+  const dockerRun = buildDockerRunCommand(composeOpts);
   const script = buildInstallScript({
     slug,
     installDir: dirs.root,
@@ -479,9 +503,9 @@ export function buildRunnerInstallPackage(opts: RunnerComposeOpts): RunnerInstal
     tsDir: dirs.ts,
     enableTailscale,
     compose,
+    dockerRun,
     tsHostname,
   });
-  const dockerRun = buildDockerRunCommand(composeOpts);
 
   return {
     compose,

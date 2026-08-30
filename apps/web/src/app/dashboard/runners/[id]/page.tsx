@@ -55,7 +55,7 @@ import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import {
@@ -264,13 +264,7 @@ export default function RunnerDetailPage() {
   }
 
   if (loading || !node) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-10 w-48" />
-        <Skeleton className="h-40 w-full rounded-lg" />
-        <Skeleton className="h-56 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const host = hostInfoOf(node);
@@ -321,7 +315,7 @@ export default function RunnerDetailPage() {
           <p className="mb-2 text-xs text-destructive whitespace-pre-wrap">{installError}</p>
         ) : null}
         {installBusy && !install ? (
-          <Skeleton className="h-40 w-full rounded-lg" />
+          <PageLoading />
         ) : install ? (
           <RunnerInstallPanel install={install} />
         ) : null}

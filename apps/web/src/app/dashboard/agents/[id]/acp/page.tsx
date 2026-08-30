@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { toast } from "sonner";
-import { ChevronLeft, ChevronRight, Plus, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Download, Loader2, Plus, Terminal, Trash2, X } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -16,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Select,
   SelectContent,
@@ -30,8 +31,15 @@ import {
   startAcpDeviceLogin,
   pollAcpDeviceLogin,
   cancelAcpDeviceLogin,
+  probeAcpAdapter,
+  installAcpAdapter,
+  fetchAcpAdapterStatus,
+  type AcpAdapterStatus,
 } from "@/lib/acp";
-import { WorkspaceTerminalDialog } from "@/components/workspace-terminal-dialog";
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
 import type { AcpAgentConfig, AcpAgentSetup, AcpManagedField, AcpPublicProfile, AcpSetupMode } from "@zakura/shared";
 import {
   acpManualSetupCommand,
@@ -56,6 +64,10 @@ export default function AgentAcpPage() {
   const [terminalProfile, setTerminalProfile] = useState<string>();
   const [terminalProfileId, setTerminalProfileId] = useState<string>();
   const configRef = useRef<AcpAgentConfig | null>(null);
+  const [adapterStatuses, setAdapterStatuses] = useState<AcpAdapterStatus[]>([]);
+  const [installingId, setInstallingId] = useState<string | null>(null);
+  const [installOutput, setInstallOutput] = useState<string | null>(null);
+  const [probeResults, setProbeResults] = useState<Record<string, { installed: boolean; output: string }>>({});
 
   const persist = useCallback(
     async (patch: Partial<AcpAgentConfig>) => {
@@ -84,11 +96,15 @@ export default function AgentAcpPage() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const res = await fetchAcpConfig(id);
+      const [res, adapters] = await Promise.all([
+        fetchAcpConfig(id),
+        fetchAcpAdapterStatus(id).catch(() => []),
+      ]);
       configRef.current = res.config;
       setConfig(res.config);
       setProfiles(res.profiles);
       setConfigError(res.configError ?? null);
+      setAdapterStatuses(adapters);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setLoadError(message);
@@ -138,6 +154,48 @@ export default function AgentAcpPage() {
     setTerminalOpen(true);
   }
 
+  async function handleProbe(profileId: string) {
+    try {
+      const result = await probeAcpAdapter(id, profileId);
+      setProbeResults((prev) => ({ ...prev, [profileId]: result }));
+      if (result.installed) {
+        toast.success(`${profileId} 已就绪`);
+      } else {
+        toast.info(`${profileId} 未安装`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleInstall(profileId: string) {
+    setInstallingId(profileId);
+    setInstallOutput(null);
+    try {
+      const result = await installAcpAdapter(id, profileId);
+      setInstallOutput(result.output);
+      if (result.ok) {
+        toast.success(`${profileId} 安装完成`);
+        setProbeResults((prev) => ({ ...prev, [profileId]: { installed: true, output: result.output } }));
+        void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => {});
+      } else {
+        toast.error(`${profileId} 安装失败`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setInstallOutput(msg);
+      toast.error(msg);
+    } finally {
+      setInstallingId(null);
+    }
+  }
+
+  function getAdapterInstallInfo(profileId: string) {
+    const status = adapterStatuses.find((a) => a.id === profileId);
+    const probe = probeResults[profileId];
+    return { status, probe };
+  }
+
   if (!config) {
     if (loadError) {
       return (
@@ -152,12 +210,7 @@ export default function AgentAcpPage() {
         </div>
       );
     }
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-7 w-36" />
-        <Skeleton className="h-64 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const catalog = profiles.length
@@ -191,7 +244,7 @@ export default function AgentAcpPage() {
           ) : null}
           <SettingsRow
             label="模型来源"
-            description="Zakura 路由会覆盖此 Agent 的模型设置，并沿用 Zakura 的路由、容灾与用量记录。"
+            description="Zakura 路由会覆盖 Agent 模型设置"
           >
             <Select
               value={modelProvider}
@@ -222,7 +275,7 @@ export default function AgentAcpPage() {
           {modelProvider === "zakura" ? (
             <SettingsRow
               label="模型"
-              description="可填 Zakura 模型别名；留空时使用该 Agent 的默认 chat 路由。"
+              description="留空使用默认路由"
             >
               <Input
                 className="max-w-72 font-mono"
@@ -436,7 +489,7 @@ export default function AgentAcpPage() {
     <div className="space-y-6">
       <SettingsHeader
         title="ACP Agent"
-        description="第三方编码 Agent 已打进工作区镜像。在这里启用、登录，聊天里按对话选择执行方。"
+        description="第三方编码 Agent 配置"
         actions={<SettingsSaveIndicator status={status} error={error} />}
       />
       <ConfigErrorBanner error={configError} />
@@ -444,7 +497,7 @@ export default function AgentAcpPage() {
       <SettingsSection title="对话">
         <SettingsRow
           label="默认执行方"
-          description="新对话用这个；composer 仍可改。已有消息的会话不会改绑。"
+          description="新对话默认使用"
         >
           <Select
             value={config.defaultRuntime || ZAKURA_RUNTIME_ID}
@@ -469,7 +522,7 @@ export default function AgentAcpPage() {
         </SettingsRow>
         <SettingsRow
           label="工具授权"
-          description="ask = 每次确认；allow = 自动允许（仅信任的 Agent）"
+          description="ask 每次确认，allow 自动允许"
         >
           <Select
             value={config.permissionPolicy}
@@ -549,6 +602,10 @@ export default function AgentAcpPage() {
             config.agents[profile.id] ??
             parseAcpAgentSetup(profile.id, { enabled: false, setupMode: "api_key" });
           const row = rowState(profile, setup);
+          const { status: adapterStatus, probe } = getAdapterInstallInfo(profile.id);
+          const isInstalling = installingId === profile.id;
+          const isInstalled = probe?.installed || (adapterStatus?.installed?.length ?? 0) > 0;
+          const hasUpdate = adapterStatus?.updateAvailable;
           return (
             <div
               key={profile.id}
@@ -570,13 +627,43 @@ export default function AgentAcpPage() {
                 <span className="block truncate text-sm font-medium">
                   {profile.displayName || profile.id}
                 </span>
-                {profile.description ? (
-                  <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                    {profile.description}
-                  </span>
-                ) : null}
+                <span className="mt-0.5 flex items-center gap-1.5">
+                  {profile.description ? (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {profile.description}
+                    </span>
+                  ) : null}
+                  {isInstalled ? (
+                    <Badge variant="outline" className="pointer-events-auto gap-0.5 text-[10px] text-success">
+                      <Check className="size-2.5" /> 已安装
+                      {adapterStatus?.installed?.[0] ? ` v${adapterStatus.installed[0]}` : ""}
+                    </Badge>
+                  ) : null}
+                  {hasUpdate ? (
+                    <Badge variant="warn" className="pointer-events-auto gap-0.5 text-[10px]">
+                      有更新 → {adapterStatus?.latest}
+                    </Badge>
+                  ) : null}
+                </span>
               </span>
               <div className="relative z-10 flex shrink-0 items-center gap-3">
+                {setup.enabled && !isInstalled && !isInstalling ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => { e.stopPropagation(); void handleInstall(profile.id); }}
+                  >
+                    <Download className="mr-1 size-3" />
+                    安装
+                  </Button>
+                ) : null}
+                {isInstalling ? (
+                  <Badge variant="secondary" className="gap-1 text-[10px]">
+                    <Loader2 className="size-3 animate-spin" /> 安装中…
+                  </Badge>
+                ) : null}
                 {row === "on_needs_config" ? (
                   <Badge variant="warn">待配置</Badge>
                 ) : null}
@@ -599,6 +686,23 @@ export default function AgentAcpPage() {
           );
         })}
       </div>
+
+      {installOutput ? (
+        <SettingsSection title="安装日志">
+          <div className="max-h-48 overflow-auto rounded-md bg-muted/40 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+            {installOutput}
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="mt-1 text-xs text-muted-foreground"
+            onClick={() => setInstallOutput(null)}
+          >
+            关闭
+          </Button>
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection title="自定义命令">
         <SettingsRow label="profile id" description="仅自定义入口需要；内置适配器不用安装">

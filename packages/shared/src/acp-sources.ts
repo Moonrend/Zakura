@@ -51,6 +51,23 @@ const REGISTRY_BY_PROFILE: Record<string, string> = {
   "kimi-code": "kimi",
   pi: "pi-acp",
   grok: "grok-build",
+  auggie: "auggie",
+  cline: "cline",
+  cursor: "cursor",
+  devin: "devin",
+  "factory-droid": "factory-droid",
+  goose: "goose",
+  junie: "junie",
+  "qwen-code": "qwen-code",
+  "mistral-vibe": "mistral-vibe",
+  nova: "nova",
+  "fast-agent": "fast-agent",
+  dirac: "dirac",
+  codebuddy: "codebuddy-code",
+  amp: "amp-acp",
+  deepagents: "deepagents",
+  poolside: "poolside",
+  sigit: "sigit",
 };
 
 /**

@@ -22,8 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
-import { ProgressLinear } from "@/components/ui/progress-linear";
+import { PageLoading, ProgressLinear } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
 
 type LifecycleView = {
@@ -257,19 +256,14 @@ export default function PlatformServicesPage() {
   }
 
   if (!data) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-32 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   return (
     <div className="space-y-5">
       <SettingsHeader
         title="自托管服务"
-        description="本机 Docker · 部署后在「网页」中选用"
+        description="本机 Docker 部署"
         actions={
           <Button size="sm" variant="outline" onClick={() => void load()}>
             <RefreshCw className="size-3.5" />

@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 /** 官方商店已并入 /dashboard/mcp/store */
 export default function McpOfficialStoreRedirect() {
@@ -10,5 +10,5 @@ export default function McpOfficialStoreRedirect() {
   useEffect(() => {
     router.replace("/dashboard/mcp/store");
   }, [router]);
-  return <Skeleton className="h-48 w-full rounded-lg" />;
+  return <PageLoading />;
 }

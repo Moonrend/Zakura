@@ -12,7 +12,7 @@ import {
 } from "@/components/connections/connector-config-sheet";
 import { SettingsHeader } from "@/components/settings-shell";
 import { SearchField } from "@/components/ui/search-field";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { api } from "@/lib/api";
 import { shouldLetBrowserHandleClick } from "@/lib/nav";
 
@@ -212,9 +212,7 @@ export default function ConnectorsHub() {
 
       <div className="divide-y divide-border border-y border-border">
         {loading
-          ? Array.from({ length: 5 }).map((_, i) => (
-              <Skeleton key={i} className="h-20 rounded-none" />
-            ))
+          ? <PageLoading />
           : visiblePackages.map((pkg) => {
               const packageConnectors = bySlug.get(pkg.slug) ?? [];
               const connector = packageConnectors.find((item) => item.ready) ?? packageConnectors[0];

@@ -134,6 +134,8 @@ type LiveRuntime = {
   authMethods: Array<{ id: string; name: string; description?: string }>;
   authRequired: boolean;
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
+  /** When true, the ACP adapter runs in a dedicated sidecar container. */
+  useSidecar: boolean;
 };
 
 /** prompt() 拒绝并发回合时使用；drainQueued 按此常量识别「已被新回合抢占」。 */
@@ -154,6 +156,12 @@ export class AcpSessionService {
    */
   private readonly maxConcurrentPerTenant: number;
   private readonly tenantInflight = new Map<string, number>();
+  /**
+   * In-memory cache of provisioned adapter paths. Keyed by `agentId:profileId`.
+   * Avoids the docker exec round trip to check the `.ok` marker on every
+   * boot — the marker only changes on install/GC, and both invalidate here.
+   */
+  private readonly provisionCache = new Map<string, { command: string; args: string[] }>();
 
   constructor(
     private readonly deps: {
@@ -867,6 +875,36 @@ export class AcpSessionService {
     };
   }
 
+  /**
+   * Invalidate the in-memory provision cache for an agent/profile.
+   * Called after manual install, adapter update, or workspace recreation.
+   */
+  invalidateProvisionCache(agentId: string, profileId?: string): void {
+    if (profileId) {
+      this.provisionCache.delete(`${agentId}:${profileId}`);
+    } else {
+      for (const key of this.provisionCache.keys()) {
+        if (key.startsWith(`${agentId}:`)) this.provisionCache.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Background pre-warm: provision the adapter so the first ACP boot
+   * skips the install step entirely. Called when an ACP profile is saved
+   * or when the workspace starts.
+   */
+  async preWarmAdapter(agent: Agent, profileId: string): Promise<void> {
+    try {
+      const setup = requireSetup(agent, profileId, true);
+      const profile = publicProfileForSetup(setup);
+      const launch = resolveAcpLaunch(profile, setup);
+      await this.provisionAdapter(agent, profileId, launch.command, true);
+    } catch {
+      // Pre-warm is best-effort; failure is not actionable until boot.
+    }
+  }
+
   /** 改模型/思考/模式时进程可能已被回收或尚未拉起；先等到可用再 RPC。 */
   private async requireLive(
     tenantId: string,
@@ -930,33 +968,54 @@ export class AcpSessionService {
    * command, or an older image that still ships the adapter — so those paths keep
    * resolving through `ACP_IMAGE_BIN_DIR`/PATH exactly as before.
    */
+  /**
+   * Make sure the adapter for `profileId` exists, returning its absolute path.
+   *
+   * When sidecar mode is active, the adapter is installed in the sidecar
+   * container (which shares the same /workspace bind mount). Otherwise falls
+   * back to the workspace container (legacy path).
+   */
   private async provisionAdapter(
     agent: Agent,
     profileId: string,
     currentCommand: string,
+    useSidecar: boolean,
   ): Promise<{ command: string; args: string[] } | null> {
-    // An absolute command is either already provisioned or explicitly chosen by the
-    // user; either way it is not ours to manage.
     if (currentCommand.includes("/")) return null;
 
     const source = acpAdapterSource(profileId);
     if (source.kind === "image") return null;
 
+    // Fast path: return cached result if a prior boot already provisioned.
+    const cacheKey = `${agent.id}:${profileId}`;
+    const cached = this.provisionCache.get(cacheKey);
+    if (cached) return cached;
+
     try {
       if (source.kind === "custom") {
-        await this.deps.workspace.ensureStarted(agent, { require: "shell" });
         const script = acpCustomProvisionScript(source);
-        const res = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
+        let res;
+        if (useSidecar) {
+          await this.deps.workspace.ensureAcpSidecar(agent);
+          res = await this.deps.workspace.execInSidecar(agent, ["bash", "-lc", script]);
+        } else {
+          await this.deps.workspace.ensureStarted(agent, { require: "shell" });
+          res = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
+        }
         if (res.exitCode !== 0) {
           throw new Error(this.describeProvisionFailure(profileId, res.stderr));
         }
-        return { command: acpCustomCommand(source), args: [] };
+        const result = { command: acpCustomCommand(source), args: [] as string[] };
+        this.provisionCache.set(cacheKey, result);
+        return result;
       }
 
       const registry = this.deps.acpRegistry;
       if (!registry) return null;
-      const result = await registry.ensureInstalled(agent, source.registryId);
-      return { command: result.command, args: result.args };
+      const installed = await registry.ensureInstalled(agent, source.registryId, useSidecar);
+      const result = { command: installed.command, args: installed.args };
+      this.provisionCache.set(cacheKey, result);
+      return result;
     } catch (err) {
       // Surface the install failure rather than letting the launch fail later with
       // a generic "binary not found", which says nothing about why.
@@ -998,12 +1057,25 @@ export class AcpSessionService {
 
     const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
     const cwd = projectDefaultWorkingDir(session?.project);
-    // 已在跑的电脑环境必须复用：`start()` 会拆掉重建整个容器（含桌面就绪等待）。
-    // ACP 编码 agent 走 stdio，只需要 shell 就绪（/workspace 挂载 + 工具链可用），
-    // 不必为 Chrome / VNC 启动多等数十秒——桌面在容器后台并行补起。
+
+    // Try to use a dedicated ACP sidecar container for the adapter process.
+    // If the sidecar image is not available (not yet built/pushed), fall back
+    // to running the adapter inside the workspace container — identical to the
+    // pre-sidecar behavior and always works.
+    let useSidecar = true;
+
+    // Workspace container is always needed for terminal/fs callbacks.
     const workspaceReady = this.deps.workspace
       .ensureStarted(agent, { require: "shell" })
       .catch(() => undefined);
+    const sidecarReady = this.deps.workspace
+      .ensureAcpSidecar(agent)
+      .catch((err) => {
+        // Sidecar unavailable — gracefully degrade to in-workspace mode.
+        useSidecar = false;
+        console.warn(`[acp] sidecar 不可用，回退到 workspace 模式：${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      });
 
     // Repair legacy Zakura ACP profiles at the point of use as well as in the
     // settings route. This closes the path where a user starts chat directly
@@ -1054,7 +1126,7 @@ export class AcpSessionService {
             setup.managed.zakura_api_key!,
           )
         : Promise.resolve(undefined);
-    const [provisioned] = await Promise.all([provisionP, workspaceReady]);
+    const [provisioned] = await Promise.all([provisionP, workspaceReady, sidecarReady]);
     if (provisioned) setup = provisioned.agents[setup.id] ?? setup;
     if (setup.modelProvider === "zakura" && !setup.managed.zakura_api_key?.trim()) {
       throw new Error("Zakura 路由缺少 Agent Gateway API key，请重新保存 ACP 配置");
@@ -1134,7 +1206,7 @@ export class AcpSessionService {
     // present (a no-op once installed) and take the resolved absolute path. Older
     // images that still carry pre-baked adapters keep working: `provision` returns
     // null for them and we fall back to the profile's own command.
-    const adapterBin = await this.provisionAdapter(agent, setup.id, launch.command);
+    const adapterBin = await this.provisionAdapter(agent, setup.id, launch.command, useSidecar);
     if (adapterBin) {
       launch.command = adapterBin.command;
       if (adapterBin.args.length && !setup.args?.length) {
@@ -1146,14 +1218,11 @@ export class AcpSessionService {
     const prep = writeScript
       ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
       : `${acpStageScript(layout)}\n${whichCheck}`;
+    const execFn = useSidecar
+      ? (cmd: string[]) => this.deps.workspace.execInSidecar(agent, cmd)
+      : (cmd: string[]) => this.deps.workspace.execInWorkspace(agent, cmd);
     try {
-      // execInWorkspace (local docker exec / remote runner) only throws on a
-      // daemon or transport error — a non-zero process exit comes back as
-      // { exitCode, stderr } and does NOT throw. The whichCheck below exits 127
-      // when the adapter binary is missing; without checking exitCode that
-      // failure was swallowed and startStdio ran anyway, surfacing the vague
-      // "ACP connection closed" instead of "binary missing".
-      const result = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", prep]);
+      const result = await execFn(["bash", "-lc", prep]);
       if (result.exitCode !== 0) {
         const stderr = (result.stderr ?? "").trim();
         if (stderr.includes("ZAKURA_BIN_MISSING")) {
@@ -1162,8 +1231,7 @@ export class AcpSessionService {
         throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
       }
     } catch (err) {
-      await this.deps.workspace
-        .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
+      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("ZAKURA_BIN_MISSING")) {
@@ -1176,13 +1244,12 @@ export class AcpSessionService {
 
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {
-      stdio = await this.deps.workspace.startStdio(agent, acpStdioArgv(launch.command, launch.args), {
-        workingDir: cwd,
-        env,
-      });
+      const argv = acpStdioArgv(launch.command, launch.args);
+      stdio = useSidecar
+        ? await this.deps.workspace.startStdioInSidecar(agent, argv, { workingDir: cwd, env })
+        : await this.deps.workspace.startStdio(agent, argv, { workingDir: cwd, env });
     } catch (err) {
-      await this.deps.workspace
-        .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
+      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
       throw err;
     }
@@ -1223,6 +1290,7 @@ export class AcpSessionService {
       authMethods: [],
       authRequired: false,
       authWaiters: [],
+      useSidecar,
       ...(opts?.runId ? { runId: opts.runId } : {}),
     };
 
@@ -1411,7 +1479,7 @@ export class AcpSessionService {
 
       const mcpServers =
         init.agentCapabilities?.mcpCapabilities?.http || profile.forceHttpMcp
-          ? await listHttpMcpServers(this.deps.agentService, agent.id)
+          ? await listHttpMcpServers(this.deps.agentService, agent.tenantId, agent.id)
           : [];
       const additionalDirectories =
         cwd !== AGENT_WORKSPACE_ROOT ? [AGENT_WORKSPACE_ROOT] : undefined;
@@ -1490,8 +1558,7 @@ export class AcpSessionService {
       return live;
     } catch (err) {
       await this.teardown(live).catch(() => undefined);
-      await this.deps.workspace
-        .execInWorkspace(agent, ["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
+      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
       // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错。
       // 现在有了 stderr 尾部就优先用它——fx 缺凭证/版本不兼容等真正的退出原因都在
@@ -1569,8 +1636,11 @@ export class AcpSessionService {
     }
     live.active?.dispose();
     await live.kill().catch(() => undefined);
-    await this.deps.workspace
-      .execInWorkspace(live.agent, ["bash", "-lc", acpSyncBackScript(live.layout)])
+    // Sync back runtime state; use the same container the adapter ran in.
+    const syncExec = live.useSidecar
+      ? (cmd: string[]) => this.deps.workspace.execInSidecar(live.agent, cmd)
+      : (cmd: string[]) => this.deps.workspace.execInWorkspace(live.agent, cmd);
+    await syncExec(["bash", "-lc", acpSyncBackScript(live.layout)])
       .catch(() => undefined);
     this.byChat.delete(live.chatSessionId);
   }
@@ -1832,9 +1902,10 @@ function elicitationFields(
 
 async function listHttpMcpServers(
   agentService: AgentService,
+  tenantId: string,
   agentId: string,
 ): Promise<acp.McpServer[]> {
-  const bindings = await agentService.listBindings(agentId);
+  const bindings = await agentService.listBindings(tenantId, agentId);
   const out: acp.McpServer[] = [];
   for (const b of bindings) {
     const url = b.endpointUrl?.trim();

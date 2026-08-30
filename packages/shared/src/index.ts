@@ -27,7 +27,7 @@ export type InstanceStatus =
   | "stopped"
   | "error";
 
-export type ContainerPurpose = "component" | "workspace" | "ephemeral";
+export type ContainerPurpose = "component" | "workspace" | "ephemeral" | "acp-sidecar";
 
 export type HealthStatus = "healthy" | "unhealthy" | "unknown";
 
@@ -260,11 +260,17 @@ export interface AgentCapabilities {
   memory?: boolean;
 }
 
-/** Default Docker image for any container-backed capability (prebaked xvfb+chromium). */
-export const DEFAULT_WORKSPACE_IMAGE = "sunwuyuan/zakura-workspace-dev:debian";
+/** Default Docker image for display/browser/computer-use workloads. */
+export const DEFAULT_WORKSPACE_IMAGE = "sunwuyuan/zakura-workspace-dev:latest";
 
 /** Local / published workspace image (docker/workspace → Docker Hub *-dev). */
-export const WORKSPACE_IMAGE_LOCAL = "sunwuyuan/zakura-workspace-dev:debian";
+export const WORKSPACE_IMAGE_LOCAL = "sunwuyuan/zakura-workspace-dev:latest";
+
+/** Default lite image for shell-only / ACP coding workloads (no display stack). */
+export const DEFAULT_WORKSPACE_LITE_IMAGE = "sunwuyuan/zakura-workspace-lite-dev:latest";
+
+/** Default ACP sidecar image (minimal container for adapter execution). */
+export const DEFAULT_ACP_SIDECAR_IMAGE = "sunwuyuan/zakura-acp-sidecar-dev:latest";
 
 /** Default remote Runner Agent image (docker/runner → Docker Hub *-dev). */
 export const DEFAULT_RUNNER_IMAGE = "sunwuyuan/zakura-runner-dev:latest";

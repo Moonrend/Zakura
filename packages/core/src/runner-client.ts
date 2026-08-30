@@ -947,4 +947,68 @@ export class RunnerClient {
     if (!res.ok) throw new Error(await res.text());
     return (await res.json()) as WorkspaceFsEntry;
   }
+
+  // ── ACP Sidecar ────────────────────────────────────────────────────────────
+
+  async ensureAcpSidecar(body: {
+    agentId: string;
+    image?: string;
+    network?: string;
+  }): Promise<{ dockerId: string; image: string; status: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(body.agentId)}/sidecar`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ image: body.image, network: body.network }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = (await res.json()) as {
+      sidecar: { dockerId: string; image: string; status: string };
+    };
+    return data.sidecar;
+  }
+
+  async stopAcpSidecar(agentId: string): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar`,
+      { method: "DELETE", headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+  }
+
+  async execInSidecar(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar/exec`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ command, ...opts }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { exitCode: number; stdout: string; stderr: string };
+  }
+
+  async startStdioInSidecar(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{ stdioId: string; agentId: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar/stdio`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ command, ...opts }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { stdioId: string; agentId: string };
+  }
 }

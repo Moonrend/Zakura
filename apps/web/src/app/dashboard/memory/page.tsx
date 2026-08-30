@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Trash2, HeartPulse, Star } from "lucide-react";
 import { api } from "@/lib/api";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   EmbeddingConfigFields,
   embeddingFromConfig,
@@ -23,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -235,7 +237,7 @@ export default function GlobalMemoryPage() {
   }
 
   async function remove(id: string) {
-    if (!(await confirm({ title: "删除此记忆 Provider？", description: "绑定到它的 Agent 需先更换。", confirmLabel: "删除" }))) return;
+    if (!(await confirm({ title: "删除此记忆配置？", description: "已关联的 Agent 会自动切换到默认。", confirmLabel: "删除" }))) return;
     try {
       await api(`/api/memory-providers/${id}`, { method: "DELETE" });
       toast.success("已删除");
@@ -270,7 +272,7 @@ export default function GlobalMemoryPage() {
     }
   }
 
-  if (!data) return <div className="text-sm text-muted-foreground">…</div>;
+  if (!data) return <PageLoading />;
 
   return (
     <div className="space-y-5">
@@ -292,15 +294,15 @@ export default function GlobalMemoryPage() {
                 <TableHead>向量</TableHead>
                 <TableHead>默认</TableHead>
                 <TableHead>状态</TableHead>
-                <TableHead>引用 Agent</TableHead>
+                <TableHead>关联 Agent</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
             <TableBody>
               {data.providers.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-muted-foreground">
-                    暂无 Provider
+                  <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                    暂无记忆配置
                   </TableCell>
                 </TableRow>
               ) : (
@@ -376,15 +378,15 @@ export default function GlobalMemoryPage() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{edit ? "编辑 Provider" : "新建记忆 Provider"}</DialogTitle>
+            <DialogTitle>{edit ? "编辑记忆配置" : "新建记忆"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
-            <div>
+            <div className="space-y-1.5">
               <Label>名称</Label>
-              <Input className="mt-1" value={name} onChange={(e) => setName(e.target.value)} />
+              <Input value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             {!edit && (
-              <div>
+              <div className="space-y-1.5">
                 <Label>类型</Label>
                 <Select
                   value={kind}
@@ -393,7 +395,7 @@ export default function GlobalMemoryPage() {
                   }}
                   items={KIND_ITEMS}
                 >
-                  <SelectTrigger className="mt-1">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -407,10 +409,9 @@ export default function GlobalMemoryPage() {
               </div>
             )}
             {(kind === "builtin" || kind === "mem0") && (
-              <div>
-                <Label>默认 user_id</Label>
+              <div className="space-y-1.5">
+                <Label>默认用户标识</Label>
                 <Input
-                  className="mt-1"
                   value={defaultUserId}
                   onChange={(e) => setDefaultUserId(e.target.value)}
                 />
@@ -426,10 +427,9 @@ export default function GlobalMemoryPage() {
               />
             )}
             {kind === "traditional" && (
-              <div>
-                <Label>全文注入最大字符数</Label>
+              <div className="space-y-1.5">
+                <Label>最大字符数</Label>
                 <Input
-                  className="mt-1"
                   value={maxChars}
                   onChange={(e) => setMaxChars(e.target.value)}
                 />
@@ -437,19 +437,17 @@ export default function GlobalMemoryPage() {
             )}
             {kind === "mem0" && (
               <>
-                <div>
+                <div className="space-y-1.5">
                   <Label>Base URL</Label>
                   <Input
-                    className="mt-1"
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                     placeholder="https://api.mem0.ai 或 http://127.0.0.1:8000"
                   />
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label>API Key</Label>
                   <Input
-                    className="mt-1"
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
@@ -459,28 +457,25 @@ export default function GlobalMemoryPage() {
             )}
             {kind === "openviking" && (
               <>
-                <div>
+                <div className="space-y-1.5">
                   <Label>Base URL</Label>
                   <Input
-                    className="mt-1"
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                     placeholder="http://127.0.0.1:1933"
                   />
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label>API Key</Label>
                   <Input
-                    className="mt-1"
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                   />
                 </div>
-                <div>
-                  <Label>鉴权 Header</Label>
+                <div className="space-y-1.5">
+                  <Label>认证头</Label>
                   <Input
-                    className="mt-1"
                     value={headerName}
                     onChange={(e) => setHeaderName(e.target.value)}
                   />
@@ -491,14 +486,14 @@ export default function GlobalMemoryPage() {
               <Label>设为团队默认</Label>
               <Switch checked={isDefault} onCheckedChange={setIsDefault} />
             </div>
-            <div className="flex justify-end gap-2 pt-2">
+            <DialogFooter>
               <Button variant="outline" onClick={() => setOpen(false)}>
                 取消
               </Button>
               <Button disabled={busy} onClick={() => void save()}>
                 保存
               </Button>
-            </div>
+            </DialogFooter>
           </div>
         </DialogContent>
       </Dialog>

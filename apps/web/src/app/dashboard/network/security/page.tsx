@@ -13,7 +13,7 @@ import { SettingsHeader, SettingsSection, SettingsField } from "@/components/set
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkSecurityPage() {
@@ -61,7 +61,7 @@ export default function NetworkSecurityPage() {
     return (
       <div className="space-y-5">
         <SettingsHeader title="安全策略" />
-        <Skeleton className="h-48 w-full" />
+        <PageLoading />
       </div>
     );
   }

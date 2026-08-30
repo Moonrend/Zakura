@@ -158,7 +158,7 @@ function AttachmentChip({
     <span
       title={attachment.path}
       className={cn(
-        "animate-pop group/chip relative flex items-center gap-2 rounded-xl border border-border/60 bg-muted/40 py-1 pr-1 pl-1",
+        "animate-pop group/chip relative flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 py-1 pr-1 pl-1",
         "transition-[background-color,border-color] duration-200 ease-fluid hover:border-border hover:bg-muted/70",
       )}
     >
@@ -181,7 +181,7 @@ function AttachmentChip({
       <button
         type="button"
         aria-label={`移除 ${attachment.name}`}
-        className="rounded-full p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+        className="rounded p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
         onClick={onRemove}
       >
         <X className="size-3" />
@@ -202,7 +202,7 @@ function UploadingChip({
   return (
     <span
       title={upload.name}
-      className="animate-pop relative flex items-center gap-2 overflow-hidden rounded-xl border border-dashed border-border/60 bg-muted/20 py-1 pr-1 pl-1"
+      className="animate-pop relative flex items-center gap-2 overflow-hidden rounded-lg border border-dashed border-border/60 bg-muted/20 py-1 pr-1 pl-1"
     >
       <span
         aria-hidden
@@ -221,7 +221,7 @@ function UploadingChip({
       <button
         type="button"
         aria-label={`取消上传 ${upload.name}`}
-        className="relative rounded-full p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+        className="relative rounded p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
         onClick={onCancel}
       >
         <X className="size-3" />
@@ -629,7 +629,7 @@ export function Composer({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={cn(
-            "relative z-10 rounded-xl border bg-background",
+            "relative z-10 rounded-lg border bg-background",
             "transition-[border-color,box-shadow] duration-200 ease-out-soft",
             focused || editing
               ? "border-ring/45 shadow-[var(--shadow-soft)]"
@@ -639,7 +639,7 @@ export function Composer({
         >
         {/* 拖放覆盖层 */}
         {dragging && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-xl border border-dashed border-ring/60 bg-background/95 text-sm text-foreground">
+          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-lg border border-dashed border-ring/60 bg-background/95 text-sm text-foreground">
             <Upload className="size-4" />
             {canAttach ? "松开即可上传到工作区" : "该 Agent 未开启电脑环境"}
           </div>

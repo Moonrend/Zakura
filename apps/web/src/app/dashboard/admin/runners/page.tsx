@@ -62,7 +62,7 @@ export default function AdminRunnersPage() {
     <div className="space-y-4">
       <SettingsHeader
         title="共享 Runner"
-        description="标记为共享后任意团队都可绑定；每团队同时仅允许 1 个活跃工作区，禁止宿主机容器分配与归档。"
+        description="标记为共享后任意团队可绑定"
       />
 
       <ListToolbar>

@@ -881,7 +881,7 @@ function describeCallBody(
   };
 }
 
-/** 状态图标：running 转圈并带呼吸光环，done 用工具语义图标，失败用叉 */
+/** 状态图标：完成=语义图标, running=spinner, error=叉 */
 function StatusIcon({
   running,
   error,
@@ -895,19 +895,18 @@ function StatusIcon({
     <span
       className={cn(
         "relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background",
-        running && "running-halo text-foreground/70",
         error && "text-destructive",
       )}
     >
       {running ? (
         <span
-          className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+          className="size-3 animate-spin rounded-full border-[1.5px] border-muted-foreground/50 border-t-transparent"
           aria-hidden
         />
       ) : error ? (
-        <X className="animate-pop size-3.5" />
+        <X className="size-3.5" />
       ) : (
-        <Icon className="animate-pop size-3.5 opacity-70" />
+        <Icon className="size-3.5 opacity-60" />
       )}
     </span>
   );
@@ -1024,8 +1023,8 @@ function ToolRow({
         }}
         className={cn(
           "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
-          "transition-[background-color,color] duration-150 ease-fluid",
-          expandable && "hover:bg-muted/50 hover:text-foreground",
+          "transition-colors duration-150 ease-fluid",
+          expandable && "hover:text-foreground",
           call.isError && "text-destructive/85 hover:text-destructive",
         )}
       >
@@ -1044,7 +1043,7 @@ function ToolRow({
         )}
         <ChevronRight
           className={cn(
-            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
+            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-200 ease-fluid",
             open && "rotate-90",
             !expandable && "hidden",
           )}
@@ -1079,7 +1078,7 @@ function MoreStepsRow({
     <button
       type="button"
       onClick={onToggle}
-      className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:bg-muted/50 hover:text-foreground"
+      className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"
     >
       <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
         <span className="flex gap-[3px]" aria-hidden>
@@ -1093,7 +1092,7 @@ function MoreStepsRow({
       </span>
       <ChevronRight
         className={cn(
-          "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
+          "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-200 ease-fluid",
           open && "rotate-90",
         )}
       />
@@ -1265,7 +1264,7 @@ export function ToolActivity({
             setExpanded(true);
             void prefetchPending();
           }}
-          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:bg-muted/50 hover:text-foreground"
+          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"
         >
           <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
             <ChevronRight className="size-3 opacity-60" />
@@ -1310,7 +1309,7 @@ export function ToolActivity({
         <button
           type="button"
           onClick={() => setExpanded(false)}
-          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:bg-muted/50 hover:text-foreground"
+          className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"
         >
           <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
             <ChevronRight className="size-3 rotate-90 opacity-60" />
@@ -1373,7 +1372,7 @@ function CompactionStepRow({
         }}
         className={cn(
           "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/75",
-          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/40 hover:text-muted-foreground",
+          "transition-colors duration-150 ease-fluid hover:text-muted-foreground",
           failed && "text-muted-foreground/65",
         )}
       >
@@ -1389,7 +1388,7 @@ function CompactionStepRow({
         {step.summary ? (
           <ChevronRight
             className={cn(
-              "size-3 shrink-0 text-muted-foreground/35 transition-transform duration-300 ease-overshoot",
+              "size-3 shrink-0 text-muted-foreground/35 transition-transform duration-200 ease-fluid",
               open && "rotate-90",
             )}
           />
@@ -1450,22 +1449,21 @@ function ReasoningStepRow({
         onClick={() => setOpen((v) => !v)}
         className={cn(
           "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
-          "transition-[background-color,color] duration-150 ease-fluid hover:bg-muted/50 hover:text-foreground",
+          "transition-colors duration-150 ease-fluid hover:text-foreground",
         )}
       >
         <span
           className={cn(
             "relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background",
-            active && "running-halo text-foreground/70",
           )}
         >
           {active ? (
             <span
-              className="size-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+              className="size-3 animate-spin rounded-full border-[1.5px] border-muted-foreground/50 border-t-transparent"
               aria-hidden
             />
           ) : (
-            <Brain className="animate-pop size-3.5 opacity-70" />
+            <Brain className="size-3.5 opacity-60" />
           )}
         </span>
         <span className={cn("min-w-0 truncate", active && "text-shimmer")}>
@@ -1473,7 +1471,7 @@ function ReasoningStepRow({
         </span>
         <ChevronRight
           className={cn(
-            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-300 ease-overshoot",
+            "size-3 shrink-0 text-muted-foreground/40 transition-transform duration-200 ease-fluid",
             open && "rotate-90",
           )}
         />

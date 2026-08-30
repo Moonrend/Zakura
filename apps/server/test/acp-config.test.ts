@@ -149,6 +149,23 @@ describe("ACP config", () => {
       "opencode",
       "kiro",
       "fx",
+      "auggie",
+      "cline",
+      "cursor",
+      "devin",
+      "factory-droid",
+      "goose",
+      "junie",
+      "qwen-code",
+      "mistral-vibe",
+      "nova",
+      "dirac",
+      "codebuddy",
+      "amp",
+      "deepagents",
+      "poolside",
+      "sigit",
+      "fast-agent",
     ]);
     // Kiro 只有自身的设备码登录，没有可注入的 key，因此不能走 Zakura 网关路由。
     const kiro = builtinAcpProfiles().find((p) => p.id === "kiro")!;

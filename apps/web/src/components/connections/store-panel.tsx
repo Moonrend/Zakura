@@ -29,7 +29,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Textarea } from "@/components/ui/textarea";
 import {
   DropdownMenu,
@@ -342,7 +342,7 @@ export function StorePanel({
       />
 
       {loading ? (
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <PageLoading />
       ) : totalItems === 0 ? (
         <p className="py-12 text-center text-sm text-muted-foreground">没有匹配结果</p>
       ) : showSections ? (

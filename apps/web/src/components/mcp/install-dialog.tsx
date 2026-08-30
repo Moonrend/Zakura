@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
 
 export type InstallResult = {
@@ -141,11 +141,7 @@ export function McpInstallDialog({
 
         {loading || !config ? (
           showChrome ? (
-            <div className="space-y-3 py-2">
-              <Skeleton className="h-4 w-3/4" />
-              <Skeleton className="h-20 w-full" />
-              <Skeleton className="h-9 w-28" />
-            </div>
+            <PageLoading />
           ) : null
         ) : (
           <div className={cn("space-y-4", !showChrome && "sr-only")}>

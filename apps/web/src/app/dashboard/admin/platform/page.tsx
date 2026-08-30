@@ -12,7 +12,7 @@ export default function AdminPlatformPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="平台服务"
-        description="组网、事务邮件、技能令牌与连接器的平台级配置。"
+        description="平台级基础设施配置"
       />
       <PlatformHeadscalePanel />
       <PlatformTransactionalEmailPanel />

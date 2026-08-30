@@ -36,7 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Separator } from "@/components/ui/separator";
 import {
   Select,
@@ -431,19 +431,7 @@ export default function AgentSettingsPage() {
   }
 
   if (!agent || !state || !ready) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-40" />
-        <div className="grid gap-5 md:grid-cols-[9rem_1fr]">
-          <Skeleton className="hidden h-48 md:block" />
-          <div className="space-y-4">
-            <Skeleton className="h-36 w-full rounded-lg" />
-            <Skeleton className="h-48 w-full rounded-lg" />
-            <Skeleton className="h-40 w-full rounded-lg" />
-          </div>
-        </div>
-      </div>
-    );
+    return <PageLoading />;
   }
 
   return (
@@ -580,7 +568,7 @@ export default function AgentSettingsPage() {
               <div className="space-y-1.5">
                 <label className="text-sm font-medium">模型</label>
                 <p className="text-xs text-muted-foreground">
-                  未选择时使用团队默认对话模型；多上游可选「自动」动态路由。
+                  未选择时使用团队默认模型
                 </p>
                 <ModelRouteSelector
                   items={modelItems}
@@ -601,7 +589,7 @@ export default function AgentSettingsPage() {
               <div className="space-y-1.5">
                 <label className="text-sm font-medium">上下文压缩模型</label>
                 <p className="text-xs text-muted-foreground">
-                  长对话摘要时使用的模型，建议选便宜、速度快的小模型；未设置则回退到上方对话模型。
+                  长对话摘要用，建议选成本低的小模型
                 </p>
                 <ModelRouteSelector
                   items={compactModelItems}
@@ -644,7 +632,7 @@ export default function AgentSettingsPage() {
                 />
               </SettingsRow>
               <p className="text-xs text-muted-foreground -mt-1">
-                关闭后仅按回合截断历史，不再调用模型生成摘要。阈值留空则用平台默认，并会按模型上下文窗口自动收紧。
+                留空使用平台默认值
               </p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1">

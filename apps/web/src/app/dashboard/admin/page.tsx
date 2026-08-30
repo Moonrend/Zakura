@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import type { AdminStats } from "@/lib/admin";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
 
 type Platform = {
@@ -54,7 +54,7 @@ function StatCard({
   );
 
   const className =
-    "rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-ring/40";
+    "surface-interactive rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-ring/40";
 
   return href ? (
     <Link href={href} className={className}>
@@ -95,14 +95,7 @@ export default function AdminOverviewPage() {
 
   if (loading) {
     return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-40" />
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 w-full" />
-          ))}
-        </div>
-      </div>
+      <PageLoading />
     );
   }
 
@@ -110,7 +103,7 @@ export default function AdminOverviewPage() {
 
   return (
     <div className="space-y-5">
-      <SettingsHeader title="概览" description="平台整体状况" />
+      <SettingsHeader title="概览" />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -146,7 +139,7 @@ export default function AdminOverviewPage() {
 
       <SettingsSection
         title="部署模式"
-        description="模式由环境变量控制（ZAKURA_EDITION=saas），不可在此修改。"
+        description="由环境变量控制，不可在此修改"
       >
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="secondary">{platform?.mode}</Badge>

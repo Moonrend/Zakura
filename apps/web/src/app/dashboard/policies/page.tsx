@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -13,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -39,6 +41,7 @@ type ApiKeyRow = { id: string; name: string; keyPrefix: string };
 type InstanceRow = { id: string; name: string; slug: string };
 
 export default function PoliciesPage() {
+  const { confirm } = useConfirmDialog();
   const [rows, setRows] = useState<Policy[]>([]);
   const [keys, setKeys] = useState<ApiKeyRow[]>([]);
   const [instances, setInstances] = useState<InstanceRow[]>([]);
@@ -108,9 +111,9 @@ export default function PoliciesPage() {
         <TableHeader>
           <TableRow>
             <TableHead>Key</TableHead>
-            <TableHead>能力</TableHead>
-            <TableHead>Allow</TableHead>
-            <TableHead>Deny</TableHead>
+            <TableHead>关联 Agent</TableHead>
+            <TableHead>允许</TableHead>
+            <TableHead>拒绝</TableHead>
             <TableHead>内置</TableHead>
             <TableHead />
           </TableRow>
@@ -155,6 +158,7 @@ export default function PoliciesPage() {
                     size="icon"
                     variant="ghost"
                     onClick={async () => {
+                      if (!(await confirm({ title: "删除此策略？", confirmLabel: "删除" }))) return;
                       await api(`/api/mcp/policies/${row.id}`, { method: "DELETE" });
                       toast.success("已删除");
                       await load();
@@ -168,7 +172,7 @@ export default function PoliciesPage() {
           ))}
           {!rows.length ? (
             <TableRow>
-              <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
+              <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
                 暂无策略
               </TableCell>
             </TableRow>
@@ -241,7 +245,7 @@ export default function PoliciesPage() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>能力 id（空=全部）</Label>
+              <Label>关联 Agent（留空=全部）</Label>
               <Input
                 value={instanceIds.join(",")}
                 onChange={(e) =>
@@ -256,20 +260,22 @@ export default function PoliciesPage() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Allowlist</Label>
-              <Input value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="a__b, c__d" />
+              <Label>允许的工具</Label>
+              <Input value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="tool_a, tool_b" />
             </div>
             <div className="space-y-1.5">
-              <Label>Denylist</Label>
+              <Label>拒绝的工具</Label>
               <Input value={deny} onChange={(e) => setDeny(e.target.value)} />
             </div>
             <div className="flex items-center justify-between">
               <Label>内置工具</Label>
               <Switch checked={includeBuiltin} onCheckedChange={setIncludeBuiltin} />
             </div>
-            <Button type="submit" className="w-full">
-              保存
-            </Button>
+            <DialogFooter>
+              <Button type="submit" className="w-full">
+                保存
+              </Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
