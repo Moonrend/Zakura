@@ -6,7 +6,7 @@ import { SettingsHeader } from "@/components/settings-shell";
 import { McpOfficialStorePanel } from "@/components/mcp/official-store-panel";
 import { McpStorePanel } from "@/components/mcp/store-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 type StoreTab = "official" | "community";
 
@@ -49,7 +49,7 @@ function McpStorePageInner() {
 
 export default function McpStorePage() {
   return (
-    <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+    <Suspense fallback={<PageLoading />}>
       <McpStorePageInner />
     </Suspense>
   );

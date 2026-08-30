@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { fetchAgents } from "@/lib/agents";
 
 /** 旧入口：跳转到某个 Agent 的平台子页 */
@@ -28,10 +28,5 @@ export default function AgentConnectionsRedirectPage() {
     };
   }, [router]);
 
-  return (
-    <div className="flex min-h-40 items-center justify-center text-sm text-muted-foreground">
-      <Loader2 className="mr-2 size-4 animate-spin" />
-      正在跳转…
-    </div>
-  );
+  return <PageLoading />;
 }

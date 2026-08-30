@@ -13,7 +13,7 @@ import {
 } from "@/lib/user-usage";
 import { SettingsSection } from "@/components/settings-shell";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Table,
   TableBody,
@@ -58,7 +58,7 @@ export function UserUsagePanel({
   if (loading || !data) {
     return (
       <SettingsSection title="用量（近 30 天）">
-        <Skeleton className="h-24 w-full" />
+        <PageLoading />
       </SettingsSection>
     );
   }

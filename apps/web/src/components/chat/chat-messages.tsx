@@ -64,7 +64,7 @@ function AttachmentChips({
           key={a.path}
           type="button"
           onClick={() => onOpenFile?.(a.path)}
-          className="flex items-center gap-1.5 rounded-xl border border-border/60 bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
           title={a.path}
         >
           {a.kind === "image" ? (
@@ -120,11 +120,11 @@ function SharedFileCards({
         return (
           <div
             key={f.shareId || f.url}
-            className="overflow-hidden rounded-2xl border border-border/70 bg-muted/20"
+            className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"
           >
             {image ? <SharedFilePreview url={f.url} fileName={f.fileName} /> : null}
             <div className="flex items-center gap-2.5 px-3 py-2.5">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-background/80 text-muted-foreground">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-background/80 text-muted-foreground">
                 {image ? (
                   <ImageIcon className="h-4 w-4" />
                 ) : (
@@ -608,7 +608,7 @@ function renderRunItems(
           {it.attachments?.length ? (
             <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
           ) : null}
-          <div className="max-w-[min(85%,36rem)] rounded-[1.35rem] bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
+          <div className="max-w-[min(85%,36rem)] rounded-xl bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
             <div className="whitespace-pre-wrap break-words">{it.content}</div>
           </div>
         </div>,
@@ -630,7 +630,7 @@ function renderRunItems(
         >
           {it.entries.map((e, i) => (
             <li key={`${it.id}-${i}`} className="flex gap-2 text-muted-foreground">
-              <span className="shrink-0 text-xs uppercase">{e.status ?? "pending"}</span>
+              <span className="shrink-0 text-[11px] text-muted-foreground/60">{e.status ?? "pending"}</span>
               <span className="text-foreground">{e.content}</span>
             </li>
           ))}
@@ -871,7 +871,12 @@ export function ChatMessages({
               (isLast && canAct));
 
           return (
-            <div key={turn.message.id} className="animate-rise flex flex-col gap-3">
+            <div
+              key={turn.message.id}
+              id={`turn-${turn.message.id}`}
+              className="animate-rise flex flex-col gap-3"
+              style={{ contentVisibility: "auto", containIntrinsicSize: "auto 200px" }}
+            >
               {turn.message.continue ? null : editing ? (
                 <div className="animate-rise ml-auto flex items-center gap-2 rounded-full border border-primary/35 bg-primary/10 px-3 py-1.5 text-xs text-muted-foreground">
                   <Pencil className="size-3 shrink-0 text-primary" />
@@ -908,7 +913,7 @@ export function ChatMessages({
                         <TooltipContent>编辑</TooltipContent>
                       </Tooltip>
                     </div>
-                    <div className="max-w-[min(85%,36rem)] rounded-[1.35rem] bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
+                    <div className="max-w-[min(85%,36rem)] rounded-xl bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
                       <div className="whitespace-pre-wrap break-words">
                         {turn.message.content}
                       </div>

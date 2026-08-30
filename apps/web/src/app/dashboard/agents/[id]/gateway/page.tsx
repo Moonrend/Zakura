@@ -34,7 +34,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SettingsHeader, SettingsRow, SettingsSection, TableActions } from "@/components/settings-shell";
@@ -282,13 +282,7 @@ export default function AgentGatewayPage() {
   }
 
   if (agentLoading || loading) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-16 w-full rounded-lg" />
-        <Skeleton className="h-40 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   if (!agent) {
@@ -306,7 +300,7 @@ export default function AgentGatewayPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="AI Gateway"
-        description="模型代理 + 会话记录。透传客户端 messages/tools，不注入云端工具；需要 Zakura 工具时请单独接 MCP。"
+        description="统一模型代理与会话记录"
       />
 
       <SettingsSection title="接入">
@@ -324,16 +318,14 @@ export default function AgentGatewayPage() {
             <CopyButton value={gatewayBaseUrl} />
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            填 Base URL + Key 即可做模型代理，对话会记入本 Agent。Claude Code / Codex 等自带
-            session 头会按会话归并；其它客户端按 user 消息历史对齐最近会话。云端工具请用 MCP
-            端点接入，不要指望 Gateway 注入。
+            填 Base URL + Key 即可做模型代理，对话会记入本 Agent。
           </p>
         </div>
       </SettingsSection>
 
       <SettingsSection
         title="API Keys"
-        description="Key 绑定本 Agent，创建后只显示一次原文；撤销立即失效。"
+        description="创建后只显示一次"
         action={keys.length ? createKeyButton : undefined}
       >
         {keys.length ? (
@@ -393,7 +385,7 @@ export default function AgentGatewayPage() {
 
       <SettingsSection
         title="模型"
-        description="客户端未指定 model 时使用默认模型；转发表做 O(1) 名称替换，适合 Codex review 等别名。"
+        description="默认模型与名称转发"
       >
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -414,7 +406,7 @@ export default function AgentGatewayPage() {
 
           <SettingsRow
             label="自动标题"
-            description="Gateway 会话首轮结束后由后台生成标题，不拖慢响应。"
+            description="会话首轮结束后后台生成"
             htmlFor="gateway-auto-title"
           >
             <Switch

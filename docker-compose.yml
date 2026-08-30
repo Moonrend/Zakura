@@ -49,7 +49,7 @@ services:
       # 部署形态：oss（默认单租户）| saas（多租户 / 自助注册，镜像内需含 @zakura/saas）
       ZAKURA_EDITION: ${ZAKURA_EDITION:-oss}
       # 工作区 / Runner 默认镜像（可由环境覆盖）
-      ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:debian}
+      ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:latest}
       ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
       # 可选：OTLP logs 完整 URL（Axiom: https://<region>.aws.edge.axiom.co/v1/logs）
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}

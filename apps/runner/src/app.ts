@@ -274,7 +274,7 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
         agentId: body.agentId,
         agentSlug: body.agentSlug,
         tenantSlug: body.tenantSlug,
-        image: body.image || "sunwuyuan/zakura-workspace-dev:debian",
+        image: body.image || "sunwuyuan/zakura-workspace-dev:latest",
         network: body.network,
         env: body.env,
         labels: body.labels,
@@ -487,6 +487,77 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       const info = await dockerWs.findByAgent(c.req.param("agentId"));
       if (!info) return c.json({ error: "Not found" }, 404);
       return c.json({ endpoints: info.endpoints, status: info.status });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  // --- ACP Sidecar lifecycle ---
+
+  app.post("/v1/workspaces/:agentId/sidecar", async (c) => {
+    type Body = { image?: string; network?: string };
+    const body = (await c.req.json().catch(() => ({}))) as Body;
+    const agentId = c.req.param("agentId");
+    try {
+      const result = await dockerWs.ensureSidecar(agentId, {
+        image: body.image || "sunwuyuan/zakura-acp-sidecar-dev:latest",
+        network: body.network,
+      });
+      return c.json({ sidecar: result }, 200);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.delete("/v1/workspaces/:agentId/sidecar", async (c) => {
+    try {
+      await dockerWs.stopSidecar(c.req.param("agentId"));
+      return c.json({ ok: true });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.post("/v1/workspaces/:agentId/sidecar/exec", async (c) => {
+    type Body = {
+      command?: string[];
+      workingDir?: string;
+      env?: Record<string, string>;
+      timeoutMs?: number;
+    };
+    const body = (await c.req.json().catch(() => ({}))) as Body;
+    if (!body.command?.length) return c.json({ error: "command required" }, 400);
+    try {
+      const result = await dockerWs.execInSidecar(c.req.param("agentId"), body.command, {
+        workingDir: body.workingDir,
+        env: body.env,
+        timeoutMs: body.timeoutMs,
+      });
+      return c.json(result);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.post("/v1/workspaces/:agentId/sidecar/stdio", async (c) => {
+    type Body = {
+      command?: string[];
+      workingDir?: string;
+      env?: Record<string, string>;
+    };
+    const body = (await c.req.json().catch(() => ({}))) as Body;
+    if (!body.command?.length) return c.json({ error: "command required" }, 400);
+    try {
+      const job = await dockerWs.startStdioInSidecar(
+        c.req.param("agentId"),
+        body.command,
+        { workingDir: body.workingDir, env: body.env },
+      );
+      return c.json({ stdioId: job.id, agentId: c.req.param("agentId") });
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, 500);

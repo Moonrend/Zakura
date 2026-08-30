@@ -10,7 +10,6 @@ import {
   log,
   resolveDockerContextSocketPath,
   toDockerHostPath,
-  mapContainerPathToHost,
   normalizeImageRef,
   ShellJob,
   ShellJobRegistry,
@@ -130,38 +129,18 @@ export class RunnerDockerWorkspace {
   private readonly jobs = new ShellJobRegistry();
   private readonly stdio = new StdioExecRegistry();
 
-  /**
-   * Host-side spelling of `storageRoot`. Only differs from `storageRoot` when the
-   * Runner itself runs in a container: the generated compose maps the host's
-   * `/var/zakura/<slug>/data` to `/var/lib/zakura` inside us, but the workspace
-   * containers we create are created on the *host* daemon and must be given the
-   * host path. See `mapContainerPathToHost`.
-   */
-  private readonly hostStorageRoot: string;
-
   constructor(
     private readonly storageRoot: string,
     private readonly publicHost: string,
     dockerOpts?: Docker.DockerOptions,
-    hostStorageRoot?: string,
   ) {
     const socketPath = dockerOpts ? undefined : resolveDockerContextSocketPath();
     this.docker = new Docker(socketPath ? { socketPath } : dockerOpts);
-    this.hostStorageRoot =
-      hostStorageRoot?.trim() ||
-      process.env.ZAKURA_RUNNER_HOST_STORAGE_ROOT?.trim() ||
-      storageRoot;
   }
 
   /** Bind-mount source for an agent workspace, in host-filesystem terms. */
   private workspaceHostPath(agentId: string): string {
-    return toDockerHostPath(
-      mapContainerPathToHost(
-        this.workspacePath(agentId),
-        this.storageRoot,
-        this.hostStorageRoot,
-      ),
-    );
+    return toDockerHostPath(this.workspacePath(agentId));
   }
 
   /** Shared Docker client (used by system-update self-recreate). */
@@ -244,14 +223,23 @@ export class RunnerDockerWorkspace {
 
   /** Always pull the image (refresh), unlike start() which only pulls when missing. */
   async pullImage(image: string): Promise<{ image: string; status: string }> {
-    await new Promise<void>((resolve, reject) => {
-      this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
-        if (err) return reject(dockerErr(err));
-        this.docker.modem.followProgress(stream, (e: Error | null) =>
-          e ? reject(dockerErr(e)) : resolve(),
-        );
+    const doPull = () =>
+      new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`docker pull ${image} timed out (120s)`)), 120_000);
+        this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+          if (err) { clearTimeout(timeout); return reject(dockerErr(err)); }
+          this.docker.modem.followProgress(stream, (e: Error | null) => {
+            clearTimeout(timeout);
+            e ? reject(dockerErr(e)) : resolve();
+          });
+        });
       });
-    });
+    try {
+      await doPull();
+    } catch (firstErr) {
+      log.warn("runner.pull_retry", { image, error: String(firstErr) });
+      await doPull();
+    }
     const info = await this.docker.getImage(image).inspect();
     return { image, status: info.Id ? "updated" : "unknown" };
   }
@@ -314,8 +302,15 @@ export class RunnerDockerWorkspace {
       // bare prefixes) and fall back to image id. The image-id guard alone
       // misses the "just pulled a new tag" case (new id ≠ old running id), so
       // the normalized string match is what actually triggers the recreate.
+      //
+      // Orphaned containers: when c.Image looks like a bare image ID (hex-only,
+      // no "/" or ":") rather than a proper ref, the container was created before
+      // normalizeImageRef was in place. These can never match any named tag, so
+      // they would be silently skipped forever. Always include them in recreate.
+      const isOrphanedRef = /^[0-9a-f]{12,64}$/i.test(c.Image) || (!c.Image.includes("/") && !c.Image.includes(":"));
       const matchesImage =
         !image ||
+        isOrphanedRef ||
         normalizeImageRef(c.Image) === normalizeImageRef(image) ||
         (targetImageId !== null && c.ImageID === targetImageId);
       if (!matchesImage) continue;
@@ -623,8 +618,8 @@ export class RunnerDockerWorkspace {
           error:
             `工作区挂载指向了另一个目录：Runner 看到的是 ${root}，` +
             `但容器里的 ${AGENT_WORKSPACE_ROOT} 是别的目录，两边内容不同步。` +
-            `Runner 跑在容器里时，请把 ZAKURA_RUNNER_HOST_STORAGE_ROOT 设为` +
-            `宿主机上对应 ${this.storageRoot} 的真实路径（compose 里挂载的那个），然后重建电脑环境。`,
+            `请确保 ZAKURA_RUNNER_STORAGE_ROOT 是宿主机的真实路径（compose 里 -v 的左侧），` +
+            `然后重建电脑环境。`,
         };
       }
       return { ok: true };
@@ -912,5 +907,148 @@ export class RunnerDockerWorkspace {
         }
       },
     };
+  }
+
+  // ── ACP Sidecar ────────────────────────────────────────────────────────────
+
+  private sidecarName(agentId: string): string {
+    return `zakura-acp-${agentId}`.slice(0, 63);
+  }
+
+  private async findSidecar(agentId: string): Promise<{ id: string; status: string } | null> {
+    const list = await this.docker.listContainers({
+      all: true,
+      filters: { label: [`zakura.agent=${agentId}`, "zakura.purpose=acp-sidecar"] },
+    });
+    if (!list.length) return null;
+    return { id: list[0]!.Id, status: list[0]!.State };
+  }
+
+  async ensureSidecar(
+    agentId: string,
+    opts: { image: string; network?: string },
+  ): Promise<{ dockerId: string; image: string; status: string }> {
+    const existing = await this.findSidecar(agentId);
+    if (existing && existing.status === "running") {
+      return { dockerId: existing.id, image: opts.image, status: "running" };
+    }
+    if (existing) {
+      await this.docker.getContainer(existing.id).remove({ force: true }).catch(() => undefined);
+    }
+
+    // Ensure image
+    try {
+      await this.docker.getImage(opts.image).inspect();
+    } catch {
+      await new Promise<void>((resolve, reject) => {
+        this.docker.pull(opts.image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+          if (err) return reject(dockerErr(err));
+          this.docker.modem.followProgress(stream, (e: Error | null) =>
+            e ? reject(dockerErr(e)) : resolve(),
+          );
+        });
+      });
+    }
+
+    const hostPath = this.workspaceHostPath(agentId);
+    const name = this.sidecarName(agentId);
+
+    // Clean up by name
+    try { await this.docker.getContainer(name).remove({ force: true }); } catch { /* */ }
+
+    const createOpts: Docker.ContainerCreateOptions = {
+      name,
+      Image: opts.image,
+      Env: [
+        `ZAKURA_AGENT_ID=${agentId}`,
+        `HOME=${AGENT_WORKSPACE_ROOT}`,
+        `PATH=${ACP_IMAGE_BIN_DIR}:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+      ],
+      Labels: {
+        "zakura.managed": "true",
+        "zakura.purpose": "acp-sidecar",
+        "zakura.agent": agentId,
+      },
+      WorkingDir: AGENT_WORKSPACE_ROOT,
+      HostConfig: {
+        Binds: [`${hostPath}:${AGENT_WORKSPACE_ROOT}`],
+        RestartPolicy: { Name: "unless-stopped" },
+      },
+    };
+
+    if (opts.network) {
+      const net = resolveNetworkMode(opts.network);
+      if (net) {
+        await this.ensureNetwork(net);
+        createOpts.NetworkingConfig = { EndpointsConfig: { [net]: {} } };
+      }
+    }
+
+    const container = await this.docker.createContainer(createOpts);
+    await container.start();
+    const info = await container.inspect();
+    return { dockerId: info.Id, image: opts.image, status: info.State.Status };
+  }
+
+  async stopSidecar(agentId: string): Promise<void> {
+    const existing = await this.findSidecar(agentId);
+    if (!existing) return;
+    const container = this.docker.getContainer(existing.id);
+    await container.stop({ t: 5 }).catch(() => undefined);
+    await container.remove({ force: true }).catch(() => undefined);
+  }
+
+  async execInSidecar(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const sidecar = await this.findSidecar(agentId);
+    if (!sidecar || sidecar.status !== "running") {
+      throw new Error("ACP sidecar container not running");
+    }
+    return this.execRaw(sidecar.id, command, opts);
+  }
+
+  async startStdioInSidecar(
+    agentId: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ) {
+    const sidecar = await this.findSidecar(agentId);
+    if (!sidecar || sidecar.status !== "running") {
+      throw new Error("ACP sidecar container not running");
+    }
+    const container = this.docker.getContainer(sidecar.id);
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      WorkingDir: opts?.workingDir,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: false,
+    })) as unknown as NodeJS.ReadWriteStream;
+    const job = new StdioExec(stream, {
+      inspect: () => exec.inspect(),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch { /* gone */ }
+      },
+    });
+    this.stdio.add(job);
+    return job;
   }
 }

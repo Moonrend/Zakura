@@ -5,7 +5,7 @@ import { Check, ChevronDown, Copy, KeyRound, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Select,
   SelectContent,
@@ -169,7 +169,7 @@ export function AgentConnectPanel({
   }
 
   if (loading) {
-    return <Skeleton className={cn("w-full rounded-lg", compact ? "h-72" : "h-80")} />;
+    return <PageLoading />;
   }
 
   return (

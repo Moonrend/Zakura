@@ -18,7 +18,7 @@ import {
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Select,
   SelectContent,
@@ -104,13 +104,7 @@ export default function AgentWebPage() {
   }
 
   if (!opts || !state) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-32" />
-        <Skeleton className="h-40 w-full rounded-xl" />
-        <Skeleton className="h-40 w-full rounded-xl" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const engines = opts.webSearch.engines;

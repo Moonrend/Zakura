@@ -12,7 +12,6 @@ import {
   Brain,
   Cable,
   ChevronRight,
-  CloudDownload,
   Cpu,
   FolderKanban,
   Globe,
@@ -27,7 +26,6 @@ import {
   Settings2,
   Shield,
   SlidersHorizontal,
-  Store,
   Users,
   Wrench,
   HardDrive,
@@ -74,7 +72,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ImageUpdateIndicator } from "@/components/image-update-status";
 import { BrandMark } from "@/components/brand-mark";
-import { Skeleton } from "@/components/ui/skeleton";
+import { ProgressLinear } from "@/components/ui/progress-linear";
 
 type IconComp = React.ComponentType<{ className?: string }>;
 
@@ -123,22 +121,6 @@ function parseAgentId(pathname: string): string | null {
 
 function defaultActive(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
-}
-
-function mcpServerActive(pathname: string) {
-  if (pathname === "/dashboard/mcp") return true;
-  if (!pathname.startsWith("/dashboard/mcp/")) return false;
-  const seg = pathname.slice("/dashboard/mcp/".length).split("/")[0];
-  return seg !== "store" && seg !== "import" && seg !== "official";
-}
-
-function mcpStoreActive(pathname: string) {
-  return (
-    pathname === "/dashboard/mcp/store" ||
-    pathname.startsWith("/dashboard/mcp/store/") ||
-    pathname === "/dashboard/mcp/official" ||
-    pathname.startsWith("/dashboard/mcp/official/")
-  );
 }
 
 function serverSectionActive(pathname: string) {
@@ -386,7 +368,7 @@ function SidebarUserFooter() {
         <Button
           variant="ghost"
           size="sm"
-          className="flex-1 justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
+          className="press flex-1 justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
           onClick={() => {
             setSession(null);
             router.replace("/login");
@@ -554,11 +536,11 @@ function AgentConfigSidebar({
         </SidebarMenu>
 
         <div className="min-w-0 px-1 group-data-[collapsible=icon]:hidden">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="text-[11px] font-medium text-muted-foreground">
             Agent 配置
           </div>
           {loading && !current ? (
-            <Skeleton className="mt-1 h-5 w-28" />
+            <ProgressLinear indeterminate className="mt-2 max-w-24" />
           ) : agents.length > 1 ? (
             <DropdownMenu>
               <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-sm font-medium hover:text-foreground">
@@ -692,7 +674,7 @@ function AdminSidebar({ pathname }: { pathname: string }) {
         </SidebarMenu>
 
         <div className="min-w-0 px-1 group-data-[collapsible=icon]:hidden">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <div className="text-[11px] font-medium text-muted-foreground">
             超级管理员
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium">
@@ -767,23 +749,8 @@ function PlatformSidebar({
         icon: MessageSquare,
         isActive: (path) => path === "/chat" || path.startsWith("/chat/"),
       },
-      {
-        id: "connectors",
-        href: "/dashboard/connectors",
-        label: "连接器",
-        icon: Plug,
-        isActive: (path) =>
-          path === "/dashboard/connectors" ||
-          path.startsWith("/dashboard/connectors/"),
-      },
-      {
-        id: "skills",
-        href: "/dashboard/skills",
-        label: "技能",
-        icon: Blocks,
-        isActive: (path) =>
-          path === "/dashboard/skills" || path.startsWith("/dashboard/skills/"),
-      },
+      /* connectors 已移入 agent 内部页面，顶层入口移除 */
+      /* skills 已移入 agent 内部页面，顶层入口移除 */
       {
         id: "web",
         href: "/dashboard/web",
@@ -806,33 +773,8 @@ function PlatformSidebar({
         label: "记忆",
         icon: Brain,
       },
-      {
-        id: "mcp",
-        href: "/dashboard/mcp",
-        label: "MCP",
-        icon: Cable,
-        isActive: (path) =>
-          path === "/dashboard/mcp" || path.startsWith("/dashboard/mcp/"),
-        children: [
-          {
-            href: "/dashboard/mcp",
-            label: "已安装",
-            icon: Server,
-            isActive: mcpServerActive,
-          },
-          {
-            href: "/dashboard/mcp/store",
-            label: "商店",
-            icon: Store,
-            isActive: mcpStoreActive,
-          },
-          {
-            href: "/dashboard/mcp/import",
-            label: "导入",
-            icon: CloudDownload,
-          },
-        ],
-      },
+      /* mcp 已移入 agent 内部页面，顶层入口移除；
+         /dashboard/mcp/* 详情、商店、导入页面仍可通过 agent MCP 页链接访问 */
       {
         id: "models",
         href: "/dashboard/models",

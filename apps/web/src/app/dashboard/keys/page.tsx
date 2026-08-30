@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { SearchField } from "@/components/ui/search-field";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 
@@ -73,7 +73,7 @@ export default function KeysPage() {
       />
 
       {loading ? (
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <PageLoading />
       ) : (
         <>
           {rows.length > 5 ? (
@@ -108,7 +108,7 @@ export default function KeysPage() {
             ))}
             {!filtered.length ? (
               <TableRow>
-                <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
+                <TableCell colSpan={4} className="py-10 text-center text-muted-foreground">
                   {rows.length ? `没有匹配「${q}」的 Key` : "暂无 Key"}
                 </TableCell>
               </TableRow>

@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { SettingsHeader, SettingsSection, SettingsField } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Switch } from "@/components/ui/switch";
 
 type AgentDefaults = {
@@ -107,10 +107,7 @@ export default function AdminAgentDefaultsPage() {
 
   if (loading || !defaults) {
     return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-64 w-full" />
-      </div>
+      <PageLoading />
     );
   }
 
@@ -118,7 +115,7 @@ export default function AdminAgentDefaultsPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="Agent 默认网页工具"
-        description="新建 Agent 和未单独覆盖的 Agent 会跟随这里的设置。平台托管服务只对租户提供使用能力，连接地址和凭据不会下发。"
+        description="新建 Agent 默认继承此配置"
       />
 
       <SettingsSection title="默认开关">
@@ -197,7 +194,7 @@ export default function AdminAgentDefaultsPage() {
 
       <SettingsSection
         title="平台默认自托管服务（Zakura 自动）"
-        description="选中的服务会作为租户网页配置里的「Zakura 自动」选项；连接地址与凭据不会下发。每种能力最多选一个。"
+        description="选中的服务作为租户网页配置中的「Zakura 自动」选项。"
       >
         {managedServices.length ? (
           <div className="grid gap-3 sm:grid-cols-2">

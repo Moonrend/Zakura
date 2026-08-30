@@ -202,7 +202,7 @@ export default function AdminUsersPage() {
     <div className="space-y-4">
       <SettingsHeader
         title="用户"
-        description="平台全部登录账号；封禁后已签发的会话会在下一次请求时被拒绝。"
+        description="平台全部登录账号"
         actions={
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus />

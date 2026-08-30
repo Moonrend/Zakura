@@ -28,7 +28,7 @@ import { useAutoSave } from "@/hooks/use-auto-save";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Select,
   SelectContent,
@@ -166,12 +166,7 @@ export default function AgentMcpPage() {
   }
 
   if (!opts || !state) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-48 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const instances = opts.mcp.instances;
@@ -370,7 +365,7 @@ export default function AgentMcpPage() {
 
         <TabsContent value="tools" className="mt-4">
           {capsBusy && !detail ? (
-            <Skeleton className="h-64 w-full rounded-lg" />
+            <PageLoading />
           ) : (
             <McpToolsExplorer
               tools={tools}
@@ -382,7 +377,7 @@ export default function AgentMcpPage() {
 
         <TabsContent value="resources" className="mt-4">
           {capsBusy && !detail ? (
-            <Skeleton className="h-64 w-full rounded-lg" />
+            <PageLoading />
           ) : (
             <McpResourcesExplorer
               resources={resources}
@@ -395,7 +390,7 @@ export default function AgentMcpPage() {
 
         <TabsContent value="prompts" className="mt-4">
           {capsBusy && !detail ? (
-            <Skeleton className="h-64 w-full rounded-lg" />
+            <PageLoading />
           ) : (
             <McpPromptsExplorer
               prompts={prompts}

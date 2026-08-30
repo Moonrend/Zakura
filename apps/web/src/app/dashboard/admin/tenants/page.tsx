@@ -114,7 +114,7 @@ export default function AdminTenantsPage() {
     <div className="space-y-4">
       <SettingsHeader
         title="团队"
-        description="平台全部团队；封禁团队会挡住其下所有成员的访问。"
+        description="平台全部团队"
         actions={
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus />

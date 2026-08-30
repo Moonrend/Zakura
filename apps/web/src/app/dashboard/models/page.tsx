@@ -20,6 +20,7 @@ import { SettingsHeader, TableActions } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -194,7 +195,7 @@ function formatUnmatchedModels(models?: ModelMatchFailure[]): string | null {
 
 export default function ModelRoutesPage() {
   return (
-    <Suspense fallback={<div className="text-sm text-muted-foreground">…</div>}>
+    <Suspense fallback={<PageLoading />}>
       <ModelRoutesPageInner />
     </Suspense>
   );
@@ -273,42 +274,37 @@ function ModelRoutesPageInner() {
     }
   }, [formReasoningPresets, reasoningPreset]);
 
-  const loadDefaults = useCallback(async () => {
+  const load = useCallback(async () => {
     setDefaultsLoading(true);
     try {
-      const entries = await Promise.all(
-        DEFAULT_CAPABILITIES.map(async (capability) => {
-          const models = await listModelsByCapability(capability);
-          return [capability, models] as const;
-        }),
-      );
-      setDefaultModels(Object.fromEntries(entries));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDefaultsLoading(false);
-    }
-  }, []);
-
-  const load = useCallback(async () => {
-    try {
-      const [upRes, modelRes] = await Promise.all([
+      // Fire upstream, model, and all per-capability default-model calls in a
+      // single Promise.all to eliminate the sequential waterfall where the 4
+      // capability fetches only started after the first two calls finished.
+      const [upRes, modelRes, ...capEntries] = await Promise.all([
         api<{ upstreams: Upstream[] }>("/api/model-upstreams"),
         api<{ models: LogicalModel[]; capabilities: CapabilityMeta[] }>(
           `/api/upstream-models?grouped=1${
             capFilter !== "all" ? `&capability=${capFilter}` : ""
           }`,
         ),
+        ...DEFAULT_CAPABILITIES.map(async (capability) => {
+          const models = await listModelsByCapability(capability);
+          return [capability, models] as const;
+        }),
       ]);
       setUpstreams(upRes.upstreams);
       setGroups(modelRes.models);
       setSelected(new Set());
       if (modelRes.capabilities?.length) setCapabilities(modelRes.capabilities);
-      void loadDefaults();
+      setDefaultModels(
+        Object.fromEntries(capEntries as Array<readonly [ModelCapabilityFilter, ChatModelOption[]]>),
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDefaultsLoading(false);
     }
-  }, [capFilter, loadDefaults]);
+  }, [capFilter]);
 
   useEffect(() => {
     void load();
@@ -541,18 +537,18 @@ function ModelRoutesPageInner() {
             </Button>
             <Button size="sm" onClick={openAdd} disabled={upstreams.length === 0}>
               <Plus />
-              手填模型
+              添加模型
             </Button>
           </div>
         }
       />
 
       <p className="text-sm text-muted-foreground">
-        模型来自上游同步或手填。系统按规范名聚合；调用时使用各上游的原始名。同规范名多上游时加权随机。在
+        从
         <Link href="/dashboard/models/upstreams" className="mx-1 underline underline-offset-2">
           上游
         </Link>
-        页点击「同步模型」拉取。
+        同步或手动添加模型部署。
       </p>
 
       <div className="space-y-3 rounded-lg border border-border p-4">
@@ -719,9 +715,9 @@ function ModelRoutesPageInner() {
           className="w-full gap-0 overflow-hidden p-0 sm:max-w-xl"
         >
           <SheetHeader className="border-b border-border pr-12">
-            <SheetTitle>{editDep ? "编辑部署" : "手填模型"}</SheetTitle>
+            <SheetTitle>{editDep ? "编辑部署" : "添加模型"}</SheetTitle>
             <SheetDescription>
-              {editDep ? "修改模型部署参数与默认调用选项。" : "选择上游并添加一个模型部署。"}
+              {editDep ? "修改模型部署参数。" : "选择上游并添加模型部署。"}
             </SheetDescription>
           </SheetHeader>
 
@@ -755,7 +751,7 @@ function ModelRoutesPageInner() {
                 </p>
               )}
               <div>
-                <Label>上游原始名（调用时使用）</Label>
+                <Label>原始模型名</Label>
                 <Input
                   className="mt-1"
                   value={nativeModel}
@@ -764,7 +760,7 @@ function ModelRoutesPageInner() {
                 />
               </div>
               <div>
-                <Label>规范名（可选，留空则自动匹配/归一化）</Label>
+                <Label>规范名（可选）</Label>
                 <Input
                   className="mt-1"
                   value={canonicalModel}

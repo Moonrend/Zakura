@@ -13,7 +13,6 @@ import { SettingsHeader, SettingsSection, TableActions } from "@/components/sett
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 export default function NetworkActiveExposuresPage() {

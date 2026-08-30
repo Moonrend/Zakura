@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Plus, Terminal, Trash2, X } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
@@ -16,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Select,
   SelectContent,
@@ -31,7 +32,10 @@ import {
   pollAcpDeviceLogin,
   cancelAcpDeviceLogin,
 } from "@/lib/acp";
-import { WorkspaceTerminalDialog } from "@/components/workspace-terminal-dialog";
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
 import type { AcpAgentConfig, AcpAgentSetup, AcpManagedField, AcpPublicProfile, AcpSetupMode } from "@zakura/shared";
 import {
   acpManualSetupCommand,
@@ -152,12 +156,7 @@ export default function AgentAcpPage() {
         </div>
       );
     }
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-7 w-36" />
-        <Skeleton className="h-64 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const catalog = profiles.length
@@ -191,7 +190,7 @@ export default function AgentAcpPage() {
           ) : null}
           <SettingsRow
             label="模型来源"
-            description="Zakura 路由会覆盖此 Agent 的模型设置，并沿用 Zakura 的路由、容灾与用量记录。"
+            description="Zakura 路由会覆盖 Agent 模型设置"
           >
             <Select
               value={modelProvider}
@@ -222,7 +221,7 @@ export default function AgentAcpPage() {
           {modelProvider === "zakura" ? (
             <SettingsRow
               label="模型"
-              description="可填 Zakura 模型别名；留空时使用该 Agent 的默认 chat 路由。"
+              description="留空使用默认路由"
             >
               <Input
                 className="max-w-72 font-mono"
@@ -436,7 +435,7 @@ export default function AgentAcpPage() {
     <div className="space-y-6">
       <SettingsHeader
         title="ACP Agent"
-        description="第三方编码 Agent 已打进工作区镜像。在这里启用、登录，聊天里按对话选择执行方。"
+        description="第三方编码 Agent 配置"
         actions={<SettingsSaveIndicator status={status} error={error} />}
       />
       <ConfigErrorBanner error={configError} />
@@ -444,7 +443,7 @@ export default function AgentAcpPage() {
       <SettingsSection title="对话">
         <SettingsRow
           label="默认执行方"
-          description="新对话用这个；composer 仍可改。已有消息的会话不会改绑。"
+          description="新对话默认使用"
         >
           <Select
             value={config.defaultRuntime || ZAKURA_RUNTIME_ID}
@@ -469,7 +468,7 @@ export default function AgentAcpPage() {
         </SettingsRow>
         <SettingsRow
           label="工具授权"
-          description="ask = 每次确认；allow = 自动允许（仅信任的 Agent）"
+          description="ask 每次确认，allow 自动允许"
         >
           <Select
             value={config.permissionPolicy}

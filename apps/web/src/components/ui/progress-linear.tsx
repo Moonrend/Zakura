@@ -40,8 +40,10 @@ export function ProgressLinear({
     >
       <div
         className={cn(
-          "h-full bg-foreground transition-[width] duration-300 ease-out",
-          indeterminate && "w-1/3 animate-progress-indeterminate",
+          "h-full rounded-full transition-[width] duration-300 ease-out",
+          indeterminate
+            ? "w-2/5 animate-progress-indeterminate bg-foreground/70"
+            : "bg-foreground",
           barClassName,
         )}
         style={
@@ -52,4 +54,12 @@ export function ProgressLinear({
       />
     </div>
   );
+}
+
+/**
+ * 页面/区块加载占位：顶部吸附的不定进度细条，替代 Skeleton 占位块。
+ * 无 wrapper、无间隔——直接渲染一条 h-0.5 的贴边线。
+ */
+export function PageLoading({ className }: { className?: string }) {
+  return <ProgressLinear indeterminate flush className={className} />;
 }

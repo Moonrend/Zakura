@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { SettingsHeader } from "@/components/settings-shell";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Input } from "@/components/ui/input";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -107,26 +107,21 @@ export default function AgentProjectsPage() {
   }
 
   if (loading || !agent) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-7 w-28" />
-        <Skeleton className="h-64 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   return (
     <div className="space-y-4">
       <SettingsHeader
         title="项目"
-        description="每个 /workspace/projects/<名>/ 是独立工作目录。可重命名或删除真实目录；对话与子代理跟着项目走。"
+        description="独立工作目录"
       />
       {listError ? (
         <p className="text-sm text-muted-foreground">{listError}。需要开启电脑环境才能读写项目文件。</p>
       ) : projects.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border p-8 text-center">
           <FolderKanban className="mx-auto mb-2 size-5 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">还没有项目。在对话侧栏创建，或让 Agent 在 projects/ 下建目录。</p>
+          <p className="text-sm text-muted-foreground">还没有项目。在对话侧栏创建或让 Agent 自动创建。</p>
         </div>
       ) : (
         <div className="grid gap-4 lg:grid-cols-[14rem_minmax(0,1fr)]">

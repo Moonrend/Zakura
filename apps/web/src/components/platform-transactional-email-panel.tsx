@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Switch } from "@/components/ui/switch";
 
 export type TransactionalEmailConfig = {
@@ -117,7 +117,7 @@ export function PlatformTransactionalEmailPanel({ onSaved }: { onSaved?: () => v
   if (loading) {
     return (
       <SettingsSection title="系统发信（Amail）">
-        <Skeleton className="h-36 w-full" />
+        <PageLoading />
       </SettingsSection>
     );
   }

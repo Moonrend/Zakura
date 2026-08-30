@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Switch } from "@/components/ui/switch";
 
 type ProviderConfig = {
@@ -186,10 +186,7 @@ export default function AdminAuthPage() {
 
   if (loading) {
     return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-64 w-full" />
-      </div>
+      <PageLoading />
     );
   }
 
@@ -197,7 +194,7 @@ export default function AdminAuthPage() {
     <div className="space-y-5">
       <SettingsHeader
         title="登录与认证"
-        description="配置多个 OAuth 登录提供商。相同邮箱会自动合并到同一账号。Client Secret 仅存服务端加密存储，不会返回前端。"
+        description="配置 OAuth 登录；相同邮箱自动合并账号"
       />
 
       <SettingsSection title="登录策略">
@@ -229,7 +226,7 @@ export default function AdminAuthPage() {
           </SettingsField>
         </div>
         <p className="text-xs text-muted-foreground">
-          高亮项在登录页使用主按钮样式并排在前面；若所选方式不可用会回退为自动。
+          高亮项在登录页使用主按钮样式并排在前面。
         </p>
       </SettingsSection>
 

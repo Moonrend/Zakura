@@ -1,7 +1,6 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -37,7 +36,7 @@ import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { McpToolPermissionsPanel } from "@/components/mcp/tool-permissions-panel";
@@ -231,7 +230,7 @@ function RuntimePanel({
     }
   }
 
-  if (loading) return <Skeleton className="h-24" />;
+  if (loading) return <PageLoading />;
   if (!items.length) return null;
 
   return (
@@ -429,12 +428,7 @@ function statusLabel(instance: InstanceDetail): string {
 export default function McpServerDetailPage() {
   return (
     <Suspense
-      fallback={
-        <div className="space-y-5">
-          <Skeleton className="h-8 w-48" />
-          <Skeleton className="h-28 w-full rounded-lg" />
-        </div>
-      }
+      fallback={<PageLoading />}
     >
       <McpServerDetailInner />
     </Suspense>
@@ -539,7 +533,7 @@ function McpServerDetailInner() {
     try {
       await api(`/api/instances/${id}`, { method: "DELETE" });
       toast.success("已删除");
-      router.push("/dashboard/mcp");
+      router.back();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
       setActionBusy(false);
@@ -600,25 +594,16 @@ function McpServerDetailInner() {
   }
 
   if (loading && !instance) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-28 w-full rounded-lg" />
-        <div className="grid gap-4 lg:grid-cols-2">
-          <Skeleton className="h-80 rounded-lg" />
-          <Skeleton className="h-80 rounded-lg" />
-        </div>
-      </div>
-    );
+    return <PageLoading />;
   }
 
   if (!instance) {
     return (
       <div className="space-y-5 py-16 text-center">
         <p className="text-sm text-muted-foreground">未找到该 MCP 服务器</p>
-        <Button variant="outline" nativeButton={false} render={<Link href="/dashboard/mcp" />}>
+        <Button variant="outline" size="sm" onClick={() => router.back()}>
           <ArrowLeft />
-          返回列表
+          返回
         </Button>
       </div>
     );
@@ -643,11 +628,10 @@ function McpServerDetailInner() {
           variant="ghost"
           size="sm"
           className="h-8 px-2 text-muted-foreground"
-          nativeButton={false}
-          render={<Link href="/dashboard/mcp" />}
+          onClick={() => router.back()}
         >
           <ArrowLeft className="size-3.5" />
-          MCP 服务器
+          返回
         </Button>
       </div>
 

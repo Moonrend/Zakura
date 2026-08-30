@@ -2,6 +2,7 @@
 
 import { BadgeCheck, Check, Download, GitFork, HardDrive, Package, Star } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { cn } from "@/lib/utils";
 import { formatCount, type SkillSearchItem, type SkillStoreId } from "@/lib/skills";
 
@@ -101,18 +102,7 @@ export function SkillCard({
 export function SkillCardSkeleton() {
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3.5 sm:p-4">
-      <div className="flex items-center gap-2.5">
-        <div className="size-8 shrink-0 animate-pulse rounded-lg bg-muted" />
-        <div className="flex-1 space-y-1.5">
-          <div className="h-3.5 w-1/2 animate-pulse rounded bg-muted" />
-          <div className="h-3 w-2/3 animate-pulse rounded bg-muted/70" />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <div className="h-3 w-full animate-pulse rounded bg-muted/70" />
-        <div className="h-3 w-5/6 animate-pulse rounded bg-muted/70" />
-      </div>
-      <div className="h-3 w-1/3 animate-pulse rounded bg-muted/60" />
+      <PageLoading />
     </div>
   );
 }

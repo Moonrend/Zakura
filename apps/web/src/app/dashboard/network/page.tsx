@@ -13,7 +13,7 @@ import {
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 export default function NetworkOverviewPage() {
   const [data, setData] = useState<NetworkOverviewDto | null>(null);
@@ -56,8 +56,7 @@ export default function NetworkOverviewPage() {
     return (
       <div className="space-y-5">
         <SettingsHeader title="网络与隧道" />
-        <Skeleton className="h-28 w-full" />
-        <Skeleton className="h-24 w-full" />
+        <PageLoading />
       </div>
     );
   }

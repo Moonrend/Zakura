@@ -55,9 +55,10 @@ const toPosixPath = (p: string): string =>
  * `ENOENT … stat '<same looking path>'`.
  *
  * `containerRoot` is where the data lives for us; `hostRoot` is where that same
- * directory lives on the host (from `ZAKURA_RUNNER_HOST_STORAGE_ROOT` /
- * `ZAKURA_HOST_DATA_DIR`). When `hostRoot` is unset or equal, this is the
- * identity mapping, which is correct for bare-metal installs.
+ * directory lives on the host (from `ZAKURA_HOST_DATA_DIR` or equivalent).
+ * When `hostRoot` is unset or equal, this is the identity mapping, which is
+ * correct for bare-metal installs and for Runner containers whose storage root
+ * already matches the host path.
  */
 export function mapContainerPathToHost(
   absPath: string,

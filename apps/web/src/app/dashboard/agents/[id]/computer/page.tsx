@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import {
   HardDrive,
@@ -35,7 +36,7 @@ import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import {
@@ -55,7 +56,10 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { subscribePlatformEvents } from "@/lib/platform-events";
-import { WorkspaceTerminalDialog } from "@/components/workspace-terminal-dialog";
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
 import { WorkspaceDesktop } from "@/components/workspace-desktop";
 
 const LOCAL_VALUE = "__local__";
@@ -317,12 +321,7 @@ export default function AgentComputerPage() {
   }
 
   if (!agent) {
-    return (
-      <div className="space-y-5">
-        <Skeleton className="h-40 w-full rounded-lg" />
-        <Skeleton className="h-64 w-full rounded-lg" />
-      </div>
-    );
+    return <PageLoading />;
   }
 
   const hasComputer = needsContainer(agent);
@@ -422,6 +421,9 @@ export default function AgentComputerPage() {
                 {agent.runtimeNodeId ? `节点 ${agent.runtimeNodeId}` : "本机"}
               </span>
             )}
+            <Badge variant="secondary" className="ml-1 text-[10px]">
+              {agent.workspace?.profile === "full" ? "完整镜像" : "精简镜像"}
+            </Badge>
           </div>
           <div className="flex gap-1.5">
             <Button

@@ -3,38 +3,27 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Check, Loader2, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 function CallbackInner() {
   const router = useRouter();
   const params = useSearchParams();
   const routeParams = useParams<{ provider: string }>();
   const provider = routeParams.provider;
-  const [status, setStatus] = useState<"loading" | "ok" | "error">("loading");
-  const [msg, setMsg] = useState("正在完成登录…");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const code = params.get("code");
     const state = params.get("state");
-    const error = params.get("error");
-    const errorDescription = params.get("error_description");
+    const err = params.get("error");
+    const errDesc = params.get("error_description");
 
     void (async () => {
-      if (!provider) {
-        setStatus("error");
-        setMsg("缺少 OAuth 提供商");
-        return;
-      }
-      if (error) {
-        setStatus("error");
-        setMsg(errorDescription || error || "授权被拒绝");
-        return;
-      }
-      if (!code || !state) {
-        setStatus("error");
-        setMsg("缺少授权码或 state");
+      if (!provider || err || !code || !state) {
+        setError(errDesc || err || (!provider ? "缺少 OAuth 提供商" : "缺少授权码"));
         return;
       }
       try {
@@ -47,62 +36,41 @@ function CallbackInner() {
           json: { code, state },
         });
         setSession(res.session);
-        setStatus("ok");
-        setMsg("登录成功，正在跳转…");
         const next =
           res.next ??
           (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");
         router.replace(next);
-      } catch (err) {
-        setStatus("error");
-        setMsg(err instanceof Error ? err.message : String(err));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
       }
     })();
   }, [params, provider, router]);
 
+  if (!error) {
+    // 成功路径：静默加载，浏览器进度条已足够反馈
+    return <PageLoading />;
+  }
+
   return (
-    <div className="mx-auto flex min-h-[60vh] max-w-md flex-col items-center justify-center gap-4 p-6 text-center">
-      <div
-        className={`flex size-12 items-center justify-center rounded-full border ${
-          status === "ok"
-            ? "border-foreground bg-foreground text-background"
-            : status === "error"
-              ? "border-destructive text-destructive"
-              : "border-border text-muted-foreground"
-        }`}
-      >
-        {status === "loading" ? (
-          <Loader2 className="size-5 animate-spin" />
-        ) : status === "ok" ? (
-          <Check className="size-5" />
-        ) : (
-          <X className="size-5" />
-        )}
-      </div>
-      <p className="text-sm text-muted-foreground">{msg}</p>
-      {status === "error" ? (
-        <Button
-          variant="outline"
-          nativeButton={false}
-          render={<Link href="/login" />}
-        >
+    <div className="grid min-h-svh place-items-center p-6">
+      <div className="w-full max-w-xs space-y-5 animate-in-page text-center">
+        <div className="flex items-center justify-center">
+          <div className="flex size-10 items-center justify-center rounded-lg border border-destructive/30 text-destructive">
+            <X className="size-4" />
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground">{error}</p>
+        <Button variant="outline" size="sm" nativeButton={false} render={<Link href="/login" />}>
           返回登录
         </Button>
-      ) : null}
+      </div>
     </div>
   );
 }
 
-/** SaaS OAuth login callback — listed in strip-manifest. */
 export default function OauthLoginCallbackPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">
-          加载中…
-        </div>
-      }
-    >
+    <Suspense fallback={<PageLoading />}>
       <CallbackInner />
     </Suspense>
   );

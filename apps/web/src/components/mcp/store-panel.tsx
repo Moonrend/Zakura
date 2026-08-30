@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 type StoreId = string;
 
@@ -392,12 +392,11 @@ export function McpStorePanel() {
         {fetchedAt ? ` · 缓存于 ${new Date(fetchedAt).toLocaleString()}` : null}
       </p>
 
+      {loading ? (
+        <PageLoading />
+      ) : (
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {loading
-          ? Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-40 rounded-lg" />
-            ))
-          : items.map((item) => (
+        {items.map((item) => (
               <StoreServerInstallCard
                 key={`${item.storeId}:${item.name}`}
                 item={item}
@@ -413,6 +412,7 @@ export function McpStorePanel() {
               />
             ))}
       </div>
+      )}
 
       {!loading && !items.length ? (
         <div className="rounded-lg border border-border bg-card p-8 text-center text-sm text-muted-foreground">

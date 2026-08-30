@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { useMe } from "@/components/me-context";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 /**
  * 超管后台守卫。二级侧边栏由 AppSidebar 根据路径切换，这里只负责鉴权。
@@ -26,10 +26,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   if (!allowed) {
     return (
-      <div className="space-y-5">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-40 w-full" />
-      </div>
+      <PageLoading />
     );
   }
 

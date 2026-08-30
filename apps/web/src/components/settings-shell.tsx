@@ -97,7 +97,7 @@ export function SettingsSaveIndicator({
     return (
       <span
         className={cn(
-          "inline-flex items-center gap-1 text-xs text-muted-foreground",
+          "inline-flex animate-pop items-center gap-1 text-xs text-muted-foreground",
           className,
         )}
       >
@@ -140,7 +140,7 @@ export function SettingsSection({
     <section
       id={id}
       className={cn(
-        "scroll-mt-20 space-y-3 rounded-lg border border-border bg-card p-4 transition-[border-color,background-color,box-shadow] duration-150 ease-out-soft",
+        "scroll-mt-20 space-y-3 rounded-lg border border-border bg-card p-4 transition-[border-color,background-color,box-shadow] duration-150 ease-fluid",
         className,
       )}
     >
@@ -259,7 +259,7 @@ export function SettingsCategoryNav({
               el?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
             className={cn(
-              "shrink-0 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+              "weight-hover shrink-0 rounded-lg px-3 py-2 text-left text-sm transition-colors",
               "hover:bg-accent hover:text-accent-foreground",
               active
                 ? "bg-accent font-medium text-accent-foreground"
@@ -288,7 +288,7 @@ export function TableActions({
   className?: string;
 }) {
   return (
-    <div className={cn("flex items-center justify-end gap-0.5", className)}>
+    <div className={cn("flex items-center justify-end gap-0.5 [&>button]:press [&>a]:press", className)}>
       {children}
     </div>
   );

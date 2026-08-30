@@ -11,7 +11,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { ImageUpdateProvider } from "@/components/image-update-status";
 
 type MeResponse = MeInfo & {
@@ -91,20 +91,7 @@ export default function DashboardLayout({
 
   if (!ready || !me) {
     return (
-      <div className="flex min-h-svh">
-        <div className="hidden w-64 border-r bg-sidebar p-3 md:block">
-          <Skeleton className="mb-4 h-8 w-32" />
-          <div className="space-y-2">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <Skeleton key={i} className="h-8 w-full" />
-            ))}
-          </div>
-        </div>
-        <div className="flex-1 p-6">
-          <Skeleton className="mb-4 h-8 w-48" />
-          <Skeleton className="h-40 w-full" />
-        </div>
-      </div>
+      <PageLoading />
     );
   }
 

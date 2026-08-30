@@ -167,12 +167,14 @@ export class AcpRegistryService {
    * Ensure `registryId` is installed in this agent's workspace, returning the
    * absolute path of its executable.
    *
-   * Idempotent and cheap when already present: the script exits immediately on the
-   * `.ok` marker without touching the network.
+   * When `useSidecar` is true, the install runs in the ACP sidecar container
+   * instead of the workspace. The adapter binaries live on the shared
+   * /workspace volume either way.
    */
   async ensureInstalled(
     agent: Agent,
     registryId: string,
+    useSidecar = false,
   ): Promise<{ command: string; args: string[]; version: string; installed: boolean }> {
     const entry = await this.findAgent(registryId);
     if (!entry) throw new Error(`ACP 注册表里没有 ${registryId}`);
@@ -182,9 +184,15 @@ export class AcpRegistryService {
     const plan = this.planFor(entry);
     if (!plan) throw new Error(`${entry.name} 无法安装`);
 
-    await this.workspace.ensureStarted(agent, { require: "shell" });
     const script = acpProvisionScript(registryId, plan);
-    const result = await this.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
+    let result;
+    if (useSidecar) {
+      await this.workspace.ensureAcpSidecar(agent);
+      result = await this.workspace.execInSidecar(agent, ["bash", "-lc", script]);
+    } else {
+      await this.workspace.ensureStarted(agent, { require: "shell" });
+      result = await this.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
+    }
 
     if (result.exitCode !== 0) {
       const stderr = result.stderr.trim();

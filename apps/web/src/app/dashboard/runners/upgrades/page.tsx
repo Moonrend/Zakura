@@ -29,7 +29,7 @@ import {
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
   Tooltip,
@@ -297,7 +297,7 @@ export default function UpgradesPage() {
       />
 
       {loading ? (
-        <Skeleton className="h-40 w-full rounded-lg" />
+        <PageLoading />
       ) : merged.length === 0 ? (
         <SettingsSection title="节点镜像状态">
           <p className="py-6 text-center text-sm text-muted-foreground">

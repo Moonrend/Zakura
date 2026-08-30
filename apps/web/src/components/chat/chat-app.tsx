@@ -51,7 +51,7 @@ import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -130,6 +130,7 @@ import { subscribePlatformEvents } from "@/lib/platform-events";
 import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
 import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { ChatMessages } from "./chat-messages";
+import { MessageNavigator } from "./message-navigator";
 import {
   Composer,
   type ComposerModelItem,
@@ -2187,11 +2188,7 @@ export function ChatApp() {
   }, [agentId, reasoning, reasoningItems, sessionId]);
 
   if (!authed) {
-    return (
-      <div className="flex h-svh items-center justify-center text-sm text-muted-foreground">
-        加载中…
-      </div>
-    );
+    return <PageLoading />;
   }
 
   function sessionRow(s: CloudSession) {
@@ -2202,11 +2199,9 @@ export function ChatApp() {
         className={cn(
           "group animate-rise relative flex items-center rounded-lg text-sm",
           "transition-colors duration-150 ease-fluid",
-          // Highlight the clicked row immediately, before its content arrives —
-          // otherwise the click has no visible effect at all until the fetch lands.
           s.id === sessionId || s.id === pendingSessionId
-            ? "bg-muted text-foreground"
-            : "text-foreground/80 hover:bg-muted/60",
+            ? "bg-muted text-foreground session-row-active"
+            : "text-foreground/75 hover:bg-muted/60 hover:text-foreground/90",
         )}
       >
         {(s.id === sessionId || s.id === pendingSessionId) && (
@@ -2238,7 +2233,7 @@ export function ChatApp() {
             */}
             <a
               href={agentId ? chatSessionHref(agentId, s.id) : undefined}
-              className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
+              className="weight-hover flex min-w-0 flex-1 items-center gap-1.5 truncate px-2 py-1.5 text-left"
               onClick={(e) => {
                 if (!agentId || shouldLetBrowserHandleClick(e)) return;
                 e.preventDefault();
@@ -2374,7 +2369,7 @@ export function ChatApp() {
                 />
               }
             >
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold text-foreground">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold text-foreground">
                 {agent?.name?.slice(0, 1) ?? <Bot className="h-4 w-4" />}
               </span>
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -2391,7 +2386,7 @@ export function ChatApp() {
                     closeNavOnMobile();
                   }}
                 >
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-foreground">
+                  <span className="flex h-5 w-5 items-center justify-center rounded bg-muted text-[10px] font-semibold text-foreground">
                     {a.name.slice(0, 1)}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{a.name}</span>
@@ -2437,7 +2432,7 @@ export function ChatApp() {
               closeNavOnMobile();
             }}
             className={cn(
-              "group/new flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 ease-fluid",
+              "press group/new flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 ease-fluid",
               sessionId === null
                 ? "bg-muted text-foreground"
                 : "text-foreground hover:bg-muted/60",
@@ -2719,7 +2714,8 @@ export function ChatApp() {
       </aside>
 
       {/* ===== 主区 ===== */}
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+      <div className="relative flex h-full min-w-0 flex-1 flex-col">
+        <MessageNavigator turns={turns} scrollEl={scrollEl ?? null} />
         <header className="flex h-12 shrink-0 items-center gap-1.5 px-3">
           <Button
             size="icon-sm"
@@ -2729,17 +2725,17 @@ export function ChatApp() {
           >
             <PanelLeft className="h-4 w-4" />
           </Button>
-          <span className="truncate text-sm font-medium text-foreground/80">
+          <span className="truncate text-sm font-medium text-foreground/90">
             {agent?.name}
           </span>
           {realtimeOffline ? (
             <span
               role="status"
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/50 px-2 py-0.5 text-xs text-muted-foreground"
+              className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
               title="实时事件流已断开，正在自动重连；重连后会从断点继续同步"
             >
               <Loader2 className="size-3 animate-spin" />
-              重连中…
+              重连中
             </span>
           ) : null}
           <div className="flex-1" />
@@ -2782,23 +2778,7 @@ export function ChatApp() {
         >
           <div ref={contentRef} className="flex min-h-full flex-col">
             {switchingSession ? (
-              // Show placeholders rather than the *previous* session's messages:
-              // leaving the old transcript up while a different session loads reads
-              // as a frozen app, and then the content jumps.
-              <div
-                aria-busy
-                aria-label="正在加载会话"
-                className="flex flex-col gap-6 px-4 py-6 md:px-6"
-              >
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="flex flex-col gap-2">
-                    <Skeleton className="h-3 w-16" />
-                    <Skeleton className="h-4 w-[72%]" />
-                    <Skeleton className="h-4 w-[54%]" />
-                    {i === 1 ? <Skeleton className="h-4 w-[38%]" /> : null}
-                  </div>
-                ))}
-              </div>
+              <PageLoading />
             ) : (
               <>
             {(loadingOlder || hasMoreHistory) && !emptyConversation && (
@@ -2863,7 +2843,7 @@ export function ChatApp() {
             <button
               type="button"
               onClick={() => scrollToBottom("smooth")}
-              className="animate-pop absolute top-0 left-1/2 z-10 flex -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-full border border-border/70 bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:text-foreground"
+              className="animate-pop absolute top-0 left-1/2 z-10 flex -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-lg border border-border/70 bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:text-foreground"
             >
               <ArrowDown className="size-3.5" />
               回到底部

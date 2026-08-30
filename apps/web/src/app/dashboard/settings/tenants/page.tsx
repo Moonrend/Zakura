@@ -18,7 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 
 type TenantItem = {
   role: string;
@@ -114,7 +114,7 @@ export default function TeamsSettingsPage() {
   }
 
   if (loading) {
-    return <Skeleton className="h-40 w-full" />;
+    return <PageLoading />;
   }
 
   if (!multiTenant) return null;

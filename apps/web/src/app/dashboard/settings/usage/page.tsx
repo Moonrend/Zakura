@@ -10,7 +10,7 @@ import type { UserUsageTenantRowDto } from "@zakura/shared";
 import { useMe } from "@/components/me-context";
 import { UserUsagePanel } from "@/components/usage/user-usage-panel";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
-import { Skeleton } from "@/components/ui/skeleton";
+import { PageLoading } from "@/components/ui/progress-linear";
 import {
   Table,
   TableBody,
@@ -43,7 +43,7 @@ export default function TenantUsagePage() {
   if (!isAdmin) {
     return (
       <div className="space-y-4">
-        <SettingsHeader title="我的用量" description="近 30 天登录、会话与回合。" />
+        <SettingsHeader title="我的用量" description="近 30 天" />
         <UserUsagePanel scope="me" />
       </div>
     );
@@ -53,12 +53,12 @@ export default function TenantUsagePage() {
     <div className="space-y-4">
       <SettingsHeader
         title="成员用量"
-        description="按用户 ID 查看近 30 天登录、会话与回合。明细在库里，不进进程日志。"
+        description="近 30 天成员用量"
       />
 
       <SettingsSection title="团队成员">
         {!rows ? (
-          <Skeleton className="h-40 w-full" />
+          <PageLoading />
         ) : (
           <Table>
             <TableHeader>

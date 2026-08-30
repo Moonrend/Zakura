@@ -24,6 +24,7 @@ export function normalizeCaps(input: {
   };
 }
 
-export function needsContainer(caps: { enableComputer: boolean }): boolean {
-  return isComputerEnvEnabled(caps);
+export function needsContainer(_caps: { enableComputer: boolean }): boolean {
+  // All agents get at least a shell container (lite image) for ACP / file ops.
+  return true;
 }

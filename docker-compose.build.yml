@@ -5,3 +5,28 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+
+  # 构建工作区镜像（不作为 compose 服务运行，仅构建用）
+  # docker compose -f docker-compose.yml -f docker-compose.build.yml build workspace-full
+  workspace-full:
+    profiles: ["build"]
+    image: sunwuyuan/zakura-workspace-dev:local
+    build:
+      context: docker/workspace
+      dockerfile: Dockerfile
+      target: full
+
+  workspace-lite:
+    profiles: ["build"]
+    image: sunwuyuan/zakura-workspace-lite-dev:local
+    build:
+      context: docker/workspace
+      dockerfile: Dockerfile
+      target: base
+
+  acp-sidecar:
+    profiles: ["build"]
+    image: sunwuyuan/zakura-acp-sidecar-dev:local
+    build:
+      context: docker/acp-sidecar
+      dockerfile: Dockerfile

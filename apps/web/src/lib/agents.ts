@@ -5,6 +5,8 @@ export type WorkspaceInfo = {
   dockerId: string | null;
   image?: string | null;
   running?: boolean;
+  /** "lite" (shell-only) or "full" (display/browser) */
+  profile?: "lite" | "full";
 };
 
 export type AgentListItem = {
@@ -21,6 +23,8 @@ export type AgentListItem = {
   lastError?: string | null;
   mcpAgentUrl: string;
   needsContainer?: boolean;
+  /** "shell" (lite image) | "display" (full image) */
+  stackMode?: "none" | "shell" | "display";
   config?: Record<string, unknown>;
   workspace?: WorkspaceInfo;
 };

@@ -24,6 +24,7 @@ import {
   AgentWorkspaceService,
   agentDataDir,
   agentWorkspaceHostPath,
+  resolveStackMode,
 } from "./agent-workspace.js";
 import { isComputerEnvEnabled, needsContainer, normalizeCaps } from "./agent-caps.js";
 import {
@@ -302,7 +303,7 @@ export class AgentService {
           runtimeNodeId: nodeId || null,
           updatedAt: new Date(),
         })
-        .where(eq(agents.id, agent.id))
+        .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
         .returning();
       agent = updated ? this.rememberAgent(updated) : agent;
     } else if (opts?.userId) {
@@ -406,7 +407,7 @@ export class AgentService {
         ...(input.config !== undefined ? { configJson: JSON.stringify(input.config) } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(agents.id, agent.id))
+      .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
       .returning();
 
     let result = updated!;
@@ -448,7 +449,7 @@ export class AgentService {
       await this.workspace.stop(agent);
     }
 
-    await this.db.delete(agents).where(eq(agents.id, agent.id));
+    await this.db.delete(agents).where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)));
     this.forgetAgent(agent);
 
     if (opts?.purgeData) {
@@ -471,7 +472,7 @@ export class AgentService {
     return this.workspace.stop(agent);
   }
 
-  async listBindings(agentId: string) {
+  async listBindings(tenantId: string, agentId: string) {
     const rows = await this.db
       .select({
         id: agentBindings.id,
@@ -486,7 +487,12 @@ export class AgentService {
       })
       .from(agentBindings)
       .innerJoin(componentInstances, eq(agentBindings.instanceId, componentInstances.id))
-      .where(eq(agentBindings.agentId, agentId));
+      .where(
+        and(
+          eq(agentBindings.agentId, agentId),
+          eq(agentBindings.tenantId, tenantId),
+        ),
+      );
     return rows;
   }
 
@@ -514,7 +520,7 @@ export class AgentService {
       .returning();
 
     this.invalidateToolsCache(agent.id);
-    return row ?? (await this.listBindings(agent.id)).find((b) => b.instanceId === instanceId);
+    return row ?? (await this.listBindings(tenantId, agent.id)).find((b) => b.instanceId === instanceId);
   }
 
   /**
@@ -561,7 +567,13 @@ export class AgentService {
     if (!agent) throw new Error("Agent not found");
     await this.db
       .delete(agentBindings)
-      .where(and(eq(agentBindings.agentId, agent.id), eq(agentBindings.instanceId, instanceId)));
+      .where(
+        and(
+          eq(agentBindings.agentId, agent.id),
+          eq(agentBindings.instanceId, instanceId),
+          eq(agentBindings.tenantId, tenantId),
+        ),
+      );
     this.invalidateToolsCache(agent.id);
     return { ok: true as const };
   }
@@ -616,7 +628,9 @@ export class AgentService {
       }
     }
 
-    await this.db.delete(agentBindings).where(eq(agentBindings.agentId, agent.id));
+    await this.db.delete(agentBindings).where(
+      and(eq(agentBindings.agentId, agent.id), eq(agentBindings.tenantId, tenantId)),
+    );
     const now = new Date();
     for (const instanceId of unique) {
       await this.db.insert(agentBindings).values({
@@ -628,7 +642,7 @@ export class AgentService {
       });
     }
     this.invalidateToolsCache(agent.id);
-    return this.listBindings(agent.id);
+    return this.listBindings(tenantId, agent.id);
   }
 
   async updateProviders(tenantId: string, agentId: string, patch: AgentProvidersConfig) {
@@ -643,7 +657,7 @@ export class AgentService {
         configJson: JSON.stringify(next),
         updatedAt: new Date(),
       })
-      .where(eq(agents.id, agent.id))
+      .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
       .returning();
 
     if (patch.mcp?.mode === "selected" && Array.isArray(patch.mcp.instanceIds)) {
@@ -720,7 +734,7 @@ export class AgentService {
       .where(eq(componentInstances.tenantId, tenantId))
       .orderBy(asc(componentInstances.createdAt));
 
-    const bound = new Set(await this.boundInstanceIds(agent.id));
+    const bound = new Set(await this.boundInstanceIds(tenantId, agent.id));
     const mcpInstances = allInstances
       .filter(
         (i) => i.providerId !== "web-search" && i.providerId !== "web-fetch",
@@ -806,11 +820,16 @@ export class AgentService {
     };
   }
 
-  async boundInstanceIds(agentId: string): Promise<string[]> {
+  async boundInstanceIds(tenantId: string, agentId: string): Promise<string[]> {
     const rows = await this.db
       .select({ instanceId: agentBindings.instanceId })
       .from(agentBindings)
-      .where(eq(agentBindings.agentId, agentId));
+      .where(
+        and(
+          eq(agentBindings.agentId, agentId),
+          eq(agentBindings.tenantId, tenantId),
+        ),
+      );
     return rows.map((r) => r.instanceId);
   }
 
@@ -868,6 +887,7 @@ export class AgentService {
     }
     const ws = opts?.workspace;
     const workspaceStatus = ws?.status ?? (needsContainer(agent) ? "idle" : "none");
+    const stackMode = resolveStackMode(agent);
     return {
       id: agent.id,
       tenantId: agent.tenantId,
@@ -889,11 +909,13 @@ export class AgentService {
       mcpAgentUrl: `${this.config.publicBaseUrl}/mcp/agents/${agent.slug}`,
       workspaceHostPath: agentWorkspaceHostPath(this.config, agent.id),
       needsContainer: needsContainer(agent),
+      stackMode,
       workspace: {
         status: workspaceStatus,
         dockerId: ws?.dockerId ?? null,
         image: ws?.image ?? agent.workspaceImage,
         running: workspaceStatus === "running",
+        profile: stackMode === "display" ? "full" as const : "lite" as const,
       },
     };
   }

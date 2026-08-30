@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
 import { api, setSession, type PlatformInfo } from "@/lib/api";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -29,9 +28,9 @@ export default function LoginPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("suspended") !== "1") return;
-    const reason = params.get("reason")?.trim();
-    setSuspendNotice(reason || "账号或所在团队已被封禁");
+    if (params.get("suspended") === "1") {
+      setSuspendNotice(params.get("reason")?.trim() || "账号已被封禁");
+    }
   }, []);
 
   useEffect(() => {
@@ -65,9 +64,7 @@ export default function LoginPage() {
   const hasOauth = oauthProviders.length > 0;
 
   const orderedOauth = useMemo(() => {
-    if (highlightedMethod === "auto" || highlightedMethod === "password") {
-      return oauthProviders;
-    }
+    if (highlightedMethod === "auto" || highlightedMethod === "password") return oauthProviders;
     const hit = oauthProviders.find((p) => p.id === highlightedMethod);
     if (!hit) return oauthProviders;
     return [hit, ...oauthProviders.filter((p) => p.id !== hit.id)];
@@ -82,15 +79,13 @@ export default function LoginPage() {
       ? highlightedMethod
       : highlightedMethod === "auto" && hasOauth && !showPasswordForm
         ? orderedOauth[0]?.id
-        : highlightedMethod === "auto" && hasOauth
-          ? null
-          : null;
+        : null;
 
   const passwordFirst = highlightPassword && hasOauth && showPasswordForm;
 
   const passwordForm = showPasswordForm ? (
     <form
-      className="space-y-4"
+      className="space-y-3"
       onSubmit={async (e) => {
         e.preventDefault();
         setLoading(true);
@@ -100,20 +95,18 @@ export default function LoginPage() {
             json: { email, password },
           });
           setSession(res.session);
-          toast.success("登录成功");
           const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
           router.push(
             current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
           );
         } catch (err) {
           toast.error(err instanceof Error ? err.message : String(err));
-        } finally {
           setLoading(false);
         }
       }}
     >
-      <div className="space-y-1.5">
-        <Label htmlFor="email">邮箱</Label>
+      <div className="space-y-1">
+        <Label htmlFor="email" className="text-xs text-muted-foreground">邮箱</Label>
         <Input
           id="email"
           type="email"
@@ -123,8 +116,8 @@ export default function LoginPage() {
           onChange={(e) => setEmail(e.target.value)}
         />
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="password">密码</Label>
+      <div className="space-y-1">
+        <Label htmlFor="password" className="text-xs text-muted-foreground">密码</Label>
         <Input
           id="password"
           type="password"
@@ -140,20 +133,17 @@ export default function LoginPage() {
         variant={highlightPassword ? "default" : "outline"}
         disabled={loading}
       >
-        {loading ? <Loader2 className="animate-spin" /> : null}
         {loading ? "登录中…" : "继续"}
       </Button>
     </form>
   ) : null;
 
   const oauthBlock = hasOauth ? (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {orderedOauth.map((p) => {
         const highlighted =
           highlightOauthId === p.id ||
-          (highlightedMethod === "auto" &&
-            !showPasswordForm &&
-            orderedOauth[0]?.id === p.id);
+          (highlightedMethod === "auto" && !showPasswordForm && orderedOauth[0]?.id === p.id);
         return (
           <Button
             key={p.id}
@@ -163,7 +153,6 @@ export default function LoginPage() {
             disabled={!!oauthLoading}
             onClick={() => void startOauth(p.id)}
           >
-            {oauthLoading === p.id ? <Loader2 className="animate-spin" /> : null}
             {oauthLoading === p.id ? "跳转中…" : `使用 ${p.name} 登录`}
           </Button>
         );
@@ -172,9 +161,9 @@ export default function LoginPage() {
   ) : null;
 
   const divider = (
-    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+    <div className="flex items-center gap-3">
       <div className="h-px flex-1 bg-border" />
-      <span>{passwordFirst ? "或使用第三方" : "或使用邮箱"}</span>
+      <span className="text-xs text-muted-foreground">{passwordFirst ? "或" : "或"}</span>
       <div className="h-px flex-1 bg-border" />
     </div>
   );
@@ -184,31 +173,36 @@ export default function LoginPage() {
       <div className="absolute right-4 top-4">
         <ThemeToggle />
       </div>
-      <div className="w-full max-w-[360px] animate-in-page">
-        <div className="mb-10 text-center">
-          <BrandMark className="justify-center" iconClassName="size-9" />
+      <div className="w-full max-w-[320px]">
+        <div
+          className="mb-8 text-center"
+          style={{
+            opacity: platformReady ? 1 : 0.6,
+            transition: "opacity 200ms",
+          }}
+        >
+          <BrandMark className="justify-center" iconClassName="size-8" />
         </div>
-        {!platformReady ? (
-          <div className="flex justify-center py-8 text-muted-foreground">
-            <Loader2 className="animate-spin" />
-          </div>
-        ) : (
-          <>
-            {suspendNotice ? (
-              <div className="mb-4 rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-xs text-destructive">
-                {suspendNotice}
-              </div>
-            ) : null}
-            <div className="space-y-6">
+
+        <div
+          style={{
+            opacity: platformReady ? 1 : 0,
+            transform: platformReady ? "translateY(0)" : "translateY(6px)",
+            transition: "opacity 220ms, transform 220ms cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          {suspendNotice ? (
+            <div className="mb-4 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {suspendNotice}
+            </div>
+          ) : null}
+
+          {platformReady && (
+            <div className="space-y-4">
               {passwordFirst ? (
                 <>
                   {passwordForm}
-                  {hasOauth ? (
-                    <>
-                      {divider}
-                      {oauthBlock}
-                    </>
-                  ) : null}
+                  {hasOauth ? <>{divider}{oauthBlock}</> : null}
                 </>
               ) : (
                 <>
@@ -217,20 +211,22 @@ export default function LoginPage() {
                   {passwordForm}
                 </>
               )}
+
+              {!hasOauth && !showPasswordForm ? (
+                <p className="text-center text-xs text-muted-foreground">暂无可用的登录方式</p>
+              ) : null}
+
+              {registrationEnabled && showPasswordForm ? (
+                <p className="text-center text-xs text-muted-foreground">
+                  没有账号？{" "}
+                  <Link href="/register" className="text-foreground underline-offset-4 hover:underline">
+                    注册
+                  </Link>
+                </p>
+              ) : null}
             </div>
-            {!hasOauth && !showPasswordForm ? (
-              <p className="text-center text-sm text-muted-foreground">暂无可用的登录方式</p>
-            ) : null}
-            {registrationEnabled && showPasswordForm ? (
-              <p className="mt-4 text-center text-sm text-muted-foreground">
-                没有账号？{" "}
-                <Link href="/register" className="text-foreground underline-offset-4 hover:underline">
-                  注册
-                </Link>
-              </p>
-            ) : null}
-          </>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
