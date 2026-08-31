@@ -56,7 +56,7 @@ RUN set -eux; \
     apt-get update; \
   fi; \
   apt-get install -y --no-install-recommends \
-    ca-certificates curl wget socat unzip zip gnupg procps \
+    ca-certificates curl wget socat unzip zip gnupg procps xz-utils \
     git openssh-client \
     python3 python3-pip python3-venv \
     jq sqlite3 file less vim-tiny tree \
