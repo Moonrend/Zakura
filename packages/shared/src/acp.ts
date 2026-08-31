@@ -718,7 +718,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           description: "Alibaba Qwen Code Agent（npx 分发，按需安装）",
           builtin: true,
           command: "qwen-code",
-          args: [],
+          args: ["--acp"],
           setupModes: ["api_key", "self"],
           supportsZakuraRoute: true,
           managedFields: [
@@ -1138,6 +1138,9 @@ export function resolveAcpLaunch(
         env.OPENAI_BASE_URL = baseUrl;
         env.AI_GATEWAY_BASE_URL = baseUrl;
       }
+    } else if (profile.id === "qwen-code") {
+      env.DASHSCOPE_API_KEY = key;
+      if (baseUrl) env.DASHSCOPE_API_BASE = baseUrl;
     } else {
       env.API_KEY = key;
       if (baseUrl) env.API_BASE_URL = baseUrl;

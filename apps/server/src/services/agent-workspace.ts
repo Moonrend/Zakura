@@ -157,19 +157,14 @@ export function resolveWorkspaceLiteImage(): string {
   );
 }
 
-/** Pick the image based on stack mode: full for display, lite for shell-only. */
+/** Pick the image: the runner always boots a full "display" stack (browser +
+ *  desktop) and the lite image isn't built/pushed, so always use the full
+ *  workspace image — it is a functional superset of shell-only workloads. */
 export function resolveImageForMode(
-  mode: StackMode,
+  _mode: StackMode,
   configured: string | null | undefined,
 ): string {
-  if (mode === "display") return resolveWorkspaceImage(configured);
-  // Lite image may not exist yet (not built/pushed). Attempt to use it, but
-  // resolveWorkspaceImage is a safe fallback — full image is a superset.
-  const lite = resolveWorkspaceLiteImage();
-  // If the user explicitly configured a workspace image, honor it regardless
-  // of mode — they know what they want.
-  if (configured?.trim()) return resolveWorkspaceImage(configured);
-  return lite;
+  return resolveWorkspaceImage(configured);
 }
 
 /** 旧版本地构建标签（docker build -t zakura/workspace:debian） */

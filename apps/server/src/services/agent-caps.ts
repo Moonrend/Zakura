@@ -24,7 +24,9 @@ export function normalizeCaps(input: {
   };
 }
 
-export function needsContainer(_caps: { enableComputer: boolean }): boolean {
-  // All agents get at least a shell container (lite image) for ACP / file ops.
-  return true;
+export function needsContainer(caps: { enableComputer: boolean }): boolean {
+  // Only the computer environment (files + shell + browser + desktop) needs a
+  // workspace container. Agents without it report status "none" (电脑未开启)
+  // instead of a half-started lite container.
+  return Boolean(caps.enableComputer);
 }
