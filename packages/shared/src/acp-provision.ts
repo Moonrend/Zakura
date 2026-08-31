@@ -67,8 +67,9 @@ export function acpProvisionedCommand(agentId: string, plan: AcpProvisionPlan): 
   const dir = acpVersionDir(agentId, plan.version);
   switch (plan.kind) {
     case "npx":
-      // `npm install --prefix <dir>` puts executables in <dir>/bin
-      return `${dir}/bin/${binNameForPackage(plan.pkg)}`;
+      // `npm install --prefix <dir>` exposes executables in <dir>/node_modules/.bin,
+      // not <dir>/bin (npm's local-install bin dir is always node_modules/.bin).
+      return `${dir}/node_modules/.bin/${binNameForPackage(plan.pkg)}`;
     case "uvx":
       return `${dir}/bin/${binNameForPackage(plan.pkg)}`;
     case "binary":
@@ -150,15 +151,28 @@ export function acpProvisionScript(
     ? `${dir}/bin/${opts.binNameOverride}`
     : acpProvisionedCommand(agentId, plan);
   const partialBin = expectedBin.replace(dir, partial);
+  // npm puts executables in <partial>/node_modules/.bin for npx installs and in
+  // <partial>/bin for uvx; the fallback alias scan below must look in the right one.
+  const partialBinDir =
+    plan.kind === "npx" ? `${partial}/node_modules/.bin` : `${partial}/bin`;
 
   lines.push(
-    // Fail here rather than at first launch: "installed but no executable" is a
-    // packaging mismatch, and the error should name it.
+    // The expected bin name is derived from the package name, but upstream
+    // sometimes renames the executable (e.g. qwen-code → qwen), so the file we
+    // look for may not exist even though the install succeeded. When the bin dir
+    // holds exactly one executable, alias the expected path to it so the launch
+    // command stays stable across upstream renames. Otherwise fail here rather
+    // than at first launch and name the mismatch.
     `if [ ! -e ${shq(partialBin)} ]; then`,
-    `  echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
-    `  ls -1 ${shq(`${partial}/bin`)} 2>/dev/null >&2 || true`,
-    `  rm -rf ${shq(partial)}`,
-    `  exit 1`,
+    `  set -- $(ls -1 ${shq(partialBinDir)} 2>/dev/null || true)`,
+    `  if [ $# -eq 1 ] && [ -n "$1" ]; then`,
+    `    ln -s "$1" ${shq(partialBin)}`,
+    `  else`,
+    `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
+    `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
+    `    rm -rf ${shq(partial)}`,
+    `    exit 1`,
+    `  fi`,
     `fi`,
     `touch ${shq(`${partial}/.ok`)}`,
     `rm -rf ${shq(dir)}`,

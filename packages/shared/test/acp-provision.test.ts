@@ -147,7 +147,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
       const script = stubbed(
         acpProvisionScript("codex-acp", { kind: "npx", pkg: "codex-acp", version: "1.6.2" }),
         root,
-        "acp/codex-acp/1.6.2.partial/bin",
+        "acp/codex-acp/1.6.2.partial/node_modules/.bin",
       );
       const file = join(root, "install.sh");
       writeFileSync(file, script);
@@ -160,10 +160,10 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
       );
 
       // 二次运行必须靠 .ok 短路：删掉可执行文件后重跑，它不应该被重新装回来。
-      rmSync(join(root, "acp/codex-acp/1.6.2/bin/codex-acp"), { force: true });
+      rmSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp"), { force: true });
       execFileSync("bash", [file], { stdio: "pipe" });
       assert.ok(
-        !existsSync(join(root, "acp/codex-acp/1.6.2/bin/codex-acp")),
+        !existsSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp")),
         "已有 .ok 时不应重复安装",
       );
     } finally {
