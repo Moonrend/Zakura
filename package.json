@@ -17,7 +17,7 @@
     "db:migrate": "pnpm --filter @zakura/server db:migrate",
     "db:up": "docker compose --profile postgres up -d postgres",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
+    "test": "pnpm --filter @zakura/shared test && pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
     "test:runner-agent": "pnpm --filter @zakura/core test && pnpm --filter @zakura/runner test && pnpm --filter @zakura/server test",
     "setup": "pnpm install && pnpm db:generate && pnpm db:migrate",
     "strip:saas": "node scripts/strip-saas.mjs",
