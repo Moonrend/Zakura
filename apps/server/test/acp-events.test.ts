@@ -205,3 +205,188 @@ describe("ACP event mapping", () => {
     assert.equal(events.length, 0);
   });
 });
+
+describe("ACP 1.3 content blocks", () => {
+  it("renders image blocks as data URI instead of dropping them", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: "AAAA", mimeType: "image/png", title: "shot" },
+      },
+      ids,
+    );
+    const deltas = events.filter((e) => e.type === "assistant_delta");
+    assert.equal(deltas.length, 1);
+    const delta = (deltas[0].payload as { delta: string }).delta;
+    assert.match(delta, /^!\[shot\]\(data:image\/png;base64,AAAA\)$/);
+  });
+
+  it("renders resource_link as a markdown link", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "resource_link", uri: "file:///a.ts", name: "a.ts" },
+      },
+      ids,
+    );
+    const delta = (events.find((e) => e.type === "assistant_delta")!.payload as { delta: string })
+      .delta;
+    assert.equal(delta, "[a.ts](file:///a.ts)");
+  });
+
+  it("renders embedded text resource as a fenced block", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "resource",
+          resource: { uri: "file:///a.json", mimeType: "application/json", text: "{}" },
+        },
+      },
+      ids,
+    );
+    const delta = (events.find((e) => e.type === "assistant_delta")!.payload as { delta: string })
+      .delta;
+    assert.match(delta, /```json\n\{\}\n```/);
+  });
+
+  it("joins array content blocks", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      {
+        sessionUpdate: "agent_message_chunk",
+        content: [
+          { type: "text", text: "see " },
+          { type: "resource_link", uri: "file:///b.ts", name: "b.ts" },
+        ],
+      },
+      ids,
+    );
+    const delta = (events.find((e) => e.type === "assistant_delta")!.payload as { delta: string })
+      .delta;
+    assert.equal(delta, "see [b.ts](file:///b.ts)");
+  });
+});
+
+describe("ACP 1.3 previously-dropped updates", () => {
+  it("handles non-streaming agent_message and agent_thought", async () => {
+    const { store, events } = fakeStore();
+    const a = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "agent_message", content: { type: "text", text: "whole" } },
+      ids,
+    );
+    const t = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "agent_thought", content: { type: "text", text: "pondering" } },
+      ids,
+    );
+    assert.equal(a.runStatus, "streaming");
+    assert.equal(t.runStatus, "thinking");
+    assert.equal(
+      (events.find((e) => e.type === "assistant_delta")!.payload as { delta: string }).delta,
+      "whole",
+    );
+    assert.equal(
+      (events.find((e) => e.type === "reasoning_delta")!.payload as { delta: string }).delta,
+      "pondering",
+    );
+  });
+
+  it("streams tool_call_content_chunk into tool progress", async () => {
+    const { store, events } = fakeStore();
+    const res = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      {
+        sessionUpdate: "tool_call_content_chunk",
+        toolCallId: "tc9",
+        content: { type: "text", text: "partial" },
+      },
+      ids,
+    );
+    assert.equal(res.runStatus, "tool");
+    const ev = events.find((e) => e.type === "tool_call_progress");
+    assert.ok(ev);
+    assert.deepEqual(ev.payload, { toolCallId: "tc9", message: "partial" });
+  });
+
+  it("surfaces terminal output instead of discarding it", async () => {
+    const { store, events } = fakeStore();
+    const res = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "terminal_output_chunk", terminalId: "t7", output: "$ ls\n" },
+      ids,
+    );
+    assert.equal(res.runStatus, "tool");
+    const ev = events.find((e) => e.type === "run_log");
+    assert.ok(ev);
+    const payload = ev.payload as { message: string; data?: { terminalId?: string } };
+    assert.equal(payload.message, "$ ls\n");
+    assert.equal(payload.data?.terminalId, "t7");
+  });
+
+  it("records echoed user messages without polluting assistant bubbles", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "echo" } },
+      ids,
+    );
+    assert.equal(events.filter((e) => e.type === "assistant_delta").length, 0);
+    assert.equal(events.filter((e) => e.type === "run_log").length, 1);
+  });
+
+  it("clears the plan on plan_removed", async () => {
+    const { store, events } = fakeStore();
+    await appendAcpUpdate(store, "s", "r", { sessionUpdate: "plan_removed" }, ids);
+    const ev = events.find((e) => e.type === "acp_plan");
+    assert.ok(ev);
+    assert.deepEqual(ev.payload, { entries: [] });
+  });
+
+  it("applies mode and config from state_update", async () => {
+    const { store, events } = fakeStore();
+    const mode = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "state_update", currentModeId: "plan" },
+      ids,
+    );
+    assert.equal(mode.modeId, "plan");
+    assert.ok(events.some((e) => e.type === "session_update"));
+    const cfg = await appendAcpUpdate(
+      store,
+      "s",
+      "r",
+      { sessionUpdate: "state_update", configOptions: [{ id: "x" }] },
+      ids,
+    );
+    assert.deepEqual(cfg.configOptions, [{ id: "x" }]);
+  });
+});
