@@ -349,7 +349,7 @@ export type CloudAgentRunErrorPayload = {
 /** 运行日志：loop 内部诊断（轮次、模型、token 用量、压缩等） */
 export type CloudAgentRunLogPayload = {
   runId: string;
-  level: "info" | "warn" | "error";
+  level: "debug" | "info" | "warn" | "error";
   message: string;
   data?: Record<string, unknown>;
 };
