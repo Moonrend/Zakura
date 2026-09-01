@@ -7,10 +7,7 @@ import {
   acpApiKeyDotenv,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
-  acpAdapterSource,
   acpCommandResolveExpr,
-  acpCustomCommand,
-  acpCustomProvisionScript,
   acpStageScript,
   acpStdioArgv,
   acpSyncBackScript,
@@ -23,6 +20,7 @@ import {
   parseAcpSessionModelState,
   parseCloudAgentConfig,
   ACP_UNSTABLE_MODEL_CONFIG_ID,
+  acpRegistryIdForProfile,
   publicProfileForSetup,
   resolveAcpLaunch,
   upsertAcpGrant,
@@ -81,6 +79,7 @@ import { newId } from "../../db/schema.js";
 import type { Agent } from "../../db/schema.js";
 import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
+import { WORKSPACE_EXEC_PATH } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import type { AcpRegistryService } from "./registry.js";
@@ -97,6 +96,7 @@ import {
   type PendingDecision,
 } from "./permissions.js";
 import { CodexDeviceAuth } from "./codex-device.js";
+import { AcpProvisioner } from "./provisioner.js";
 
 type PendingPermission = PendingDecision<acp.RequestPermissionResponse> & {
   kind?: string;
@@ -157,11 +157,10 @@ export class AcpSessionService {
   private readonly maxConcurrentPerTenant: number;
   private readonly tenantInflight = new Map<string, number>();
   /**
-   * In-memory cache of provisioned adapter paths. Keyed by `agentId:profileId`.
-   * Avoids the docker exec round trip to check the `.ok` marker on every
-   * boot — the marker only changes on install/GC, and both invalidate here.
+   * 适配器 provisioning。缓存已解析的路径，避免每次启动都 docker exec 去查
+   * `.ok` 标记——标记只在安装/GC 时变，两处都会 invalidate。
    */
-  private readonly provisionCache = new Map<string, { command: string; args: string[] }>();
+  private readonly provisioner: AcpProvisioner;
 
   constructor(
     private readonly deps: {
@@ -177,6 +176,10 @@ export class AcpSessionService {
   ) {
     this.hooks = new AgentHooksService(deps.workspace);
     this.deviceAuth = new CodexDeviceAuth(deps.workspace);
+    this.provisioner = new AcpProvisioner({
+      workspace: deps.workspace,
+      registry: deps.acpRegistry,
+    });
     this.maxConcurrentPerTenant = Math.max(1, deps.maxConcurrentAcpPerTenant ?? 8);
     this.reapTimer = setInterval(() => void this.reapIdle(), 60_000);
     this.reapTimer.unref?.();
@@ -848,15 +851,51 @@ export class AcpSessionService {
     };
   }
 
+  /**
+   * 手动安装/更新一个 profile 的适配器。
+   *
+   * 以前这里对 `builtin` 直接抛「已预装在镜像中」——那是 adapters 还烤进镜像时
+   * 的遗留。现在镜像只带 Node/uv，28 个内置 profile 全部按需装，于是那条分支
+   * 等于让每个内置 agent 的安装按钮必定失败。
+   *
+   * 现在按 profile 的实际来源分派：
+   *   - preinstalled（仅 fx@full 镜像）→ 无需安装，probe 一下确认可用即可
+   *   - registry 源 → 交给 AcpRegistryService，走 pin 版本 + sha256 + 原子切换
+   *   - custom/自定义 → 沿用 installHint 白名单
+   */
   async install(
     agent: Agent,
     profileId: string,
   ): Promise<{ ok: boolean; command: string; output: string }> {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
-    if (profile.builtin) {
-      throw new Error("内置适配器已预装在工作区镜像中，请重建镜像以更新版本");
+
+    if (profile.preinstalled) {
+      const probed = await this.probe(agent, profileId);
+      return {
+        ok: probed.installed,
+        command: probed.command,
+        output: probed.installed
+          ? `${profile.displayName} 随工作区镜像出厂，无需安装。\n${probed.output}`
+          : `${profile.displayName} 应随镜像出厂，但当前工作区里没找到。` +
+            `可能用的是 lite/shell 镜像，或镜像版本过旧。\n${probed.output}`,
+      };
     }
+
+    const registryId = acpRegistryIdForProfile(profileId);
+    const registry = this.deps.acpRegistry;
+    if (registryId && registry) {
+      const res = await registry.ensureInstalled(agent, registryId);
+      this.invalidateProvisionCache(agent.id, profileId);
+      return {
+        ok: true,
+        command: [res.command, ...res.args].join(" "),
+        output: res.installed
+          ? `已安装 ${profile.displayName} ${res.version}`
+          : `${profile.displayName} ${res.version} 已是最新，跳过安装`,
+      };
+    }
+
     if (!profile.installHint) throw new Error("该 profile 没有安装命令");
     if (!isSafeInstallHint(profile.installHint)) {
       throw new Error("安装命令不在允许列表内，请用 self 模式自行安装");
@@ -867,6 +906,7 @@ export class AcpSessionService {
       ["bash", "-lc", profile.installHint],
       { timeoutMs: 180_000 },
     );
+    this.invalidateProvisionCache(agent.id, profileId);
     const output = `${result.stdout}${result.stderr}`.trim();
     return {
       ok: result.exitCode === 0,
@@ -880,13 +920,7 @@ export class AcpSessionService {
    * Called after manual install, adapter update, or workspace recreation.
    */
   invalidateProvisionCache(agentId: string, profileId?: string): void {
-    if (profileId) {
-      this.provisionCache.delete(`${agentId}:${profileId}`);
-    } else {
-      for (const key of this.provisionCache.keys()) {
-        if (key.startsWith(`${agentId}:`)) this.provisionCache.delete(key);
-      }
-    }
+    this.provisioner.invalidate(agentId, profileId);
   }
 
   /**
@@ -957,23 +991,11 @@ export class AcpSessionService {
   }
 
   /**
-   * Make sure the adapter for `profileId` exists in the workspace, returning its
-   * absolute path.
+   * Make sure the adapter for `profileId` exists, returning its resolved command.
    *
-   * Adapters used to be baked into the workspace image. They are now installed on
-   * demand under `/workspace/.zakura/acp/<id>/<version>/`, which decouples adapter
-   * updates from image releases and keeps unused adapters off disk entirely.
-   *
-   * Returns null when there is nothing to provision — a user-supplied custom
-   * command, or an older image that still ships the adapter — so those paths keep
-   * resolving through `ACP_IMAGE_BIN_DIR`/PATH exactly as before.
-   */
-  /**
-   * Make sure the adapter for `profileId` exists, returning its absolute path.
-   *
-   * When sidecar mode is active, the adapter is installed in the sidecar
-   * container (which shares the same /workspace bind mount). Otherwise falls
-   * back to the workspace container (legacy path).
+   * Delegates to AcpProvisioner; when sidecar mode is active the adapter is
+   * installed in the sidecar container (which shares the same /workspace bind
+   * mount), otherwise in the workspace container (legacy path).
    */
   private async provisionAdapter(
     agent: Agent,
@@ -981,61 +1003,7 @@ export class AcpSessionService {
     currentCommand: string,
     useSidecar: boolean,
   ): Promise<{ command: string; args: string[] } | null> {
-    if (currentCommand.includes("/")) return null;
-
-    const source = acpAdapterSource(profileId);
-    if (source.kind === "image") return null;
-
-    // Fast path: return cached result if a prior boot already provisioned.
-    const cacheKey = `${agent.id}:${profileId}`;
-    const cached = this.provisionCache.get(cacheKey);
-    if (cached) return cached;
-
-    try {
-      if (source.kind === "custom") {
-        const script = acpCustomProvisionScript(source);
-        let res;
-        if (useSidecar) {
-          await this.deps.workspace.ensureAcpSidecar(agent);
-          res = await this.deps.workspace.execInSidecar(agent, ["bash", "-lc", script]);
-        } else {
-          await this.deps.workspace.ensureStarted(agent, { require: "shell" });
-          res = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
-        }
-        if (res.exitCode !== 0) {
-          throw new Error(this.describeProvisionFailure(profileId, res.stderr));
-        }
-        const result = { command: acpCustomCommand(source), args: [] as string[] };
-        this.provisionCache.set(cacheKey, result);
-        return result;
-      }
-
-      const registry = this.deps.acpRegistry;
-      if (!registry) return null;
-      const installed = await registry.ensureInstalled(agent, source.registryId, useSidecar);
-      const result = { command: installed.command, args: installed.args };
-      this.provisionCache.set(cacheKey, result);
-      return result;
-    } catch (err) {
-      // Surface the install failure rather than letting the launch fail later with
-      // a generic "binary not found", which says nothing about why.
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(`无法安装 ${profileId} 适配器：${detail}`);
-    }
-  }
-
-  private describeProvisionFailure(profileId: string, stderr: string): string {
-    const tail = stderr.trim().slice(-800);
-    if (stderr.includes("ZAKURA_ACP_NEED_UV")) {
-      return `${profileId} 需要 uv（Python 工具链），当前工作区镜像未提供。请更新工作区镜像后重试。`;
-    }
-    if (stderr.includes("ZAKURA_ACP_UNSUPPORTED_ARCH")) {
-      return `${profileId} 不支持该 Runner 的 CPU 架构。`;
-    }
-    if (stderr.includes("ZAKURA_ACP_BIN_NOT_FOUND")) {
-      return `${profileId} 安装完成但没找到可执行文件（上游包结构可能已变化）：\n${tail}`;
-    }
-    return `${profileId} 安装失败：\n${tail}`;
+    return this.provisioner.resolve(agent, profileId, currentCommand, useSidecar);
   }
 
   private async bootRuntime(
@@ -1241,6 +1209,14 @@ export class AcpSessionService {
     }
 
     const env: Record<string, string> = { ...launch.env, ...layout.env };
+
+    // npx-provisioned adapters live under `<dir>/node_modules/.bin`. Some shell out
+    // to a companion CLI (e.g. pi-acp runs `pi`, installed alongside via
+    // extraPackages) and resolve it from PATH, so prepend the adapter's own .bin dir.
+    if (adapterBin && adapterBin.command.includes("/node_modules/.bin/")) {
+      const binDir = adapterBin.command.slice(0, adapterBin.command.lastIndexOf("/"));
+      env.PATH = `${binDir}:${env.PATH ?? WORKSPACE_EXEC_PATH}`;
+    }
 
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {

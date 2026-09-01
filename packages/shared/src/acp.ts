@@ -110,7 +110,19 @@ export type AcpPublicProfile = {
   id: string;
   displayName: string;
   description: string;
-  builtin: boolean;
+  /**
+   * Zakura 维护该 profile 的启动命令/参数，用户不可手改。
+   *
+   * 这**不**代表适配器已经装好。历史上 `builtin` 同时表达「已预装」「不可编辑」
+   * 「禁止安装」三件事，于是 28 个内置 agent 全部在 UI 上谎称已预装、且点安装
+   * 必然抛错。现在这三个语义被拆成 `managed` / `preinstalled` / 安装路径本身。
+   */
+  managed: boolean;
+  /**
+   * 适配器随镜像出厂，无需 provision。当前只有 fx（且仅 full 镜像）满足。
+   * 其余 profile 一律按需装到 /workspace/.zakura/acp/<id>/<version>/。
+   */
+  preinstalled?: boolean;
   command: string;
   args: string[];
   setupModes: AcpSetupMode[];
@@ -270,7 +282,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "claude-code",
       displayName: "Claude Code",
       description: "Anthropic Claude Code，经官方 ACP 适配器接入",
-      builtin: true,
+      managed: true,
       command: "claude-agent-acp",
       args: [],
       setupModes: ["api_key", "oauth", "self"],
@@ -313,7 +325,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "codex",
       displayName: "Codex",
       description: "OpenAI Codex CLI，经官方 ACP 适配器接入",
-      builtin: true,
+      managed: true,
       command: "codex-acp",
       args: [],
       setupModes: ["api_key", "oauth", "self"],
@@ -347,7 +359,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "gemini-cli",
       displayName: "Gemini CLI",
       description: "Google Gemini CLI 的内置 ACP 入口",
-      builtin: true,
+      managed: true,
       command: "gemini",
       args: ["--acp"],
       setupModes: ["api_key", "oauth", "self"],
@@ -375,7 +387,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "hermes",
       displayName: "Hermes",
       description: "Nous Research Hermes Agent（ACP）",
-      builtin: true,
+      managed: true,
       command: "hermes-acp",
       args: [],
       setupModes: ["api_key", "self"],
@@ -415,7 +427,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "grok",
       displayName: "Grok Build",
       description: "xAI Grok Build，支持 xAI API key 或 Agent 自身登录",
-      builtin: true,
+      managed: true,
       command: "grok",
       args: ["agent", "stdio"],
       setupModes: ["api_key", "oauth", "self"],
@@ -448,7 +460,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "copilot",
       displayName: "GitHub Copilot",
       description: "GitHub Copilot CLI 原生 ACP（官方 Registry 入口 copilot --acp）",
-      builtin: true,
+      managed: true,
       command: "copilot",
       args: ["--acp"],
       setupModes: ["api_key", "oauth", "self"],
@@ -469,7 +481,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "kimi-code",
       displayName: "Kimi Code",
       description: "Moonshot Kimi Code CLI 原生 ACP（官方入口 kimi acp）",
-      builtin: true,
+      managed: true,
       command: "kimi",
       args: ["acp"],
       setupModes: ["api_key", "oauth", "self"],
@@ -501,7 +513,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       id: "pi",
       displayName: "Pi Coding Agent",
       description: "Pi coding agent，经社区 pi-acp MVP 适配器接入",
-      builtin: true,
+      managed: true,
       command: "pi-acp",
       args: [],
       setupModes: ["api_key", "oauth", "self"],
@@ -541,7 +553,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "opencode",
           displayName: "OpenCode",
           description: "OpenCode 原生 ACP（ACP 官方 Registry 入口 opencode acp）",
-          builtin: true,
+          managed: true,
           command: "opencode",
           args: ["acp"],
           setupModes: ["api_key", "oauth", "self"],
@@ -576,7 +588,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "kiro",
           displayName: "Kiro CLI",
           description: "AWS Kiro CLI（kiro-cli acp）— 支持 AGENTS.md、Skills 与 MCP",
-          builtin: true,
+          managed: true,
           command: "kiro-cli",
           args: ["acp"],
           // Kiro 只支持自身的设备码登录，没有可注入的 API key，
@@ -589,7 +601,11 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "fx",
           displayName: "fx",
           description: "Vercel fx — 轻量原生编码 Agent（fx acp）",
-          builtin: true,
+          managed: true,
+          // 唯一随镜像出厂的适配器（见 docker/workspace/Dockerfile 的 full 阶段）。
+          // lite/shell 镜像不含 fx，届时照常按需 provision——所以启动路径不读这个
+          // 字段，它只用于「是否需要走安装流程」的判断与 UI 文案。
+          preinstalled: true,
           command: "fx",
           args: ["acp"],
           setupModes: ["api_key", "oauth", "self"],
@@ -625,7 +641,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "auggie",
           displayName: "Auggie CLI",
           description: "Augment Code CLI（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "auggie",
           args: [],
           setupModes: ["api_key", "self"],
@@ -638,7 +654,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "cline",
           displayName: "Cline",
           description: "Cline CLI（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "cline",
           args: [],
           setupModes: ["api_key", "self"],
@@ -653,7 +669,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "cursor",
           displayName: "Cursor",
           description: "Cursor Agent CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "cursor",
           args: [],
           setupModes: ["self"],
@@ -664,7 +680,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "devin",
           displayName: "Devin",
           description: "Cognition Devin CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "devin",
           args: [],
           setupModes: ["api_key", "self"],
@@ -677,7 +693,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "factory-droid",
           displayName: "Factory Droid",
           description: "Factory AI Droid CLI（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "factory-droid",
           args: [],
           setupModes: ["api_key", "self"],
@@ -690,7 +706,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "goose",
           displayName: "Goose",
           description: "Block Goose Agent CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "goose",
           args: [],
           setupModes: ["api_key", "self"],
@@ -705,7 +721,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "junie",
           displayName: "Junie",
           description: "JetBrains Junie Agent CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "junie",
           args: [],
           setupModes: ["self"],
@@ -716,7 +732,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "qwen-code",
           displayName: "Qwen Code",
           description: "Alibaba Qwen Code Agent（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "qwen-code",
           args: ["--acp"],
           setupModes: ["api_key", "self"],
@@ -730,7 +746,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "mistral-vibe",
           displayName: "Mistral Vibe",
           description: "Mistral AI Vibe Agent（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "mistral-vibe",
           args: [],
           setupModes: ["api_key", "self"],
@@ -744,7 +760,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "nova",
           displayName: "Nova",
           description: "Amazon Nova Agent CLI（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "nova",
           args: [],
           setupModes: ["api_key", "self"],
@@ -757,7 +773,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "dirac",
           displayName: "Dirac",
           description: "Dirac CLI Agent（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "dirac",
           args: [],
           setupModes: ["api_key", "self"],
@@ -772,7 +788,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "codebuddy",
           displayName: "Codebuddy Code",
           description: "Codebuddy Code Agent（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "codebuddy-code",
           args: [],
           setupModes: ["api_key", "self"],
@@ -785,7 +801,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "amp",
           displayName: "Amp",
           description: "Amp Agent CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "amp",
           args: [],
           setupModes: ["api_key", "self"],
@@ -798,7 +814,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "deepagents",
           displayName: "DeepAgents",
           description: "DeepAgents CLI（npx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "deepagents",
           args: [],
           setupModes: ["api_key", "self"],
@@ -813,7 +829,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "poolside",
           displayName: "Poolside",
           description: "Poolside Agent CLI（binary 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "poolside",
           args: [],
           setupModes: ["api_key", "self"],
@@ -826,7 +842,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "sigit",
           displayName: "siGit Code",
           description: "siGit Code Agent（npx + binary 双分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "sigit",
           args: [],
           setupModes: ["api_key", "self"],
@@ -841,7 +857,7 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           id: "fast-agent",
           displayName: "fast-agent",
           description: "fast-agent（uvx 分发，按需安装）",
-          builtin: true,
+          managed: true,
           command: "fast-agent",
           args: [],
           setupModes: ["api_key", "self"],
@@ -1261,20 +1277,20 @@ function applyModelEnv(env: Record<string, string>, profileId: string, model: st
 
 export function publicProfileForSetup(
   setup: AcpAgentSetup,
-  builtin = lookupBuiltinAcpProfile(setup.id),
+  managedProfile = lookupBuiltinAcpProfile(setup.id),
 ): AcpPublicProfile {
-  if (builtin) {
+  if (managedProfile) {
     return {
-      ...builtin,
-      command: setup.command?.trim() || builtin.command,
-      args: setup.args?.length ? setup.args : builtin.args,
+      ...managedProfile,
+      command: setup.command?.trim() || managedProfile.command,
+      args: setup.args?.length ? setup.args : managedProfile.args,
     };
   }
   return {
     id: setup.id,
     displayName: setup.displayName || setup.id,
     description: "自定义 ACP Agent",
-    builtin: false,
+    managed: false,
     command: setup.command?.trim() || "",
     args: setup.args ?? [],
     setupModes: ["api_key", "oauth", "self"],

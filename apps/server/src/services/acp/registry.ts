@@ -30,6 +30,13 @@ import type { AgentWorkspaceService } from "../agent-workspace.js";
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 15_000;
 
+/** Companion packages installed alongside certain adapters. `pi-acp` is a thin ACP
+ * shim that spawns the separate `pi` coding agent (`@earendil-works/pi-coding-agent`),
+ * which is not a dependency of the shim itself, so it has to be installed here. */
+const ACP_COMPANION_PACKAGES: Record<string, string[]> = {
+  "pi-acp": ["@earendil-works/pi-coding-agent@0.84.4"],
+};
+
 export type AcpCatalogEntry = {
   id: string;
   name: string;
@@ -146,8 +153,12 @@ export class AcpRegistryService {
     const d = entry.dist;
     if (!d) return null;
     switch (d.kind) {
-      case "npx":
-        return { kind: "npx", pkg: d.pkg, version: d.version };
+      case "npx": {
+        const extra = ACP_COMPANION_PACKAGES[entry.id];
+        return extra
+          ? { kind: "npx", pkg: d.pkg, version: d.version, extraPackages: extra }
+          : { kind: "npx", pkg: d.pkg, version: d.version };
+      }
       case "uvx":
         return { kind: "uvx", pkg: d.pkg, version: d.version };
       case "binary":

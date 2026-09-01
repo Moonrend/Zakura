@@ -128,6 +128,20 @@ RUN set -eux; \
 
 ENV DISPLAY=:99
 
+# ── fx: the one adapter we ship in the image ───────────────────────────────────
+# Every other ACP adapter is provisioned on demand into
+# /workspace/.zakura/acp/<id>/<version>/. fx is the exception: it's the default
+# pick for new agents, so baking it here means a fresh full-image workspace can
+# run an agent on first click with zero network round-trip.
+#
+# Deliberately full-only — the lite/shell image stays minimal and provisions fx
+# on demand like everything else, so `preinstalled` is a full-image guarantee.
+# /opt/zakura/acp/bin is already on PATH from the base stage.
+RUN set -eux; \
+  curl -fsSL https://fx.sh/setup.sh | FX_INSTALL_DIR=/opt/zakura/acp/bin bash; \
+  fx --version; \
+  rm -rf /root/.cache /root/.npm /tmp/*
+
 COPY entrypoint.sh /usr/local/bin/zakura-workspace
 RUN chmod +x /usr/local/bin/zakura-workspace
 

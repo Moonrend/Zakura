@@ -40,7 +40,7 @@ import {
 } from "./agent-progress.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
 
-const WORKSPACE_EXEC_PATH =
+export const WORKSPACE_EXEC_PATH =
   "/opt/zakura/acp/bin:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 function isLoopbackHost(host: string): boolean {
@@ -157,14 +157,16 @@ export function resolveWorkspaceLiteImage(): string {
   );
 }
 
-/** Pick the image: the runner always boots a full "display" stack (browser +
- *  desktop) and the lite image isn't built/pushed, so always use the full
- *  workspace image — it is a functional superset of shell-only workloads. */
+/** Pick the image for a workspace. shell-only workloads (ACP / MCP / exec) use the
+ *  lean lite image; display (browser / desktop / computer-use) needs the full image.
+ *  A per-agent configured image always wins. */
 export function resolveImageForMode(
-  _mode: StackMode,
+  mode: StackMode,
   configured: string | null | undefined,
 ): string {
-  return resolveWorkspaceImage(configured);
+  if (configured?.trim()) return resolveWorkspaceImage(configured);
+  if (mode === "shell") return resolveWorkspaceLiteImage();
+  return resolveWorkspaceImage(null);
 }
 
 /** 旧版本地构建标签（docker build -t zakura/workspace:debian） */
@@ -1077,14 +1079,9 @@ export class AgentWorkspaceService {
       }
 
       const mode = resolveStackMode(agent);
-      // Remote runner pulls images itself; if the lite image isn't available on
-      // the registry yet, fall back to the full image which always exists.
-      let image = resolveImageForMode(mode, agent.workspaceImage);
-      // Quick fallback: if mode is shell and we're requesting a lite image that
-      // might not exist, send the full image reference to the runner instead.
-      if (mode === "shell" && /workspace-lite/i.test(image)) {
-        image = resolveWorkspaceImage(agent.workspaceImage);
-      }
+      // The lite image is built/pushed by CI, so remote runners can pull it the
+      // same way they pull the full image.
+      const image = resolveImageForMode(mode, agent.workspaceImage);
       log("container", `在远程 Runner 启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
 
       const ws = await client.startWorkspace({

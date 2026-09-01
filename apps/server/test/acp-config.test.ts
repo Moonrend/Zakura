@@ -319,6 +319,18 @@ describe("ACP config", () => {
     }
   });
 
+  it("marks fx as the only preinstalled adapter", () => {
+    // Regression guard: every builtin profile used to claim `builtin: true`,
+    // which the UI rendered as "已预装在工作区镜像中" and which made
+    // AcpSessionService.install() throw for all 28 of them. Adapters are
+    // provisioned on demand now; fx is the sole image-shipped exception.
+    const profiles = builtinAcpProfiles();
+    const preinstalled = profiles.filter((p) => p.preinstalled).map((p) => p.id);
+    assert.deepEqual(preinstalled, ["fx"]);
+    // `managed` means "Zakura owns the launch command", not "already installed".
+    assert.ok(profiles.every((p) => p.managed));
+  });
+
   it("accepts custom command profiles", () => {
     const config = parseAcpAgentConfig({
       acp: {
@@ -334,7 +346,7 @@ describe("ACP config", () => {
       },
     });
     const profile = publicProfileForSetup(config.agents["my-cli"]!);
-    assert.equal(profile.builtin, false);
+    assert.equal(profile.managed, false);
     assert.equal(profile.command, "my-cli");
     assert.deepEqual(profile.args, ["acp"]);
   });

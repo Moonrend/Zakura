@@ -8,7 +8,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -124,6 +124,24 @@ describe("ACP 适配器安装脚本", () => {
     assert.ok(dir.startsWith(`${ACP_PROVISION_ROOT}/`), dir);
     assert.ok(!dir.includes(".."), dir);
   });
+
+  it("npx 计划可携带伴生包，并写入同一条 install 命令", () => {
+    const plan: AcpProvisionPlan = {
+      kind: "npx",
+      pkg: "pi-acp",
+      version: "0.0.33",
+      extraPackages: ["@earendil-works/pi-coding-agent@0.84.4"],
+    };
+    const script = acpProvisionScript("pi-acp", plan);
+    assertValidBash(script, "npx+extraPackages");
+    assert.ok(script.includes("pi-acp@0.0.33"));
+    assert.ok(script.includes("@earendil-works/pi-coding-agent@0.84.4"));
+    // 必须同一条 install 命令，否则第二次 --prefix 安装会清掉第一个包。
+    assert.ok(
+      /npm install[^\n]*pi-acp@0\.0\.33[^\n]*@earendil-works\/pi-coding-agent@0\.84\.4/.test(script),
+      "伴生包应与主包在同一条 npm install 里",
+    );
+  });
 });
 
 describe("ACP 安装脚本行为（桩掉真实安装）", () => {
@@ -166,6 +184,44 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
         !existsSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp")),
         "已有 .ok 时不应重复安装",
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("包把可执行文件改名时，按 package.json 的 bin 字段建别名", () => {
+    const root = mkdtempSync(join(tmpdir(), "acp-rename-"));
+    try {
+      const binDir = join(root, "acp/qwen-code/0.22.3.partial/node_modules/.bin");
+      const pkgDir = join(root, "acp/qwen-code/0.22.3.partial/node_modules/@qwen-code/qwen-code");
+      const script = acpProvisionScript("qwen-code", {
+        kind: "npx",
+        pkg: "@qwen-code/qwen-code",
+        version: "0.22.3",
+      })
+        .split(ACP_PROVISION_ROOT)
+        .join(join(root, "acp"))
+        .split("/workspace/.zakura/cache")
+        .join(join(root, "cache"))
+        .replace(
+          /^npm_config_cache=.*$/m,
+          `mkdir -p ${JSON.stringify(pkgDir)} && ` +
+            `printf '%s' '{"name":"@qwen-code/qwen-code","version":"0.22.3","bin":{"qwen":"cli-entry.js"}}' > ${JSON.stringify(join(pkgDir, "package.json"))} && ` +
+            `mkdir -p ${JSON.stringify(binDir)} && ` +
+            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "qwen"))} && ` +
+            `chmod +x ${JSON.stringify(join(binDir, "qwen"))} && ` +
+            // 传递依赖污染 .bin，逼逻辑去读 package.json 而不是数条目。
+            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "node-gyp-build"))} && ` +
+            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "semver"))}`,
+        );
+      const file = join(root, "install.sh");
+      writeFileSync(file, script);
+      execFileSync("bash", [file], { stdio: "pipe" });
+
+      assert.ok(existsSync(join(root, "acp/qwen-code/0.22.3/.ok")), "缺少 .ok 标记");
+      const alias = join(root, "acp/qwen-code/0.22.3/node_modules/.bin/qwen-code");
+      assert.ok(existsSync(alias), "缺少 qwen-code 别名");
+      assert.equal(readlinkSync(alias), "qwen", "别名应指向真实的 qwen 可执行文件");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

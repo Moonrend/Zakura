@@ -51,7 +51,7 @@ export function acpInstallMarker(agentId: string, version: string): string {
 }
 
 export type AcpProvisionPlan =
-  | { kind: "npx"; pkg: string; version: string }
+  | { kind: "npx"; pkg: string; version: string; extraPackages?: string[] }
   | { kind: "uvx"; pkg: string; version: string }
   | { kind: "binary"; url: string; sha256: string | null; cmd: string; version: string };
 
@@ -108,11 +108,15 @@ export function acpProvisionScript(
 
   if (plan.kind === "npx") {
     const spec = plan.version === "latest" ? plan.pkg : `${plan.pkg}@${plan.version}`;
+    // Companion packages (e.g. pi-acp shells out to the separate `pi` CLI that is
+    // not a dependency of the adapter) must be installed in the SAME invocation:
+    // a second `npm install --prefix` without a package.json would prune the first.
+    const specs = [spec, ...(plan.extraPackages ?? [])].map((p) => shq(p)).join(" ");
     lines.push(
       // --prefix keeps the dependency tree inside this version dir, so deleting
       // the dir reclaims everything. --no-fund/--no-audit keep output clean.
       `npm_config_cache=${shq(`${ACP_PROVISION_CACHE}/npm`)} ` +
-        `npm install --prefix ${shq(partial)} --no-fund --no-audit --loglevel=error ${shq(spec)} >&2`,
+        `npm install --prefix ${shq(partial)} --no-fund --no-audit --loglevel=error ${specs} >&2`,
     );
   } else if (plan.kind === "uvx") {
     const spec = plan.version === "latest" ? plan.pkg : `${plan.pkg}==${plan.version}`;
@@ -158,21 +162,60 @@ export function acpProvisionScript(
 
   lines.push(
     // The expected bin name is derived from the package name, but upstream
-    // sometimes renames the executable (e.g. qwen-code → qwen), so the file we
-    // look for may not exist even though the install succeeded. When the bin dir
-    // holds exactly one executable, alias the expected path to it so the launch
-    // command stays stable across upstream renames. Otherwise fail here rather
-    // than at first launch and name the mismatch.
+    // sometimes renames the executable (e.g. qwen-code -> qwen), so the file we
+    // look for may not exist even though the install succeeded. For npm installs
+    // we read the package's own `bin` field to find the real name; globbing
+    // node_modules/.bin is unreliable because transitive deps (e.g. node-gyp-build
+    // or semver pulled in by @qwen-code/qwen-code) land in the same dir. For uvx
+    // we keep the single-executable alias scan, since --tool-bin-dir holds only the
+    // one tool. Either way we fail here rather than at first launch.
     `if [ ! -e ${shq(partialBin)} ]; then`,
-    `  set -- $(ls -1 ${shq(partialBinDir)} 2>/dev/null || true)`,
-    `  if [ $# -eq 1 ] && [ -n "$1" ]; then`,
-    `    ln -s "$1" ${shq(partialBin)}`,
-    `  else`,
-    `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
-    `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
-    `    rm -rf ${shq(partial)}`,
-    `    exit 1`,
-    `  fi`,
+  );
+  if (plan.kind === "npx") {
+    const pkgJson = `${partial}/node_modules/${plan.pkg}/package.json`;
+    const resolver = [
+      `const fs = require("fs");`,
+      `const p = process.argv[1];`,
+      `try {`,
+      `  const j = JSON.parse(fs.readFileSync(p, "utf8"));`,
+      `  const b = j.bin;`,
+      `  const n = (j.name || "").includes("@") ? (j.name.split("/")[1] || "") : (j.name || "");`,
+      `  let out = "";`,
+      `  if (typeof b === "string") out = n;`,
+      `  else if (b && typeof b === "object") {`,
+      `    const k = Object.keys(b);`,
+      `    out = k.find((x) => x === n) || k[0] || "";`,
+      `  }`,
+      `  process.stdout.write(out);`,
+      `} catch (e) {`,
+      `  process.stdout.write("");`,
+      `}`,
+    ].join("\n");
+    lines.push(
+      `  real=$(node -e ${shq(resolver)} ${shq(pkgJson)} 2>/dev/null || true)`,
+      `  if [ -n "$real" ] && [ -e "${partialBinDir}/$real" ]; then`,
+      `    ln -s "$real" ${shq(partialBin)}`,
+      `  else`,
+      `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
+      `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
+      `    rm -rf ${shq(partial)}`,
+      `    exit 1`,
+      `  fi`,
+    );
+  } else {
+    lines.push(
+      `  set -- $(ls -1 ${shq(partialBinDir)} 2>/dev/null || true)`,
+      `  if [ $# -eq 1 ] && [ -n "$1" ]; then`,
+      `    ln -s "$1" ${shq(partialBin)}`,
+      `  else`,
+      `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
+      `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
+      `    rm -rf ${shq(partial)}`,
+      `    exit 1`,
+      `  fi`,
+    );
+  }
+  lines.push(
     `fi`,
     `touch ${shq(`${partial}/.ok`)}`,
     `rm -rf ${shq(dir)}`,
