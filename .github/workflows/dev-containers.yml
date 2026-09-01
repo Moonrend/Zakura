@@ -22,6 +22,7 @@ on:
           - app
           - runner
           - workspace
+          - workspace-lite
 
 concurrency:
   group: dev-containers-${{ github.ref }}
@@ -89,6 +90,7 @@ jobs:
             timeout: 60
             workspace_tags: "false"
             build_args: ""
+            target: ""
           - name: runner
             image: zakura-runner-dev
             dockerfile: docker/runner/Dockerfile
@@ -96,6 +98,7 @@ jobs:
             timeout: 60
             workspace_tags: "false"
             build_args: ""
+            target: ""
           - name: workspace
             image: zakura-workspace-dev
             dockerfile: docker/workspace/Dockerfile
@@ -103,6 +106,15 @@ jobs:
             timeout: 180
             workspace_tags: "true"
             build_args: "APT_MIRROR=http://deb.debian.org"
+            target: ""
+          - name: workspace-lite
+            image: zakura-workspace-lite-dev
+            dockerfile: docker/workspace/Dockerfile
+            context: docker/workspace
+            timeout: 180
+            workspace_tags: "false"
+            build_args: "APT_MIRROR=http://deb.debian.org"
+            target: base
     steps:
       - name: Decide whether to build
         id: gate
@@ -169,6 +181,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.build_args }}
+          target: ${{ matrix.target }}
           cache-from: type=gha,scope=dev-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=dev-${{ matrix.image }}
           provenance: false
