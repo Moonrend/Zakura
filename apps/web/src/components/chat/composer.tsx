@@ -178,14 +178,16 @@ function AttachmentChip({
           </span>
         ) : null}
       </span>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         aria-label={`移除 ${attachment.name}`}
-        className="rounded p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+        className="size-5 text-muted-foreground hover:text-foreground"
         onClick={onRemove}
       >
         <X className="size-3" />
-      </button>
+      </Button>
     </span>
   );
 }
@@ -218,14 +220,16 @@ function UploadingChip({
           {percent}% · {formatSize(upload.size)}
         </span>
       </span>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon"
         aria-label={`取消上传 ${upload.name}`}
-        className="relative rounded p-1 text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground"
+        className="relative size-5 text-muted-foreground hover:text-foreground"
         onClick={onCancel}
       >
         <X className="size-3" />
-      </button>
+      </Button>
     </span>
   );
 }
@@ -583,15 +587,17 @@ export function Composer({
 
         <div className="relative">
         {showContinue && !editing ? (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             disabled={!routeReady}
             onClick={() => onContinue?.()}
-            className="animate-pop absolute top-0 left-0 z-20 inline-flex h-7 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-full border border-border/70 bg-background/90 px-2.5 text-xs text-foreground/80 shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:bg-muted hover:text-foreground disabled:opacity-50"
+            className="animate-pop absolute top-0 left-0 z-20 h-7 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-full border-border/70 bg-background/90 px-2.5 text-xs font-normal text-foreground/80 shadow-[var(--shadow-soft)] backdrop-blur hover:text-foreground"
           >
             <Play className="size-3 fill-current" />
             继续
-          </button>
+          </Button>
         ) : null}
 
         {runtimes && runtimes.length > 0 && onRuntimeChange ? (

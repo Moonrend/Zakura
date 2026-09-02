@@ -60,11 +60,13 @@ function AttachmentChips({
   return (
     <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
       {attachments.map((a) => (
-        <button
+        <Button
           key={a.path}
           type="button"
+          variant="outline"
+          size="sm"
           onClick={() => onOpenFile?.(a.path)}
-          className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          className="h-auto gap-1.5 rounded-lg border-border/60 bg-muted/30 px-2.5 py-1.5 text-xs font-normal text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           title={a.path}
         >
           {a.kind === "image" ? (
@@ -73,7 +75,7 @@ function AttachmentChips({
             <FileIcon className="h-3.5 w-3.5 shrink-0" />
           )}
           <span className="max-w-40 truncate">{a.name}</span>
-        </button>
+        </Button>
       ))}
     </div>
   );

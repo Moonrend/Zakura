@@ -24,13 +24,11 @@ import {
   PanelLeft,
   Pencil,
   Plus,
-  Search,
   Settings2,
   SquarePen,
   Square,
   Trash2,
   Loader2,
-  X,
 } from "lucide-react";
 import type {
   CloudAgentEvent,
@@ -51,6 +49,7 @@ import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { SearchField } from "@/components/ui/search-field";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -145,151 +144,18 @@ import { AutomationPanel } from "./automation-panel";
 import { RunLogDrawer } from "./run-log-drawer";
 import { ProjectConfigPanel } from "./project-config-panel";
 
-const AGENT_KEY = "zakura_chat_agent";
-const REASONING_KEY = "zakura_chat_reasoning";
-const DRAFT_KEY_PREFIX = "zakura_chat_draft";
-
-/** 对话列表：chat 过滤时仍拉项目里的子代理/系统会话，方便归组。 */
-function kindsForSidebar(filter: CloudAgentSessionKind | "all"): SessionKindsFilter {
-  if (filter === "all") return "all";
-  if (filter === "chat") return ["chat", "subagent", "delegate", "acp", "system"];
-  return [filter];
-}
-
-
-/** 把当前 agent/session 写回地址栏，刷新后仍停在同一对话；新对话则清掉 session */
-function syncChatUrl(agentId: string | null, sessionId: string | null) {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  if (agentId) url.searchParams.set("agent", agentId);
-  else url.searchParams.delete("agent");
-  if (sessionId) url.searchParams.set("session", sessionId);
-  else url.searchParams.delete("session");
-  const next = url.searchParams.toString()
-    ? `${url.pathname}?${url.searchParams.toString()}`
-    : url.pathname;
-  const current = `${window.location.pathname}${window.location.search}`;
-  if (next !== current) window.history.replaceState({}, "", next);
-}
-
-/** 侧栏会话类型过滤选项（chat 为默认视图；其余为系统产生的对话记录） */
-const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; label: string }> = [
-  { value: "chat", label: SESSION_KIND_LABELS.chat },
-  { value: "subagent", label: SESSION_KIND_LABELS.subagent },
-  { value: "delegate", label: SESSION_KIND_LABELS.delegate },
-  { value: "acp", label: SESSION_KIND_LABELS.acp },
-  { value: "system", label: SESSION_KIND_LABELS.system },
-  { value: "all", label: "全部类型" },
-];
-
-function groupSessions(sessions: CloudSession[]): Array<{
-  label: string;
-  items: CloudSession[];
-}> {
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const groups = [
-    { label: "今天", items: [] as CloudSession[] },
-    { label: "昨天", items: [] as CloudSession[] },
-    { label: "近 7 天", items: [] as CloudSession[] },
-    { label: "更早", items: [] as CloudSession[] },
-  ];
-  for (const s of sessions) {
-    const t = +new Date(s.updatedAt);
-    if (t >= startOfDay) groups[0]!.items.push(s);
-    else if (t >= startOfDay - 86_400_000) groups[1]!.items.push(s);
-    else if (t >= startOfDay - 6 * 86_400_000) groups[2]!.items.push(s);
-    else groups[3]!.items.push(s);
-  }
-  return groups.filter((g) => g.items.length > 0);
-}
-
-function latestCompaction(events: CloudAgentEvent[]) {
-  return [...events].reverse().find((ev) => ev.type === "context_compacted") ?? null;
-}
-
-/** 最近一次模型调用的 measured prompt_tokens（run_log） */
-function latestMeasuredPromptTokens(events: CloudAgentEvent[]): number | null {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const ev = events[i]!;
-    if (ev.type !== "run_log") continue;
-    const data = (ev.payload as { data?: Record<string, unknown> }).data;
-    if (!data) continue;
-    const n =
-      typeof data.promptTokens === "number"
-        ? data.promptTokens
-        : typeof data.calibratedPromptTokens === "number"
-          ? data.calibratedPromptTokens
-          : null;
-    if (n != null && n > 0) return n;
-  }
-  return null;
-}
-
-function buildContextWindowInfo(
-  events: CloudAgentEvent[],
-  modelItem: ChatModelOption | undefined,
-): ContextWindowInfo {
-  const compaction = latestCompaction(events);
-  const compactionSeq = compaction?.seq ?? 0;
-  const compactionPayload = (compaction?.payload ?? {}) as Record<string, unknown>;
-  const summary =
-    typeof compactionPayload.summary === "string" ? compactionPayload.summary : "";
-
-  // 与压缩点之后的事件 + 摘要，用 CJK 感知估算（与服务端一致）
-  let estimatedTokens = events
-    .filter((ev) => ev.seq > compactionSeq)
-    .reduce(
-      (sum, ev) => sum + estimateEventPayloadTokens(ev.payload as Record<string, unknown>),
-      0,
-    );
-  if (summary) estimatedTokens += estimateTextTokens(summary) + 20;
-
-  const measured = latestMeasuredPromptTokens(events);
-  // 有 measured 时优先（更接近真实 prompt）；压缩后 measured 可能偏旧，仍作上限参考
-  const usedTokens =
-    measured != null && measured > 0
-      ? Math.max(estimatedTokens, Math.min(measured, estimatedTokens * 2.2))
-      : estimatedTokens;
-
-  const limitTokens =
-    modelItem?.contextLimit && modelItem.contextLimit > 0
-      ? modelItem.contextLimit
-      : DEFAULT_CONTEXT_LIMIT_TOKENS;
-
-  const beforeTokens =
-    typeof compactionPayload.beforeTokens === "number"
-      ? compactionPayload.beforeTokens
-      : typeof compactionPayload.beforeChars === "number"
-        ? estimateTokensFromChars(compactionPayload.beforeChars)
-        : 0;
-  const afterTokens =
-    typeof compactionPayload.afterTokens === "number"
-      ? compactionPayload.afterTokens
-      : typeof compactionPayload.afterChars === "number"
-        ? estimateTokensFromChars(compactionPayload.afterChars)
-        : 0;
-
-  return {
-    usedTokens: Math.max(0, Math.round(usedTokens)),
-    limitTokens,
-    ratio: limitTokens > 0 ? usedTokens / limitTokens : 0,
-    messageCount: events.filter(
-      (ev) => ev.type === "user_message" || ev.type === "assistant_message",
-    ).length,
-    toolResultCount: events.filter((ev) => ev.type === "tool_call_result").length,
-    summaryCount: events.filter((ev) => ev.type === "context_compacted").length,
-    lastSummary: summary || undefined,
-    lastCompactedAt: compaction?.createdAt,
-    lastSavedTokens:
-      beforeTokens > afterTokens ? Math.round(beforeTokens - afterTokens) : undefined,
-    systemSessionId:
-      typeof compactionPayload.systemSessionId === "string"
-        ? compactionPayload.systemSessionId
-        : undefined,
-    source: measured != null ? "measured" : modelItem?.contextLimit ? "model" : "estimated",
-  };
-}
+import {
+  AGENT_KEY,
+  REASONING_KEY,
+  DRAFT_KEY_PREFIX,
+  kindsForSidebar,
+  syncChatUrl,
+  KIND_FILTER_OPTIONS,
+  groupSessions,
+  latestCompaction,
+  latestMeasuredPromptTokens,
+  buildContextWindowInfo,
+} from "./chat-helpers";
 
 export function ChatApp() {
   const { confirm } = useConfirmDialog();
@@ -2442,25 +2308,13 @@ export function ChatApp() {
             新对话
           </button>
           <div className="flex items-center gap-1">
-            <div className="relative min-w-0 flex-1">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
-              <Input
-                value={searchQ}
-                onChange={(e) => setSearchQ(e.target.value)}
-                placeholder="搜索对话"
-                className="h-8 border-0 bg-transparent pl-7 shadow-none focus-visible:bg-muted/60 focus-visible:ring-0"
-              />
-              {searching && (
-                <button
-                  type="button"
-                  aria-label="清除"
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/70 hover:text-foreground"
-                  onClick={() => setSearchQ("")}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
+            {/* 统一搜索框（含清空 + Esc 清空），与其余列表页保持一致 */}
+            <SearchField
+              value={searchQ}
+              onValueChange={setSearchQ}
+              placeholder="搜索对话"
+              className="min-w-0 flex-1"
+            />
             {/* 会话类型过滤：查看子代理/委派/系统产生的对话记录 */}
             <DropdownMenu>
               <DropdownMenuTrigger
@@ -2540,23 +2394,26 @@ export function ChatApp() {
               <div>
                 <div className="flex items-center px-2 pb-0.5 pt-1">
                   <div className="flex-1 text-[11px] text-muted-foreground/60">项目</div>
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="icon"
                     title="新建项目"
                     onClick={() => setNewProjectOpen(true)}
-                    className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className="size-6 text-muted-foreground hover:text-foreground"
                   >
                     <FolderPlus className="h-3.5 w-3.5" />
-                  </button>
+                  </Button>
                 </div>
                 {projectRows.length === 0 ? (
-                  <button
+                  <Button
                     type="button"
+                    variant="ghost"
                     onClick={() => setNewProjectOpen(true)}
-                    className="w-full rounded-lg px-2 py-2 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                    className="h-auto w-full justify-start rounded-lg px-2 py-2 text-xs font-normal text-muted-foreground hover:text-foreground"
                   >
                     暂无项目，点此创建
-                  </button>
+                  </Button>
                 ) : (
                   projectRows.map((row) => {
                     const collapsed = collapsedProjects.has(row.name);
@@ -2840,14 +2697,16 @@ export function ChatApp() {
         {/* 组合器：排队列表贴在输入框上方连成一块 */}
         <div className="relative shrink-0 px-2.5 pt-1 pb-[max(env(safe-area-inset-bottom),0.625rem)] md:px-4 md:pb-4">
           {!atBottom && !emptyConversation && (
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="sm"
               onClick={() => scrollToBottom("smooth")}
-              className="animate-pop absolute top-0 left-1/2 z-10 flex -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] items-center gap-1 rounded-lg border border-border/70 bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur transition-colors duration-150 hover:text-foreground"
+              className="animate-pop absolute top-0 left-1/2 z-10 h-auto -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-lg border-border/70 bg-background/90 px-3 py-1.5 text-xs font-normal text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur hover:text-foreground"
             >
               <ArrowDown className="size-3.5" />
               回到底部
-            </button>
+            </Button>
           )}
           <Composer
             value={input}
