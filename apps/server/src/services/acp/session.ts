@@ -16,6 +16,7 @@ import {
   projectDefaultWorkingDir,
   parseAcpSessionModelState,
   parseCloudAgentConfig,
+  planAcpPromptBlocks,
   ACP_UNSTABLE_MODEL_CONFIG_ID,
   acpRegistryIdForProfile,
   publicProfileForSetup,
@@ -24,9 +25,12 @@ import {
   type AcpAgentSetup,
   type AcpGatewayModel,
   type AcpPermissionGrant,
+  type AcpPromptBlockPlanItem,
+  type AcpPromptCapabilities,
   type AcpRuntimeLayout,
   type AcpRuntimeState,
   type AcpRuntimeStatus,
+  type CloudAgentAttachment,
 } from "@zakura/shared";
 /** Zakura 路由下可用的网关模型别名（带元数据）；失败返回 undefined，由调用方回退。 */
 async function fetchAcpGatewayModels(
@@ -78,6 +82,7 @@ import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import { WORKSPACE_EXEC_PATH } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
+import type { WorkspaceFs } from "@zakura/core";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import type { AcpRegistryService } from "./registry.js";
 import { AgentHooksService } from "../agent-hooks.js";
@@ -131,6 +136,12 @@ export type LiveRuntime = {
   gatewayModels?: AcpGatewayModel[];
   authMethods: Array<{ id: string; name: string; description?: string }>;
   authRequired: boolean;
+  /**
+   * initialize 返回的 agentCapabilities.promptCapabilities。
+   * 发送 session/prompt 前据此裁剪 ContentBlock，避免向不支持的 agent 发送
+   * image/audio/embedded resource 而被整轮拒绝。
+   */
+  promptCapabilities: AcpPromptCapabilities;
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
   /** When true, the ACP adapter runs in a dedicated sidecar container. */
   useSidecar: boolean;
@@ -293,6 +304,8 @@ export class AcpSessionService {
     agentId: string;
     sessionId: string;
     content: string;
+    /** 随消息一同发送的附件；按 agent 的 promptCapabilities 内联或降级为 resource_link */
+    attachments?: CloudAgentAttachment[] | null;
     parentRunId?: string | null;
   }): Promise<{ runId: string }> {
     const session = await this.deps.store.getSession(
@@ -347,6 +360,7 @@ export class AcpSessionService {
       sessionId: input.sessionId,
       runId: run.id,
       content,
+      attachments: input.attachments ?? null,
       setup,
       existingAcpSessionId: origin.acpSessionId,
     }).catch(async (err) => {
@@ -374,12 +388,85 @@ export class AcpSessionService {
     return { runId: run.id };
   }
 
+  /**
+   * 把一轮用户输入构建成 ACP ContentBlock[]。
+   *
+   * 规则（严格遵循 spec）：
+   * - text 恒发送；
+   * - image/audio 仅在 agent 声明对应 promptCapabilities 时才 base64 内联；
+   * - 其余（含能力不支持、体积过大、读取失败）一律降级为 resource_link ——
+   *   resource_link 无需能力声明，任何 agent 都能收下，最差情况也只是让
+   *   agent 自己去 fs/read_text_file，而不会整轮 prompt 被拒。
+   */
+  private async buildPromptBlocks(input: {
+    agent: Agent;
+    content: string;
+    attachments: CloudAgentAttachment[] | null;
+    capabilities: AcpPromptCapabilities;
+  }): Promise<acp.ContentBlock[]> {
+    const plan = planAcpPromptBlocks({
+      text: input.content,
+      attachments: input.attachments ?? [],
+      capabilities: input.capabilities,
+      workspaceRoot: AGENT_WORKSPACE_ROOT,
+    });
+
+    const blocks: acp.ContentBlock[] = [];
+    if (plan.text) blocks.push({ type: "text", text: plan.text });
+    if (plan.items.length === 0) return blocks;
+
+    const provider = this.deps.workspaceFs;
+    let fs: WorkspaceFs | undefined;
+
+    const asLink = (item: AcpPromptBlockPlanItem): acp.ContentBlock => ({
+      type: "resource_link",
+      uri: item.uri,
+      name: item.attachment.name || item.attachment.path,
+      ...(item.attachment.mime ? { mimeType: item.attachment.mime } : {}),
+      ...(typeof item.attachment.size === "number"
+        ? { size: item.attachment.size }
+        : {}),
+    });
+
+    for (const item of plan.items) {
+      if (item.action === "link" || !provider) {
+        blocks.push(asLink(item));
+        continue;
+      }
+      try {
+        if (fs === undefined) {
+          fs = await provider.forAgentBinding({
+            id: input.agent.id,
+            tenantId: input.agent.tenantId,
+            runtimeNodeId: input.agent.runtimeNodeId,
+          });
+        }
+        const file = await fs.readBytes(item.attachment.path);
+        if (file.data.length === 0) {
+          blocks.push(asLink(item));
+          continue;
+        }
+        blocks.push({
+          type: item.blockType,
+          data: file.data.toString("base64"),
+          mimeType: item.attachment.mime || "application/octet-stream",
+          ...(item.blockType === "image" ? { uri: item.uri } : {}),
+        } as acp.ContentBlock);
+      } catch {
+        // 文件被移动/删除/权限问题：降级为链接，不阻断这一轮对话
+        blocks.push(asLink(item));
+      }
+    }
+    return blocks;
+  }
+
   private async runPromptTurn(input: {
     tenantId: string;
     agent: Agent;
     sessionId: string;
     runId: string;
     content: string;
+    attachments?: CloudAgentAttachment[] | null;
     setup: AcpAgentSetup;
     existingAcpSessionId?: string;
   }): Promise<void> {
@@ -400,7 +487,13 @@ export class AcpSessionService {
     // 永久停在 running。这里把 rejection 记下来，由 tick 分支转成 run_error。
     let promptFailed: unknown = null;
     let promptSettledAt: number | null = null;
-    void active.prompt(input.content).then(
+    const promptBlocks = await this.buildPromptBlocks({
+      agent: input.agent,
+      content: input.content,
+      attachments: input.attachments ?? null,
+      capabilities: live.promptCapabilities,
+    });
+    void active.prompt(promptBlocks).then(
       () => {
         promptSettledAt = Date.now();
       },
@@ -604,6 +697,7 @@ export class AcpSessionService {
       reasoning: live?.reasoning,
       modes: snapshotModes(live),
       availableCommands: live?.availableCommands,
+      promptCapabilities: live?.promptCapabilities,
       authMethods: live?.authMethods,
       authRequired: live?.authRequired,
     };
@@ -768,7 +862,11 @@ export class AcpSessionService {
     const authLogin = Boolean(live?.authRequired && input.requestId.startsWith("auth-"));
     if (!pending && !authLogin) throw new Error("没有等待中的表单请求");
     if (pending) {
-      live!.elicitations.delete(input.requestId);
+      // url 模式会以 requestId + elicitationId 两个键登记同一个 pending，
+      // 这里按引用清理所有别名，避免留下永远不会被 resolve 的悬挂条目。
+      for (const [key, value] of live!.elicitations) {
+        if (value === pending) live!.elicitations.delete(key);
+      }
       pending.resolve(
         (input.cancelled
           ? { action: "cancel" }
@@ -1263,6 +1361,7 @@ export class AcpSessionService {
       ...(gatewayModels?.length ? { gatewayModels } : {}),
       authMethods: [],
       authRequired: false,
+      promptCapabilities: {},
       authWaiters: [],
       useSidecar,
       ...(opts?.runId ? { runId: opts.runId } : {}),
@@ -1305,6 +1404,9 @@ export class AcpSessionService {
           ? { description: m.description }
           : {}),
       }));
+      live.promptCapabilities = normalizePromptCapabilities(
+        init.agentCapabilities?.promptCapabilities,
+      );
 
       const mcpServers =
         init.agentCapabilities?.mcpCapabilities?.http || profile.forceHttpMcp
@@ -1612,6 +1714,22 @@ function snapshotModes(live?: LiveRuntime): AcpRuntimeStatus["modes"] {
   }
   if (live.currentModeId) return { currentId: live.currentModeId, available: [] };
   return undefined;
+}
+
+/**
+ * 归一化 initialize 返回的 promptCapabilities。
+ * spec 中这些字段均为可选 boolean，缺省即 false；text 与 resource_link 恒可用，
+ * 因此不出现在能力表里。任何非 boolean 值一律按 false 处理（保守降级）。
+ */
+function normalizePromptCapabilities(raw: unknown): AcpPromptCapabilities {
+  if (!raw || typeof raw !== "object") return {};
+  const caps = raw as Record<string, unknown>;
+  const pick = (key: string): boolean => caps[key] === true;
+  return {
+    image: pick("image"),
+    audio: pick("audio"),
+    embeddedContext: pick("embeddedContext"),
+  };
 }
 
 function sleep(ms: number): Promise<void> {

@@ -710,6 +710,9 @@ export {
   parseAcpConfigOptions,
   parseAcpModelsBlock,
   parseAcpSessionModelState,
+  planAcpPromptBlocks,
+  acpAttachmentUri,
+  ACP_INLINE_ATTACHMENT_MAX_BYTES,
   ACP_UNSTABLE_MODEL_CONFIG_ID,
 } from "./acp.js";
 export {
@@ -743,6 +746,10 @@ export type {
   AcpPermissionGrant,
   AcpRuntimeState,
   AcpOptionInfo,
+  AcpPromptCapabilities,
+  AcpPromptAttachment,
+  AcpPromptBlockPlanItem,
+  AcpPromptPlan,
   AcpRuntimeStatus,
   AcpPermissionOption,
 } from "./acp.js";

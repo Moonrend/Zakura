@@ -149,6 +149,7 @@ export function registerCloudAgentRoutes(
             agentId: input.agentId,
             sessionId: input.sessionId,
             content: taken.content,
+            ...(taken.attachments?.length ? { attachments: taken.attachments } : {}),
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -659,6 +660,7 @@ export function registerCloudAgentRoutes(
           agentId,
           sessionId: sid,
           content: body.content ?? "",
+          ...(attachments.length ? { attachments } : {}),
           ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
         });
         return c.json(result, 202);

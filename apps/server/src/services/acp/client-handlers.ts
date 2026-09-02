@@ -193,6 +193,10 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
     })
     .onRequest(acp.methods.client.elicitation.create, async (ctx) => {
       const requestId = String(ctx.requestId);
+      const elicitationId =
+        typeof (ctx.params as { elicitationId?: unknown }).elicitationId === "string"
+          ? (ctx.params as { elicitationId: string }).elicitationId
+          : undefined;
       await deps.store.appendEvent({
         sessionId: chatSessionId,
         type: "elicitation_request",
@@ -210,7 +214,30 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
       });
       return new Promise((resolve, reject) => {
         live.elicitations.set(requestId, { resolve, reject });
+        // url 模式下 agent 通过 elicitation/complete 通知收尾，而该通知只带
+        // elicitationId（与 JSON-RPC requestId 不同）。这里额外登记一条别名，
+        // 否则 URL 型 elicitation 永远等不到 resolve，整轮 prompt 会一直挂起。
+        if (elicitationId && elicitationId !== requestId) {
+          live.elicitations.set(elicitationId, { resolve, reject });
+        }
       });
+    })
+    .onNotification(acp.methods.client.elicitation.complete, async (ctx) => {
+      const elicitationId =
+        typeof ctx.params?.elicitationId === "string" ? ctx.params.elicitationId : "";
+      if (!elicitationId) return;
+      const pending = live.elicitations.get(elicitationId);
+      if (!pending) return;
+      for (const [key, value] of live.elicitations) {
+        if (value === pending) live.elicitations.delete(key);
+      }
+      await deps.store.appendEvent({
+        sessionId: chatSessionId,
+        type: "elicitation_resolved",
+        ...(live.runId ? { runId: live.runId } : {}),
+        payload: { requestId: elicitationId, cancelled: false },
+      });
+      pending.resolve({ action: "accept" });
     });
 
 

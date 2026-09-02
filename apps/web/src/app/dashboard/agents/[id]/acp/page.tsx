@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { toast } from "sonner";
-import { Check, ChevronLeft, ChevronRight, Download, Loader2, Plus, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Download, Loader2, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -66,6 +66,7 @@ export default function AgentAcpPage() {
   const configRef = useRef<AcpAgentConfig | null>(null);
   const [adapterStatuses, setAdapterStatuses] = useState<AcpAdapterStatus[]>([]);
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [installingIsUpdate, setInstallingIsUpdate] = useState(false);
   const [installOutput, setInstallOutput] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { installed: boolean; output: string }>>({});
 
@@ -168,18 +169,19 @@ export default function AgentAcpPage() {
     }
   }
 
-  async function handleInstall(profileId: string) {
+  async function handleInstall(profileId: string, isUpdate = false) {
     setInstallingId(profileId);
+    setInstallingIsUpdate(isUpdate);
     setInstallOutput(null);
     try {
       const result = await installAcpAdapter(id, profileId);
       setInstallOutput(result.output);
       if (result.ok) {
-        toast.success(`${profileId} 安装完成`);
+        toast.success(isUpdate ? `${profileId} 已更新到最新版本` : `${profileId} 安装完成`);
         setProbeResults((prev) => ({ ...prev, [profileId]: { installed: true, output: result.output } }));
         void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => {});
       } else {
-        toast.error(`${profileId} 安装失败`);
+        toast.error(isUpdate ? `${profileId} 更新失败` : `${profileId} 安装失败`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -187,6 +189,7 @@ export default function AgentAcpPage() {
       toast.error(msg);
     } finally {
       setInstallingId(null);
+      setInstallingIsUpdate(false);
     }
   }
 
@@ -651,21 +654,21 @@ export default function AgentAcpPage() {
                 </span>
               </span>
               <div className="relative z-10 flex shrink-0 items-center gap-3">
-                {setup.enabled && !isInstalled && !isInstalling ? (
+                {setup.enabled && (hasUpdate || !isInstalled) && !isInstalling ? (
                   <Button
                     type="button"
-                    variant="outline"
+                    variant={hasUpdate ? "default" : "outline"}
                     size="sm"
                     className="h-7 text-xs"
-                    onClick={(e) => { e.stopPropagation(); void handleInstall(profile.id); }}
+                    onClick={(e) => { e.stopPropagation(); void handleInstall(profile.id, Boolean(hasUpdate)); }}
                   >
-                    <Download className="mr-1 size-3" />
-                    安装
+                    {hasUpdate ? <RefreshCw className="mr-1 size-3" /> : <Download className="mr-1 size-3" />}
+                    {hasUpdate ? "更新" : "安装"}
                   </Button>
                 ) : null}
                 {isInstalling ? (
                   <Badge variant="secondary" className="gap-1 text-[10px]">
-                    <Loader2 className="size-3 animate-spin" /> 安装中…
+                    <Loader2 className="size-3 animate-spin" /> {installingIsUpdate ? "更新中…" : "安装中…"}
                   </Badge>
                 ) : null}
                 {row === "on_needs_config" ? (

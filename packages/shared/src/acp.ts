@@ -229,6 +229,19 @@ export type AcpOptionInfo = {
   name: string;
 };
 
+/**
+ * 对应 ACP spec 的 PromptCapabilities（initialize 结果中 agentCapabilities.promptCapabilities）。
+ * 字段缺省一律视为 false —— spec 规定 text 与 resource_link 恒可用，无需声明。
+ */
+export type AcpPromptCapabilities = {
+  /** 支持 ContentBlock::Image */
+  image?: boolean;
+  /** 支持 ContentBlock::Audio */
+  audio?: boolean;
+  /** 支持 session/prompt 中内嵌 ContentBlock::Resource */
+  embeddedContext?: boolean;
+};
+
 export type AcpRuntimeStatus = {
   runtimeId: string;
   sessionId?: string;
@@ -252,6 +265,12 @@ export type AcpRuntimeStatus = {
     available: AcpOptionInfo[];
   };
   availableCommands?: Array<{ name: string; description?: string }>;
+  /**
+   * Agent 在 initialize 时声明的 prompt 能力。用于在发送 session/prompt 前
+   * 判断可否携带 image / audio / 嵌入式 resource，避免盲发被拒。
+   * 未声明时按全 false 处理（仅 text + resource_link 安全）。
+   */
+  promptCapabilities?: AcpPromptCapabilities;
   authMethods?: Array<{ id: string; name: string; description?: string }>;
   authRequired?: boolean;
   /** 后台启动失败时的可读原因；state 一般为 closed */
@@ -1527,4 +1546,115 @@ export function acpConfigToJson(config: AcpAgentConfig): Record<string, unknown>
     ...(config.permissionGrants.length ? { permissionGrants: config.permissionGrants } : {}),
     agents,
   };
+}
+
+// ---------------------------------------------------------------------------
+// session/prompt 多模态内容块构建
+//
+// ACP spec 规定 prompt 可携带 ContentBlock[]，但 image/audio/embedded resource
+// 三类必须由 agent 在 initialize 时通过 promptCapabilities 显式声明才能发送。
+// 这里只做"规划"（纯函数、可测试），真正的文件读取由 server 侧执行，
+// 以免 shared 包引入 fs 依赖。
+// ---------------------------------------------------------------------------
+
+/** 单个待发送附件（等价于 CloudAgentAttachment，避免 shared 内部循环依赖） */
+export type AcpPromptAttachment = {
+  name: string;
+  /** 工作区内路径，如 /uploads/xxx.png */
+  path: string;
+  mime: string;
+  size: number;
+  kind: "image" | "file";
+};
+
+/**
+ * 超过该大小的文件不做 base64 内联，退化为 resource_link。
+ * base64 会膨胀约 33%，且整个 prompt 走一条 JSON-RPC 消息，过大易触发
+ * agent 侧的 stdio 缓冲/长度限制。
+ */
+export const ACP_INLINE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+export type AcpPromptBlockPlanItem =
+  | {
+      /** 需要 server 读取文件并 base64 内联 */
+      action: "inline";
+      blockType: "image" | "audio";
+      attachment: AcpPromptAttachment;
+      uri: string;
+    }
+  | {
+      /** 仅发送链接引用；spec 规定 resource_link 无需能力声明，恒可用 */
+      action: "link";
+      attachment: AcpPromptAttachment;
+      uri: string;
+      /** 降级原因，便于日志与前端提示；未降级时为 undefined */
+      reason?: "capability" | "too-large";
+    };
+
+export type AcpPromptPlan = {
+  text: string;
+  items: AcpPromptBlockPlanItem[];
+};
+
+function isImageMime(mime: string): boolean {
+  return mime.toLowerCase().startsWith("image/");
+}
+
+function isAudioMime(mime: string): boolean {
+  return mime.toLowerCase().startsWith("audio/");
+}
+
+/** 把工作区相对路径转成 file:// URI（ACP 要求绝对路径） */
+export function acpAttachmentUri(workspaceRoot: string, path: string): string {
+  const root = workspaceRoot.replace(/\/+$/, "");
+  const rel = path.startsWith("/") ? path : `/${path}`;
+  return `file://${root}${rel}`;
+}
+
+/**
+ * 依据 agent 声明的 promptCapabilities 规划各附件的发送方式。
+ * 关键约束：能力未声明时绝不内联 —— 宁可降级成 resource_link，
+ * 也不要因为发送了不支持的块导致整轮 prompt 被 agent 拒绝。
+ */
+export function planAcpPromptBlocks(input: {
+  text: string;
+  attachments?: AcpPromptAttachment[] | null;
+  capabilities?: AcpPromptCapabilities | null;
+  workspaceRoot: string;
+}): AcpPromptPlan {
+  const caps = input.capabilities ?? {};
+  const items: AcpPromptBlockPlanItem[] = [];
+
+  for (const att of input.attachments ?? []) {
+    if (!att || typeof att.path !== "string" || !att.path) continue;
+    const uri = acpAttachmentUri(input.workspaceRoot, att.path);
+    const mime = typeof att.mime === "string" ? att.mime : "";
+    const wantsImage = isImageMime(mime) || att.kind === "image";
+    const wantsAudio = isAudioMime(mime);
+
+    if (!wantsImage && !wantsAudio) {
+      items.push({ action: "link", attachment: att, uri });
+      continue;
+    }
+
+    const supported = wantsImage ? caps.image === true : caps.audio === true;
+    if (!supported) {
+      items.push({ action: "link", attachment: att, uri, reason: "capability" });
+      continue;
+    }
+
+    if (typeof att.size === "number" && att.size > ACP_INLINE_ATTACHMENT_MAX_BYTES) {
+      items.push({ action: "link", attachment: att, uri, reason: "too-large" });
+      continue;
+    }
+
+    items.push({
+      action: "inline",
+      blockType: wantsImage ? "image" : "audio",
+      attachment: att,
+      uri,
+    });
+  }
+
+  return { text: input.text, items };
 }
