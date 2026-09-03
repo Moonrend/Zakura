@@ -120,3 +120,37 @@ export function acpConfigResponse(config: AcpAgentConfig, configError?: string |
     ...(configError ? { configError } : {}),
   };
 }
+
+/**
+ * Provision the Agent-bound credential used to reach this project's own MCP
+ * gateway (`/mcp/agents/:slug`).
+ *
+ * Unlike {@link provisionAcpZakuraRoutes} this is NOT gated on
+ * `modelProvider === "zakura"`: tool access is orthogonal to which LLM the
+ * adapter talks to, so an adapter using its own native model still needs to
+ * reach our aggregated tools.
+ *
+ * The key is persisted in `managed.zakura_mcp_api_key` and reused on later
+ * sessions, so we do not mint a fresh credential per `session/new`.
+ */
+export async function provisionAcpMcpGatewayKey(
+  agentService: AgentService,
+  tenantId: string,
+  agent: Agent,
+  config: AcpAgentConfig,
+  setupId: string,
+): Promise<{ config: AcpAgentConfig; apiKey: string | null }> {
+  const setup = config.agents[setupId];
+  if (!setup) return { config, apiKey: null };
+  const existing = setup.managed.zakura_mcp_api_key?.trim();
+  if (existing) return { config, apiKey: existing };
+  const key = await agentService.createAgentApiKey(
+    tenantId,
+    agent.id,
+    `acp:${setup.id}:mcp-gateway`,
+    { scopes: ["mcp"] },
+  );
+  setup.managed.zakura_mcp_api_key = key.rawKey;
+  const saved = await saveAgentAcpConfig(agentService, tenantId, agent, config);
+  return { config: saved, apiKey: key.rawKey };
+}

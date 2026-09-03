@@ -87,6 +87,7 @@ import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import type { AcpRegistryService } from "./registry.js";
 import { AgentHooksService } from "../agent-hooks.js";
 import {
+  provisionAcpMcpGatewayKey,
   provisionAcpZakuraRoutes,
   readAgentAcpConfig,
   saveAgentAcpConfig,
@@ -1087,6 +1088,36 @@ export class AcpSessionService {
   }
 
   /**
+   * Resolve the aggregated MCP gateway endpoint handed to the ACP agent.
+   *
+   * Returns `undefined` when no public base URL is configured, in which case
+   * the caller falls back to the legacy per-binding fan-out.
+   */
+  private async resolveMcpGateway(
+    agent: Agent,
+    profileId: string,
+  ): Promise<{ baseUrl: string; slug: string; apiKey: string } | undefined> {
+    const baseUrl = this.deps.publicBaseUrl?.trim();
+    if (!baseUrl) return undefined;
+    try {
+      const config = readAgentAcpConfig(agent);
+      const { apiKey } = await provisionAcpMcpGatewayKey(
+        this.deps.agentService,
+        agent.tenantId,
+        agent,
+        config,
+        profileId,
+      );
+      if (!apiKey) return undefined;
+      return { baseUrl, slug: agent.slug, apiKey };
+    } catch {
+      // Never let credential provisioning break session start; fall back to
+      // the legacy per-binding list instead.
+      return undefined;
+    }
+  }
+
+  /**
    * Make sure the adapter for `profileId` exists, returning its resolved command.
    *
    * Delegates to AcpProvisioner; when sidecar mode is active the adapter is
@@ -1410,7 +1441,12 @@ export class AcpSessionService {
 
       const mcpServers =
         init.agentCapabilities?.mcpCapabilities?.http || profile.forceHttpMcp
-          ? await listHttpMcpServers(this.deps.agentService, agent.tenantId, agent.id)
+          ? await listHttpMcpServers(
+              this.deps.agentService,
+              agent.tenantId,
+              agent.id,
+              await this.resolveMcpGateway(agent, setup.id),
+            )
           : [];
       const additionalDirectories =
         cwd !== AGENT_WORKSPACE_ROOT ? [AGENT_WORKSPACE_ROOT] : undefined;
@@ -1778,11 +1814,49 @@ function isSafeInstallHint(hint: string): boolean {
   return false;
 }
 
-async function listHttpMcpServers(
+/**
+ * Build the MCP server list handed to an ACP agent at `session/new`.
+ *
+ * We deliberately expose a SINGLE aggregated endpoint (this project's own MCP
+ * gateway at `/mcp/agents/:slug`) instead of fanning out one entry per binding.
+ *
+ * Why this matters, beyond tidiness:
+ *
+ *  1. Every entry in `session/new.mcpServers` is REQUIRED by the ACP wire
+ *     protocol - `McpServer` has no `optional`/`enabled` field. So a single
+ *     unreachable or subtly non-conforming upstream aborts the whole session
+ *     with "Required MCP server '<name>' failed to start", and the user loses
+ *     the agent entirely rather than just one tool.
+ *  2. Upstreams vary in spec conformance. Observed in the wild: mcp.grep.app
+ *     answers `notifications/initialized` with a bare `202` carrying no
+ *     `content-type` header. That is legal per the MCP spec (a 202 has no
+ *     body), but the `fx` client rejects it with `MissingContentType` and
+ *     treats the server as failed to start. Fronting upstreams with our own
+ *     gateway normalises these differences in exactly one place.
+ *  3. The gateway already namespaces aggregated tools as `re_<slug>__<tool>`,
+ *     so collapsing to one endpoint does not create tool-name collisions.
+ *
+ * Falls back to the legacy per-binding fan-out when no gateway credentials are
+ * available, so self-hosted setups without a reachable public base URL keep
+ * working exactly as before.
+ */
+export async function listHttpMcpServers(
   agentService: AgentService,
   tenantId: string,
   agentId: string,
+  gateway?: { baseUrl: string; slug: string; apiKey: string },
 ): Promise<acp.McpServer[]> {
+  if (gateway) {
+    const base = gateway.baseUrl.replace(/\/+$/, "");
+    return [
+      {
+        type: "http",
+        name: "zakura",
+        url: `${base}/mcp/agents/${encodeURIComponent(gateway.slug)}`,
+        headers: [{ name: "Authorization", value: `Bearer ${gateway.apiKey}` }],
+      },
+    ];
+  }
   const bindings = await agentService.listBindings(tenantId, agentId);
   const out: acp.McpServer[] = [];
   for (const b of bindings) {
