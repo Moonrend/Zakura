@@ -7,6 +7,19 @@
 import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { componentInstances, managedContainers, providerCatalog } from "../db/schema.js";
+import type { AppConfig } from "../config.js";
+import { isSessionAdmin } from "../services/auth.js";
+
+/** 租户管理员可管本租户；整站仅超管（OSS 下管理员可管整站） */
+export function canManageMcpOauthApps(
+  session: { role: string; userId: string; isPlatformAdmin?: boolean },
+  config: AppConfig,
+  scope: "platform" | "tenant",
+): boolean {
+  if (scope === "tenant") return isSessionAdmin(session);
+  if (config.multiTenant) return session.isPlatformAdmin === true;
+  return isSessionAdmin(session);
+}
 
 export function noDcrOauthError(mcpUrl: string): string {
   const host = (() => {
