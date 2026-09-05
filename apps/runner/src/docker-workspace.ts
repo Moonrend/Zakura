@@ -1099,16 +1099,15 @@ export class RunnerDockerWorkspace {
     const stream = (await container.attach({
       ...attachOpts,
       hijack: true,
-      // See apps/server/src/runtime/docker.ts attachStdio for the full analysis.
-      // docker-modem serializes the attach opts as the POST body, which on a
-      // hijacked connection is written onto the container's stdin, corrupting
-      // the first JSON-RPC frame. `_body` must be truthy (`""` is falsy and
-      // falls through to serializing the whole opts object), and `_query` must
-      // be set or `_body` itself leaks into the query string.
-      _query: attachOpts,
-      _body: {},
+      // See apps/server/src/runtime/docker.ts attachStdio: do NOT add a
+      // `_body` override here. It makes docker-modem drop Content-Length and
+      // fall back to `Transfer-Encoding: chunked`, and the attach then hangs
+      // forever waiting on a body Docker never receives.
+      // The request body docker-modem does send can race onto the container's
+      // stdin, so the StdioExec below sets `newlineGuard`.
     } as unknown as Parameters<typeof container.attach>[0])) as unknown as NodeJS.ReadWriteStream;
     const job = new StdioExec(stream, {
+      newlineGuard: true,
       inspect: async () => {
         const cur = await container.inspect();
         return {

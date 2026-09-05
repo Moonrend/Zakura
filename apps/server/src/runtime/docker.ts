@@ -470,31 +470,34 @@ export class DockerRuntime implements ContainerRuntime {
     const stream = (await container.attach({
       ...attachOpts,
       hijack: true,
-      // docker-modem (5.0.7) mangles hijacked attach in two separate places:
-      //
-      //   modem.js:162  address += this.buildQuerystring(opts._query || opts);
-      //   modem.js:208  data = JSON.stringify(opts._body || opts);
-      //
-      // The second one is the dangerous one: on a hijacked attach the request
-      // body is written into the UPGRADED socket — i.e. straight onto the
-      // container's stdin. Without a `_body` override PID 1 receives a literal
+      // docker-modem 5.0.7 serializes the opts object as the POST body
+      // (modem.js:208). On a hijacked attach there is a race: if Docker
+      // upgrades the socket before it finishes consuming the request body,
+      // that body lands on the container's STDIN. Measured by teeing PID 1
+      // inside the real adapter image: ~13% of attaches (2/15, 4/20) received
       //   {"stream":true,"stdin":true,"stdout":true,"stderr":true,"hijack":true}
-      // prefixed to our first JSON-RPC frame. Verified by teeing the
-      // container's stdin: ~15% of boots got a `-32700 Parse error` because the
-      // junk merged with the real frame instead of flushing as its own line.
+      // prepended to the first frame.
       //
-      // Both keys are required, and `_body` must be a NON-EMPTY-ish truthy
-      // value: `_body: ""` is falsy, so `opts._body || opts` falls through and
-      // serializes the whole options object anyway (observed as a literal
-      // `"_body":""` inside the injected JSON). `{}` is truthy and stringifies
-      // to '{}', which modem.js:212-215 converts to `data = undefined`.
-      //
-      // `_query` must be set too, otherwise the `_body` key itself leaks into
-      // the query string as `?...&_body=`.
-      _query: attachOpts,
-      _body: {},
+      // There is no way to suppress the body through dockerode's attach():
+      //   * `_body: {}`      -> modem.js:212 turns '{}' into data=undefined, so
+      //                         no Content-Length is sent and line 224 falls back
+      //                         to Transfer-Encoding: chunked. Docker then blocks
+      //                         forever waiting for a body. (Reproduced: hung >7min.)
+      //   * `_body: <other>` -> still a non-empty body, still leaks. (Verified:
+      //                         a `{"_":0}` body leaked verbatim onto stdin.)
+      //   * options.file     -> would give Content-Length: 0, but dockerode's
+      //                         attach() builds its own optsf and never forwards it.
+      // So we accept the body and neutralise it in StdioExec instead: the first
+      // write is newline-prefixed, which forces any leaked prefix to terminate as
+      // its own line. The adapter answers that junk line with one harmless
+      // `-32700 Parse error` and parses our real frame normally.
+      // Verified end-to-end: 20/20 handshakes OK, including one trial that did
+      // leak and still completed.
     } as unknown as Parameters<typeof container.attach>[0])) as unknown as NodeJS.ReadWriteStream;
     return new StdioExec(stream, {
+      // Hijacked attach can leak the request body onto stdin — see the comment
+      // on the attach() call above.
+      newlineGuard: true,
       inspect: async () => {
         const cur = await container.inspect();
         return {
