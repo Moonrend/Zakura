@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { builtinAcpProfiles } from "../src/acp.js";
 import {
   acpAdapterSource,
   acpAgentByProfile,
@@ -136,4 +137,19 @@ test("a malformed index is rejected and leaves the active one intact", () => {
     assert.equal(res.ok, false, `should reject: ${JSON.stringify(bad)}`);
   }
   assert.equal(acpAgents().length, before, "active index must survive bad input");
+});
+test("registry auth modes agree with the builtin profiles", () => {
+  // The UI renders setup flows from the profile while the adapter reads them
+  // from the registry; drift between the two silently breaks login.
+  const mismatches: string[] = [];
+  for (const profile of builtinAcpProfiles()) {
+    const agent = acpAgentByProfile(profile.id);
+    if (!agent) continue;
+    const fromProfile = [...profile.setupModes].sort().join(",");
+    const fromRegistry = [...agent.auth.modes].sort().join(",");
+    if (fromProfile !== fromRegistry) {
+      mismatches.push(`${profile.id}: profile=[${fromProfile}] registry=[${fromRegistry}]`);
+    }
+  }
+  assert.deepEqual(mismatches, [], `setup mode drift:\n  ${mismatches.join("\n  ")}`);
 });

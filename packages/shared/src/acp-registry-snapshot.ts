@@ -234,6 +234,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -499,8 +500,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       },
       "auth": {
         "modes": [
-          "self",
-          "api_key"
+          "self"
         ]
       }
     },
@@ -731,6 +731,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -763,6 +764,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -861,6 +863,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -926,8 +929,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       },
       "auth": {
         "modes": [
-          "self",
-          "api_key"
+          "self"
         ]
       }
     },
@@ -992,6 +994,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -1131,6 +1134,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -1163,6 +1167,7 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "auth": {
         "modes": [
           "self",
+          "oauth",
           "api_key"
         ]
       }
@@ -1366,5 +1371,5 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     }
   ],
-  "digest": "24275e1e08b370cd"
+  "digest": "0a6a228e92596db0"
 } as AcpCuratedIndex;

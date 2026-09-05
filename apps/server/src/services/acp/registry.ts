@@ -25,6 +25,7 @@ import {
   type AcpRegistryIndex,
   type AcpRegistryPlatform,
   type AcpResolvedDist,
+  acpEnabledAgents,
 } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
@@ -83,6 +84,15 @@ export type AcpAdapterStatus = {
   updateAvailable: boolean;
   /** Kilobytes on disk, per installed version. */
   diskKb: Record<string, number>;
+  /**
+   * Where this adapter comes from.
+   *
+   * `container` adapters ship as prebuilt images and are never installed into
+   * the workspace, so install state and disk usage do not apply to them.
+   */
+  source: "workspace" | "container";
+  /** Image reference, for container-sourced adapters. */
+  image?: string;
 };
 
 /** Workspaces are Linux containers regardless of where the server runs. */
@@ -313,6 +323,7 @@ export class AcpRegistryService {
         latest: null,
         updateAvailable: false,
         diskKb: {},
+        source: "workspace" as const,
       };
       existing.installed.push(version);
       byId.set(id, existing);
@@ -335,6 +346,22 @@ export class AcpRegistryService {
       // Only claim an update when we actually know the target version; an
       // unreachable registry must not render as "up to date" either way.
       entry.updateAvailable = Boolean(latest && !entry.installed.includes(latest));
+    }
+
+    // Containerized adapters ship as prebuilt images. They never appear in the
+    // workspace scan above, so without this they would render as "not
+    // installed" forever and offer an install button that does nothing.
+    for (const containerAgent of acpEnabledAgents()) {
+      if (byId.has(containerAgent.id)) continue;
+      byId.set(containerAgent.id, {
+        id: containerAgent.id,
+        installed: [containerAgent.version],
+        latest: containerAgent.version,
+        updateAvailable: false,
+        diskKb: {},
+        source: "container",
+        image: containerAgent.image,
+      });
     }
     return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
   }
