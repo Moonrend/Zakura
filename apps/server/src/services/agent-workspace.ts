@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -1641,35 +1642,35 @@ export class AgentWorkspaceService {
     adapterId: string,
     sessionKey: string,
   ): string {
-    // NOTE: the container is scoped per *chat session*, not per agent × adapter.
+    // Scope: since Phase 3 the caller passes a per-(agent × adapter) process
+    // key, so one container serves every chat session for that pair.
     //
-    // The adapter is PID 1 and we talk to it over `docker attach`. Docker
-    // broadcasts PID 1's stdout to every attached client and merges all
-    // attached stdins into one pipe — verified empirically: two attaches to the
-    // same container both received the *same* JSON-RPC reply, and interleaved
-    // writes produced a `Parse error`. So one container can serve exactly one
-    // JSON-RPC peer until the adapter itself multiplexes by `sessionId`
-    // (Phase 3, one-process-multi-session).
+    // This is only safe because the adapter multiplexes by ACP `sessionId`.
+    // Docker itself does NOT help here: it broadcasts PID 1's stdout to every
+    // attached client and merges all attached stdins into one pipe — verified
+    // empirically (two attaches got the *same* JSON-RPC reply, and interleaved
+    // writes produced a `Parse error`). Hence the invariant: exactly ONE attach
+    // per container, with all chats multiplexed in-band over it.
     //
-    // Credentials are still shared per agent × adapter via `acpAdapterCredVolume`,
-    // so this only costs process isolation, not re-authentication.
-    const short = sessionKey.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+    // `sessionKey` is hashed rather than truncated: keys are structured
+    // (`tenant:agent:profile`), and stripping separators before a 12-char slice
+    // let distinct keys collide onto one container name.
+    const short = createHash("sha256").update(sessionKey).digest("hex").slice(0, 12);
     return `zakura-acpa-${adapterId}-${agentId}-${short}`
       .replace(/[^a-zA-Z0-9_.-]/g, "-")
       .slice(0, 63);
   }
 
   /**
-   * Ensure the dedicated adapter container for (agent × adapter × chat session)
-   * is running.
+   * Ensure the dedicated adapter container for (agent × adapter) is running.
    *
    * Unlike the sidecar, the adapter binary is the container CMD (PID 1): we
    * never `docker exec` into it. Credentials live on a per-adapter volume
    * mounted at HOME, so one adapter's login cannot read another's.
    *
-   * `sessionKey` scopes the *process*, not the credentials — see
-   * `acpAdapterContainerName` for why sharing one PID 1 across chat sessions
-   * corrupts the JSON-RPC stream.
+   * `sessionKey` scopes the *process*. Callers must keep at most one attach
+   * alive per container — see `acpAdapterContainerName` for why a second
+   * attach corrupts the JSON-RPC stream.
    */
   async ensureAcpAdapterContainer(
     agent: Agent,

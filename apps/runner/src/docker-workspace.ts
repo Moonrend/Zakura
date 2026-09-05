@@ -2,6 +2,7 @@
  * Local Docker ops for agent workspace containers on the Runner host.
  */
 import Docker from "dockerode";
+import { createHash } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, type AddressInfo, type Socket } from "node:net";
@@ -925,14 +926,17 @@ export class RunnerDockerWorkspace {
     return { id: list[0]!.Id, status: list[0]!.State };
   }
 
-  // ── ACP Adapter containers (one per agent × adapter × chat session) ────────
+  // ── ACP Adapter containers (one per agent × adapter) ───────────────────────
 
   private adapterContainerName(
     agentId: string,
     adapterId: string,
     sessionKey: string,
   ): string {
-    const short = sessionKey.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+    // Must stay byte-identical to the server's `acpAdapterContainerName`:
+    // the server computes the name it expects, and a divergent hash here would
+    // silently start a second container instead of reusing the running one.
+    const short = createHash("sha256").update(sessionKey).digest("hex").slice(0, 12);
     return `zakura-acpa-${adapterId}-${agentId}-${short}`
       .replace(/[^a-zA-Z0-9_.-]/g, "-")
       .slice(0, 63);
