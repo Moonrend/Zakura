@@ -1,0 +1,134 @@
+/**
+ * Client for the standalone ACP registry (`Moonrend/acp-registry`).
+ *
+ * Zakura deliberately holds no per-agent knowledge. Everything about an adapter
+ * — its image, how its credentials persist, which auth flows it supports —
+ * comes from the registry index, so adding an adapter is a pull request against
+ * that repo and no change here.
+ *
+ * The compiled index ships with the app as a build-time snapshot, and can be
+ * refreshed at runtime from `ZAKURA_ACP_REGISTRY_URL` for hosts that want
+ * updates without redeploying.
+ */
+
+import { ACP_REGISTRY_SNAPSHOT } from "./acp-registry-snapshot.js";
+
+/** How an adapter's credentials and config persist between sessions. */
+export type AcpStorageMode = "home" | "state-home" | "files" | "none";
+
+/** When a runtime file is copied back to durable storage. */
+export type AcpArtifactSync = "none" | "exit" | "codex_auth";
+
+export type AcpSetupMode = "self" | "oauth" | "api_key";
+
+export interface AcpStorageArtifact {
+  /** Path relative to the durable root. */
+  durable: string;
+  /** Path relative to the runtime state dir. */
+  runtime: string;
+  sync?: AcpArtifactSync;
+  /** Restrict this artifact to specific setup modes. Absent means all. */
+  when?: AcpSetupMode[];
+}
+
+export interface AcpStorageSpec {
+  mode: AcpStorageMode;
+  /** Extra adapter env. `${STATE_DIR}`/`${RUNTIME_DIR}`/`${HOME_DIR}` expand at launch. */
+  env?: Record<string, string>;
+  /** Point XDG_CONFIG_HOME / XDG_DATA_HOME at the persisted home. */
+  xdg?: boolean;
+  artifacts?: AcpStorageArtifact[];
+}
+
+export interface AcpAuthSpec {
+  modes: AcpSetupMode[];
+  apiKeyEnv?: string[];
+  /** Env forcing device-code flow instead of opening a browser. */
+  noBrowserEnv?: Record<string, string>;
+}
+
+export interface AcpCuratedAgent {
+  id: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  /** Stable Zakura-side profile id. */
+  profileId: string;
+  /** Fully qualified image ref, including tag. */
+  image: string;
+  dist: { kind: "npx" | "uvx" | "binary" };
+  storage: AcpStorageSpec;
+  auth: AcpAuthSpec;
+}
+
+export interface AcpCuratedIndex {
+  schemaVersion: number;
+  imagePrefix: string;
+  digest: string;
+  agents: AcpCuratedAgent[];
+}
+
+const SNAPSHOT = ACP_REGISTRY_SNAPSHOT;
+
+let active: AcpCuratedIndex = SNAPSHOT;
+let byProfile = new Map<string, AcpCuratedAgent>();
+let byId = new Map<string, AcpCuratedAgent>();
+
+function reindex(index: AcpCuratedIndex): void {
+  byProfile = new Map(index.agents.map((a) => [a.profileId, a]));
+  byId = new Map(index.agents.map((a) => [a.id, a]));
+}
+reindex(active);
+
+/** Current index, including any successful runtime refresh. */
+export const acpRegistryIndex = (): AcpCuratedIndex => active;
+
+export const acpAgentByProfile = (profileId: string): AcpCuratedAgent | undefined =>
+  byProfile.get(profileId);
+
+export const acpAgentById = (id: string): AcpCuratedAgent | undefined => byId.get(id);
+
+export const acpAgents = (): AcpCuratedAgent[] => active.agents;
+
+/** Agents the registry publishes images for. */
+export const acpEnabledAgents = (): AcpCuratedAgent[] =>
+  active.agents.filter((a) => a.enabled);
+
+function isValidIndex(value: unknown): value is AcpCuratedIndex {
+  if (!value || typeof value !== "object") return false;
+  const idx = value as Partial<AcpCuratedIndex>;
+  if (idx.schemaVersion !== SNAPSHOT.schemaVersion) return false;
+  if (!Array.isArray(idx.agents) || idx.agents.length === 0) return false;
+  return idx.agents.every(
+    (a) =>
+      typeof a?.id === "string" &&
+      typeof a?.profileId === "string" &&
+      typeof a?.image === "string" &&
+      typeof a?.storage?.mode === "string",
+  );
+}
+
+/**
+ * Validate and install a freshly fetched index.
+ *
+ * This module stays free of IO so it can run in the browser as well as on the
+ * server; callers do the fetching and hand the parsed value here. A malformed
+ * index must never take the adapter layer down, so it is rejected and the
+ * previous index stays active.
+ */
+export function applyAcpRegistryIndex(
+  value: unknown,
+): { ok: boolean; digest: string; reason?: string } {
+  if (!isValidIndex(value)) {
+    return { ok: false, digest: active.digest, reason: "index failed validation" };
+  }
+  active = value;
+  reindex(active);
+  return { ok: true, digest: active.digest };
+}
+
+/** Restore the built-in snapshot. Primarily for tests. */
+export function resetAcpRegistry(): void {
+  active = SNAPSHOT;
+  reindex(active);
+}

@@ -499,6 +499,23 @@ export {
   acpCustomCommand,
 } from "./acp-sources.js";
 export type { AcpAdapterSource } from "./acp-sources.js";
+export {
+  acpRegistryIndex,
+  acpAgents,
+  acpAgentById,
+  acpAgentByProfile,
+  acpEnabledAgents,
+  applyAcpRegistryIndex,
+  resetAcpRegistry,
+} from "./acp-registry-client.js";
+export type {
+  AcpCuratedAgent,
+  AcpCuratedIndex,
+  AcpStorageSpec,
+  AcpStorageArtifact,
+  AcpStorageMode,
+  AcpAuthSpec,
+} from "./acp-registry-client.js";
 export type {
   ImageUpdateKind,
   ImageUpdateEntry,

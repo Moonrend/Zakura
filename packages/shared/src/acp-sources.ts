@@ -1,17 +1,18 @@
 /**
  * Where each builtin ACP profile's binary comes from.
  *
- * Most builtin profiles correspond 1:1 to an entry in the upstream ACP registry, so
- * they can be provisioned on demand with pinned versions and no image release. A
- * few ship their own installer and are not in the curated registry (which requires
- * verified `authMethods`); those get an explicit script.
+ * Adapter facts live in the standalone `Moonrend/acp-registry` repo, not here.
+ * This module only decides *how* to obtain an adapter: a published image when
+ * the registry has one, on-demand provisioning otherwise. Adding an adapter is
+ * a pull request against that repo — no change in Zakura.
  *
- * Keeping this as a table rather than a chain of `if (id === …)` is deliberate: the
- * registry has ~39 agents and grows weekly, and the old per-id branching in
- * `acp-storage.ts` is exactly what made adding one a multi-file change.
+ * The exception is `CUSTOM_SOURCES`: a few vendors ship their own installer and
+ * are absent from the curated registry (which requires verified `authMethods`),
+ * so they still need an explicit script here.
  */
 
 import { ACP_PROVISION_CACHE, acpVersionDir } from "./acp-provision.js";
+import { acpAgentByProfile, acpAgents } from "./acp-registry-client.js";
 
 export type AcpAdapterSource =
   /** Provision from the upstream registry under this id. */
@@ -40,54 +41,7 @@ export type AcpAdapterSource =
    */
   | { kind: "container"; image: string };
 
-/**
- * Builtin profile id → dedicated adapter image.
- *
- * Opt-in per profile: a profile listed here takes precedence over its registry
- * entry, so containerization can be rolled out one adapter at a time and rolled
- * back by deleting a line.
- */
-const CONTAINER_SOURCES: Record<string, string> = {
-  // NOTE: keyed by *profile* id (`claude-code`), not the registry/image id
-  // (`claude-acp`). The two differ for this adapter.
-  "claude-code": "ghcr.io/moonrend/zakura/acp-claude-acp:0.74.0",
-};
-
 const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
-
-/**
- * Builtin profile id → registry id.
- *
- * Verified against the live registry index (39 agents). Ids that differ from our
- * own profile naming are the reason this mapping is explicit rather than inferred.
- */
-const REGISTRY_BY_PROFILE: Record<string, string> = {
-  "claude-code": "claude-acp",
-  codex: "codex-acp",
-  "gemini-cli": "gemini",
-  opencode: "opencode",
-  copilot: "github-copilot-cli",
-  "kimi-code": "kimi",
-  pi: "pi-acp",
-  grok: "grok-build",
-  auggie: "auggie",
-  cline: "cline",
-  cursor: "cursor",
-  devin: "devin",
-  "factory-droid": "factory-droid",
-  goose: "goose",
-  junie: "junie",
-  "qwen-code": "qwen-code",
-  "mistral-vibe": "mistral-vibe",
-  nova: "nova",
-  "fast-agent": "fast-agent",
-  dirac: "dirac",
-  codebuddy: "codebuddy-code",
-  amp: "amp-acp",
-  deepagents: "deepagents",
-  poolside: "poolside",
-  sigit: "sigit",
-};
 
 /**
  * Installers for adapters the registry does not carry.
@@ -162,12 +116,17 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
   },
 };
 
-/** How to obtain the adapter for a builtin profile id. */
+/**
+ * How to obtain the adapter for a builtin profile id.
+ *
+ * Resolution is registry-first: if `Moonrend/acp-registry` publishes an image
+ * for this profile, that image wins. Only profiles the registry does not cover
+ * fall back to the host-side install scripts below.
+ */
 export function acpAdapterSource(profileId: string): AcpAdapterSource {
-  const image = CONTAINER_SOURCES[profileId];
-  if (image) return { kind: "container", image };
-  const registryId = REGISTRY_BY_PROFILE[profileId];
-  if (registryId) return { kind: "registry", registryId };
+  const agent = acpAgentByProfile(profileId);
+  if (agent?.enabled) return { kind: "container", image: agent.image };
+  if (agent) return { kind: "registry", registryId: agent.id };
   const custom = CUSTOM_SOURCES[profileId];
   if (custom) return custom;
   // Custom/user-defined profiles supply their own command; nothing to provision.
@@ -176,11 +135,11 @@ export function acpAdapterSource(profileId: string): AcpAdapterSource {
 
 /** Registry id for a builtin profile, when it has one. */
 export function acpRegistryIdForProfile(profileId: string): string | null {
-  return REGISTRY_BY_PROFILE[profileId] ?? null;
+  return acpAgentByProfile(profileId)?.id ?? null;
 }
 
 export function acpProfileIdsWithRegistrySource(): string[] {
-  return Object.keys(REGISTRY_BY_PROFILE);
+  return acpAgents().map((a) => a.profileId);
 }
 
 /**
