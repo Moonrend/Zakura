@@ -69,6 +69,7 @@ export default function AgentAcpPage() {
   const [installingIsUpdate, setInstallingIsUpdate] = useState(false);
   const [installOutput, setInstallOutput] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { installed: boolean; output: string }>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   const persist = useCallback(
     async (patch: Partial<AcpAgentConfig>) => {
@@ -190,6 +191,26 @@ export default function AgentAcpPage() {
     } finally {
       setInstallingId(null);
       setInstallingIsUpdate(false);
+    }
+  }
+
+  /**
+   * Re-reads the registry index with `refresh=1`. The plain `load()` path is
+   * served from a 6h-TTL cache, so without this a freshly published version
+   * stays invisible for hours and the "更新" button never appears.
+   */
+  async function handleCheckUpdates() {
+    setCheckingUpdates(true);
+    try {
+      const next = await fetchAcpAdapterStatus(id, { refresh: true });
+      setAdapterStatuses(next);
+      const count = next.filter((a) => a.updateAvailable).length;
+      if (count > 0) toast.success(`发现 ${count} 个适配器有更新`);
+      else toast.info("所有适配器均为最新版本");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingUpdates(false);
     }
   }
 
@@ -604,6 +625,20 @@ export default function AgentAcpPage() {
       </SettingsSection>
 
       <div className="space-y-2">
+        <div className="flex items-center justify-between px-1">
+          <p className="text-xs text-muted-foreground">
+            更新检查每 6 小时自动刷新一次，点右侧可立即重查。
+          </p>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleCheckUpdates}
+            disabled={checkingUpdates}
+          >
+            <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${checkingUpdates ? "animate-spin" : ""}`} />
+            {checkingUpdates ? "检查中…" : "检查更新"}
+          </Button>
+        </div>
         {catalog.map((profile) => {
           const setup =
             config.agents[profile.id] ??

@@ -236,11 +236,13 @@ export class AcpRegistryService {
   }
 
   /** Installed versions + disk usage + whether the registry has something newer. */
-  async status(agent: Agent): Promise<AcpAdapterStatus[]> {
+  async status(agent: Agent, opts?: { force?: boolean }): Promise<AcpAdapterStatus[]> {
     const [versionsOut, diskOut, index] = await Promise.all([
       this.workspace.execInWorkspace(agent, ["bash", "-lc", acpInstalledVersionsScript()]),
       this.workspace.execInWorkspace(agent, ["bash", "-lc", acpDiskUsageScript()]),
-      this.getIndex(),
+      // `force` lets the UI's "check for updates" bypass the 6h index TTL; without
+      // it an update published minutes ago stays invisible for hours.
+      this.getIndex(opts),
     ]);
 
     const byId = new Map<string, AcpAdapterStatus>();

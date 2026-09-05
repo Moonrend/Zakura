@@ -63,8 +63,9 @@ export function registerAcpRoutes(
     const session = c.get("session")!;
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
+    const force = c.req.query("refresh") === "1";
     try {
-      return c.json({ adapters: await acpRegistry.status(agent) });
+      return c.json({ adapters: await acpRegistry.status(agent, { force }) });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err), adapters: [] },

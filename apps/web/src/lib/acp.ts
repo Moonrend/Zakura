@@ -149,7 +149,12 @@ export type AcpAdapterStatus = {
   diskKb: Record<string, number>;
 };
 
-export async function fetchAcpAdapterStatus(agentId: string): Promise<AcpAdapterStatus[]> {
-  const res = await api<{ adapters: AcpAdapterStatus[] }>(`/api/agents/${agentId}/acp/adapters`);
+export async function fetchAcpAdapterStatus(
+  agentId: string,
+  opts?: { refresh?: boolean },
+): Promise<AcpAdapterStatus[]> {
+  const res = await api<{ adapters: AcpAdapterStatus[] }>(
+    `/api/agents/${agentId}/acp/adapters${opts?.refresh ? "?refresh=1" : ""}`,
+  );
   return res.adapters;
 }
