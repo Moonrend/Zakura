@@ -47,12 +47,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { SearchField } from "@/components/ui/search-field";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -70,13 +68,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -85,8 +76,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
-import { SettingsRow, SettingsSaveIndicator } from "@/components/settings-shell";
+import { ChatSettingsSheet } from "./chat-settings-sheet";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -2975,139 +2965,44 @@ export function ChatApp() {
 
       <RunLogDrawer open={logOpen} onOpenChange={setLogOpen} events={events} />
 
-      {/* 设置（自动保存；完整分类见 Agent 设置页） */}
-      <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <SheetContent className="sm:max-w-md">
-          <SheetHeader>
-            <div className="flex items-start justify-between gap-2 pr-6">
-              <SheetTitle>{agent?.name ?? "Agent"} 设置</SheetTitle>
-              <SettingsSaveIndicator
-                status={settingsSaveStatus}
-                error={settingsSaveError}
-              />
-            </div>
-            <SheetDescription className="sr-only">Agent 设置</SheetDescription>
-          </SheetHeader>
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="mt-4 space-y-1 px-1 pb-6">
-              <div className="space-y-2 pb-3">
-                <Label htmlFor="chat-system">系统提示词</Label>
-                <Textarea
-                  id="chat-system"
-                  value={systemPrompt}
-                  onChange={(e) => {
-                    setSystemPrompt(e.target.value);
-                    scheduleSettings({ systemPrompt: e.target.value });
-                  }}
-                  className="min-h-28"
-                />
-              </div>
-              <Separator />
-              <SettingsRow label="工具调用">
-                <Switch
-                  checked={enableTools}
-                  onCheckedChange={(v) => {
-                    setEnableTools(v);
-                    saveSettingsNow({ enableTools: v });
-                  }}
-                />
-              </SettingsRow>
-              <Separator />
-              <SettingsRow label="自动记忆">
-                <Switch
-                  checked={autoMemory}
-                  onCheckedChange={(v) => {
-                    setAutoMemory(v);
-                    saveSettingsNow({ autoMemory: v });
-                  }}
-                />
-              </SettingsRow>
-              <Separator />
-              <SettingsRow label="自动标题">
-                <Switch
-                  checked={autoTitle}
-                  onCheckedChange={(v) => {
-                    setAutoTitle(v);
-                    saveSettingsNow({ autoTitle: v });
-                  }}
-                />
-              </SettingsRow>
-              <Separator />
-              <div className="flex items-center justify-between gap-4 py-3">
-                <div className="min-w-0 space-y-0.5">
-                  <Label>执行中发消息</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {followUpMode === "steer" ? "下一工具后注入" : "结束后按序发送"}
-                  </p>
-                </div>
-                <Select
-                  value={followUpMode}
-                  onValueChange={(v) => {
-                    if (v !== "steer" && v !== "queue") return;
-                    setFollowUpMode(v);
-                    saveSettingsNow({ followUpMode: v });
-                  }}
-                  items={[
-                    { value: "steer", label: "注入" },
-                    { value: "queue", label: "排队" },
-                  ]}
-                >
-                  <SelectTrigger className="w-24">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="steer">注入</SelectItem>
-                    <SelectItem value="queue">排队</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between gap-4 py-3">
-                <Label>子代理深度</Label>
-                <Select
-                  value={maxSubagentDepth}
-                  onValueChange={(v) => {
-                    if (v == null) return;
-                    setMaxSubagentDepth(v);
-                    saveSettingsNow({ maxSubagentDepth: v });
-                  }}
-                  items={[
-                    { value: "1", label: "1" },
-                    { value: "2", label: "2" },
-                    { value: "3", label: "3" },
-                    { value: "4", label: "4" },
-                    { value: "5", label: "5" },
-                  ]}
-                >
-                  <SelectTrigger className="w-20">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1</SelectItem>
-                    <SelectItem value="2">2</SelectItem>
-                    <SelectItem value="3">3</SelectItem>
-                    <SelectItem value="4">4</SelectItem>
-                    <SelectItem value="5">5</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              {agentId ? (
-                <Button
-                  variant="outline"
-                  className="mt-2 w-full"
-                  nativeButton={false}
-                  render={
-                    <Link href={`/dashboard/agents/${agentId}/overview`} />
-                  }
-                >
-                  全部设置
-                  <ExternalLink className="size-3.5 opacity-70" />
-                </Button>
-              ) : null}
-            </div>
-          </ScrollArea>
-        </SheetContent>
-      </Sheet>
+      <ChatSettingsSheet
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        agentName={agent?.name}
+        agentId={agentId}
+        saveStatus={settingsSaveStatus}
+        saveError={settingsSaveError}
+        systemPrompt={systemPrompt}
+        onSystemPromptChange={(v) => {
+          setSystemPrompt(v);
+          scheduleSettings({ systemPrompt: v });
+        }}
+        enableTools={enableTools}
+        onEnableToolsChange={(v) => {
+          setEnableTools(v);
+          saveSettingsNow({ enableTools: v });
+        }}
+        autoMemory={autoMemory}
+        onAutoMemoryChange={(v) => {
+          setAutoMemory(v);
+          saveSettingsNow({ autoMemory: v });
+        }}
+        autoTitle={autoTitle}
+        onAutoTitleChange={(v) => {
+          setAutoTitle(v);
+          saveSettingsNow({ autoTitle: v });
+        }}
+        followUpMode={followUpMode}
+        onFollowUpModeChange={(v) => {
+          setFollowUpMode(v);
+          saveSettingsNow({ followUpMode: v });
+        }}
+        maxSubagentDepth={maxSubagentDepth}
+        onMaxSubagentDepthChange={(v) => {
+          setMaxSubagentDepth(v);
+          saveSettingsNow({ maxSubagentDepth: v });
+        }}
+      />
     </div>
   );
 }
