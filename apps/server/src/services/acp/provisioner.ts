@@ -17,7 +17,18 @@ import {
   acpCustomProvisionScript,
 } from "@zakura/shared";
 
-export type AcpResolvedAdapter = { command: string; args: string[] };
+export type AcpResolvedAdapter = {
+  command: string;
+  args: string[];
+  /**
+   * Registry adapter id + installed version backing this command, when it came
+   * from the registry. GC uses these to avoid pruning a directory that a live
+   * session is still executing from. Absent for custom sources, which are not
+   * version-managed.
+   */
+  registryId?: string;
+  version?: string;
+};
 
 /** provisioner 需要的最小工作区能力，便于单测替身。 */
 export type AcpProvisionWorkspace = {
@@ -116,7 +127,12 @@ export class AcpProvisioner {
       const registry = this.deps.registry;
       if (!registry) return null;
       const installed = await registry.ensureInstalled(agent, source.registryId, useSidecar);
-      const result: AcpResolvedAdapter = { command: installed.command, args: installed.args };
+      const result: AcpResolvedAdapter = {
+        command: installed.command,
+        args: installed.args,
+        registryId: source.registryId,
+        version: installed.version,
+      };
       this.cache.set(cacheKey, result);
       return result;
     } catch (err) {

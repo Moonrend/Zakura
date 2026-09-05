@@ -72,11 +72,24 @@ export class AcpRegistryService {
   private index: AcpRegistryIndex | null = null;
   private fetchedAt = 0;
   private inFlight: Promise<AcpRegistryIndex | null> | null = null;
+  /**
+   * Reports adapter versions currently backing a live session. Injected rather
+   * than imported so the registry stays free of a dependency on the session
+   * service (which already depends on the registry).
+   */
+  private inUseVersions: ((agent: Agent) => Array<{ id: string; version: string }>) | null = null;
 
   constructor(
     private readonly workspace: AgentWorkspaceService,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
+
+  /** Wired up at composition time by the ACP session service. */
+  setInUseVersionsProvider(
+    provider: (agent: Agent) => Array<{ id: string; version: string }>,
+  ): void {
+    this.inUseVersions = provider;
+  }
 
   /**
    * Registry index, cached for 6h. A fetch failure keeps serving the previous
@@ -295,6 +308,15 @@ export class AcpRegistryService {
       const chosen =
         pinned && versions.includes(pinned) ? pinned : [...versions].sort().pop();
       if (chosen) keep.push({ id, version: chosen });
+    }
+    // An update makes the previous version unpinned, but a running session is
+    // still executing from that directory: the adapter CLIs resolve modules at
+    // runtime, so pruning it would kill the session with MODULE_NOT_FOUND.
+    // Those directories are reclaimed by a later GC, once the session ends.
+    for (const inUse of this.inUseVersions?.(agent) ?? []) {
+      const known = statuses.get(inUse.id)?.includes(inUse.version) ?? false;
+      const already = keep.some((k) => k.id === inUse.id && k.version === inUse.version);
+      if (known && !already) keep.push(inUse);
     }
     const out = await this.workspace.execInWorkspace(agent, [
       "bash",

@@ -40,6 +40,36 @@ function countingFetch(version = "1.0.0") {
 
 const noWorkspace = {} as Workspace;
 
+const fakeAgent = { id: "agent-1" } as Parameters<AcpRegistryService["collectGarbage"]>[0];
+
+/**
+ * Stubs the workspace so `collectGarbage` sees a fixed set of installed
+ * versions, and captures the GC script it generates.
+ */
+function gcHarness(installed: string, indexVersion = "2.0.0") {
+  let gcScript = "";
+  const workspace = {
+    execInWorkspace: async (_agent: unknown, argv: string[]) => {
+      const script = argv[2] ?? "";
+      // The GC script is the one built from the keep-list.
+      if (script.includes("ZAKURA_ACP_PRUNED")) {
+        gcScript = script;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: installed, stderr: "", exitCode: 0 };
+    },
+  } as unknown as Workspace;
+
+  const impl = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => indexPayload(indexVersion),
+    }) as unknown as Response) as unknown as typeof fetch;
+
+  return { registry: new AcpRegistryService(workspace, impl), gc: () => gcScript };
+}
+
 describe("ACP registry index cache", () => {
   it("serves a warm index from cache without refetching", async () => {
     const { impl, calls } = countingFetch();
@@ -85,5 +115,39 @@ describe("ACP registry index cache", () => {
     // "no agents exist" / "no updates available" in the UI.
     assert.ok(second, "a failed refresh must not drop the cached index");
     assert.equal(second?.agents.length, 1);
+  });
+});
+
+describe("ACP registry GC", () => {
+  it("prunes an old version once nothing is running on it", async () => {
+    // 1.0.0 installed but superseded by the pinned 2.0.0, and no live session.
+    const { registry, gc } = gcHarness("demo\t1.0.0\ndemo\t2.0.0");
+
+    await registry.collectGarbage(fakeAgent);
+
+    assert.match(gc(), /demo\/2\.0\.0/, "pinned version must be kept");
+    assert.doesNotMatch(gc(), /demo\/1\.0\.0/, "superseded version should be prunable");
+  });
+
+  it("keeps a superseded version that a live session is still running", async () => {
+    const { registry, gc } = gcHarness("demo\t1.0.0\ndemo\t2.0.0");
+    // A session started before the update is still executing from 1.0.0.
+    registry.setInUseVersionsProvider(() => [{ id: "demo", version: "1.0.0" }]);
+
+    await registry.collectGarbage(fakeAgent);
+
+    // Pruning it would kill that session with MODULE_NOT_FOUND, since the
+    // adapter CLIs resolve modules from their install directory at runtime.
+    assert.match(gc(), /demo\/1\.0\.0/, "in-use version must survive GC");
+    assert.match(gc(), /demo\/2\.0\.0/, "pinned version must still be kept");
+  });
+
+  it("ignores in-use versions that are not actually installed", async () => {
+    const { registry, gc } = gcHarness("demo\t2.0.0");
+    registry.setInUseVersionsProvider(() => [{ id: "demo", version: "9.9.9" }]);
+
+    await registry.collectGarbage(fakeAgent);
+
+    assert.doesNotMatch(gc(), /demo\/9\.9\.9/, "stale entries must not enter the keep list");
   });
 });

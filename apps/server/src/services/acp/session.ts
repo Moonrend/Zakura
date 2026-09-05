@@ -99,7 +99,7 @@ import {
   type PendingDecision,
 } from "./permissions.js";
 import { CodexDeviceAuth } from "./codex-device.js";
-import { AcpProvisioner } from "./provisioner.js";
+import { AcpProvisioner, type AcpResolvedAdapter } from "./provisioner.js";
 import { buildAcpClient } from "./client-handlers.js";
 
 type PendingPermission = PendingDecision<acp.RequestPermissionResponse> & {
@@ -132,6 +132,8 @@ export type LiveRuntime = {
   elicitations: Map<string, PendingDecision<acp.CreateElicitationResponse>>;
   layout: AcpRuntimeLayout;
   agent: Agent;
+  /** Registry adapter + version this process is executing from, when managed. */
+  adapter?: { id: string; version: string };
   /** Zakura 路由：模型目录与切换都以网关别名表达 */
   zakuraRouted: boolean;
   gatewayModels?: AcpGatewayModel[];
@@ -191,8 +193,20 @@ export class AcpSessionService {
       registry: deps.acpRegistry,
     });
     this.maxConcurrentPerTenant = Math.max(1, deps.maxConcurrentAcpPerTenant ?? 8);
+    // Let GC see which adapter versions are backing live runtimes.
+    deps.acpRegistry?.setInUseVersionsProvider((agent) => this.inUseAdapterVersions(agent));
     this.reapTimer = setInterval(() => void this.reapIdle(), 60_000);
     this.reapTimer.unref?.();
+  }
+
+  /** Adapter versions currently backing a live runtime for `agent`. */
+  private inUseAdapterVersions(agent: Agent): Array<{ id: string; version: string }> {
+    const out = new Map<string, { id: string; version: string }>();
+    for (const rt of this.byChat.values()) {
+      if (rt.agent.id !== agent.id || !rt.adapter) continue;
+      out.set(`${rt.adapter.id}@${rt.adapter.version}`, rt.adapter);
+    }
+    return [...out.values()];
   }
 
   readonly deviceAuth: CodexDeviceAuth;
@@ -1129,7 +1143,7 @@ export class AcpSessionService {
     profileId: string,
     currentCommand: string,
     useSidecar: boolean,
-  ): Promise<{ command: string; args: string[] } | null> {
+  ): Promise<AcpResolvedAdapter | null> {
     return this.provisioner.resolve(agent, profileId, currentCommand, useSidecar);
   }
 
@@ -1395,6 +1409,11 @@ export class AcpSessionService {
       promptCapabilities: {},
       authWaiters: [],
       useSidecar,
+      // Lets GC know this version is in use, so an update triggered mid-session
+      // does not prune the directory this process is running from.
+      ...(adapterBin?.registryId && adapterBin.version
+        ? { adapter: { id: adapterBin.registryId, version: adapterBin.version } }
+        : {}),
       ...(opts?.runId ? { runId: opts.runId } : {}),
     };
 
