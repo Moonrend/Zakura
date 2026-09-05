@@ -28,8 +28,52 @@
 export const ACP_PROVISION_ROOT = "/workspace/.zakura/acp";
 /** Shared package-manager caches, kept inside the workspace so they are prunable. */
 export const ACP_PROVISION_CACHE = "/workspace/.zakura/cache";
+/** Name of the sibling staging dir `zk_rm` renames into; swept by `acpGcScript`. */
+export const ACP_TRASH_DIRNAME = ".trash";
 
 const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Shell helper `zk_rm` - a `rm -rf` that actually finishes on a bind mount.
+ *
+ * Plain `rm -rf` fails with "Directory not empty" on the workspace bind mount:
+ * rm walks a directory, unlinks what it saw, then rmdir's it — but on overlay/
+ * fuse-backed mounts entries can still be materialising (npm writes thousands of
+ * files across nested dep trees, and deletion is not atomic with the walk), so
+ * the rmdir races and aborts the whole install. That is exactly the pi-acp
+ * failure: dozens of "cannot remove .../dist/... Directory not empty" lines.
+ *
+ * Two defences, in order:
+ *  1. Rename the tree out of the way first. Rename is atomic and cheap, so the
+ *     caller's path is free immediately even if the bytes linger. If the rename
+ *     succeeds we can delete lazily and a residual failure is harmless.
+ *  2. Retry the recursive delete a few times; races are transient by nature.
+ *
+ * Deliberately never fails the script: a leftover trash dir costs disk, while a
+ * failed delete would cost the user their install. `acpGcScript` sweeps trash.
+ *
+ * The staging dir is a sibling of the target rather than one fixed absolute path:
+ * rename is only atomic within a filesystem, so a cross-device trash would silently
+ * degrade into a full copy. A sibling is always on the same mount.
+ */
+export function acpRmHelper(): string[] {
+  return [
+    `zk_rm() {`,
+    `  [ -e "$1" ] || return 0`,
+    `  trash="$(dirname "$1")/${ACP_TRASH_DIRNAME}"`,
+    `  mkdir -p "$trash" 2>/dev/null || true`,
+    `  tmp="$trash/$(basename "$1").$$.$(date +%s 2>/dev/null || echo 0)"`,
+    `  if mv "$1" "$tmp" 2>/dev/null; then`,
+    `    for _ in 1 2 3; do rm -rf "$tmp" 2>/dev/null && break; done`,
+    `    return 0`,
+    `  fi`,
+    `  for _ in 1 2 3; do`,
+    `    rm -rf "$1" 2>/dev/null && return 0`,
+    `  done`,
+    `  return 0`,
+    `}`,
+  ];
+}
 
 /** Filesystem-safe segment for an id/version. */
 function safeSegment(value: string): string {
@@ -102,7 +146,8 @@ export function acpProvisionScript(
   const lines: string[] = [
     "set -eu",
     `if [ -f ${shq(marker)} ]; then exit 0; fi`,
-    `rm -rf ${shq(partial)}`,
+    ...acpRmHelper(),
+    `zk_rm ${shq(partial)}`,
     `mkdir -p ${shq(partial)} ${shq(ACP_PROVISION_CACHE)}`,
   ];
 
@@ -112,12 +157,41 @@ export function acpProvisionScript(
     // not a dependency of the adapter) must be installed in the SAME invocation:
     // a second `npm install --prefix` without a package.json would prune the first.
     const specs = [spec, ...(plan.extraPackages ?? [])].map((p) => shq(p)).join(" ");
-    lines.push(
-      // --prefix keeps the dependency tree inside this version dir, so deleting
-      // the dir reclaims everything. --no-fund/--no-audit keep output clean.
-      `npm_config_cache=${shq(`${ACP_PROVISION_CACHE}/npm`)} ` +
-        `npm install --prefix ${shq(partial)} --no-fund --no-audit --loglevel=error ${specs} >&2`,
-    );
+    const npmEnv = `npm_config_cache=${shq(`${ACP_PROVISION_CACHE}/npm`)}`;
+    // --prefix keeps the dependency tree inside this version dir, so deleting
+    // the dir reclaims everything. --no-fund/--no-audit keep output clean.
+    const npmInstall = (s: string) =>
+      `${npmEnv} npm install --prefix ${shq(partial)} --no-fund --no-audit --loglevel=error ${s} >&2`;
+    if (plan.version === "latest") {
+      lines.push(npmInstall(specs));
+    } else {
+      // The upstream registry pins a version that npm may not actually serve:
+      // grok-cli is published as @xai-official/grok but the index still points at
+      // 1.0.18, which was never on the registry, so npm exits ETARGET and the
+      // agent is simply uninstallable. The pin is a hint about what upstream
+      // tested, not a security control (integrity for npm comes from the
+      // lockfile-free registry itself; binaries are the sha256-gated path), so a
+      // missing pin should degrade to the latest published version rather than
+      // dead-end the user. Anything other than a version-resolution failure still
+      // aborts, and the substitution is announced so the UI can show what it got.
+      const fallbackSpecs = [plan.pkg, ...(plan.extraPackages ?? [])]
+        .map((p) => shq(p))
+        .join(" ");
+      lines.push(
+        `if ! ${npmInstall(specs)} 2>${shq(`${partial}.npm-err`)}; then`,
+        `  cat ${shq(`${partial}.npm-err`)} >&2`,
+        `  if grep -qE 'ETARGET|No matching version|is not in this registry' ${shq(`${partial}.npm-err`)}; then`,
+        `    rm -f ${shq(`${partial}.npm-err`)}`,
+        `    echo ${shq(`ZAKURA_ACP_VERSION_FALLBACK:${agentId}:${plan.version}`)} >&2`,
+        `    ${npmInstall(fallbackSpecs)}`,
+        `  else`,
+        `    rm -f ${shq(`${partial}.npm-err`)}`,
+        `    exit 1`,
+        `  fi`,
+        `fi`,
+        `rm -f ${shq(`${partial}.npm-err`)}`,
+      );
+    }
   } else if (plan.kind === "uvx") {
     const spec = plan.version === "latest" ? plan.pkg : `${plan.pkg}==${plan.version}`;
     lines.push(
@@ -198,7 +272,7 @@ export function acpProvisionScript(
       `  else`,
       `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
       `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
-      `    rm -rf ${shq(partial)}`,
+      `    zk_rm ${shq(partial)}`,
       `    exit 1`,
       `  fi`,
     );
@@ -210,22 +284,36 @@ export function acpProvisionScript(
       `  else`,
       `    echo ${shq(`ZAKURA_ACP_BIN_NOT_FOUND:${expectedBin}`)} >&2`,
       `    ls -1 ${shq(partialBinDir)} 2>/dev/null >&2 || true`,
-      `    rm -rf ${shq(partial)}`,
+      `    zk_rm ${shq(partial)}`,
       `    exit 1`,
       `  fi`,
     );
   }
   lines.push(
     `fi`,
+    // Record what actually landed on disk. With a version fallback the directory
+    // is still named after the pinned version, so without this the UI would keep
+    // reporting a version that was never installed.
+    ...(plan.kind === "npx"
+      ? [
+          `zk_real_ver=$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||""))}catch(e){}' ${shq(`${partial}/node_modules/${plan.pkg}/package.json`)} 2>/dev/null || true)`,
+          `[ -n "$zk_real_ver" ] && printf '%s' "$zk_real_ver" > ${shq(`${partial}/.version`)} || true`,
+        ]
+      : [`printf '%s' ${shq(plan.version)} > ${shq(`${partial}/.version`)}`]),
     `touch ${shq(`${partial}/.ok`)}`,
-    `rm -rf ${shq(dir)}`,
+    `zk_rm ${shq(dir)}`,
     `mv ${shq(partial)} ${shq(dir)}`,
     `echo ${shq(`ZAKURA_ACP_INSTALLED:${agentId}:${plan.version}`)} >&2`,
   );
   return lines.join("\n");
 }
 
-/** Report installed versions per adapter, one `id<TAB>version` line each. */
+/**
+ * Report installed versions per adapter, one `id<TAB>version<TAB>actual` line each.
+ *
+ * `version` is the directory name (what was requested); `actual` is what npm really
+ * resolved, which differs whenever a bad upstream pin triggered the fallback.
+ */
 export function acpInstalledVersionsScript(): string {
   return [
     "set -eu",
@@ -233,9 +321,13 @@ export function acpInstalledVersionsScript(): string {
     `[ -d "$root" ] || exit 0`,
     `for agent in "$root"/*; do`,
     `  [ -d "$agent" ] || continue`,
+    `  [ "$(basename "$agent")" = ${shq(ACP_TRASH_DIRNAME)} ] && continue`,
     `  for ver in "$agent"/*; do`,
     `    [ -f "$ver/.ok" ] || continue`,
-    `    printf '%s\\t%s\\n' "$(basename "$agent")" "$(basename "$ver")"`,
+    `    actual=""`,
+    `    [ -f "$ver/.version" ] && actual=$(cat "$ver/.version" 2>/dev/null || true)`,
+    `    [ -n "$actual" ] || actual=$(basename "$ver")`,
+    `    printf '%s\\t%s\\t%s\\n' "$(basename "$agent")" "$(basename "$ver")" "$actual"`,
     `  done`,
     `done`,
   ].join("\n");
@@ -256,24 +348,34 @@ export function acpGcScript(keep: Array<{ id: string; version: string }>): strin
     .join("\n");
   return [
     "set -eu",
+    ...acpRmHelper(),
     `root=${shq(ACP_PROVISION_ROOT)}`,
     `[ -d "$root" ] || exit 0`,
     `keep=${shq(keepList)}`,
     `for agent in "$root"/*; do`,
     `  [ -d "$agent" ] || continue`,
     `  a=$(basename "$agent")`,
+    // Trash dirs are siblings of what zk_rm removed, so they can appear at both
+    // levels. They are bookkeeping, never an adapter, and must not be treated as one.
+    `  [ "$a" = ${shq(ACP_TRASH_DIRNAME)} ] && { rm -rf "$agent" 2>/dev/null || true; continue; }`,
     `  for ver in "$agent"/*; do`,
     `    [ -d "$ver" ] || continue`,
     `    v=$(basename "$ver")`,
+    `    [ "$v" = ${shq(ACP_TRASH_DIRNAME)} ] && { rm -rf "$ver" 2>/dev/null || true; continue; }`,
     // Also sweep interrupted installs, which are never valid to keep.
-    `    case "$v" in *.partial) rm -rf "$ver"; continue ;; esac`,
+    `    case "$v" in *.partial) zk_rm "$ver"; continue ;; esac`,
     `    if ! printf '%s\\n' "$keep" | grep -qxF "$a/$v"; then`,
-    `      rm -rf "$ver"`,
+    `      zk_rm "$ver"`,
     `      echo "ZAKURA_ACP_PRUNED:$a/$v" >&2`,
     `    fi`,
     `  done`,
+    // zk_rm may have just created a trash dir inside this agent; clear it so the
+    // rmdir below can succeed for a fully-pruned adapter.
+    `  rm -rf "$agent/${ACP_TRASH_DIRNAME}" 2>/dev/null || true`,
     `  rmdir "$agent" 2>/dev/null || true`,
     `done`,
+    // Finally clear the root-level trash, including leftovers from earlier runs.
+    `rm -rf "$root/${ACP_TRASH_DIRNAME}" 2>/dev/null || true`,
   ].join("\n");
 }
 
@@ -284,7 +386,32 @@ export function acpDiskUsageScript(): string {
     `root=${shq(ACP_PROVISION_ROOT)}`,
     `[ -d "$root" ] || exit 0`,
     `du -sk "$root"/*/* 2>/dev/null | while read -r kb path; do`,
+    `  case "$path" in */${ACP_TRASH_DIRNAME}|*/${ACP_TRASH_DIRNAME}/*) continue ;; esac`,
     `  printf '%s\\t%s\\n' "$kb" "$path"`,
     `done`,
+  ].join("\n");
+}
+
+/**
+ * Remove one adapter entirely, or a single version of it.
+ *
+ * Uninstall is deliberately not expressed through {@link acpGcScript}: GC keeps a
+ * survivor per adapter on purpose, so it can never express "the user wants this
+ * adapter gone". Removing the whole agent directory is the only way to get the
+ * disk back and to make the adapter disappear from the installed list.
+ */
+export function acpUninstallScript(agentId: string, version?: string): string {
+  const target = version
+    ? `${ACP_PROVISION_ROOT}/${safeSegment(agentId)}/${safeSegment(version)}`
+    : `${ACP_PROVISION_ROOT}/${safeSegment(agentId)}`;
+  return [
+    "set -eu",
+    ...acpRmHelper(),
+    `target=${shq(target)}`,
+    `if [ ! -e "$target" ]; then echo "ZAKURA_ACP_NOT_INSTALLED" >&2; exit 0; fi`,
+    `zk_rm "$target"`,
+    // Drop the now-empty agent dir so status/GC stop reporting a ghost entry.
+    `rmdir ${shq(`${ACP_PROVISION_ROOT}/${safeSegment(agentId)}`)} 2>/dev/null || true`,
+    `echo "ZAKURA_ACP_REMOVED:${safeSegment(agentId)}${version ? `/${safeSegment(version)}` : ""}" >&2`,
   ].join("\n");
 }

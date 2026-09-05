@@ -100,6 +100,9 @@ export class AcpProvisioner {
 
     const source = acpAdapterSource(profileId);
     if (source.kind === "image") return null;
+    // Container adapters are not provisioned into the workspace: the session
+    // layer starts the image and attaches to its stdio. Nothing to install.
+    if (source.kind === "container") return null;
 
     const cacheKey = `${agent.id}:${profileId}`;
     const cached = this.cache.get(cacheKey);

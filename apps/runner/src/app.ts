@@ -564,6 +564,75 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     }
   });
 
+  // ACP adapter container: ensure running.
+  // One container per agent × adapter × chat session — `sessionKey` is required
+  // and we fail closed rather than defaulting, because silently sharing one
+  // container across chat sessions cross-talks their JSON-RPC streams.
+  app.post("/v1/workspaces/:agentId/acp-adapters/:adapterId/ensure", async (c) => {
+    type Body = {
+      image?: string;
+      network?: string;
+      env?: Record<string, string>;
+      sessionKey?: string;
+    };
+    const body = (await c.req.json().catch(() => ({}))) as Body;
+    if (!body.image) return c.json({ error: "image required" }, 400);
+    if (!body.sessionKey) return c.json({ error: "sessionKey required" }, 400);
+    try {
+      const res = await dockerWs.ensureAdapterContainer(
+        c.req.param("agentId"),
+        c.req.param("adapterId"),
+        {
+          image: body.image,
+          network: body.network,
+          env: body.env,
+          sessionKey: body.sessionKey,
+        },
+      );
+      return c.json(res);
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  // Attach 到 adapter 容器 PID 1 的 stdio（adapter 即容器 CMD）
+  app.post("/v1/workspaces/:agentId/acp-adapters/:adapterId/attach", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { sessionKey?: string };
+    if (!body.sessionKey) return c.json({ error: "sessionKey required" }, 400);
+    try {
+      const job = await dockerWs.attachStdioInAdapter(
+        c.req.param("agentId"),
+        c.req.param("adapterId"),
+        body.sessionKey,
+      );
+      return c.json({
+        stdioId: job.id,
+        agentId: c.req.param("agentId"),
+        adapterId: c.req.param("adapterId"),
+      });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
+  app.delete("/v1/workspaces/:agentId/acp-adapters/:adapterId", async (c) => {
+    const sessionKey = c.req.query("sessionKey");
+    if (!sessionKey) return c.json({ error: "sessionKey required" }, 400);
+    try {
+      await dockerWs.removeAdapterContainer(
+        c.req.param("agentId"),
+        c.req.param("adapterId"),
+        sessionKey,
+      );
+      return c.json({ ok: true });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
   // --- Component / MCP instance lifecycle ---
   app.post("/v1/instances/:instanceId/start", async (c) => {
     const instanceId = c.req.param("instanceId");

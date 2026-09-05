@@ -51,6 +51,50 @@ export interface AcpClientHandlerContext {
   /** Snapshot of the agent's ACP config; drives the permission fast-path. */
   config: AcpAgentConfig;
   hooks: AgentHooksService;
+  /**
+   * Resolve the runtime that owns an incoming ACP `sessionId`.
+   *
+   * Phase 2 wires every handler through this instead of closing over a single
+   * `live`. Today one process serves one session, so the default resolver just
+   * checks the bound runtime and the behaviour is unchanged. Phase 3 swaps in a
+   * real routing table for one-process-many-sessions without touching handlers.
+   */
+  resolveSession?: (acpSessionId: string) => LiveRuntime | undefined;
+  /**
+   * All runtimes served by this connection. `elicitation/complete` carries only
+   * an elicitationId (no sessionId), so the owner must be found by lookup.
+   * Defaults to the single bound runtime.
+   */
+  allSessions?: () => Iterable<LiveRuntime>;
+}
+
+/**
+ * Every ACP client request carries the `sessionId` it belongs to. Resolving the
+ * target runtime from that id -- rather than from the closure -- is what keeps
+ * a multiplexed connection from leaking one session's files, permissions or
+ * terminals into another.
+ *
+ * Fail closed: an unknown or absent id throws instead of silently falling back
+ * to the bound runtime. Under today's one-session-per-process model the
+ * assertion can never fire, which is exactly why it is safe to add now and
+ * load-bearing later.
+ */
+function makeSessionResolver(ctx: AcpClientHandlerContext) {
+  const { live } = ctx;
+  return (acpSessionId: unknown, method: string): LiveRuntime => {
+    if (typeof acpSessionId !== "string" || !acpSessionId) {
+      throw new Error(`${method}: 缺少 sessionId，拒绝执行`);
+    }
+    const resolved = ctx.resolveSession
+      ? ctx.resolveSession(acpSessionId)
+      : live.acpSessionId === acpSessionId
+        ? live
+        : undefined;
+    if (!resolved) {
+      throw new Error(`${method}: 未知会话 ${acpSessionId}，拒绝执行`);
+    }
+    return resolved;
+  };
 }
 
 /**
@@ -58,13 +102,18 @@ export interface AcpClientHandlerContext {
  * The caller owns the transport and connects the returned app to a stream.
  */
 export function buildAcpClient(ctx: AcpClientHandlerContext) {
-  const { deps, live, agent, chatSessionId, config, hooks } = ctx;
+  const { deps, live, agent, config, hooks } = ctx;
+  // Handler callbacks shadow `ctx` with their own request context, so keep a
+  // stable alias to the builder-level context.
+  const handlerCtx = ctx;
   const fsProvider = deps.workspaceFs;
+  const sessionOf = makeSessionResolver(ctx);
 
   const app = acp
     .client({ name: "zakura" })
     .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
       const requestId = String(ctx.requestId);
+      const target = sessionOf(ctx.params.sessionId, "session/request_permission");
       const options = ctx.params.options ?? [];
       const tool = ctx.params.toolCall;
       const kind = tool?.kind ? String(tool.kind) : undefined;
@@ -79,7 +128,7 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         };
       }
       const granted = pickGrantedOptionId(
-        live.permissionGrants,
+        target.permissionGrants,
         { kind, locations: tool?.locations ?? undefined },
         options.map((o) => ({ optionId: o.optionId, kind: String(o.kind) })),
       );
@@ -87,9 +136,9 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         return { outcome: { outcome: "selected", optionId: granted } };
       }
       await deps.store.appendEvent({
-        sessionId: chatSessionId,
+        sessionId: target.chatSessionId,
         type: "permission_request",
-        ...(live.runId ? { runId: live.runId } : {}),
+        ...(target.runId ? { runId: target.runId } : {}),
         payload: {
           requestId,
           toolCallId: tool?.toolCallId ?? undefined,
@@ -102,7 +151,7 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         },
       });
       return new Promise<acp.RequestPermissionResponse>((resolve, reject) => {
-        live.permissions.set(requestId, {
+        target.permissions.set(requestId, {
           resolve,
           reject,
           kind,
@@ -113,7 +162,8 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
     })
     .onRequest(acp.methods.client.fs.readTextFile, async (ctx) => {
       if (!fsProvider) throw new Error("workspace fs unavailable");
-      const path = assertAcpFsPath(ctx.params.path, live);
+      const target = sessionOf(ctx.params.sessionId, "fs/read_text_file");
+      const path = assertAcpFsPath(ctx.params.path, target);
       const fs = await fsProvider.forAgent(agent.id, agent.tenantId);
       const read = await fs.readText(path);
       let content = read.content;
@@ -128,13 +178,14 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
     })
     .onRequest(acp.methods.client.fs.writeTextFile, async (ctx) => {
       if (!fsProvider) throw new Error("workspace fs unavailable");
-      const path = assertAcpFsPath(ctx.params.path, live);
+      const target = sessionOf(ctx.params.sessionId, "fs/write_text_file");
+      const path = assertAcpFsPath(ctx.params.path, target);
       const denied = firstDeny(
         await hooks.runEvent(agent, "PreToolUse", {
           toolName: "write_text_file",
           toolArgs: { path, content: ctx.params.content },
-          workingDir: live.cwd,
-          sessionId: chatSessionId,
+          workingDir: target.cwd,
+          sessionId: target.chatSessionId,
         }),
       );
       if (denied) throw new Error(denied.reason || "hook 拒绝写入");
@@ -143,8 +194,9 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
       return {};
     })
     .onRequest(acp.methods.client.terminal.create, async (ctx) => {
-      const cwd = ctx.params.cwd || live.cwd;
-      if (cwd) assertAcpFsPath(cwd, live);
+      const target = sessionOf(ctx.params.sessionId, "terminal/create");
+      const cwd = ctx.params.cwd || target.cwd;
+      if (cwd) assertAcpFsPath(cwd, target);
       const args = ctx.params.args ?? [];
       const command = args.length
         ? [ctx.params.command, ...args]
@@ -154,17 +206,18 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         if (item.name) env[item.name] = item.value ?? "";
       }
       const result = await deps.workspace.startShellJob(agent, command, {
-        workingDir: cwd || live.cwd,
+        workingDir: cwd || target.cwd,
         ...(Object.keys(env).length ? { env } : {}),
       });
-      live.terminals.set(result.jobId, {
+      target.terminals.set(result.jobId, {
         outputByteLimit: ctx.params.outputByteLimit ?? undefined,
       });
       return { terminalId: result.jobId };
     })
     .onRequest(acp.methods.client.terminal.output, async (ctx) => {
+      const target = sessionOf(ctx.params.sessionId, "terminal/output");
       const snap = await deps.workspace.getShellJob(agent, ctx.params.terminalId);
-      const limit = live.terminals.get(ctx.params.terminalId)?.outputByteLimit;
+      const limit = target.terminals.get(ctx.params.terminalId)?.outputByteLimit;
       const clipped = clipAcpTerminalOutput(`${snap.stdout}${snap.stderr}`, limit);
       return {
         output: clipped.output,
@@ -173,11 +226,13 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
       };
     })
     .onRequest(acp.methods.client.terminal.release, async (ctx) => {
-      live.terminals.delete(ctx.params.terminalId);
+      const target = sessionOf(ctx.params.sessionId, "terminal/release");
+      target.terminals.delete(ctx.params.terminalId);
       await deps.workspace.killShellJob(agent, ctx.params.terminalId).catch(() => undefined);
       return {};
     })
     .onRequest(acp.methods.client.terminal.waitForExit, async (ctx) => {
+      sessionOf(ctx.params.sessionId, "terminal/wait_for_exit");
       const snap = await deps.workspace.waitShellJob(agent, ctx.params.terminalId, 120_000);
       if (snap.running) {
         // 命令仍在运行却返回 exitCode 会把失败伪装成成功，agent 会基于
@@ -187,20 +242,30 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
       return { exitCode: snap.exitCode ?? 0, signal: null };
     })
     .onRequest(acp.methods.client.terminal.kill, async (ctx) => {
-      live.terminals.delete(ctx.params.terminalId);
+      const target = sessionOf(ctx.params.sessionId, "terminal/kill");
+      target.terminals.delete(ctx.params.terminalId);
       await deps.workspace.killShellJob(agent, ctx.params.terminalId);
       return {};
     })
     .onRequest(acp.methods.client.elicitation.create, async (ctx) => {
       const requestId = String(ctx.requestId);
+      // Unlike fs/terminal/permission requests, an elicitation may be scoped to
+      // a session *or* only to a request id (ElicitationRequestScope), so a
+      // sessionId is not guaranteed. Route when it is present; otherwise fall
+      // back to the bound runtime rather than rejecting a legal request.
+      const scoped = (ctx.params as { sessionId?: unknown }).sessionId;
+      const target =
+        typeof scoped === "string" && scoped
+          ? sessionOf(scoped, "session/elicitation/create")
+          : live;
       const elicitationId =
         typeof (ctx.params as { elicitationId?: unknown }).elicitationId === "string"
           ? (ctx.params as { elicitationId: string }).elicitationId
           : undefined;
       await deps.store.appendEvent({
-        sessionId: chatSessionId,
+        sessionId: target.chatSessionId,
         type: "elicitation_request",
-        ...(live.runId ? { runId: live.runId } : {}),
+        ...(target.runId ? { runId: target.runId } : {}),
         payload: {
           requestId,
           mode: ctx.params.mode === "url" ? "url" : "form",
@@ -213,12 +278,12 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         },
       });
       return new Promise((resolve, reject) => {
-        live.elicitations.set(requestId, { resolve, reject });
+        target.elicitations.set(requestId, { resolve, reject });
         // url 模式下 agent 通过 elicitation/complete 通知收尾，而该通知只带
         // elicitationId（与 JSON-RPC requestId 不同）。这里额外登记一条别名，
         // 否则 URL 型 elicitation 永远等不到 resolve，整轮 prompt 会一直挂起。
         if (elicitationId && elicitationId !== requestId) {
-          live.elicitations.set(elicitationId, { resolve, reject });
+          target.elicitations.set(elicitationId, { resolve, reject });
         }
       });
     })
@@ -226,15 +291,25 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
       const elicitationId =
         typeof ctx.params?.elicitationId === "string" ? ctx.params.elicitationId : "";
       if (!elicitationId) return;
-      const pending = live.elicitations.get(elicitationId);
+      // This notification carries no sessionId, so locate the owning runtime by
+      // the elicitation id itself instead of assuming the bound one.
+      let target: LiveRuntime | undefined;
+      for (const candidate of handlerCtx.allSessions ? handlerCtx.allSessions() : [live]) {
+        if (candidate.elicitations.has(elicitationId)) {
+          target = candidate;
+          break;
+        }
+      }
+      if (!target) return;
+      const pending = target.elicitations.get(elicitationId);
       if (!pending) return;
-      for (const [key, value] of live.elicitations) {
-        if (value === pending) live.elicitations.delete(key);
+      for (const [key, value] of target.elicitations) {
+        if (value === pending) target.elicitations.delete(key);
       }
       await deps.store.appendEvent({
-        sessionId: chatSessionId,
+        sessionId: target.chatSessionId,
         type: "elicitation_resolved",
-        ...(live.runId ? { runId: live.runId } : {}),
+        ...(target.runId ? { runId: target.runId } : {}),
         payload: { requestId: elicitationId, cancelled: false },
       });
       pending.resolve({ action: "accept" });

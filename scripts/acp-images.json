@@ -1,0 +1,504 @@
+{
+  "schema": 1,
+  "generatedFrom": ".tmp-registry.json",
+  "registryVersion": "1.0.0",
+  "platform": "linux/amd64",
+  "agents": [
+    {
+      "id": "agoragentic-acp",
+      "name": "Agoragentic",
+      "version": "1.3.0",
+      "enabled": false,
+      "kind": "npx",
+      "package": "agoragentic-mcp@1.3.0",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "amp-acp",
+      "name": "Amp",
+      "version": "0.9.0",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.9.0/amp-acp-linux-x86_64.tar.gz",
+      "sha256": "afaa50a152eb86a8ff21e354ded63fe2d21b730859692e3a60b2c4c9ef23df31",
+      "cmd": "./amp-acp",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "antigravity-acp",
+      "name": "Google Antigravity",
+      "version": "1.1.1",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip",
+      "sha256": null,
+      "cmd": "./agy_acp_server.par",
+      "args": [
+        "--uid="
+      ],
+      "env": {}
+    },
+    {
+      "id": "auggie",
+      "name": "Auggie CLI",
+      "version": "0.36.0",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@augmentcode/auggie@0.36.0",
+      "args": [
+        "--acp"
+      ],
+      "env": {
+        "AUGMENT_DISABLE_AUTO_UPDATE": "1"
+      }
+    },
+    {
+      "id": "autohand",
+      "name": "Autohand Code",
+      "version": "0.2.1",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@autohandai/autohand-acp@0.2.1",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "claude-acp",
+      "name": "Claude Agent",
+      "version": "0.74.0",
+      "enabled": true,
+      "kind": "npx",
+      "package": "@agentclientprotocol/claude-agent-acp@0.74.0",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "cline",
+      "name": "Cline",
+      "version": "3.0.61",
+      "enabled": false,
+      "kind": "npx",
+      "package": "cline@3.0.61",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "codebuddy-code",
+      "name": "Codebuddy Code",
+      "version": "2.144.0",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@tencent-ai/codebuddy-code@2.144.0",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "codex-acp",
+      "name": "Codex",
+      "version": "1.10.0",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@agentclientprotocol/codex-acp@1.10.0",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "cortex-code",
+      "name": "Cortex Code",
+      "version": "1.0.73",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://sfc-repo.snowflakecomputing.com/cortex-code-cli/a4643c4278/1.0.73%2B180523.e6179a031de9/coco-1.0.73%2B180523.e6179a031de9-linux-amd64.tar.gz",
+      "sha256": null,
+      "cmd": "./coco-1.0.73+180523.e6179a031de9-linux-amd64/cortex",
+      "args": [
+        "acp",
+        "serve"
+      ],
+      "env": {}
+    },
+    {
+      "id": "corust-agent",
+      "name": "Corust Agent",
+      "version": "0.6.0",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/Corust-ai/corust-agent-release/releases/download/v0.6.0/agent-linux-x64.tar.gz",
+      "sha256": null,
+      "cmd": "./corust-agent-acp",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "crow-cli",
+      "name": "crow-cli",
+      "version": "0.1.24",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/crow-cli/crow-cli/releases/download/v0.1.24/crow-cli-linux-x86_64.tar.gz",
+      "sha256": null,
+      "cmd": "./crow-cli",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "version": "2026.09.02",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://downloads.cursor.com/lab/2026.09.02-c22c1a3/linux/x64/agent-cli-package.tar.gz",
+      "sha256": null,
+      "cmd": "./dist-package/cursor-agent",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "deepagents",
+      "name": "DeepAgents",
+      "version": "0.1.7",
+      "enabled": false,
+      "kind": "npx",
+      "package": "deepagents-acp@0.1.7",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "devin",
+      "name": "Devin",
+      "version": "3000.6.14",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://static.devin.ai/cli/3000.6.14/devin-3000.6.14-x86_64-unknown-linux.tar.gz",
+      "sha256": null,
+      "cmd": "./bin/devin",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "dimcode",
+      "name": "DimCode",
+      "version": "0.3.28",
+      "enabled": false,
+      "kind": "npx",
+      "package": "dimcode@0.3.28",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "dirac",
+      "name": "Dirac",
+      "version": "0.5.9",
+      "enabled": false,
+      "kind": "npx",
+      "package": "dirac-cli@0.5.9",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "factory-droid",
+      "name": "Factory Droid",
+      "version": "0.212.1",
+      "enabled": false,
+      "kind": "npx",
+      "package": "droid@0.212.1",
+      "args": [
+        "exec",
+        "--output-format",
+        "acp-daemon"
+      ],
+      "env": {
+        "DROID_DISABLE_AUTO_UPDATE": "true",
+        "FACTORY_DROID_AUTO_UPDATE_ENABLED": "false"
+      }
+    },
+    {
+      "id": "fast-agent",
+      "name": "fast-agent",
+      "version": "0.10.1",
+      "enabled": false,
+      "kind": "uvx",
+      "package": "fast-agent-acp==0.10.1",
+      "args": [
+        "-x"
+      ],
+      "env": {
+        "FAST_AGENT_MODEL": "codexplan"
+      }
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "version": "0.58.0",
+      "enabled": true,
+      "kind": "npx",
+      "package": "@google/gemini-cli@0.58.0",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "github-copilot-cli",
+      "name": "GitHub Copilot",
+      "version": "1.0.83",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@github/copilot@1.0.83",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "glm-acp-agent",
+      "name": "GLM Agent",
+      "version": "1.8.0",
+      "enabled": false,
+      "kind": "npx",
+      "package": "glm-acp-agent@1.8.0",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "goose",
+      "name": "goose",
+      "version": "1.49.0",
+      "enabled": true,
+      "kind": "binary",
+      "archive": "https://github.com/block/goose/releases/download/v1.49.0/goose-x86_64-unknown-linux-gnu.tar.bz2",
+      "sha256": "c631a55e7d826d28c3bcd87b71a0aaecc9612f5a44e6c0d01e7a5b82dd8b7143",
+      "cmd": "./goose",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "grok-build",
+      "name": "Grok Build",
+      "version": "1.0.21",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@xai-official/grok@1.0.21",
+      "args": [
+        "agent",
+        "stdio"
+      ],
+      "env": {}
+    },
+    {
+      "id": "harn",
+      "name": "Harn",
+      "version": "0.10.129",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.129/harn-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "0013659bb2d6cb6c275a1d04a9338fab2b5146a33a2b37b725f96aec84bf1da9",
+      "cmd": "./harn",
+      "args": [
+        "serve",
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "junie",
+      "name": "Junie",
+      "version": "3123.7.0",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/JetBrains/junie-acp-release/releases/download/3123.7/junie-release-3123.7-linux-amd64.zip",
+      "sha256": null,
+      "cmd": "./junie-app/bin/junie",
+      "args": [
+        "--acp=true"
+      ],
+      "env": {}
+    },
+    {
+      "id": "kilo",
+      "name": "Kilo",
+      "version": "7.5.14",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@kilocode/cli@7.5.14",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi CLI",
+      "version": "1.50.0",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/MoonshotAI/kimi-cli/releases/download/1.50.0/kimi-1.50.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "10ccaa26ee7f5bb43f7c05baf808c11cd0160710b07ac422382d1d1923f3dab6",
+      "cmd": "./kimi",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "minion-code",
+      "name": "Minion Code",
+      "version": "0.1.44",
+      "enabled": false,
+      "kind": "uvx",
+      "package": "minion-code@0.1.44",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "mistral-vibe",
+      "name": "Mistral Vibe",
+      "version": "2.24.1",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/mistralai/mistral-vibe/releases/download/v2.24.1/vibe-acp-linux-x86_64-2.24.1.tar.gz",
+      "sha256": "8e87f581e7c292fbeab7377178e947ddc4e83753c409f1db0760631f11d7083c",
+      "cmd": "./vibe-acp",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "nova",
+      "name": "Nova",
+      "version": "1.1.37",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@compass-ai/nova@1.1.37",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "version": "1.18.29",
+      "enabled": true,
+      "kind": "binary",
+      "archive": "https://github.com/anomalyco/opencode/releases/download/v1.18.29/opencode-linux-x64.tar.gz",
+      "sha256": "ea800b7ff56226b70952126c9fc1e2517ca4c4b5682fd9d3f9e87449697a1194",
+      "cmd": "./opencode",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "pi-acp",
+      "name": "pi ACP",
+      "version": "0.0.33",
+      "enabled": false,
+      "kind": "npx",
+      "package": "pi-acp@0.0.33",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "poolside",
+      "name": "Poolside",
+      "version": "1.0.16",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://downloads.poolside.ai/pool/v1.0.16/pool-linux-amd64.tar.gz",
+      "sha256": "e86aa8c9feef003540673ab494e91bfadc273218d531c43d662cafb69e464146",
+      "cmd": "./pool-linux-amd64",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "qoder",
+      "name": "Qoder CLI",
+      "version": "0.2.14",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@qoder-ai/qodercli@0.2.14",
+      "args": [
+        "--acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "qwen-code",
+      "name": "Qwen Code",
+      "version": "0.23.0",
+      "enabled": true,
+      "kind": "npx",
+      "package": "@qwen-code/qwen-code@0.23.0",
+      "args": [
+        "--acp",
+        "--experimental-skills"
+      ],
+      "env": {}
+    },
+    {
+      "id": "sigit",
+      "name": "siGit Code",
+      "version": "1.5.2",
+      "enabled": false,
+      "kind": "npx",
+      "package": "@smbcloud/sigit@1.5.2",
+      "args": [],
+      "env": {}
+    },
+    {
+      "id": "stakpak",
+      "name": "Stakpak",
+      "version": "0.3.88",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/stakpak/agent/releases/download/v0.3.88/stakpak-linux-x86_64.tar.gz",
+      "sha256": null,
+      "cmd": "./stakpak",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    },
+    {
+      "id": "vtcode",
+      "name": "VT Code",
+      "version": "0.96.14",
+      "enabled": false,
+      "kind": "binary",
+      "archive": "https://github.com/vinhnx/VTCode/releases/download/0.96.14/vtcode-0.96.14-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": null,
+      "cmd": "./vtcode",
+      "args": [
+        "acp"
+      ],
+      "env": {
+        "VT_ACP_ENABLED": "1",
+        "VT_ACP_ZED_ENABLED": "1"
+      }
+    }
+  ]
+}

@@ -17,6 +17,11 @@ export const REDIS_TTL = {
   tools: 300,
   /** 单实例 MCP 工具预缓存（启动/刷新时写入；热路径不现场 tools/list） */
   instanceTools: 24 * 60 * 60,
+  /**
+   * 单实例降级缓存（未授权 / 不可达 / 上游超时，按空工具缓存）。
+   * 短 TTL：实例恢复或完成授权后能较快自动回到真实工具列表。
+   */
+  instanceToolsDegraded: 5 * 60,
   /** Gateway clientSessionKey → sessionId */
   gwClient: 24 * 60 * 60,
 } as const;

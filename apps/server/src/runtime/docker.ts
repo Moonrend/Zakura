@@ -11,6 +11,7 @@ import {
   discoverDockerRegistryMirrors,
   groupRunningImageIds,
   log,
+  StdioExec,
   type ContainerRuntime,
   type CreateContainerOptions,
   type RunningContainer,
@@ -194,6 +195,9 @@ export class DockerRuntime implements ContainerRuntime {
         : {}),
       ...(spec.command && spec.command.length > 0 ? { Cmd: spec.command } : {}),
       ...(spec.workingDir ? { WorkingDir: spec.workingDir } : {}),
+      ...(spec.stdinOpen
+        ? { OpenStdin: true, StdinOnce: false, AttachStdin: true, Tty: false }
+        : {}),
       ExposedPorts: Object.keys(exposed).length ? exposed : undefined,
       HostConfig: {
         PortBindings: Object.keys(portBindings).length ? portBindings : undefined,
@@ -411,8 +415,7 @@ export class DockerRuntime implements ContainerRuntime {
     containerId: string,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
-  ): Promise<import("@zakura/core").StdioExec> {
-    const { StdioExec } = await import("@zakura/core");
+  ): Promise<StdioExec> {
     const container = this.docker.getContainer(containerId);
     const exec = await container.exec({
       Cmd: command,
@@ -441,6 +444,71 @@ export class DockerRuntime implements ContainerRuntime {
           ks.resume();
         } catch {
           /* gone */
+        }
+      },
+    });
+  }
+
+  /**
+   * Attach 到容器主进程（CMD）的 stdio。用于 adapter 即容器 CMD 的场景。
+   * 与 execStdio 不同：不新起进程，接管已运行的 PID 1；
+   * 因此 kill 语义是「停容器」而非「杀某个 pid」。
+   */
+  async attachStdio(containerId: string): Promise<StdioExec> {
+    const container = this.docker.getContainer(containerId);
+    // attach 前先确认容器在跑，否则拿到的流会立刻 EOF，调用方难以区分原因
+    const info = await container.inspect();
+    if (!info.State?.Running) {
+      throw new Error(`attachStdio: container ${containerId} is not running`);
+    }
+    const attachOpts = {
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+    };
+    const stream = (await container.attach({
+      ...attachOpts,
+      hijack: true,
+      // docker-modem (5.0.7) mangles hijacked attach in two separate places:
+      //
+      //   modem.js:162  address += this.buildQuerystring(opts._query || opts);
+      //   modem.js:208  data = JSON.stringify(opts._body || opts);
+      //
+      // The second one is the dangerous one: on a hijacked attach the request
+      // body is written into the UPGRADED socket — i.e. straight onto the
+      // container's stdin. Without a `_body` override PID 1 receives a literal
+      //   {"stream":true,"stdin":true,"stdout":true,"stderr":true,"hijack":true}
+      // prefixed to our first JSON-RPC frame. Verified by teeing the
+      // container's stdin: ~15% of boots got a `-32700 Parse error` because the
+      // junk merged with the real frame instead of flushing as its own line.
+      //
+      // Both keys are required, and `_body` must be a NON-EMPTY-ish truthy
+      // value: `_body: ""` is falsy, so `opts._body || opts` falls through and
+      // serializes the whole options object anyway (observed as a literal
+      // `"_body":""` inside the injected JSON). `{}` is truthy and stringifies
+      // to '{}', which modem.js:212-215 converts to `data = undefined`.
+      //
+      // `_query` must be set too, otherwise the `_body` key itself leaks into
+      // the query string as `?...&_body=`.
+      _query: attachOpts,
+      _body: {},
+    } as unknown as Parameters<typeof container.attach>[0])) as unknown as NodeJS.ReadWriteStream;
+    return new StdioExec(stream, {
+      inspect: async () => {
+        const cur = await container.inspect();
+        return {
+          ExitCode: cur.State?.ExitCode ?? null,
+          Running: cur.State?.Running,
+          Pid: cur.State?.Pid,
+        };
+      },
+      // attach 的对端是 PID 1：逐个 kill 无意义，直接停容器
+      killPid: async () => {
+        try {
+          await container.stop({ t: 5 });
+        } catch {
+          /* already stopped */
         }
       },
     });

@@ -5,6 +5,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import {
   AGENT_WORKSPACE_ROOT,
   acpApiKeyDotenv,
+  acpAdapterSource,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
   acpCommandResolveExpr,
@@ -148,6 +149,14 @@ export type LiveRuntime = {
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
   /** When true, the ACP adapter runs in a dedicated sidecar container. */
   useSidecar: boolean;
+  /**
+   * When true, the adapter is PID 1 of its own container, scoped to this chat
+   * session (agent × adapter × chatSessionId). Nothing was staged into the
+   * workspace, so teardown skips the runtimeDir sync-back and instead removes
+   * the container. The credential volume is keyed by (agent × adapter) and
+   * survives teardown so the next session does not re-authenticate.
+   */
+  containerized: boolean;
 };
 
 /** prompt() 拒绝并发回合时使用；drainQueued 按此常量识别「已被新回合抢占」。 */
@@ -1315,38 +1324,54 @@ export class AcpSessionService {
     // present (a no-op once installed) and take the resolved absolute path. Older
     // images that still carry pre-baked adapters keep working: `provision` returns
     // null for them and we fall back to the profile's own command.
-    const adapterBin = await this.provisionAdapter(agent, setup.id, launch.command, useSidecar);
-    if (adapterBin) {
-      launch.command = adapterBin.command;
-      if (adapterBin.args.length && !setup.args?.length) {
-        launch.args = adapterBin.args;
-      }
-    }
+    // ── Containerized adapter ───────────────────────────────────────────────
+    // The adapter binary is the container CMD (PID 1), its filesystem ships
+    // with the image and its credentials live on a dedicated volume. None of
+    // the workspace staging below applies: nothing to copy, nothing to
+    // install, no binary to probe. We skip straight to attaching to PID 1.
+    const adapterSource = acpAdapterSource(setup.id);
+    const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
 
-    const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
-    const prep = writeScript
-      ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
-      : `${acpStageScript(layout)}\n${whichCheck}`;
     const execFn = useSidecar
       ? (cmd: string[]) => this.deps.workspace.execInSidecar(agent, cmd)
       : (cmd: string[]) => this.deps.workspace.execInWorkspace(agent, cmd);
-    try {
-      const result = await execFn(["bash", "-lc", prep]);
-      if (result.exitCode !== 0) {
-        const stderr = (result.stderr ?? "").trim();
-        if (stderr.includes("ZAKURA_BIN_MISSING")) {
-          throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
-        }
-        throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
-      }
-    } catch (err) {
+    const cleanupRuntimeDir = async () => {
+      if (containerImage) return; // no runtimeDir was staged
       await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("ZAKURA_BIN_MISSING")) {
-        throw new Error(`工作区里找不到 ${launch.command}`);
+    };
+
+    let adapterBin: Awaited<ReturnType<AcpSessionService["provisionAdapter"]>> = null;
+    if (!containerImage) {
+      adapterBin = await this.provisionAdapter(agent, setup.id, launch.command, useSidecar);
+      if (adapterBin) {
+        launch.command = adapterBin.command;
+        if (adapterBin.args.length && !setup.args?.length) {
+          launch.args = adapterBin.args;
+        }
       }
-      throw err;
+
+      const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
+      const prep = writeScript
+        ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
+        : `${acpStageScript(layout)}\n${whichCheck}`;
+      try {
+        const result = await execFn(["bash", "-lc", prep]);
+        if (result.exitCode !== 0) {
+          const stderr = (result.stderr ?? "").trim();
+          if (stderr.includes("ZAKURA_BIN_MISSING")) {
+            throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
+          }
+          throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
+        }
+      } catch (err) {
+        await cleanupRuntimeDir();
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("ZAKURA_BIN_MISSING")) {
+          throw new Error(`工作区里找不到 ${launch.command}`);
+        }
+        throw err;
+      }
     }
 
     const env: Record<string, string> = { ...launch.env, ...layout.env };
@@ -1361,13 +1386,25 @@ export class AcpSessionService {
 
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {
-      const argv = acpStdioArgv(launch.command, launch.args);
-      stdio = useSidecar
-        ? await this.deps.workspace.startStdioInSidecar(agent, argv, { workingDir: cwd, env })
-        : await this.deps.workspace.startStdio(agent, argv, { workingDir: cwd, env });
+      if (containerImage) {
+        // Adapter is PID 1 of its own container: start/reuse it and attach.
+        // Scoped by chatSessionId — one PID 1 can serve only one JSON-RPC peer
+        // (Docker broadcasts its stdout to every attach and merges their stdin).
+        stdio = await this.deps.workspace.attachStdioInAcpAdapter(
+          agent,
+          setup.id,
+          containerImage,
+          chatSessionId,
+          { env },
+        );
+      } else {
+        const argv = acpStdioArgv(launch.command, launch.args);
+        stdio = useSidecar
+          ? await this.deps.workspace.startStdioInSidecar(agent, argv, { workingDir: cwd, env })
+          : await this.deps.workspace.startStdio(agent, argv, { workingDir: cwd, env });
+      }
     } catch (err) {
-      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
-        .catch(() => undefined);
+      await cleanupRuntimeDir();
       throw err;
     }
 
@@ -1411,9 +1448,12 @@ export class AcpSessionService {
       useSidecar,
       // Lets GC know this version is in use, so an update triggered mid-session
       // does not prune the directory this process is running from.
+      // In container mode adapterBin stays null (no runtime dir is staged, so
+      // there is nothing for GC to prune), and this spread collapses to nothing.
       ...(adapterBin?.registryId && adapterBin.version
         ? { adapter: { id: adapterBin.registryId, version: adapterBin.version } }
         : {}),
+      containerized: containerImage !== null,
       ...(opts?.runId ? { runId: opts.runId } : {}),
     };
 
@@ -1544,8 +1584,7 @@ export class AcpSessionService {
       return live;
     } catch (err) {
       await this.teardown(live).catch(() => undefined);
-      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
-        .catch(() => undefined);
+      await cleanupRuntimeDir();
       // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错。
       // 现在有了 stderr 尾部就优先用它——fx 缺凭证/版本不兼容等真正的退出原因都在
       // stderr 里；只有真的没有 stderr 时才回退到「镜像过旧」的猜测提示。
@@ -1622,12 +1661,24 @@ export class AcpSessionService {
     }
     live.active?.dispose();
     await live.kill().catch(() => undefined);
-    // Sync back runtime state; use the same container the adapter ran in.
-    const syncExec = live.useSidecar
-      ? (cmd: string[]) => this.deps.workspace.execInSidecar(live.agent, cmd)
-      : (cmd: string[]) => this.deps.workspace.execInWorkspace(live.agent, cmd);
-    await syncExec(["bash", "-lc", acpSyncBackScript(live.layout)])
-      .catch(() => undefined);
+    if (live.containerized) {
+      // `kill()` only tears down the attach stream. The container is scoped to
+      // this chat session, so nothing else can reuse it — remove it or it
+      // leaks one container per ended session. The credential volume is keyed
+      // by (agent × adapter) and deliberately survives.
+      await this.deps.workspace
+        .stopAcpAdapterContainer(live.agent, live.profileId, live.chatSessionId)
+        .catch(() => undefined);
+    } else {
+      // Sync back runtime state; use the same container the adapter ran in.
+      // Containerized adapters stage nothing into the workspace, so there is
+      // no runtimeDir to sync back.
+      const syncExec = live.useSidecar
+        ? (cmd: string[]) => this.deps.workspace.execInSidecar(live.agent, cmd)
+        : (cmd: string[]) => this.deps.workspace.execInWorkspace(live.agent, cmd);
+      await syncExec(["bash", "-lc", acpSyncBackScript(live.layout)])
+        .catch(() => undefined);
+    }
     this.byChat.delete(live.chatSessionId);
   }
 

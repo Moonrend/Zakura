@@ -13,6 +13,8 @@ import {
   acpDiskUsageScript,
   acpGcScript,
   acpInstalledVersionsScript,
+  acpRequiresUnverifiedOptIn,
+  acpUninstallScript,
   acpWorkspacePlatform,
   acpProvisionScript,
   acpProvisionedCommand,
@@ -48,9 +50,29 @@ export type AcpCatalogEntry = {
   icon?: string;
   /** How it would be installed, or null when unavailable on this platform. */
   dist: AcpResolvedDist | null;
+  /**
+   * True when the only distribution is a binary with no published sha256, so it
+   * installs only under an explicit user opt-in.
+   */
+  requiresUnverified: boolean;
   /** Human-readable reason when `dist` is null. */
   unavailable: string | null;
 };
+
+/**
+ * Thrown when an adapter's only distribution is an unverified binary.
+ *
+ * Separate from a generic Error so the API can answer 409 + a consent prompt
+ * instead of a flat failure: the install is possible, it just needs the user to
+ * accept that the registry published no sha256 for this platform.
+ */
+export class AcpUnverifiedBinaryError extends Error {
+  readonly requiresUnverified = true;
+  constructor(readonly agentName: string) {
+    super(`${agentName} 的上游注册表没有提供该平台二进制的 sha256 校验值`);
+    this.name = "AcpUnverifiedBinaryError";
+  }
+}
 
 export type AcpAdapterStatus = {
   id: string;
@@ -130,18 +152,24 @@ export class AcpRegistryService {
   }
 
   /** Registry entries decorated with the install plan for the workspace platform. */
-  async catalog(opts?: { force?: boolean }): Promise<AcpCatalogEntry[]> {
+  async catalog(opts?: { force?: boolean; allowUnverifiedBinary?: boolean }): Promise<AcpCatalogEntry[]> {
     const index = await this.getIndex(opts);
     if (!index) return [];
     const platform = workspacePlatform();
-    return index.agents.map((agent) => this.toCatalogEntry(agent, platform));
+    return index.agents.map((agent) => this.toCatalogEntry(agent, platform, opts));
   }
 
   private toCatalogEntry(
     agent: AcpRegistryAgent,
     platform: AcpRegistryPlatform,
+    opts?: { allowUnverifiedBinary?: boolean },
   ): AcpCatalogEntry {
-    const dist = resolveAcpDistribution(agent, platform);
+    const allowUnverified = opts?.allowUnverifiedBinary ?? false;
+    const dist = resolveAcpDistribution(
+      agent,
+      platform,
+      allowUnverified ? { allowUnverifiedBinary: true } : undefined,
+    );
     return {
       id: agent.id,
       name: agent.name,
@@ -152,28 +180,39 @@ export class AcpRegistryService {
       ...(agent.license ? { license: agent.license } : {}),
       ...(agent.icon ? { icon: agent.icon } : {}),
       dist,
+      // Cursor/Devin/Junie publish no digest. Rather than presenting them as
+      // broken, tell the UI an install is possible if the user accepts the
+      // missing check, so the refusal becomes a decision instead of a dead end.
+      requiresUnverified: acpRequiresUnverifiedOptIn(agent, platform),
       unavailable: dist ? null : acpDistributionUnavailableReason(agent, platform),
     };
   }
 
-  async findAgent(id: string): Promise<AcpCatalogEntry | null> {
+  async findAgent(
+    id: string,
+    opts?: { allowUnverifiedBinary?: boolean },
+  ): Promise<AcpCatalogEntry | null> {
     const index = await this.getIndex();
     const agent = index?.agents.find((a) => a.id === id);
-    return agent ? this.toCatalogEntry(agent, workspacePlatform()) : null;
+    return agent ? this.toCatalogEntry(agent, workspacePlatform(), opts) : null;
   }
 
-  private planFor(entry: AcpCatalogEntry): AcpProvisionPlan | null {
+  private planFor(entry: AcpCatalogEntry, versionOverride?: string): AcpProvisionPlan | null {
     const d = entry.dist;
     if (!d) return null;
+    // An explicit version is how "update" and "switch version" are expressed:
+    // only npm/uv can resolve an arbitrary version, since a binary URL is minted
+    // per release and the registry gives us no way to rewrite it safely.
     switch (d.kind) {
       case "npx": {
         const extra = ACP_COMPANION_PACKAGES[entry.id];
+        const v = versionOverride ?? d.version;
         return extra
-          ? { kind: "npx", pkg: d.pkg, version: d.version, extraPackages: extra }
-          : { kind: "npx", pkg: d.pkg, version: d.version };
+          ? { kind: "npx", pkg: d.pkg, version: v, extraPackages: extra }
+          : { kind: "npx", pkg: d.pkg, version: v };
       }
       case "uvx":
-        return { kind: "uvx", pkg: d.pkg, version: d.version };
+        return { kind: "uvx", pkg: d.pkg, version: versionOverride ?? d.version };
       case "binary":
         return {
           kind: "binary",
@@ -199,13 +238,19 @@ export class AcpRegistryService {
     agent: Agent,
     registryId: string,
     useSidecar = false,
+    opts?: { allowUnverifiedBinary?: boolean; version?: string },
   ): Promise<{ command: string; args: string[]; version: string; installed: boolean }> {
-    const entry = await this.findAgent(registryId);
+    const entry = await this.findAgent(registryId, opts);
     if (!entry) throw new Error(`ACP 注册表里没有 ${registryId}`);
     if (!entry.dist) {
+      // Distinguish "cannot" from "will not without consent": the second is
+      // recoverable by the caller passing allowUnverifiedBinary.
+      if (entry.requiresUnverified) {
+        throw new AcpUnverifiedBinaryError(entry.name);
+      }
       throw new Error(`${entry.name} 无法安装：${entry.unavailable ?? "没有可用的分发方式"}`);
     }
-    const plan = this.planFor(entry);
+    const plan = this.planFor(entry, opts?.version);
     if (!plan) throw new Error(`${entry.name} 无法安装`);
 
     const script = acpProvisionScript(registryId, plan);
@@ -329,6 +374,36 @@ export class AcpRegistryService {
       .map((l) => l.split("ZAKURA_ACP_PRUNED:")[1]!.trim());
     if (pruned.length) log.info("acp_registry.pruned", { count: pruned.length });
     return { pruned };
+  }
+
+  /**
+   * Remove an adapter (or one of its versions) from the workspace.
+   *
+   * This is not GC with a narrower keep-list: {@link collectGarbage} always keeps a
+   * survivor per adapter, so it structurally cannot remove the last version. An
+   * explicit uninstall is the only way for the user to reclaim that disk.
+   */
+  async uninstall(
+    agent: Agent,
+    registryId: string,
+    version?: string,
+  ): Promise<{ removed: boolean }> {
+    await this.workspace.ensureStarted(agent, { require: "shell" });
+    const out = await this.workspace.execInWorkspace(agent, [
+      "bash",
+      "-lc",
+      acpUninstallScript(registryId, version),
+    ]);
+    if (out.exitCode !== 0) {
+      throw new Error(`卸载 ${registryId} 失败：\n${out.stderr.trim().slice(-800)}`);
+    }
+    const removed = out.stderr.includes("ZAKURA_ACP_REMOVED:");
+    log.info("acp_registry.uninstalled", {
+      id: registryId,
+      version: version ?? "all",
+      removed,
+    });
+    return { removed };
   }
 
   private async rawInstalled(agent: Agent): Promise<Map<string, string[]>> {

@@ -26,6 +26,7 @@ import {
   AGENT_DESKTOP_WIDTH,
   AGENT_DESKTOP_HEIGHT,
   ACP_IMAGE_BIN_DIR,
+  acpDurableDir,
 } from "@zakura/shared";
 
 function dockerErr(err: unknown): Error {
@@ -922,6 +923,221 @@ export class RunnerDockerWorkspace {
     });
     if (!list.length) return null;
     return { id: list[0]!.Id, status: list[0]!.State };
+  }
+
+  // ── ACP Adapter containers (one per agent × adapter × chat session) ────────
+
+  private adapterContainerName(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): string {
+    const short = sessionKey.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+    return `zakura-acpa-${adapterId}-${agentId}-${short}`
+      .replace(/[^a-zA-Z0-9_.-]/g, "-")
+      .slice(0, 63);
+  }
+
+  /** Per agent × adapter credential volume. Keeps adapter logins isolated. */
+  private adapterVolumeName(agentId: string, adapterId: string): string {
+    return `zakura-acpcred-${adapterId}-${agentId}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
+  }
+
+  private async findAdapterContainer(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): Promise<{ id: string; status: string } | null> {
+    const list = await this.docker.listContainers({
+      all: true,
+      filters: {
+        label: [
+          `zakura.agent=${agentId}`,
+          `zakura.acp_adapter=${adapterId}`,
+          `zakura.acp_session=${sessionKey}`,
+          "zakura.purpose=acp-adapter",
+        ],
+      },
+    });
+    if (!list.length) return null;
+    return { id: list[0]!.Id, status: list[0]!.State };
+  }
+
+  /**
+   * Ensure the adapter container for (agent, adapter, chat session) is running.
+   * The adapter binary is the container CMD (PID 1); we never exec into it.
+   *
+   * Scoped per chat session because Docker broadcasts PID 1 stdout to every
+   * attached client and merges their stdin — two sessions on one container
+   * cross-talk and corrupt the JSON-RPC framing.
+   */
+  async ensureAdapterContainer(
+    agentId: string,
+    adapterId: string,
+    opts: {
+      image: string;
+      network?: string;
+      env?: Record<string, string>;
+      sessionKey: string;
+    },
+  ): Promise<{ dockerId: string; image: string; status: string }> {
+    const existing = await this.findAdapterContainer(agentId, adapterId, opts.sessionKey);
+    if (existing && existing.status === "running") {
+      return { dockerId: existing.id, image: opts.image, status: "running" };
+    }
+    if (existing) {
+      await this.docker.getContainer(existing.id).remove({ force: true }).catch(() => undefined);
+    }
+
+    try {
+      await this.docker.getImage(opts.image).inspect();
+    } catch {
+      await new Promise<void>((resolve, reject) => {
+        this.docker.pull(opts.image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+          if (err) return reject(dockerErr(err));
+          this.docker.modem.followProgress(stream, (e: Error | null) =>
+            e ? reject(dockerErr(e)) : resolve(),
+          );
+        });
+      });
+    }
+
+    const hostPath = this.workspaceHostPath(agentId);
+    const name = this.adapterContainerName(agentId, adapterId, opts.sessionKey);
+    const volume = this.adapterVolumeName(agentId, adapterId);
+    const credHome = "/opt/zakura/acp-home";
+
+    try {
+      await this.docker.createVolume({
+        Name: volume,
+        Labels: {
+          "zakura.managed": "true",
+          "zakura.purpose": "acp-adapter-cred",
+          "zakura.agent": agentId,
+          "zakura.acp_adapter": adapterId,
+        },
+      });
+    } catch {
+      /* already exists */
+    }
+
+    try {
+      await this.docker.getContainer(name).remove({ force: true });
+    } catch {
+      /* */
+    }
+
+    const env = [
+      `ZAKURA_AGENT_ID=${agentId}`,
+      `HOME=${credHome}`,
+      `PATH=${ACP_IMAGE_BIN_DIR}:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+      // Pre-container logins live under the workspace bind mount; the image
+      // entrypoint copies them into the cred volume once, before exec'ing the
+      // adapter, so upgrading users are not silently logged out.
+      `ACP_LEGACY_HOME=${acpDurableDir(adapterId)}`,
+      ...Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`),
+    ];
+
+    const createOpts: Docker.ContainerCreateOptions = {
+      name,
+      Image: opts.image,
+      Env: env,
+      // The adapter speaks JSON-RPC over stdio as PID 1; keep stdin open.
+      OpenStdin: true,
+      StdinOnce: false,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      Labels: {
+        "zakura.managed": "true",
+        "zakura.purpose": "acp-adapter",
+        "zakura.agent": agentId,
+        "zakura.acp_adapter": adapterId,
+        "zakura.acp_session": opts.sessionKey,
+      },
+      WorkingDir: AGENT_WORKSPACE_ROOT,
+      HostConfig: {
+        Binds: [`${hostPath}:${AGENT_WORKSPACE_ROOT}`, `${volume}:${credHome}`],
+        // Lifetime is the chat session's; a restart yields a fresh PID 1 with
+        // no attached peer and no way to replay in-flight JSON-RPC state.
+        RestartPolicy: { Name: "no" },
+      },
+    };
+
+    if (opts.network) {
+      const net = resolveNetworkMode(opts.network);
+      if (net) {
+        await this.ensureNetwork(net);
+        createOpts.NetworkingConfig = { EndpointsConfig: { [net]: {} } };
+      }
+    }
+
+    const container = await this.docker.createContainer(createOpts);
+    await container.start();
+    const info = await container.inspect();
+    return {
+      dockerId: info.Id,
+      image: opts.image,
+      status: info.State?.Running ? "running" : "stopped",
+    };
+  }
+
+  /** Attach to the adapter container's PID 1 stdio. */
+  async attachStdioInAdapter(agentId: string, adapterId: string, sessionKey: string) {
+    const found = await this.findAdapterContainer(agentId, adapterId, sessionKey);
+    if (!found || found.status !== "running") {
+      throw new Error(`ACP adapter container not running: ${adapterId}`);
+    }
+    const container = this.docker.getContainer(found.id);
+    const attachOpts = {
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+    };
+    const stream = (await container.attach({
+      ...attachOpts,
+      hijack: true,
+      // See apps/server/src/runtime/docker.ts attachStdio for the full analysis.
+      // docker-modem serializes the attach opts as the POST body, which on a
+      // hijacked connection is written onto the container's stdin, corrupting
+      // the first JSON-RPC frame. `_body` must be truthy (`""` is falsy and
+      // falls through to serializing the whole opts object), and `_query` must
+      // be set or `_body` itself leaks into the query string.
+      _query: attachOpts,
+      _body: {},
+    } as unknown as Parameters<typeof container.attach>[0])) as unknown as NodeJS.ReadWriteStream;
+    const job = new StdioExec(stream, {
+      inspect: async () => {
+        const cur = await container.inspect();
+        return {
+          ExitCode: cur.State?.ExitCode ?? null,
+          Running: cur.State?.Running,
+          Pid: cur.State?.Pid,
+        };
+      },
+      // 对端是 PID 1，逐进程 kill 无意义，直接停容器
+      killPid: async () => {
+        try {
+          await container.stop({ t: 5 });
+        } catch {
+          /* already stopped */
+        }
+      },
+    });
+    this.stdio.add(job);
+    return job;
+  }
+
+  async removeAdapterContainer(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): Promise<void> {
+    const found = await this.findAdapterContainer(agentId, adapterId, sessionKey);
+    if (!found) return;
+    await this.docker.getContainer(found.id).remove({ force: true }).catch(() => undefined);
   }
 
   async ensureSidecar(

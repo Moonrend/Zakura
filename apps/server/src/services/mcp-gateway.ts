@@ -92,12 +92,40 @@ const LEGACY_SKILL_RESOURCE_PREFIX = "zakura://agent/skills/";
 
 type InstanceRow = typeof componentInstances.$inferSelect;
 
+/**
+ * 单实例 tools/list 的硬超时。
+ * 上游 MCP 默认超时为 20s，一个不可达实例即可让聚合 tools/list 拖到十几秒，
+ * 超过 ACP 客户端 session/new 的等待上限。这里主动收紧。
+ */
+const INSTANCE_LIST_TOOLS_TIMEOUT_MS = 3000;
+
+/** 给 Promise 加超时；超时抛错，由调用方按降级缓存处理 */
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** 单实例 tools/list 预缓存条目 */
 type CachedInstanceTools = {
   tools: McpToolDef[];
   providerId: string;
   slug: string;
   updatedAt: number;
+  /**
+   * 降级缓存：实例当前无法产出工具（未授权 / 不可达 / provider 缺失）。
+   * 仍写入缓存并按空工具计入命中，避免单个坏实例让 agent 聚合缓存永不生成。
+   */
+  degraded?: boolean;
+  reason?: string;
 };
 
 export interface ResolvedTool {
@@ -508,14 +536,28 @@ export class McpGateway {
         ),
       });
       if (!instance || instance.status !== "running") return null;
-      if (!globalRegistry.has(instance.providerId)) return null;
+      if (!globalRegistry.has(instance.providerId)) {
+        return await this.cacheDegradedInstanceTools(
+          tenantId,
+          instanceId,
+          instance.providerId,
+          instance.slug,
+          "provider_missing",
+        );
+      }
 
       const plugin = globalRegistry.get(instance.providerId);
       let handle: InstanceHandle;
       try {
         handle = await this.orchestrator.toHandle(tenantId, instanceId);
       } catch {
-        return null;
+        return await this.cacheDegradedInstanceTools(
+          tenantId,
+          instanceId,
+          instance.providerId,
+          instance.slug,
+          "handle_unavailable",
+        );
       }
 
       const hasCreds =
@@ -527,10 +569,20 @@ export class McpGateway {
         (handle.config.authRequired === true || lastError.startsWith("AUTH_REQUIRED")) &&
         !hasCreds
       ) {
-        return null;
+        // 未授权实例按“没有工具”缓存：它不该拖慢每次 tools/list
+        return await this.cacheDegradedInstanceTools(
+          tenantId,
+          instanceId,
+          instance.providerId,
+          instance.slug,
+          "auth_required",
+        );
       }
 
-      const listed = await plugin.listTools(handle);
+      const listed = await withTimeout(
+        plugin.listTools(handle),
+        INSTANCE_LIST_TOOLS_TIMEOUT_MS,
+      );
       const entry: CachedInstanceTools = {
         tools: listed,
         providerId: instance.providerId,
@@ -547,10 +599,62 @@ export class McpGateway {
       return entry;
     } catch {
       getTelemetry().mcpErrors.inc({ kind: "refresh_instance_tools" });
-      return null;
+      // 上游报错 / 超时同样按空工具缓存（短 TTL），避免毒化 agent 聚合缓存
+      return await this.cacheDegradedInstanceTools(
+        tenantId,
+        instanceId,
+        null,
+        null,
+        "list_tools_failed",
+      );
     } finally {
       this.instanceToolsRefreshing.delete(instanceId);
     }
+  }
+
+  /**
+   * 写入“空工具”降级缓存条目。
+   * 目的：让未授权 / 不可达的实例也能算作缓存命中，
+   * 使 agent 聚合缓存 (cacheable) 得以生成，tools/list 不再每次全量 fan-out。
+   * 用较短 TTL，便于实例恢复后自动回到正常工具列表。
+   */
+  private async cacheDegradedInstanceTools(
+    tenantId: string,
+    instanceId: string,
+    providerId: string | null,
+    slug: string | null,
+    reason: string,
+  ): Promise<CachedInstanceTools | null> {
+    let resolvedProviderId = providerId;
+    let resolvedSlug = slug;
+    if (!resolvedProviderId || !resolvedSlug) {
+      const row = await this.db.query.componentInstances.findFirst({
+        where: and(
+          eq(componentInstances.id, instanceId),
+          eq(componentInstances.tenantId, tenantId),
+        ),
+      });
+      if (!row) return null;
+      resolvedProviderId = resolvedProviderId ?? row.providerId;
+      resolvedSlug = resolvedSlug ?? row.slug;
+    }
+
+    const entry: CachedInstanceTools = {
+      tools: [],
+      providerId: resolvedProviderId,
+      slug: resolvedSlug,
+      updatedAt: Date.now(),
+      degraded: true,
+      reason,
+    };
+    this.instanceToolsMemCache.set(instanceId, entry);
+    void redisSetJson(
+      REDIS_KEYS.instanceTools(instanceId),
+      entry,
+      REDIS_TTL.instanceToolsDegraded,
+    );
+    await this.invalidateTenantAgentToolsCaches(tenantId);
+    return entry;
   }
 
   /** 热路径：只读预缓存；未命中则后台刷新，本轮不现场 tools/list */

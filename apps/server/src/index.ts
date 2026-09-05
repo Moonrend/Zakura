@@ -193,6 +193,22 @@ async function main() {
   if (orphaned > 0) {
     log.warn("boot.orphan_exposures", { count: orphaned });
   }
+  // ACP adapter 容器是会话级的，正常由 teardown 移除；进程被杀时 teardown 不会跑，
+  // 每个存活会话都会留下一个 stdin 常开的孤儿容器，且记录它们的内存表已随进程消失。
+  // 启动时清扫是唯一可靠的回收点；凭据 volume 按 (agent × adapter) 保留，不受影响。
+  if (defaultTenant) {
+    const sweptAdapters = await agentService.workspace
+      .sweepOrphanedAcpAdapterContainers(defaultTenant.id)
+      .catch((err) => {
+        telemetry.recordFault("acp.sweep_orphan_adapters", err, {
+          subsystem: "acp",
+        });
+        return 0;
+      });
+    if (sweptAdapters > 0) {
+      log.warn("boot.orphan_acp_adapters", { count: sweptAdapters });
+    }
+  }
   // MCP 服务器（含远程 HTTP）统一自动启动；远程无本地进程，status 表示启用
   void orchestrator
     .autoStartMcpInstances()
@@ -208,6 +224,32 @@ async function main() {
     .catch((err) => {
       telemetry.recordFault("mcp.autostart", err, { subsystem: "mcp" });
     });
+  // 幽灵实例自检：DB 标记 running 但容器已消失的实例既不会被 autostart 选中，
+  // 也会被 startInstance 幂等分支短路，只能靠周期核对 docker 真实状态来自愈。
+  // 否则 tools/list 每次都会去连不存在的容器直到超时，拖垮聚合缓存。
+  const runGhostReconcile = (phase: string) => {
+    void orchestrator
+      .reconcileGhostInstances()
+      .then((r) => {
+        if (r.ghosts || r.failed) {
+          log.warn("mcp.ghost_reconcile", {
+            phase,
+            checked: r.checked,
+            ghosts: r.ghosts,
+            recovered: r.recovered,
+            failed: r.failed,
+          });
+        }
+      })
+      .catch((err) => {
+        telemetry.recordFault("mcp.ghost_reconcile", err, { subsystem: "mcp" });
+      });
+  };
+  // 启动后延迟一次，等 autostart 先把该拉的实例拉起来，避免互相打架
+  const ghostBootTimer = setTimeout(() => runGhostReconcile("boot"), 60_000);
+  ghostBootTimer.unref?.();
+  const ghostReconcileTimer = setInterval(() => runGhostReconcile("periodic"), 5 * 60_000);
+  ghostReconcileTimer.unref?.();
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
   );

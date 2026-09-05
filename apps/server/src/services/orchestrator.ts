@@ -176,8 +176,19 @@ function mergeMaskedConfig(
   return next;
 }
 
+export type ReconcileSnapshot = {
+  checked: number;
+  ghosts: number;
+  recovered: number;
+  failed: number;
+  ranAt: string;
+  durationMs: number;
+};
+
 export class Orchestrator {
   private nodes: RuntimeNodeService | null = null;
+  /** 最近一次幽灵实例自检结果（进程内快照，重启后清空） */
+  private lastReconcile: ReconcileSnapshot | null = null;
   /** 实例启动并完成 afterStart 后回调（用于预缓存 tools/list） */
   private onInstanceReady: ((tenantId: string, instanceId: string) => void) | null = null;
 
@@ -385,6 +396,137 @@ export class Orchestrator {
       }
     }
     return this.startInstance(tenantId, instanceId);
+  }
+
+  /**
+   * 幽灵实例自检：DB 标记 running，但底层容器已不存在（宿主重启、docker prune、
+   * 手工 docker rm 等）。这类实例既不会被 autoStartMcpInstances 选中
+   * （其过滤条件是 status != running），也会被 startInstance 的幂等分支直接短路，
+   * 因此永远无法自愈，只会在 tools/list 时反复连接不存在的容器直到超时。
+   *
+   * 这里主动核对 managed_containers.dockerId 与运行时真实状态，
+   * 发现不一致就把状态回滚为 stopped 并重新拉起。
+   */
+  async reconcileGhostInstances(opts?: {
+    tenantId?: string;
+  }): Promise<{ checked: number; ghosts: number; recovered: number; failed: number }> {
+    const startedAt = Date.now();
+    const filters = [
+      notInArray(componentInstances.providerId, [...CAPABILITY_PROVIDER_IDS]),
+      eq(componentInstances.status, "running"),
+    ];
+    if (opts?.tenantId) {
+      filters.unshift(eq(componentInstances.tenantId, opts.tenantId));
+    }
+    const rows = await this.db
+      .select()
+      .from(componentInstances)
+      .where(and(...filters));
+
+    let checked = 0;
+    let ghosts = 0;
+    let recovered = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      // 远端 runtime node 的容器不由本进程的 docker 客户端管理，跳过以免误判
+      if (!isLocalRuntimeNodeId(row.runtimeNodeId)) continue;
+
+      const containerRows = await this.db.query.managedContainers.findMany({
+        where: and(
+          eq(managedContainers.instanceId, row.id),
+          eq(managedContainers.tenantId, row.tenantId),
+        ),
+      });
+      // 无托管容器的实例（纯远端 HTTP MCP）不涉及容器存活问题
+      if (containerRows.length === 0) continue;
+
+      checked += 1;
+
+      let alive = true;
+      for (const c of containerRows) {
+        if (!c.dockerId) {
+          alive = false;
+          break;
+        }
+        try {
+          const info = await this.runtime.inspect(c.dockerId);
+          // inspect 对不存在的容器返回 null；exited/dead 也视为不可用
+          if (!info || info.status === "exited" || info.status === "dead") {
+            alive = false;
+            break;
+          }
+        } catch {
+          alive = false;
+          break;
+        }
+      }
+
+      if (alive) continue;
+
+      ghosts += 1;
+      componentLogger("orch").warn(
+        "ghost instance detected: marked running but container is gone; recovering",
+        { instanceId: row.id, slug: row.slug, providerId: row.providerId },
+      );
+
+      try {
+        await this.db
+          .update(componentInstances)
+          .set({
+            status: "stopped",
+            lastError: "container disappeared; auto-recovered by health check",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(eq(componentInstances.id, row.id), eq(componentInstances.tenantId, row.tenantId)),
+          );
+
+        // 清掉指向已消失容器的陈旧记录。startInstance 只会删除 docker 中仍存在的
+        // 同名容器对应的行，幽灵行的 dockerId 已查不到，不清理就会永久残留，
+        // 导致后续自检每轮都判定该实例 not alive 而反复重建。
+        for (const c of containerRows) {
+          if (!c.dockerId) continue;
+          let stale = false;
+          try {
+            stale = (await this.runtime.inspect(c.dockerId)) === null;
+          } catch {
+            stale = true;
+          }
+          if (stale) {
+            await this.db.delete(managedContainers).where(eq(managedContainers.id, c.id));
+          }
+        }
+
+        await this.startInstance(row.tenantId, row.id);
+        recovered += 1;
+        componentLogger("orch").info("ghost instance recovered", {
+          instanceId: row.id,
+          slug: row.slug,
+        });
+      } catch (err) {
+        failed += 1;
+        getTelemetry().mcpErrors.inc({ kind: "orch_ghost_recover" });
+        componentLogger("orch").error("ghost instance recovery failed", {
+          instanceId: row.id,
+          slug: row.slug,
+          err: String(err),
+        });
+      }
+    }
+
+    const result = { checked, ghosts, recovered, failed };
+    this.lastReconcile = {
+      ...result,
+      ranAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+    };
+    return result;
+  }
+
+  /** 最近一次幽灵实例自检的结果快照，供 UI / 运维接口读取 */
+  getLastReconcile(): ReconcileSnapshot | null {
+    return this.lastReconcile;
   }
 
   /**
@@ -753,6 +895,60 @@ export class Orchestrator {
       );
     this.emitInstance(instance, "stopped");
     this.notifyInstanceStopped(tenantId, instanceId);
+  }
+
+  /**
+   * 强制重建实例容器：先拆除现有容器（含已失效的幽灵记录），
+   * 再按 component_instances.config_enc 重新推导 spec 并拉起。
+   *
+   * 与 start/stop 的区别：
+   * - startInstance 对 status==="running" 幂等早退，无法修复"状态是 running 但容器已被删"的情况
+   * - 本方法总是走完整的 拆除 → 重建 流程，是配置漂移/容器被误删时的手动兜底
+   */
+  async rebuildInstance(tenantId: string, instanceId: string): Promise<InstanceHandle> {
+    const instance = await this.requireInstance(tenantId, instanceId);
+    const log = componentLogger("orch");
+
+    log.info("rebuild instance: begin", {
+      instanceId,
+      slug: instance.slug,
+      providerId: instance.providerId,
+    });
+
+    // 1) 拆除现有容器。stopInstance 会把 managed_containers 标为 removed 并清空 dockerId。
+    try {
+      await this.stopInstance(tenantId, instanceId);
+    } catch (err) {
+      // 容器早已不存在时 stop 可能报错，不应阻塞重建
+      recordPlatformFault("orch.rebuild_stop", err, { subsystem: "orch" });
+      log.warn("rebuild instance: stop failed, continuing", {
+        instanceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // 2) 回收该实例所有陈旧容器行，避免重建后残留指向已消失容器的记录
+    await this.db
+      .delete(managedContainers)
+      .where(
+        and(
+          eq(managedContainers.instanceId, instanceId),
+          eq(managedContainers.tenantId, tenantId),
+        ),
+      );
+
+    // 3) 确保状态不是 running，否则 startInstance 会幂等早退
+    await this.db
+      .update(componentInstances)
+      .set({ status: "stopped", lastError: null, updatedAt: new Date() })
+      .where(
+        and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
+      );
+
+    // 4) 按 config_enc 重新推导 spec 并拉起
+    const handle = await this.startInstance(tenantId, instanceId);
+    log.info("rebuild instance: done", { instanceId, slug: instance.slug });
+    return handle;
   }
 
   /** Merge/replace encrypted config for an existing instance */

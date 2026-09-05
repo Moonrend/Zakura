@@ -32,7 +32,26 @@ export type AcpAdapterSource =
       probeVersion?: string;
     }
   /** Present in the image already; nothing to install. */
-  | { kind: "image" };
+  | { kind: "image" }
+  /**
+   * Adapter ships as its own container image and speaks ACP over the container's
+   * main-process stdio. Nothing is installed into the workspace; the runtime
+   * starts `image` and attaches to PID 1.
+   */
+  | { kind: "container"; image: string };
+
+/**
+ * Builtin profile id → dedicated adapter image.
+ *
+ * Opt-in per profile: a profile listed here takes precedence over its registry
+ * entry, so containerization can be rolled out one adapter at a time and rolled
+ * back by deleting a line.
+ */
+const CONTAINER_SOURCES: Record<string, string> = {
+  // NOTE: keyed by *profile* id (`claude-code`), not the registry/image id
+  // (`claude-acp`). The two differ for this adapter.
+  "claude-code": "ghcr.io/moonrend/zakura/acp-claude-acp:0.74.0",
+};
 
 const shq = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`;
 
@@ -145,6 +164,8 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
 
 /** How to obtain the adapter for a builtin profile id. */
 export function acpAdapterSource(profileId: string): AcpAdapterSource {
+  const image = CONTAINER_SOURCES[profileId];
+  if (image) return { kind: "container", image };
   const registryId = REGISTRY_BY_PROFILE[profileId];
   if (registryId) return { kind: "registry", registryId };
   const custom = CUSTOM_SOURCES[profileId];

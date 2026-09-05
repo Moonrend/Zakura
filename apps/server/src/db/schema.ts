@@ -64,6 +64,15 @@ export const users = pgTable(
      * 平台管理员默认视为已授权。
      */
     canUseLocalRunner: boolean("can_use_local_runner").notNull().default(false),
+    /** 邮箱验证完成时间；为空表示邮箱尚未验证。 */
+    emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
+    /** 最近一次成功登录时间（任意登录方式）。 */
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    /**
+     * 密码最后一次变更时间。用于「改密后使旧会话失效」：
+     * 早于该时间签发的会话会被 services/user-sessions.ts 判定为失效。
+     */
+    passwordUpdatedAt: timestamp("password_updated_at", { withTimezone: true }),
     /**
      * 平台封号：非空即视为已封禁。会话仍可能有效，但鉴权中间件会拒绝。
      * 由 services/account-status.ts 统一读取并缓存。
@@ -1870,3 +1879,4 @@ export type SkillSourceTokenRow = typeof skillSourceTokens.$inferSelect;
 export type AgentSchedule = typeof agentSchedules.$inferSelect;
 export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
+
