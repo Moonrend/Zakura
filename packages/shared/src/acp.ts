@@ -1186,6 +1186,16 @@ export function resolveAcpLaunch(
     } else if (profile.id === "qwen-code") {
       env.DASHSCOPE_API_KEY = key;
       if (baseUrl) env.DASHSCOPE_API_BASE = baseUrl;
+    } else if (profile.id === "fast-agent") {
+      // fast-agent 只从 YAML 配置读取 base_url，但它的 pydantic-settings 开了
+      // env_nested_delimiter="__"，所以 OPENAI__BASE_URL 能覆盖 openai.base_url。
+      // 只给 OPENAI_API_KEY 而不给 __ 形式，它会拿到 key 却仍打官方端点。
+      env.OPENAI_API_KEY = key;
+      env.OPENAI__API_KEY = key;
+      if (baseUrl) {
+        env.OPENAI_BASE_URL = baseUrl;
+        env.OPENAI__BASE_URL = baseUrl;
+      }
     } else {
       env.API_KEY = key;
       if (baseUrl) env.API_BASE_URL = baseUrl;
@@ -1240,6 +1250,8 @@ function applyZakuraRouteEnv(
     } else if (profileId === "fx") {
       env.AI_GATEWAY_API_KEY = key;
       env.OPENAI_API_KEY = key;
+    } else if (profileId === "fast-agent") {
+      env.OPENAI__API_KEY = key;
     }
   }
   if (!baseUrl) return;
@@ -1267,6 +1279,11 @@ function applyZakuraRouteEnv(
   }
   else if (profileId === "fx") {
     env.AI_GATEWAY_BASE_URL = baseUrl;
+  }
+  else if (profileId === "fast-agent") {
+    // 见 buildAcpLaunch：fast-agent 的 base_url 只认 YAML 或 OPENAI__BASE_URL。
+    // 缺了它就会退回 api.openai.com，表现为“重试后变回 Zakura/无验证头”。
+    env.OPENAI__BASE_URL = baseUrl;
   }
 }
 
