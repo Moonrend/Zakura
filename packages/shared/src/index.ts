@@ -495,8 +495,6 @@ export {
   acpAdapterSource,
   acpRegistryIdForProfile,
   acpProfileIdsWithRegistrySource,
-  acpCustomProvisionScript,
-  acpCustomCommand,
 } from "./acp-sources.js";
 export type { AcpAdapterSource } from "./acp-sources.js";
 export {

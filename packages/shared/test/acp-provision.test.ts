@@ -22,8 +22,6 @@ import { join, relative, sep } from "node:path";
 import {
   ACP_PROVISION_ROOT,
   acpAdapterSource,
-  acpCustomCommand,
-  acpCustomProvisionScript,
   acpDiskUsageScript,
   acpGcScript,
   acpInstalledVersionsScript,
@@ -31,7 +29,6 @@ import {
   acpProvisionScript,
   acpProvisionedCommand,
   acpVersionDir,
-  type AcpAdapterSource,
   type AcpProvisionPlan,
 } from "../src/index.js";
 
@@ -116,14 +113,15 @@ describe("ACP 适配器安装脚本", () => {
     }
   });
 
-  it("自带安装器的适配器脚本语法合法", () => {
+  it("fx / kiro / hermes 已由注册表接管，不再走宿主机安装脚本", () => {
+    // 这三个曾经是仅剩的「自带安装器」特例：宿主机维护安装脚本，其余 39 个
+    // 都只是拉镜像。加进注册表后它们必须和别人走同一条路径，否则等于把已经
+    // 删掉的分支又悄悄养回来。
     for (const id of ["fx", "kiro", "hermes"]) {
       const source = acpAdapterSource(id);
-      assert.equal(source.kind, "custom", `${id} 应使用自带安装器`);
-      if (source.kind !== "custom") return;
-      assertValidBash(acpCustomProvisionScript(source), `custom:${id}`);
-      // 必须是绝对路径：适配器以空 HOME 启动，PATH 查找不可靠。
-      assert.ok(acpCustomCommand(source).startsWith(ACP_PROVISION_ROOT));
+      assert.equal(source.kind, "container", `${id} 应由注册表镜像提供`);
+      if (source.kind !== "container") continue;
+      assert.match(source.image, /^ghcr\.io\/moonrend\/acp-registry\//);
     }
   });
 
@@ -133,10 +131,8 @@ describe("ACP 适配器安装脚本", () => {
     //   error: unexpected argument '--tool-dir' found
     // 脚本本身仍是合法 bash，所以语法检查抓不到，只能断言调用约定。
     const scripts = [
-      acpCustomProvisionScript(
-        acpAdapterSource("hermes") as Extract<AcpAdapterSource, { kind: "custom" }>,
-      ),
       acpProvisionScript("fast-agent", { kind: "uvx", pkg: "fast-agent", version: "0.10.1" }),
+      acpProvisionScript("hermes-acp", { kind: "uvx", pkg: "hermes-agent[acp]", version: "0.19.0" }),
     ];
     for (const script of scripts) {
       for (const line of script.split("\n")) {

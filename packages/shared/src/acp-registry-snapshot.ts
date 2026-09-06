@@ -684,6 +684,40 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     },
     {
+      "id": "fx-acp",
+      "name": "fx",
+      "version": "0.0.7",
+      "profileId": "fx",
+      "image": "ghcr.io/moonrend/acp-registry/fx-acp:0.0.7",
+      "dist": {
+        "kind": "binary"
+      },
+      "storage": {
+        "mode": "files",
+        "env": {
+          "HOME": "${HOME_DIR}"
+        },
+        "artifacts": [
+          {
+            "durable": ".fx",
+            "runtime": ".fx",
+            "sync": "exit",
+            "when": [
+              "self",
+              "oauth"
+            ]
+          }
+        ]
+      },
+      "auth": {
+        "modes": [
+          "self",
+          "oauth",
+          "api_key"
+        ]
+      }
+    },
+    {
       "id": "gemini",
       "name": "Gemini CLI",
       "version": "0.58.0",
@@ -877,6 +911,48 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     },
     {
+      "id": "hermes-acp",
+      "name": "Hermes",
+      "version": "0.19.0",
+      "profileId": "hermes",
+      "image": "ghcr.io/moonrend/acp-registry/hermes-acp:0.19.0",
+      "dist": {
+        "kind": "uvx"
+      },
+      "storage": {
+        "mode": "home",
+        "env": {
+          "HOME": "${HOME_DIR}",
+          "HERMES_HOME": "${HOME_DIR}"
+        },
+        "artifacts": [
+          {
+            "durable": "home",
+            "runtime": "home",
+            "sync": "exit",
+            "when": [
+              "self",
+              "oauth"
+            ]
+          },
+          {
+            "durable": "home",
+            "runtime": "home",
+            "sync": "none",
+            "when": [
+              "api_key"
+            ]
+          }
+        ]
+      },
+      "auth": {
+        "modes": [
+          "self",
+          "api_key"
+        ]
+      }
+    },
+    {
       "id": "junie",
       "name": "Junie",
       "version": "3123.7.0",
@@ -968,6 +1044,32 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "oauth",
           "api_key"
+        ]
+      }
+    },
+    {
+      "id": "kiro-acp",
+      "name": "Kiro CLI",
+      "version": "2.21.1",
+      "profileId": "kiro",
+      "image": "ghcr.io/moonrend/acp-registry/kiro-acp:2.21.1",
+      "dist": {
+        "kind": "binary"
+      },
+      "storage": {
+        "mode": "state-home",
+        "xdg": true,
+        "artifacts": [
+          {
+            "durable": "home",
+            "runtime": "home",
+            "sync": "exit"
+          }
+        ]
+      },
+      "auth": {
+        "modes": [
+          "self"
         ]
       }
     },
@@ -1332,5 +1434,5 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     }
   ],
-  "digest": "0aac197b945017dd"
+  "digest": "b2bcc2af9ed90fdc"
 } as AcpCuratedIndex;

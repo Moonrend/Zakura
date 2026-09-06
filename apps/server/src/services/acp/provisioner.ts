@@ -5,17 +5,13 @@
  * 同一个 2000+ 行的类里让安装逻辑既难测也难改。这里只关心「把 profileId 变成
  * 一条可执行的 command + args」，不碰 JSON-RPC、会话状态或权限。
  *
- * 两条来源（见 @zakura/shared 的 acp-sources）：
- *   - custom：上游自带安装脚本，跑幂等脚本装进 /workspace/.zakura/acp/
+ * 来源见 @zakura/shared 的 acp-sources：
  *   - registry：走 AcpRegistryService，pin 版本 + sha256 + 原子切换
- * image 源不需要 provision（适配器随镜像出厂，目前只有 full 镜像里的 fx）。
+ *   - container / image：不需要 provision（前者由 session 层起容器并接管
+ *     stdio，后者随镜像出厂）
  */
 import type { Agent } from "../../db/schema.js";
-import {
-  acpAdapterSource,
-  acpCustomCommand,
-  acpCustomProvisionScript,
-} from "@zakura/shared";
+import { acpAdapterSource } from "@zakura/shared";
 
 export type AcpResolvedAdapter = {
   command: string;
@@ -23,8 +19,7 @@ export type AcpResolvedAdapter = {
   /**
    * Registry adapter id + installed version backing this command, when it came
    * from the registry. GC uses these to avoid pruning a directory that a live
-   * session is still executing from. Absent for custom sources, which are not
-   * version-managed.
+   * session is still executing from.
    */
   registryId?: string;
   version?: string;
@@ -109,24 +104,6 @@ export class AcpProvisioner {
     if (cached) return cached;
 
     try {
-      if (source.kind === "custom") {
-        const script = acpCustomProvisionScript(source);
-        let res;
-        if (useSidecar) {
-          await this.deps.workspace.ensureAcpSidecar(agent);
-          res = await this.deps.workspace.execInSidecar(agent, ["bash", "-lc", script]);
-        } else {
-          await this.deps.workspace.ensureStarted(agent, { require: "shell" });
-          res = await this.deps.workspace.execInWorkspace(agent, ["bash", "-lc", script]);
-        }
-        if (res.exitCode !== 0) {
-          throw new Error(describeAcpProvisionFailure(profileId, res.stderr));
-        }
-        const result: AcpResolvedAdapter = { command: acpCustomCommand(source), args: [] };
-        this.cache.set(cacheKey, result);
-        return result;
-      }
-
       const registry = this.deps.registry;
       if (!registry) return null;
       const installed = await registry.ensureInstalled(agent, source.registryId, useSidecar);
