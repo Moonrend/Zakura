@@ -12,7 +12,11 @@
  */
 
 import { ACP_PROVISION_CACHE, acpVersionDir } from "./acp-provision.js";
-import { acpAgentByProfile, acpAgents } from "./acp-registry-client.js";
+import {
+  acpAgentByProfile,
+  acpAgents,
+  acpImageAtVersion,
+} from "./acp-registry-client.js";
 
 export type AcpAdapterSource =
   /** Provision from the upstream registry under this id. */
@@ -103,9 +107,13 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
     install: [
       'mkdir -p "$ZAKURA_ACP_DIR/bin"',
       `command -v uv >/dev/null 2>&1 || { echo "ZAKURA_ACP_NEED_UV" >&2; exit 127; }`,
+      // `uv tool install` has no --tool-dir flag; the install root is only
+      // configurable through UV_TOOL_DIR. Passing it as an argument makes uv
+      // reject the whole command ("unexpected argument '--tool-dir' found").
       `UV_CACHE_DIR=${shq(`${ACP_PROVISION_CACHE}/uv`)} ` +
-        'uv tool install --force --tool-dir "$ZAKURA_ACP_DIR/tools" ' +
-        '--tool-bin-dir "$ZAKURA_ACP_DIR/bin" "hermes-agent[acp]" >&2',
+        'UV_TOOL_DIR="$ZAKURA_ACP_DIR/tools" ' +
+        'UV_TOOL_BIN_DIR="$ZAKURA_ACP_DIR/bin" ' +
+        'uv tool install --force "hermes-agent[acp]" >&2',
       // The package exposes `hermes`; ACP mode is a subcommand, so wrap it.
       'if [ ! -x "$ZAKURA_ACP_DIR/bin/hermes-acp" ]; then',
       '  printf \'%s\\n\' \'#!/bin/sh\' \'exec "$(dirname "$0")/hermes" acp "$@"\' >"$ZAKURA_ACP_DIR/bin/hermes-acp"',
@@ -122,10 +130,27 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
  * Resolution is registry-first: if `Moonrend/acp-registry` publishes an image
  * for this profile, that image wins. Only profiles the registry does not cover
  * fall back to the host-side install scripts below.
+ *
+ * `pinnedVersion` lets an agent adopt a registry version newer than the one
+ * this build shipped, without a redeploy. It only applies to container
+ * adapters, and only when the running index still knows the agent: an unknown
+ * pin falls through to the registry's own version rather than synthesising an
+ * image ref that may not exist.
  */
-export function acpAdapterSource(profileId: string): AcpAdapterSource {
+export function acpAdapterSource(
+  profileId: string,
+  pinnedVersion?: string | null,
+): AcpAdapterSource {
   const agent = acpAgentByProfile(profileId);
-  if (agent) return { kind: "container", image: agent.image };
+  if (agent) {
+    // A pin only applies to registry-backed container adapters, and only when
+    // the running index still knows the agent — `acpImageAtVersion` returns
+    // null for an unknown id, in which case we fall back to the version the
+    // index itself advertises instead of synthesising a bogus image ref.
+    const pinned = pinnedVersion?.trim();
+    const pinnedImage = pinned ? acpImageAtVersion(agent.id, pinned) : null;
+    return { kind: "container", image: pinnedImage ?? agent.image };
+  }
   const custom = CUSTOM_SOURCES[profileId];
   if (custom) return custom;
   // Custom/user-defined profiles supply their own command; nothing to provision.

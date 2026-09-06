@@ -16,6 +16,7 @@ import {
   applyAcpRegistryIndex,
   resetAcpRegistry,
   acpRuntimeLayout,
+  acpSnapshotVersion,
 } from "../src/index.js";
 
 test("registry snapshot ships with the expected shape", () => {
@@ -140,6 +141,71 @@ test("a malformed index is rejected and leaves the active one intact", () => {
   }
   assert.equal(acpAgents().length, before, "active index must survive bad input");
 });
+
+test("refreshing from the live index keeps every agent a container adapter", (t) => {
+  // Membership in the index *is* the enablement signal: there is no `enabled`
+  // flag any more. Applying the published dist/index.json verbatim must
+  // therefore leave the roster intact, because a dropped agent would silently
+  // demote that profile to workspace provisioning and change how sessions run.
+  t.after(() => resetAcpRegistry());
+  const before = acpAgents().map((a) => a.id).sort();
+  assert.ok(before.length > 0, "precondition: snapshot ships agents");
+
+  const live = {
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "live000000000000",
+    agents: acpAgents(),
+  };
+  assert.ok(applyAcpRegistryIndex(live).ok, "live-shaped index must be accepted");
+
+  assert.deepEqual(acpAgents().map((a) => a.id).sort(), before);
+  for (const id of before) {
+    const source = acpAdapterSource(acpAgents().find((a) => a.id === id)!.profileId);
+    assert.equal(source.kind, "container", `${id} must stay a container adapter`);
+  }
+});
+
+test("a published version bump reads as an available update", (t) => {
+  // Container adapters launch the tag in `image`, so "installed" is the version
+  // this build shipped with and an update is a newer tag we have not adopted.
+  t.after(() => resetAcpRegistry());
+  const target = acpAgents()[0];
+  assert.equal(acpSnapshotVersion(target.id), target.version, "no update before refresh");
+
+  applyAcpRegistryIndex({
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "bumped0000000000",
+    agents: acpAgents().map((a) => (a.id === target.id ? { ...a, version: "99.0.0" } : a)),
+  });
+
+  const after = acpAgents().find((a) => a.id === target.id)!;
+  assert.equal(after.version, "99.0.0", "active index must carry the new version");
+  assert.equal(acpSnapshotVersion(target.id), target.version, "shipped version is immutable");
+  assert.notEqual(acpSnapshotVersion(target.id), after.version, "difference drives updateAvailable");
+});
+
+test("an agent dropped from the index stops being a container adapter", (t) => {
+  // Withdrawing an image is how the registry retires an agent, so the resolver
+  // must fall back instead of pointing sessions at a tag that no longer exists.
+  t.after(() => resetAcpRegistry());
+  const target = acpAgents()[0];
+  applyAcpRegistryIndex({
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "dropped000000000",
+    agents: acpAgents().filter((a) => a.id !== target.id),
+  });
+  assert.ok(!acpAgents().some((a) => a.id === target.id), "withdrawn agent must be gone");
+  assert.notEqual(
+    acpAdapterSource(target.profileId).kind === "container" &&
+      (acpAdapterSource(target.profileId) as { image: string }).image,
+    target.image,
+    "resolver must not keep serving the withdrawn image",
+  );
+});
+
 test("registry auth modes agree with the builtin profiles", () => {
   // The UI renders setup flows from the profile while the adapter reads them
   // from the registry; drift between the two silently breaks login.

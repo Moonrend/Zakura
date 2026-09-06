@@ -1133,6 +1133,66 @@ export class RunnerDockerWorkspace {
     return job;
   }
 
+  /**
+   * Interactive login PTY inside the adapter container.
+   *
+   * `docker exec`, not attach: PID 1 is the adapter's ACP JSON-RPC stream and
+   * writing a shell into it would corrupt the protocol. Credentials written by
+   * the CLI land on the adapter's cred volume, so the login must happen in
+   * this container and nowhere else.
+   */
+  async startAdapterLoginShell(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+    opts?: { command?: string[]; cols?: number; rows?: number },
+  ): Promise<ShellJob> {
+    const found = await this.findAdapterContainer(agentId, adapterId, sessionKey);
+    if (!found || found.status !== "running") {
+      throw new Error(`ACP adapter container not running: ${adapterId}`);
+    }
+    const container = this.docker.getContainer(found.id);
+    const command = opts?.command?.length
+      ? opts.command
+      : ["/bin/sh", "-lc", "exec /bin/bash -l || exec /bin/sh -l"];
+    const exec = await container.exec({
+      Cmd: command,
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      Env: ["TERM=xterm-256color"],
+    });
+    const stream = (await exec.start({
+      hijack: true,
+      stdin: true,
+      Tty: true,
+    })) as unknown as NodeJS.ReadWriteStream;
+    const job = new ShellJob({ agentId });
+    bindExecStream(job, stream, {
+      inspect: () => exec.inspect(),
+      resize: (cols, rows) => exec.resize({ w: cols, h: rows }),
+      killPid: async (pid) => {
+        try {
+          const killer = await container.exec({
+            Cmd: ["kill", "-TERM", String(pid)],
+            AttachStdout: true,
+            AttachStderr: true,
+          });
+          const ks = await killer.start({ hijack: true, stdin: false });
+          ks.resume();
+        } catch {
+          /* gone */
+        }
+      },
+    });
+    this.jobs.add(job);
+    if (opts?.cols && opts?.rows) {
+      await exec.resize({ w: opts.cols, h: opts.rows }).catch(() => undefined);
+    }
+    return job;
+  }
+
   async removeAdapterContainer(
     agentId: string,
     adapterId: string,

@@ -2105,7 +2105,10 @@ export async function createApiApp(deps: {
       store: cloudStore,
       workspace: agentService.workspace,
       workspaceFs: workspaceFsProvider,
-      publicBaseUrl: config.publicBaseUrl,
+      // ACP agents run in sibling containers and dial this URL for the MCP
+      // gateway, so it must be routable from inside the Docker network rather
+      // than the (often external) public URL.
+      publicBaseUrl: config.internalBaseUrl,
       maxConcurrentAcpPerTenant: config.maxConcurrentAcpPerTenant || 8,
       acpRegistry,
     });
@@ -2113,7 +2116,11 @@ export async function createApiApp(deps: {
       agentService,
       acp: acpSessions,
       acpRegistry,
-      publicBaseUrl: config.publicBaseUrl,
+      // Feeds provisionAcpZakuraRoutes, which bakes `zakura_base_url` into the
+      // persisted adapter config. That URL is dialed by the adapter *from
+      // inside its container*, so it must be the internal address too —
+      // otherwise the model route 404s exactly like the MCP gateway did.
+      publicBaseUrl: config.internalBaseUrl,
     });
     remoteIngress = new RemoteAgentIngress(
       db,

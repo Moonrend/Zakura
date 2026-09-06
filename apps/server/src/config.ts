@@ -44,6 +44,14 @@ export interface AppConfig {
   host: string;
   port: number;
   publicBaseUrl: string;
+  /**
+   * Base URL that sibling containers (ACP agents, workspaces) must use to reach
+   * this server. `publicBaseUrl` is frequently an external host/IP that is not
+   * routable from inside the Docker network, which makes MCP handshakes fail
+   * with UnexpectedHttpStatus. When the server runs inside a container we
+   * default to its own container DNS alias on the shared Docker network.
+   */
+  internalBaseUrl: string;
   /** Web console URL for OAuth authorize UI redirects */
   webPublicUrl: string;
   dockerNetwork: string;
@@ -96,6 +104,30 @@ function isRunningInContainer(): boolean {
   return existsSync("/.dockerenv") || existsSync("/run/.containerenv");
 }
 
+/**
+ * Resolve the URL that sibling containers should use to reach this server.
+ *
+ * Precedence:
+ *  1. `ZAKURA_INTERNAL_URL` — explicit operator override.
+ *  2. Container DNS alias — when we run inside Docker, `$HOSTNAME` resolves on
+ *     the shared network for every container attached to it. Compose also
+ *     registers the service name, but the hostname is always correct.
+ *  3. `publicBaseUrl` — bare-metal server, where public == reachable.
+ */
+export function resolveInternalBaseUrl(
+  publicBaseUrl: string,
+  port: number,
+  // Injectable so tests can exercise both deployment shapes on any host.
+  inContainer: () => boolean = isRunningInContainer,
+): string {
+  const explicit = process.env.ZAKURA_INTERNAL_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+  if (!inContainer()) return publicBaseUrl.replace(/\/$/, "");
+  const alias = process.env.ZAKURA_CONTAINER_ALIAS?.trim() || process.env.HOSTNAME?.trim();
+  if (!alias) return publicBaseUrl.replace(/\/$/, "");
+  return `http://${alias}:${port}`;
+}
+
 export function loadConfig(): AppConfig {
   const dataDir = resolveDataDir();
   mkdirSync(dataDir, { recursive: true });
@@ -132,6 +164,7 @@ export function loadConfig(): AppConfig {
     host,
     port,
     publicBaseUrl,
+    internalBaseUrl: resolveInternalBaseUrl(publicBaseUrl, port),
     webPublicUrl: webPublicUrl.replace(/\/$/, ""),
     dockerNetwork: process.env.ZAKURA_DOCKER_NETWORK ?? "zakura",
     platformServiceEndpointMode: isRunningInContainer() ? "network" : "published",

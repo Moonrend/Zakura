@@ -1,0 +1,68 @@
+# 第二套 Zakura —— 开发/测试实例，与生产 (/opt/zakura) 完全隔离
+# 端口（均不同于生产 80/443）：
+#   server 直连 8787  / web 3001  / redis 127.0.0.1:6380
+# postgres 共用生产的 zakura-postgres，分库 zakura_dev（加入生产 zakura 网络直连容器名）
+# 启动：cd /opt/zakura-dev && docker compose -f docker-compose.dev.yml up -d
+services:
+  # service 名不能叫 "zakura"：Compose 总会把 service 名注册为网络别名，
+  # 在共享的生产 zakura 网络上会与生产容器撞名，导致 caddy 反代 DNS 轮询到 dev。
+  zakura-app-dev:
+    image: ${ZAKURA_IMAGE:-sunwuyuan/zakura-dev:latest}
+    container_name: zakura-dev
+    ports:
+      - "8787:8787"   # server 直连
+      - "3001:3001"   # web 前端直连
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://zakura:zakura@zakura-postgres:5432/zakura_dev}
+      REDIS_URL: ${REDIS_URL:-redis://redis-dev:6379}
+      ZAKURA_DATA_DIR: /data
+      ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-http://34.171.13.101:8787}
+      ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-http://34.171.13.101:3001}
+      HOST: 0.0.0.0
+      PORT: 8787
+      ZAKURA_EDITION: ${ZAKURA_EDITION:-saas}
+      ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:debian}
+      ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+    volumes:
+      - zakura-dev-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      redis-dev:
+        condition: service_healthy
+        required: true
+    networks:
+      zakura-dev:
+      # 只为直连生产的 zakura-postgres 而加入该网络。
+      zakura:
+
+  redis-dev:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: zakura-dev-redis
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - zakura-dev-redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - zakura-dev
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  zakura-dev-data:
+  zakura-dev-redis-data:
+
+networks:
+  zakura-dev:
+    name: zakura-dev
+    driver: bridge
+  zakura:
+    name: zakura
+    external: true

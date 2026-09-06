@@ -507,6 +507,11 @@ export {
   acpContainerAgents,
   applyAcpRegistryIndex,
   resetAcpRegistry,
+  acpRegistryDigest,
+  acpRegistryIsSnapshot,
+  acpSnapshotDigest,
+  acpSnapshotVersion,
+  acpImageAtVersion,
 } from "./acp-registry-client.js";
 export type {
   AcpCuratedAgent,

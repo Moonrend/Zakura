@@ -8,7 +8,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import {
@@ -23,6 +31,7 @@ import {
   acpProvisionScript,
   acpProvisionedCommand,
   acpVersionDir,
+  type AcpAdapterSource,
   type AcpProvisionPlan,
 } from "../src/index.js";
 
@@ -48,6 +57,33 @@ function scratchRoot(): string {
   const local = join(process.cwd(), ".test-tmp");
   mkdirSync(local, { recursive: true });
   return local;
+}
+
+/**
+ * The generated script resolves a package's bin entry with `node -e`. Inside the
+ * adapter image node is always present, but the host bash used by these tests may
+ * be WSL, where only `node.exe` exists via interop and no POSIX `node` is on PATH.
+ *
+ * Rather than weaken the script for the sake of the test, hand the test its own
+ * `node`: a shim that delegates to `node.exe`. That keeps the test hermetic and
+ * leaves production behaviour untouched.
+ *
+ * Runs `file` under bash with the shim first on PATH. Note WSL *rebuilds* PATH on
+ * startup and discards whatever is handed over via the child env, so the
+ * assignment has to happen inside the bash command line itself.
+ */
+function runInstallScript(file: string): void {
+  if (process.platform !== "win32") {
+    execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+    return;
+  }
+  const dir = mkdtempSync(join(scratchRoot(), "acp-nodeshim-"));
+  const shim = join(dir, "node");
+  writeFileSync(shim, '#!/bin/sh\nexec node.exe "$@"\n');
+  chmodSync(shim, 0o755);
+  execFileSync("bash", ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
+    stdio: "pipe",
+  });
 }
 
 function assertValidBash(script: string, label: string): void {
@@ -88,6 +124,28 @@ describe("ACP 适配器安装脚本", () => {
       assertValidBash(acpCustomProvisionScript(source), `custom:${id}`);
       // 必须是绝对路径：适配器以空 HOME 启动，PATH 查找不可靠。
       assert.ok(acpCustomCommand(source).startsWith(ACP_PROVISION_ROOT));
+    }
+  });
+
+  it("uv 安装脚本不传 uv 不认识的 --tool-dir/--tool-bin-dir", () => {
+    // `uv tool install` 只认 UV_TOOL_DIR / UV_TOOL_BIN_DIR 环境变量，没有对应的
+    // 命令行参数。写成 flag 时 uv 会直接拒绝整条命令：
+    //   error: unexpected argument '--tool-dir' found
+    // 脚本本身仍是合法 bash，所以语法检查抓不到，只能断言调用约定。
+    const scripts = [
+      acpCustomProvisionScript(
+        acpAdapterSource("hermes") as Extract<AcpAdapterSource, { kind: "custom" }>,
+      ),
+      acpProvisionScript("fast-agent", { kind: "uvx", pkg: "fast-agent", version: "0.10.1" }),
+    ];
+    for (const script of scripts) {
+      for (const line of script.split("\n")) {
+        if (!/\buv tool install\b/.test(line)) continue;
+        assert.ok(!/--tool-dir\b/.test(line), `uv tool install 不能带 --tool-dir：${line.trim()}`);
+        assert.ok(!/--tool-bin-dir\b/.test(line), `uv tool install 不能带 --tool-bin-dir：${line.trim()}`);
+        assert.match(line, /UV_TOOL_DIR=/, `必须用 UV_TOOL_DIR 指定安装根目录：${line.trim()}`);
+        assert.match(line, /UV_TOOL_BIN_DIR=/, `必须用 UV_TOOL_BIN_DIR 指定 bin 目录：${line.trim()}`);
+      }
     }
   });
 
@@ -180,6 +238,14 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
   function stubbed(script: string, root: string, binPath: string): string {
     // 安装行有两种形态：latest 是裸命令，钉版本时包在 `if ! ... ; then` 回退分支里。
     // 桩必须同时覆盖，否则会漏桩并真的去调 npm。
+    //
+    // 两处站点的上下文不同，必须分别处理：
+    //   1) `if ! npm_config_cache=... ; then`
+    //   2) 回退分支里缩进的 `npm_config_cache=...`
+    // 站点 1 前面带 `!`，而 `! A && B` 在 shell 里解析成 `(! A) && B`：mkdir 成功
+    // 后被 `!` 取反成假，`&&` 直接短路，printf 永远不执行，桩只建了目录却没造出
+    // 可执行文件，最后表现为 BIN_NOT_FOUND。所以要用 `{ ...; }` 包成一条复合命令，
+    // 让 `!` 作用在整个序列上而不是第一条。
     const stubCmd =
       `mkdir -p ${JSON.stringify(bashPath(join(root, binPath)))} && ` +
       `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(root, binPath, "codex-acp")))}`;
@@ -188,7 +254,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
       .join(bashPath(join(root, "acp")))
       .split("/workspace/.zakura/cache")
       .join(bashPath(join(root, "cache")))
-      .replace(/^if ! npm_config_cache=.*$/m, `if ! ${stubCmd}; then`)
+      .replace(/^if ! npm_config_cache=.*$/m, `if ! { ${stubCmd}; }; then`)
       // 回退分支里的第二次 npm 调用也要桩掉，否则钉版本用例会去调真实 npm。
       .replace(/^\s*npm_config_cache=.*$/gm, stubCmd);
   }
@@ -236,21 +302,31 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
         .split(ACP_PROVISION_ROOT)
         .join(bashPath(join(root, "acp")))
         .split("/workspace/.zakura/cache")
-        .join(join(root, "cache"))
+        .join(bashPath(join(root, "cache")))
         .replace(
-          /^npm_config_cache=.*$/m,
-          `mkdir -p ${JSON.stringify(pkgDir)} && ` +
-            `printf '%s' '{"name":"@qwen-code/qwen-code","version":"0.22.3","bin":{"qwen":"cli-entry.js"}}' > ${JSON.stringify(join(pkgDir, "package.json"))} && ` +
-            `mkdir -p ${JSON.stringify(binDir)} && ` +
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "qwen"))} && ` +
-            `chmod +x ${JSON.stringify(join(binDir, "qwen"))} && ` +
-            // 传递依赖污染 .bin，逼逻辑去读 package.json 而不是数条目。
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "node-gyp-build"))} && ` +
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "semver"))}`,
+          // 两处 npm 站点必须都桩掉。旧写法 `/^npm_config_cache=/m` 一处都匹配不上：
+          // 首处前面有 `if ! `，回退分支那处带缩进，于是脚本真的去调 npm，在没有
+          // npm 的 bash 里直接 `command not found`。
+          /^(?:if ! )?[ \t]*npm_config_cache=.*$/gm,
+          (line) => {
+            const cmd =
+              `mkdir -p ${JSON.stringify(bashPath(pkgDir))} && ` +
+              `printf '%s' '{"name":"@qwen-code/qwen-code","version":"0.22.3","bin":{"qwen":"cli-entry.js"}}' > ${JSON.stringify(bashPath(join(pkgDir, "package.json")))} && ` +
+              `mkdir -p ${JSON.stringify(bashPath(binDir))} && ` +
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "qwen")))} && ` +
+              `chmod +x ${JSON.stringify(bashPath(join(binDir, "qwen")))} && ` +
+              // 传递依赖污染 .bin，逼逻辑去读 package.json 而不是数条目。
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "node-gyp-build")))} && ` +
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "semver")))}`;
+            // 同样要包成复合命令：`! A && B` 解析成 `(! A) && B`，会短路掉后续。
+            return line.startsWith("if ! ") ? `if ! { ${cmd}; }; then` : cmd;
+          },
         );
       const file = join(root, "install.sh");
       writeFileSync(file, script);
-      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+      // 脚本用 `node -e` 读 package.json 的 bin 字段。适配器镜像里必有 node，
+      // 但宿主的 bash 可能是 WSL——那里只有 node.exe，没有 POSIX node。
+      runInstallScript(file);
 
       assert.ok(existsSync(join(root, "acp/qwen-code/0.22.3/.ok")), "缺少 .ok 标记");
       const alias = join(root, "acp/qwen-code/0.22.3/node_modules/.bin/qwen-code");

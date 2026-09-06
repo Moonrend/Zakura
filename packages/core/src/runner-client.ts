@@ -1074,4 +1074,28 @@ export class RunnerClient {
     );
     if (!res.ok) throw new Error(await res.text());
   }
+
+  /**
+   * Open an interactive PTY inside the adapter container so a human can run
+   * the agent's CLI login. Credentials land on the adapter's cred volume,
+   * which is why this must exec into that exact container rather than the
+   * agent workspace.
+   */
+  async startAcpAdapterLoginShell(
+    agentId: string,
+    adapterId: string,
+    body: { sessionKey: string; command?: string[]; cols?: number; rows?: number },
+  ): Promise<{ jobId: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/login-shell`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { jobId: string };
+  }
+
 }

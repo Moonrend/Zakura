@@ -163,6 +163,13 @@ type AdapterProcess = {
   gatewayModels?: LiveRuntime["gatewayModels"];
   /** Owning agent — needed at dispose time, when no refs remain to read it from. */
   agent: Agent;
+  /**
+   * Set once the shared connection has closed (adapter crash, container OOM,
+   * attach stream drop). A dead process must never be handed out for reuse:
+   * `session/new` on a closed connection would hang until timeout instead of
+   * failing fast, so every reuse path checks this first.
+   */
+  dead: boolean;
 };
 
 export type LiveRuntime = {
@@ -1276,7 +1283,11 @@ export class AcpSessionService {
     // (verified empirically: 2 concurrent sessions, 0 misrouted updates).
     const procKey = this.procKey(agent, setup.id);
     const pooled = this.procs.get(procKey);
-    if (pooled) {
+    if (pooled && pooled.dead) {
+      // Crashed between the close handler firing and this lookup. Drop it so we
+      // cold-boot rather than issuing `session/new` into a dead connection.
+      if (this.procs.get(procKey) === pooled) this.procs.delete(procKey);
+    } else if (pooled) {
       try {
         return await this.joinProcess(pooled, agent, chatSessionId, setup, opts);
       } catch (err) {
@@ -1453,7 +1464,7 @@ export class AcpSessionService {
     // with the image and its credentials live on a dedicated volume. None of
     // the workspace staging below applies: nothing to copy, nothing to
     // install, no binary to probe. We skip straight to attaching to PID 1.
-    const adapterSource = acpAdapterSource(setup.id);
+    const adapterSource = acpAdapterSource(setup.id, setup.pinnedVersion);
     const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
 
     const execFn = useSidecar
@@ -1610,6 +1621,7 @@ export class AcpSessionService {
       layout: live.layout,
       zakuraRouted: live.zakuraRouted,
       agent,
+      dead: false,
       ...(live.gatewayModels?.length ? { gatewayModels: live.gatewayModels } : {}),
     };
 
@@ -1749,8 +1761,13 @@ export class AcpSessionService {
         },
       });
 
+      // The connection is shared by every chat bound to this process, so its
+      // close is a *process-level* event. Handling only `chatSessionId` here
+      // would silently strand every sibling ref: their LiveRuntimes would stay
+      // in `byChat` pointing at a dead connection, and the next prompt would
+      // hang instead of failing. Route through the process-wide handler.
       void live.connection.closed.then(() => {
-        this.byChat.delete(chatSessionId);
+        void this.onProcessClosed(proc, "adapter 连接已关闭");
       });
       return live;
     } catch (err) {
@@ -2017,6 +2034,57 @@ export class AcpSessionService {
   }
 
   /**
+   * Handle the death of a shared adapter process.
+   *
+   * Phase 3 made one adapter process serve many chats, which also made its
+   * crash a *fan-out* failure: a container OOM, an adapter panic or a dropped
+   * attach stream takes down every chat bound to it. Before this handler the
+   * only cleanup was `byChat.delete(chatSessionId)` for whichever chat happened
+   * to boot the process, so every sibling was left holding a LiveRuntime whose
+   * connection was already closed — the next prompt would hang on a request
+   * that could never be answered, with nothing shown in the UI.
+   *
+   * So the close is broadcast to all refs: reject in-flight waiters, drop the
+   * runtimes, and persist a `closed` event per chat so each one surfaces the
+   * failure. Deliberately *not* auto-restarting — a crash usually means bad
+   * credentials or a broken image, and a silent respawn loop would burn
+   * container starts while hiding the fault. The next user prompt cold-boots a
+   * fresh process through the normal path.
+   */
+  private async onProcessClosed(proc: AdapterProcess, reason: string): Promise<void> {
+    if (proc.dead) return; // `closed` can settle more than once; fan out exactly once.
+    proc.dead = true;
+    // Evict first: any concurrent `ensureRuntime` must cold-boot rather than
+    // join a corpse. Guarded so we never evict a healthy replacement that has
+    // already taken this key.
+    if (this.procs.get(proc.key) === proc) this.procs.delete(proc.key);
+
+    const refs = [...proc.refs.keys()];
+    proc.refs.clear();
+    for (const chatSessionId of refs) {
+      const live = this.byChat.get(chatSessionId);
+      // Only drop the runtime if it still belongs to this process — a chat may
+      // already have been rebooted onto a new one.
+      if (!live || live.proc !== proc) continue;
+      this.byChat.delete(chatSessionId);
+      // Unblocks anything awaiting a permission/elicitation/auth reply that the
+      // dead adapter can no longer answer.
+      this.cancelPending(live);
+      live.active?.dispose();
+      await this.deps.store
+        .appendEvent({
+          sessionId: chatSessionId,
+          type: "session_update",
+          payload: { acpState: "closed", acpError: reason },
+        })
+        .catch(() => undefined);
+    }
+
+    // Reclaim the container/staged dir. Safe now that refs are drained.
+    await this.disposeProcess(proc).catch(() => undefined);
+  }
+
+  /**
    * Tear down a shared adapter process once no chat references it.
    *
    * Mirrors the non-pooled branch of `teardown`, but at process scope: the
@@ -2026,6 +2094,10 @@ export class AcpSessionService {
    * survives, so the next boot reuses the existing login.
    */
   private async disposeProcess(proc: AdapterProcess): Promise<void> {
+    // Mark dead *before* killing. `kill()` settles `connection.closed`, which
+    // fires `onProcessClosed`; without this flag an intentional teardown would
+    // be re-entered as if it were a crash and dispose twice.
+    proc.dead = true;
     if (this.procs.get(proc.key) === proc) this.procs.delete(proc.key);
     await proc.kill().catch(() => undefined);
     const agent = proc.agent;

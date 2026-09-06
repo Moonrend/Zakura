@@ -196,9 +196,12 @@ export function acpProvisionScript(
     const spec = plan.version === "latest" ? plan.pkg : `${plan.pkg}==${plan.version}`;
     lines.push(
       `command -v uv >/dev/null 2>&1 || { echo "ZAKURA_ACP_NEED_UV" >&2; exit 127; }`,
+      // uv exposes the install/bin roots as env vars only — there is no
+      // --tool-dir / --tool-bin-dir flag on `uv tool install`.
       `UV_CACHE_DIR=${shq(`${ACP_PROVISION_CACHE}/uv`)} ` +
-        `uv tool install --force --tool-dir ${shq(`${partial}/tools`)} ` +
-        `--tool-bin-dir ${shq(`${partial}/bin`)} ${shq(spec)} >&2`,
+        `UV_TOOL_DIR=${shq(`${partial}/tools`)} ` +
+        `UV_TOOL_BIN_DIR=${shq(`${partial}/bin`)} ` +
+        `uv tool install --force ${shq(spec)} >&2`,
     );
   } else {
     const archive = `${partial}/archive`;

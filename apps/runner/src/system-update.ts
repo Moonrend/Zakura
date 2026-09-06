@@ -7,20 +7,15 @@
  *
  *   1. docker pull <image>
  *   2. inspect the current container to copy its full config
- *   3. detach-spawn a short-lived "recreator" process (still this image's node)
- *      that, after a grace delay, creates + starts the replacement container
- *      with the copied config and the NEW image, then removes the old one.
- *   4. the Runner process exits; the replacement takes over (compose
- *      `restart: always` is not needed — we create the new container directly).
- *
- * The recreator uses the Docker API against the same socket, so it survives the
- * old container being removed (it runs as a child of PID 1; we detach via
- * `child_process` with stdio inherited and unref).
+ *   3. start a sibling "zakura-recreator" container (same new image + docker.sock)
+ *      that, after a grace delay, creates + starts the replacement with the
+ *      copied runtime identity and the NEW image's Cmd/Entrypoint, then removes
+ *      the old one. A child process inside this PID namespace would die when we
+ *      `docker stop` ourselves — the sibling container does not.
+ *   4. this process keeps serving until the recreator stops it; the replacement
+ *      takes over.
  */
 import type Docker from "dockerode";
-import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { log } from "@zakura/core";
 
 function dockerErr(err: unknown): Error {
@@ -44,73 +39,373 @@ export async function pullImage(
   return { image };
 }
 
+export type SelfProcHints = {
+  cgroupId: string | null;
+  overlayUpperId: string | null;
+  /** container ids from mountinfo, excluding the netns owner's resolv.conf/hostname/hosts */
+  mountinfoContainerIds: string[];
+};
+
+export type FindSelfOpts = {
+  hints?: SelfProcHints;
+  hostname?: string;
+  token?: string;
+  slug?: string;
+};
+
+const HEX_ID = /^[0-9a-f]{12,64}$/i;
+const HEX64 = /[0-9a-f]{64}/i;
+
+/**
+ * Parse cgroup + mountinfo the way a Tailscale-sidecar Runner actually looks:
+ * privileged cgroup is `0::/`, overlay upperdir is OUR layer, and the only
+ * `containers/<id>` paths are the sidecar's `/etc/resolv.conf|hostname|hosts`
+ * because `network_mode: container:<ts>` shares that netns.
+ *
+ * The previous implementation took the first `containers/<id>` (the sidecar)
+ * and self-update then rebuilt zakura-ts with the runner image.
+ */
+export function parseSelfProcHints(cgroup: string, mountinfo: string): SelfProcHints {
+  const cgroupId =
+    /(?:docker[-/]|containerd-[^/\s]*\/|libpod-)([0-9a-f]{64})/i.exec(cgroup)?.[1] ?? null;
+
+  let overlayUpperId: string | null = null;
+  const mountinfoContainerIds: string[] = [];
+  for (const line of mountinfo.split("\n")) {
+    if (!overlayUpperId) {
+      const upper = /(?:^|[\s,])upperdir=\S*?([0-9a-f]{64})/i.exec(line);
+      if (upper?.[1]) overlayUpperId = upper[1];
+    }
+    // Shared-netns files belong to the network-namespace owner, not us.
+    if (/\/etc\/(?:resolv\.conf|hostname|hosts)(?:\s|$)/.test(line)) continue;
+    const fromPath = /containers\/([0-9a-f]{64})/i.exec(line);
+    if (fromPath?.[1] && !mountinfoContainerIds.includes(fromPath[1])) {
+      mountinfoContainerIds.push(fromPath[1]);
+    }
+  }
+
+  return { cgroupId, overlayUpperId, mountinfoContainerIds };
+}
+
+function containerName(names: string[] | undefined, name?: string): string {
+  if (name) return name.replace(/^\//, "");
+  return (names?.[0] ?? "").replace(/^\//, "");
+}
+
+/** Reject the Tailscale sidecar even if /proc or HOSTNAME points at it. */
+export function containerLooksLikeRunner(
+  info: {
+    names?: string[];
+    name?: string;
+    image?: string;
+    command?: string;
+    cmd?: string[] | null;
+    env?: string[] | null;
+  },
+  token?: string | null,
+): boolean {
+  const name = containerName(info.names, info.name);
+  if (name.startsWith("zakura-ts-")) return false;
+  const image = info.image ?? "";
+  if (/(^|\/)tailscale(\/|:|$)/i.test(image)) return false;
+  const command = `${info.command ?? ""} ${(info.cmd ?? []).join(" ")}`;
+  if (command.includes("containerboot")) return false;
+  const env = info.env ?? [];
+  if (token && !env.includes(`ZAKURA_RUNNER_TOKEN=${token}`)) return false;
+  const hasTsAuth = env.some((e) => e.startsWith("TS_AUTHKEY="));
+  const hasRunnerToken = env.some((e) => e.startsWith("ZAKURA_RUNNER_TOKEN="));
+  if (hasTsAuth && !hasRunnerToken) return false;
+  return true;
+}
+
+function graphDriverBlob(info: Docker.ContainerInspectInfo): string {
+  const data = info.GraphDriver?.Data ?? {};
+  return Object.values(data).join(" ");
+}
+
+async function readSelfProcHintsFromHost(): Promise<SelfProcHints> {
+  const { readFileSync } = await import("node:fs");
+  const read = (path: string) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return "";
+    }
+  };
+  return parseSelfProcHints(read("/proc/self/cgroup"), read("/proc/self/mountinfo"));
+}
+
 /**
  * Locate this Runner's own container id from the Docker daemon.
  *
- * Inside a container `HOSTNAME` defaults to the **12-char container id**, not a
- * name. The previous implementation compared it against container *Names*, which
- * essentially never matched, and its fallback compared a node id against a
- * `zakura.runner_slug` label — two different identifiers. Self-update therefore
- * failed with "无法定位当前 Runner 容器" on normal deployments. Match on the id
- * first, and only then fall back to names/labels.
+ * Never return a container that does not look like the Runner — a Tailscale
+ * sidecar shares hostname/UTS/netns with us, and its id is the first
+ * `containers/<id>` in mountinfo. Matching that used to recreate zakura-ts
+ * with the runner image while keeping `Cmd=containerboot`.
  */
-export async function findSelfContainerId(docker: Docker): Promise<string | null> {
+export async function findSelfContainerId(
+  docker: Docker,
+  opts?: FindSelfOpts,
+): Promise<string | null> {
   const list = await docker.listContainers({ all: true });
+  const hostname = (opts?.hostname ?? process.env.HOSTNAME)?.trim();
+  const token = (opts?.token ?? process.env.ZAKURA_RUNNER_TOKEN)?.trim();
+  const slug = (opts?.slug ?? process.env.ZAKURA_RUNNER_SLUG)?.trim();
+  const hints = opts?.hints ?? (await readSelfProcHintsFromHost());
 
-  // 1. /proc-derived container id (most reliable): HOSTNAME is the short id.
-  const hostname = process.env.HOSTNAME?.trim();
-  if (hostname && /^[0-9a-f]{12,64}$/i.test(hostname)) {
-    const byId = list.find((c) => c.Id.startsWith(hostname));
-    if (byId) return byId.Id;
+  const inspectCache = new Map<string, Docker.ContainerInspectInfo>();
+  const inspectOf = async (id: string) => {
+    const cached = inspectCache.get(id);
+    if (cached) return cached;
+    const info = await docker.getContainer(id).inspect();
+    inspectCache.set(id, info);
+    return info;
+  };
+
+  const accept = async (id: string | undefined): Promise<string | null> => {
+    if (!id) return null;
+    const row = list.find((c) => c.Id === id || c.Id.startsWith(id) || id.startsWith(c.Id));
+    if (!row) return null;
+    const info = await inspectOf(row.Id);
+    const ok = containerLooksLikeRunner(
+      {
+        name: info.Name,
+        image: info.Config?.Image,
+        cmd: info.Config?.Cmd,
+        env: info.Config?.Env,
+      },
+      token,
+    );
+    return ok ? row.Id : null;
+  };
+
+  if (hostname && HEX_ID.test(hostname)) {
+    const hit = await accept(list.find((c) => c.Id.startsWith(hostname))?.Id);
+    if (hit) return hit;
   }
 
-  // 2. cgroup/mountinfo id, for runtimes that set a custom hostname.
-  const cgroupId = await readSelfContainerIdFromProc();
-  if (cgroupId) {
-    const byCgroup = list.find((c) => c.Id.startsWith(cgroupId));
-    if (byCgroup) return byCgroup.Id;
+  if (hints.overlayUpperId && HEX64.test(hints.overlayUpperId)) {
+    for (const row of list) {
+      const info = await inspectOf(row.Id);
+      if (!graphDriverBlob(info).includes(hints.overlayUpperId)) continue;
+      const hit = await accept(row.Id);
+      if (hit) return hit;
+    }
   }
 
-  // 3. Explicit container_name match (compose sets it to zakura-runner-<slug>).
+  if (hints.cgroupId) {
+    const hit = await accept(list.find((c) => c.Id.startsWith(hints.cgroupId!))?.Id);
+    if (hit) return hit;
+  }
+
+  for (const id of hints.mountinfoContainerIds) {
+    const hit = await accept(list.find((c) => c.Id.startsWith(id))?.Id);
+    if (hit) return hit;
+  }
+
   if (hostname) {
     const byName = list.find((c) =>
       c.Names.some((n) => n.replace(/^\//, "") === hostname),
     );
-    if (byName) return byName.Id;
+    const hit = await accept(byName?.Id);
+    if (hit) return hit;
   }
 
-  // 4. Label match on the runner slug (compare slug to slug, not node id).
-  const slug = process.env.ZAKURA_RUNNER_SLUG?.trim();
   if (slug) {
     const byLabel = list.find((c) => (c.Labels ?? {})["zakura.runner_slug"] === slug);
-    if (byLabel) return byLabel.Id;
+    const labeled = await accept(byLabel?.Id);
+    if (labeled) return labeled;
+    const byName = list.find((c) =>
+      c.Names.some((n) => n.replace(/^\//, "") === `zakura-runner-${slug}`),
+    );
+    const named = await accept(byName?.Id);
+    if (named) return named;
+  }
+
+  if (token) {
+    const matches: string[] = [];
+    for (const row of list) {
+      const hit = await accept(row.Id);
+      if (hit) matches.push(hit);
+    }
+    const named = matches.filter((id) =>
+      containerName(undefined, inspectCache.get(id)?.Name).startsWith("zakura-runner-"),
+    );
+    if (named.length === 1) return named[0]!;
+    if (matches.length === 1) return matches[0]!;
   }
 
   return null;
 }
 
-/** Read our own container id from cgroup / mountinfo. Returns null on a host. */
-async function readSelfContainerIdFromProc(): Promise<string | null> {
-  const { readFileSync } = await import("node:fs");
-  for (const path of ["/proc/self/cgroup", "/proc/self/mountinfo"]) {
-    let raw: string;
-    try {
-      raw = readFileSync(path, "utf8");
-    } catch {
-      continue;
+export function sidecarNameForRunner(runnerName: string): string | null {
+  const m = /^zakura-runner-(.+)$/.exec(runnerName.replace(/^\//, ""));
+  return m ? `zakura-ts-${m[1]}` : null;
+}
+
+/**
+ * `network_mode: container:<id>` dies with the sidecar. Rewrite to
+ * `container:<name>` so the replacement attaches to whoever currently owns
+ * that name (compose recreate of zakura-ts changes the id).
+ */
+export function resolveSharedNetworkMode(
+  mode: string | undefined,
+  idToName: (id: string) => string | undefined,
+  fallbackName?: string | null,
+): string | undefined {
+  if (!mode) return mode;
+  const m = /^container:([0-9a-f]{12,64})$/i.exec(mode.trim());
+  if (!m?.[1]) return mode;
+  const name = idToName(m[1]) ?? fallbackName ?? undefined;
+  return name ? `container:${name.replace(/^\//, "")}` : mode;
+}
+
+export function hostDockerSockPath(self: Docker.ContainerInspectInfo): string {
+  for (const bind of self.HostConfig?.Binds ?? []) {
+    if (bind.includes("/var/run/docker.sock")) {
+      return bind.split(":")[0] || "/var/run/docker.sock";
     }
-    // docker/<id>, containerd .../<id>, or a 64-hex path segment
-    const m =
-      /(?:docker[-/]|containers\/)([0-9a-f]{64})/.exec(raw) ??
-      /\b([0-9a-f]{64})\b/.exec(raw);
-    if (m?.[1]) return m[1];
+  }
+  return "/var/run/docker.sock";
+}
+
+export function assertSafeToRecreate(
+  self: Docker.ContainerInspectInfo,
+  token?: string | null,
+): void {
+  const name = (self.Name ?? "").replace(/^\//, "");
+  if (name.startsWith("zakura-ts-")) {
+    throw new Error("定位到的容器是 Tailscale sidecar（zakura-ts-*）。已中止自更新。");
+  }
+  if (
+    !containerLooksLikeRunner(
+      {
+        name,
+        image: self.Config?.Image,
+        cmd: self.Config?.Cmd,
+        env: self.Config?.Env,
+      },
+      token,
+    )
+  ) {
+    throw new Error(
+      "定位到的容器不是当前 Runner（疑似 Tailscale sidecar）。已中止自更新，避免误重建。",
+    );
+  }
+  const devices = self.HostConfig?.Devices ?? [];
+  if (
+    devices.some(
+      (d: { PathOnHost?: string; PathInContainer?: string }) =>
+        `${d.PathOnHost ?? ""} ${d.PathInContainer ?? ""}`.includes("/dev/net/tun"),
+    )
+  ) {
+    throw new Error("定位到的容器挂了 /dev/net/tun，是 Tailscale sidecar。已中止自更新。");
+  }
+}
+
+export function replacementLooksHealthy(
+  info: {
+    Name?: string;
+    State?: { Running?: boolean };
+    Config?: { Cmd?: string[] | null; Image?: string };
+  },
+  expectedName: string,
+): string | null {
+  if (!info.State?.Running) return "replacement is not running";
+  const name = (info.Name ?? "").replace(/^\//, "");
+  if (name.startsWith("zakura-ts-")) return "replacement is the Tailscale sidecar";
+  if (name !== expectedName) return `name is ${name}, expected ${expectedName}`;
+  const cmd = (info.Config?.Cmd ?? []).join(" ");
+  if (cmd.includes("containerboot")) return "replacement is running Tailscale containerboot";
+  if (/(^|\/)tailscale(\/|:|$)/i.test(info.Config?.Image ?? "")) {
+    return "replacement image is tailscale";
   }
   return null;
 }
 
 /**
- * Update this Runner to `image`. Returns immediately after scheduling the
- * detached recreator; the actual swap happens a few seconds later.
+ * Copy runtime identity from the live Runner, but never copy Cmd/Entrypoint —
+ * those belong to the *new image*. Copying them is how a mis-identified
+ * sidecar turned into `node docker-entrypoint.sh /usr/local/bin/containerboot`.
+ */
+export function buildReplacementCreateOpts(
+  self: Docker.ContainerInspectInfo,
+  image: string,
+  networkMode: string | undefined,
+): {
+  createOpts: Docker.ContainerCreateOptions;
+  extraNetworks: Array<{ name: string; aliases: string[] }>;
+} {
+  const name = (self.Name ?? "").replace(/^\//, "");
+  if (name.startsWith("zakura-ts-")) {
+    throw new Error("拒绝重建 Tailscale sidecar");
+  }
+  const cfg = self.Config;
+  const shared = Boolean(networkMode?.startsWith("container:"));
+  const hostConfig: Docker.ContainerCreateOptions["HostConfig"] = {
+    ...(self.HostConfig ?? {}),
+    RestartPolicy: { Name: "always" },
+    Binds: self.HostConfig?.Binds ?? [],
+    NetworkMode: networkMode ?? self.HostConfig?.NetworkMode ?? "bridge",
+    PortBindings: shared ? {} : (self.HostConfig?.PortBindings ?? {}),
+    PublishAllPorts: shared ? false : self.HostConfig?.PublishAllPorts,
+  };
+
+  const networks = shared ? [] : Object.entries(self.NetworkSettings?.Networks ?? {});
+  const primaryNetwork = networks[0];
+  const extraNetworks = networks.slice(1).map(([netName, v]) => ({
+    name: netName,
+    aliases: v.Aliases ?? [],
+  }));
+
+  return {
+    createOpts: {
+      name,
+      Image: image,
+      Env: (cfg.Env ?? []).filter((e) => !e.startsWith("ZAKURA_RUNNER_VERSION=")),
+      Labels: cfg.Labels ?? {},
+      WorkingDir: cfg.WorkingDir ?? undefined,
+      ExposedPorts: shared ? undefined : (cfg.ExposedPorts ?? {}),
+      HostConfig: hostConfig,
+      NetworkingConfig: primaryNetwork
+        ? {
+            EndpointsConfig: {
+              [primaryNetwork[0]]: { Aliases: primaryNetwork[1].Aliases ?? [] },
+            },
+          }
+        : undefined,
+    },
+    extraNetworks,
+  };
+}
+
+export const RECREATOR_CONTAINER_NAME = "zakura-recreator";
+
+export function buildRecreatorContainerSpec(
+  image: string,
+  script: string,
+  sockPath: string,
+): Docker.ContainerCreateOptions {
+  return {
+    name: RECREATOR_CONTAINER_NAME,
+    Image: image,
+    Entrypoint: ["node"],
+    Cmd: ["--input-type=module", "-e", script],
+    WorkingDir: "/app/apps/runner",
+    Env: ["DOCKER_HOST=unix:///var/run/docker.sock", "ZAKURA_RECREATOR=1"],
+    HostConfig: {
+      Binds: [`${sockPath}:/var/run/docker.sock`],
+      RestartPolicy: { Name: "no" },
+      NetworkMode: "none",
+    },
+  };
+}
+
+/**
+ * Update this Runner to `image`. Returns immediately after scheduling a
+ * sibling recreator *container* (not a child process). A child of this PID
+ * dies when we `docker stop` ourselves; a separate container with docker.sock
+ * survives and can roll back.
  */
 export async function updateRunnerSelf(
   docker: Docker,
@@ -122,124 +417,85 @@ export async function updateRunnerSelf(
   const selfId = await findSelfContainerId(docker);
   if (!selfId) {
     throw new Error(
-      "无法定位当前 Runner 容器（未匹配到 hostname / runner_slug）。请在宿主机手动 `docker compose up -d --force-recreate`。",
+      "无法定位当前 Runner 容器（未匹配到 overlay / token / runner_slug）。请在宿主机手动 `docker compose up -d --force-recreate`。",
     );
   }
   const self = await docker.getContainer(selfId).inspect();
+  assertSafeToRecreate(self, process.env.ZAKURA_RUNNER_TOKEN);
 
-  // Build the replacement config from the live container, swapping the image.
-  const cfg = self.Config;
-  const hostConfig = self.HostConfig ?? {};
-  // Preserve all env except any prior version pin so the new image's default wins.
-  const env = (cfg.Env ?? []).filter(
-    (e) => !e.startsWith("ZAKURA_RUNNER_VERSION="),
+  const runnerName = (self.Name ?? "").replace(/^\//, "");
+  const rawMode = self.HostConfig?.NetworkMode;
+  let idToName: string | undefined;
+  const idMatch = /^container:([0-9a-f]{12,64})$/i.exec(rawMode ?? "");
+  if (idMatch?.[1]) {
+    try {
+      const peer = await docker.getContainer(idMatch[1]).inspect();
+      idToName = (peer.Name ?? "").replace(/^\//, "");
+    } catch {
+      idToName = undefined;
+    }
+  }
+  const networkMode = resolveSharedNetworkMode(
+    rawMode,
+    () => idToName,
+    sidecarNameForRunner(runnerName),
   );
 
-  // Docker rejects createContainer when EndpointsConfig has more than one entry,
-  // so attach to a single network here and let the recreator connect the rest.
-  const networks = Object.entries(self.NetworkSettings?.Networks ?? {});
-  const primaryNetwork = networks[0];
-  const extraNetworks = networks.slice(1).map(([name, v]) => ({
-    name,
-    aliases: v.Aliases ?? [],
-  }));
-
-  const createOpts: Docker.ContainerCreateOptions = {
-    name: self.Name.replace(/^\//, ""),
-    Image: image,
-    Env: env,
-    Cmd: cfg.Cmd ?? undefined,
-    Entrypoint: cfg.Entrypoint ?? undefined,
-    Labels: cfg.Labels ?? {},
-    WorkingDir: cfg.WorkingDir ?? undefined,
-    ExposedPorts: cfg.ExposedPorts ?? {},
-    HostConfig: {
-      ...hostConfig,
-      RestartPolicy: { Name: "always" },
-      PortBindings: hostConfig.PortBindings ?? {},
-      Binds: hostConfig.Binds ?? [],
-      NetworkMode: hostConfig.NetworkMode ?? "bridge",
-    },
-    NetworkingConfig: primaryNetwork
-      ? {
-          EndpointsConfig: {
-            [primaryNetwork[0]]: { Aliases: primaryNetwork[1].Aliases ?? [] },
-          },
-        }
-      : undefined,
-  };
-
+  const { createOpts, extraNetworks } = buildReplacementCreateOpts(self, image, networkMode);
   const delayMs = opts?.recreateDelayMs ?? 3000;
+  const recreatorScript = buildRecreatorScript(
+    selfId,
+    image,
+    createOpts,
+    delayMs,
+    extraNetworks,
+  );
 
-  // Detached recreator: survives this process exit and drives the daemon over the
-  // same socket.
-  //
-  // `--input-type=module` is load-bearing. The script uses top-level `await`, and
-  // `node -e` evaluates as CommonJS by default — so it used to die instantly with
-  // a SyntaxError. With `stdio: "ignore"` and no error handler that failure was
-  // completely invisible, and the route still answered `scheduled: true`: the
-  // self-update reported success and did nothing, every time.
-  const recreatorScript = buildRecreatorScript(selfId, image, createOpts, delayMs, extraNetworks);
-  const child = spawn(process.execPath, ["--input-type=module", "-e", recreatorScript], {
-    detached: true,
-    stdio: ["ignore", "ignore", "pipe"],
-    // `node -e` resolves bare specifiers from CWD, not from the app directory.
-    cwd: appRootDir(),
-    env: { ...process.env, ZAKURA_RECREATOR: "1" },
-  });
-
-  // Surface an immediately-failing child (bad flags, unresolvable imports) instead
-  // of silently claiming success.
-  const earlyFailure = await new Promise<string | null>((resolve) => {
-    let stderr = "";
-    const done = setTimeout(() => resolve(null), 400);
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.once("error", (err) => {
-      clearTimeout(done);
-      resolve(err.message);
-    });
-    child.once("exit", (code) => {
-      clearTimeout(done);
-      resolve(code === 0 ? null : `recreator exited with ${code}: ${stderr.slice(-500)}`);
-    });
-  });
-  if (earlyFailure) {
-    log.error("runner.update_recreator_failed", { image, error: earlyFailure });
-    throw new Error(`无法启动 Runner 自更新进程：${earlyFailure}`);
+  try {
+    await docker.getContainer(RECREATOR_CONTAINER_NAME).remove({ force: true });
+  } catch {
+    // leftover from a previous update, or first run
   }
 
-  child.stderr?.destroy();
-  child.unref();
+  const rec = await docker.createContainer(
+    buildRecreatorContainerSpec(image, recreatorScript, hostDockerSockPath(self)),
+  );
+  await rec.start();
+
+  await new Promise((r) => setTimeout(r, 400));
+  try {
+    const st = await rec.inspect();
+    if (st.State?.Status === "exited" && st.State.ExitCode !== 0) {
+      throw new Error(`recreator exited with ${st.State.ExitCode}`);
+    }
+  } catch (err) {
+    log.error("runner.update_recreator_failed", {
+      image,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new Error(
+      `无法启动 Runner 自更新进程：${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   log.info("runner.update_scheduled", {
     image,
     self_id: selfId.slice(0, 12),
     recreate_delay_ms: delayMs,
+    via: RECREATOR_CONTAINER_NAME,
   });
   return { image, scheduled: true };
 }
 
-/** Directory containing this app's node_modules, so `node -e` can resolve imports. */
-function appRootDir(): string {
-  // dist/system-update.js | src/system-update.ts → package root
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
-}
-
 /**
- * The detached process that performs the actual swap.
+ * Sibling-container script that performs the swap.
  *
  * Ordering is chosen so a failure is always recoverable:
  *   1. stop + rename the old container aside (still present, still restartable)
  *   2. create + start the replacement under the original name
- *   3. verify it is still running after a grace period
+ *   3. verify it is still running, is not the Tailscale sidecar, and is not
+ *      executing containerboot
  *   4. only then remove the old one
- * If step 2 or 3 fails we roll back — rename the old container to its original
- * name and start it — instead of leaving the host with no Runner at all. The
- * previous version force-removed the old container on any rename hiccup, and on
- * a failed create it exited leaving the old container running under a
- * `-old-<ts>` name, which then broke id/name matching for all future updates.
  */
 function buildRecreatorScript(
   oldId: string,
@@ -265,6 +521,17 @@ const log = (...a) => console.error("[recreator]", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const originalName = createOpts.name;
 
+function replacementLooksHealthy(info) {
+  if (!info?.State?.Running) return "replacement is not running";
+  const name = String(info.Name || "").replace(/^\\//, "");
+  if (name.startsWith("zakura-ts-")) return "replacement is the Tailscale sidecar";
+  if (name !== originalName) return "name is " + name + ", expected " + originalName;
+  const cmd = (info.Config?.Cmd || []).join(" ");
+  if (cmd.includes("containerboot")) return "replacement is running Tailscale containerboot";
+  if (/(^|\\/)tailscale(\\/|:|$)/i.test(String(info.Config?.Image || ""))) return "replacement image is tailscale";
+  return null;
+}
+
 async function rollback(parkedName) {
   log("rolling back to the previous container");
   try {
@@ -279,7 +546,11 @@ async function rollback(parkedName) {
 async function main() {
   await sleep(delayMs);
 
-  // Park the old container: two containers cannot share a name.
+  if (String(originalName || "").startsWith("zakura-ts-")) {
+    log("refusing to recreate Tailscale sidecar", originalName);
+    process.exit(1);
+  }
+
   const parkedName = originalName + "-old-" + Date.now();
   try {
     await docker.getContainer(oldId).stop({ t: 10 }).catch(() => {});
@@ -306,17 +577,15 @@ async function main() {
     process.exit(1);
   }
 
-  // Verify it stayed up. A container that starts and immediately crashes used to
-  // pass silently, because the old one was removed after a fixed sleep.
   await sleep(5000);
-  let healthy = false;
+  let reason = "inspect after start failed";
   try {
-    healthy = Boolean((await created.inspect())?.State?.Running);
+    reason = replacementLooksHealthy(await created.inspect()) || "";
   } catch (e) {
     log("inspect after start failed:", e?.message || e);
   }
-  if (!healthy) {
-    log("replacement is not running after start — rolling back");
+  if (reason) {
+    log("replacement unhealthy — rolling back:", reason);
     try { await created.stop({ t: 5 }).catch(() => {}); await created.remove({ force: true }); } catch {}
     await rollback(parkedName);
     process.exit(1);

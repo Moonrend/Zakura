@@ -1821,6 +1821,66 @@ export class AgentWorkspaceService {
   }
 
   /**
+   * Open an interactive PTY *inside the adapter container* so a human can
+   * complete a CLI login (`codex login`, `pi auth`, …).
+   *
+   * This must never fall back to the agent workspace: credentials are written
+   * to the adapter's HOME, which lives on the per-(agent × adapter) cred
+   * volume mounted only into this container. A shell opened anywhere else
+   * would write the tokens somewhere the adapter can never read, and the user
+   * would appear to log in successfully yet stay unauthenticated forever.
+   *
+   * Unlike `attachStdioInAcpAdapter` this is a `docker exec`, not an attach —
+   * PID 1 is the adapter's JSON-RPC stream and must not be disturbed.
+   */
+  async startAcpAdapterLoginShell(
+    agent: Agent,
+    adapterId: string,
+    sessionKey: string,
+    opts?: { command?: string[]; cols?: number; rows?: number },
+  ): Promise<{ jobId: string }> {
+    const command = opts?.command?.length ? opts.command : ["/bin/sh", "-lc", "exec /bin/bash -l || exec /bin/sh -l"];
+
+    if (this.isRemoteAgent(agent)) {
+      // The container lives on the runner, so the PTY has to be opened there.
+      const { client } = await this.requireRunnerClient(agent);
+      const job = await client.startAcpAdapterLoginShell(agent.id, adapterId, {
+        sessionKey,
+        command,
+        cols: opts?.cols,
+        rows: opts?.rows,
+      });
+      return { jobId: job.jobId };
+    }
+
+    const existing = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-adapter",
+    });
+    const target = existing.find(
+      (c) =>
+        c.labels["zakura.agent"] === agent.id &&
+        c.labels["zakura.acp_adapter"] === adapterId &&
+        c.labels["zakura.acp_session"] === sessionKey &&
+        c.status === "running",
+    );
+    if (!target) {
+      throw new Error(
+        `no running ACP adapter container for ${adapterId}; start the agent before logging in`,
+      );
+    }
+
+    // execJob always allocates a TTY and returns a ShellJob we can resize.
+    const job = await this.runtime.execJob(target.id, command, {
+      agentId: agent.id,
+      workingDir: ACP_ADAPTER_HOME,
+      env: { TERM: "xterm-256color", HOME: ACP_ADAPTER_HOME, PATH: WORKSPACE_EXEC_PATH },
+    });
+    if (opts?.cols && opts?.rows) await job.resize(opts.cols, opts.rows);
+    return { jobId: job.id };
+  }
+
+  /**
    * Remove every managed adapter container for this tenant.
    *
    * Adapter containers are session-scoped and normally removed by `teardown`.

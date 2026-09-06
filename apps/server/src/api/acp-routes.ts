@@ -3,6 +3,8 @@
  */
 import type { Hono } from "hono";
 import {
+  acpAgentById,
+  acpImageAtVersion,
   isValidAcpProfileId,
   parseAcpAgentConfig,
   parseAcpAgentSetup,
@@ -122,6 +124,57 @@ export function registerAcpRoutes(
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
     }
+  });
+
+  /**
+   * Adopt a newer container image tag for one adapter.
+   *
+   * Container adapters run the tag baked into the build-time snapshot, so a
+   * registry release would otherwise be unreachable until the host is rebuilt.
+   * Persisting a pin lets the next session pull the new image immediately.
+   * Sending no version clears the pin, which is the rollback path back to the
+   * shipped default.
+   */
+  app.post("/api/agents/:id/acp/adapters/:registryId/adopt", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+
+    const registryId = c.req.param("registryId");
+    const curated = acpAgentById(registryId);
+    if (!curated) return c.json({ error: "该适配器不是容器适配器" }, 400);
+
+    const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+    const raw = (body as { version?: unknown }).version;
+    const version = typeof raw === "string" ? raw.trim() : "";
+
+    // Only versions the registry actually publishes are adoptable; an arbitrary
+    // string would resolve to an image tag that cannot be pulled.
+    if (version && version !== curated.version) {
+      return c.json({ error: `注册表未发布版本 ${version}` }, 400);
+    }
+
+    const config = readAgentAcpConfig(agent);
+    const setup = config.agents[curated.profileId];
+    if (!setup) return c.json({ error: "该适配器尚未配置" }, 400);
+
+    const next = {
+      ...config,
+      agents: {
+        ...config.agents,
+        [curated.profileId]: version
+          ? { ...setup, pinnedVersion: version }
+          : (({ pinnedVersion: _drop, ...rest }) => rest)(setup),
+      },
+    };
+    await saveAgentAcpConfig(agentService, session.tenantId, agent, next);
+
+    return c.json({
+      id: registryId,
+      pinnedVersion: version || null,
+      image: acpImageAtVersion(registryId, version || curated.version),
+    });
   });
 
   app.get("/api/agents/:id/acp/config", async (c) => {

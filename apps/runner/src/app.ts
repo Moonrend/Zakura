@@ -617,6 +617,30 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     }
   });
 
+  // Interactive login PTY inside the adapter container. Uses exec (not attach)
+  // so PID 1 — the adapter's JSON-RPC stream — is left untouched.
+  app.post("/v1/workspaces/:agentId/acp-adapters/:adapterId/login-shell", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      sessionKey?: string;
+      command?: string[];
+      cols?: number;
+      rows?: number;
+    };
+    if (!body.sessionKey) return c.json({ error: "sessionKey required" }, 400);
+    try {
+      const job = await dockerWs.startAdapterLoginShell(
+        c.req.param("agentId"),
+        c.req.param("adapterId"),
+        body.sessionKey,
+        { command: body.command, cols: body.cols, rows: body.rows },
+      );
+      return c.json({ jobId: job.id });
+    } catch (err) {
+      const e = fsError(err);
+      return c.json(e.body, 500);
+    }
+  });
+
   app.delete("/v1/workspaces/:agentId/acp-adapters/:adapterId", async (c) => {
     const sessionKey = c.req.query("sessionKey");
     if (!sessionKey) return c.json({ error: "sessionKey required" }, 400);
