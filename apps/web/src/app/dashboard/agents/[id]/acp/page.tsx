@@ -215,7 +215,14 @@ export default function AgentAcpPage() {
   }
 
   function getAdapterInstallInfo(profileId: string) {
-    const status = adapterStatuses.find((a) => a.id === profileId);
+    // Match on `profileId`, never on `id`. For 12 of 42 registry agents the
+    // registry id differs from the profile id (`claude-code` vs
+    // `claude-code-acp`), so comparing against `id` silently missed and the
+    // adapter rendered as "not installed" with a button that POSTed to a
+    // nonexistent id.
+    const status = adapterStatuses.find(
+      (a) => a.profileId === profileId || a.id === profileId,
+    );
     const probe = probeResults[profileId];
     return { status, probe };
   }
@@ -648,9 +655,15 @@ export default function AgentAcpPage() {
           const isInstalling = installingId === profile.id;
           const isInstalled = probe?.installed || (adapterStatus?.installed?.length ?? 0) > 0;
           const hasUpdate = adapterStatus?.updateAvailable;
-          // Container adapters ship as prebuilt images: nothing to install,
-          // nothing to update from here.
           const isContainer = adapterStatus?.source === "container";
+          // A container adapter is only usable once its image is actually on
+          // the host. `imageReady === undefined` means we could not check
+          // (remote runner) — show it as ready-ish rather than blocking, since
+          // the runner pulls on create.
+          const imageMissing = isContainer && adapterStatus?.imageReady === false;
+          // Prepare = pull the image. This is the container equivalent of
+          // "install", and the only reason a container row needs a button.
+          const needsPrepare = imageMissing && !isInstalling;
           return (
             <div
               key={profile.id}
@@ -681,10 +694,12 @@ export default function AgentAcpPage() {
                   {isContainer ? (
                     <Badge
                       variant="outline"
-                      className="pointer-events-auto gap-0.5 text-[10px] text-success"
+                      className={`pointer-events-auto gap-0.5 text-[10px] ${
+                        imageMissing ? "text-muted-foreground" : "text-success"
+                      }`}
                       title={adapterStatus?.image}
                     >
-                      <Package className="size-2.5" /> 容器
+                      <Package className="size-2.5" /> {imageMissing ? "待拉取" : "容器"}
                       {adapterStatus?.latest ? ` v${adapterStatus.latest}` : ""}
                     </Badge>
                   ) : isInstalled ? (
@@ -713,9 +728,22 @@ export default function AgentAcpPage() {
                     {hasUpdate ? "更新" : "安装"}
                   </Button>
                 ) : null}
+                {setup.enabled && needsPrepare ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => { e.stopPropagation(); void handleInstall(profile.id, false); }}
+                  >
+                    <Download className="mr-1 size-3" />
+                    拉取镜像
+                  </Button>
+                ) : null}
                 {isInstalling ? (
                   <Badge variant="secondary" className="gap-1 text-[10px]">
-                    <Loader2 className="size-3 animate-spin" /> {installingIsUpdate ? "更新中…" : "安装中…"}
+                    <Loader2 className="size-3 animate-spin" />{" "}
+                    {isContainer ? "拉取中…" : installingIsUpdate ? "更新中…" : "安装中…"}
                   </Badge>
                 ) : null}
                 {row === "on_needs_config" ? (

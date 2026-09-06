@@ -26,6 +26,7 @@ import {
   type AcpRegistryPlatform,
   type AcpResolvedDist,
   acpContainerAgents,
+  acpAgentById,
   acpImageAtVersion,
   acpRegistryDigest,
   acpRegistryIsSnapshot,
@@ -96,6 +97,16 @@ export class AcpUnverifiedBinaryError extends Error {
 
 export type AcpAdapterStatus = {
   id: string;
+  /**
+   * Profile id this adapter backs, e.g. `claude-code` for registry id
+   * `claude-code-acp`.
+   *
+   * 12 of 42 registry agents have `id !== profileId`. The UI keys everything
+   * off the profile, so without this field it looked up status by profile id,
+   * missed, and fell back to rendering a workspace-style install button that
+   * POSTed to a registry id that does not exist — the "点了没反应" case.
+   */
+  profileId: string;
   /** Versions currently present in the workspace. */
   installed: string[];
   /** Version the registry pins right now. */
@@ -112,6 +123,19 @@ export type AcpAdapterStatus = {
   source: "workspace" | "container";
   /** Image reference, for container-sourced adapters. */
   image?: string;
+  /**
+   * Whether the image is actually present on the machine that will run it.
+   *
+   * Container adapters used to report `installed: [version]` unconditionally,
+   * which only ever described *which tag we intend to run* — never whether it
+   * had been pulled. So the UI hid the install button while the image was
+   * absent, and the failure surfaced at launch as "没镜像". This field is the
+   * observed truth; `installed` stays the intended version.
+   *
+   * `undefined` means the probe could not run (runtime unreachable). Treat that
+   * as unknown, never as ready.
+   */
+  imageReady?: boolean;
   /**
    * Registry version this agent has explicitly adopted, when set.
    *
@@ -346,6 +370,26 @@ export class AcpRegistryService {
   ): Promise<{ command: string; args: string[]; version: string; installed: boolean }> {
     const entry = await this.findAgent(registryId, opts);
     if (!entry) throw new Error(`ACP 注册表里没有 ${registryId}`);
+
+    // Container adapters are "installed" by pulling their image. `planFor`
+    // returns null for dist.kind === "image", so without this branch every
+    // install request for a containerized agent fell through to the generic
+    // "无法安装" error — the click that appeared to do nothing.
+    if (entry.dist?.kind === "image") {
+      // `dist.kind === "image"` carries no image ref — resolve it from the
+      // snapshot, which is the same source the launcher uses.
+      const version = opts?.version ?? entry.version ?? acpSnapshotVersion(registryId);
+      const image = version ? acpImageAtVersion(registryId, version) : null;
+      if (!image || !version) throw new Error(`${entry.name} 没有可用的镜像`);
+      const pulled = await this.workspace.ensureAcpAdapterImage(agent, image);
+      return {
+        command: entry.dist.command,
+        args: entry.dist.args ?? [],
+        version,
+        installed: pulled,
+      };
+    }
+
     if (!entry.dist) {
       // Distinguish "cannot" from "will not without consent": the second is
       // recoverable by the caller passing allowUnverifiedBinary.
@@ -425,6 +469,7 @@ export class AcpRegistryService {
       if (!id || !version) continue;
       const existing = byId.get(id) ?? {
         id,
+        profileId: acpAgentById(id)?.profileId ?? id,
         installed: [],
         latest: null,
         updateAvailable: false,
@@ -470,6 +515,22 @@ export class AcpRegistryService {
     // Containerized adapters ship as prebuilt images. They never appear in the
     // workspace scan above, so without this they would render as "not
     // installed" forever and offer an install button that does nothing.
+    //
+    // Probe the runtime once for every image we are about to report on. Without
+    // this, "installed" meant nothing more than "we know a tag", and a missing
+    // image only surfaced at launch time.
+    const containerImages = acpContainerAgents()
+      .filter((a) => !byId.has(a.id))
+      .map((a) => {
+        const pinned = pinnedByRegistryId.get(a.id);
+        const shipped = pinned ?? acpSnapshotVersion(a.id) ?? a.version;
+        return acpImageAtVersion(a.id, shipped) ?? a.image;
+      })
+      .filter((img): img is string => Boolean(img));
+    const imagePresence = await this.workspace.acpAdapterImagePresence(
+      agent,
+      containerImages,
+    );
     for (const containerAgent of acpContainerAgents()) {
       if (byId.has(containerAgent.id)) continue;
       // `containerAgent.version` comes from the *active* index, which a refresh
@@ -482,14 +543,18 @@ export class AcpRegistryService {
       const pinned = pinnedByRegistryId.get(containerAgent.id);
       const shipped =
         pinned ?? acpSnapshotVersion(containerAgent.id) ?? containerAgent.version;
+      const image =
+        acpImageAtVersion(containerAgent.id, shipped) ?? containerAgent.image;
       byId.set(containerAgent.id, {
         id: containerAgent.id,
+        profileId: containerAgent.profileId,
         installed: [shipped],
         latest: containerAgent.version,
         updateAvailable: shipped !== containerAgent.version,
         diskKb: {},
         source: "container",
-        image: acpImageAtVersion(containerAgent.id, shipped) ?? containerAgent.image,
+        image,
+        imageReady: imagePresence.get(image),
         ...(pinned ? { pinnedVersion: pinned } : {}),
         ...(curated.stale
           ? {

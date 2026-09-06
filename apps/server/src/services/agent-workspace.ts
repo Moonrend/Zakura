@@ -6,6 +6,7 @@ import {
   RunnerClient,
   ShellJobRegistry,
   ensureWorkspaceDir,
+  log,
   mapContainerPathToHost,
   recordPlatformFault,
   type ShellJobSnapshot,
@@ -1662,6 +1663,63 @@ export class AgentWorkspaceService {
   }
 
   /**
+   * Pull the adapter image so a later launch cannot fail on a missing image.
+   *
+   * Returns true when the image was actually fetched, false when it was already
+   * present. Remote runners pull on create, so there we only verify the tag is
+   * resolvable rather than transferring bytes through the server.
+   */
+  async ensureAcpAdapterImage(agent: Agent, image: string): Promise<boolean> {
+    if (this.isRemoteAgent(agent)) {
+      // No image endpoint on the runner. The runner's ensureAcpAdapterContainer
+      // pulls before create, so treat this as a no-op rather than lying about
+      // having pulled.
+      return false;
+    }
+    const had = await this.runtime.hasImage(image).catch(() => false);
+    await this.runtime.ensureImage(image, (line) => {
+      log.debug("acp.adapter.image.pull", { agent: agent.id, image, line });
+    });
+    return !had;
+  }
+
+  /**
+   * Report which of `images` are already present on the machine that would run
+   * them.
+   *
+   * Returns `undefined` for an image when presence cannot be determined (remote
+   * runner, or an unreachable runtime). Callers must treat `undefined` as
+   * unknown and never as ready — reporting a missing image as installed is the
+   * bug this exists to prevent.
+   */
+  async acpAdapterImagePresence(
+    agent: Agent,
+    images: string[],
+  ): Promise<Map<string, boolean | undefined>> {
+    const out = new Map<string, boolean | undefined>();
+    const unique = [...new Set(images.filter(Boolean))];
+    if (unique.length === 0) return out;
+
+    // Remote runners expose no image-query endpoint. Leave presence unknown
+    // rather than guessing; the runner pulls on create, so launch still works.
+    if (this.isRemoteAgent(agent)) {
+      for (const image of unique) out.set(image, undefined);
+      return out;
+    }
+
+    await Promise.all(
+      unique.map(async (image) => {
+        try {
+          out.set(image, await this.runtime.hasImage(image));
+        } catch {
+          out.set(image, undefined);
+        }
+      }),
+    );
+    return out;
+  }
+
+  /**
    * Ensure the dedicated adapter container for (agent × adapter) is running.
    *
    * Unlike the sidecar, the adapter binary is the container CMD (PID 1): we
@@ -1707,6 +1765,14 @@ export class AgentWorkspaceService {
     for (const c of mine) {
       await this.runtime.remove(c.id, true).catch(() => undefined);
     }
+
+    // Pull before create. `createAndStart` does not pull, so a missing image
+    // used to fail deep inside container creation with a raw Docker error
+    // ("没镜像") after the UI had already reported the adapter as installed.
+    // Provisioning the image is part of provisioning the adapter.
+    await this.runtime.ensureImage(image, (line) => {
+      log.debug("acp.adapter.pull", { agent: agent.id, adapterId, image, line });
+    });
 
     const credHome = ACP_ADAPTER_HOME;
     const result = await this.runtime.createAndStart({

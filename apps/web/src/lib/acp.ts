@@ -143,6 +143,8 @@ export async function installAcpAdapter(
 
 export type AcpAdapterStatus = {
   id: string;
+  /** Profile id this adapter backs; differs from `id` for 12 of 42 agents. */
+  profileId?: string;
   installed: string[];
   latest: string | null;
   updateAvailable: boolean;
@@ -150,6 +152,12 @@ export type AcpAdapterStatus = {
   /** Container adapters ship as prebuilt images and are never installed. */
   source: "workspace" | "container";
   image?: string;
+  /**
+   * Whether the image is actually present on the machine that runs it.
+   * `undefined` means unknown (remote runner / probe failed) — never treat
+   * unknown as ready.
+   */
+  imageReady?: boolean;
   /**
    * Registry version this agent explicitly adopted. Absent means the adapter
    * runs the version baked into this build's snapshot.
