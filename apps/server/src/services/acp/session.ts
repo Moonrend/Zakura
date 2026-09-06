@@ -1532,7 +1532,15 @@ export class AcpSessionService {
           setup.id,
           containerImage,
           procKey,
-          { env },
+          {
+            env,
+            // The workspace staging exec above is skipped for containerized
+            // adapters, so its generated config files (hermes `.env`,
+            // opencode/codex config, …) must be staged into the container
+            // instead. Without this the adapter starts with no credential
+            // file and fails with "Missing Authentication header".
+            files: writes,
+          },
         );
       } else {
         const argv = acpStdioArgv(launch.command, launch.args);

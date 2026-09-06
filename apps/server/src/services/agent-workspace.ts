@@ -1824,12 +1824,69 @@ export class AgentWorkspaceService {
   }
 
   /** Attach to the adapter container's PID 1 stdio (adapter is the CMD). */
+  /**
+   * Write generated config files into a running ACP adapter container.
+   *
+   * Uses base64 + `sh -c` rather than a bind mount because the adapter's HOME
+   * lives on a per-agent credential volume the server cannot write to directly,
+   * and because the content (API keys) must not touch the host filesystem.
+   *
+   * Adapter images are minimal — `sh` is assumed, `bash` is not.
+   */
+  private async stageAcpAdapterFiles(
+    agent: Agent,
+    dockerId: string,
+    files?: { dest: string; content: string }[],
+  ): Promise<void> {
+    if (!files?.length) return;
+    for (const file of files) {
+      if (!file.dest || typeof file.content !== "string") continue;
+      const b64 = Buffer.from(file.content, "utf8").toString("base64");
+      // Single-quote the path for the shell; escape any embedded quote.
+      const dest = `'${file.dest.replace(/'/g, `'\\''`)}'`;
+      const res = await this.runtime.exec(dockerId, [
+        "sh",
+        "-c",
+        // 0600: these files carry credentials.
+        `mkdir -p "$(dirname ${dest})" && printf %s '${b64}' | base64 -d > ${dest} && chmod 600 ${dest}`,
+      ]);
+      if (res.exitCode !== 0) {
+        // Surface loudly: a silently missing credential file is exactly the
+        // failure mode this method exists to prevent.
+        throw new Error(
+          `failed to stage ACP adapter file ${file.dest} (exit ${res.exitCode}): ${res.stderr || res.stdout}`,
+        );
+      }
+      log.debug("acp.adapter.file.staged", {
+        agentId: agent.id,
+        dest: file.dest,
+        bytes: file.content.length,
+      });
+    }
+  }
+
   async attachStdioInAcpAdapter(
     agent: Agent,
     adapterId: string,
     image: string,
     sessionKey: string,
-    opts?: { env?: Record<string, string> },
+    opts?: {
+      env?: Record<string, string>;
+      /**
+       * Generated config files (hermes `.env`, fast-agent secrets, …) that must
+       * exist *inside the adapter container* before PID 1 reads them.
+       *
+       * These used to be written by the workspace staging exec, which the
+       * containerized path skips entirely — so file-based credentials silently
+       * never arrived and the adapter came up unauthenticated ("Missing
+       * Authentication header"). Env vars alone are not a substitute: several
+       * adapters only read their key from a dotenv/TOML file.
+       *
+       * Must be staged *before* the attach: PID 1 is the adapter itself and
+       * typically loads its config at startup, so a later write is too late.
+       */
+      files?: { dest: string; content: string }[];
+    },
   ): Promise<{
     writable: WritableStream<Uint8Array>;
     readable: ReadableStream<Uint8Array>;
@@ -1843,6 +1900,7 @@ export class AgentWorkspaceService {
       sessionKey,
       opts,
     );
+    await this.stageAcpAdapterFiles(agent, dockerId, opts?.files);
     if (!this.runtime.attachStdio) {
       throw new Error("container runtime does not support stdio attach");
     }

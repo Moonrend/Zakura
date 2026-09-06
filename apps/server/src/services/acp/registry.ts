@@ -325,6 +325,30 @@ export class AcpRegistryService {
     return agent ? this.toCatalogEntry(agent, workspacePlatform(), opts) : null;
   }
 
+  /**
+   * Resolve the container image for an entry, or null if it is not
+   * containerized.
+   *
+   * Mirrors the resolution used by `status()` and `acpAdapterSource()` so that
+   * "what install pulls" and "what the launcher runs" can never diverge.
+   *
+   * Note this keys on the curated agent's `image` rather than `dist.kind`:
+   * every shipped agent has an image while `dist.kind` still describes the
+   * legacy host-install method.
+   */
+  private containerImageFor(
+    entry: AcpCatalogEntry,
+    versionOverride?: string,
+  ): { image: string; version: string } | null {
+    const curated = acpContainerAgents().find((a) => a.id === entry.id);
+    if (!curated?.image) return null;
+    const version =
+      versionOverride ?? acpSnapshotVersion(entry.id) ?? curated.version;
+    const image = acpImageAtVersion(entry.id, version) ?? curated.image;
+    if (!image) return null;
+    return { image, version };
+  }
+
   private planFor(entry: AcpCatalogEntry, versionOverride?: string): AcpProvisionPlan | null {
     const d = entry.dist;
     if (!d) return null;
@@ -371,21 +395,24 @@ export class AcpRegistryService {
     const entry = await this.findAgent(registryId, opts);
     if (!entry) throw new Error(`ACP 注册表里没有 ${registryId}`);
 
-    // Container adapters are "installed" by pulling their image. `planFor`
-    // returns null for dist.kind === "image", so without this branch every
-    // install request for a containerized agent fell through to the generic
-    // "无法安装" error — the click that appeared to do nothing.
-    if (entry.dist?.kind === "image") {
-      // `dist.kind === "image"` carries no image ref — resolve it from the
-      // snapshot, which is the same source the launcher uses.
-      const version = opts?.version ?? entry.version ?? acpSnapshotVersion(registryId);
-      const image = version ? acpImageAtVersion(registryId, version) : null;
-      if (!image || !version) throw new Error(`${entry.name} 没有可用的镜像`);
-      const pulled = await this.workspace.ensureAcpAdapterImage(agent, image);
+    // Container adapters are "installed" by pulling their image.
+    //
+    // The signal is the curated agent's `image`, NOT `dist.kind`: every one of
+    // the 42 registry agents ships an image while its `dist.kind` remains the
+    // legacy host-install method (npx/binary/uvx). Keying on `dist.kind ===
+    // "image"` therefore matched nothing, and every containerized install fell
+    // through to the host provisioner below — which is how a mere "pull image"
+    // ended up running `npm install` into /workspace/.zakura and failing with
+    // ENOENT (no `sh`/build toolchain for sharp).
+    const containerImage = this.containerImageFor(entry, opts?.version);
+    if (containerImage) {
+      const pulled = await this.workspace.ensureAcpAdapterImage(agent, containerImage.image);
       return {
-        command: entry.dist.command,
-        args: entry.dist.args ?? [],
-        version,
+        // Containerized adapters launch via the image entrypoint, so no host
+        // command is spawned; the launcher derives argv from the registry.
+        command: "",
+        args: [],
+        version: containerImage.version,
         installed: pulled,
       };
     }
