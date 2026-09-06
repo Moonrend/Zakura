@@ -1011,4 +1011,67 @@ export class RunnerClient {
     if (!res.ok) throw new Error(await res.text());
     return (await res.json()) as { stdioId: string; agentId: string };
   }
+
+  /**
+   * 确保 (agent × adapter × chat session) 的 adapter 容器在运行。
+   * adapter 二进制即容器 CMD（PID 1），凭据挂在专属 volume 上。
+   *
+   * sessionKey 是必填：Docker 会把 PID 1 的 stdout 广播给所有 attach 方，
+   * 并把它们的 stdin 合流，所以一个容器同时只能服务一个 JSON-RPC 对端。
+   */
+  async ensureAcpAdapterContainer(
+    agentId: string,
+    adapterId: string,
+    body: {
+      image: string;
+      network?: string;
+      env?: Record<string, string>;
+      sessionKey: string;
+    },
+  ): Promise<{ dockerId: string; image: string; status: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/ensure`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { dockerId: string; image: string; status: string };
+  }
+
+  /**
+   * Attach 到 adapter 容器 PID 1 的 stdio。
+   * 返回的 stdioId 与 startStdioInSidecar 同源，可复用现有
+   * stream / stdin / kill 端点。
+   */
+  async attachStdioInAdapter(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): Promise<{ stdioId: string; agentId: string; adapterId: string }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/attach`,
+      {
+        method: "POST",
+        headers: this.headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ sessionKey }),
+      },
+    );
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()) as { stdioId: string; agentId: string; adapterId: string };
+  }
+
+  async removeAcpAdapterContainer(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): Promise<void> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}?sessionKey=${encodeURIComponent(sessionKey)}`,
+      { method: "DELETE", headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(await res.text());
+  }
 }

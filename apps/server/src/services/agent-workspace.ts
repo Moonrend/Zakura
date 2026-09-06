@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -20,6 +21,7 @@ import {
   DEFAULT_WORKSPACE_LITE_IMAGE,
   LOCAL_RUNTIME_NODE_ID,
   WORKSPACE_IMAGE_LOCAL,
+  acpDurableDir,
   type RunnerHostInfo,
 } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
@@ -42,6 +44,19 @@ import { type RuntimeNodeService } from "./runtime-nodes.js";
 
 export const WORKSPACE_EXEC_PATH =
   "/opt/zakura/acp/bin:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/**
+ * HOME inside an ACP adapter container. Backed by a per-adapter docker volume
+ * so each adapter's credentials (`~/.claude`, `~/.gemini`, ...) stay isolated.
+ */
+export const ACP_ADAPTER_HOME = "/opt/zakura/acp-home";
+
+/** Per agent × adapter credential volume name. */
+export function acpAdapterCredVolume(agentId: string, adapterId: string): string {
+  return `zakura-acpcred-${adapterId}-${agentId}`
+    .replace(/[^a-zA-Z0-9_.-]/g, "-")
+    .slice(0, 63);
+}
 
 function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase();
@@ -1618,5 +1633,214 @@ export class AgentWorkspaceService {
         await this.runtime.remove(c.id, true).catch(() => undefined);
       }
     }
+  }
+
+  // ── ACP adapter containers (one per agent × adapter) ──────────────────────
+
+  private acpAdapterContainerName(
+    agentId: string,
+    adapterId: string,
+    sessionKey: string,
+  ): string {
+    // Scope: since Phase 3 the caller passes a per-(agent × adapter) process
+    // key, so one container serves every chat session for that pair.
+    //
+    // This is only safe because the adapter multiplexes by ACP `sessionId`.
+    // Docker itself does NOT help here: it broadcasts PID 1's stdout to every
+    // attached client and merges all attached stdins into one pipe — verified
+    // empirically (two attaches got the *same* JSON-RPC reply, and interleaved
+    // writes produced a `Parse error`). Hence the invariant: exactly ONE attach
+    // per container, with all chats multiplexed in-band over it.
+    //
+    // `sessionKey` is hashed rather than truncated: keys are structured
+    // (`tenant:agent:profile`), and stripping separators before a 12-char slice
+    // let distinct keys collide onto one container name.
+    const short = createHash("sha256").update(sessionKey).digest("hex").slice(0, 12);
+    return `zakura-acpa-${adapterId}-${agentId}-${short}`
+      .replace(/[^a-zA-Z0-9_.-]/g, "-")
+      .slice(0, 63);
+  }
+
+  /**
+   * Ensure the dedicated adapter container for (agent × adapter) is running.
+   *
+   * Unlike the sidecar, the adapter binary is the container CMD (PID 1): we
+   * never `docker exec` into it. Credentials live on a per-adapter volume
+   * mounted at HOME, so one adapter's login cannot read another's.
+   *
+   * `sessionKey` scopes the *process*. Callers must keep at most one attach
+   * alive per container — see `acpAdapterContainerName` for why a second
+   * attach corrupts the JSON-RPC stream.
+   */
+  async ensureAcpAdapterContainer(
+    agent: Agent,
+    adapterId: string,
+    image: string,
+    sessionKey: string,
+    opts?: { env?: Record<string, string> },
+  ): Promise<{ dockerId: string; image: string }> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      const result = await client.ensureAcpAdapterContainer(agent.id, adapterId, {
+        image,
+        network: this.config.dockerNetwork,
+        env: opts?.env,
+        sessionKey,
+      });
+      return { dockerId: result.dockerId, image: result.image };
+    }
+
+    const existing = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-adapter",
+    });
+    const mine = existing.filter(
+      (c) =>
+        c.labels["zakura.agent"] === agent.id &&
+        c.labels["zakura.acp_adapter"] === adapterId &&
+        c.labels["zakura.acp_session"] === sessionKey,
+    );
+    const running = mine.find((c) => c.status === "running" && c.image === image);
+    if (running) return { dockerId: running.id, image: running.image };
+
+    // Stale (stopped, or built from a superseded image) → replace.
+    for (const c of mine) {
+      await this.runtime.remove(c.id, true).catch(() => undefined);
+    }
+
+    const credHome = ACP_ADAPTER_HOME;
+    const result = await this.runtime.createAndStart({
+      tenantId: agent.tenantId,
+      purpose: "acp-adapter",
+      allocatedTo: agent.id,
+      spec: {
+        name: this.acpAdapterContainerName(agent.id, adapterId, sessionKey),
+        image,
+        purpose: "acp-adapter",
+        workingDir: AGENT_WORKSPACE_ROOT,
+        network: this.config.dockerNetwork,
+        // The container's lifetime is the chat session's; a restart would give
+        // us a fresh PID 1 with no attached peer and no way to replay state.
+        restartPolicy: "no",
+        ports: [],
+        stdinOpen: true,
+        volumes: [
+          {
+            hostPath: agentWorkspaceBindSource(this.config, agent.id),
+            containerPath: AGENT_WORKSPACE_ROOT,
+          },
+          {
+            volumeName: acpAdapterCredVolume(agent.id, adapterId),
+            containerPath: credHome,
+          },
+        ],
+        env: {
+          ZAKURA_AGENT_ID: agent.id,
+          HOME: credHome,
+          PATH: WORKSPACE_EXEC_PATH,
+          // Pre-container logins live under the workspace bind mount; the
+          // entrypoint copies them into the cred volume once, before exec'ing
+          // the adapter, so upgrading users are not silently logged out.
+          ACP_LEGACY_HOME: acpDurableDir(adapterId),
+          ...(opts?.env ?? {}),
+        },
+        labels: {
+          "zakura.agent": agent.id,
+          "zakura.purpose": "acp-adapter",
+          "zakura.acp_adapter": adapterId,
+          "zakura.acp_session": sessionKey,
+          "zakura.managed": "true",
+        },
+      },
+    });
+
+    return { dockerId: result.id, image: result.image };
+  }
+
+  /** Attach to the adapter container's PID 1 stdio (adapter is the CMD). */
+  async attachStdioInAcpAdapter(
+    agent: Agent,
+    adapterId: string,
+    image: string,
+    sessionKey: string,
+    opts?: { env?: Record<string, string> },
+  ): Promise<{
+    writable: WritableStream<Uint8Array>;
+    readable: ReadableStream<Uint8Array>;
+    kill: () => Promise<void>;
+    onStderr: (fn: (chunk: string) => void) => () => void;
+  }> {
+    const { dockerId } = await this.ensureAcpAdapterContainer(
+      agent,
+      adapterId,
+      image,
+      sessionKey,
+      opts,
+    );
+    if (!this.runtime.attachStdio) {
+      throw new Error("container runtime does not support stdio attach");
+    }
+    const job = await this.runtime.attachStdio(dockerId);
+    const streams = job.toWebStreams();
+    return {
+      ...streams,
+      kill: () => job.kill(),
+      onStderr: (fn) => job.onStderr(fn),
+    };
+  }
+
+  /**
+   * Remove the adapter container for (agent × adapter × chat session).
+   * Keeps the cred volume so the next session does not re-authenticate.
+   */
+  async stopAcpAdapterContainer(
+    agent: Agent,
+    adapterId: string,
+    sessionKey: string,
+  ): Promise<void> {
+    if (this.isRemoteAgent(agent)) {
+      const { client } = await this.requireRunnerClient(agent);
+      await client
+        .removeAcpAdapterContainer(agent.id, adapterId, sessionKey)
+        .catch(() => undefined);
+      return;
+    }
+    const existing = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-adapter",
+    });
+    for (const c of existing) {
+      if (
+        c.labels["zakura.agent"] === agent.id &&
+        c.labels["zakura.acp_adapter"] === adapterId &&
+        c.labels["zakura.acp_session"] === sessionKey
+      ) {
+        await this.runtime.remove(c.id, true).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
+   * Remove every managed adapter container for this tenant.
+   *
+   * Adapter containers are session-scoped and normally removed by `teardown`.
+   * That never runs if the server is killed, so a crash leaves one orphan per
+   * live session behind — they hold a stdin-open PID 1 forever and nothing
+   * else will ever reclaim them (the in-memory `byChat` map that knew about
+   * them died with the process). Sweeping at boot is the only reliable
+   * reclamation point. Cred volumes are keyed by (agent × adapter) and are
+   * deliberately left intact so the next session skips re-authentication.
+   */
+  async sweepOrphanedAcpAdapterContainers(tenantId: string): Promise<number> {
+    const existing = await this.runtime
+      .list({ tenantId, purpose: "acp-adapter" })
+      .catch(() => []);
+    let removed = 0;
+    for (const c of existing) {
+      if (c.labels["zakura.managed"] !== "true") continue;
+      await this.runtime.remove(c.id, true).catch(() => undefined);
+      removed += 1;
+    }
+    return removed;
   }
 }

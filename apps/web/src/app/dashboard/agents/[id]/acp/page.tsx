@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { toast } from "sonner";
-import { Check, ChevronLeft, ChevronRight, Download, Loader2, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Download, Loader2, Package, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -648,6 +648,9 @@ export default function AgentAcpPage() {
           const isInstalling = installingId === profile.id;
           const isInstalled = probe?.installed || (adapterStatus?.installed?.length ?? 0) > 0;
           const hasUpdate = adapterStatus?.updateAvailable;
+          // Container adapters ship as prebuilt images: nothing to install,
+          // nothing to update from here.
+          const isContainer = adapterStatus?.source === "container";
           return (
             <div
               key={profile.id}
@@ -675,13 +678,22 @@ export default function AgentAcpPage() {
                       {profile.description}
                     </span>
                   ) : null}
-                  {isInstalled ? (
+                  {isContainer ? (
+                    <Badge
+                      variant="outline"
+                      className="pointer-events-auto gap-0.5 text-[10px] text-success"
+                      title={adapterStatus?.image}
+                    >
+                      <Package className="size-2.5" /> 容器
+                      {adapterStatus?.latest ? ` v${adapterStatus.latest}` : ""}
+                    </Badge>
+                  ) : isInstalled ? (
                     <Badge variant="outline" className="pointer-events-auto gap-0.5 text-[10px] text-success">
                       <Check className="size-2.5" /> 已安装
                       {adapterStatus?.installed?.[0] ? ` v${adapterStatus.installed[0]}` : ""}
                     </Badge>
                   ) : null}
-                  {hasUpdate ? (
+                  {hasUpdate && !isContainer ? (
                     <Badge variant="warn" className="pointer-events-auto gap-0.5 text-[10px]">
                       有更新 → {adapterStatus?.latest}
                     </Badge>
@@ -689,7 +701,7 @@ export default function AgentAcpPage() {
                 </span>
               </span>
               <div className="relative z-10 flex shrink-0 items-center gap-3">
-                {setup.enabled && (hasUpdate || !isInstalled) && !isInstalling ? (
+                {setup.enabled && !isContainer && (hasUpdate || !isInstalled) && !isInstalling ? (
                   <Button
                     type="button"
                     variant={hasUpdate ? "default" : "outline"}

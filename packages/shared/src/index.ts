@@ -27,7 +27,12 @@ export type InstanceStatus =
   | "stopped"
   | "error";
 
-export type ContainerPurpose = "component" | "workspace" | "ephemeral" | "acp-sidecar";
+export type ContainerPurpose =
+  | "component"
+  | "workspace"
+  | "ephemeral"
+  | "acp-sidecar"
+  | "acp-adapter";
 
 export type HealthStatus = "healthy" | "unhealthy" | "unknown";
 
@@ -61,6 +66,11 @@ export interface ContainerSpec {
   workingDir?: string;
   network?: string;
   labels?: Record<string, string>;
+  /**
+   * Keep stdin open (Docker OpenStdin/AttachStdin). Required when the
+   * container's PID 1 speaks a stdio protocol and we attach to it later.
+   */
+  stdinOpen?: boolean;
   /** Docker HostConfig.ShmSize in bytes (e.g. Crawl4AI needs ~1g) */
   shmSize?: number;
   healthcheck?: {
@@ -477,6 +487,7 @@ export {
   acpInstalledVersionsScript,
   acpGcScript,
   acpDiskUsageScript,
+  acpUninstallScript,
 } from "./acp-provision.js";
 export type { AcpProvisionPlan } from "./acp-provision.js";
 
@@ -488,6 +499,23 @@ export {
   acpCustomCommand,
 } from "./acp-sources.js";
 export type { AcpAdapterSource } from "./acp-sources.js";
+export {
+  acpRegistryIndex,
+  acpAgents,
+  acpAgentById,
+  acpAgentByProfile,
+  acpEnabledAgents,
+  applyAcpRegistryIndex,
+  resetAcpRegistry,
+} from "./acp-registry-client.js";
+export type {
+  AcpCuratedAgent,
+  AcpCuratedIndex,
+  AcpStorageSpec,
+  AcpStorageArtifact,
+  AcpStorageMode,
+  AcpAuthSpec,
+} from "./acp-registry-client.js";
 export type {
   ImageUpdateKind,
   ImageUpdateEntry,

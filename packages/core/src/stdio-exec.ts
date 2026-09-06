@@ -9,6 +9,17 @@ export type StdioInspect = () => Promise<{ ExitCode?: number | null; Running?: b
 export type StdioExecOptions = {
   inspect: StdioInspect;
   killPid?: (pid: number) => Promise<void>;
+  /**
+   * Prefix the very first write with a newline.
+   *
+   * Only needed when the stream came from a hijacked `container.attach`:
+   * docker-modem serializes the attach options as the HTTP request body, and
+   * if Docker upgrades the socket before draining that body it lands on the
+   * container's stdin (measured ~13% of attaches). The stray newline forces
+   * such a leaked prefix to terminate as its own line, so a line-delimited
+   * JSON-RPC peer rejects just that junk line instead of our first frame.
+   */
+  newlineGuard?: boolean;
 };
 
 export class StdioExec {
@@ -20,6 +31,7 @@ export class StdioExec {
   private exited = false;
   private readonly exitWaiters: Array<(code: number | null) => void> = [];
   private readonly stderrListeners = new Set<(chunk: string) => void>();
+  private wroteFirst = false;
 
   constructor(
     readonly stream: NodeJS.ReadWriteStream,
@@ -47,6 +59,12 @@ export class StdioExec {
   write(data: Uint8Array | string): void {
     if (this.exited) return;
     const buf = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+    if (!this.wroteFirst) {
+      this.wroteFirst = true;
+      if (this.opts.newlineGuard) {
+        this.stream.write(Buffer.from("\n", "utf8"));
+      }
+    }
     this.stream.write(buf);
   }
 

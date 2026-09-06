@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   Container,
+  Hammer,
   KeyRound,
   Loader2,
   RefreshCw,
@@ -183,8 +184,10 @@ function ConfigField({
 
 function RuntimePanel({
   instance,
+  onRebuilt,
 }: {
   instance: InstanceDetail;
+  onRebuilt?: () => Promise<void> | void;
 }) {
   const fallback = (instance.containers ?? []).map((container) => ({
     id: container.id,
@@ -200,6 +203,7 @@ function RuntimePanel({
   const [loading, setLoading] = useState(true);
   const [logs, setLogs] = useState<Record<string, string>>({});
   const [logsBusy, setLogsBusy] = useState<string | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -230,19 +234,42 @@ function RuntimePanel({
     }
   }
 
+  async function rebuild() {
+    setRebuilding(true);
+    try {
+      await api(`/api/instances/${instance.id}/rebuild`, { method: "POST" });
+      toast.success("已重建容器");
+      await load();
+      await onRebuilt?.();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRebuilding(false);
+    }
+  }
+
   if (loading) return <PageLoading />;
-  if (!items.length) return null;
+  // 注意：容器被删/未创建时 items 为空，此时恰恰最需要「重建容器」入口，
+  // 因此不能直接 return null，只隐藏列表部分。
+  const hasItems = items.length > 0;
 
   return (
     <section className="border-t border-border pt-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-sm font-medium">运行环境</h3>
-        <Button size="icon-sm" variant="ghost" onClick={() => void load()} aria-label="刷新运行环境">
-          <RefreshCw />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" disabled={rebuilding} onClick={() => void rebuild()}>
+            {rebuilding ? <Loader2 className="animate-spin" /> : <Hammer />}
+            重建容器
+          </Button>
+          <Button size="icon-sm" variant="ghost" onClick={() => void load()} aria-label="刷新运行环境">
+            <RefreshCw />
+          </Button>
+        </div>
       </div>
-      <div className="divide-y divide-border border-y border-border">
-        {items.map(({ id, runtime }) => (
+      {hasItems ? (
+        <div className="divide-y divide-border border-y border-border">
+          {items.map(({ id, runtime }) => (
           <div key={id} className="space-y-3 py-3">
             <div className="flex items-start gap-3">
               <Container className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -271,7 +298,12 @@ function RuntimePanel({
             {logs[id] ? <pre className="ml-7 max-h-56 overflow-auto whitespace-pre-wrap bg-muted/40 p-2 text-[11px] leading-4">{logs[id]}</pre> : null}
           </div>
         ))}
-      </div>
+        </div>
+      ) : (
+        <p className="border-y border-border py-4 text-xs text-muted-foreground">
+          未检测到运行中的容器。若容器被误删，可点击「重建容器」按当前配置重新创建。
+        </p>
+      )}
     </section>
   );
 }
@@ -368,7 +400,7 @@ function ConfigurationPanel({
           </Button>
         ) : null}
       </div>
-      <RuntimePanel instance={instance} />
+      <RuntimePanel instance={instance} onRebuilt={onSaved} />
     </div>
   );
 }

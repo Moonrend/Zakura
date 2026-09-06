@@ -5,6 +5,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import {
   AGENT_WORKSPACE_ROOT,
   acpApiKeyDotenv,
+  acpAdapterSource,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
   acpCommandResolveExpr,
@@ -108,6 +109,69 @@ type PendingPermission = PendingDecision<acp.RequestPermissionResponse> & {
   optionKinds: Record<string, string>;
 };
 
+/**
+ * One adapter OS process (container PID 1) and the single JSON-RPC connection
+ * multiplexed over its stdio.
+ *
+ * Phase 3 splits the former 1:1 chat↔process model: several `LiveRuntime`s
+ * (one per chat session) now share one `AdapterProcess`. Two upstream facts
+ * make this safe, both verified empirically against the real claude-acp image
+ * before this refactor was written:
+ *
+ *   1. The adapter accepts repeated `session/new` on one process and returns
+ *      distinct sessionIds (it keeps per-session state internally).
+ *   2. The ACP SDK's SessionUpdateRouter keys `activeSessions` by sessionId,
+ *      so `session/update` notifications fan out only to the matching
+ *      ActiveSession — 0 misrouted updates under concurrent prompts.
+ *
+ * `refs` is the set of chat sessions currently bound to this process. When it
+ * drains to empty the process is *not* killed immediately; `reapIdle` reclaims
+ * it after the idle TTL so a quick reconnect reuses the warm process.
+ */
+type AdapterProcess = {
+  /** agent.id × profileId — the reuse key, mirroring the container identity. */
+  key: string;
+  agentId: string;
+  profileId: string;
+  connection: acp.ClientConnection;
+  /** Kills the OS process / detaches the container attach stream. */
+  kill: () => Promise<void>;
+  /** Removes the underlying container, when the adapter is containerized. */
+  removeContainer?: () => Promise<void>;
+  containerized: boolean;
+  useSidecar: boolean;
+  /** Chat sessions currently routed over this process, keyed by chatSessionId. */
+  refs: Map<string, LiveRuntime>;
+  /** Bumped whenever a ref detaches, so the reaper can apply an idle TTL. */
+  lastUsedAt: number;
+  adapter?: { id: string; version: string };
+  /**
+   * Results of the one-time `initialize` handshake. These describe the process,
+   * not any single chat, so `joinProcess` reuses them instead of re-querying —
+   * ACP allows `initialize` exactly once per connection.
+   */
+  mcpServers: acp.McpServer[];
+  promptCapabilities: acp.PromptCapabilities;
+  loadSession: boolean;
+  authMethods: LiveRuntime["authMethods"];
+  /**
+   * Staged runtime dir for this process. Shared by every chat on it — the
+   * refs map can be empty while idle, so this must not be read off a sibling.
+   */
+  layout: AcpRuntimeLayout;
+  zakuraRouted: boolean;
+  gatewayModels?: LiveRuntime["gatewayModels"];
+  /** Owning agent — needed at dispose time, when no refs remain to read it from. */
+  agent: Agent;
+  /**
+   * Set once the shared connection has closed (adapter crash, container OOM,
+   * attach stream drop). A dead process must never be handed out for reuse:
+   * `session/new` on a closed connection would hang until timeout instead of
+   * failing fast, so every reuse path checks this first.
+   */
+  dead: boolean;
+};
+
 export type LiveRuntime = {
   id: string;
   profileId: string;
@@ -116,7 +180,16 @@ export type LiveRuntime = {
   cwd: string;
   extraRoots: string[];
   kill: () => Promise<void>;
+  /**
+   * The shared JSON-RPC connection. Several LiveRuntimes may hold the *same*
+   * object reference (see AdapterProcess); never assume it is exclusive.
+   */
   connection: acp.ClientConnection;
+  /**
+   * The adapter process backing this chat session. Undefined only for legacy
+   * non-multiplexed paths that still own their process 1:1.
+   */
+  proc?: AdapterProcess;
   active?: acp.ActiveSession;
   assistantMessageId: string;
   thoughtMessageId: string;
@@ -148,6 +221,14 @@ export type LiveRuntime = {
   authWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }>;
   /** When true, the ACP adapter runs in a dedicated sidecar container. */
   useSidecar: boolean;
+  /**
+   * When true, the adapter is PID 1 of its own container, scoped to this chat
+   * session (agent × adapter × chatSessionId). Nothing was staged into the
+   * workspace, so teardown skips the runtimeDir sync-back and instead removes
+   * the container. The credential volume is keyed by (agent × adapter) and
+   * survives teardown so the next session does not re-authenticate.
+   */
+  containerized: boolean;
 };
 
 /** prompt() 拒绝并发回合时使用；drainQueued 按此常量识别「已被新回合抢占」。 */
@@ -156,6 +237,18 @@ const DRAFT_BOOT_TIMEOUT_MS = 90_000;
 
 export class AcpSessionService {
   private readonly byChat = new Map<string, LiveRuntime>();
+  /**
+   * Phase 3 process pool: agent.id × profileId → one shared adapter process.
+   * `byChat` remains the per-chat index (unchanged for ~130 call sites); this
+   * map is what makes several chats reuse a single process/container.
+   */
+  private readonly procs = new Map<string, AdapterProcess>();
+  /**
+   * How long a process with zero refs is kept warm before the reaper removes
+   * it. Short enough to release memory, long enough that closing and
+   * reopening a chat does not pay a cold adapter boot.
+   */
+  private readonly idleProcessTtlMs: number;
   /** 使超时/切换后的迟到启动结果失效 */
   private readonly draftEpoch = new Map<string, number>();
   private readonly reapTimer: ReturnType<typeof setInterval>;
@@ -182,6 +275,11 @@ export class AcpSessionService {
       workspaceFs?: ServerWorkspaceFsProvider;
       publicBaseUrl?: string;
       maxConcurrentAcpPerTenant?: number;
+      /**
+       * Idle TTL for a warm adapter process with no attached chat sessions.
+       * Defaults to ACP_IDLE_PROCESS_TTL_MS or 5 minutes.
+       */
+      idleAdapterProcessTtlMs?: number;
       /** Registry-backed on-demand adapter provisioning. */
       acpRegistry?: AcpRegistryService;
     },
@@ -193,6 +291,10 @@ export class AcpSessionService {
       registry: deps.acpRegistry,
     });
     this.maxConcurrentPerTenant = Math.max(1, deps.maxConcurrentAcpPerTenant ?? 8);
+    this.idleProcessTtlMs = Math.max(
+      0,
+      deps.idleAdapterProcessTtlMs ?? Number(process.env.ACP_IDLE_PROCESS_TTL_MS ?? 5 * 60_000),
+    );
     // Let GC see which adapter versions are backing live runtimes.
     deps.acpRegistry?.setInUseVersionsProvider((agent) => this.inUseAdapterVersions(agent));
     this.reapTimer = setInterval(() => void this.reapIdle(), 60_000);
@@ -1147,6 +1249,17 @@ export class AcpSessionService {
     return this.provisioner.resolve(agent, profileId, currentCommand, useSidecar);
   }
 
+  /**
+   * Pool key for a shared adapter process: one PID 1 per agent x profile.
+   *
+   * Deliberately excludes chatSessionId — that is the whole point of Phase 3.
+   * Credentials live in a volume keyed the same way (Q3), so two chats that
+   * share this key already share an identity and may share a process.
+   */
+  private procKey(agent: Agent, profileId: string): string {
+    return `${agent.tenantId}:${agent.id}:${profileId}`;
+  }
+
   private async bootRuntime(
     agent: Agent,
     chatSessionId: string,
@@ -1162,6 +1275,37 @@ export class AcpSessionService {
 
     if (cached) {
       await this.teardown(cached).catch(() => undefined);
+    }
+
+    // Phase 3: reuse a live adapter process for this agent x profile when one
+    // exists. `session/new` on the shared connection yields a fresh sessionId,
+    // and the SDK's SessionUpdateRouter demultiplexes notifications by that id
+    // (verified empirically: 2 concurrent sessions, 0 misrouted updates).
+    const procKey = this.procKey(agent, setup.id);
+    const pooled = this.procs.get(procKey);
+    if (pooled && pooled.dead) {
+      // Crashed between the close handler firing and this lookup. Drop it so we
+      // cold-boot rather than issuing `session/new` into a dead connection.
+      if (this.procs.get(procKey) === pooled) this.procs.delete(procKey);
+    } else if (pooled) {
+      try {
+        return await this.joinProcess(pooled, agent, chatSessionId, setup, opts);
+      } catch (err) {
+        // A dead or wedged process must not poison every future chat: evict it
+        // from the pool and fall through to a cold boot below.
+        console.warn(
+          `[acp] 复用适配器进程失败，回退到冷启动：${err instanceof Error ? err.message : String(err)}`,
+        );
+        if (this.procs.get(procKey) === pooled) this.procs.delete(procKey);
+        // Only dispose if nobody else is on it. A join can fail for reasons
+        // local to *this* chat (bad cwd, auth), and killing PID 1 would take
+        // down every sibling chat with it. Evicting from the pool is enough:
+        // the process is unreachable for new joins, and `reapIdle` disposes it
+        // once its remaining refs drain.
+        if (pooled.refs.size === 0) {
+          await this.disposeProcess(pooled).catch(() => undefined);
+        }
+      }
     }
 
     const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
@@ -1315,38 +1459,54 @@ export class AcpSessionService {
     // present (a no-op once installed) and take the resolved absolute path. Older
     // images that still carry pre-baked adapters keep working: `provision` returns
     // null for them and we fall back to the profile's own command.
-    const adapterBin = await this.provisionAdapter(agent, setup.id, launch.command, useSidecar);
-    if (adapterBin) {
-      launch.command = adapterBin.command;
-      if (adapterBin.args.length && !setup.args?.length) {
-        launch.args = adapterBin.args;
-      }
-    }
+    // ── Containerized adapter ───────────────────────────────────────────────
+    // The adapter binary is the container CMD (PID 1), its filesystem ships
+    // with the image and its credentials live on a dedicated volume. None of
+    // the workspace staging below applies: nothing to copy, nothing to
+    // install, no binary to probe. We skip straight to attaching to PID 1.
+    const adapterSource = acpAdapterSource(setup.id);
+    const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
 
-    const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
-    const prep = writeScript
-      ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
-      : `${acpStageScript(layout)}\n${whichCheck}`;
     const execFn = useSidecar
       ? (cmd: string[]) => this.deps.workspace.execInSidecar(agent, cmd)
       : (cmd: string[]) => this.deps.workspace.execInWorkspace(agent, cmd);
-    try {
-      const result = await execFn(["bash", "-lc", prep]);
-      if (result.exitCode !== 0) {
-        const stderr = (result.stderr ?? "").trim();
-        if (stderr.includes("ZAKURA_BIN_MISSING")) {
-          throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
-        }
-        throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
-      }
-    } catch (err) {
+    const cleanupRuntimeDir = async () => {
+      if (containerImage) return; // no runtimeDir was staged
       await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
         .catch(() => undefined);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("ZAKURA_BIN_MISSING")) {
-        throw new Error(`工作区里找不到 ${launch.command}`);
+    };
+
+    let adapterBin: Awaited<ReturnType<AcpSessionService["provisionAdapter"]>> = null;
+    if (!containerImage) {
+      adapterBin = await this.provisionAdapter(agent, setup.id, launch.command, useSidecar);
+      if (adapterBin) {
+        launch.command = adapterBin.command;
+        if (adapterBin.args.length && !setup.args?.length) {
+          launch.args = adapterBin.args;
+        }
       }
-      throw err;
+
+      const whichCheck = acpCommandResolveExpr(launch.command, "ZAKURA_ACP_PROBE");
+      const prep = writeScript
+        ? `${acpStageScript(layout)}\n${writeScript}\n${whichCheck}`
+        : `${acpStageScript(layout)}\n${whichCheck}`;
+      try {
+        const result = await execFn(["bash", "-lc", prep]);
+        if (result.exitCode !== 0) {
+          const stderr = (result.stderr ?? "").trim();
+          if (stderr.includes("ZAKURA_BIN_MISSING")) {
+            throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
+          }
+          throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
+        }
+      } catch (err) {
+        await cleanupRuntimeDir();
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("ZAKURA_BIN_MISSING")) {
+          throw new Error(`工作区里找不到 ${launch.command}`);
+        }
+        throw err;
+      }
     }
 
     const env: Record<string, string> = { ...launch.env, ...layout.env };
@@ -1361,13 +1521,27 @@ export class AcpSessionService {
 
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {
-      const argv = acpStdioArgv(launch.command, launch.args);
-      stdio = useSidecar
-        ? await this.deps.workspace.startStdioInSidecar(agent, argv, { workingDir: cwd, env })
-        : await this.deps.workspace.startStdio(agent, argv, { workingDir: cwd, env });
+      if (containerImage) {
+        // Adapter is PID 1 of its own container: start/reuse it and attach.
+        // Phase 3 scopes the container by agent x profile rather than by chat.
+        // The one-PID-1-per-peer constraint still holds — we simply keep a
+        // single attach per process now and multiplex chats over it in-band,
+        // instead of opening a second attach (which Docker would cross-wire).
+        stdio = await this.deps.workspace.attachStdioInAcpAdapter(
+          agent,
+          setup.id,
+          containerImage,
+          procKey,
+          { env },
+        );
+      } else {
+        const argv = acpStdioArgv(launch.command, launch.args);
+        stdio = useSidecar
+          ? await this.deps.workspace.startStdioInSidecar(agent, argv, { workingDir: cwd, env })
+          : await this.deps.workspace.startStdio(agent, argv, { workingDir: cwd, env });
+      }
     } catch (err) {
-      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
-        .catch(() => undefined);
+      await cleanupRuntimeDir();
       throw err;
     }
 
@@ -1411,15 +1585,46 @@ export class AcpSessionService {
       useSidecar,
       // Lets GC know this version is in use, so an update triggered mid-session
       // does not prune the directory this process is running from.
+      // In container mode adapterBin stays null (no runtime dir is staged, so
+      // there is nothing for GC to prune), and this spread collapses to nothing.
       ...(adapterBin?.registryId && adapterBin.version
         ? { adapter: { id: adapterBin.registryId, version: adapterBin.version } }
         : {}),
+      containerized: containerImage !== null,
       ...(opts?.runId ? { runId: opts.runId } : {}),
     };
 
     const config = readAgentAcpConfig(agent);
     live.permissionGrants = config.permissionGrants.slice();
     const stream = acp.ndJsonStream(stdio.writable, stdio.readable);
+
+    // Phase 3: the connection is owned by the *process*, not by this chat.
+    // `routes` maps acpSessionId -> LiveRuntime so inbound client requests
+    // (fs/*, terminal/*, permission, elicitation) reach the right chat. The
+    // handlers resolve every target through these hooks and fail closed on an
+    // unknown sessionId, so a stale id can never write into another chat.
+    const proc: AdapterProcess = {
+      key: procKey,
+      agentId: agent.id,
+      profileId: setup.id,
+      kill: stdio.kill,
+      connection: null as unknown as acp.ClientConnection,
+      containerized: containerImage !== null,
+      useSidecar,
+      refs: new Map(),
+      lastUsedAt: Date.now(),
+      adapter: live.adapter,
+      mcpServers: [],
+      promptCapabilities: {},
+      loadSession: false,
+      authMethods: [],
+      layout: live.layout,
+      zakuraRouted: live.zakuraRouted,
+      agent,
+      dead: false,
+      ...(live.gatewayModels?.length ? { gatewayModels: live.gatewayModels } : {}),
+    };
+
     const app = buildAcpClient({
       deps: this.deps,
       live,
@@ -1427,8 +1632,19 @@ export class AcpSessionService {
       chatSessionId,
       config,
       hooks: this.hooks,
+      resolveSession: (sessionId) => {
+        for (const ref of proc.refs.values()) {
+          if (ref.acpSessionId === sessionId) return ref;
+        }
+        return undefined;
+      },
+      allSessions: () => Array.from(proc.refs.values()),
     });
     live.connection = app.connect(stream);
+    proc.connection = live.connection;
+    live.proc = proc;
+    proc.refs.set(chatSessionId, live);
+    this.procs.set(procKey, proc);
     this.byChat.set(chatSessionId, live);
     try {
       // initialize 也可能在缺凭证时返回 auth-required（fx 无 AI_GATEWAY_API_KEY
@@ -1469,6 +1685,13 @@ export class AcpSessionService {
           : [];
       const additionalDirectories =
         cwd !== AGENT_WORKSPACE_ROOT ? [AGENT_WORKSPACE_ROOT] : undefined;
+
+      // Freeze the handshake results onto the process so later chats can join
+      // without re-running `initialize` (which ACP permits only once).
+      proc.mcpServers = mcpServers;
+      proc.promptCapabilities = live.promptCapabilities;
+      proc.authMethods = live.authMethods;
+      proc.loadSession = init.agentCapabilities?.loadSession ?? false;
       const existingAcpSessionId = opts?.existingAcpSessionId;
 
       const openSession = async () => {
@@ -1538,18 +1761,166 @@ export class AcpSessionService {
         },
       });
 
+      // The connection is shared by every chat bound to this process, so its
+      // close is a *process-level* event. Handling only `chatSessionId` here
+      // would silently strand every sibling ref: their LiveRuntimes would stay
+      // in `byChat` pointing at a dead connection, and the next prompt would
+      // hang instead of failing. Route through the process-wide handler.
       void live.connection.closed.then(() => {
-        this.byChat.delete(chatSessionId);
+        void this.onProcessClosed(proc, "adapter 连接已关闭");
       });
       return live;
     } catch (err) {
       await this.teardown(live).catch(() => undefined);
-      await execFn(["bash", "-lc", `rm -rf ${shellSingle(layout.runtimeDir)}`])
-        .catch(() => undefined);
+      await cleanupRuntimeDir();
       // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错。
       // 现在有了 stderr 尾部就优先用它——fx 缺凭证/版本不兼容等真正的退出原因都在
       // stderr 里；只有真的没有 stderr 时才回退到「镜像过旧」的猜测提示。
       throw toAcpConnectionHint(err, stderrTail);
+    }
+  }
+
+  /**
+   * Phase 3: bind a new chat session to an already-running adapter process.
+   *
+   * This is the fast path — no container start, no `initialize`. We only issue
+   * `session/new` on the shared connection, which yields a fresh acpSessionId;
+   * the SDK's SessionUpdateRouter then demultiplexes `session/update` by that
+   * id, and our client handlers resolve inbound requests through `proc.refs`.
+   *
+   * Note the deliberate asymmetry with `bootRuntime`: capabilities discovered
+   * during `initialize` (promptCapabilities, adapter version) belong to the
+   * *process*, so they are copied from an existing ref rather than re-queried.
+   */
+  private async joinProcess(
+    proc: AdapterProcess,
+    agent: Agent,
+    chatSessionId: string,
+    setup: AcpAgentSetup,
+    opts?: { existingAcpSessionId?: string; runId?: string },
+  ): Promise<LiveRuntime> {
+    const session = await this.deps.store.getSession(agent.tenantId, agent.id, chatSessionId);
+    const cwd = projectDefaultWorkingDir(session?.project);
+    const profile = publicProfileForSetup(setup);
+    const config = readAgentAcpConfig(agent);
+
+    const live: LiveRuntime = {
+      id: newId(),
+      profileId: setup.id,
+      chatSessionId,
+      cwd,
+      extraRoots: cwd === AGENT_WORKSPACE_ROOT ? [cwd] : [cwd, AGENT_WORKSPACE_ROOT],
+      // Killing one chat must not kill the shared process; teardown detaches
+      // this ref instead, and the reaper disposes the process once idle.
+      kill: async () => undefined,
+      connection: proc.connection,
+      proc,
+      assistantMessageId: newId(),
+      thoughtMessageId: newId(),
+      lastUsedAt: Date.now(),
+      availableCommands: [],
+      terminals: new Map(),
+      permissionGrants: config.permissionGrants.slice(),
+      permissions: new Map(),
+      elicitations: new Map(),
+      layout: proc.layout,
+      agent,
+      zakuraRouted: proc.zakuraRouted,
+      ...(proc.gatewayModels?.length ? { gatewayModels: proc.gatewayModels } : {}),
+      authMethods: proc.authMethods,
+      authRequired: false,
+      promptCapabilities: proc.promptCapabilities,
+      authWaiters: [],
+      useSidecar: proc.useSidecar,
+      ...(proc.adapter ? { adapter: proc.adapter } : {}),
+      containerized: proc.containerized,
+      ...(opts?.runId ? { runId: opts.runId } : {}),
+    };
+
+    // Register before session/new: the adapter may emit updates or issue client
+    // requests (fs/permission) for the new session before the response lands,
+    // and an unregistered ref would be dropped fail-closed by the handlers.
+    proc.refs.set(chatSessionId, live);
+    this.byChat.set(chatSessionId, live);
+
+    try {
+      const mcpServers = proc.mcpServers;
+      const additionalDirectories =
+        cwd !== AGENT_WORKSPACE_ROOT ? [AGENT_WORKSPACE_ROOT] : undefined;
+      const existingAcpSessionId = proc.loadSession ? opts?.existingAcpSessionId : undefined;
+
+      await withAuthRetry(this.deps.store, live, async () => {
+        if (existingAcpSessionId) {
+          try {
+            const loaded = await proc.connection.agent.request(acp.methods.agent.session.load, {
+              sessionId: existingAcpSessionId,
+              cwd,
+              mcpServers,
+              ...(additionalDirectories ? { additionalDirectories } : {}),
+            });
+            live.active = attachLoadedSession(
+              proc.connection.agent,
+              existingAcpSessionId,
+              loaded,
+            );
+            live.acpSessionId = existingAcpSessionId;
+            return;
+          } catch (err) {
+            if (isAuthRequiredError(err)) throw err;
+          }
+        }
+        live.active = await startAcpSession(
+          proc.connection.agent,
+          cwd,
+          mcpServers,
+          additionalDirectories,
+        );
+        live.acpSessionId = live.active.sessionId;
+      });
+
+      const modeId = profile.sessionModeId;
+      if (modeId && live.active) {
+        await proc.connection.agent
+          .request(acp.methods.agent.session.setMode, {
+            sessionId: live.active.sessionId,
+            modeId,
+          })
+          .catch(() => undefined);
+        live.currentModeId = modeId;
+      }
+
+      if (live.active) {
+        await this.applyConfigOptions(
+          live,
+          live.active.newSessionResponse,
+          chatSessionId,
+          opts?.runId,
+          [setup.managed.model],
+        );
+        const preferredModelId = setup.managed.model?.trim() || proc.gatewayModels?.[0]?.id;
+        if (preferredModelId) {
+          await this.applyPreferredModel(live, preferredModelId);
+        }
+      }
+
+      await this.deps.store.updateSession(agent.tenantId, agent.id, chatSessionId, {
+        origin: {
+          ...safeOrigin(session?.originJson ?? "{}"),
+          runtime: "acp",
+          acpProfileId: setup.id,
+          acpSessionId: live.acpSessionId,
+          acpRuntimeId: live.id,
+        },
+      });
+
+      proc.lastUsedAt = Date.now();
+      return live;
+    } catch (err) {
+      // Detach only this ref — the process stays up for its other chats.
+      proc.refs.delete(chatSessionId);
+      this.byChat.delete(chatSessionId);
+      proc.lastUsedAt = Date.now();
+      throw err;
     }
   }
 
@@ -1621,20 +1992,140 @@ export class AcpSessionService {
         .catch(() => undefined);
     }
     live.active?.dispose();
+
+    const proc = live.proc;
+    if (proc) {
+      // Phase 3: this chat is one ref among several on a shared process.
+      // Detaching must not kill PID 1 — `session/close` above already released
+      // the adapter-side state. The process stays warm for its remaining refs
+      // and is disposed by `reapIdle` once it has been ref-less past the TTL.
+      proc.refs.delete(live.chatSessionId);
+      proc.lastUsedAt = Date.now();
+      this.byChat.delete(live.chatSessionId);
+      // An evicted process (see the join-failure path in `bootRuntime`) is no
+      // longer in `this.procs`, so the reaper will never see it. Dispose it
+      // here as soon as its last ref drains, or it leaks a container.
+      if (proc.refs.size === 0 && this.procs.get(proc.key) !== proc) {
+        await this.disposeProcess(proc).catch(() => undefined);
+      }
+      return;
+    }
+
     await live.kill().catch(() => undefined);
-    // Sync back runtime state; use the same container the adapter ran in.
-    const syncExec = live.useSidecar
-      ? (cmd: string[]) => this.deps.workspace.execInSidecar(live.agent, cmd)
-      : (cmd: string[]) => this.deps.workspace.execInWorkspace(live.agent, cmd);
-    await syncExec(["bash", "-lc", acpSyncBackScript(live.layout)])
-      .catch(() => undefined);
+    if (live.containerized) {
+      // `kill()` only tears down the attach stream. The container is scoped to
+      // this chat session, so nothing else can reuse it — remove it or it
+      // leaks one container per ended session. The credential volume is keyed
+      // by (agent × adapter) and deliberately survives.
+      await this.deps.workspace
+        .stopAcpAdapterContainer(live.agent, live.profileId, live.chatSessionId)
+        .catch(() => undefined);
+    } else {
+      // Sync back runtime state; use the same container the adapter ran in.
+      // Containerized adapters stage nothing into the workspace, so there is
+      // no runtimeDir to sync back.
+      const syncExec = live.useSidecar
+        ? (cmd: string[]) => this.deps.workspace.execInSidecar(live.agent, cmd)
+        : (cmd: string[]) => this.deps.workspace.execInWorkspace(live.agent, cmd);
+      await syncExec(["bash", "-lc", acpSyncBackScript(live.layout)])
+        .catch(() => undefined);
+    }
     this.byChat.delete(live.chatSessionId);
+  }
+
+  /**
+   * Handle the death of a shared adapter process.
+   *
+   * Phase 3 made one adapter process serve many chats, which also made its
+   * crash a *fan-out* failure: a container OOM, an adapter panic or a dropped
+   * attach stream takes down every chat bound to it. Before this handler the
+   * only cleanup was `byChat.delete(chatSessionId)` for whichever chat happened
+   * to boot the process, so every sibling was left holding a LiveRuntime whose
+   * connection was already closed — the next prompt would hang on a request
+   * that could never be answered, with nothing shown in the UI.
+   *
+   * So the close is broadcast to all refs: reject in-flight waiters, drop the
+   * runtimes, and persist a `closed` event per chat so each one surfaces the
+   * failure. Deliberately *not* auto-restarting — a crash usually means bad
+   * credentials or a broken image, and a silent respawn loop would burn
+   * container starts while hiding the fault. The next user prompt cold-boots a
+   * fresh process through the normal path.
+   */
+  private async onProcessClosed(proc: AdapterProcess, reason: string): Promise<void> {
+    if (proc.dead) return; // `closed` can settle more than once; fan out exactly once.
+    proc.dead = true;
+    // Evict first: any concurrent `ensureRuntime` must cold-boot rather than
+    // join a corpse. Guarded so we never evict a healthy replacement that has
+    // already taken this key.
+    if (this.procs.get(proc.key) === proc) this.procs.delete(proc.key);
+
+    const refs = [...proc.refs.keys()];
+    proc.refs.clear();
+    for (const chatSessionId of refs) {
+      const live = this.byChat.get(chatSessionId);
+      // Only drop the runtime if it still belongs to this process — a chat may
+      // already have been rebooted onto a new one.
+      if (!live || live.proc !== proc) continue;
+      this.byChat.delete(chatSessionId);
+      // Unblocks anything awaiting a permission/elicitation/auth reply that the
+      // dead adapter can no longer answer.
+      this.cancelPending(live);
+      live.active?.dispose();
+      await this.deps.store
+        .appendEvent({
+          sessionId: chatSessionId,
+          type: "session_update",
+          payload: { acpState: "closed", acpError: reason },
+        })
+        .catch(() => undefined);
+    }
+
+    // Reclaim the container/staged dir. Safe now that refs are drained.
+    await this.disposeProcess(proc).catch(() => undefined);
+  }
+
+  /**
+   * Tear down a shared adapter process once no chat references it.
+   *
+   * Mirrors the non-pooled branch of `teardown`, but at process scope: the
+   * attach stream dies with `kill()`, the container (scoped by agent x profile
+   * since Phase 3) is removed, and non-containerized runtimes sync their staged
+   * dir back. The credential volume is keyed the same way and deliberately
+   * survives, so the next boot reuses the existing login.
+   */
+  private async disposeProcess(proc: AdapterProcess): Promise<void> {
+    // Mark dead *before* killing. `kill()` settles `connection.closed`, which
+    // fires `onProcessClosed`; without this flag an intentional teardown would
+    // be re-entered as if it were a crash and dispose twice.
+    proc.dead = true;
+    if (this.procs.get(proc.key) === proc) this.procs.delete(proc.key);
+    await proc.kill().catch(() => undefined);
+    const agent = proc.agent;
+    if (proc.containerized) {
+      await this.deps.workspace
+        .stopAcpAdapterContainer(agent, proc.profileId, proc.key)
+        .catch(() => undefined);
+    } else {
+      const syncExec = proc.useSidecar
+        ? (cmd: string[]) => this.deps.workspace.execInSidecar(agent, cmd)
+        : (cmd: string[]) => this.deps.workspace.execInWorkspace(agent, cmd);
+      await syncExec(["bash", "-lc", acpSyncBackScript(proc.layout)]).catch(() => undefined);
+    }
   }
 
   private async reapIdle(): Promise<void> {
     const now = Date.now();
     for (const live of [...this.byChat.values()]) {
       if (shouldReapAcpRuntime(live, now)) await this.teardown(live).catch(() => undefined);
+    }
+    // Reclaim processes that no chat references any more. Kept separate from
+    // the per-chat sweep above: a process may legitimately sit ref-less between
+    // two chats, and tearing it down instantly would defeat the whole point of
+    // pooling. Only after `idleProcessTtlMs` is it actually disposed.
+    for (const proc of [...this.procs.values()]) {
+      if (proc.refs.size > 0) continue;
+      if (now - proc.lastUsedAt < this.idleProcessTtlMs) continue;
+      await this.disposeProcess(proc).catch(() => undefined);
     }
   }
 }

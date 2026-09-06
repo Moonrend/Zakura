@@ -1,0 +1,25 @@
+# Keep shell scripts and container files LF, otherwise CRLF sneaks in on Windows
+# checkouts and Linux images fail with `bad interpreter: /bin/sh^M`.
+# Scoped deliberately to shell/container files: a repo-wide `* text=auto eol=lf`
+# would renormalize unrelated files and produce churn in future diffs.
+
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+entrypoint.sh text eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary

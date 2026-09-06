@@ -11,6 +11,7 @@ import {
   discoverDockerRegistryMirrors,
   groupRunningImageIds,
   log,
+  StdioExec,
   type ContainerRuntime,
   type CreateContainerOptions,
   type RunningContainer,
@@ -194,6 +195,9 @@ export class DockerRuntime implements ContainerRuntime {
         : {}),
       ...(spec.command && spec.command.length > 0 ? { Cmd: spec.command } : {}),
       ...(spec.workingDir ? { WorkingDir: spec.workingDir } : {}),
+      ...(spec.stdinOpen
+        ? { OpenStdin: true, StdinOnce: false, AttachStdin: true, Tty: false }
+        : {}),
       ExposedPorts: Object.keys(exposed).length ? exposed : undefined,
       HostConfig: {
         PortBindings: Object.keys(portBindings).length ? portBindings : undefined,
@@ -411,8 +415,7 @@ export class DockerRuntime implements ContainerRuntime {
     containerId: string,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
-  ): Promise<import("@zakura/core").StdioExec> {
-    const { StdioExec } = await import("@zakura/core");
+  ): Promise<StdioExec> {
     const container = this.docker.getContainer(containerId);
     const exec = await container.exec({
       Cmd: command,
@@ -441,6 +444,74 @@ export class DockerRuntime implements ContainerRuntime {
           ks.resume();
         } catch {
           /* gone */
+        }
+      },
+    });
+  }
+
+  /**
+   * Attach 到容器主进程（CMD）的 stdio。用于 adapter 即容器 CMD 的场景。
+   * 与 execStdio 不同：不新起进程，接管已运行的 PID 1；
+   * 因此 kill 语义是「停容器」而非「杀某个 pid」。
+   */
+  async attachStdio(containerId: string): Promise<StdioExec> {
+    const container = this.docker.getContainer(containerId);
+    // attach 前先确认容器在跑，否则拿到的流会立刻 EOF，调用方难以区分原因
+    const info = await container.inspect();
+    if (!info.State?.Running) {
+      throw new Error(`attachStdio: container ${containerId} is not running`);
+    }
+    const attachOpts = {
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+    };
+    const stream = (await container.attach({
+      ...attachOpts,
+      hijack: true,
+      // docker-modem 5.0.7 serializes the opts object as the POST body
+      // (modem.js:208). On a hijacked attach there is a race: if Docker
+      // upgrades the socket before it finishes consuming the request body,
+      // that body lands on the container's STDIN. Measured by teeing PID 1
+      // inside the real adapter image: ~13% of attaches (2/15, 4/20) received
+      //   {"stream":true,"stdin":true,"stdout":true,"stderr":true,"hijack":true}
+      // prepended to the first frame.
+      //
+      // There is no way to suppress the body through dockerode's attach():
+      //   * `_body: {}`      -> modem.js:212 turns '{}' into data=undefined, so
+      //                         no Content-Length is sent and line 224 falls back
+      //                         to Transfer-Encoding: chunked. Docker then blocks
+      //                         forever waiting for a body. (Reproduced: hung >7min.)
+      //   * `_body: <other>` -> still a non-empty body, still leaks. (Verified:
+      //                         a `{"_":0}` body leaked verbatim onto stdin.)
+      //   * options.file     -> would give Content-Length: 0, but dockerode's
+      //                         attach() builds its own optsf and never forwards it.
+      // So we accept the body and neutralise it in StdioExec instead: the first
+      // write is newline-prefixed, which forces any leaked prefix to terminate as
+      // its own line. The adapter answers that junk line with one harmless
+      // `-32700 Parse error` and parses our real frame normally.
+      // Verified end-to-end: 20/20 handshakes OK, including one trial that did
+      // leak and still completed.
+    } as unknown as Parameters<typeof container.attach>[0])) as unknown as NodeJS.ReadWriteStream;
+    return new StdioExec(stream, {
+      // Hijacked attach can leak the request body onto stdin — see the comment
+      // on the attach() call above.
+      newlineGuard: true,
+      inspect: async () => {
+        const cur = await container.inspect();
+        return {
+          ExitCode: cur.State?.ExitCode ?? null,
+          Running: cur.State?.Running,
+          Pid: cur.State?.Pid,
+        };
+      },
+      // attach 的对端是 PID 1：逐个 kill 无意义，直接停容器
+      killPid: async () => {
+        try {
+          await container.stop({ t: 5 });
+        } catch {
+          /* already stopped */
         }
       },
     });

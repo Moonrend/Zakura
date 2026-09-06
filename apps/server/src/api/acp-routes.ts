@@ -89,6 +89,26 @@ export function registerAcpRoutes(
   });
 
   /**
+   * Uninstall an adapter, or one specific version via `?version=`.
+   *
+   * GC cannot express this: it always keeps a survivor per adapter, so a user who
+   * installed the wrong agent would otherwise have no way to reclaim that disk.
+   */
+  app.delete("/api/agents/:id/acp/adapters/:registryId", async (c) => {
+    if (!acpRegistry) return c.json({ error: "ACP 注册表未启用" }, 503);
+    const session = c.get("session")!;
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    try {
+      const version = c.req.query("version") || undefined;
+      const result = await acpRegistry.uninstall(agent, c.req.param("registryId"), version);
+      return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  });
+
+  /**
    * Reclaim disk: drop every adapter version except the currently pinned one.
    * Without this an adapter update would leave its predecessor behind forever.
    */

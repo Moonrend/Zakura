@@ -8,9 +8,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   ACP_PROVISION_ROOT,
   acpAdapterSource,
@@ -28,12 +36,61 @@ import {
 
 const SHA = "a".repeat(64);
 
+/**
+ * bash on this host may be WSL or Git-for-Windows, and neither reads a native
+ * `C:\...` path the way node hands it over. Passing a path relative to the
+ * package dir works under both, and is a no-op on Linux/macOS CI.
+ */
+function bashPath(abs: string): string {
+  const rel = relative(process.cwd(), abs);
+  return process.platform === "win32" ? rel.split(sep).join("/") : abs;
+}
+
+/**
+ * Scratch root for tests. On Windows the system temp dir usually sits on another
+ * drive than the checkout, and a cross-drive relative path is impossible to
+ * express — so keep scratch dirs inside the package there.
+ */
+function scratchRoot(): string {
+  if (process.platform !== "win32") return tmpdir();
+  const local = join(process.cwd(), ".test-tmp");
+  mkdirSync(local, { recursive: true });
+  return local;
+}
+
+/**
+ * The generated script resolves a package's bin entry with `node -e`. Inside the
+ * adapter image node is always present, but the host bash used by these tests may
+ * be WSL, where only `node.exe` exists via interop and no POSIX `node` is on PATH.
+ *
+ * Rather than weaken the script for the sake of the test, hand the test its own
+ * `node`: a shim that delegates to `node.exe`. That keeps the test hermetic and
+ * leaves production behaviour untouched.
+ *
+ * Runs `file` under bash with the shim first on PATH. Note WSL *rebuilds* PATH on
+ * startup and discards whatever is handed over via the child env, so the
+ * assignment has to happen inside the bash command line itself.
+ */
+function runInstallScript(file: string): void {
+  if (process.platform !== "win32") {
+    execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+    return;
+  }
+  const dir = mkdtempSync(join(scratchRoot(), "acp-nodeshim-"));
+  const shim = join(dir, "node");
+  writeFileSync(shim, '#!/bin/sh\nexec node.exe "$@"\n');
+  chmodSync(shim, 0o755);
+  execFileSync("bash", ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
+    stdio: "pipe",
+  });
+}
+
 function assertValidBash(script: string, label: string): void {
-  const dir = mkdtempSync(join(tmpdir(), "acp-syntax-"));
+  const dir = mkdtempSync(join(scratchRoot(), "acp-syntax-"));
   try {
     const file = join(dir, "script.sh");
     writeFileSync(file, script);
-    execFileSync("bash", ["-n", file], { stdio: "pipe" });
+    execFileSync("bash", ["-n", bashPath(file)], { stdio: "pipe" });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     assert.fail(`${label} 不是合法的 bash：${detail}`);
@@ -98,13 +155,26 @@ describe("ACP 适配器安装脚本", () => {
     );
   });
 
-  it("每个走注册表的内置 profile 都能解析到注册表来源", () => {
+  it("每个走注册表的内置 profile 都能解析到注册表来源（容器化的除外）", () => {
     const ids = acpProfileIdsWithRegistrySource();
     assert.ok(ids.length >= 8, `注册表映射过少：${ids.length}`);
+    let containerized = 0;
     for (const id of ids) {
       const source = acpAdapterSource(id);
+      // 容器化灰度中的 profile 由镜像分发，会覆盖注册表来源；这是预期的，
+      // 但其余 profile 必须仍然走注册表，否则就是灰度开关误伤。
+      if (source.kind === "container") {
+        containerized += 1;
+        continue;
+      }
       assert.equal(source.kind, "registry", `${id} 应走注册表`);
     }
+    // 灰度必须是少数：如果哪天所有 profile 都被切成容器，这条断言会提醒我们
+    // 这个测试已经失去意义，需要重写而不是继续放行。
+    assert.ok(
+      containerized < ids.length,
+      "不应所有注册表 profile 都被容器化，该测试需重写",
+    );
   });
 
   it("未知 profile 视为镜像内置，不做安装", () => {
@@ -147,20 +217,31 @@ describe("ACP 适配器安装脚本", () => {
 describe("ACP 安装脚本行为（桩掉真实安装）", () => {
   /** 把绝对工作区路径改写到临时目录，并用「创建可执行文件」替换真实安装步骤。 */
   function stubbed(script: string, root: string, binPath: string): string {
+    // 安装行有两种形态：latest 是裸命令，钉版本时包在 `if ! ... ; then` 回退分支里。
+    // 桩必须同时覆盖，否则会漏桩并真的去调 npm。
+    //
+    // 两处站点的上下文不同，必须分别处理：
+    //   1) `if ! npm_config_cache=... ; then`
+    //   2) 回退分支里缩进的 `npm_config_cache=...`
+    // 站点 1 前面带 `!`，而 `! A && B` 在 shell 里解析成 `(! A) && B`：mkdir 成功
+    // 后被 `!` 取反成假，`&&` 直接短路，printf 永远不执行，桩只建了目录却没造出
+    // 可执行文件，最后表现为 BIN_NOT_FOUND。所以要用 `{ ...; }` 包成一条复合命令，
+    // 让 `!` 作用在整个序列上而不是第一条。
+    const stubCmd =
+      `mkdir -p ${JSON.stringify(bashPath(join(root, binPath)))} && ` +
+      `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(root, binPath, "codex-acp")))}`;
     return script
       .split(ACP_PROVISION_ROOT)
-      .join(join(root, "acp"))
+      .join(bashPath(join(root, "acp")))
       .split("/workspace/.zakura/cache")
-      .join(join(root, "cache"))
-      .replace(
-        /^npm_config_cache=.*$/m,
-        `mkdir -p ${JSON.stringify(join(root, binPath))} && ` +
-          `printf '#!/bin/sh\\n' > ${JSON.stringify(join(root, binPath, "codex-acp"))}`,
-      );
+      .join(bashPath(join(root, "cache")))
+      .replace(/^if ! npm_config_cache=.*$/m, `if ! { ${stubCmd}; }; then`)
+      // 回退分支里的第二次 npm 调用也要桩掉，否则钉版本用例会去调真实 npm。
+      .replace(/^\s*npm_config_cache=.*$/gm, stubCmd);
   }
 
   it("首次安装写入 .ok 并把 .partial 原子改名", () => {
-    const root = mkdtempSync(join(tmpdir(), "acp-behave-"));
+    const root = mkdtempSync(join(scratchRoot(), "acp-behave-"));
     try {
       const script = stubbed(
         acpProvisionScript("codex-acp", { kind: "npx", pkg: "codex-acp", version: "1.6.2" }),
@@ -169,7 +250,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
       );
       const file = join(root, "install.sh");
       writeFileSync(file, script);
-      execFileSync("bash", [file], { stdio: "pipe" });
+      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
 
       assert.ok(existsSync(join(root, "acp/codex-acp/1.6.2/.ok")), "缺少 .ok 标记");
       assert.ok(
@@ -179,7 +260,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
 
       // 二次运行必须靠 .ok 短路：删掉可执行文件后重跑，它不应该被重新装回来。
       rmSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp"), { force: true });
-      execFileSync("bash", [file], { stdio: "pipe" });
+      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
       assert.ok(
         !existsSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp")),
         "已有 .ok 时不应重复安装",
@@ -190,7 +271,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
   });
 
   it("包把可执行文件改名时，按 package.json 的 bin 字段建别名", () => {
-    const root = mkdtempSync(join(tmpdir(), "acp-rename-"));
+    const root = mkdtempSync(join(scratchRoot(), "acp-rename-"));
     try {
       const binDir = join(root, "acp/qwen-code/0.22.3.partial/node_modules/.bin");
       const pkgDir = join(root, "acp/qwen-code/0.22.3.partial/node_modules/@qwen-code/qwen-code");
@@ -200,23 +281,33 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
         version: "0.22.3",
       })
         .split(ACP_PROVISION_ROOT)
-        .join(join(root, "acp"))
+        .join(bashPath(join(root, "acp")))
         .split("/workspace/.zakura/cache")
-        .join(join(root, "cache"))
+        .join(bashPath(join(root, "cache")))
         .replace(
-          /^npm_config_cache=.*$/m,
-          `mkdir -p ${JSON.stringify(pkgDir)} && ` +
-            `printf '%s' '{"name":"@qwen-code/qwen-code","version":"0.22.3","bin":{"qwen":"cli-entry.js"}}' > ${JSON.stringify(join(pkgDir, "package.json"))} && ` +
-            `mkdir -p ${JSON.stringify(binDir)} && ` +
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "qwen"))} && ` +
-            `chmod +x ${JSON.stringify(join(binDir, "qwen"))} && ` +
-            // 传递依赖污染 .bin，逼逻辑去读 package.json 而不是数条目。
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "node-gyp-build"))} && ` +
-            `printf '#!/bin/sh\n' > ${JSON.stringify(join(binDir, "semver"))}`,
+          // 两处 npm 站点必须都桩掉。旧写法 `/^npm_config_cache=/m` 一处都匹配不上：
+          // 首处前面有 `if ! `，回退分支那处带缩进，于是脚本真的去调 npm，在没有
+          // npm 的 bash 里直接 `command not found`。
+          /^(?:if ! )?[ \t]*npm_config_cache=.*$/gm,
+          (line) => {
+            const cmd =
+              `mkdir -p ${JSON.stringify(bashPath(pkgDir))} && ` +
+              `printf '%s' '{"name":"@qwen-code/qwen-code","version":"0.22.3","bin":{"qwen":"cli-entry.js"}}' > ${JSON.stringify(bashPath(join(pkgDir, "package.json")))} && ` +
+              `mkdir -p ${JSON.stringify(bashPath(binDir))} && ` +
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "qwen")))} && ` +
+              `chmod +x ${JSON.stringify(bashPath(join(binDir, "qwen")))} && ` +
+              // 传递依赖污染 .bin，逼逻辑去读 package.json 而不是数条目。
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "node-gyp-build")))} && ` +
+              `printf '#!/bin/sh\\n' > ${JSON.stringify(bashPath(join(binDir, "semver")))}`;
+            // 同样要包成复合命令：`! A && B` 解析成 `(! A) && B`，会短路掉后续。
+            return line.startsWith("if ! ") ? `if ! { ${cmd}; }; then` : cmd;
+          },
         );
       const file = join(root, "install.sh");
       writeFileSync(file, script);
-      execFileSync("bash", [file], { stdio: "pipe" });
+      // 脚本用 `node -e` 读 package.json 的 bin 字段。适配器镜像里必有 node，
+      // 但宿主的 bash 可能是 WSL——那里只有 node.exe，没有 POSIX node。
+      runInstallScript(file);
 
       assert.ok(existsSync(join(root, "acp/qwen-code/0.22.3/.ok")), "缺少 .ok 标记");
       const alias = join(root, "acp/qwen-code/0.22.3/node_modules/.bin/qwen-code");
@@ -228,7 +319,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
   });
 
   it("GC 保留指定版本、清掉其余版本与残留 .partial", () => {
-    const root = mkdtempSync(join(tmpdir(), "acp-gc-"));
+    const root = mkdtempSync(join(scratchRoot(), "acp-gc-"));
     try {
       for (const v of ["1.6.2", "9.9.9"]) {
         mkdirSync(join(root, `acp/codex-acp/${v}`), { recursive: true });
@@ -238,10 +329,10 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
 
       const gc = acpGcScript([{ id: "codex-acp", version: "1.6.2" }])
         .split(ACP_PROVISION_ROOT)
-        .join(join(root, "acp"));
+        .join(bashPath(join(root, "acp")));
       const file = join(root, "gc.sh");
       writeFileSync(file, gc);
-      execFileSync("bash", [file], { stdio: "pipe" });
+      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
 
       assert.ok(existsSync(join(root, "acp/codex-acp/1.6.2")), "不该删掉要保留的版本");
       assert.ok(!existsSync(join(root, "acp/codex-acp/9.9.9")), "旧版本应被回收");

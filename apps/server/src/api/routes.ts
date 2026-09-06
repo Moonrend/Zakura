@@ -1202,6 +1202,32 @@ export async function createApiApp(deps: {
     }
   });
 
+  app.get("/api/instances/reconcile", async (c) => {
+    c.get("session")!;
+    return c.json({ last: orchestrator.getLastReconcile() });
+  });
+
+  app.post("/api/instances/reconcile", async (c) => {
+    const session = c.get("session")!;
+    const result = await orchestrator.reconcileGhostInstances({ tenantId: session.tenantId });
+    return c.json({ ...result, last: orchestrator.getLastReconcile() });
+  });
+
+  app.post("/api/instances/:id/rebuild", async (c) => {
+    const session = c.get("session")!;
+    const id = c.req.param("id");
+    try {
+      await orchestrator.rebuildInstance(session.tenantId, id);
+      const fresh = await loadInstanceWithContainers(db, session.tenantId, id);
+      return c.json(fresh);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        instanceErrorStatus(err),
+      );
+    }
+  });
+
   app.delete("/api/instances/:id", async (c) => {
     const session = c.get("session")!;
     const id = c.req.param("id");
