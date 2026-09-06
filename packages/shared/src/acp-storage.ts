@@ -1,8 +1,20 @@
 /**
- * ACP 进程 runtime 与 durable 凭证的边界。
- * 完整 HOME 不落 /workspace；只按 profile 声明的文件进出 /workspace/data/acp/<id>。
+ * Boundary between an ACP process's runtime state and its durable credentials.
+ *
+ * The full HOME never lands in /workspace; only the files a profile declares
+ * move in and out of /workspace/data/acp/<id>.
+ *
+ * Layouts are derived from the agent's registry declaration rather than a
+ * per-agent branch here, so a new adapter needs no change in this file. The
+ * only local table is LOCAL_STORAGE, for custom profiles that are absent from
+ * the registry and already carry host-side install scripts in acp-sources.ts.
  */
 import { AGENT_DATA_DIR, AGENT_WORKSPACE_ROOT } from "./projects.js";
+import {
+  acpAgentByProfile,
+  type AcpAuthSpec,
+  type AcpStorageSpec,
+} from "./acp-registry-client.js";
 
 type AcpSetupMode = "api_key" | "oauth" | "self";
 
@@ -41,6 +53,53 @@ function file(
   return { durableRel, runtimeRel, sync };
 }
 
+/**
+ * Storage for custom profiles that are absent from the registry. These already
+ * carry host-side install scripts in acp-sources.ts, so their layout lives here
+ * too rather than in a registry declaration.
+ */
+const LOCAL_STORAGE: Record<string, AcpStorageSpec> = {
+  hermes: {
+    mode: "home",
+    env: { HOME: "${HOME_DIR}", HERMES_HOME: "${HOME_DIR}" },
+    artifacts: [
+      { durable: "home", runtime: "home", sync: "exit", when: ["self", "oauth"] },
+      { durable: "home", runtime: "home", sync: "none", when: ["api_key"] },
+    ],
+  },
+  fx: {
+    mode: "files",
+    // fx keeps login state, settings and sessions under ~/.fx.
+    env: { HOME: "${HOME_DIR}" },
+    artifacts: [
+      { durable: ".fx", runtime: ".fx", sync: "exit", when: ["self", "oauth"] },
+    ],
+  },
+  // kiro's device-code login spreads across ~/.kiro and ~/.aws and it only has
+  // a self mode, so the whole home must round-trip or every session re-auths.
+  kiro: {
+    mode: "state-home",
+    xdg: true,
+    artifacts: [{ durable: "home", runtime: "home", sync: "exit" }],
+  },
+};
+
+/** Fallback for profiles with no declaration: one credentials file, self only. */
+const DEFAULT_STORAGE: AcpStorageSpec = {
+  mode: "files",
+  env: { HOME: "${RUNTIME_DIR}" },
+  artifacts: [
+    { durable: ".credentials.json", runtime: ".credentials.json", sync: "exit", when: ["self"] },
+  ],
+};
+
+const storageSpecFor = (profileId: string): AcpStorageSpec =>
+  acpAgentByProfile(profileId)?.storage ?? LOCAL_STORAGE[profileId] ?? DEFAULT_STORAGE;
+
+/** Auth spec drives env that depends on the setup mode, e.g. device-code flows. */
+const authSpecFor = (profileId: string): AcpAuthSpec | undefined =>
+  acpAgentByProfile(profileId)?.auth;
+
 export function acpRuntimeLayout(
   profileId: string,
   setupMode: AcpSetupMode,
@@ -49,127 +108,44 @@ export function acpRuntimeLayout(
   const durableDir = acpDurableDir(profileId);
   const runtimeDir = acpRuntimeDir(profileId, runtimeId);
   const stateDir = `${runtimeDir}/state`;
-  const id = profileId;
-  if (id === "codex") {
-    const authSync: AcpArtifactSync =
-      setupMode === "api_key" ? "none" : "codex_auth";
-    const cfgSync: AcpArtifactSync = setupMode === "self" ? "exit" : "none";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: {
-        HOME: runtimeDir,
-        CODEX_HOME: stateDir,
-        CODEX_SQLITE_HOME: stateDir,
-        ...(setupMode === "oauth" ? { NO_BROWSER: "1" } : {}),
-      },
-      artifacts: [
-        file(".codex/auth.json", "auth.json", authSync),
-        file(".codex/config.toml", "config.toml", cfgSync),
-      ],
-    };
+  const spec = storageSpecFor(profileId);
+  const authSpec = authSpecFor(profileId);
+
+  const homeDir = `${stateDir}/home`;
+  const expand = (value: string): string =>
+    value
+      .replaceAll("${STATE_DIR}", stateDir)
+      .replaceAll("${RUNTIME_DIR}", runtimeDir)
+      .replaceAll("${HOME_DIR}", homeDir);
+
+  const env: Record<string, string> = {};
+  if (spec.mode === "home" || spec.mode === "state-home") {
+    env.HOME = homeDir;
+    if (spec.xdg) {
+      env.XDG_CONFIG_HOME = `${homeDir}/.config`;
+      env.XDG_DATA_HOME = `${homeDir}/.local/share`;
+    }
+  } else if (spec.mode === "files") {
+    env.HOME = runtimeDir;
   }
-  if (id === "claude-code") {
-    const self = setupMode === "self";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: { HOME: runtimeDir, CLAUDE_CONFIG_DIR: stateDir },
-      artifacts: self
-        ? [
-            file(".claude/.credentials.json", ".credentials.json", "exit"),
-            file(".claude/settings.json", "settings.json", "exit"),
-            file(".claude/settings.local.json", "settings.local.json", "exit"),
-            file(".claude/CLAUDE.md", "CLAUDE.md", "exit"),
-            file(".claude.json", ".claude.json", "none"),
-          ]
-        : [],
-    };
+  for (const [key, value] of Object.entries(spec.env ?? {})) {
+    env[key] = expand(value);
   }
-  if (id === "hermes") {
-    const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: { HOME: `${stateDir}/home`, HERMES_HOME: `${stateDir}/home` },
-      artifacts: [file("home", "home", sync)],
-    };
+  // Device-code flows must not try to open a browser inside the container.
+  if (setupMode === "oauth") {
+    for (const [key, value] of Object.entries(authSpec?.noBrowserEnv ?? {})) {
+      env[key] = expand(value);
+    }
   }
-  if (id === "opencode") {
-    const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: {
-        HOME: `${stateDir}/home`,
-        XDG_CONFIG_HOME: `${stateDir}/home/.config`,
-        XDG_DATA_HOME: `${stateDir}/home/.local/share`,
-      },
-      artifacts: [file("home", "home", sync)],
-    };
-  }
-  if (id === "fx") {
-    const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: { HOME: `${stateDir}/home` },
-      // fx 在 ~/.fx/ 下保存登录态、settings、sessions 等私有状态。
-      artifacts: sync === "exit" ? [file(".fx", ".fx", sync)] : [],
-    };
-  }
-  if (id === "kiro") {
-    // Kiro 的设备码登录态在 $HOME 下（~/.kiro、~/.aws）。它只有 self 模式，
-    // 所以必须把整个 home 同步回 durable，否则每次会话都要重新登录。
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: {
-        HOME: `${stateDir}/home`,
-        XDG_CONFIG_HOME: `${stateDir}/home/.config`,
-        XDG_DATA_HOME: `${stateDir}/home/.local/share`,
-      },
-      artifacts: [file("home", "home", "exit")],
-    };
-  }
-  if (id === "grok" || id === "copilot" || id === "kimi-code" || id === "pi") {
-    const sync: AcpArtifactSync = setupMode === "api_key" ? "none" : "exit";
-    return {
-      profileId,
-      durableDir,
-      runtimeDir,
-      stateDir,
-      env: {
-        HOME: `${stateDir}/home`,
-        XDG_CONFIG_HOME: `${stateDir}/home/.config`,
-        XDG_DATA_HOME: `${stateDir}/home/.local/share`,
-      },
-      artifacts: sync === "exit" ? [file("home", "home", sync)] : [],
-    };
-  }
-  return {
-    profileId,
-    durableDir,
-    runtimeDir,
-    stateDir,
-    env: { HOME: runtimeDir },
-    artifacts:
-      setupMode === "self"
-        ? [file(".credentials.json", ".credentials.json", "exit")]
-        : [],
-  };
+
+  // `when` decides whether an artifact exists at all in this mode; `sync`
+  // decides whether it is copied back. Both come from the declaration, so no
+  // per-agent branching is needed here.
+  const artifacts: AcpRuntimeArtifact[] = (spec.artifacts ?? [])
+    .filter((a) => !a.when || a.when.includes(setupMode))
+    .map((a) => file(a.durable, a.runtime, a.sync ?? "exit"));
+
+  return { profileId, durableDir, runtimeDir, stateDir, env, artifacts };
 }
 
 /**

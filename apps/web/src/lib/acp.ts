@@ -147,6 +147,9 @@ export type AcpAdapterStatus = {
   latest: string | null;
   updateAvailable: boolean;
   diskKb: Record<string, number>;
+  /** Container adapters ship as prebuilt images and are never installed. */
+  source: "workspace" | "container";
+  image?: string;
 };
 
 export async function fetchAcpAdapterStatus(
