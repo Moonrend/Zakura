@@ -1,0 +1,6 @@
+SNAP digest=0a6a228e92596db0 count=39 enabledTrue=5 enabledFieldPresent=39
+LIVE digest=0aac197b945017dd count=39 enabledTrue=0 enabledFieldPresent=0
+SNAPenabled: claude-acp,gemini,goose,opencode,qwen-code
+onlyInSnap: 
+onlyInLive: 
+versionChanges(0): 

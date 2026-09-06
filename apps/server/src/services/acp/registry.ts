@@ -26,12 +26,31 @@ import {
   type AcpRegistryPlatform,
   type AcpResolvedDist,
   acpEnabledAgents,
+  acpImageAtVersion,
+  acpRegistryDigest,
+  acpRegistryIsSnapshot,
+  acpSnapshotVersion,
+  applyAcpRegistryIndex,
 } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
+import { readAgentAcpConfig } from "./config.js";
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Compiled index of the curated registry (`Moonrend/acp-registry`).
+ *
+ * This is a different source from `ACP_REGISTRY_URL`: the upstream index carries
+ * provisioning metadata for adapters installed *into* the workspace, while this
+ * one pins the container images for adapters that run as their own container.
+ * Container adapters ship as a build-time snapshot, so without refreshing this
+ * they can never report an available update.
+ */
+const CURATED_REGISTRY_URL =
+  process.env.ZAKURA_ACP_REGISTRY_URL ??
+  "https://raw.githubusercontent.com/Moonrend/acp-registry/main/dist/index.json";
 
 /** Companion packages installed alongside certain adapters. `pi-acp` is a thin ACP
  * shim that spawns the separate `pi` coding agent (`@earendil-works/pi-coding-agent`),
@@ -93,6 +112,30 @@ export type AcpAdapterStatus = {
   source: "workspace" | "container";
   /** Image reference, for container-sourced adapters. */
   image?: string;
+  /**
+   * Registry version this agent has explicitly adopted, when set.
+   *
+   * Present only for container adapters. When absent the adapter runs the
+   * version baked into this build's snapshot.
+   */
+  pinnedVersion?: string;
+  /**
+   * Set when the update state could not be determined (registry or digest probe
+   * failed). Distinguishes "no update" from "could not check" so the UI never
+   * silently reports an adapter as current.
+   */
+  checkError?: string;
+};
+
+/** Outcome of refreshing the curated container registry. */
+export type AcpCuratedRefresh = {
+  /** Digest of the index now in effect. */
+  digest: string;
+  /** True when the fetch failed and a previously loaded index is being reused. */
+  stale: boolean;
+  /** True when the index in effect is still the build-time snapshot. */
+  usingSnapshot: boolean;
+  error?: string;
 };
 
 /** Workspaces are Linux containers regardless of where the server runs. */
@@ -103,6 +146,7 @@ function workspacePlatform(arch = process.arch): AcpRegistryPlatform {
 export class AcpRegistryService {
   private index: AcpRegistryIndex | null = null;
   private fetchedAt = 0;
+  private curatedFetchedAt = 0;
   private inFlight: Promise<AcpRegistryIndex | null> | null = null;
   /**
    * Reports adapter versions currently backing a live session. Injected rather
@@ -159,6 +203,56 @@ export class AcpRegistryService {
       }
     })();
     return this.inFlight;
+  }
+
+  /**
+   * Refresh the curated container registry, cached on the same 6h cycle.
+   *
+   * Container adapters are pinned by a build-time snapshot, so without this they
+   * are structurally incapable of reporting an update. On failure we keep the
+   * index already in effect and report `stale`, so the UI can distinguish
+   * "checked, nothing new" from "could not check".
+   */
+  async refreshCuratedIndex(opts?: { force?: boolean }): Promise<AcpCuratedRefresh> {
+    const fresh = Date.now() - this.curatedFetchedAt < REFRESH_INTERVAL_MS;
+    if (fresh && !opts?.force) {
+      return { digest: acpRegistryDigest(), stale: false, usingSnapshot: acpRegistryIsSnapshot() };
+    }
+
+    const before = acpRegistryDigest();
+    try {
+      const res = await this.fetchImpl(CURATED_REGISTRY_URL, {
+        headers: { Accept: "application/json", "User-Agent": "zakura/1.0" },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // A malformed index is rejected rather than thrown, and leaves the previous
+      // one active — treat that as a failed check, not a successful refresh.
+      const applied = applyAcpRegistryIndex(await res.json());
+      if (!applied.ok) {
+        throw new Error(applied.reason ?? "registry index failed validation");
+      }
+      this.curatedFetchedAt = Date.now();
+      if (applied.digest !== before) {
+        log.info("acp_curated_registry.updated", {
+          from: before,
+          to: applied.digest,
+        });
+      }
+      return { digest: applied.digest, stale: false, usingSnapshot: false };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn("acp_curated_registry.fetch_failed", {
+        error: message,
+        usingSnapshot: acpRegistryIsSnapshot(),
+      });
+      return {
+        digest: acpRegistryDigest(),
+        stale: true,
+        usingSnapshot: acpRegistryIsSnapshot(),
+        error: message,
+      };
+    }
   }
 
   /** Registry entries decorated with the install plan for the workspace platform. */
@@ -305,13 +399,25 @@ export class AcpRegistryService {
 
   /** Installed versions + disk usage + whether the registry has something newer. */
   async status(agent: Agent, opts?: { force?: boolean }): Promise<AcpAdapterStatus[]> {
-    const [versionsOut, diskOut, index] = await Promise.all([
+    const [versionsOut, diskOut, index, curated] = await Promise.all([
       this.workspace.execInWorkspace(agent, ["bash", "-lc", acpInstalledVersionsScript()]),
       this.workspace.execInWorkspace(agent, ["bash", "-lc", acpDiskUsageScript()]),
       // `force` lets the UI's "check for updates" bypass the 6h index TTL; without
       // it an update published minutes ago stays invisible for hours.
       this.getIndex(opts),
+      // Container adapters are pinned by the curated index, not the upstream one,
+      // so they need their own refresh or they can never show an update.
+      this.refreshCuratedIndex(opts),
     ]);
+
+    // Adapter status is keyed by registry id, but the adopted version lives on
+    // the agent's ACP setup, which is keyed by profile id.
+    const setups = readAgentAcpConfig(agent).agents ?? {};
+    const pinnedByRegistryId = new Map<string, string>();
+    for (const containerAgent of acpEnabledAgents()) {
+      const pin = setups[containerAgent.profileId]?.pinnedVersion;
+      if (pin) pinnedByRegistryId.set(containerAgent.id, pin);
+    }
 
     const byId = new Map<string, AcpAdapterStatus>();
     for (const line of versionsOut.stdout.split("\n")) {
@@ -346,6 +452,19 @@ export class AcpRegistryService {
       // Only claim an update when we actually know the target version; an
       // unreachable registry must not render as "up to date" either way.
       entry.updateAvailable = Boolean(latest && !entry.installed.includes(latest));
+      if (!latest) {
+        // An adapter that moved to a container is absent from the upstream index
+        // by design; that is a leftover workspace install, not a delisting.
+        const curatedEntry = acpEnabledAgents().find((a) => a.id === entry.id);
+        if (curatedEntry) {
+          entry.latest = curatedEntry.version;
+          entry.updateAvailable = !entry.installed.includes(curatedEntry.version);
+        } else {
+          entry.checkError = index
+            ? "This adapter is no longer listed in the registry."
+            : "Could not reach the adapter registry; update state is unknown.";
+        }
+      }
     }
 
     // Containerized adapters ship as prebuilt images. They never appear in the
@@ -353,14 +472,32 @@ export class AcpRegistryService {
     // installed" forever and offer an install button that does nothing.
     for (const containerAgent of acpEnabledAgents()) {
       if (byId.has(containerAgent.id)) continue;
+      // `containerAgent.version` comes from the *active* index, which a refresh
+      // may have advanced past the build-time snapshot. Sessions launch the tag
+      // in `image`, so the honest "installed" value is whatever this deployment
+      // shipped with, and an update is a published tag we have not adopted yet.
+      //
+      // An adopted pin overrides the shipped version, because that is the tag
+      // sessions will actually launch (see acpAdapterSource).
+      const pinned = pinnedByRegistryId.get(containerAgent.id);
+      const shipped =
+        pinned ?? acpSnapshotVersion(containerAgent.id) ?? containerAgent.version;
       byId.set(containerAgent.id, {
         id: containerAgent.id,
-        installed: [containerAgent.version],
+        installed: [shipped],
         latest: containerAgent.version,
-        updateAvailable: false,
+        updateAvailable: shipped !== containerAgent.version,
         diskKb: {},
         source: "container",
-        image: containerAgent.image,
+        image: acpImageAtVersion(containerAgent.id, shipped) ?? containerAgent.image,
+        ...(pinned ? { pinnedVersion: pinned } : {}),
+        ...(curated.stale
+          ? {
+              checkError:
+                curated.error ??
+                "Could not reach the adapter registry; showing the last known version.",
+            }
+          : {}),
       });
     }
     return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));

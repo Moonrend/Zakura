@@ -74,6 +74,24 @@ let active: AcpCuratedIndex = SNAPSHOT;
 let byProfile = new Map<string, AcpCuratedAgent>();
 let byId = new Map<string, AcpCuratedAgent>();
 
+/** Local enablement policy, keyed by agent id. See `mergeEnabled`. */
+const SNAPSHOT_ENABLED = new Map(SNAPSHOT.agents.map((a) => [a.id, a.enabled]));
+
+/** Versions frozen at build time, keyed by agent id. See `acpSnapshotVersion`. */
+const SNAPSHOT_VERSIONS = new Map(SNAPSHOT.agents.map((a) => [a.id, a.version]));
+
+/**
+ * The container image version baked in at build time.
+ *
+ * Container adapters launch `image` straight from the active index, so once a
+ * refresh lands the newer tag is what sessions pull. Comparing against the
+ * snapshot is what lets the UI say "a newer adapter image is published"
+ * instead of silently swapping the tag underneath the user.
+ */
+export function acpSnapshotVersion(id: string): string | undefined {
+  return SNAPSHOT_VERSIONS.get(id);
+}
+
 function reindex(index: AcpCuratedIndex): void {
   byProfile = new Map(index.agents.map((a) => [a.profileId, a]));
   byId = new Map(index.agents.map((a) => [a.id, a]));
@@ -94,6 +112,19 @@ export const acpAgents = (): AcpCuratedAgent[] => active.agents;
 export const acpEnabledAgents = (): AcpCuratedAgent[] =>
   active.agents.filter((a) => a.enabled);
 
+/**
+ * Rebuild an image ref at an explicit version.
+ *
+ * Derived from `imagePrefix` + agent id rather than string-editing the tag off
+ * `agent.image`, because an image ref may legitimately contain `:` in a
+ * registry host:port. Returns null when the agent is unknown.
+ */
+export function acpImageAtVersion(id: string, version: string): string | null {
+  const agent = byId.get(id);
+  if (!agent) return null;
+  return `${active.imagePrefix}/${agent.id}:${version}`;
+}
+
 function isValidIndex(value: unknown): value is AcpCuratedIndex {
   if (!value || typeof value !== "object") return false;
   const idx = value as Partial<AcpCuratedIndex>;
@@ -106,6 +137,29 @@ function isValidIndex(value: unknown): value is AcpCuratedIndex {
       typeof a?.image === "string" &&
       typeof a?.storage?.mode === "string",
   );
+}
+
+/**
+ * Re-apply local enablement to a freshly fetched index.
+ *
+ * The published `dist/index.json` carries no `enabled` field today, so taking
+ * remote agents verbatim would leave every `enabled` undefined. That empties
+ * `acpEnabledAgents()` and silently demotes every container adapter to
+ * workspace provisioning — a behaviour change, not just a display bug.
+ *
+ * So an omitted flag falls back to what this build shipped with, while an
+ * explicit boolean is honoured. That keeps the registry authoritative when it
+ * chooses to speak (a new agent can ship enabled with no host change) without
+ * letting silence turn every container adapter off.
+ */
+function mergeEnabled(index: AcpCuratedIndex): AcpCuratedIndex {
+  return {
+    ...index,
+    agents: index.agents.map((a) => ({
+      ...a,
+      enabled: typeof a.enabled === "boolean" ? a.enabled : (SNAPSHOT_ENABLED.get(a.id) ?? false),
+    })),
+  };
 }
 
 /**
@@ -122,7 +176,7 @@ export function applyAcpRegistryIndex(
   if (!isValidIndex(value)) {
     return { ok: false, digest: active.digest, reason: "index failed validation" };
   }
-  active = value;
+  active = mergeEnabled(value);
   reindex(active);
   return { ok: true, digest: active.digest };
 }
@@ -132,3 +186,12 @@ export function resetAcpRegistry(): void {
   active = SNAPSHOT;
   reindex(active);
 }
+
+/** Digest of the index currently in effect. */
+export const acpRegistryDigest = (): string => active.digest;
+
+/** True when the active index is still the build-time snapshot. */
+export const acpRegistryIsSnapshot = (): boolean => active === SNAPSHOT;
+
+/** Digest of the build-time snapshot, for reporting drift against the live index. */
+export const acpSnapshotDigest = (): string => SNAPSHOT.digest;

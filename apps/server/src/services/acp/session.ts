@@ -1464,7 +1464,7 @@ export class AcpSessionService {
     // with the image and its credentials live on a dedicated volume. None of
     // the workspace staging below applies: nothing to copy, nothing to
     // install, no binary to probe. We skip straight to attaching to PID 1.
-    const adapterSource = acpAdapterSource(setup.id);
+    const adapterSource = acpAdapterSource(setup.id, setup.pinnedVersion);
     const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
 
     const execFn = useSidecar

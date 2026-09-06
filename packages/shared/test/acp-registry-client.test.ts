@@ -16,6 +16,7 @@ import {
   applyAcpRegistryIndex,
   resetAcpRegistry,
   acpRuntimeLayout,
+  acpSnapshotVersion,
 } from "../src/index.js";
 
 test("registry snapshot ships with the expected shape", () => {
@@ -138,6 +139,65 @@ test("a malformed index is rejected and leaves the active one intact", () => {
   }
   assert.equal(acpAgents().length, before, "active index must survive bad input");
 });
+
+test("refreshing from the live index keeps container adapters enabled", (t) => {
+  // The published dist/index.json carries no `enabled` field. Applying it
+  // verbatim would empty acpEnabledAgents(), which does not merely hide rows:
+  // acpAdapterSource() would demote every container adapter to workspace
+  // provisioning and change how sessions actually run.
+  t.after(() => resetAcpRegistry());
+  const before = acpEnabledAgents().map((a) => a.id).sort();
+  assert.ok(before.length > 0, "precondition: snapshot has enabled agents");
+
+  const live = {
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "live000000000000",
+    agents: acpAgents().map(({ enabled: _enabled, ...rest }) => rest),
+  };
+  assert.ok(applyAcpRegistryIndex(live).ok, "live-shaped index must be accepted");
+
+  assert.deepEqual(acpEnabledAgents().map((a) => a.id).sort(), before);
+  for (const id of before) {
+    const source = acpAdapterSource(acpAgents().find((a) => a.id === id)!.profileId);
+    assert.equal(source.kind, "container", `${id} must stay a container adapter`);
+  }
+});
+
+test("a published version bump reads as an available update", (t) => {
+  // Container adapters launch the tag in `image`, so "installed" is the version
+  // this build shipped with and an update is a newer tag we have not adopted.
+  t.after(() => resetAcpRegistry());
+  const target = acpEnabledAgents()[0];
+  assert.equal(acpSnapshotVersion(target.id), target.version, "no update before refresh");
+
+  applyAcpRegistryIndex({
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "bumped0000000000",
+    agents: acpAgents().map(({ enabled: _enabled, ...rest }) =>
+      rest.id === target.id ? { ...rest, version: "99.0.0" } : rest,
+    ),
+  });
+
+  const after = acpEnabledAgents().find((a) => a.id === target.id)!;
+  assert.equal(after.version, "99.0.0", "active index must carry the new version");
+  assert.equal(acpSnapshotVersion(target.id), target.version, "shipped version is immutable");
+  assert.notEqual(acpSnapshotVersion(target.id), after.version, "difference drives updateAvailable");
+});
+
+test("an agent the registry explicitly disables is honoured", (t) => {
+  t.after(() => resetAcpRegistry());
+  const target = acpEnabledAgents()[0];
+  applyAcpRegistryIndex({
+    schemaVersion: 1,
+    imagePrefix: "ghcr.io/moonrend/acp-registry",
+    digest: "disabled00000000",
+    agents: acpAgents().map((a) => (a.id === target.id ? { ...a, enabled: false } : a)),
+  });
+  assert.ok(!acpEnabledAgents().some((a) => a.id === target.id), "explicit false must win");
+});
+
 test("registry auth modes agree with the builtin profiles", () => {
   // The UI renders setup flows from the profile while the adapter reads them
   // from the registry; drift between the two silently breaks login.

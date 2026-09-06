@@ -150,7 +150,32 @@ export type AcpAdapterStatus = {
   /** Container adapters ship as prebuilt images and are never installed. */
   source: "workspace" | "container";
   image?: string;
+  /**
+   * Registry version this agent explicitly adopted. Absent means the adapter
+   * runs the version baked into this build's snapshot.
+   */
+  pinnedVersion?: string;
+  /**
+   * Set when update state could not be determined. Lets the UI say "check
+   * failed" instead of falsely showing the adapter as up to date.
+   */
+  checkError?: string;
 };
+
+/**
+ * Adopt a registry version for a container adapter, or roll back to the
+ * snapshot version by passing null.
+ */
+export async function adoptAcpAdapterVersion(
+  agentId: string,
+  registryId: string,
+  version: string | null,
+): Promise<{ id: string; pinnedVersion: string | null; image: string }> {
+  return api(`/api/agents/${agentId}/acp/adapters/${encodeURIComponent(registryId)}/adopt`, {
+    method: "POST",
+    json: { version: version ?? "" },
+  });
+}
 
 export async function fetchAcpAdapterStatus(
   agentId: string,

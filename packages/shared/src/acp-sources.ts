@@ -12,7 +12,11 @@
  */
 
 import { ACP_PROVISION_CACHE, acpVersionDir } from "./acp-provision.js";
-import { acpAgentByProfile, acpAgents } from "./acp-registry-client.js";
+import {
+  acpAgentByProfile,
+  acpAgents,
+  acpImageAtVersion,
+} from "./acp-registry-client.js";
 
 export type AcpAdapterSource =
   /** Provision from the upstream registry under this id. */
@@ -122,10 +126,25 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
  * Resolution is registry-first: if `Moonrend/acp-registry` publishes an image
  * for this profile, that image wins. Only profiles the registry does not cover
  * fall back to the host-side install scripts below.
+ *
+ * `pinnedVersion` lets an agent adopt a registry version newer than the one
+ * this build shipped, without a redeploy. It only applies to container
+ * adapters, and only when the running index still knows the agent: an unknown
+ * pin falls through to the registry's own version rather than synthesising an
+ * image ref that may not exist.
  */
-export function acpAdapterSource(profileId: string): AcpAdapterSource {
+export function acpAdapterSource(
+  profileId: string,
+  pinnedVersion?: string | null,
+): AcpAdapterSource {
   const agent = acpAgentByProfile(profileId);
-  if (agent?.enabled) return { kind: "container", image: agent.image };
+  if (agent?.enabled) {
+    if (pinnedVersion && pinnedVersion !== agent.version) {
+      const pinned = acpImageAtVersion(agent.id, pinnedVersion);
+      if (pinned) return { kind: "container", image: pinned };
+    }
+    return { kind: "container", image: agent.image };
+  }
   if (agent) return { kind: "registry", registryId: agent.id };
   const custom = CUSTOM_SOURCES[profileId];
   if (custom) return custom;

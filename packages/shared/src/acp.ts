@@ -206,6 +206,13 @@ export type AcpAgentSetup = {
   managed: Record<string, string>;
   /** 模型来源：第三方自身配置，或由 Zakura Gateway 暴露的租户路由。 */
   modelProvider?: "native" | "zakura";
+  /**
+   * 容器适配器采用的注册表版本。
+   *
+   * 缺省时使用本次构建快照内的版本；用户在「检查更新」中确认采用新版本后写入，
+   * 使其无需重新部署即可生效。清空该字段即回滚到构建时版本。
+   */
+  pinnedVersion?: string;
 };
 
 export type AcpAgentConfig = {
@@ -943,6 +950,8 @@ export function parseAcpAgentSetup(id: string, raw: unknown): AcpAgentSetup {
   const env = rec.env ? asStringMap(rec.env) : undefined;
   const command = typeof rec.command === "string" ? rec.command.trim() : "";
   const displayName = typeof rec.displayName === "string" ? rec.displayName.trim() : "";
+  const pinnedVersion =
+    typeof rec.pinnedVersion === "string" ? rec.pinnedVersion.trim() : "";
   return {
     id: normalizeAcpProfileId(id),
     enabled: rec.enabled === true,
@@ -951,6 +960,7 @@ export function parseAcpAgentSetup(id: string, raw: unknown): AcpAgentSetup {
     ...(command ? { command } : {}),
     ...(args?.length ? { args } : {}),
     ...(env && Object.keys(env).length ? { env } : {}),
+    ...(pinnedVersion ? { pinnedVersion } : {}),
     managed,
     // Older ACP settings persisted only the zakura_* fields without
     // modelProvider; infer the route so those profiles do not silently launch
@@ -1538,6 +1548,7 @@ export function acpConfigToJson(config: AcpAgentConfig): Record<string, unknown>
     if (setup.command) row.command = setup.command;
     if (setup.args?.length) row.args = setup.args;
     if (setup.env && Object.keys(setup.env).length) row.env = setup.env;
+    if (setup.pinnedVersion) row.pinnedVersion = setup.pinnedVersion;
     agents[id] = row;
   }
   return {

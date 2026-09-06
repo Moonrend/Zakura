@@ -253,8 +253,11 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
+      ZAKURA_RUNNER_SLUG: ${yamlQuote(slug)}
       ZAKURA_RUNNER_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
+    labels:
+      zakura.runner_slug: ${yamlQuote(slug)}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${dirs.data}:${dirs.data}
@@ -311,6 +314,7 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       ZAKURA_RUNNER_SERVER_URL: ${yamlQuote(opts.serverUrl)}
       ZAKURA_RUNNER_TOKEN: ${yamlQuote(opts.token)}
       ZAKURA_RUNNER_PORT: "${port}"
+      ZAKURA_RUNNER_SLUG: ${yamlQuote(slug)}
       ZAKURA_RUNNER_STORAGE_ROOT: ${dirs.data}
       DOCKER_HOST: unix:///var/run/docker.sock
       # 避免继承宿主机 HTTP 代理；控制面走 Tailscale / 直连
@@ -320,6 +324,8 @@ export function buildRunnerComposeSnippet(opts: RunnerComposeOpts): string {
       https_proxy: ""
       NO_PROXY: "*"
       no_proxy: "*"
+    labels:
+      zakura.runner_slug: ${yamlQuote(slug)}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${dirs.data}:${dirs.data}
@@ -347,10 +353,12 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
       `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
       `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
       `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
+      `  -e ZAKURA_RUNNER_SLUG=${shQuote(slug)} \\`,
       `  -e ZAKURA_RUNNER_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
       "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
       "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
       '  -e NO_PROXY=* -e no_proxy=* \\',
+      `  --label zakura.runner_slug=${shQuote(slug)} \\`,
       "  -v /var/run/docker.sock:/var/run/docker.sock \\",
       `  -v ${dirs.data}:${dirs.data} \\`,
       "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",
@@ -395,10 +403,12 @@ function buildDockerRunCommand(opts: RunnerComposeOpts & { slug: string }): stri
     `  -e ZAKURA_RUNNER_SERVER_URL=${shQuote(opts.serverUrl)} \\`,
     `  -e ZAKURA_RUNNER_TOKEN=${shQuote(opts.token)} \\`,
     `  -e ZAKURA_RUNNER_PORT=${shQuote(String(port))} \\`,
+    `  -e ZAKURA_RUNNER_SLUG=${shQuote(slug)} \\`,
     `  -e ZAKURA_RUNNER_STORAGE_ROOT=${shQuote(dirs.data)} \\`,
     "  -e DOCKER_HOST=unix:///var/run/docker.sock \\",
     "  -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= \\",
     '  -e NO_PROXY=* -e no_proxy=* \\',
+    `  --label zakura.runner_slug=${shQuote(slug)} \\`,
     "  -v /var/run/docker.sock:/var/run/docker.sock \\",
     `  -v ${dirs.data}:${dirs.data} \\`,
     "  -v /tmp/.X11-unix:/tmp/.X11-unix \\",
