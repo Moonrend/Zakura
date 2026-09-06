@@ -51,7 +51,6 @@ export interface AcpCuratedAgent {
   id: string;
   name: string;
   version: string;
-  enabled: boolean;
   /** Stable Zakura-side profile id. */
   profileId: string;
   /** Fully qualified image ref, including tag. */
@@ -90,9 +89,14 @@ export const acpAgentById = (id: string): AcpCuratedAgent | undefined => byId.ge
 
 export const acpAgents = (): AcpCuratedAgent[] => active.agents;
 
-/** Agents the registry publishes images for. */
-export const acpEnabledAgents = (): AcpCuratedAgent[] =>
-  active.agents.filter((a) => a.enabled);
+/**
+ * Agents the registry publishes container images for.
+ *
+ * The registry publishes an image for every declaration it carries, so this is
+ * currently all of them. It stays a named helper because callers mean
+ * "adapters that run as containers", not "everything the index knows".
+ */
+export const acpContainerAgents = (): AcpCuratedAgent[] => active.agents;
 
 function isValidIndex(value: unknown): value is AcpCuratedIndex {
   if (!value || typeof value !== "object") return false;

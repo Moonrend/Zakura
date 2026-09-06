@@ -125,8 +125,7 @@ const CUSTOM_SOURCES: Record<string, Extract<AcpAdapterSource, { kind: "custom" 
  */
 export function acpAdapterSource(profileId: string): AcpAdapterSource {
   const agent = acpAgentByProfile(profileId);
-  if (agent?.enabled) return { kind: "container", image: agent.image };
-  if (agent) return { kind: "registry", registryId: agent.id };
+  if (agent) return { kind: "container", image: agent.image };
   const custom = CUSTOM_SOURCES[profileId];
   if (custom) return custom;
   // Custom/user-defined profiles supply their own command; nothing to provision.

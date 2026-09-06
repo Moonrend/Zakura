@@ -11,7 +11,7 @@ import {
   acpAdapterSource,
   acpAgentByProfile,
   acpAgents,
-  acpEnabledAgents,
+  acpContainerAgents,
   acpRegistryIdForProfile,
   applyAcpRegistryIndex,
   resetAcpRegistry,
@@ -37,22 +37,24 @@ test("profile ids are unique across the registry", () => {
   }
 });
 
-test("enabled agents resolve to a container image", () => {
-  const enabled = acpEnabledAgents();
-  assert.ok(enabled.length > 0, "expected at least one enabled agent");
-  for (const a of enabled) {
+test("every registry agent resolves to its container image", () => {
+  const agents = acpContainerAgents();
+  assert.ok(agents.length > 0, "expected at least one registry agent");
+  for (const a of agents) {
     const source = acpAdapterSource(a.profileId);
     assert.equal(source.kind, "container", `${a.id} should be containerized`);
     if (source.kind === "container") assert.equal(source.image, a.image);
   }
 });
 
-test("disabled agents fall back to on-demand provisioning", () => {
-  const disabled = acpAgents().find((a) => !a.enabled);
-  assert.ok(disabled, "expected a disabled agent in the registry");
-  const source = acpAdapterSource(disabled.profileId);
-  assert.equal(source.kind, "registry");
-  if (source.kind === "registry") assert.equal(source.registryId, disabled.id);
+test("the registry publishes an image for every declaration", () => {
+  // The registry builds and pushes unconditionally, so no declaration may be
+  // left without an image -- otherwise a profile would resolve to a tag that
+  // was never published.
+  for (const a of acpAgents()) {
+    assert.ok(a.image, `${a.id} has no image`);
+    assert.match(a.image, /^ghcr\.io\/moonrend\/acp-registry\//, `${a.id}: ${a.image}`);
+  }
 });
 
 test("gemini keeps its distinct profile id and registry id", () => {

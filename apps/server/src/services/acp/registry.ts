@@ -25,7 +25,7 @@ import {
   type AcpRegistryIndex,
   type AcpRegistryPlatform,
   type AcpResolvedDist,
-  acpEnabledAgents,
+  acpContainerAgents,
 } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
@@ -351,7 +351,7 @@ export class AcpRegistryService {
     // Containerized adapters ship as prebuilt images. They never appear in the
     // workspace scan above, so without this they would render as "not
     // installed" forever and offer an install button that does nothing.
-    for (const containerAgent of acpEnabledAgents()) {
+    for (const containerAgent of acpContainerAgents()) {
       if (byId.has(containerAgent.id)) continue;
       byId.set(containerAgent.id, {
         id: containerAgent.id,

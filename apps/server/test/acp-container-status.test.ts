@@ -6,13 +6,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { acpEnabledAgents } from "@zakura/shared";
+import { acpContainerAgents } from "@zakura/shared";
 import type { AcpAdapterStatus } from "../src/services/acp/registry.js";
 
 /** Mirrors the merge step at the end of AcpRegistryService.status(). */
 function mergeContainerAdapters(scanned: AcpAdapterStatus[]): AcpAdapterStatus[] {
   const byId = new Map(scanned.map((s) => [s.id, s]));
-  for (const agent of acpEnabledAgents()) {
+  for (const agent of acpContainerAgents()) {
     if (byId.has(agent.id)) continue;
     byId.set(agent.id, {
       id: agent.id,
@@ -29,7 +29,7 @@ function mergeContainerAdapters(scanned: AcpAdapterStatus[]): AcpAdapterStatus[]
 
 test("containerized adapters report as installed and need no update", () => {
   const merged = mergeContainerAdapters([]);
-  const enabled = acpEnabledAgents();
+  const enabled = acpContainerAgents();
   assert.ok(enabled.length > 0, "expected enabled container agents");
 
   for (const agent of enabled) {
@@ -45,7 +45,7 @@ test("containerized adapters report as installed and need no update", () => {
 test("a workspace install of the same adapter wins over the container entry", () => {
   // A user who installed an adapter by hand should keep seeing real disk state
   // rather than having it masked by the image entry.
-  const agent = acpEnabledAgents()[0];
+  const agent = acpContainerAgents()[0];
   assert.ok(agent);
   const scanned: AcpAdapterStatus[] = [
     {
@@ -77,5 +77,5 @@ test("container entries do not disturb unrelated workspace adapters", () => {
   const merged = mergeContainerAdapters(scanned);
   const other = merged.find((s) => s.id === "some-other-adapter");
   assert.equal(other?.updateAvailable, true, "workspace update state must survive");
-  assert.equal(merged.length, acpEnabledAgents().length + 1);
+  assert.equal(merged.length, acpContainerAgents().length + 1);
 });

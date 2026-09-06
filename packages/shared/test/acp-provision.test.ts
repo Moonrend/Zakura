@@ -120,26 +120,22 @@ describe("ACP 适配器安装脚本", () => {
     );
   });
 
-  it("每个走注册表的内置 profile 都能解析到注册表来源（容器化的除外）", () => {
+  it("每个注册表 profile 都解析到已发布的容器镜像", () => {
     const ids = acpProfileIdsWithRegistrySource();
     assert.ok(ids.length >= 8, `注册表映射过少：${ids.length}`);
-    let containerized = 0;
     for (const id of ids) {
       const source = acpAdapterSource(id);
-      // 容器化灰度中的 profile 由镜像分发，会覆盖注册表来源；这是预期的，
-      // 但其余 profile 必须仍然走注册表，否则就是灰度开关误伤。
+      // 注册表为每个声明都构建并推送镜像，因此不再有"灰度"一说：
+      // 任何注册表 profile 都必须解析到容器来源，解析不到就说明镜像缺失。
+      assert.equal(source.kind, "container", `${id} 应走容器`);
       if (source.kind === "container") {
-        containerized += 1;
-        continue;
+        assert.match(
+          source.image,
+          /^ghcr\.io\/moonrend\/acp-registry\//,
+          `${id} 镜像地址异常：${source.image}`,
+        );
       }
-      assert.equal(source.kind, "registry", `${id} 应走注册表`);
     }
-    // 灰度必须是少数：如果哪天所有 profile 都被切成容器，这条断言会提醒我们
-    // 这个测试已经失去意义，需要重写而不是继续放行。
-    assert.ok(
-      containerized < ids.length,
-      "不应所有注册表 profile 都被容器化，该测试需重写",
-    );
   });
 
   it("未知 profile 视为镜像内置，不做安装", () => {

@@ -4,6 +4,10 @@
  *
  * The snapshot is committed so builds are hermetic and the app works offline;
  * this script is how it gets updated. Run: pnpm acp:sync-registry
+ *
+ * ZAKURA_ACP_REGISTRY_URL accepts an https URL or a local path, so a registry
+ * checkout can be synced directly:
+ *   ZAKURA_ACP_REGISTRY_URL=../acp-registry/dist/index.json pnpm acp:sync-registry
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -17,12 +21,28 @@ const SOURCE =
 
 const CHECK = process.argv.includes("--check");
 
-const res = await fetch(SOURCE);
-if (!res.ok) {
-  console.error(`failed to fetch registry index: HTTP ${res.status}`);
-  process.exit(2);
+const index = await load(SOURCE);
+
+async function load(source) {
+  if (!/^https?:/.test(source)) {
+    const file = path.resolve(source.replace(/^file:\/\//, ""));
+    if (!fs.existsSync(file)) {
+      console.error(`registry index not found: ${file}`);
+      process.exit(2);
+    }
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  }
+  // raw.githubusercontent.com sits behind a 5-minute varnish cache, so a plain
+  // fetch right after a push can return the previous index. Bust it explicitly
+  // rather than silently snapshotting a stale digest.
+  const url = `${source}${source.includes("?") ? "&" : "?"}ts=${Date.now()}`;
+  const res = await fetch(url, { cache: "no-store", headers: { "cache-control": "no-cache" } });
+  if (!res.ok) {
+    console.error(`failed to fetch registry index: HTTP ${res.status}`);
+    process.exit(2);
+  }
+  return res.json();
 }
-const index = await res.json();
 
 if (!Array.isArray(index.agents) || index.agents.length === 0) {
   console.error("registry index is empty or malformed; refusing to write");

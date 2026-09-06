@@ -504,7 +504,7 @@ export {
   acpAgents,
   acpAgentById,
   acpAgentByProfile,
-  acpEnabledAgents,
+  acpContainerAgents,
   applyAcpRegistryIndex,
   resetAcpRegistry,
 } from "./acp-registry-client.js";
