@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal as WTermTerminal, useTerminal } from "@wterm/react";
 import "@wterm/react/css";
 import { Loader2, Maximize2, RotateCcw, Unplug } from "lucide-react";
-import { acpManualSetupBootScript } from "@zakura/shared";
+import { acpAdapterLoginBootScript } from "@zakura/shared";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,10 +45,13 @@ export function WorkspaceTerminalDialog({
   const generationRef = useRef(0);
   const [state, setState] = useState<State>("idle");
   const [detail, setDetail] = useState("等待建立动态会话");
-  const bootRef = useRef(request?.profileId ? acpManualSetupBootScript(request.profileId) : null);
+  // Which boot script applies depends on where the shell lands. A profile id
+  // routes the bridge into that adapter's container (HOME already points at
+  // the credential volume), so the login must NOT re-export a workspace HOME.
+  const bootRef = useRef(request?.profileId ? acpAdapterLoginBootScript(request.profileId) : null);
 
   useEffect(() => {
-    bootRef.current = request?.profileId ? acpManualSetupBootScript(request.profileId) : null;
+    bootRef.current = request?.profileId ? acpAdapterLoginBootScript(request.profileId) : null;
   }, [request?.profileId]);
 
   const sendInput = useCallback((data: string) => {
@@ -73,7 +76,14 @@ export function WorkspaceTerminalDialog({
     setState("connecting");
     setDetail("正在向平台申请一次性连接凭据…");
     try {
-      const ticket = await api<Ticket>(`/api/agents/${agentId}/terminal-ticket`, { method: "POST" });
+      // An ACP login must land *inside that adapter's container*: the CLI and
+      // the credential volume live there, and the workspace container has
+      // neither. Passing the profile id routes the bridge to a docker exec in
+      // the adapter; omitting it keeps the plain workspace shell.
+      const ticketPath = request?.profileId
+        ? `/api/agents/${agentId}/terminal-ticket?adapterId=${encodeURIComponent(request.profileId)}`
+        : `/api/agents/${agentId}/terminal-ticket`;
+      const ticket = await api<Ticket>(ticketPath, { method: "POST" });
       if (generation !== generationRef.current) return;
       const socket = new WebSocket(runtimeSocketUrl(ticket.url));
       socketRef.current = socket;

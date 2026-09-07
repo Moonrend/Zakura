@@ -160,6 +160,29 @@ export function acpManualSetupBootScript(profileId: string): {
   return { commandLine: line, initialInput: setup.initialInput, display: setup.display };
 }
 
+/**
+ * Boot script for a login shell that already runs *inside* the adapter
+ * container.
+ *
+ * The workspace variant above exports a HOME under the durable dir because the
+ * workspace shell has no ACP environment of its own. Inside the adapter the
+ * situation is reversed: the container is started with HOME pointing at the
+ * per-agent credential volume, which is exactly where the adapter process will
+ * later read its credentials from. Re-exporting the workspace HOME here would
+ * send the login into a directory the adapter never reads -- the same class of
+ * bug as the ephemeral-HOME defect. So inherit the container's environment and
+ * only run the command.
+ */
+export function acpAdapterLoginBootScript(profileId: string): {
+  commandLine: string;
+  initialInput?: string;
+  display: string;
+} {
+  const setup = acpManualSetupCommand(profileId);
+  const line = `clear; echo "· ${setup.display} ·"; ${setup.command.join(" ")}`;
+  return { commandLine: line, initialInput: setup.initialInput, display: setup.display };
+}
+
 function shellEnvQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }

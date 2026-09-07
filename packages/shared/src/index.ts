@@ -709,6 +709,7 @@ export {
   acpStdioArgv,
   acpCommandResolveExpr,
   acpManualSetupCommand,
+  acpAdapterLoginBootScript,
   acpManualSetupBootScript,
   normalizeAcpProfileId,
   isValidAcpProfileId,
