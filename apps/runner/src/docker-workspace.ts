@@ -36,6 +36,11 @@ function dockerErr(err: unknown): Error {
   return new Error(e.json?.message || e.message || String(err));
 }
 
+/** Mount point of the per (agent x adapter) credential volume. */
+const ACP_ADAPTER_HOME = "/opt/zakura/acp-home";
+/** PATH used for execs into adapter containers (adapter CLI lives first). */
+const WORKSPACE_EXEC_PATH = `${ACP_IMAGE_BIN_DIR}:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
+
 /** `["K=V", …]` (docker's merged image+runtime env) → record. */
 function parseEnvPairs(pairs: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -950,7 +955,7 @@ export class RunnerDockerWorkspace {
   private async findAdapterContainer(
     agentId: string,
     adapterId: string,
-    sessionKey: string,
+    sessionKey: string | undefined,
   ): Promise<{ id: string; status: string } | null> {
     const list = await this.docker.listContainers({
       all: true,
@@ -958,12 +963,17 @@ export class RunnerDockerWorkspace {
         label: [
           `zakura.agent=${agentId}`,
           `zakura.acp_adapter=${adapterId}`,
-          `zakura.acp_session=${sessionKey}`,
+          ...(sessionKey ? [`zakura.acp_session=${sessionKey}`] : []),
           "zakura.purpose=acp-adapter",
         ],
       },
     });
     if (!list.length) return null;
+    // Without a session filter, prefer a running container over a stopped one.
+    if (!sessionKey) {
+      const running = list.find((c) => c.State === "running");
+      if (running) return { id: running.Id, status: running.State };
+    }
     return { id: list[0]!.Id, status: list[0]!.State };
   }
 
@@ -1144,7 +1154,7 @@ export class RunnerDockerWorkspace {
   async startAdapterLoginShell(
     agentId: string,
     adapterId: string,
-    sessionKey: string,
+    sessionKey: string | undefined,
     opts?: { command?: string[]; cols?: number; rows?: number },
   ): Promise<ShellJob> {
     const found = await this.findAdapterContainer(agentId, adapterId, sessionKey);
@@ -1152,16 +1162,26 @@ export class RunnerDockerWorkspace {
       throw new Error(`ACP adapter container not running: ${adapterId}`);
     }
     const container = this.docker.getContainer(found.id);
+    // Not a login shell — see the note in agent-workspace.startAcpAdapterLoginShell:
+    // /etc/profile clobbers PATH and hides /opt/zakura/acp/bin (the adapter CLI).
     const command = opts?.command?.length
       ? opts.command
-      : ["/bin/sh", "-lc", "exec /bin/bash -l || exec /bin/sh -l"];
+      : ["/bin/sh", "-c", "exec /bin/bash -i || exec /bin/sh -i"];
     const exec = await container.exec({
       Cmd: command,
       AttachStdin: true,
       AttachStdout: true,
       AttachStderr: true,
       Tty: true,
-      Env: ["TERM=xterm-256color"],
+      // HOME must point at the cred volume so the CLI writes credentials where
+      // the adapter reads them; PATH must include /opt/zakura/acp/bin so the
+      // CLI is on PATH at all.
+      Env: [
+        "TERM=xterm-256color",
+        `HOME=${ACP_ADAPTER_HOME}`,
+        `PATH=${WORKSPACE_EXEC_PATH}`,
+      ],
+      WorkingDir: ACP_ADAPTER_HOME,
     });
     const stream = (await exec.start({
       hijack: true,

@@ -1802,11 +1802,16 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
+    // `adapterId` opts into an ACP adapter login shell: the terminal is bridged
+    // into that adapter's own container (where its CLI and credential volume
+    // live) instead of the agent workspace container.
+    const adapterId = c.req.query("adapterId") || undefined;
     const ticket = signWorkspaceConnectionTicket(
       config.secret,
       session.tenantId,
       agent.id,
       "terminal",
+      adapterId,
     );
     return c.json({
       ticket,

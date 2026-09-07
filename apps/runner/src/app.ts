@@ -626,7 +626,6 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
       cols?: number;
       rows?: number;
     };
-    if (!body.sessionKey) return c.json({ error: "sessionKey required" }, 400);
     try {
       const job = await dockerWs.startAdapterLoginShell(
         c.req.param("agentId"),
@@ -634,7 +633,9 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
         body.sessionKey,
         { command: body.command, cols: body.cols, rows: body.rows },
       );
-      return c.json({ jobId: job.id });
+      // Return the full snapshot so the caller gets the same shape as
+      // /exec/jobs and can seed its terminal with any early output.
+      return c.json(job.snapshot());
     } catch (err) {
       const e = fsError(err);
       return c.json(e.body, 500);

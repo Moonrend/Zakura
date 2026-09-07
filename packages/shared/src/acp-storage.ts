@@ -104,9 +104,18 @@ export function acpRuntimeLayout(
   profileId: string,
   setupMode: AcpSetupMode,
   runtimeId: string,
+  /**
+   * When the adapter runs in its own container, pass the path of the persistent
+   * credential volume mounted inside it (ACP_ADAPTER_HOME). The runtime tree
+   * then lives on that volume instead of the container-local `/tmp`, so logins
+   * survive adapter teardown. Omit for workspace-hosted adapters.
+   */
+  containerHome?: string,
 ): AcpRuntimeLayout {
   const durableDir = acpDurableDir(profileId);
-  const runtimeDir = acpRuntimeDir(profileId, runtimeId);
+  const runtimeDir = containerHome
+    ? `${containerHome}/runtime/${profileId}`
+    : acpRuntimeDir(profileId, runtimeId);
   const stateDir = `${runtimeDir}/state`;
   const spec = storageSpecFor(profileId);
   const authSpec = authSpecFor(profileId);

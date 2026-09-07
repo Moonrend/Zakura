@@ -28,7 +28,7 @@ export function createDesktopProxyGateway(
       }
       wss.handleUpgrade(req, socket, head, (ws) => {
         if (kind === "desktop") void bridgeDesktop(ws, agent);
-        else void bridgeTerminal(ws, agent);
+        else void bridgeTerminal(ws, agent, ticket.adapterId);
       });
     }).catch(() => socket.destroy());
   });
@@ -71,6 +71,7 @@ export function createDesktopProxyGateway(
   async function bridgeTerminal(
     ws: WebSocket,
     agent: NonNullable<Awaited<ReturnType<AgentService["get"]>>>,
+    adapterId?: string,
   ) {
     let jobId: string | undefined;
     let outputCursor = 0;
@@ -119,17 +120,28 @@ export function createDesktopProxyGateway(
       if (jobId) void deps.agentService.workspace.killShellJob(agent, jobId).catch(() => undefined);
     });
     try {
-      const initial = await deps.agentService.workspace.startShellJob(
-        agent,
-        ["bash", "-l"],
-        { onOutput: pushSnapshot, interactive: true },
-      );
+      // An ACP adapter now runs in its own container with its own credential
+      // volume, so an interactive login must happen *there* — a shell in the
+      // workspace container would write credentials the adapter never reads
+      // (and in most images the adapter CLI is not even installed there).
+      const initial = adapterId
+        ? await deps.agentService.workspace.startAcpAdapterLoginShell(
+            agent,
+            adapterId,
+            undefined,
+            { onOutput: pushSnapshot },
+          )
+        : await deps.agentService.workspace.startShellJob(
+            agent,
+            ["bash", "-l"],
+            { onOutput: pushSnapshot, interactive: true },
+          );
       jobId = initial.jobId;
       if (pendingSize) {
         await deps.agentService.workspace.resizeShellJob(agent, jobId, pendingSize.cols, pendingSize.rows);
       }
       pushSnapshot(initial);
-      send({ type: "ready", sessionId: jobId, command: "bash -l" });
+      send({ type: "ready", sessionId: jobId, command: adapterId ? `${adapterId} login shell` : "bash -l" });
       // Remote Runner callbacks cross an HTTP boundary, so keep a tight authoritative
       // snapshot stream as a fallback. Local PTY output is pushed immediately above.
       poll = setInterval(() => {

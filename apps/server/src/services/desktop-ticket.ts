@@ -6,6 +6,13 @@ export type WorkspaceConnectionTicket = {
   tenantId: string;
   agentId: string;
   kind: WorkspaceConnectionKind;
+  /**
+   * When set, a "terminal" connection is bridged into that ACP adapter's own
+   * container instead of the agent workspace container. This is what makes
+   * interactive `codex login` style flows write credentials to the place the
+   * adapter actually reads them from.
+   */
+  adapterId?: string;
   exp: number;
 };
 
@@ -14,11 +21,13 @@ export function signWorkspaceConnectionTicket(
   tenantId: string,
   agentId: string,
   kind: WorkspaceConnectionKind,
+  adapterId?: string,
 ): string {
   const payload: WorkspaceConnectionTicket = {
     tenantId,
     agentId,
     kind,
+    ...(adapterId ? { adapterId } : {}),
     exp: Math.floor(Date.now() / 1000) + 45,
   };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");

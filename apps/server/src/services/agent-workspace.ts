@@ -1865,6 +1865,35 @@ export class AgentWorkspaceService {
     }
   }
 
+  /**
+   * Seed the adapter's persistent credential volume from the durable workspace
+   * directory, for users who authenticated before adapters were containerized.
+   *
+   * Uses `cp -n` (no-clobber): once the volume holds real credentials this is a
+   * no-op, so a fresh in-container login is never overwritten by a stale copy.
+   * Best-effort — a missing source dir simply means "nothing to migrate".
+   */
+  private async seedAcpAdapterHome(
+    agent: Agent,
+    dockerId: string,
+    seedFrom?: string,
+  ): Promise<void> {
+    if (!seedFrom) return;
+    const src = `'${seedFrom.replace(/'/g, `'\\''`)}'`;
+    const dst = `'${ACP_ADAPTER_HOME.replace(/'/g, `'\\''`)}'`;
+    const res = await this.runtime.exec(dockerId, [
+      "sh",
+      "-c",
+      // The trailing /. copies the directory *contents* (including dotfiles).
+      `[ -d ${src} ] || exit 0; mkdir -p ${dst} && cp -an ${src}/. ${dst}/ 2>/dev/null || true`,
+    ]);
+    log.debug("acp.adapter.home.seeded", {
+      agentId: agent.id,
+      seedFrom,
+      exitCode: res.exitCode,
+    });
+  }
+
   async attachStdioInAcpAdapter(
     agent: Agent,
     adapterId: string,
@@ -1886,6 +1915,7 @@ export class AgentWorkspaceService {
        * typically loads its config at startup, so a later write is too late.
        */
       files?: { dest: string; content: string }[];
+      seedFrom?: string;
     },
   ): Promise<{
     writable: WritableStream<Uint8Array>;
@@ -1900,6 +1930,8 @@ export class AgentWorkspaceService {
       sessionKey,
       opts,
     );
+    // Seed before staging: staged config files must win over migrated copies.
+    await this.seedAcpAdapterHome(agent, dockerId, opts?.seedFrom);
     await this.stageAcpAdapterFiles(agent, dockerId, opts?.files);
     if (!this.runtime.attachStdio) {
       throw new Error("container runtime does not support stdio attach");
@@ -1960,10 +1992,23 @@ export class AgentWorkspaceService {
   async startAcpAdapterLoginShell(
     agent: Agent,
     adapterId: string,
-    sessionKey: string,
-    opts?: { command?: string[]; cols?: number; rows?: number },
-  ): Promise<{ jobId: string }> {
-    const command = opts?.command?.length ? opts.command : ["/bin/sh", "-lc", "exec /bin/bash -l || exec /bin/sh -l"];
+    sessionKey: string | undefined,
+    opts?: {
+      command?: string[];
+      cols?: number;
+      rows?: number;
+      onOutput?: (snap: ShellJobSnapshot) => void;
+    },
+  ): Promise<ShellJobSnapshot> {
+    // Deliberately NOT a login shell. `/etc/profile` in the adapter images
+    // hard-assigns PATH="/usr/local/sbin:...:/bin", which drops
+    // `/opt/zakura/acp/bin` — exactly where the adapter CLI lives. A `-l`
+    // shell therefore lands the user in a prompt where `codex`/`opencode`/etc.
+    // are "command not found". `-i` keeps the interactive niceties (prompt,
+    // history, aliases) without sourcing the PATH-clobbering profile.
+    const command = opts?.command?.length
+      ? opts.command
+      : ["/bin/sh", "-c", "exec /bin/bash -i || exec /bin/sh -i"];
 
     if (this.isRemoteAgent(agent)) {
       // The container lives on the runner, so the PTY has to be opened there.
@@ -1974,20 +2019,27 @@ export class AgentWorkspaceService {
         cols: opts?.cols,
         rows: opts?.rows,
       });
-      return { jobId: job.jobId };
+      return job;
     }
 
     const existing = await this.runtime.list({
       tenantId: agent.tenantId,
       purpose: "acp-adapter",
     });
-    const target = existing.find(
+    // The credential volume is per agent x adapter, not per session, so any
+    // running container for this adapter writes to the same place. Prefer an
+    // exact session match when the caller knows one, but fall back to any
+    // running adapter container: interactive login is usually initiated from
+    // the settings UI, which has no chat session in hand.
+    const candidates = existing.filter(
       (c) =>
         c.labels["zakura.agent"] === agent.id &&
         c.labels["zakura.acp_adapter"] === adapterId &&
-        c.labels["zakura.acp_session"] === sessionKey &&
         c.status === "running",
     );
+    const target =
+      (sessionKey && candidates.find((c) => c.labels["zakura.acp_session"] === sessionKey)) ||
+      candidates[0];
     if (!target) {
       throw new Error(
         `no running ACP adapter container for ${adapterId}; start the agent before logging in`,
@@ -2000,8 +2052,17 @@ export class AgentWorkspaceService {
       workingDir: ACP_ADAPTER_HOME,
       env: { TERM: "xterm-256color", HOME: ACP_ADAPTER_HOME, PATH: WORKSPACE_EXEC_PATH },
     });
+    // Register with the shared registry, otherwise the websocket bridge cannot
+    // find this job again to deliver keystrokes or window resizes.
+    this.shellJobs.add(job);
+    job.setOnOutput((snap) => {
+      opts?.onOutput?.(snap);
+      if (!snap.running) {
+        setTimeout(() => this.shellJobs.remove(job.id), 10 * 60 * 1000);
+      }
+    });
     if (opts?.cols && opts?.rows) await job.resize(opts.cols, opts.rows);
-    return { jobId: job.id };
+    return job.snapshot();
   }
 
   /**

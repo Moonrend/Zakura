@@ -81,7 +81,7 @@ import { newId } from "../../db/schema.js";
 import type { Agent } from "../../db/schema.js";
 import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
-import { WORKSPACE_EXEC_PATH } from "../agent-workspace.js";
+import { ACP_ADAPTER_HOME, WORKSPACE_EXEC_PATH } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import type { WorkspaceFs } from "@zakura/core";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
@@ -1400,7 +1400,18 @@ export class AcpSessionService {
     // process: Kimi (and similar CLIs) inspect that state before environment
     // variables and otherwise return `Authentication required`.
     const runtimeSetupMode = setup.modelProvider === "zakura" ? "api_key" : setup.setupMode;
-    const layout = acpRuntimeLayout(setup.id, runtimeSetupMode, runtimeId);
+    // Resolve the adapter source up front: a containerized adapter must place
+    // its runtime tree on the persistent credential volume (ACP_ADAPTER_HOME)
+    // rather than the container-local /tmp, otherwise every interactive login
+    // is discarded when the adapter container is torn down.
+    const adapterSource = acpAdapterSource(setup.id, setup.pinnedVersion);
+    const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
+    const layout = acpRuntimeLayout(
+      setup.id,
+      runtimeSetupMode,
+      runtimeId,
+      containerImage ? ACP_ADAPTER_HOME : undefined,
+    );
     // OpenCode/Codex 需要真正的配置文件（自定义 provider / base URL 不能
     // 只靠 env 传递）。所有走 Zakura 路由的 profile 都拉取网关模型别名：
     // 一是填充启动配置，二是运行时覆盖适配器自己公告的模型目录——
@@ -1464,8 +1475,8 @@ export class AcpSessionService {
     // with the image and its credentials live on a dedicated volume. None of
     // the workspace staging below applies: nothing to copy, nothing to
     // install, no binary to probe. We skip straight to attaching to PID 1.
-    const adapterSource = acpAdapterSource(setup.id, setup.pinnedVersion);
-    const containerImage = adapterSource.kind === "container" ? adapterSource.image : null;
+    // (`adapterSource`/`containerImage` are resolved earlier, before the
+    // runtime layout, because the layout depends on them.)
 
     const execFn = useSidecar
       ? (cmd: string[]) => this.deps.workspace.execInSidecar(agent, cmd)
@@ -1540,6 +1551,14 @@ export class AcpSessionService {
             // instead. Without this the adapter starts with no credential
             // file and fails with "Missing Authentication header".
             files: writes,
+            // One-time migration: users who authenticated before the adapter
+            // ran in its own container have credentials in the durable
+            // workspace dir (/workspace/data/acp/<profile>). The runtime tree
+            // now lives on the persistent credential volume, which starts
+            // empty, so seed it from durable storage on first boot. `-n`
+            // (no-clobber) makes this a no-op once the volume has real
+            // credentials, so a fresh login is never overwritten by a stale copy.
+            seedFrom: layout.durableDir,
           },
         );
       } else {

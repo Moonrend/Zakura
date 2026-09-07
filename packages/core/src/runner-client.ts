@@ -1084,8 +1084,8 @@ export class RunnerClient {
   async startAcpAdapterLoginShell(
     agentId: string,
     adapterId: string,
-    body: { sessionKey: string; command?: string[]; cols?: number; rows?: number },
-  ): Promise<{ jobId: string }> {
+    body: { sessionKey?: string; command?: string[]; cols?: number; rows?: number },
+  ): Promise<ShellJobSnapshot> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/login-shell`,
       {
@@ -1095,7 +1095,7 @@ export class RunnerClient {
       },
     );
     if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { jobId: string };
+    return (await res.json()) as ShellJobSnapshot;
   }
 
 }
