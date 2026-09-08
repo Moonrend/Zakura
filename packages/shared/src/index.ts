@@ -755,6 +755,7 @@ export {
   acpStageScript,
   acpSyncBackScript,
   acpApiKeyDotenv,
+  acpIntegrationRuntimeFiles,
   acpManualSetupEnvironment,
   acpGeneratedRuntimeFiles,
   buildCodexAuthJson,

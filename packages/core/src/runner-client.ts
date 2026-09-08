@@ -1027,6 +1027,7 @@ export class RunnerClient {
       network?: string;
       env?: Record<string, string>;
       sessionKey: string;
+      specHash?: string;
     },
   ): Promise<{ dockerId: string; image: string; status: string }> {
     const res = await this.fetchImpl(

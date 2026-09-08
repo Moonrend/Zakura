@@ -313,6 +313,59 @@ export function acpApiKeyDotenv(
   return lines.length && meaningful ? `${lines.join("\n")}\n` : null;
 }
 
+export type AcpIntegrationRuntimeFile = {
+  /** Path relative to the adapter home. */
+  path: string;
+  content: string;
+};
+
+/**
+ * Render every runtime file declared by the registry for an API-key/routed
+ * launch. Zakura owns only the generic substitution mechanism; agent-specific
+ * filenames and contents live in Moonrend/acp-registry.
+ */
+export function acpIntegrationRuntimeFiles(
+  profileId: string,
+  managed: Record<string, string>,
+): AcpIntegrationRuntimeFile[] {
+  const integration = acpAgentByProfile(profileId)?.integration;
+  const templates = {
+    ...(integration?.dotenv ?? {}),
+    ...(integration?.runtimeFiles ?? {}),
+  };
+  const routed = Boolean(managed.zakura_api_key?.trim());
+  const apiKey = (routed ? managed.zakura_api_key : managed.api_key)?.trim() ?? "";
+  const baseUrl = (routed ? managed.zakura_base_url : managed.base_url)?.trim() ?? "";
+  const model = managed.model?.trim() ?? "";
+  const provider = routed ? "openai" : (managed.provider?.trim() ?? "");
+  const runtimeProvider = routed ? "custom" : provider;
+  const vars: Record<string, string> = {
+    api_key: apiKey,
+    base_url: baseUrl,
+    model,
+    provider,
+    runtime_provider: runtimeProvider,
+  };
+
+  return Object.entries(templates).flatMap(([path, template]) => {
+    const lines = template
+      .split("\n")
+      .map((line) => {
+        if (!line.trim()) return "";
+        let empty = false;
+        const out = line.replace(/\$\{([a-z_]+)\}/gi, (_m, key: string) => {
+          const value = vars[key] ?? "";
+          if (!value) empty = true;
+          return value;
+        });
+        return empty ? "" : out;
+      })
+      .filter(Boolean);
+    const content = lines.length ? `${lines.join("\n")}\n` : "";
+    return content && (apiKey || baseUrl || model) ? [{ path, content }] : [];
+  });
+}
+
 export function buildCodexAuthJson(tokens: {
   id_token: string;
   access_token: string;

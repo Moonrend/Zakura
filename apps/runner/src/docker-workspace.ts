@@ -993,11 +993,18 @@ export class RunnerDockerWorkspace {
       network?: string;
       env?: Record<string, string>;
       sessionKey: string;
+      specHash?: string;
     },
   ): Promise<{ dockerId: string; image: string; status: string }> {
     const existing = await this.findAdapterContainer(agentId, adapterId, opts.sessionKey);
     if (existing && existing.status === "running") {
-      return { dockerId: existing.id, image: opts.image, status: "running" };
+      const info = await this.docker.getContainer(existing.id).inspect().catch(() => null);
+      if (
+        info?.Config?.Image === opts.image
+        && (!opts.specHash || info.Config?.Labels?.["zakura.acp_spec"] === opts.specHash)
+      ) {
+        return { dockerId: existing.id, image: opts.image, status: "running" };
+      }
     }
     if (existing) {
       await this.docker.getContainer(existing.id).remove({ force: true }).catch(() => undefined);
@@ -1069,6 +1076,7 @@ export class RunnerDockerWorkspace {
         "zakura.agent": agentId,
         "zakura.acp_adapter": adapterId,
         "zakura.acp_session": opts.sessionKey,
+        ...(opts.specHash ? { "zakura.acp_spec": opts.specHash } : {}),
       },
       WorkingDir: AGENT_WORKSPACE_ROOT,
       HostConfig: {

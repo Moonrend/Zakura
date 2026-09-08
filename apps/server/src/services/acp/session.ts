@@ -2,9 +2,10 @@
  * ACP 会话：在 workspace 容器里拉起第三方 Agent，把协议事件写入 Cloud 会话。
  */
 import * as acp from "@agentclientprotocol/sdk";
+import { createHash } from "node:crypto";
 import {
   AGENT_WORKSPACE_ROOT,
-  acpApiKeyDotenv,
+  acpIntegrationRuntimeFiles,
   acpAgentByProfile,
   acpAdapterSource,
   acpGeneratedRuntimeFiles,
@@ -893,7 +894,18 @@ export class AcpSessionService {
     const previousAcpSessionId = live?.acpSessionId ?? origin.acpSessionId;
     const profileId = live?.profileId ?? origin.acpProfileId;
     if (!profileId) throw new Error("会话未绑定 ACP profile");
+    const oldProcKey = live?.proc?.key;
     if (live) await this.teardown(live, { keepSession: true });
+    if (oldProcKey) {
+      const oldProc = this.procs.get(oldProcKey);
+      if (oldProc && oldProc.refs.size === 0) {
+        // Launch-time model selection cannot change inside an existing PID 1.
+        // Remove it before ensureRuntime or the restart path would immediately
+        // reconnect to the same process and falsely report success.
+        if (this.procs.get(oldProcKey) === oldProc) this.procs.delete(oldProcKey);
+        await this.disposeProcess(oldProc).catch(() => undefined);
+      }
+    }
     const agent = await this.deps.agentService.get(tenantId, agentId);
     if (!agent) throw new Error("Agent 不存在");
     const setup = requireSetup(agent, profileId);
@@ -1103,6 +1115,10 @@ export class AcpSessionService {
       const res = await registry.ensureInstalled(agent, registryId, false, {
         version: opts?.version,
       });
+      // A present image does not mean PID 1 is using it (or the latest model,
+      // credentials and generated files). Explicit prepare/update always
+      // invalidates the adapter runtime so the next launch is a clean create.
+      await this.invalidateAgentRuntimes(agent, profileId);
       this.invalidateProvisionCache(agent.id, profileId);
       return {
         ok: true,
@@ -1130,6 +1146,23 @@ export class AcpSessionService {
       command: profile.installHint,
       output: output.slice(0, 8000),
     };
+  }
+
+  /** Stop every live/warm adapter process for an agent, optionally one profile. */
+  async invalidateAgentRuntimes(agent: Agent, profileId?: string): Promise<void> {
+    const lives = [...this.byChat.values()].filter(
+      (live) => live.agent.id === agent.id && (!profileId || live.profileId === profileId),
+    );
+    for (const live of lives) {
+      await this.teardown(live, { keepSession: true }).catch(() => undefined);
+    }
+    const procs = [...this.procs.values()].filter(
+      (proc) => proc.agentId === agent.id && (!profileId || proc.profileId === profileId),
+    );
+    for (const proc of procs) {
+      if (this.procs.get(proc.key) === proc) this.procs.delete(proc.key);
+      await this.disposeProcess(proc).catch(() => undefined);
+    }
   }
 
   /**
@@ -1254,14 +1287,12 @@ export class AcpSessionService {
   }
 
   /**
-   * Pool key for a shared adapter process: one PID 1 per agent x profile.
-   *
-   * Deliberately excludes chatSessionId — that is the whole point of Phase 3.
-   * Credentials live in a volume keyed the same way (Q3), so two chats that
-   * share this key already share an identity and may share a process.
+   * One adapter process per chat session. Launch-time model routing,
+   * credentials and generated files can differ between chats; sharing PID 1
+   * by agent/profile made model changes silently reconnect to stale state.
    */
-  private procKey(agent: Agent, profileId: string): string {
-    return `${agent.tenantId}:${agent.id}:${profileId}`;
+  private procKey(agent: Agent, profileId: string, chatSessionId: string): string {
+    return `${agent.tenantId}:${agent.id}:${profileId}:${chatSessionId}`;
   }
 
   private async bootRuntime(
@@ -1281,11 +1312,9 @@ export class AcpSessionService {
       await this.teardown(cached).catch(() => undefined);
     }
 
-    // Phase 3: reuse a live adapter process for this agent x profile when one
-    // exists. `session/new` on the shared connection yields a fresh sessionId,
-    // and the SDK's SessionUpdateRouter demultiplexes notifications by that id
-    // (verified empirically: 2 concurrent sessions, 0 misrouted updates).
-    const procKey = this.procKey(agent, setup.id);
+    // Reuse within this chat only. Different chats may have different model or
+    // credential settings and therefore must never share launch-time state.
+    const procKey = this.procKey(agent, setup.id, chatSessionId);
     const pooled = this.procs.get(procKey);
     if (pooled && pooled.dead) {
       // Crashed between the close handler firing and this lookup. Drop it so we
@@ -1438,11 +1467,10 @@ export class AcpSessionService {
     //
     // Which agents need a dotenv, and what goes in it, is declared by the
     // registry (integration.dotenv) rather than keyed off the agent name.
-    const dotenv =
-      acpAgentByProfile(launchSetup.id)?.integration?.dotenv &&
+    const integrationFiles =
       (launchSetup.setupMode === "api_key" || launchSetup.modelProvider === "zakura")
-        ? acpApiKeyDotenv(launchSetup.id, launchSetup.managed)
-        : null;
+        ? acpIntegrationRuntimeFiles(launchSetup.id, launchSetup.managed)
+        : [];
     const generated = acpGeneratedRuntimeFiles({
       layout,
       keyMode: runtimeSetupMode,
@@ -1452,12 +1480,10 @@ export class AcpSessionService {
       preferredModel,
     });
     const writes = [
-      ...(dotenv
-        ? [{
-            dest: `${layout.env.HERMES_HOME || layout.stateDir}/.env`,
-            content: dotenv,
-          }]
-        : []),
+      ...integrationFiles.map((file) => ({
+        dest: `${layout.env.HOME || layout.env.HERMES_HOME || layout.stateDir}/${file.path}`,
+        content: file.content,
+      })),
       ...generated,
     ];
     const writeScript = writes
@@ -1537,14 +1563,23 @@ export class AcpSessionService {
       env.PATH = `${binDir}:${env.PATH ?? WORKSPACE_EXEC_PATH}`;
     }
 
+    const adapterSpecHash = containerImage
+      ? createHash("sha256")
+          .update(JSON.stringify({
+            image: containerImage,
+            env: Object.entries(env).sort(([a], [b]) => a.localeCompare(b)),
+            files: writes
+              .map((file) => ({ dest: file.dest, content: file.content }))
+              .sort((a, b) => a.dest.localeCompare(b.dest)),
+          }))
+          .digest("hex")
+      : undefined;
+
     let stdio: Awaited<ReturnType<AgentWorkspaceService["startStdio"]>>;
     try {
       if (containerImage) {
-        // Adapter is PID 1 of its own container: start/reuse it and attach.
-        // Phase 3 scopes the container by agent x profile rather than by chat.
-        // The one-PID-1-per-peer constraint still holds — we simply keep a
-        // single attach per process now and multiplex chats over it in-band,
-        // instead of opening a second attach (which Docker would cross-wire).
+        // Adapter is PID 1 of its own per-chat container. Reuse is allowed only
+        // while its image, launch env and generated runtime files still match.
         stdio = await this.deps.workspace.attachStdioInAcpAdapter(
           agent,
           setup.id,
@@ -1566,6 +1601,7 @@ export class AcpSessionService {
             // (no-clobber) makes this a no-op once the volume has real
             // credentials, so a fresh login is never overwritten by a stale copy.
             seedFrom: layout.durableDir,
+            specHash: adapterSpecHash,
           },
         );
       } else {

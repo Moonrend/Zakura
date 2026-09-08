@@ -5,6 +5,7 @@ import {
   acpAgentByProfile,
   acpAgents,
   acpApiKeyDotenv,
+  acpIntegrationRuntimeFiles,
   builtinAcpProfiles,
   supportsAcpZakuraRoute,
 } from "../src/index.js";
@@ -108,4 +109,21 @@ test("dotenv is rendered from the registry template", () => {
   // Nothing to write, and agents with no template declared get nothing.
   assert.equal(acpApiKeyDotenv("hermes", {}), null);
   assert.equal(acpApiKeyDotenv("codex", { api_key: "sk-4" }), null);
+});
+
+test("Hermes runtime config selects the custom OpenAI-compatible gateway", () => {
+  const files = new Map(
+    acpIntegrationRuntimeFiles("hermes", {
+      zakura_api_key: "zk-test",
+      zakura_base_url: "http://zakura-dev:8787/v1",
+      model: "qwen/qwen3-coder",
+    }).map((file) => [file.path, file.content]),
+  );
+
+  assert.match(files.get(".env") ?? "", /^OPENAI_API_KEY=zk-test$/m);
+  assert.equal(
+    files.get("config.yaml"),
+    "model:\n  provider: custom\n  default: qwen/qwen3-coder\n  base_url: http://zakura-dev:8787/v1\n",
+  );
+  assert.ok(!files.get("config.yaml")?.includes("${"), "left an unresolved placeholder");
 });

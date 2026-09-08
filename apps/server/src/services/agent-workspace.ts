@@ -1735,7 +1735,7 @@ export class AgentWorkspaceService {
     adapterId: string,
     image: string,
     sessionKey: string,
-    opts?: { env?: Record<string, string> },
+    opts?: { env?: Record<string, string>; specHash?: string },
   ): Promise<{ dockerId: string; image: string }> {
     if (this.isRemoteAgent(agent)) {
       const { client } = await this.requireRunnerClient(agent);
@@ -1744,6 +1744,7 @@ export class AgentWorkspaceService {
         network: this.config.dockerNetwork,
         env: opts?.env,
         sessionKey,
+        specHash: opts?.specHash,
       });
       return { dockerId: result.dockerId, image: result.image };
     }
@@ -1758,7 +1759,11 @@ export class AgentWorkspaceService {
         c.labels["zakura.acp_adapter"] === adapterId &&
         c.labels["zakura.acp_session"] === sessionKey,
     );
-    const running = mine.find((c) => c.status === "running" && c.image === image);
+    const running = mine.find(
+      (c) => c.status === "running"
+        && c.image === image
+        && (!opts?.specHash || c.labels["zakura.acp_spec"] === opts.specHash),
+    );
     if (running) return { dockerId: running.id, image: running.image };
 
     // Stale (stopped, or built from a superseded image) → replace.
@@ -1815,6 +1820,7 @@ export class AgentWorkspaceService {
           "zakura.purpose": "acp-adapter",
           "zakura.acp_adapter": adapterId,
           "zakura.acp_session": sessionKey,
+          ...(opts?.specHash ? { "zakura.acp_spec": opts.specHash } : {}),
           "zakura.managed": "true",
         },
       },
@@ -1916,6 +1922,8 @@ export class AgentWorkspaceService {
        */
       files?: { dest: string; content: string }[];
       seedFrom?: string;
+      /** Hash of image + launch env + generated files. */
+      specHash?: string;
     },
   ): Promise<{
     writable: WritableStream<Uint8Array>;

@@ -170,7 +170,7 @@ export default function AgentAcpPage() {
     }
   }
 
-  async function handleInstall(profileId: string, isUpdate = false) {
+  async function handleInstall(profileId: string, isUpdate = false, isRebuild = false) {
     setInstallingId(profileId);
     setInstallingIsUpdate(isUpdate);
     setInstallOutput(null);
@@ -178,7 +178,13 @@ export default function AgentAcpPage() {
       const result = await installAcpAdapter(id, profileId);
       setInstallOutput(result.output);
       if (result.ok) {
-        toast.success(isUpdate ? `${profileId} 已更新到最新版本` : `${profileId} 安装完成`);
+        toast.success(
+          isRebuild
+            ? `${profileId} 镜像已确认，旧运行环境已清理`
+            : isUpdate
+              ? `${profileId} 已更新到最新版本`
+              : `${profileId} 安装完成`,
+        );
         setProbeResults((prev) => ({ ...prev, [profileId]: { installed: true, output: result.output } }));
         void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => {});
       } else {
@@ -664,6 +670,7 @@ export default function AgentAcpPage() {
           // Prepare = pull the image. This is the container equivalent of
           // "install", and the only reason a container row needs a button.
           const needsPrepare = imageMissing && !isInstalling;
+          const canRebuild = isContainer && !imageMissing && !isInstalling;
           return (
             <div
               key={profile.id}
@@ -738,6 +745,18 @@ export default function AgentAcpPage() {
                   >
                     <Download className="mr-1 size-3" />
                     拉取镜像
+                  </Button>
+                ) : null}
+                {setup.enabled && canRebuild ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => { e.stopPropagation(); void handleInstall(profile.id, false, true); }}
+                  >
+                    <RefreshCw className="mr-1 size-3" />
+                    重建
                   </Button>
                 ) : null}
                 {isInstalling ? (

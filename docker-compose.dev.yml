@@ -17,6 +17,9 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis-dev:6379}
       ZAKURA_DATA_DIR: /data
       ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-http://34.171.13.101:8787}
+      # ACP adapter containers must call a stable Docker-network alias, not the
+      # public host URL or the ephemeral container-id value of $HOSTNAME.
+      ZAKURA_INTERNAL_URL: ${ZAKURA_INTERNAL_URL:-http://zakura-dev:8787}
       ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-http://34.171.13.101:3001}
       HOST: 0.0.0.0
       PORT: 8787

@@ -572,8 +572,9 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
     type Body = {
       image?: string;
       network?: string;
-      env?: Record<string, string>;
-      sessionKey?: string;
+          env?: Record<string, string>;
+          sessionKey?: string;
+          specHash?: string;
     };
     const body = (await c.req.json().catch(() => ({}))) as Body;
     if (!body.image) return c.json({ error: "image required" }, 400);
@@ -587,6 +588,7 @@ export function createRunnerApp(cfg: RunnerConfig): Hono {
           network: body.network,
           env: body.env,
           sessionKey: body.sessionKey,
+          specHash: body.specHash,
         },
       );
       return c.json(res);

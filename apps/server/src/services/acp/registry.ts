@@ -10,7 +10,6 @@ import { log } from "@zakura/core";
 import {
   ACP_REGISTRY_URL,
   acpDistributionUnavailableReason,
-  acpDiskUsageScript,
   acpGcScript,
   acpInstalledVersionsScript,
   acpRequiresUnverifiedOptIn,
@@ -26,7 +25,6 @@ import {
   type AcpRegistryPlatform,
   type AcpResolvedDist,
   acpContainerAgents,
-  acpAgentById,
   acpImageAtVersion,
   acpRegistryDigest,
   acpRegistryIsSnapshot,
@@ -498,16 +496,10 @@ export class AcpRegistryService {
 
   /** Installed versions + disk usage + whether the registry has something newer. */
   async status(agent: Agent, opts?: { force?: boolean }): Promise<AcpAdapterStatus[]> {
-    const [versionsOut, diskOut, index, curated] = await Promise.all([
-      this.workspace.execInWorkspace(agent, ["bash", "-lc", acpInstalledVersionsScript()]),
-      this.workspace.execInWorkspace(agent, ["bash", "-lc", acpDiskUsageScript()]),
-      // `force` lets the UI's "check for updates" bypass the 6h index TTL; without
-      // it an update published minutes ago stays invisible for hours.
-      this.getIndex(opts),
-      // Container adapters are pinned by the curated index, not the upstream one,
-      // so they need their own refresh or they can never show an update.
-      this.refreshCuratedIndex(opts),
-    ]);
+    // The Moonrend registry is the only ACP catalog. Do not probe the workspace
+    // container here: a stopped/not-yet-created workspace is a valid state for
+    // the settings page, and every supported adapter now runs from an image.
+    const curated = await this.refreshCuratedIndex(opts);
 
     // Adapter status is keyed by registry id, but the adopted version lives on
     // the agent's ACP setup, which is keyed by profile id.
@@ -519,53 +511,6 @@ export class AcpRegistryService {
     }
 
     const byId = new Map<string, AcpAdapterStatus>();
-    for (const line of versionsOut.stdout.split("\n")) {
-      const [id, version] = line.trim().split("\t");
-      if (!id || !version) continue;
-      const existing = byId.get(id) ?? {
-        id,
-        profileId: acpAgentById(id)?.profileId ?? id,
-        installed: [],
-        latest: null,
-        updateAvailable: false,
-        diskKb: {},
-        source: "workspace" as const,
-      };
-      existing.installed.push(version);
-      byId.set(id, existing);
-    }
-
-    for (const line of diskOut.stdout.split("\n")) {
-      const [kb, path] = line.trim().split("\t");
-      if (!kb || !path) continue;
-      const parts = path.split("/");
-      const version = parts.pop();
-      const id = parts.pop();
-      if (!id || !version) continue;
-      const entry = byId.get(id);
-      if (entry) entry.diskKb[version] = Number(kb) || 0;
-    }
-
-    for (const entry of byId.values()) {
-      const latest = index?.agents.find((a) => a.id === entry.id)?.version ?? null;
-      entry.latest = latest;
-      // Only claim an update when we actually know the target version; an
-      // unreachable registry must not render as "up to date" either way.
-      entry.updateAvailable = Boolean(latest && !entry.installed.includes(latest));
-      if (!latest) {
-        // An adapter that moved to a container is absent from the upstream index
-        // by design; that is a leftover workspace install, not a delisting.
-        const curatedEntry = acpContainerAgents().find((a) => a.id === entry.id);
-        if (curatedEntry) {
-          entry.latest = curatedEntry.version;
-          entry.updateAvailable = !entry.installed.includes(curatedEntry.version);
-        } else {
-          entry.checkError = index
-            ? "This adapter is no longer listed in the registry."
-            : "Could not reach the adapter registry; update state is unknown.";
-        }
-      }
-    }
 
     // Containerized adapters ship as prebuilt images. They never appear in the
     // workspace scan above, so without this they would render as "not
@@ -575,7 +520,6 @@ export class AcpRegistryService {
     // this, "installed" meant nothing more than "we know a tag", and a missing
     // image only surfaced at launch time.
     const containerImages = acpContainerAgents()
-      .filter((a) => !byId.has(a.id))
       .map((a) => {
         const pinned = pinnedByRegistryId.get(a.id);
         const shipped = pinned ?? acpSnapshotVersion(a.id) ?? a.version;
@@ -587,7 +531,6 @@ export class AcpRegistryService {
       containerImages,
     );
     for (const containerAgent of acpContainerAgents()) {
-      if (byId.has(containerAgent.id)) continue;
       // `containerAgent.version` comes from the *active* index, which a refresh
       // may have advanced past the build-time snapshot. Sessions launch the tag
       // in `image`, so the honest "installed" value is whatever this deployment

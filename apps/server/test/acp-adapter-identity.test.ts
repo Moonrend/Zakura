@@ -15,7 +15,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { acpAgentByProfile, acpContainerAgents } from "@zakura/shared";
+import { acpAgentByProfile, acpContainerAgents, acpRegistryIndex } from "@zakura/shared";
+import { AcpRegistryService } from "../src/services/acp/registry.js";
 
 test("registry id and profile id genuinely diverge", () => {
   const agents = acpContainerAgents();
@@ -53,4 +54,31 @@ test("looking up a diverging agent by registry id fails, by profile id succeeds"
     `${agent.id} must not be reachable via acpAgentByProfile — that lookup takes a profile id`,
   );
   assert.equal(acpAgentByProfile(agent.profileId)?.id, agent.id);
+});
+
+test("container status does not require a running workspace", async () => {
+  let workspaceExecs = 0;
+  const workspace = {
+    execInWorkspace: async () => {
+      workspaceExecs += 1;
+      throw new Error("workspace container is not running");
+    },
+    acpAdapterImagePresence: async (_agent: unknown, images: string[]) =>
+      new Map(images.map((image) => [image, false])),
+  };
+  const fetchRegistry: typeof fetch = async () =>
+    new Response(JSON.stringify(acpRegistryIndex()), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const service = new AcpRegistryService(workspace as never, fetchRegistry);
+  const statuses = await service.status({
+    id: "test-agent",
+    tenantId: "test-tenant",
+    configJson: {},
+  } as never, { force: true });
+
+  assert.equal(workspaceExecs, 0, "status tried to execute inside a stopped workspace");
+  assert.equal(statuses.length, acpContainerAgents().length);
+  assert.ok(statuses.every((entry) => entry.source === "container"));
 });

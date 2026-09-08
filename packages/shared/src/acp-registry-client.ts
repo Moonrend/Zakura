@@ -62,6 +62,8 @@ export interface AcpIntegrationSpec {
   installHint?: string;
   /** Files written into the adapter home before launch. Values may use ${VAR}. */
   dotenv?: Record<string, string>;
+  /** Runtime-only files, keyed by a path relative to the adapter home. */
+  runtimeFiles?: Record<string, string>;
 }
 
 export interface AcpCuratedAgent {

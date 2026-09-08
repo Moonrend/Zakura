@@ -987,6 +987,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
         "zakuraRoute": true,
         "dotenv": {
           ".env": "LLM_PROVIDER=${provider}\nLLM_MODEL=${model}\nLLM_API_KEY=${api_key}\nOPENAI_API_KEY=${api_key}\nHERMES_API_KEY=${api_key}\nOPENAI_API_TOKEN=${api_key}\nAPI_KEY=${api_key}\nLLM_BASE_URL=${base_url}\nOPENAI_BASE_URL=${base_url}\nOPENAI_API_BASE=${base_url}\nOPENAI_API_BASE_URL=${base_url}\nLLM_API_BASE=${base_url}\nLLM_API_BASE_URL=${base_url}\nHERMES_BASE_URL=${base_url}\n"
+        },
+        "runtimeFiles": {
+          "config.yaml": "model:\n  provider: ${runtime_provider}\n  default: ${model}\n  base_url: ${base_url}\n"
         }
       }
     },
@@ -1490,5 +1493,5 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     }
   ],
-  "digest": "26eb715321a611cd"
+  "digest": "a7fa8205602207d3"
 } as AcpCuratedIndex;

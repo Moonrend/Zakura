@@ -218,6 +218,7 @@ export function registerAcpRoutes(
       saved,
       publicBaseUrl,
     );
+    if (acp) await acp.invalidateAgentRuntimes(agent);
     return c.json(acpConfigResponse(saved));
   });
 
@@ -250,6 +251,7 @@ export function registerAcpRoutes(
     const current = readAgentAcpConfig(agent);
     delete current.agents[c.req.param("profileId")];
     const saved = await saveAgentAcpConfig(agentService, session.tenantId, agent, current);
+    if (acp) await acp.invalidateAgentRuntimes(agent, c.req.param("profileId"));
     return c.json(acpConfigResponse(saved));
   });
 
