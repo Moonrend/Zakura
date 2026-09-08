@@ -5,6 +5,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import {
   AGENT_WORKSPACE_ROOT,
   acpApiKeyDotenv,
+  acpAgentByProfile,
   acpAdapterSource,
   acpGeneratedRuntimeFiles,
   acpRuntimeLayout,
@@ -1079,6 +1080,7 @@ export class AcpSessionService {
   async install(
     agent: Agent,
     profileId: string,
+    opts?: { version?: string },
   ): Promise<{ ok: boolean; command: string; output: string }> {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
@@ -1098,14 +1100,16 @@ export class AcpSessionService {
     const registryId = acpRegistryIdForProfile(profileId);
     const registry = this.deps.acpRegistry;
     if (registryId && registry) {
-      const res = await registry.ensureInstalled(agent, registryId);
+      const res = await registry.ensureInstalled(agent, registryId, false, {
+        version: opts?.version,
+      });
       this.invalidateProvisionCache(agent.id, profileId);
       return {
         ok: true,
         command: [res.command, ...res.args].join(" "),
         output: res.installed
           ? `已安装 ${profile.displayName} ${res.version}`
-          : `${profile.displayName} ${res.version} 已是最新，跳过安装`,
+          : `${profile.displayName} ${res.version} 已在本机，跳过下载`,
       };
     }
 
@@ -1431,8 +1435,11 @@ export class AcpSessionService {
     // Zakura route is commonly configured as `self` (the route supplies the
     // credential), so gating this only on api_key silently dropped the
     // Gateway token and produced HTTP 401 Missing Authentication header.
+    //
+    // Which agents need a dotenv, and what goes in it, is declared by the
+    // registry (integration.dotenv) rather than keyed off the agent name.
     const dotenv =
-      launchSetup.id === "hermes" &&
+      acpAgentByProfile(launchSetup.id)?.integration?.dotenv &&
       (launchSetup.setupMode === "api_key" || launchSetup.modelProvider === "zakura")
         ? acpApiKeyDotenv(launchSetup.id, launchSetup.managed)
         : null;
@@ -2226,7 +2233,11 @@ export function acpHotModelConfigId(live: {
   profileId: string;
   models?: { configId?: string };
 }): string | undefined {
-  if (live.zakuraRouted && live.profileId !== "opencode") return undefined;
+  // Zakura 路由下，只有模型 id 为 provider/model 形式的 agent（即注册表声明了
+  // modelPrefix 的）才能热切模型；其余的 configId 不具备可切换语义。
+  if (live.zakuraRouted && !acpAgentByProfile(live.profileId)?.integration?.modelPrefix) {
+    return undefined;
+  }
   const configId = live.models?.configId;
   return configId && configId !== ACP_UNSTABLE_MODEL_CONFIG_ID && !configId.startsWith("_")
     ? configId
@@ -2239,11 +2250,15 @@ function dynamicModelConfigId(live: LiveRuntime): string | undefined {
 }
 
 /**
- * ACP 模型取值的协议 id：内部与网关别名一律用裸名；只有 OpenCode 的
- * 模型 id 是 provider/model 形式，Zakura 路由下要挂 zakura/ 前缀。
+ * ACP 模型取值的协议 id：内部与网关别名一律用裸名。少数 agent 的模型 id 是
+ * provider/model 形式，Zakura 路由下要挂前缀 —— 该前缀由注册表的
+ * integration.modelPrefix 声明，不再按 agent 名硬编码。
  */
 function acpModelProtocolId(live: LiveRuntime, modelId: string): string {
-  return live.zakuraRouted && live.profileId === "opencode" ? `zakura/${modelId}` : modelId;
+  if (!live.zakuraRouted) return modelId;
+  const prefix = acpAgentByProfile(live.profileId)?.integration?.modelPrefix;
+  if (!prefix || modelId.startsWith(prefix)) return modelId;
+  return `${prefix}${modelId}`;
 }
 
 /** Apply a one-session model override without changing the persisted ACP profile. */

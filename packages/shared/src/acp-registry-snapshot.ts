@@ -170,9 +170,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
     {
       "id": "claude-acp",
       "name": "Claude Agent",
-      "version": "0.74.0",
+      "version": "0.75.1",
       "profileId": "claude-code",
-      "image": "ghcr.io/moonrend/acp-registry/claude-acp:0.74.0",
+      "image": "ghcr.io/moonrend/acp-registry/claude-acp:0.75.1",
       "dist": {
         "kind": "npx"
       },
@@ -231,6 +231,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "integration": {
+        "sessionModeId": "default"
       }
     },
     {
@@ -263,14 +266,17 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
       "id": "codebuddy-code",
       "name": "Codebuddy Code",
-      "version": "2.144.0",
+      "version": "2.147.0",
       "profileId": "codebuddy",
-      "image": "ghcr.io/moonrend/acp-registry/codebuddy-code:2.144.0",
+      "image": "ghcr.io/moonrend/acp-registry/codebuddy-code:2.147.0",
       "dist": {
         "kind": "npx"
       },
@@ -362,6 +368,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
         "noBrowserEnv": {
           "NO_BROWSER": "1"
         }
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -521,6 +530,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -558,9 +570,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
     {
       "id": "dimcode",
       "name": "DimCode",
-      "version": "0.3.28",
+      "version": "0.3.30",
       "profileId": "dimcode",
-      "image": "ghcr.io/moonrend/acp-registry/dimcode:0.3.28",
+      "image": "ghcr.io/moonrend/acp-registry/dimcode:0.3.30",
       "dist": {
         "kind": "npx"
       },
@@ -590,9 +602,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
     {
       "id": "dirac",
       "name": "Dirac",
-      "version": "0.5.9",
+      "version": "0.5.10",
       "profileId": "dirac",
-      "image": "ghcr.io/moonrend/acp-registry/dirac:0.5.9",
+      "image": "ghcr.io/moonrend/acp-registry/dirac:0.5.10",
       "dist": {
         "kind": "npx"
       },
@@ -617,14 +629,17 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
       "id": "factory-droid",
       "name": "Factory Droid",
-      "version": "0.212.1",
+      "version": "0.213.0",
       "profileId": "factory-droid",
-      "image": "ghcr.io/moonrend/acp-registry/factory-droid:0.212.1",
+      "image": "ghcr.io/moonrend/acp-registry/factory-droid:0.213.0",
       "dist": {
         "kind": "npx"
       },
@@ -681,6 +696,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -715,6 +733,12 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "description": "fx CLI（fx acp）— Vercel AI Gateway 驱动的编码代理",
+      "homepage": "https://fx.sh",
+      "integration": {
+        "zakuraRoute": true,
+        "preinstalled": true
       }
     },
     {
@@ -844,14 +868,17 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
       "id": "grok-build",
       "name": "Grok Build",
-      "version": "1.0.21",
+      "version": "1.0.24",
       "profileId": "grok",
-      "image": "ghcr.io/moonrend/acp-registry/grok-build:1.0.21",
+      "image": "ghcr.io/moonrend/acp-registry/grok-build:1.0.24",
       "dist": {
         "kind": "npx"
       },
@@ -876,14 +903,17 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
       "id": "harn",
       "name": "Harn",
-      "version": "0.10.129",
+      "version": "0.10.133",
       "profileId": "harn",
-      "image": "ghcr.io/moonrend/acp-registry/harn:0.10.129",
+      "image": "ghcr.io/moonrend/acp-registry/harn:0.10.133",
       "dist": {
         "kind": "binary"
       },
@@ -950,6 +980,14 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "description": "Hermes Agent（hermes-acp）— 支持 MCP 的 Python 编码代理",
+      "homepage": "https://pypi.org/project/hermes-agent/",
+      "integration": {
+        "zakuraRoute": true,
+        "dotenv": {
+          ".env": "LLM_PROVIDER=${provider}\nLLM_MODEL=${model}\nLLM_API_KEY=${api_key}\nOPENAI_API_KEY=${api_key}\nHERMES_API_KEY=${api_key}\nOPENAI_API_TOKEN=${api_key}\nAPI_KEY=${api_key}\nLLM_BASE_URL=${base_url}\nOPENAI_BASE_URL=${base_url}\nOPENAI_API_BASE=${base_url}\nOPENAI_API_BASE_URL=${base_url}\nLLM_API_BASE=${base_url}\nLLM_API_BASE_URL=${base_url}\nHERMES_BASE_URL=${base_url}\n"
+        }
       }
     },
     {
@@ -986,9 +1024,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
     {
       "id": "kilo",
       "name": "Kilo",
-      "version": "7.5.14",
+      "version": "7.5.16",
       "profileId": "kilo",
-      "image": "ghcr.io/moonrend/acp-registry/kilo:7.5.14",
+      "image": "ghcr.io/moonrend/acp-registry/kilo:7.5.16",
       "dist": {
         "kind": "npx"
       },
@@ -1045,6 +1083,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -1071,7 +1112,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
         "modes": [
           "self"
         ]
-      }
+      },
+      "description": "AWS Kiro CLI（kiro-cli acp）— 支持 AGENTS.md、Skills 与 MCP",
+      "homepage": "https://kiro.dev"
     },
     {
       "id": "minion-code",
@@ -1207,6 +1250,10 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true,
+        "modelPrefix": "zakura/"
       }
     },
     {
@@ -1239,6 +1286,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "oauth",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -1335,14 +1385,17 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
       "id": "sigit",
       "name": "siGit Code",
-      "version": "1.5.2",
+      "version": "1.5.7",
       "profileId": "sigit",
-      "image": "ghcr.io/moonrend/acp-registry/sigit:1.5.2",
+      "image": "ghcr.io/moonrend/acp-registry/sigit:1.5.7",
       "dist": {
         "kind": "npx"
       },
@@ -1367,6 +1420,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
+      },
+      "integration": {
+        "zakuraRoute": true
       }
     },
     {
@@ -1434,5 +1490,5 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     }
   ],
-  "digest": "b2bcc2af9ed90fdc"
+  "digest": "26eb715321a611cd"
 } as AcpCuratedIndex;

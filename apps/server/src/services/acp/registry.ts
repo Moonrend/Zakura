@@ -336,6 +336,28 @@ export class AcpRegistryService {
    * every shipped agent has an image while `dist.kind` still describes the
    * legacy host-install method.
    */
+  /**
+   * Resolve an agent from our own curated index.
+   *
+   * Container adapters live here, not upstream. The curated agent carries no
+   * `dist` (its image entrypoint supplies argv), so this deliberately returns a
+   * minimal entry: `containerImageFor` keys off `id` alone, and callers that
+   * need a host install plan fall back to the upstream entry.
+   */
+  private async findCuratedAgent(id: string): Promise<AcpCatalogEntry | null> {
+    const curated = acpContainerAgents().find((a) => a.id === id);
+    if (!curated?.image) return null;
+    return {
+      id: curated.id,
+      name: curated.name,
+      description: "",
+      version: curated.version,
+      dist: null,
+      requiresUnverified: false,
+      unavailable: null,
+    };
+  }
+
   private containerImageFor(
     entry: AcpCatalogEntry,
     versionOverride?: string,
@@ -392,7 +414,13 @@ export class AcpRegistryService {
     useSidecar = false,
     opts?: { allowUnverifiedBinary?: boolean; version?: string },
   ): Promise<{ command: string; args: string[]; version: string; installed: boolean }> {
-    const entry = await this.findAgent(registryId, opts);
+    // Single source of truth: Moonrend/acp-registry.
+    //
+    // Zakura reads version and distribution data from the curated index only
+    // and does no extra resolution of its own. The upstream ACP index is not
+    // consulted here: it lacks fx-acp/hermes-acp/kiro-acp entirely, and its
+    // versions may point at images we never built.
+    const entry = await this.findCuratedAgent(registryId);
     if (!entry) throw new Error(`ACP 注册表里没有 ${registryId}`);
 
     // Container adapters are "installed" by pulling their image.

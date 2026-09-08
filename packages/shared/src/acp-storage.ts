@@ -274,34 +274,43 @@ function sh(value: string): string {
 }
 
 /**
- * Hermes reads its durable `.env` before inherited process variables. For a
- * Zakura-routed profile, derive these fields from the Gateway credentials too.
+ * Some agents read a durable dotenv before inherited process variables. Which
+ * agents, which files, and which keys are declared by the registry
+ * (integration.dotenv); this only substitutes the credential values.
+ *
+ * Lines whose placeholders resolve to empty are dropped, so a template may
+ * list every alias an agent might accept without emitting blank assignments.
  */
 export function acpApiKeyDotenv(
   profileId: string,
   managed: Record<string, string>,
 ): string | null {
-  if (profileId !== "hermes") return null;
+  const template = acpAgentByProfile(profileId)?.integration?.dotenv?.[".env"];
+  if (!template) return null;
   const routed = Boolean(managed.zakura_api_key?.trim());
-  const apiKey = (routed ? managed.zakura_api_key : managed.api_key)?.trim();
-  const baseUrl = (routed ? managed.zakura_base_url : managed.base_url)?.trim();
-  const lines = [
-    routed ? "LLM_PROVIDER=openai" : managed.provider?.trim() ? `LLM_PROVIDER=${managed.provider.trim()}` : "",
-    managed.model?.trim() ? `LLM_MODEL=${managed.model.trim()}` : "",
-    apiKey ? `LLM_API_KEY=${apiKey}` : "",
-    apiKey ? `OPENAI_API_KEY=${apiKey}` : "",
-    apiKey ? `HERMES_API_KEY=${apiKey}` : "",
-    apiKey ? `OPENAI_API_TOKEN=${apiKey}` : "",
-    apiKey ? `API_KEY=${apiKey}` : "",
-    baseUrl ? `LLM_BASE_URL=${baseUrl}` : "",
-    baseUrl ? `OPENAI_BASE_URL=${baseUrl}` : "",
-    baseUrl ? `OPENAI_API_BASE=${baseUrl}` : "",
-    baseUrl ? `OPENAI_API_BASE_URL=${baseUrl}` : "",
-    baseUrl ? `LLM_API_BASE=${baseUrl}` : "",
-    baseUrl ? `LLM_API_BASE_URL=${baseUrl}` : "",
-    baseUrl ? `HERMES_BASE_URL=${baseUrl}` : "",
-  ].filter(Boolean);
-  return lines.length ? `${lines.join("\n")}\n` : null;
+  const apiKey = (routed ? managed.zakura_api_key : managed.api_key)?.trim() ?? "";
+  const baseUrl = (routed ? managed.zakura_base_url : managed.base_url)?.trim() ?? "";
+  const model = managed.model?.trim() ?? "";
+  const provider = routed ? "openai" : (managed.provider?.trim() ?? "");
+  const vars: Record<string, string> = { api_key: apiKey, base_url: baseUrl, model, provider };
+  const lines = template
+    .split("\n")
+    .map((line) => {
+      if (!line.trim()) return "";
+      // Drop the whole assignment when any placeholder it uses is empty.
+      let empty = false;
+      const out = line.replace(/\$\{([a-z_]+)\}/gi, (_m, k: string) => {
+        const v = vars[k] ?? "";
+        if (!v) empty = true;
+        return v;
+      });
+      return empty ? "" : out;
+    })
+    .filter(Boolean);
+  // A file carrying only a provider hint has no credential in it; the previous
+  // implementation emitted nothing in that case, so keep that behaviour.
+  const meaningful = lines.some((l) => !l.startsWith("LLM_PROVIDER="));
+  return lines.length && meaningful ? `${lines.join("\n")}\n` : null;
 }
 
 export function buildCodexAuthJson(tokens: {

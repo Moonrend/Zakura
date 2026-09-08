@@ -272,7 +272,11 @@ export function registerAcpRoutes(
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     try {
-      const result = await acp.install(agent, c.req.param("profileId"));
+      // `version` lets the UI ask for a specific release. Without it "更新"
+      // just re-resolved the shipped version and pulled the same image again,
+      // reporting success while nothing changed.
+      const version = c.req.query("version") || undefined;
+      const result = await acp.install(agent, c.req.param("profileId"), { version });
       return c.json(result, result.ok ? 200 : 400);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);

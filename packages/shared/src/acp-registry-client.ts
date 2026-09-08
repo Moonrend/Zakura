@@ -47,6 +47,23 @@ export interface AcpAuthSpec {
   noBrowserEnv?: Record<string, string>;
 }
 
+export interface AcpIntegrationSpec {
+  /** Agent can be pointed at Zakura's own model gateway. */
+  zakuraRoute?: boolean;
+  /** Prefix prepended to model ids when routed through Zakura. */
+  modelPrefix?: string;
+  /** ACP session mode id to request on session/new. */
+  sessionModeId?: string;
+  /** Agent only speaks HTTP MCP; never hand it a stdio gateway. */
+  forceHttpMcp?: boolean;
+  /** Binary already lives in the image; skip any install step. */
+  preinstalled?: boolean;
+  /** Human-facing hint shown when setup needs manual action. */
+  installHint?: string;
+  /** Files written into the adapter home before launch. Values may use ${VAR}. */
+  dotenv?: Record<string, string>;
+}
+
 export interface AcpCuratedAgent {
   id: string;
   name: string;
@@ -58,6 +75,13 @@ export interface AcpCuratedAgent {
   dist: { kind: "npx" | "uvx" | "binary" };
   storage: AcpStorageSpec;
   auth: AcpAuthSpec;
+  description?: string;
+  homepage?: string;
+  /**
+   * How the host wires this agent up. Ships with the registry so Zakura
+   * needs no per-agent code -- adding an agent is a registry-only change.
+   */
+  integration?: AcpIntegrationSpec;
 }
 
 export interface AcpCuratedIndex {

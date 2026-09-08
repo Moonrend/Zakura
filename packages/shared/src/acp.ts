@@ -4,6 +4,7 @@
  */
 
 import { acpManualSetupEnvironment } from "./acp-storage.js";
+import { acpAgents } from "./acp-registry-client.js";
 
 export const ACP_PROTOCOL_VERSION = 1;
 
@@ -13,37 +14,15 @@ export type AcpSetupMode = (typeof ACP_SETUP_MODES)[number];
 export const ACP_PERMISSION_POLICIES = ["ask", "allow"] as const;
 export type AcpPermissionPolicy = (typeof ACP_PERMISSION_POLICIES)[number];
 
-export const ACP_BUILTIN_PROFILE_IDS = [
-  "claude-code",
-  "codex",
-  "gemini-cli",
-  "hermes",
-  "grok",
-  "copilot",
-  "kimi-code",
-  "pi",
-  "opencode",
-  "fx",
-  "kiro",
-  "auggie",
-  "cline",
-  "cursor",
-  "devin",
-  "factory-droid",
-  "goose",
-  "junie",
-  "qwen-code",
-  "mistral-vibe",
-  "nova",
-  "dirac",
-  "codebuddy",
-  "amp",
-  "deepagents",
-  "poolside",
-  "sigit",
-  "fast-agent",
-] as const;
-export type AcpBuiltinProfileId = (typeof ACP_BUILTIN_PROFILE_IDS)[number];
+/**
+ * Every profile id the registry ships. Derived, not hand-maintained: the
+ * registry is the single source of truth, so adding an agent there makes it
+ * appear here with no Zakura-side edit.
+ */
+export const ACP_BUILTIN_PROFILE_IDS: readonly string[] = acpAgents()
+  .map((a) => a.profileId)
+  .sort();
+export type AcpBuiltinProfileId = string;
 
 export const ZAKURA_RUNTIME_ID = "zakura";
 
@@ -325,7 +304,12 @@ export function isBuiltinAcpProfileId(id: string): boolean {
   return (ACP_BUILTIN_PROFILE_IDS as readonly string[]).includes(id);
 }
 
-export function builtinAcpProfiles(): AcpPublicProfile[] {
+/**
+ * Hand-written form copy for agents we have written it for. Not the
+ * catalogue -- `builtinAcpProfiles()` below decides which agents exist,
+ * using the registry as the single source of truth.
+ */
+function curatedAcpProfiles(): AcpPublicProfile[] {
   return [
     {
       id: "claude-code",
@@ -918,6 +902,63 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
           ],
         },
   ];
+}
+
+/**
+ * Default form fields for an agent the curated table says nothing about.
+ * Derived from its declared auth modes, so a registry-only agent still gets
+ * a usable setup form instead of vanishing from the UI.
+ */
+function derivedManagedFields(modes: readonly string[]): AcpManagedField[] {
+  if (!modes.includes("api_key")) return [];
+  return [
+    { id: "api_key", label: "API key", type: "password", required: true, sensitive: true },
+    { id: "base_url", label: "Base URL", type: "url" },
+    { id: "model", label: "默认模型", type: "text" },
+  ];
+}
+
+/**
+ * The catalogue of ACP agents Zakura offers.
+ *
+ * The registry is the single source of truth for *which* agents exist and how
+ * they are wired up (see `integration`). The curated table above only supplies
+ * richer form copy -- labels, help text, placeholders -- for agents we have
+ * written it for. Anything the registry ships that we have no copy for still
+ * shows up, using fields derived from its declared auth modes.
+ *
+ * Net effect: adding an agent is a registry-only change.
+ */
+export function builtinAcpProfiles(): AcpPublicProfile[] {
+  const curated = new Map(curatedAcpProfiles().map((p) => [p.id, p]));
+  const out: AcpPublicProfile[] = [];
+
+  for (const agent of acpAgents()) {
+    const base = curated.get(agent.profileId);
+    const integration = agent.integration ?? {};
+    const modes = agent.auth?.modes ?? ["self"];
+
+    out.push({
+      ...(base ?? {
+        id: agent.profileId,
+        displayName: agent.name || agent.profileId,
+        description: agent.description ?? "",
+        managed: true,
+        command: agent.profileId,
+        args: [],
+        setupModes: [...modes] as AcpPublicProfile["setupModes"],
+        managedFields: derivedManagedFields(modes),
+      }),
+      // Wiring always comes from the registry, never from the local table.
+      sessionModeId: integration.sessionModeId ?? base?.sessionModeId,
+      supportsZakuraRoute: integration.zakuraRoute ?? false,
+      forceHttpMcp: integration.forceHttpMcp ?? false,
+      preinstalled: integration.preinstalled ?? false,
+      installHint: integration.installHint ?? base?.installHint,
+    });
+  }
+
+  return out;
 }
 
 export function lookupBuiltinAcpProfile(id: string): AcpPublicProfile | null {

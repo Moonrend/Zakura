@@ -22,6 +22,7 @@ import {
   ACP_UNSTABLE_MODEL_CONFIG_ID,
   scrubAcpConfigForResponse,
   supportsAcpZakuraRoute,
+  acpAgents,
   upsertAcpGrant,
 } from "@zakura/shared";
 
@@ -137,36 +138,19 @@ describe("ACP config", () => {
     });
     assert.equal(oauthLaunch.env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-secret");
     const ids = builtinAcpProfiles().map((p) => p.id);
-    assert.deepEqual(ids, [
-      "claude-code",
-      "codex",
-      "gemini-cli",
-      "hermes",
-      "grok",
-      "copilot",
-      "kimi-code",
-      "pi",
-      "opencode",
-      "kiro",
-      "fx",
-      "auggie",
-      "cline",
-      "cursor",
-      "devin",
-      "factory-droid",
-      "goose",
-      "junie",
-      "qwen-code",
-      "mistral-vibe",
-      "nova",
-      "dirac",
-      "codebuddy",
-      "amp",
-      "deepagents",
-      "poolside",
-      "sigit",
-      "fast-agent",
-    ]);
+    // The registry is the single source of truth for the catalogue, so assert
+    // agreement with it rather than pinning a copy of the list here -- a
+    // hardcoded list would have to be edited every time an agent is added.
+    assert.deepEqual(
+      [...ids].sort(),
+      acpAgents()
+        .map((a) => a.profileId)
+        .sort(),
+    );
+    // Agents we ship hand-written form copy for must keep it.
+    for (const id of ["claude-code", "codex", "gemini-cli", "hermes", "opencode"]) {
+      assert.ok(ids.includes(id), `${id} missing from catalogue`);
+    }
     // Kiro 只有自身的设备码登录，没有可注入的 key，因此不能走 Zakura 网关路由。
     const kiro = builtinAcpProfiles().find((p) => p.id === "kiro")!;
     assert.deepEqual(kiro.args, ["acp"]);
