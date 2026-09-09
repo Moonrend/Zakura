@@ -266,9 +266,6 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
-      },
-      "integration": {
-        "zakuraRoute": true
       }
     },
     {
@@ -530,9 +527,6 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
-      },
-      "integration": {
-        "zakuraRoute": true
       }
     },
     {
@@ -631,7 +625,13 @@ export const ACP_REGISTRY_SNAPSHOT = {
         ]
       },
       "integration": {
-        "zakuraRoute": true
+        "zakuraRoute": true,
+        "env": {
+          "DIRAC_PROVIDER": "openai",
+          "DIRAC_API_KEY": "${managed.zakura_api_key}",
+          "DIRAC_BASE_URL": "${managed.zakura_base_url}",
+          "DIRAC_MODEL": "${managed.model}"
+        }
       }
     },
     {
@@ -698,7 +698,13 @@ export const ACP_REGISTRY_SNAPSHOT = {
         ]
       },
       "integration": {
-        "zakuraRoute": true
+        "zakuraRoute": true,
+        "env": {
+          "FAST_AGENT_MODEL": "generic.${managed.model}",
+          "GENERIC__API_KEY": "${managed.zakura_api_key}",
+          "GENERIC__BASE_URL": "${managed.zakura_base_url}",
+          "GENERIC__DEFAULT_MODEL": "${managed.model}"
+        }
       }
     },
     {
@@ -737,8 +743,8 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "description": "fx CLI（fx acp）— Vercel AI Gateway 驱动的编码代理",
       "homepage": "https://fx.sh",
       "integration": {
-        "zakuraRoute": true,
-        "preinstalled": true
+        "preinstalled": true,
+        "zakuraRoute": true
       }
     },
     {
@@ -870,7 +876,14 @@ export const ACP_REGISTRY_SNAPSHOT = {
         ]
       },
       "integration": {
-        "zakuraRoute": true
+        "zakuraRoute": true,
+        "env": {
+          "GOOSE_PROVIDER": "openai",
+          "GOOSE_MODEL": "${managed.model}",
+          "OPENAI_API_KEY": "${managed.zakura_api_key}",
+          "OPENAI_HOST": "${managed.zakura_base_url}",
+          "OPENAI_BASE_PATH": "chat/completions"
+        }
       }
     },
     {
@@ -1262,9 +1275,9 @@ export const ACP_REGISTRY_SNAPSHOT = {
     {
       "id": "pi-acp",
       "name": "pi ACP",
-      "version": "0.0.33",
+      "version": "0.0.33-zakura.1",
       "profileId": "pi",
-      "image": "ghcr.io/moonrend/acp-registry/pi-acp:0.0.33",
+      "image": "ghcr.io/moonrend/acp-registry/pi-acp:0.0.33-zakura.1",
       "dist": {
         "kind": "npx"
       },
@@ -1291,7 +1304,8 @@ export const ACP_REGISTRY_SNAPSHOT = {
         ]
       },
       "integration": {
-        "zakuraRoute": true
+        "zakuraRoute": true,
+        "modelPrefix": "zakura/"
       }
     },
     {
@@ -1423,9 +1437,6 @@ export const ACP_REGISTRY_SNAPSHOT = {
           "self",
           "api_key"
         ]
-      },
-      "integration": {
-        "zakuraRoute": true
       }
     },
     {
@@ -1493,5 +1504,5 @@ export const ACP_REGISTRY_SNAPSHOT = {
       }
     }
   ],
-  "digest": "a7fa8205602207d3"
+  "digest": "057821b59672c55f"
 } as AcpCuratedIndex;

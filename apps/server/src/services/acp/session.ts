@@ -872,7 +872,10 @@ export class AcpSessionService {
     let live = this.byChat.get(sessionId);
     if (live?.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
     if (live?.active && await this.trySetProtocolModel(live, modelId)) {
-      return this.runtimeStatus(tenantId, agentId, sessionId);
+      return {
+        ...await this.runtimeStatus(tenantId, agentId, sessionId),
+        modelChange: "hot",
+      };
     }
     // Pin before setConfigOption: Codex 回包会带官方模型目录，overlay 要以
     // 用户刚选的网关别名为准，不能被适配器 currentId 盖掉。
@@ -882,19 +885,19 @@ export class AcpSessionService {
     if (live?.active && configId) {
       // setConfigOption 的取值用适配器协议 id（OpenCode 需要 zakura/ 前缀）；
       // 展示与持久化始终用网关裸别名。
-      return this.setConfigOption(
+      const status = await this.setConfigOption(
         tenantId,
         agentId,
         sessionId,
         configId,
         acpModelProtocolId(live, modelId),
       );
+      return { ...status, modelChange: "hot" };
     }
 
     // 无热切换（Codex/Grok 等不认网关别名）或进程已不在：走启动参数。
     // 进程未起来时不要抛「未启动」——刷新/回收后再改模型是正常路径。
     const origin = safeOrigin(session.originJson);
-    const previousAcpSessionId = live?.acpSessionId ?? origin.acpSessionId;
     const profileId = live?.profileId ?? origin.acpProfileId;
     if (!profileId) throw new Error("会话未绑定 ACP profile");
     const oldProcKey = live?.proc?.key;
@@ -912,10 +915,17 @@ export class AcpSessionService {
     const agent = await this.deps.agentService.get(tenantId, agentId);
     if (!agent) throw new Error("Agent 不存在");
     const setup = requireSetup(agent, profileId);
+    // A launch-time model change is a configuration boundary. Loading the old
+    // ACP session can restore its old model from the adapter's own session DB
+    // and silently undo the freshly generated runtime config. Start a new ACP
+    // session when no hot-switch API is available.
     await this.ensureRuntime(agent, sessionId, setup, {
-      existingAcpSessionId: previousAcpSessionId,
+      existingAcpSessionId: undefined,
     });
-    return this.runtimeStatus(tenantId, agentId, sessionId);
+    return {
+      ...await this.runtimeStatus(tenantId, agentId, sessionId),
+      modelChange: "restart",
+    };
   }
 
   async setConfigOption(
@@ -2011,15 +2021,13 @@ export class AcpSessionService {
     preferredModels?: Array<string | undefined>,
   ): Promise<void> {
     const parsed = parseAcpSessionModelState(raw);
-    const models = parsed.models
-      ? overlayAcpGatewayModels({
-          zakuraRouted: live.zakuraRouted,
-          gatewayModels: live.gatewayModels,
-          incoming: parsed.models,
-          previous: live.models,
-          preferred: preferredModels,
-        })
-      : undefined;
+    const models = acpVisibleModels({
+      adapterModels: parsed.models,
+      gatewayModels: live.gatewayModels,
+      preferred: preferredModels,
+      previous: live.models,
+      zakuraRouted: live.zakuraRouted,
+    });
     if (models) live.models = models;
     if (parsed.reasoning) live.reasoning = parsed.reasoning;
     if (!models && !parsed.reasoning) return;
@@ -2065,7 +2073,11 @@ export class AcpSessionService {
    * fall through to setConfigOption or a clean process restart.
    */
   private async trySetProtocolModel(live: LiveRuntime, requestedId: string): Promise<boolean> {
-    if (!live.active || !live.models) return false;
+    // session/set_model is currently a Hermes extension, not part of the ACP
+    // baseline. A synthetic gateway catalogue must never be mistaken for
+    // protocol support; other adapters use a declared config option or the
+    // safe restart/new-session fallback in setModel().
+    if (!live.active || !live.models || live.profileId !== "hermes") return false;
     const exact = live.models.available.find(
       (entry) => entry.id === requestedId || entry.id.endsWith(`:${requestedId}`),
     );
@@ -2300,6 +2312,45 @@ export function overlayAcpGatewayModels(input: {
     available: gateway.map((m) => ({ id: m.id, name: m.name || m.id })),
     configId: input.incoming.configId ?? input.previous?.configId,
   };
+}
+
+/**
+ * Model state exposed to the web client.
+ *
+ * Most ACP adapters do not advertise a model config option even though Zakura
+ * routes them through the gateway and can apply another model by restarting
+ * the per-chat adapter container. Hiding the gateway catalogue in that case
+ * made model switching appear unsupported for almost every adapter.
+ */
+export function acpVisibleModels(input: {
+  adapterModels?: AcpModelsBlock;
+  gatewayModels?: AcpGatewayModel[];
+  previous?: AcpModelsBlock;
+  preferred?: Array<string | undefined>;
+  zakuraRouted: boolean;
+}): AcpModelsBlock | undefined {
+  if (input.adapterModels) {
+    return overlayAcpGatewayModels({
+      zakuraRouted: input.zakuraRouted,
+      gatewayModels: input.gatewayModels,
+      incoming: input.adapterModels,
+      previous: input.previous,
+      preferred: input.preferred,
+    });
+  }
+  if (!input.zakuraRouted || !input.gatewayModels?.length) return undefined;
+  return overlayAcpGatewayModels({
+    zakuraRouted: true,
+    gatewayModels: input.gatewayModels,
+    incoming: {
+      currentId: input.preferred?.find((id): id is string => Boolean(id?.trim()))
+        ?? input.previous?.currentId
+        ?? input.gatewayModels[0]!.id,
+      available: [],
+    },
+    previous: input.previous,
+    preferred: input.preferred,
+  });
 }
 
 /**

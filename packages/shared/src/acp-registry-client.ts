@@ -50,6 +50,8 @@ export interface AcpAuthSpec {
 export interface AcpIntegrationSpec {
   /** Agent can be pointed at Zakura's own model gateway. */
   zakuraRoute?: boolean;
+  /** Environment templates expanded from the selected setup's managed values. */
+  env?: Record<string, string>;
   /** Prefix prepended to model ids when routed through Zakura. */
   modelPrefix?: string;
   /** ACP session mode id to request on session/new. */

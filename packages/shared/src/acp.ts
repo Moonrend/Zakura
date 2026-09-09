@@ -264,6 +264,9 @@ export type AcpRuntimeStatus = {
     available: AcpOptionInfo[];
     configId?: string;
   };
+  /** Included by set-model responses so the UI can explain whether the Agent
+   * changed in place or restarted with a fresh ACP session. */
+  modelChange?: "hot" | "restart";
   reasoning?: {
     current?: string;
     available: AcpOptionInfo[];
@@ -980,6 +983,25 @@ function asStringMap(v: unknown): Record<string, string> {
   return out;
 }
 
+/** Expand agent-specific registry env templates for one launch. */
+export function acpIntegrationEnvironment(
+  profileId: string,
+  managed: Record<string, string>,
+): Record<string, string> {
+  const templates = acpAgents().find((agent) => agent.profileId === profileId)?.integration?.env ?? {};
+  const out: Record<string, string> = {};
+  for (const [name, template] of Object.entries(templates)) {
+    let missing = false;
+    const value = template.replace(/\$\{managed\.([a-z0-9_]+)\}/gi, (_match, key: string) => {
+      const resolved = managed[key]?.trim() ?? "";
+      if (!resolved) missing = true;
+      return resolved;
+    });
+    if (!missing && value) out[name] = value;
+  }
+  return out;
+}
+
 export function parseAcpSetupMode(raw: unknown): AcpSetupMode {
   return raw === "self" || raw === "oauth" ? raw : "api_key";
 }
@@ -1275,6 +1297,15 @@ export function resolveAcpLaunch(
   }
   if (profile.id === "grok" && model && !args.some((arg) => arg === "--model" || arg === "-m")) {
     args = [...args, "--model", model];
+  }
+  // Agent-specific variable names belong in Moonrend/acp-registry. Apply the
+  // declarative mapping last so it can intentionally replace generic aliases.
+  // Registry integration mappings describe how an adapter reaches Zakura's
+  // gateway. Saved setups retain the previous route's secrets when a user
+  // switches back to native credentials; never let those stale values
+  // override the native provider environment.
+  if (setup.modelProvider === "zakura") {
+    Object.assign(env, acpIntegrationEnvironment(profile.id, setup.managed));
   }
   return { command, args, env };
 }

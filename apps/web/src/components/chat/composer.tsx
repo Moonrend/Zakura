@@ -17,6 +17,7 @@ import {
   ArrowUp,
   Brain,
   File as FileIcon,
+  Loader2,
   Play,
   Square,
   Upload,
@@ -283,6 +284,7 @@ export function Composer({
   onAcpModelChange,
   acpReasoning,
   onAcpReasoningChange,
+  acpControlPending,
   hideZakuraModel,
   contextWindow,
   contextWindowOpen,
@@ -347,6 +349,7 @@ export function Composer({
   onAcpModelChange?: (modelId: string) => void;
   acpReasoning?: { current?: string; available: Array<{ id: string; name: string }> };
   onAcpReasoningChange?: (value: string) => void;
+  acpControlPending?: "mode" | "model" | "reasoning" | null;
   hideZakuraModel?: boolean;
   contextWindow: ContextWindowInfo;
   contextWindowOpen: boolean;
@@ -805,6 +808,20 @@ export function Composer({
                     ))}
                   </SelectContent>
                 </Select>
+              ) : null}
+              {acpControlPending ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full bg-muted px-2.5 text-xs text-muted-foreground"
+                >
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {acpControlPending === "model"
+                    ? "正在切换模型…"
+                    : acpControlPending === "mode"
+                      ? "正在切换模式…"
+                      : "正在更新思考强度…"}
+                </span>
               ) : null}
             </>
           ) : (

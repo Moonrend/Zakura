@@ -215,6 +215,53 @@ describe("ACP generated runtime config files", () => {
     assert.equal(kimi.reasoning, undefined);
   });
 
+  it("registers every routed gateway model in Pi's custom provider", () => {
+    const layout = acpRuntimeLayout("pi", "api_key", "pi1");
+    const files = acpGeneratedRuntimeFiles({
+      layout,
+      keyMode: "api_key",
+      routed: true,
+      managed: {
+        zakura_api_key: "zk-key",
+        zakura_base_url: "https://zakura.example/v1/",
+      },
+      preferredModel: "primary-model",
+      gatewayModels: [
+        { id: "primary-model", name: "Primary", contextLimit: 200_000, outputLimit: 16_000 },
+        { id: "secondary-model", name: "Secondary", attachment: true },
+      ],
+    });
+    assert.equal(files.length, 1);
+    assert.equal(files[0]!.dest, `${layout.env.HOME}/.pi/agent/models.json`);
+    const config = JSON.parse(files[0]!.content) as {
+      providers: {
+        zakura: {
+          baseUrl: string;
+          api: string;
+          apiKey: string;
+          authHeader: boolean;
+          models: Array<{
+            id: string;
+            contextWindow: number;
+            maxTokens: number;
+            input: string[];
+          }>;
+        };
+      };
+    };
+    assert.equal(config.providers.zakura.baseUrl, "https://zakura.example/v1");
+    assert.equal(config.providers.zakura.api, "openai-completions");
+    assert.equal(config.providers.zakura.apiKey, "zk-key");
+    assert.equal(config.providers.zakura.authHeader, true);
+    assert.deepEqual(
+      config.providers.zakura.models.map((candidate) => candidate.id),
+      ["primary-model", "secondary-model"],
+    );
+    assert.equal(config.providers.zakura.models[0]!.contextWindow, 200_000);
+    assert.equal(config.providers.zakura.models[0]!.maxTokens, 16_000);
+    assert.deepEqual(config.providers.zakura.models[1]!.input, ["text", "image"]);
+  });
+
   it("keeps builtin OpenCode defaults (model only) without a base URL", () => {
     const layout = acpRuntimeLayout("opencode", "api_key", "oc4");
     const files = acpGeneratedRuntimeFiles({
@@ -251,7 +298,7 @@ describe("ACP generated runtime config files", () => {
     }
   });
 
-  it("generates Codex config.toml with a chat wire provider and auth.json", () => {
+  it("generates Codex config.toml with a Responses wire provider and auth.json", () => {
     const layout = acpRuntimeLayout("codex", "api_key", "cx1");
     const files = acpGeneratedRuntimeFiles({
       layout,

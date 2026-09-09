@@ -450,6 +450,17 @@ export function acpGeneratedRuntimeFiles(input: {
     );
     return file ? [file] : [];
   }
+  if (layout.profileId === "pi") {
+    const file = piConfigFile(
+      layout,
+      key,
+      baseUrl,
+      model,
+      routed,
+      input.gatewayModels,
+    );
+    return file ? [file] : [];
+  }
   if (layout.profileId === "codex") {
     const fallback =
       input.gatewayModels?.find((m) => m.id === input.preferredModel?.trim())?.id ??
@@ -532,6 +543,50 @@ function opencodeConfigFile(
   return {
     dest: `${configHome}/opencode/opencode.json`,
     content: `${JSON.stringify(config, null, 2)}\n`,
+  };
+}
+
+function piConfigFile(
+  layout: AcpRuntimeLayout,
+  key: string,
+  baseUrl: string,
+  model: string,
+  routed: boolean,
+  gatewayModels?: AcpGatewayModel[],
+): AcpRuntimeConfigFile | null {
+  if (!key || !baseUrl) return null;
+  const models: AcpGatewayModel[] = gatewayModels?.length
+    ? gatewayModels
+    : model
+      ? [{ id: model }]
+      : [];
+  if (!models.length) return null;
+
+  const providerId = routed ? "zakura" : "custom";
+  return {
+    dest: `${layout.env.HOME}/.pi/agent/models.json`,
+    content: `${JSON.stringify(
+      {
+        providers: {
+          [providerId]: {
+            baseUrl: baseUrl.replace(/\/+$/, ""),
+            api: "openai-completions",
+            apiKey: key,
+            authHeader: true,
+            models: models.map((candidate) => ({
+              id: candidate.id,
+              name: candidate.name || candidate.id,
+              reasoning: candidate.reasoning ?? false,
+              input: candidate.attachment ? ["text", "image"] : ["text"],
+              contextWindow: candidate.contextLimit ?? 128_000,
+              maxTokens: candidate.outputLimit ?? 32_000,
+            })),
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
   };
 }
 

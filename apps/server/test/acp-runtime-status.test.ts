@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   acpHotModelConfigId,
   acpSnapshotState,
+  acpVisibleModels,
   overlayAcpGatewayModels,
 } from "../src/services/acp/session.js";
 
@@ -118,6 +119,52 @@ describe("overlayAcpGatewayModels", () => {
       },
     });
     assert.equal(out.currentId, "kimi-k2.5");
+  });
+});
+
+describe("acpVisibleModels", () => {
+  const gatewayModels = [
+    { id: "gateway/model-a", name: "Model A" },
+    { id: "gateway/model-b", name: "Model B" },
+  ];
+
+  it("exposes gateway choices when a routed adapter advertises no models", () => {
+    assert.deepEqual(
+      acpVisibleModels({
+        gatewayModels,
+        preferred: ["gateway/model-b"],
+        zakuraRouted: true,
+      }),
+      {
+        currentId: "gateway/model-b",
+        available: gatewayModels,
+        configId: undefined,
+      },
+    );
+  });
+
+  it("does not invent model controls for a non-routed adapter", () => {
+    assert.equal(acpVisibleModels({ gatewayModels, zakuraRouted: false }), undefined);
+  });
+
+  it("preserves an adapter config id while overlaying gateway choices", () => {
+    assert.deepEqual(
+      acpVisibleModels({
+        adapterModels: {
+          currentId: "adapter/default",
+          available: [{ id: "adapter/default", name: "Adapter default" }],
+          configId: "model",
+        },
+        gatewayModels,
+        preferred: ["gateway/model-a"],
+        zakuraRouted: true,
+      }),
+      {
+        currentId: "gateway/model-a",
+        available: gatewayModels,
+        configId: "model",
+      },
+    );
   });
 });
 

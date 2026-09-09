@@ -46,8 +46,10 @@ test("agents with hand-written copy keep their richer form", () => {
 test("wiring comes from the registry's integration block", () => {
   const byId = new Map(builtinAcpProfiles().map((p) => [p.id, p]));
 
-  // opencode is the agent whose model ids are provider/model shaped.
+  // These adapters expose model ids as provider/model and therefore need the
+  // gateway prefix again when Zakura sends a hot model change.
   assert.equal(acpAgentByProfile("opencode")?.integration?.modelPrefix, "zakura/");
+  assert.equal(acpAgentByProfile("pi")?.integration?.modelPrefix, "zakura/");
   assert.equal(byId.get("opencode")?.supportsZakuraRoute, true);
   assert.equal(supportsAcpZakuraRoute(byId.get("opencode")!), true);
 

@@ -236,6 +236,9 @@ export function ChatApp() {
   const [draftRuntimeId, setDraftRuntimeId] = useState(ZAKURA_RUNTIME_ID);
   const [draftProject, setDraftProject] = useState<string | null>(null);
   const [acpPreparingProfileId, setAcpPreparingProfileId] = useState<string | null>(null);
+  const [acpControlPending, setAcpControlPending] = useState<
+    "mode" | "model" | "reasoning" | null
+  >(null);
   /** 实时事件流断开（正在自动重连）；收到任何事件即恢复 */
   const [realtimeOffline, setRealtimeOffline] = useState(false);
   const defaultRuntimeRef = useRef(ZAKURA_RUNTIME_ID);
@@ -2588,7 +2591,9 @@ export function ChatApp() {
               Boolean(sessionId && !isNewSession) || Boolean(acpPreparingProfileId)
             }
             runtimeLoading={
-              Boolean(acpPreparingProfileId) || acpRuntime?.state === "starting"
+              Boolean(acpPreparingProfileId)
+              || acpRuntime?.state === "starting"
+              || Boolean(acpControlPending)
             }
             runtimeDisabledHint={
               acpPreparingProfileId
@@ -2663,49 +2668,63 @@ export function ChatApp() {
             acpCommands={acpRuntime?.availableCommands}
             acpModels={acpRuntime?.models}
             acpReasoning={acpRuntime?.reasoning}
+            acpControlPending={acpControlPending}
             onAcpModeChange={(modeId) => {
-              if (!agentId || !sessionId) return;
+              if (!agentId || !sessionId || acpControlPending) return;
+              setAcpControlPending("mode");
               void setAcpMode(agentId, sessionId, modeId)
-                .then((status) =>
+                .then((status) => {
                   setAcpRuntime((prev) => ({
                     ...prev,
                     modes: status.modes ?? prev?.modes,
                     availableCommands: status.availableCommands ?? prev?.availableCommands,
                     models: status.models ?? prev?.models,
                     reasoning: status.reasoning ?? prev?.reasoning,
-                  })),
-                )
-                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+                  }));
+                  toast.success("Agent 模式已切换");
+                })
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)))
+                .finally(() => setAcpControlPending(null));
             }}
             onAcpModelChange={(modelId) => {
-              if (!agentId || !sessionId) return;
+              if (!agentId || !sessionId || acpControlPending) return;
+              setAcpControlPending("model");
               void setAcpModel(agentId, sessionId, modelId)
-                .then((status) =>
+                .then((status) => {
                   setAcpRuntime((prev) => ({
                     ...prev,
                     models: status.models ?? prev?.models,
                     reasoning: status.reasoning ?? prev?.reasoning,
                     modes: status.modes ?? prev?.modes,
                     availableCommands: status.availableCommands ?? prev?.availableCommands,
-                  })),
-                )
-                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+                  }));
+                  toast.success(
+                    status.modelChange === "restart"
+                      ? "模型已切换，Agent 已自动重启并创建新会话"
+                      : "模型已切换",
+                  );
+                })
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)))
+                .finally(() => setAcpControlPending(null));
             }}
             onAcpReasoningChange={(value) => {
-              if (!agentId || !sessionId) return;
+              if (!agentId || !sessionId || acpControlPending) return;
               const configId = acpRuntime?.reasoning?.configId;
               if (!configId) return;
+              setAcpControlPending("reasoning");
               void setAcpConfigOption(agentId, sessionId, configId, value)
-                .then((status) =>
+                .then((status) => {
                   setAcpRuntime((prev) => ({
                     ...prev,
                     models: status.models ?? prev?.models,
                     reasoning: status.reasoning ?? prev?.reasoning,
                     modes: status.modes ?? prev?.modes,
                     availableCommands: status.availableCommands ?? prev?.availableCommands,
-                  })),
-                )
-                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
+                  }));
+                  toast.success("思考强度已更新");
+                })
+                .catch((err) => toast.error(err instanceof Error ? err.message : String(err)))
+                .finally(() => setAcpControlPending(null));
             }}
             sending={sending}
             runActive={runActive}
