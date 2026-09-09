@@ -871,6 +871,9 @@ export class AcpSessionService {
 
     let live = this.byChat.get(sessionId);
     if (live?.runId) throw new Error("当前 ACP 任务运行中，完成后再切换模型");
+    if (live?.active && await this.trySetProtocolModel(live, modelId)) {
+      return this.runtimeStatus(tenantId, agentId, sessionId);
+    }
     // Pin before setConfigOption: Codex 回包会带官方模型目录，overlay 要以
     // 用户刚选的网关别名为准，不能被适配器 currentId 盖掉。
     if (live?.models) live.models = { ...live.models, currentId: modelId };
@@ -2032,6 +2035,7 @@ export class AcpSessionService {
   }
 
   private async applyPreferredModel(live: LiveRuntime, modelId: string): Promise<void> {
+    if (await this.trySetProtocolModel(live, modelId)) return;
     const configId = dynamicModelConfigId(live);
     // Do not probe undocumented JSON-RPC extensions here.  Codex rejects
     // them with `Invalid params`; launch env is the compatible path for ACP
@@ -2051,6 +2055,45 @@ export class AcpSessionService {
         configId,
         error: describeAcpRpcError(err),
       });
+    }
+  }
+
+  /**
+   * Use the ACP model extension when an agent advertises top-level model state.
+   * The TS SDK does not yet expose `session/set_model`, so the low-level request
+   * transport is used only behind that capability check. Unsupported agents
+   * fall through to setConfigOption or a clean process restart.
+   */
+  private async trySetProtocolModel(live: LiveRuntime, requestedId: string): Promise<boolean> {
+    if (!live.active || !live.models) return false;
+    const exact = live.models.available.find(
+      (entry) => entry.id === requestedId || entry.id.endsWith(`:${requestedId}`),
+    );
+    const currentPrefix = live.models.currentId?.includes(":")
+      ? `${live.models.currentId.slice(0, live.models.currentId.indexOf(":"))}:`
+      : "";
+    const modelId = exact?.id
+      ?? (requestedId.includes(":") ? requestedId : `${currentPrefix}${requestedId}`);
+    type RawAgentRequest = {
+      sendRequest(method: string, params: unknown, mapResponse?: unknown): Promise<unknown>;
+    };
+    const raw = live.connection.agent as unknown as RawAgentRequest;
+    if (typeof raw.sendRequest !== "function") return false;
+    try {
+      await raw.sendRequest("session/set_model", {
+        sessionId: live.active.sessionId,
+        modelId,
+      });
+      live.models = { ...live.models, currentId: modelId };
+      return true;
+    } catch (err) {
+      console.warn("[acp] protocol model switch rejected", {
+        profileId: live.profileId,
+        method: "session/set_model",
+        modelId,
+        error: describeAcpRpcError(err),
+      });
+      return false;
     }
   }
 
