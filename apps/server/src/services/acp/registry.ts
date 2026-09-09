@@ -32,6 +32,7 @@ import {
   applyAcpRegistryIndex,
 } from "@zakura/shared";
 import type { Agent } from "../../db/schema.js";
+import type { DockerPullEvent } from "../../runtime/docker.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import { readAgentAcpConfig } from "./config.js";
 
@@ -410,7 +411,12 @@ export class AcpRegistryService {
     agent: Agent,
     registryId: string,
     useSidecar = false,
-    opts?: { allowUnverifiedBinary?: boolean; version?: string },
+    opts?: {
+      allowUnverifiedBinary?: boolean;
+      version?: string;
+      onProgress?: (line: string, event?: DockerPullEvent) => void;
+      forcePull?: boolean;
+    },
   ): Promise<{ command: string; args: string[]; version: string; installed: boolean }> {
     // Single source of truth: Moonrend/acp-registry.
     //
@@ -432,7 +438,12 @@ export class AcpRegistryService {
     // ENOENT (no `sh`/build toolchain for sharp).
     const containerImage = this.containerImageFor(entry, opts?.version);
     if (containerImage) {
-      const pulled = await this.workspace.ensureAcpAdapterImage(agent, containerImage.image);
+      const pulled = await this.workspace.ensureAcpAdapterImage(
+        agent,
+        containerImage.image,
+        opts?.onProgress,
+        { forcePull: opts?.forcePull },
+      );
       return {
         // Containerized adapters launch via the image entrypoint, so no host
         // command is spawned; the launcher derives argv from the registry.

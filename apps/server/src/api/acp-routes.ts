@@ -274,15 +274,26 @@ export function registerAcpRoutes(
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     try {
-      // `version` lets the UI ask for a specific release. Without it "更新"
-      // just re-resolved the shipped version and pulled the same image again,
-      // reporting success while nothing changed.
       const version = c.req.query("version") || undefined;
-      const result = await acp.install(agent, c.req.param("profileId"), { version });
-      return c.json(result, result.ok ? 200 : 400);
+      const install = acp.startInstall(agent, c.req.param("profileId"), {
+        version,
+        update: c.req.query("update") === "true",
+        rebuild: c.req.query("rebuild") === "true",
+      });
+      // Image pulls can take minutes. Return immediately and let the UI poll
+      // the progress endpoint instead of holding a proxy request open.
+      return c.json({ ok: true, accepted: true, install }, 202);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
+  });
+
+  app.get("/api/agents/:id/acp/installs", async (c) => {
+    const session = c.get("session")!;
+    if (!acp) return c.json({ error: "ACP 未启用" }, 400);
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    return c.json({ installs: acp.listInstalls(agent.id) });
   });
 
   app.get("/api/agents/:id/sessions/:sid/acp-runtime", async (c) => {

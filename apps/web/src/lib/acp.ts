@@ -135,10 +135,42 @@ export async function probeAcpAdapter(
 export async function installAcpAdapter(
   agentId: string,
   profileId: string,
-): Promise<{ ok: boolean; command: string; output: string }> {
-  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/install`, {
+  opts?: { version?: string; update?: boolean; rebuild?: boolean },
+): Promise<{ ok: boolean; accepted: boolean; install: AcpAdapterInstallProgress }> {
+  const params = new URLSearchParams();
+  if (opts?.version) params.set("version", opts.version);
+  if (opts?.update) params.set("update", "true");
+  if (opts?.rebuild) params.set("rebuild", "true");
+  const query = params.toString();
+  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/install${query ? `?${query}` : ""}`, {
     method: "POST",
   });
+}
+
+export type AcpAdapterInstallProgress = {
+  profileId: string;
+  registryId?: string;
+  image?: string;
+  state: "queued" | "pulling" | "completed" | "failed";
+  percent: number | null;
+  downloadedBytes: number;
+  totalBytes: number;
+  message: string;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  output?: string;
+  error?: string;
+};
+
+export async function fetchAcpAdapterInstalls(
+  agentId: string,
+): Promise<AcpAdapterInstallProgress[]> {
+  const result = await api<{ installs: AcpAdapterInstallProgress[] }>(
+    `/api/agents/${agentId}/acp/installs`,
+    { cacheTtlMs: false },
+  );
+  return result.installs;
 }
 
 export type AcpAdapterStatus = {

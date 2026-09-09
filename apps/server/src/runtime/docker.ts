@@ -21,6 +21,20 @@ import type { ContainerSpec, ImageUpdateEntry } from "@zakura/shared";
 
 export { toDockerHostPath };
 
+export interface DockerPullEvent {
+  id?: string;
+  status?: string;
+  progress?: string;
+  progressDetail?: { current?: number; total?: number };
+  error?: string;
+  errorDetail?: { message?: string };
+  zakura?: {
+    phase?: "queued" | "pulling" | "present";
+    image?: string;
+    deduplicated?: boolean;
+  };
+}
+
 function dockerErr(err: unknown): Error {
   if (!err || typeof err !== "object") return new Error(String(err));
   const e = err as { message?: string; json?: { message?: string }; statusCode?: number };
@@ -114,6 +128,19 @@ async function findFreePort(): Promise<number> {
 export class DockerRuntime implements ContainerRuntime {
   readonly kind = "docker";
   private readonly docker: Docker;
+  /**
+   * One flight per image plus a serial pull queue. Without this, callers
+   * racing through `hasImage() -> pullImage()` download the same ACP layers
+   * more than once and concurrent multi-GB pulls can exhaust the host.
+   */
+  private readonly imagePulls = new Map<
+    string,
+    {
+      promise: Promise<void>;
+      listeners: Set<(line: string, event?: DockerPullEvent) => void>;
+    }
+  >();
+  private imagePullTail: Promise<void> = Promise.resolve();
 
   constructor(options?: Docker.DockerOptions) {
     const socketPath = options ? undefined : resolveDockerContextSocketPath();
@@ -687,48 +714,122 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  async pullImage(image: string, onProgress?: (line: string) => void): Promise<void> {
+  private async pullImageUncoordinated(
+    image: string,
+    onProgress?: (line: string, event?: DockerPullEvent) => void,
+  ): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       this.docker.pull(image, (err: Error | null, stream: NodeJS.ReadableStream) => {
         if (err) return reject(dockerErr(err));
         this.docker.modem.followProgress(
           stream,
           (e: Error | null) => (e ? reject(dockerErr(e)) : resolve()),
-          (event: {
-            status?: string;
-            progress?: string;
-            id?: string;
-            error?: string;
-          }) => {
+          (event: DockerPullEvent) => {
             if (!onProgress) return;
-            if (event.error) {
-              onProgress(event.error);
-              return;
-            }
             const parts = [event.id, event.status, event.progress]
-              .map((p) => (typeof p === "string" ? p.trim() : ""))
+              .map((part) => (typeof part === "string" ? part.trim() : ""))
               .filter(Boolean);
-            if (parts.length) onProgress(parts.join(" "));
+            onProgress(event.error || parts.join(" "), event);
           },
         );
       });
     });
   }
 
-  /**
-   * Pull image if missing. onProgress receives raw dockerode status lines
-   * (e.g. "abc123 Pulling fs layer", "Downloading [====>] 12MB/40MB").
-   */
+  private emitPullProgress(
+    listeners: Set<(line: string, event?: DockerPullEvent) => void>,
+    line: string,
+    event?: DockerPullEvent,
+  ): void {
+    for (const listener of listeners) {
+      try {
+        listener(line, event);
+      } catch {
+        // Progress observers must never be able to fail the image pull.
+      }
+    }
+  }
+
+  private enqueueImagePull(task: () => Promise<void>): Promise<void> {
+    const run = this.imagePullTail.catch(() => undefined).then(task);
+    // Keep the queue usable after a failed pull and consume the tail rejection.
+    this.imagePullTail = run.catch(() => undefined);
+    return run;
+  }
+
+  private coordinatedImagePull(
+    image: string,
+    opts: {
+      skipIfPresent: boolean;
+      onProgress?: (line: string, event?: DockerPullEvent) => void;
+    },
+  ): Promise<void> {
+    const active = this.imagePulls.get(image);
+    if (active) {
+      if (opts.onProgress) {
+        active.listeners.add(opts.onProgress);
+        try {
+          opts.onProgress("Waiting for the active image pull", {
+            status: "Waiting for the active image pull",
+            zakura: { phase: "queued", image, deduplicated: true },
+          });
+        } catch {
+          // Progress observers must never be able to fail the image pull.
+        }
+      }
+      return active.promise;
+    }
+
+    const listeners = new Set<(line: string, event?: DockerPullEvent) => void>();
+    if (opts.onProgress) listeners.add(opts.onProgress);
+    this.emitPullProgress(listeners, "Queued image pull", {
+      status: "Queued image pull",
+      zakura: { phase: "queued", image },
+    });
+
+    // enqueueImagePull defers `task` to a promise microtask. Install the map
+    // entry synchronously below, before another same-tick caller can enter.
+    const promise = this.enqueueImagePull(async () => {
+      if (opts.skipIfPresent && (await this.hasImage(image))) {
+        this.emitPullProgress(listeners, `Image already present: ${image}`, {
+          status: "Image is already present",
+          zakura: { phase: "present", image },
+        });
+        return;
+      }
+      this.emitPullProgress(listeners, `Pulling ${image}`, {
+        status: `Pulling ${image}`,
+        zakura: { phase: "pulling", image },
+      });
+      await this.pullImageUncoordinated(image, (line, event) =>
+        this.emitPullProgress(listeners, line, event),
+      );
+    });
+    const operation = { promise, listeners };
+    this.imagePulls.set(image, operation);
+    void promise
+      .finally(() => {
+        if (this.imagePulls.get(image) === operation) this.imagePulls.delete(image);
+      })
+      .catch(() => undefined);
+    return promise;
+  }
+
+  async pullImage(
+    image: string,
+    onProgress?: (line: string, event?: DockerPullEvent) => void,
+  ): Promise<void> {
+    return this.coordinatedImagePull(image, { skipIfPresent: false, onProgress });
+  }
+
+  /** Pull an image if missing, joining an active pull for the same tag. */
   async ensureImage(
     image: string,
-    onProgress?: (line: string) => void,
+    onProgress?: (line: string, event?: DockerPullEvent) => void,
   ): Promise<void> {
-    if (await this.hasImage(image)) {
-      onProgress?.(`Image already present: ${image}`);
-      return;
-    }
-    await this.pullImage(image, onProgress);
+    return this.coordinatedImagePull(image, { skipIfPresent: true, onProgress });
   }
+
 
   /**
    * Recreate every running workspace container matching `image` (or all

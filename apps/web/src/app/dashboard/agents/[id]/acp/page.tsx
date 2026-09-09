@@ -17,7 +17,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { PageLoading } from "@/components/ui/progress-linear";
+import { PageLoading, ProgressLinear } from "@/components/ui/progress-linear";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -33,7 +34,9 @@ import {
   cancelAcpDeviceLogin,
   probeAcpAdapter,
   installAcpAdapter,
+  fetchAcpAdapterInstalls,
   fetchAcpAdapterStatus,
+  type AcpAdapterInstallProgress,
   type AcpAdapterStatus,
 } from "@/lib/acp";
 const WorkspaceTerminalDialog = dynamic(
@@ -51,6 +54,14 @@ import {
   ZAKURA_RUNTIME_ID,
 } from "@zakura/shared";
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** index;
+  return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
 export default function AgentAcpPage() {
   const { id } = useAgentDetail();
   const { confirm } = useConfirmDialog();
@@ -65,8 +76,9 @@ export default function AgentAcpPage() {
   const [terminalProfileId, setTerminalProfileId] = useState<string>();
   const configRef = useRef<AcpAgentConfig | null>(null);
   const [adapterStatuses, setAdapterStatuses] = useState<AcpAdapterStatus[]>([]);
-  const [installingId, setInstallingId] = useState<string | null>(null);
-  const [installingIsUpdate, setInstallingIsUpdate] = useState(false);
+  const [installJobs, setInstallJobs] = useState<Record<string, AcpAdapterInstallProgress>>({});
+  const requestedInstallsRef = useRef(new Set<string>());
+  const notifiedInstallsRef = useRef(new Set<string>());
   const [installOutput, setInstallOutput] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { installed: boolean; output: string }>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -98,15 +110,17 @@ export default function AgentAcpPage() {
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const [res, adapters] = await Promise.all([
+      const [res, adapters, installs] = await Promise.all([
         fetchAcpConfig(id),
         fetchAcpAdapterStatus(id).catch(() => []),
+        fetchAcpAdapterInstalls(id).catch(() => []),
       ]);
       configRef.current = res.config;
       setConfig(res.config);
       setProfiles(res.profiles);
       setConfigError(res.configError ?? null);
       setAdapterStatuses(adapters);
+      setInstallJobs(Object.fromEntries(installs.map((job) => [job.profileId, job])));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setLoadError(message);
@@ -117,6 +131,51 @@ export default function AgentAcpPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const hasActiveInstall = Object.values(installJobs).some(
+    (job) => job.state === "queued" || job.state === "pulling",
+  );
+
+  useEffect(() => {
+    if (!hasActiveInstall) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const installs = await fetchAcpAdapterInstalls(id);
+        if (!stopped) {
+          setInstallJobs(Object.fromEntries(installs.map((job) => [job.profileId, job])));
+        }
+      } catch {
+        // A transient poll failure must not turn a healthy background pull into
+        // a user-visible install failure. The next tick will retry.
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 600);
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [hasActiveInstall, id]);
+
+  useEffect(() => {
+    for (const job of Object.values(installJobs)) {
+      if (job.state !== "completed" && job.state !== "failed") continue;
+      const key = `${job.profileId}:${job.startedAt}`;
+      if (!requestedInstallsRef.current.has(key) || notifiedInstallsRef.current.has(key)) {
+        continue;
+      }
+      notifiedInstallsRef.current.add(key);
+      if (job.state === "completed") {
+        toast.success("适配器镜像已就绪");
+        setInstallOutput(job.output ?? "镜像拉取及安装完成");
+      } else {
+        toast.error(job.error ?? job.message ?? "适配器安装失败");
+        setInstallOutput(job.error ?? job.message);
+      }
+      void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => undefined);
+    }
+  }, [id, installJobs]);
 
   function commit(next: AcpAgentConfig, immediate = false) {
     configRef.current = next;
@@ -171,32 +230,24 @@ export default function AgentAcpPage() {
   }
 
   async function handleInstall(profileId: string, isUpdate = false, isRebuild = false) {
-    setInstallingId(profileId);
-    setInstallingIsUpdate(isUpdate);
     setInstallOutput(null);
     try {
-      const result = await installAcpAdapter(id, profileId);
-      setInstallOutput(result.output);
-      if (result.ok) {
-        toast.success(
-          isRebuild
-            ? `${profileId} 镜像已确认，旧运行环境已清理`
-            : isUpdate
-              ? `${profileId} 已更新到最新版本`
-              : `${profileId} 安装完成`,
-        );
-        setProbeResults((prev) => ({ ...prev, [profileId]: { installed: true, output: result.output } }));
-        void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => {});
-      } else {
-        toast.error(isUpdate ? `${profileId} 更新失败` : `${profileId} 安装失败`);
-      }
+      const version = isUpdate
+        ? (adapterStatuses.find((status) => status.profileId === profileId)?.latest ?? undefined)
+        : undefined;
+      const result = await installAcpAdapter(id, profileId, {
+        version,
+        update: isUpdate,
+        rebuild: isRebuild,
+      });
+      const job = result.install;
+      requestedInstallsRef.current.add(`${job.profileId}:${job.startedAt}`);
+      setInstallJobs((current) => ({ ...current, [job.profileId]: job }));
+      toast.success(job.state === "queued" ? "已加入镜像拉取队列" : "正在拉取镜像");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setInstallOutput(msg);
       toast.error(msg);
-    } finally {
-      setInstallingId(null);
-      setInstallingIsUpdate(false);
     }
   }
 
@@ -658,7 +709,9 @@ export default function AgentAcpPage() {
             parseAcpAgentSetup(profile.id, { enabled: false, setupMode: "api_key" });
           const row = rowState(profile, setup);
           const { status: adapterStatus, probe } = getAdapterInstallInfo(profile.id);
-          const isInstalling = installingId === profile.id;
+          const installJob = installJobs[profile.id];
+          const isInstalling =
+            installJob?.state === "queued" || installJob?.state === "pulling";
           const isInstalled = probe?.installed || (adapterStatus?.installed?.length ?? 0) > 0;
           const hasUpdate = adapterStatus?.updateAvailable;
           const isContainer = adapterStatus?.source === "container";
@@ -674,7 +727,7 @@ export default function AgentAcpPage() {
           return (
             <div
               key={profile.id}
-              className="relative flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 transition-colors hover:bg-muted/40"
+              className="relative flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3.5 transition-colors hover:bg-muted/40"
             >
               <button
                 type="button"
@@ -762,7 +815,7 @@ export default function AgentAcpPage() {
                 {isInstalling ? (
                   <Badge variant="secondary" className="gap-1 text-[10px]">
                     <Loader2 className="size-3 animate-spin" />{" "}
-                    {isContainer ? "拉取中…" : installingIsUpdate ? "更新中…" : "安装中…"}
+                    {installJob.state === "queued" ? "排队中…" : "拉取中…"}
                   </Badge>
                 ) : null}
                 {row === "on_needs_config" ? (
@@ -783,6 +836,37 @@ export default function AgentAcpPage() {
                   }}
                 />
               </div>
+              {installJob &&
+              (installJob.state === "queued" ||
+                installJob.state === "pulling" ||
+                installJob.state === "failed") ? (
+                <div className="relative z-10 w-full pl-[52px]">
+                  <ProgressLinear
+                    value={installJob.percent ?? undefined}
+                    indeterminate={
+                      installJob.state !== "failed" && installJob.percent == null
+                    }
+                    barClassName={installJob.state === "failed" ? "bg-destructive" : undefined}
+                  />
+                  <p
+                    className={cn(
+                      "mt-1 truncate text-[11px] text-muted-foreground",
+                      installJob.state === "failed" && "text-destructive",
+                    )}
+                    title={installJob.error || installJob.message}
+                  >
+                    {installJob.state === "failed"
+                      ? installJob.error || installJob.message
+                      : `${installJob.message}${
+                          installJob.totalBytes > 0
+                            ? ` · ${formatBytes(installJob.downloadedBytes)} / ${formatBytes(
+                                installJob.totalBytes,
+                              )}`
+                            : ""
+                        }`}
+                  </p>
+                </div>
+              ) : null}
             </div>
           );
         })}

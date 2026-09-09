@@ -38,13 +38,20 @@ function upstreamWithout(ids: string[]) {
 /** Records which image the install path asked the workspace to pull. */
 function imageWorkspace() {
   const pulled: string[] = [];
+  const forcePulls: Array<boolean | undefined> = [];
   const workspace = {
-    ensureAcpAdapterImage: async (_agent: unknown, image: string) => {
+    ensureAcpAdapterImage: async (
+      _agent: unknown,
+      image: string,
+      _onProgress?: unknown,
+      opts?: { forcePull?: boolean },
+    ) => {
       pulled.push(image);
+      forcePulls.push(opts?.forcePull);
       return true;
     },
   } as unknown as Workspace;
-  return { workspace, pulled };
+  return { workspace, pulled, forcePulls };
 }
 
 const fakeAgent = { id: "agent-1" } as Parameters<AcpRegistryService["ensureInstalled"]>[0];
@@ -91,6 +98,15 @@ describe("ensureInstalled resolves curated container agents", () => {
       "ghcr.io/moonrend/acp-registry/hermes-acp:9.9.9",
       `explicit version ignored; pulled ${pulled[0]}`,
     );
+  });
+
+  it("forwards forced pulls so 重建 refreshes an existing image tag", async () => {
+    const { workspace, forcePulls } = imageWorkspace();
+    const registry = new AcpRegistryService(workspace, upstreamWithout(["hermes-acp"]));
+
+    await registry.ensureInstalled(fakeAgent, "hermes-acp", false, { forcePull: true });
+
+    assert.deepEqual(forcePulls, [true]);
   });
 
   it("every curated agent's shipped version matches its image tag", () => {

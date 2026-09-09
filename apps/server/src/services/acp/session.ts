@@ -81,6 +81,7 @@ async function fetchAcpGatewayModels(
 }
 import { newId } from "../../db/schema.js";
 import type { Agent } from "../../db/schema.js";
+import type { DockerPullEvent } from "../../runtime/docker.js";
 import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import { ACP_ADAPTER_HOME, WORKSPACE_EXEC_PATH } from "../agent-workspace.js";
@@ -103,6 +104,10 @@ import {
 } from "./permissions.js";
 import { CodexDeviceAuth } from "./codex-device.js";
 import { AcpProvisioner, type AcpResolvedAdapter } from "./provisioner.js";
+import {
+  AcpImagePullProgressTracker,
+  type AcpAdapterInstallProgress,
+} from "./install-progress.js";
 import { buildAcpClient } from "./client-handlers.js";
 
 type PendingPermission = PendingDecision<acp.RequestPermissionResponse> & {
@@ -268,6 +273,10 @@ export class AcpSessionService {
    * `.ok` 标记——标记只在安装/GC 时变，两处都会 invalidate。
    */
   private readonly provisioner: AcpProvisioner;
+  private readonly installJobs = new Map<
+    string,
+    { progress: AcpAdapterInstallProgress; promise: Promise<void> }
+  >();
 
   constructor(
     private readonly deps: {
@@ -1105,7 +1114,11 @@ export class AcpSessionService {
   async install(
     agent: Agent,
     profileId: string,
-    opts?: { version?: string },
+    opts?: {
+      version?: string;
+      onProgress?: (line: string, event?: DockerPullEvent) => void;
+      forcePull?: boolean;
+    },
   ): Promise<{ ok: boolean; command: string; output: string }> {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
@@ -1127,6 +1140,8 @@ export class AcpSessionService {
     if (registryId && registry) {
       const res = await registry.ensureInstalled(agent, registryId, false, {
         version: opts?.version,
+        onProgress: opts?.onProgress,
+        forcePull: opts?.forcePull,
       });
       // A present image does not mean PID 1 is using it (or the latest model,
       // credentials and generated files). Explicit prepare/update always
@@ -1159,6 +1174,114 @@ export class AcpSessionService {
       command: profile.installHint,
       output: output.slice(0, 8000),
     };
+  }
+
+  /**
+   * Start an adapter install without holding an HTTP request open for a large
+   * image pull. Active jobs are idempotent per agent/profile. DockerRuntime
+   * performs the lower-level deduplication when different jobs resolve to the
+   * same image.
+   */
+  startInstall(
+    agent: Agent,
+    profileId: string,
+    opts?: { version?: string; update?: boolean; rebuild?: boolean },
+  ): AcpAdapterInstallProgress {
+    const profile = acpAgentByProfile(profileId);
+    if (!profile) throw new Error(`Unknown ACP profile: ${profileId}`);
+
+    this.pruneInstallJobs();
+    const key = `${agent.id}:${profileId}`;
+    const active = this.installJobs.get(key);
+    if (active && (active.progress.state === "queued" || active.progress.state === "pulling")) {
+      return { ...active.progress };
+    }
+
+    const now = new Date().toISOString();
+    const registryId = acpRegistryIdForProfile(profileId);
+    const progress: AcpAdapterInstallProgress = {
+      profileId,
+      registryId: registryId ?? undefined,
+      image: profile.image,
+      state: "queued",
+      percent: null,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      message: "已加入镜像拉取队列",
+      startedAt: now,
+      updatedAt: now,
+    };
+    const tracker = new AcpImagePullProgressTracker();
+
+    const promise = (async () => {
+      // The UI passes the registry's latest version for updates. Preserve that
+      // override: dropping it would reinstall the version pinned in this build.
+      const selectedVersion = opts?.version;
+      const result = await this.install(agent, profileId, {
+        version: selectedVersion,
+        forcePull: opts?.rebuild,
+        onProgress: (line, event) => {
+          const current = this.installJobs.get(key);
+          if (!current || current.progress.startedAt !== progress.startedAt) return;
+          const next = tracker.update(line, event);
+          current.progress = {
+            ...current.progress,
+            ...next,
+            image: event?.zakura?.image ?? current.progress.image,
+            updatedAt: new Date().toISOString(),
+          };
+        },
+      });
+      const current = this.installJobs.get(key);
+      if (!current || current.progress.startedAt !== progress.startedAt) return;
+      if (!result.ok) throw new Error(result.output || "ACP adapter install failed");
+      const finishedAt = new Date().toISOString();
+      current.progress = {
+        ...current.progress,
+        ...tracker.complete("镜像拉取及安装完成"),
+        output: result.output,
+        updatedAt: finishedAt,
+        finishedAt,
+      };
+    })().catch((error: unknown) => {
+      const current = this.installJobs.get(key);
+      if (!current || current.progress.startedAt !== progress.startedAt) return;
+      const message = error instanceof Error ? error.message : String(error);
+      const finishedAt = new Date().toISOString();
+      current.progress = {
+        ...current.progress,
+        state: "failed",
+        message,
+        error: message,
+        updatedAt: finishedAt,
+        finishedAt,
+      };
+    });
+
+    this.installJobs.set(key, { progress, promise });
+    return { ...progress };
+  }
+
+  listInstalls(agentId: string): AcpAdapterInstallProgress[] {
+    this.pruneInstallJobs();
+    const prefix = `${agentId}:`;
+    return [...this.installJobs.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, job]) => ({ ...job.progress }));
+  }
+
+  private pruneInstallJobs(): void {
+    const cutoff = Date.now() - 30 * 60_000;
+    for (const [key, job] of this.installJobs) {
+      if (
+        job.progress.finishedAt &&
+        Date.parse(job.progress.finishedAt) < cutoff &&
+        job.progress.state !== "queued" &&
+        job.progress.state !== "pulling"
+      ) {
+        this.installJobs.delete(key);
+      }
+    }
   }
 
   /** Stop every live/warm adapter process for an agent, optionally one profile. */

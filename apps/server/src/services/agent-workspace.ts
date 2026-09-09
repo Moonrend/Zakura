@@ -35,7 +35,7 @@ import {
   type Agent,
   type RuntimeNode,
 } from "../db/schema.js";
-import type { DockerRuntime, TcpTunnel } from "../runtime/docker.js";
+import type { DockerPullEvent, DockerRuntime, TcpTunnel } from "../runtime/docker.js";
 import {
   beginAgentProgress,
   finishAgentProgress,
@@ -1669,7 +1669,12 @@ export class AgentWorkspaceService {
    * present. Remote runners pull on create, so there we only verify the tag is
    * resolvable rather than transferring bytes through the server.
    */
-  async ensureAcpAdapterImage(agent: Agent, image: string): Promise<boolean> {
+  async ensureAcpAdapterImage(
+    agent: Agent,
+    image: string,
+    onProgress?: (line: string, event?: DockerPullEvent) => void,
+    opts: { forcePull?: boolean } = {},
+  ): Promise<boolean> {
     if (this.isRemoteAgent(agent)) {
       // No image endpoint on the runner. The runner's ensureAcpAdapterContainer
       // pulls before create, so treat this as a no-op rather than lying about
@@ -1677,10 +1682,13 @@ export class AgentWorkspaceService {
       return false;
     }
     const had = await this.runtime.hasImage(image).catch(() => false);
-    await this.runtime.ensureImage(image, (line) => {
+    const report = (line: string, event?: DockerPullEvent) => {
       log.debug("acp.adapter.image.pull", { agent: agent.id, image, line });
-    });
-    return !had;
+      onProgress?.(line, event);
+    };
+    if (opts.forcePull) await this.runtime.pullImage(image, report);
+    else await this.runtime.ensureImage(image, report);
+    return !had || opts.forcePull === true;
   }
 
   /**
