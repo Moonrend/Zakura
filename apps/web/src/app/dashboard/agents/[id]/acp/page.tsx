@@ -117,10 +117,11 @@ export default function AgentAcpPage() {
       ]);
       configRef.current = res.config;
       setConfig(res.config);
-      setProfiles(res.profiles);
+      setProfiles(Array.isArray(res.profiles) ? res.profiles : []);
       setConfigError(res.configError ?? null);
-      setAdapterStatuses(adapters);
-      setInstallJobs(Object.fromEntries(installs.map((job) => [job.profileId, job])));
+      setAdapterStatuses(Array.isArray(adapters) ? adapters : []);
+      const safeInstalls = Array.isArray(installs) ? installs : [];
+      setInstallJobs(Object.fromEntries(safeInstalls.map((job) => [job.profileId, job])));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setLoadError(message);
@@ -142,8 +143,19 @@ export default function AgentAcpPage() {
     const poll = async () => {
       try {
         const installs = await fetchAcpAdapterInstalls(id);
-        if (!stopped) {
-          setInstallJobs(Object.fromEntries(installs.map((job) => [job.profileId, job])));
+        if (!stopped && Array.isArray(installs)) {
+          setInstallJobs((current) => {
+            const next = Object.fromEntries(installs.map((job) => [job.profileId, job]));
+            // Keep the immediate local feedback until the POST that creates the
+            // server-side job returns. Otherwise this poll can win the race and
+            // make a rebuild click look like it did nothing.
+            for (const [profileId, job] of Object.entries(current)) {
+              if (!next[profileId] && job.message.startsWith("正在提交")) {
+                next[profileId] = job;
+              }
+            }
+            return next;
+          });
         }
       } catch {
         // A transient poll failure must not turn a healthy background pull into
@@ -231,6 +243,20 @@ export default function AgentAcpPage() {
 
   async function handleInstall(profileId: string, isUpdate = false, isRebuild = false) {
     setInstallOutput(null);
+    const optimisticStartedAt = new Date().toISOString();
+    setInstallJobs((current) => ({
+      ...current,
+      [profileId]: {
+        profileId,
+        state: "queued",
+        percent: null,
+        downloadedBytes: 0,
+        totalBytes: 0,
+        message: isRebuild ? "正在提交重建任务…" : "正在提交安装任务…",
+        startedAt: optimisticStartedAt,
+        updatedAt: optimisticStartedAt,
+      },
+    }));
     try {
       const version = isUpdate
         ? (adapterStatuses.find((status) => status.profileId === profileId)?.latest ?? undefined)
@@ -245,6 +271,12 @@ export default function AgentAcpPage() {
       setInstallJobs((current) => ({ ...current, [job.profileId]: job }));
       toast.success(job.state === "queued" ? "已加入镜像拉取队列" : "正在拉取镜像");
     } catch (err) {
+      setInstallJobs((current) => {
+        if (current[profileId]?.startedAt !== optimisticStartedAt) return current;
+        const next = { ...current };
+        delete next[profileId];
+        return next;
+      });
       const msg = err instanceof Error ? err.message : String(err);
       setInstallOutput(msg);
       toast.error(msg);

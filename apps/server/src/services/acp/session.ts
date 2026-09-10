@@ -1147,6 +1147,11 @@ export class AcpSessionService {
       // credentials and generated files). Explicit prepare/update always
       // invalidates the adapter runtime so the next launch is a clean create.
       await this.invalidateAgentRuntimes(agent, profileId);
+      if (opts?.forcePull) {
+        // Rebuild also removes managed containers orphaned by a server restart;
+        // those have no in-memory AdapterProcess for invalidation to discover.
+        await this.deps.workspace.removeAcpAdapterContainers(agent, profileId);
+      }
       this.invalidateProvisionCache(agent.id, profileId);
       return {
         ok: true,

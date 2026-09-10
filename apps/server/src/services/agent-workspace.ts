@@ -1992,6 +1992,37 @@ export class AgentWorkspaceService {
     }
   }
 
+  /** Remove local ACP containers that are no longer represented in session memory. */
+  async removeAcpAdapterContainers(agent: Agent, adapterId: string): Promise<number> {
+    if (this.isRemoteAgent(agent)) {
+      // Remote adapter lifecycle is owned by the runner's exact-session RPC.
+      return 0;
+    }
+
+    const containers = await this.runtime.list({
+      tenantId: agent.tenantId,
+      purpose: "acp-adapter",
+    });
+    // Filter again locally so this destructive operation remains narrowly
+    // scoped even if another runtime implements list() filters differently.
+    const matching = containers.filter(
+      (container) =>
+        container.labels["zakura.acp_adapter"] === adapterId &&
+        container.labels["zakura.agent"] === agent.id,
+    );
+    for (const container of matching) {
+      await this.runtime.remove(container.id, true);
+    }
+    if (matching.length > 0) {
+      log.debug("acp.adapter.rebuild.cleanup", {
+        agent: agent.id,
+        adapterId,
+        count: matching.length,
+      });
+    }
+    return matching.length;
+  }
+
   /**
    * Open an interactive PTY *inside the adapter container* so a human can
    * complete a CLI login (`codex login`, `pi auth`, …).
