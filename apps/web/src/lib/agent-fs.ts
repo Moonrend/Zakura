@@ -307,7 +307,14 @@ export function isArchiveFile(name: string): boolean {
   return ARCHIVE_EXT.has(ext) || name.toLowerCase().endsWith(".tar.gz");
 }
 
-export type AgentProject = { name: string; path: string };
+export type AgentProject = {
+  slug: string;
+  name: string;
+  description: string;
+  instructions: string;
+  hasWorkspace: boolean;
+  path: string | null;
+};
 
 export async function listAgentProjects(agentId: string) {
   return api<{ projects: AgentProject[] }>(`/api/agents/${agentId}/projects`, {
@@ -317,7 +324,13 @@ export async function listAgentProjects(agentId: string) {
 
 export async function createAgentProject(
   agentId: string,
-  body: { name: string; gitUrl?: string },
+  body: {
+    name: string;
+    description?: string;
+    instructions?: string;
+    withWorkspace?: boolean;
+    gitUrl?: string;
+  },
 ) {
   return api<{ project: AgentProject; cloneError?: string }>(
     `/api/agents/${agentId}/projects`,
@@ -325,11 +338,25 @@ export async function createAgentProject(
   );
 }
 
-export async function renameAgentProject(agentId: string, slug: string, name: string) {
+export async function updateAgentProject(
+  agentId: string,
+  slug: string,
+  body: {
+    name?: string;
+    slug?: string;
+    description?: string;
+    instructions?: string;
+    withWorkspace?: boolean;
+  },
+) {
   return api<{ project: AgentProject }>(
     `/api/agents/${agentId}/projects/${encodeURIComponent(slug)}`,
-    { method: "PATCH", json: { name } },
+    { method: "PATCH", json: body },
   );
+}
+
+export async function renameAgentProject(agentId: string, slug: string, name: string) {
+  return updateAgentProject(agentId, slug, { slug: name, name });
 }
 
 export async function deleteAgentProject(agentId: string, slug: string) {

@@ -250,6 +250,10 @@ async function main() {
   ghostBootTimer.unref?.();
   const ghostReconcileTimer = setInterval(() => runGhostReconcile("periodic"), 5 * 60_000);
   ghostReconcileTimer.unref?.();
+  const identityCleanupTimer = setInterval(() => {
+    void import("./services/identity/cleanup.js").then((m) => m.purgeIdentityExpired(db)).catch(() => undefined);
+  }, 6 * 60 * 60_000);
+  identityCleanupTimer.unref?.();
   const browserService = new AgentBrowserService((agentId) =>
     agentService.workspace.resolveCdp(agentId),
   );

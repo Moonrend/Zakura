@@ -410,7 +410,10 @@ export function createOpenAiCompatibleAdapter(
 ): ModelProtocolAdapter {
   return {
     protocol: protocol as ModelUpstreamProtocol,
-    supportedCapabilities: ["chat", "embedding", "rerank", "image"],
+    supportedCapabilities:
+      protocol === "grok-build"
+        ? (["chat"] as const)
+        : (["chat", "embedding", "rerank", "image"] as const),
     ...handlers,
   };
 }

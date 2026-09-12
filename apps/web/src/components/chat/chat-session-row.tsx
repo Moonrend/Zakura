@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { SESSION_KIND_LABELS, type CloudSession } from "@/lib/cloud-agent";
 import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
+import { PresenceAvatars } from "./presence-avatars";
+import type { PresenceLocation } from "@zakura/shared";
 
 export interface ChatSessionRowProps {
   session: CloudSession;
@@ -31,7 +33,7 @@ export interface ChatSessionRowProps {
   /** 正在切换中的会话（乐观高亮 + spinner） */
   pendingSessionId: string | null;
   acpRuntimes: { id: string; label: string }[];
-  projects: { name: string }[];
+  projects: { slug: string; name: string }[];
   renamingId: string | null;
   renameValue: string;
   onRenameValueChange: (value: string) => void;
@@ -43,6 +45,10 @@ export interface ChatSessionRowProps {
   onMove: (sessionId: string, project: string | null) => void | Promise<void>;
   onArchive: (sessionId: string) => void | Promise<void>;
   onDelete: (sessionId: string) => void | Promise<void>;
+  peers?: PresenceLocation[];
+  onPickUser?: (userId: string) => void;
+  /** 侧栏当前所在项目；被钉住的会话可能属于别的项目 */
+  listProject?: string | null;
 }
 
 /** 侧边栏单条会话：内联重命名 + 操作菜单（Fork / 移动 / 归档 / 删除） */
@@ -64,6 +70,9 @@ export function ChatSessionRow({
   onMove,
   onArchive,
   onDelete,
+  peers = [],
+  onPickUser,
+  listProject = null,
 }: ChatSessionRowProps) {
   const isActive = s.id === sessionId || s.id === pendingSessionId;
   return (
@@ -73,8 +82,8 @@ export function ChatSessionRow({
         "group animate-rise relative flex items-center rounded-lg text-sm",
         "transition-colors duration-150 ease-fluid",
         isActive
-          ? "bg-muted text-foreground session-row-active"
-          : "text-foreground/75 hover:bg-muted/60 hover:text-foreground/90",
+          ? "text-foreground session-row-active"
+          : "text-foreground/70 hover:bg-muted/40 hover:text-foreground",
       )}
     >
       {isActive && (
@@ -90,10 +99,13 @@ export function ChatSessionRow({
           onChange={(e) => onRenameValueChange(e.target.value)}
           onBlur={() => void onCommitRename()}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void onCommitRename();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void onCommitRename();
+            }
             if (e.key === "Escape") onRenamingIdChange(null);
           }}
-          className="mx-1 my-0.5 h-6 px-1 text-sm"
+          className="mx-1 my-0.5 h-7 min-w-0 flex-1 px-2 text-sm"
         />
       ) : (
         <>
@@ -130,6 +142,11 @@ export function ChatSessionRow({
                 Gateway
               </span>
             ) : null}
+            {s.project && s.project !== listProject ? (
+              <span className="max-w-[5.5rem] shrink-0 truncate text-[10px] text-muted-foreground">
+                {s.project}
+              </span>
+            ) : null}
             {s.id === pendingSessionId ? (
               <Loader2
                 aria-label="加载中"
@@ -142,6 +159,11 @@ export function ChatSessionRow({
               />
             ) : null}
           </a>
+          <PresenceAvatars
+            peers={peers}
+            onPick={onPickUser}
+            className="pr-0.5"
+          />
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -163,8 +185,13 @@ export function ChatSessionRow({
               ) : null}
               <DropdownMenuItem
                 onClick={() => {
-                  onRenamingIdChange(s.id);
-                  onRenameValueChange(s.title);
+                  // 等菜单把焦点还回去再切到输入框，否则立刻 blur 把重命名提交掉
+                  const id = s.id;
+                  const title = s.title;
+                  window.setTimeout(() => {
+                    onRenamingIdChange(id);
+                    onRenameValueChange(title);
+                  }, 0);
                 }}
               >
                 <Pencil />
@@ -174,9 +201,9 @@ export function ChatSessionRow({
                 <DropdownMenuSubTrigger>移到项目</DropdownMenuSubTrigger>
                 <DropdownMenuSubContent className="min-w-32">
                   {projects.map((p) => (
-                    <DropdownMenuItem key={p.name} onClick={() => void onMove(s.id, p.name)}>
+                    <DropdownMenuItem key={p.slug} onClick={() => void onMove(s.id, p.slug)}>
                       {p.name}
-                      {s.project === p.name ? <Check className="h-3.5 w-3.5" /> : null}
+                      {s.project === p.slug ? <Check className="h-3.5 w-3.5" /> : null}
                     </DropdownMenuItem>
                   ))}
                   {s.project ? (

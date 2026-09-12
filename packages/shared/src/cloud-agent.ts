@@ -222,6 +222,9 @@ export type CloudAgentUserMessagePayload = {
    * 从上次中断的 Run 接着做。UI 不展示用户气泡；模型仍把它当作用户指令。
    */
   continue?: boolean;
+  /** 发送者；缺省（旧事件）不展示头像 */
+  userId?: string;
+  userName?: string;
 };
 
 /** 运行中收到用户消息时的默认策略 */
@@ -245,6 +248,8 @@ export type CloudAgentQueuedMessage = {
   /** 引导标记：取消当前 Run 后立即用这条开启新回合 */
   interrupt?: boolean;
   createdAt: string;
+  userId?: string;
+  userName?: string;
 };
 
 /** 队列快照：每次入队/编辑/移除/出队后全量广播（条目少，天然幂等） */

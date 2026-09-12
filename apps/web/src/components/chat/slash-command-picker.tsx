@@ -18,7 +18,7 @@ export function SlashCommandPicker({
 }) {
   if (items.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs text-muted-foreground shadow-sm">
+      <div className="rounded-lg px-3 py-2 text-xs text-muted-foreground">
         没有匹配的命令
       </div>
     );
@@ -28,7 +28,7 @@ export function SlashCommandPicker({
     <div
       role="listbox"
       aria-label="斜杠命令"
-      className="overflow-hidden rounded-lg border border-border bg-popover shadow-sm"
+      className="overflow-hidden rounded-lg border border-border/50 bg-background"
     >
       <div className="max-h-[min(16rem,40vh)] overflow-y-auto p-1">
         {items.map((item, index) => {

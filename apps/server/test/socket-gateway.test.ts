@@ -348,4 +348,25 @@ describe("socket gateway", () => {
     c.close();
     await h.close();
   });
+
+  it("连接后推送 presence 快照", async () => {
+    process.env.REDIS_URL = "off";
+    const fake = makeFakeStore();
+    const h = await startGateway(fake.store);
+    const c = track(connect(h.url, validToken()));
+    const state = await new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("未收到 presence:state")), 5000);
+      c.once("presence:state", (payload: unknown) => {
+        clearTimeout(timer);
+        resolve(payload);
+      });
+      c.once("connect_error", (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    assert.ok(Array.isArray(state));
+    c.close();
+    await h.close();
+  });
 });

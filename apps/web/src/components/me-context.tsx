@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect } from "react";
 import { setOtelIdentity } from "@/lib/otel";
 
 export type MeInfo = {
-  user?: { id: string };
+  user?: { id: string; name?: string | null; email?: string; avatarRev?: number };
   tenant: {
     id?: string;
     name: string;

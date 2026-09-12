@@ -34,6 +34,7 @@ import {
   syncProviderCatalog,
 } from "../services/bootstrap.js";
 import {
+  createUserSession,
   extractBearer,
   isSessionAdmin,
   loginUser,
@@ -43,6 +44,16 @@ import {
   switchTenantSession,
   verifySession,
 } from "../services/auth.js";
+import { assertSessionAlive, touchLastLogin } from "../services/identity/sessions.js";
+import { issueAuthToken } from "../services/identity/tokens.js";
+import { mfaRequired, mfaStatus } from "../services/identity/mfa.js";
+import { maybeAutoJoinTenant } from "../services/identity/domains.js";
+import { passwordLoginBlockedBySso } from "../services/identity/sso.js";
+import { loginThrottleClear, loginThrottleHit } from "../services/identity/throttle.js";
+import { clientIpFromHeaders } from "../services/identity/util.js";
+import { SecurityAuditService } from "../services/identity/audit.js";
+import { registerIdentityRoutes } from "./identity-routes.js";
+import { registerScimRoutes } from "./scim-routes.js";
 import {
   checkSessionSuspended,
   invalidateTenantSuspension,
@@ -80,6 +91,9 @@ import { PROVIDER_CATEGORY_META, hasImageProbeErrors } from "@zakura/shared";
 import { registerAgentFsRoutes } from "./agent-fs-routes.js";
 import { registerFileShareRoutes } from "./file-share-routes.js";
 import { registerModelRouterRoutes } from "./model-router-routes.js";
+import { ModelUpstreamAuthService } from "../services/model-upstream-auth/index.js";
+import { bindOauthSecret } from "../services/model-upstream-auth/tokens.js";
+import { setRouteHydrator } from "../model-router/oauth-hook.js";
 import { registerCloudAgentRoutes } from "./cloud-agent-routes.js";
 import { registerAcpRoutes } from "./acp-routes.js";
 import { AcpRegistryService } from "../services/acp/registry.js";
@@ -290,6 +304,7 @@ export async function createApiApp(deps: {
   const integrationCatalog = new IntegrationCatalogService(db, config);
   const connectorAuth = new ConnectorAuthService(db, config);
   const tenantService = new TenantService(db);
+  const securityAudit = new SecurityAuditService(db);
   const app = new Hono<{ Variables: AppVariables }>();
 
   // 全局错误兜底：未在路由内 try/catch 的异常统一转结构化 JSON。
@@ -333,6 +348,14 @@ export async function createApiApp(deps: {
       "/api/platform",
       "/api/setup",
       "/api/auth/login",
+      "/api/auth/forgot-password",
+      "/api/auth/reset-password",
+      "/api/auth/verify-email",
+      "/api/auth/mfa/complete",
+      "/api/auth/mfa/webauthn/options",
+      "/api/auth/sso/discover",
+      "/api/auth/sso/oidc/callback",
+      "/api/auth/sso/ticket",
       "/api/oauth/authorize-info",
       "/api/mcp/upstream-oauth/callback",
       "/api/runtime-nodes/register",
@@ -353,6 +376,10 @@ export async function createApiApp(deps: {
       (/^\/api\/invites\/[^/]+$/.test(path) ||
         /^\/api\/invites\/[^/]+\/accept$/.test(path));
     const isFileSharePublic = /^\/api\/files\/shared\/[^/]+$/.test(path);
+    const isSsoPublic =
+      /^\/api\/auth\/sso\/(oidc|saml)\/start$/.test(path) ||
+      /^\/api\/auth\/sso\/saml\/[^/]+\/(acs|metadata)$/.test(path);
+    const isScim = path === "/scim/v2" || path.startsWith("/scim/v2/");
 
     // probe/import require auth — intentional
     if (
@@ -360,6 +387,8 @@ export async function createApiApp(deps: {
       isOauthLoginPublic ||
       isInvitePublic ||
       isFileSharePublic ||
+      isSsoPublic ||
+      isScim ||
       isEmailInbound ||
       isRemoteWebhook
     ) {
@@ -409,15 +438,19 @@ export async function createApiApp(deps: {
     // session token or API key both accepted for API
     const session = verifySession(config.secret, token);
     if (session) {
+      const alive = await assertSessionAlive(db, session);
+      if (!alive) {
+        return c.json({ error: "Unauthorized" }, 401);
+      }
       // 会话是无状态签名的，封号后旧 token 仍能通过签名校验 → 每请求回查一次（带 TTL 缓存）
-      const suspended = await checkSessionSuspended(db, session);
+      const suspended = await checkSessionSuspended(db, alive);
       if (suspended) {
         return c.json(
           { error: suspensionMessage(suspended), code: "account_suspended" },
           403,
         );
       }
-      c.set("session", session);
+      c.set("session", alive);
       await withLogContext(idsFromSession(session), next);
       return;
     }
@@ -597,7 +630,7 @@ export async function createApiApp(deps: {
       await ensurePlatformMeta(db, { multiTenant: config.multiTenant });
       await syncProviderCatalog(db);
       const result = await runSetup(db, body);
-      const session = signSession(config.secret, {
+      const session = await createUserSession(db, config.secret, {
         userId: result.user.id,
         tenantId: result.tenant.id,
         email: result.user.email,
@@ -661,6 +694,10 @@ export async function createApiApp(deps: {
     if (!body.email || !body.password) {
       return c.json({ error: "email and password required" }, 400);
     }
+    const ip = clientIpFromHeaders((name) => c.req.header(name));
+    if (await passwordLoginBlockedBySso(db, body.email)) {
+      return c.json({ error: "该邮箱需使用公司 SSO 登录", code: "sso_required" }, 403);
+    }
     let result;
     try {
       result = await loginUser(db, body.email, body.password, {
@@ -672,13 +709,64 @@ export async function createApiApp(deps: {
       }
       throw err;
     }
-    if (!result) return c.json({ error: "Invalid credentials" }, 401);
-    const session = signSession(config.secret, {
+    if (!result) {
+      const throttle = await loginThrottleHit(body.email, ip);
+      if (throttle.blocked) {
+        return c.json({ error: "登录尝试过于频繁，请稍后再试" }, 429);
+      }
+      const failedUser = await db.query.users.findFirst({
+        where: eq(users.email, body.email.trim().toLowerCase()),
+      });
+      if (failedUser) {
+        const membership = await db.query.tenantMemberships.findFirst({
+          where: eq(tenantMemberships.userId, failedUser.id),
+        });
+        await securityAudit.append(membership?.tenantId, "auth.login_fail", {
+          actor: { type: "user", id: failedUser.id, ip },
+          targetType: "user",
+          targetId: failedUser.id,
+          detail: { method: "password" },
+        });
+      }
+      return c.json({ error: "Invalid credentials" }, 401);
+    }
+    await loginThrottleClear(body.email, ip);
+    await maybeAutoJoinTenant(db, {
       userId: result.user.id,
-      tenantId: result.tenant.id,
       email: result.user.email,
-      role: result.membership.role,
-      isPlatformAdmin: config.multiTenant && result.user.isPlatformAdmin,
+      emailVerified: Boolean(result.user.emailVerifiedAt),
+    });
+    const factors = await mfaStatus(db, result.user.id);
+    if (mfaRequired(factors)) {
+      const ticket = await issueAuthToken(db, {
+        kind: "mfa_login",
+        userId: result.user.id,
+        meta: { tenantId: result.tenant.id, role: result.membership.role },
+      });
+      return c.json({
+        mfaRequired: true,
+        mfaTicket: ticket,
+        methods: factors.methods,
+      });
+    }
+    await touchLastLogin(db, result.user.id);
+    const session = await createUserSession(
+      db,
+      config.secret,
+      {
+        userId: result.user.id,
+        tenantId: result.tenant.id,
+        email: result.user.email,
+        role: result.membership.role,
+        isPlatformAdmin: config.multiTenant && result.user.isPlatformAdmin,
+      },
+      { ip, userAgent: c.req.header("user-agent") },
+    );
+    await securityAudit.append(result.tenant.id, "auth.login", {
+      actor: { type: "user", id: result.user.id, ip },
+      targetType: "user",
+      targetId: result.user.id,
+      detail: { method: "password" },
     });
     return c.json({
       session,
@@ -720,6 +808,9 @@ export async function createApiApp(deps: {
             name: user.name,
             isPlatformAdmin: user.isPlatformAdmin,
             canUseLocalRunner: user.canUseLocalRunner || user.isPlatformAdmin || !config.multiTenant,
+            emailVerified: Boolean(user.emailVerifiedAt),
+            totpEnabled: Boolean(user.totpEnabledAt),
+            avatarRev: user.avatarUpdatedAt ? user.avatarUpdatedAt.getTime() : 0,
           }
         : { id: "api-key", email: session.email, isPlatformAdmin: false, canUseLocalRunner: false },
       tenant: {
@@ -2089,12 +2180,16 @@ export async function createApiApp(deps: {
   }
 
   if (modelRouter && modelUpstreams && modelRoutes) {
+    const modelUpstreamAuth = new ModelUpstreamAuthService(db, config.secret);
+    bindOauthSecret(config.secret);
+    setRouteHydrator((route, opts) => modelUpstreamAuth.hydrateRoute(route, opts));
     registerModelRouterRoutes(app, {
       upstreams: modelUpstreams,
       routes: modelRoutes,
       router: modelRouter,
       catalog: modelCatalog,
       upstreamModels,
+      auth: modelUpstreamAuth,
     });
   }
 
@@ -2175,6 +2270,7 @@ export async function createApiApp(deps: {
         remoteChannels: remoteRuntime.sessions,
         automation,
         acp: acpSessions,
+        db,
       });
       cloudAgentRuntime = cloudRuntime;
       automation.setRunner({
@@ -2491,6 +2587,8 @@ export async function createApiApp(deps: {
     }
   });
 
+  registerIdentityRoutes(app as never, { db, config, audit: securityAudit });
+  registerScimRoutes(app as never, { db, audit: securityAudit });
   registerTenantRoutes(app, {
     db,
     config,
@@ -2524,7 +2622,15 @@ export async function createApiApp(deps: {
           else invalidateTenantSuspension(id);
         },
         signSession,
-        sessionFromLogin,
+        sessionFromLogin: (_secret: string, result: Parameters<typeof sessionFromLogin>[2]) =>
+          sessionFromLogin(db, config.secret, result),
+        issueSession: (payload: {
+          userId: string;
+          tenantId: string;
+          email: string;
+          role: string;
+          isPlatformAdmin?: boolean;
+        }) => createUserSession(db, config.secret, payload),
         switchTenantSession,
         isSessionAdmin,
         ensurePlatformMeta,
@@ -2537,6 +2643,41 @@ export async function createApiApp(deps: {
           settings,
           newId,
         },
+        resolveRegistrationJoin: async (email: string) => {
+          const { findVerifiedDomainPolicy, registrationJoinDecision } = await import(
+            "../services/identity/domains.js"
+          );
+          const policy = await findVerifiedDomainPolicy(db, email);
+          const decision = registrationJoinDecision(policy);
+          if (decision === "sso_required") {
+            return { action: "sso_required" as const, message: "该邮箱需使用公司 SSO 登录" };
+          }
+          if (decision === "auto_join" && policy) {
+            return { action: "auto_join" as const, tenantId: policy.tenantId, role: "member" as const };
+          }
+          return { action: "create_tenant" as const };
+        },
+        sendInviteEmail: (input: {
+          to: string;
+          tenantName: string;
+          acceptUrl: string;
+          role: string;
+        }) => import("../services/identity/mail.js").then((m) => m.sendInviteEmail(input)),
+        requestEmailVerification: (user: { id: string; email: string }) =>
+          import("../services/identity/account.js").then((m) =>
+            m.requestEmailVerification(db, config.webPublicUrl, { ...user, emailVerifiedAt: null }),
+          ).then(() => undefined),
+        appendAudit: (
+          tenantId: string,
+          action: string,
+          opts?: { actorId?: string; targetType?: string; targetId?: string; detail?: Record<string, unknown> },
+        ) =>
+          securityAudit.append(tenantId, action, {
+            actor: { type: "user", id: opts?.actorId },
+            targetType: opts?.targetType,
+            targetId: opts?.targetId,
+            detail: opts?.detail,
+          }),
         onTenantCreated: async (tenantId: string) => {
           await runtimeNodes?.ensureLocalNode(tenantId).catch(() => undefined);
           await networkSettings?.ensureTenantDefaults(tenantId).catch(() => undefined);

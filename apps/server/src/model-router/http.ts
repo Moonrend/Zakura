@@ -23,9 +23,15 @@ export function buildHeaders(
   if (cfg.apiKey) {
     if (protocol === "azure-openai") {
       headers["api-key"] = cfg.apiKey;
-    } else if (protocol !== "gemini") {
+    } else if (protocol === "claude-code") {
+      headers.Authorization = `Bearer ${cfg.apiKey}`;
+    } else if (protocol !== "gemini" && protocol !== "gemini-cli") {
       headers.Authorization = `Bearer ${cfg.apiKey}`;
     }
+  }
+  if (protocol === "codex") {
+    headers.originator = headers.originator || "codex_cli_rs";
+    headers["OpenAI-Beta"] = headers["OpenAI-Beta"] || "responses=experimental";
   }
   return headers;
 }

@@ -25,6 +25,12 @@ import type { McpGateway } from "../services/mcp-gateway.js";
 import type { SkillsService } from "../services/skills/index.js";
 import { toComposerCapabilities } from "../services/cloud-agent/composer-capabilities.js";
 import { parseRouteOptions } from "../model-router/types.js";
+import { platformEvents } from "../services/platform-events.js";
+
+function senderOf(session: { userId: string; email: string }) {
+  if (!session.userId || session.userId === "api-key") return {};
+  return { userId: session.userId, userName: session.email };
+}
 
 function sessionDto(row: {
   id: string;
@@ -368,6 +374,10 @@ export function registerCloudAgentRoutes(
     await agentService.update(session.tenantId, agent.id, {
       config: configJson,
     });
+    platformEvents.publish(session.tenantId, {
+      type: "agent_config_changed",
+      agentId: agent.id,
+    });
     return c.json({ cloud: parseCloudAgentConfig(configJson) });
   });
 
@@ -469,8 +479,21 @@ export function registerCloudAgentRoutes(
     if (!row) return c.json({ error: "Not found" }, 404);
     const afterSeq = Number(c.req.query("afterSeq") ?? "0");
     const beforeSeq = Number(c.req.query("beforeSeq") ?? "");
+    const aroundSeq = Number(c.req.query("aroundSeq") ?? "");
     const safeAfter = Number.isFinite(afterSeq) ? afterSeq : 0;
     const safeBefore = Number.isFinite(beforeSeq) && beforeSeq > 0 ? beforeSeq : 0;
+    const safeAround = Number.isFinite(aroundSeq) && aroundSeq > 0 ? aroundSeq : 0;
+
+    if (safeAround > 0) {
+      const page = await store.listEventsAround(sid, { aroundSeq: safeAround });
+      return c.json({
+        session: sessionDto(row),
+        events: page.events,
+        hasMore: page.hasMore,
+        hasMoreAfter: page.hasMoreAfter,
+        queue: [],
+      });
+    }
 
     if (safeBefore > 0) {
       const page = await store.listEventsBefore(sid, { beforeSeq: safeBefore });
@@ -644,6 +667,7 @@ export function registerCloudAgentRoutes(
         content: body.content ?? "",
         ...(attachments.length ? { attachments } : {}),
         mode,
+        ...senderOf(session),
       });
       return c.json({ queued: true, ...result }, 202);
     };
@@ -662,6 +686,7 @@ export function registerCloudAgentRoutes(
           content: body.content ?? "",
           ...(attachments.length ? { attachments } : {}),
           ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
+          ...senderOf(session),
         });
         return c.json(result, 202);
       }
@@ -673,6 +698,7 @@ export function registerCloudAgentRoutes(
         ...("parentRunId" in body ? { parentRunId: body.parentRunId ?? null } : {}),
         ...(attachments.length ? { attachments } : {}),
         ...(options ? { options } : {}),
+        ...senderOf(session),
       });
       return c.json(result, 202);
     } catch (err) {

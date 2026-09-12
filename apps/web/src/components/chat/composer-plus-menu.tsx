@@ -100,6 +100,7 @@ export function ComposerPlusMenu({
   commands,
   onCommand,
   runtimeId,
+  nudgeToken,
 }: {
   canAttach: boolean;
   attachHint: string;
@@ -115,6 +116,7 @@ export function ComposerPlusMenu({
   onCommand?: (name: string) => void;
   /** 当前执行方：zakura 或 ACP profile id。技能/连接器是 Zakura 运行时的概念 */
   runtimeId?: string;
+  nudgeToken?: number;
 }) {
   const [open, setOpen] = useState(false);
   const disabledCount = disabledGroupIds.length;
@@ -123,7 +125,7 @@ export function ComposerPlusMenu({
   const showCommands = isAcpRuntime && (commands?.length ?? 0) > 0 && Boolean(onCommand);
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu key={nudgeToken ?? "plus"} open={open} onOpenChange={setOpen}>
       <Tooltip>
         <TooltipTrigger render={<span className="inline-flex" />}>
           <DropdownMenuTrigger
@@ -133,7 +135,10 @@ export function ComposerPlusMenu({
                 variant="ghost"
                 aria-label="添加"
                 aria-expanded={open}
-                className="relative size-8 rounded-full text-muted-foreground"
+                className={cn(
+                  "relative size-8 rounded-full text-muted-foreground",
+                  nudgeToken ? "animate-remote-nudge" : null,
+                )}
               />
             }
           >
@@ -288,7 +293,7 @@ export function SkillRequestChip({
   return (
     <span
       title={name}
-      className="animate-pop flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/40 py-1 pr-1 pl-2"
+      className="animate-pop flex items-center gap-1.5 rounded-lg py-1 pr-1 pl-2"
     >
       <Blocks className="size-3.5 text-muted-foreground" />
       <span className="max-w-36 truncate text-xs">{title || name}</span>

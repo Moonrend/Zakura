@@ -98,7 +98,7 @@ function SourceItem({
   return (
     <div
       style={{ animationDelay: `${Math.min(index, 8) * 30}ms` }}
-      className="animate-rise overflow-hidden rounded-lg border border-border/60 bg-muted/15 transition-colors duration-200 ease-fluid hover:border-border"
+      className="animate-rise overflow-hidden rounded-lg border border-border/40 transition-colors duration-200 ease-fluid hover:border-border"
     >
       <button
         type="button"

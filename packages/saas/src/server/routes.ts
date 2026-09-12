@@ -45,10 +45,15 @@ export function registerSaasRoutes(
     tenants: tenantService,
     signSession,
     sessionFromLogin,
+    issueSession,
     switchTenantSession,
     isSessionAdmin,
     ensurePlatformMeta,
     onTenantCreated,
+    resolveRegistrationJoin,
+    sendInviteEmail,
+    requestEmailVerification,
+    appendAudit,
     encryptJson,
     decryptJson,
     schema,
@@ -99,14 +104,22 @@ export function registerSaasRoutes(
       return c.json({ error: "email and password required" }, 400);
     }
     try {
+      const join = await resolveRegistrationJoin?.(body.email);
+      if (join?.action === "sso_required") {
+        throw new RegisterError(join.message, 403);
+      }
       const result = await registerSaasUser(db, schema, {
         email: body.email,
         password: body.password,
         name: body.name,
         tenantName: body.tenantName,
+        joinTenant: join?.action === "auto_join" ? { tenantId: join.tenantId, role: join.role } : undefined,
       });
-      await onTenantCreated?.(result.tenant.id).catch(() => undefined);
-      const token = sessionFromLogin(config.secret, result);
+      if (join?.action !== "auto_join") {
+        await onTenantCreated?.(result.tenant.id).catch(() => undefined);
+      }
+      await requestEmailVerification?.({ id: result.user.id, email: result.user.email }).catch(() => undefined);
+      const token = await sessionFromLogin(config.secret, result);
       return c.json(
         {
           session: token,
@@ -177,7 +190,7 @@ export function registerSaasRoutes(
         code: body.code ?? "",
         state: body.state ?? "",
       });
-      const token = sessionFromLogin(config.secret, result);
+      const token = await sessionFromLogin(config.secret, result);
       return c.json({
         session: token,
         user: {
@@ -217,13 +230,23 @@ export function registerSaasRoutes(
         ownerUserId: session.userId,
       });
       await onTenantCreated?.(tenant.id).catch(() => undefined);
-      const newSession = signSession(config.secret, {
-        userId: session.userId,
-        tenantId: tenant.id,
-        email: session.email,
-        role: membership.role,
-        isPlatformAdmin: session.isPlatformAdmin,
-      });
+      const newSession = await (issueSession
+        ? issueSession({
+            userId: session.userId,
+            tenantId: tenant.id,
+            email: session.email,
+            role: membership.role,
+            isPlatformAdmin: session.isPlatformAdmin,
+          })
+        : Promise.resolve(
+            signSession(config.secret, {
+              userId: session.userId,
+              tenantId: tenant.id,
+              email: session.email,
+              role: membership.role,
+              isPlatformAdmin: session.isPlatformAdmin,
+            }),
+          ));
       return c.json(
         {
           tenant: {
@@ -293,6 +316,12 @@ export function registerSaasRoutes(
         body.role,
         session.userId,
       );
+      await appendAudit?.(session.tenantId, "member.role_change", {
+        actorId: session.userId,
+        targetType: "membership",
+        targetId: c.req.param("id"),
+        detail: { role: body.role },
+      });
       return c.json(row);
     } catch (err) {
       const e = handleTenantErr(err);
@@ -303,13 +332,17 @@ export function registerSaasRoutes(
   app.delete("/api/tenant/members/:id", async (c) => {
     const session = c.get("session")!;
     try {
-      return c.json(
-        await tenantService.removeMember(
-          session.tenantId,
-          c.req.param("id"),
-          session.userId,
-        ),
+      const removed = await tenantService.removeMember(
+        session.tenantId,
+        c.req.param("id"),
+        session.userId,
       );
+      await appendAudit?.(session.tenantId, "member.remove", {
+        actorId: session.userId,
+        targetType: "membership",
+        targetId: c.req.param("id"),
+      });
+      return c.json(removed);
     } catch (err) {
       const e = handleTenantErr(err);
       return c.json(e.body, e.status);
@@ -355,6 +388,20 @@ export function registerSaasRoutes(
         invitedByUserId: session.userId,
       });
       const acceptUrl = `${config.webPublicUrl}/invite/${token}`;
+      const emailed = await sendInviteEmail?.({
+        to: invite.email,
+        tenantName: (await db.query.tenants.findFirst({
+          where: eq((schema.tenants as { id: unknown }).id as never, session.tenantId),
+        }))?.name ?? "团队",
+        acceptUrl,
+        role: invite.role,
+      }).catch(() => false);
+      await appendAudit?.(session.tenantId, "member.invite", {
+        actorId: session.userId,
+        targetType: "invite",
+        targetId: invite.id,
+        detail: { email: invite.email, role: invite.role },
+      });
       return c.json(
         {
           invite: {
@@ -365,6 +412,7 @@ export function registerSaasRoutes(
           },
           token,
           acceptUrl,
+          emailed: Boolean(emailed),
         },
         201,
       );
@@ -419,7 +467,12 @@ export function registerSaasRoutes(
         password: body.password,
         name: body.name,
       });
-      const token = sessionFromLogin(config.secret, result);
+      const token = await sessionFromLogin(config.secret, result);
+      await appendAudit?.(result.tenant.id, "member.invite_accept", {
+        actorId: result.user.id,
+        targetType: "user",
+        targetId: result.user.id,
+      });
       return c.json({
         session: token,
         user: {

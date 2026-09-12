@@ -67,7 +67,7 @@ export function applyReasoningOptions(
     r.budgetTokens ??
     (effort && effort !== "none" ? EFFORT_TO_BUDGET[effort] : undefined);
 
-  if (protocol === "anthropic") {
+  if (protocol === "anthropic" || protocol === "claude-code") {
     if (effort === "none") return;
     if (budgetTokens) {
       body.thinking = { type: "enabled", budget_tokens: budgetTokens };
@@ -75,7 +75,7 @@ export function applyReasoningOptions(
     return;
   }
 
-  if (protocol === "gemini") {
+  if (protocol === "gemini" || protocol === "gemini-cli") {
     if (effort === "none") {
       body.generationConfig = {
         ...((body.generationConfig && typeof body.generationConfig === "object"

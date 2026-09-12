@@ -21,8 +21,41 @@ const GEMINI_EMBED_CONCURRENCY = 8;
 
 function apiKey(route: ResolvedRoute): string {
   const key = route.upstream.config.apiKey;
-  if (!key) throw new Error("Gemini 上游需要配置 apiKey");
+  if (!key) throw new Error("Gemini 上游需要配置 apiKey 或完成订阅登录");
   return key;
+}
+
+function isGeminiCli(route: ResolvedRoute): boolean {
+  return route.upstream.protocol === "gemini-cli";
+}
+
+export function geminiChatUrl(route: ResolvedRoute, stream: boolean): string {
+  const base = route.upstream.config.baseUrl.replace(/\/$/, "");
+  if (isGeminiCli(route)) {
+    const verb = stream ? "streamGenerateContent" : "generateContent";
+    return `${base}/v1internal:${verb}`;
+  }
+  const suffix = stream ? "streamGenerateContent" : "generateContent";
+  return `${base}/models/${encodeURIComponent(route.model)}:${suffix}?key=${encodeURIComponent(apiKey(route))}`;
+}
+
+function geminiRequestHeaders(route: ResolvedRoute): Record<string, string> {
+  if (!isGeminiCli(route)) return { "Content-Type": "application/json" };
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey(route)}`,
+    ...(route.upstream.config.extraHeaders ?? {}),
+  };
+}
+
+export function wrapGeminiBody(route: ResolvedRoute, inner: Record<string, unknown>): Record<string, unknown> {
+  if (!isGeminiCli(route)) return inner;
+  const project = route.upstream.config.extraHeaders?.["x-goog-user-project"];
+  return {
+    model: route.model.startsWith("models/") ? route.model : `models/${route.model}`,
+    ...(project ? { project } : {}),
+    request: inner,
+  };
 }
 
 function timeout(route: ResolvedRoute): number {
@@ -161,8 +194,8 @@ async function chat(
   messages: ModelChatMessage[],
   options?: ModelChatInvokeOptions,
 ): Promise<ModelChatResult> {
-  const url = `${route.upstream.config.baseUrl}/models/${encodeURIComponent(route.model)}:generateContent?key=${encodeURIComponent(apiKey(route))}`;
-  const body = buildChatBody(route, messages, options);
+  const url = geminiChatUrl(route, false);
+  const body = wrapGeminiBody(route, buildChatBody(route, messages, options));
 
   const res = await httpJson<{
     candidates?: Array<{
@@ -182,13 +215,17 @@ async function chat(
     error?: { message?: string };
   }>(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: geminiRequestHeaders(route),
     body: JSON.stringify(body),
     timeoutMs: timeout(route),
   });
   if (!res.ok) throw apiError("gemini chat", res.status, res.data, res.text);
 
-  const candidate = res.data?.candidates?.[0];
+  const payload =
+    res.data?.candidates
+      ? res.data
+      : ((res.data as { response?: typeof res.data } | null)?.response ?? res.data);
+  const candidate = payload?.candidates?.[0];
   const parts = candidate?.content?.parts ?? [];
   const textParts: string[] = [];
   const toolCalls: NonNullable<ModelChatResult["toolCalls"]> = [];
@@ -330,15 +367,15 @@ async function chatStream(
   options: ModelChatInvokeOptions | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
-  const url = `${route.upstream.config.baseUrl}/models/${encodeURIComponent(route.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey(route))}`;
-  const body = buildChatBody(route, messages, options);
+  const url = geminiChatUrl(route, true);
+  const body = wrapGeminiBody(route, buildChatBody(route, messages, options));
   const state = createGeminiStreamState();
   await httpSse(
     "gemini chat(stream)",
     url,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: { ...geminiRequestHeaders(route), Accept: "text/event-stream" },
       body: JSON.stringify(body),
       timeoutMs: timeout(route),
       ...(callbacks.signal ? { signal: callbacks.signal } : {}),
@@ -430,4 +467,11 @@ export const geminiAdapter: ModelProtocolAdapter = {
   chatStream,
   embed,
   generateImage,
+};
+
+export const geminiCliAdapter: ModelProtocolAdapter = {
+  protocol: "gemini-cli",
+  supportedCapabilities: ["chat"],
+  chat,
+  chatStream,
 };

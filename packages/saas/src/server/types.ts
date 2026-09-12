@@ -123,6 +123,13 @@ export type SaasHostDeps = {
       isPlatformAdmin?: boolean;
     },
   ) => string;
+  issueSession?: (payload: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    role: string;
+    isPlatformAdmin?: boolean;
+  }) => Promise<string>;
   sessionFromLogin: (
     secret: string,
     result: {
@@ -130,7 +137,7 @@ export type SaasHostDeps = {
       tenant: { id: string };
       membership: { role: string };
     },
-  ) => string;
+  ) => string | Promise<string>;
   switchTenantSession: (
     db: unknown,
     secret: string,
@@ -144,6 +151,23 @@ export type SaasHostDeps = {
   ) => Promise<{ setupCompleted: boolean; mode: string; version: string }>;
   /** Optional: seed local runner / network defaults for newly created tenants */
   onTenantCreated?: (tenantId: string) => Promise<void>;
+  resolveRegistrationJoin?: (email: string) => Promise<
+    | { action: "create_tenant" }
+    | { action: "auto_join"; tenantId: string; role: "member" | "admin" }
+    | { action: "sso_required"; message: string }
+  >;
+  sendInviteEmail?: (input: {
+    to: string;
+    tenantName: string;
+    acceptUrl: string;
+    role: string;
+  }) => Promise<boolean>;
+  requestEmailVerification?: (user: { id: string; email: string }) => Promise<void>;
+  appendAudit?: (
+    tenantId: string,
+    action: string,
+    opts?: { actorId?: string; targetType?: string; targetId?: string; detail?: Record<string, unknown> },
+  ) => Promise<void>;
   /** 封号/解封后清除宿主侧账号状态缓存 */
   invalidateSuspension?: (kind: "user" | "tenant", id: string) => void;
   /**

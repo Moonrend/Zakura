@@ -8,11 +8,20 @@ import {
   normalizeHooksByEvent,
   PROJECT_INSTRUCTION_FILES,
   projectRelativePath,
-  projectSlugsFromList,
   projectWorkspacePath,
 } from "@zakura/shared";
 import type { Db } from "../db/client.js";
 import { agentSchedules, cloudAgentSessions } from "../db/schema.js";
+import {
+  deleteAgentProjectRow,
+  getAgentProject,
+  listAgentProjectRows,
+  listWorkspaceSlugs,
+  renameAgentProjectRow,
+  syncProjectsFromWorkspace,
+  toProjectDto,
+  upsertAgentProject,
+} from "../services/agent-projects.js";
 import type { AgentService } from "../services/agents.js";
 import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provider.js";
 import { platformEvents } from "../services/platform-events.js";
@@ -363,36 +372,57 @@ export function registerAgentFsRoutes(
 
   app.get("/api/agents/:id/projects", async (c) => {
     const session = c.get("session")!;
-    const resolved = await resolveAgentFs(
-      agentService,
-      fsProvider,
-      session.tenantId,
-      c.req.param("id"),
-    );
-    if (!resolved) return c.json({ error: "Not found" }, 404);
-    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
-    try {
-      const projects = await listWorkspaceProjects(resolved.fs);
-      return c.json({ projects });
-    } catch (err) {
-      const e = fsError(err);
-      return c.json(e.body, e.status);
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    let diskSlugs: string[] | null = null;
+    if (agent.enableFs) {
+      const resolved = await resolveAgentFs(
+        agentService,
+        fsProvider,
+        session.tenantId,
+        agent.id,
+      );
+      if (resolved && !resolved.denied) {
+        try {
+          diskSlugs = await listWorkspaceSlugs(resolved.fs);
+        } catch {
+          diskSlugs = null;
+        }
+      }
     }
+    if (diskSlugs) {
+      await syncProjectsFromWorkspace(db, agent.tenantId, agent.id, diskSlugs);
+    }
+    const rows = await listAgentProjectRows(db, agent.id);
+    return c.json({
+      projects: rows
+        .map(toProjectDto)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    });
   });
 
   app.post("/api/agents/:id/projects", async (c) => {
     const session = c.get("session")!;
-    const resolved = await resolveAgentFs(
-      agentService,
-      fsProvider,
-      session.tenantId,
-      c.req.param("id"),
-    );
-    if (!resolved) return c.json({ error: "Not found" }, 404);
-    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
     const body = await c.req
-      .json<{ name?: string; gitUrl?: string }>()
-      .catch(() => ({} as { name?: string; gitUrl?: string }));
+      .json<{
+        name?: string;
+        description?: string;
+        instructions?: string;
+        withWorkspace?: boolean;
+        gitUrl?: string;
+      }>()
+      .catch(
+        () =>
+          ({}) as {
+            name?: string;
+            description?: string;
+            instructions?: string;
+            withWorkspace?: boolean;
+            gitUrl?: string;
+          },
+      );
     const name = (body.name ?? "").trim();
     if (!isValidProjectSlug(name)) {
       return c.json({ error: "无效的项目名（字母数字开头，可含 . _ -）" }, 400);
@@ -401,73 +431,117 @@ export function registerAgentFsRoutes(
     if (gitUrl && !isSafeGitRemoteUrl(gitUrl)) {
       return c.json({ error: "gitUrl 仅支持 https:// 或 git@host:path" }, 400);
     }
-    const rel = projectRelativePath(name);
-    try {
-      if (await resolved.fs.exists(rel)) {
-        return c.json({ error: "项目已存在" }, 409);
-      }
-      if (!(await resolved.fs.exists(AGENT_PROJECTS_DIR))) {
-        await resolved.fs.mkdir(AGENT_PROJECTS_DIR);
-      }
-      await resolved.fs.mkdir(rel);
-      platformEvents.publish(resolved.agent.tenantId, {
-        type: "agent_fs_changed",
-        agentId: resolved.agent.id,
-        path: `/${rel}`,
-      });
-      let cloneError: string | undefined;
-      if (gitUrl) {
-        try {
-          const dest = projectWorkspacePath(name);
-          const started = await agentService.workspace.startShellJob(
-            resolved.agent,
-            ["git", "clone", "--depth", "1", "--", gitUrl, dest],
-            { timeoutMs: 120_000 },
-          );
-          const snap = await agentService.workspace.waitShellJob(
-            resolved.agent,
-            started.jobId,
-            120_000,
-          );
-          if (snap.exitCode !== 0) {
-            cloneError =
-              (snap.stderr || snap.stdout || `git clone exited ${snap.exitCode}`).slice(0, 800);
-          }
-        } catch (err) {
-          cloneError = err instanceof Error ? err.message : String(err);
-        }
-      }
-      return c.json(
-        {
-          project: { name, path: projectWorkspacePath(name) },
-          ...(cloneError ? { cloneError } : {}),
-        },
-        201,
-      );
-    } catch (err) {
-      const e = fsError(err);
-      return c.json(e.body, e.status);
+    const wantWorkspace = Boolean(body.withWorkspace) || Boolean(gitUrl);
+    if (await getAgentProject(db, agent.id, name)) {
+      return c.json({ error: "项目已存在" }, 409);
     }
+    let cloneError: string | undefined;
+    if (wantWorkspace) {
+      const resolved = await resolveAgentFs(
+        agentService,
+        fsProvider,
+        session.tenantId,
+        agent.id,
+      );
+      if (!resolved) return c.json({ error: "Not found" }, 404);
+      if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+      const rel = projectRelativePath(name);
+      try {
+        if (await resolved.fs.exists(rel)) {
+          return c.json({ error: "项目目录已存在" }, 409);
+        }
+        if (!(await resolved.fs.exists(AGENT_PROJECTS_DIR))) {
+          await resolved.fs.mkdir(AGENT_PROJECTS_DIR);
+        }
+        await resolved.fs.mkdir(rel);
+        platformEvents.publish(resolved.agent.tenantId, {
+          type: "agent_fs_changed",
+          agentId: resolved.agent.id,
+          path: `/${rel}`,
+        });
+        if (gitUrl) {
+          try {
+            const dest = projectWorkspacePath(name);
+            const started = await agentService.workspace.startShellJob(
+              resolved.agent,
+              ["git", "clone", "--depth", "1", "--", gitUrl, dest],
+              { timeoutMs: 120_000 },
+            );
+            const snap = await agentService.workspace.waitShellJob(
+              resolved.agent,
+              started.jobId,
+              120_000,
+            );
+            if (snap.exitCode !== 0) {
+              cloneError =
+                (snap.stderr || snap.stdout || `git clone exited ${snap.exitCode}`).slice(0, 800);
+            }
+          } catch (err) {
+            cloneError = err instanceof Error ? err.message : String(err);
+          }
+        }
+      } catch (err) {
+        const e = fsError(err);
+        return c.json(e.body, e.status);
+      }
+    }
+    const row = await upsertAgentProject(db, {
+      tenantId: agent.tenantId,
+      agentId: agent.id,
+      slug: name,
+      name,
+      description: (body.description ?? "").trim(),
+      instructions: body.instructions ?? "",
+      hasWorkspace: wantWorkspace,
+    });
+    return c.json({
+      project: toProjectDto(row),
+      ...(cloneError ? { cloneError } : {}),
+    });
   });
 
   app.patch("/api/agents/:id/projects/:slug", async (c) => {
     const session = c.get("session")!;
     const from = c.req.param("slug");
     if (!isValidProjectSlug(from)) return c.json({ error: "无效的项目名" }, 400);
-    const resolved = await resolveAgentFs(
-      agentService,
-      fsProvider,
-      session.tenantId,
-      c.req.param("id"),
-    );
-    if (!resolved) return c.json({ error: "Not found" }, 404);
-    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
-    const body = await c.req.json<{ name?: string }>().catch(() => ({} as { name?: string }));
-    const to = (body.name ?? "").trim();
-    try {
-      const project = await renameProject(resolved.fs, from, to);
-      if (from !== to) {
-        await rebindProjectRefs(db, resolved.agent.tenantId, resolved.agent.id, from, to);
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    const existing = await getAgentProject(db, agent.id, from);
+    if (!existing) return c.json({ error: "项目不存在" }, 404);
+    const body = await c.req
+      .json<{
+        name?: string;
+        slug?: string;
+        description?: string;
+        instructions?: string;
+        withWorkspace?: boolean;
+      }>()
+      .catch(
+        () =>
+          ({}) as {
+            name?: string;
+            slug?: string;
+            description?: string;
+            instructions?: string;
+            withWorkspace?: boolean;
+          },
+      );
+    const nextSlug = (typeof body.slug === "string" ? body.slug : from).trim();
+    if (!isValidProjectSlug(nextSlug)) return c.json({ error: "无效的项目名" }, 400);
+    const displayName =
+      (typeof body.name === "string" ? body.name : existing.name).trim() || nextSlug;
+
+    if (existing.hasWorkspace && nextSlug !== from) {
+      const resolved = await resolveAgentFs(
+        agentService,
+        fsProvider,
+        session.tenantId,
+        agent.id,
+      );
+      if (!resolved) return c.json({ error: "Not found" }, 404);
+      if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+      try {
+        await renameProject(resolved.fs, from, nextSlug);
         platformEvents.publish(resolved.agent.tenantId, {
           type: "agent_fs_changed",
           agentId: resolved.agent.id,
@@ -476,45 +550,99 @@ export function registerAgentFsRoutes(
         platformEvents.publish(resolved.agent.tenantId, {
           type: "agent_fs_changed",
           agentId: resolved.agent.id,
-          path: `/${projectRelativePath(to)}`,
+          path: `/${projectRelativePath(nextSlug)}`,
         });
+      } catch (err) {
+        if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
+        const e = fsError(err);
+        return c.json(e.body, e.status);
       }
-      return c.json({ project });
-    } catch (err) {
-      if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
-      const e = fsError(err);
-      return c.json(e.body, e.status);
     }
+
+    if (body.withWorkspace && !existing.hasWorkspace) {
+      const resolved = await resolveAgentFs(
+        agentService,
+        fsProvider,
+        session.tenantId,
+        agent.id,
+      );
+      if (!resolved) return c.json({ error: "Not found" }, 404);
+      if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
+      const slugForDir = nextSlug;
+      const rel = projectRelativePath(slugForDir);
+      try {
+        if (!(await resolved.fs.exists(AGENT_PROJECTS_DIR))) {
+          await resolved.fs.mkdir(AGENT_PROJECTS_DIR);
+        }
+        if (!(await resolved.fs.exists(rel))) {
+          await resolved.fs.mkdir(rel);
+          platformEvents.publish(resolved.agent.tenantId, {
+            type: "agent_fs_changed",
+            agentId: resolved.agent.id,
+            path: `/${rel}`,
+          });
+        }
+      } catch (err) {
+        const e = fsError(err);
+        return c.json(e.body, e.status);
+      }
+    }
+
+    let row = existing;
+    if (nextSlug !== from) {
+      const renamed = await renameAgentProjectRow(db, agent.id, from, nextSlug);
+      if (!renamed) return c.json({ error: "无法重命名项目" }, 409);
+      await rebindProjectRefs(db, agent.tenantId, agent.id, from, nextSlug);
+      row = renamed;
+    }
+    row = await upsertAgentProject(db, {
+      tenantId: agent.tenantId,
+      agentId: agent.id,
+      slug: nextSlug,
+      name: displayName,
+      description: body.description ?? row.description,
+      instructions: body.instructions ?? row.instructions,
+      hasWorkspace: body.withWorkspace ? true : row.hasWorkspace,
+    });
+    return c.json({ project: toProjectDto(row) });
   });
 
   app.delete("/api/agents/:id/projects/:slug", async (c) => {
     const session = c.get("session")!;
     const slug = c.req.param("slug");
     if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
-    const resolved = await resolveAgentFs(
-      agentService,
-      fsProvider,
-      session.tenantId,
-      c.req.param("id"),
-    );
-    if (!resolved) return c.json({ error: "Not found" }, 404);
-    if (resolved.denied) return c.json({ error: "Filesystem not enabled for this agent" }, 403);
-    try {
-      const deleted = await deleteProject(resolved.fs, slug);
-      await rebindProjectRefs(db, resolved.agent.tenantId, resolved.agent.id, slug, null);
-      if (deleted) {
-        platformEvents.publish(resolved.agent.tenantId, {
-          type: "agent_fs_changed",
-          agentId: resolved.agent.id,
-          path: `/${projectRelativePath(slug)}`,
-        });
+    const agent = await agentService.get(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Not found" }, 404);
+    const existing = await getAgentProject(db, agent.id, slug);
+    if (!existing) return c.json({ error: "项目不存在" }, 404);
+    let deletedDir = false;
+    if (existing.hasWorkspace) {
+      const resolved = await resolveAgentFs(
+        agentService,
+        fsProvider,
+        session.tenantId,
+        agent.id,
+      );
+      if (resolved && !resolved.denied) {
+        try {
+          deletedDir = await deleteProject(resolved.fs, slug);
+          if (deletedDir) {
+            platformEvents.publish(resolved.agent.tenantId, {
+              type: "agent_fs_changed",
+              agentId: resolved.agent.id,
+              path: `/${projectRelativePath(slug)}`,
+            });
+          }
+        } catch (err) {
+          if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
+          const e = fsError(err);
+          return c.json(e.body, e.status);
+        }
       }
-      return c.json({ ok: true, deleted });
-    } catch (err) {
-      if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
-      const e = fsError(err);
-      return c.json(e.body, e.status);
     }
+    await deleteAgentProjectRow(db, agent.id, slug);
+    await rebindProjectRefs(db, agent.tenantId, agent.id, slug, null);
+    return c.json({ ok: true, deleted: true, deletedDir });
   });
 
   app.get("/api/agents/:id/projects/:slug/config", async (c) => {
@@ -728,20 +856,6 @@ export function registerAgentFsRoutes(
       return c.json(e.body, e.status);
     }
   });
-}
-
-async function listWorkspaceProjects(
-  fs: WorkspaceFs,
-): Promise<Array<{ name: string; path: string }>> {
-  if (!(await fs.exists(AGENT_PROJECTS_DIR))) {
-    await fs.mkdir(AGENT_PROJECTS_DIR);
-    return [];
-  }
-  const listed = await fs.list(AGENT_PROJECTS_DIR);
-  return projectSlugsFromList(listed.entries).map((name) => ({
-    name,
-    path: projectWorkspacePath(name),
-  }));
 }
 
 /** 目录改名/删除后，会话与定时任务上的 slug 跟着改（含子代理）。 */

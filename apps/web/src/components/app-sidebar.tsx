@@ -27,6 +27,7 @@ import {
   Shield,
   SlidersHorizontal,
   Users,
+  UserRound,
   Wrench,
   HardDrive,
   Building2,
@@ -73,6 +74,8 @@ import { cn } from "@/lib/utils";
 import { ImageUpdateIndicator } from "@/components/image-update-status";
 import { BrandMark } from "@/components/brand-mark";
 import { ProgressLinear } from "@/components/ui/progress-linear";
+import { useMeOptional } from "@/components/me-context";
+import { UserAvatar } from "@/components/user-avatar";
 
 type IconComp = React.ComponentType<{ className?: string }>;
 
@@ -360,15 +363,35 @@ const ExpandableNavItem = memo(function ExpandableNavItem({
 
 function SidebarUserFooter() {
   const router = useRouter();
+  const me = useMeOptional();
+  const user = me?.user;
+  const label = user?.name?.trim() || user?.email || "账户";
 
   return (
     <SidebarFooter className="border-t border-sidebar-border">
       <div className="flex items-center gap-1 group-data-[collapsible=icon]:flex-col">
+        {user?.id ? (
+          <SidebarMenuButton
+            tooltip={label}
+            className="min-w-0 flex-1 group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
+            render={<Link href="/dashboard/settings/account" />}
+          >
+            <UserAvatar
+              userId={user.id}
+              name={user.name}
+              email={user.email}
+              avatarRev={user.avatarRev}
+              size="sm"
+              className="size-5"
+            />
+            <span className="min-w-0 truncate group-data-[collapsible=icon]:hidden">{label}</span>
+          </SidebarMenuButton>
+        ) : null}
         <ThemeToggle />
         <Button
           variant="ghost"
           size="sm"
-          className="press flex-1 justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
+          className="press justify-start group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:px-0"
           onClick={() => {
             setSession(null);
             router.replace("/login");
@@ -834,9 +857,24 @@ function PlatformSidebar({
         isActive: (path) => path.startsWith("/dashboard/settings/"),
         children: [
           {
+            href: "/dashboard/settings/account",
+            label: "账户",
+            icon: UserRound,
+          },
+          {
             href: "/dashboard/settings/team",
             label: "团队",
             icon: Building2,
+          },
+          {
+            href: "/dashboard/settings/identity",
+            label: "身份",
+            icon: ShieldCheck,
+          },
+          {
+            href: "/dashboard/settings/audit",
+            label: "审计",
+            icon: Shield,
           },
           ...(multiTenant
             ? [

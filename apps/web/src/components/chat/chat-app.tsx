@@ -7,25 +7,21 @@ import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
 import { toast } from "sonner";
 import {
   ArrowDown,
+  ArrowLeft,
   Bot,
   Check,
   ChevronsUpDown,
-  ChevronDown,
-  ChevronRight,
-  ExternalLink,
+  AlarmClock,
   FileClock,
+  FolderKanban,
   FolderOpen,
-  FolderPlus,
   LayoutDashboard,
   ListFilter,
-  MoreHorizontal,
   PanelLeft,
-  Pencil,
-  Plus,
+  Search,
   Settings2,
   SquarePen,
   Square,
-  Trash2,
   Loader2,
 } from "lucide-react";
 import type {
@@ -45,15 +41,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { notifyAcpStartFailed } from "@/components/workspace-image-upgrade-dialog";
-import { Input } from "@/components/ui/input";
-import { SearchField } from "@/components/ui/search-field";
 import { PageLoading } from "@/components/ui/progress-linear";
-import { Label } from "@/components/ui/label";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -97,7 +89,6 @@ import {
   regenerateCloudRun,
   removeQueuedMessage,
   saveCloudConfig,
-  searchCloudSessions,
   sendCloudMessage,
   subscribeCloudEvents,
   updateCloudSession,
@@ -110,16 +101,16 @@ import {
   type CloudSession,
   type SessionKindsFilter,
 } from "@/lib/cloud-agent";
-import { formatSize, fsUploadWithProgress, listAgentProjects, createAgentProject, renameAgentProject, deleteAgentProject, type AgentProject } from "@/lib/agent-fs";
+import { formatSize, fsUploadWithProgress, listAgentProjects, createAgentProject, deleteAgentProject, type AgentProject } from "@/lib/agent-fs";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import { useStickToBottom } from "@/hooks/use-stick-to-bottom";
-import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { ChatMessages } from "./chat-messages";
 import { MessageNavigator } from "./message-navigator";
 import {
   Composer,
   type ComposerModelItem,
   type ComposerReasoningValue,
+  type ComposerRemoteFlash,
   type PendingUpload,
   reasoningItemsFromLevels,
 } from "./composer";
@@ -128,7 +119,22 @@ import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
 import { AutomationPanel } from "./automation-panel";
 import { RunLogDrawer } from "./run-log-drawer";
-import { ProjectConfigPanel } from "./project-config-panel";
+import { ProjectListPane, ProjectSettingsPane, NewProjectFields } from "./project-pane";
+import { SessionSearchDialog } from "./session-search-dialog";
+import { PresenceAvatars } from "./presence-avatars";
+import { ChatProjectRow } from "./chat-project-row";
+import { FollowChip, PresencePointers } from "./presence-cursors";
+import { UserAvatar } from "@/components/user-avatar";
+import { useTenantPresence } from "@/lib/sync/presence";
+import { useSessionDoc } from "@/lib/sync/session-doc";
+import {
+  activeSessionIds,
+  othersOnProject,
+  othersOnSession,
+  normalizePresencePane,
+  type PresenceLocation,
+  type PresencePane,
+} from "@zakura/shared";
 
 import {
   AGENT_KEY,
@@ -138,25 +144,75 @@ import {
   syncChatUrl,
   KIND_FILTER_OPTIONS,
   groupSessions,
+  pinViewingSession,
   latestCompaction,
   latestMeasuredPromptTokens,
   buildContextWindowInfo,
 } from "./chat-helpers";
 
+function sameArr(a: readonly string[], b: readonly string[]) {
+  if (a.length !== b.length) return false;
+  const left = new Set(a);
+  return b.every((x) => left.has(x));
+}
+
+function parsePrefList(raw: string | undefined): string[] | undefined {
+  if (raw == null) return undefined;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (!Array.isArray(v)) return undefined;
+    return v.filter((x): x is string => typeof x === "string");
+  } catch {
+    return undefined;
+  }
+}
+
 export function ChatApp() {
   const { confirm } = useConfirmDialog();
   const router = useRouter();
   const [authed, setAuthed] = useState(false);
+  const [meUser, setMeUser] = useState<{
+    id: string;
+    name: string;
+    email: string;
+    avatarRev?: number;
+  } | null>(null);
+  const [pointerHost, setPointerHost] = useState<HTMLDivElement | null>(null);
+  const [followUserId, setFollowUserId] = useState<string | null>(null);
+  const [remoteFlash, setRemoteFlash] = useState<ComposerRemoteFlash>({});
+  const bumpFlash = useCallback((keys: Array<keyof ComposerRemoteFlash>) => {
+    if (keys.length === 0) return;
+    setRemoteFlash((prev) => {
+      const next = { ...prev };
+      for (const k of keys) next[k] = (prev[k] ?? 0) + 1;
+      return next;
+    });
+  }, []);
+  const liveRef = useRef({
+    model: "",
+    modelRouteId: null as string | null,
+    reasoning: "default" as ComposerReasoningValue,
+    runtimeId: ZAKURA_RUNTIME_ID,
+    project: null as string | null,
+    skills: [] as string[],
+    groups: [] as string[],
+    acpMode: undefined as string | undefined,
+    acpModel: undefined as string | undefined,
+    acpReasoning: undefined as string | undefined,
+  });
+  const prefsSeededKeyRef = useRef("");
+  const lastFollowKeyRef = useRef("");
+  const applyRemotePrefsRef = useRef<(prefs: Record<string, string>) => void>(() => {});
   const [agents, setAgents] = useState<AgentListItem[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CloudSession[]>([]);
   const [projects, setProjects] = useState<AgentProject[]>([]);
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectGit, setNewProjectGit] = useState("");
+  const [newProjectWithWorkspace, setNewProjectWithWorkspace] = useState(false);
   const [newProjectBusy, setNewProjectBusy] = useState(false);
-  const [configProject, setConfigProject] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   /** 会话类型过滤：chat=日常对话；subagent/delegate/system=系统产生的对话记录 */
   const [kindFilter, setKindFilter] = useState<CloudAgentSessionKind | "all">("chat");
@@ -182,8 +238,9 @@ export function ChatApp() {
   const [sending, setSending] = useState(false);
   const [agentReady, setAgentReady] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  /** 侧栏：对话列表 | 定时任务 */
-  const [sidebarMode, setSidebarMode] = useState<"chats" | "tasks">("chats");
+  const [mainPane, setMainPane] = useState<"chat" | "files" | "tasks" | "projects" | "project-settings">(
+    "chat",
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
@@ -209,18 +266,19 @@ export function ChatApp() {
   const [hasChatRoute, setHasChatRoute] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [renamingProject, setRenamingProject] = useState<string | null>(null);
-  const [renameProjectValue, setRenameProjectValue] = useState("");
-  const [searchQ, setSearchQ] = useState("");
-  const [searchHits, setSearchHits] = useState<CloudSearchHit[] | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [activeProject, setActiveProject] = useState<string | null>(null);
+  const [settingsProject, setSettingsProject] = useState<string | null>(null);
   const [variantByMessage, setVariantByMessage] = useState<Record<string, string>>({});
   const [branchByParent, setBranchByParent] = useState<Record<string, string>>({});
-  const [filePanelOpen, setFilePanelOpen] = useState(false);
   const [fileRequest, setFileRequest] = useState<{
     path: string;
     nonce: number;
     dir?: boolean;
   } | null>(null);
+  const [collabFile, setCollabFile] = useState<{ path: string; dir?: boolean } | null>(
+    null,
+  );
   const [attachments, setAttachments] = useState<CloudAgentAttachment[]>([]);
   /** 待发送图片的本地预览地址（object URL），key 为工作区路径 */
   const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
@@ -252,6 +310,8 @@ export function ChatApp() {
   } | null>(null);
   const acpPreparingProfileIdRef = useRef<string | null>(null);
   acpPreparingProfileIdRef.current = acpPreparingProfileId;
+  const acpControlPendingRef = useRef(acpControlPending);
+  acpControlPendingRef.current = acpControlPending;
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [disabledGroupIds, setDisabledGroupIds] = useState<string[]>([]);
   /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
@@ -295,8 +355,117 @@ export function ChatApp() {
   const focusComposerAfterPromptRef = useRef(false);
   /** 最新类型过滤值（供稳定回调读取，避免依赖引发的重订阅） */
   const kindFilterRef = useRef<CloudAgentSessionKind | "all">("chat");
+  const eventsRef = useRef<CloudAgentEvent[]>([]);
+  eventsRef.current = events;
 
   const isMobile = useIsMobile();
+  const peers = useTenantPresence({
+    userId: meUser?.id ?? null,
+    agentId,
+    project: activeProject,
+    sessionId,
+    pane: mainPane,
+    filePath: mainPane === "files" ? (collabFile?.path ?? fileRequest?.path ?? null) : null,
+    fileDir: mainPane === "files" ? Boolean(collabFile?.dir ?? fileRequest?.dir) : false,
+  });
+  const {
+    bindValueChange,
+    remotes,
+    setPointer,
+    setView,
+    ready: yjsReady,
+    ui,
+    setUiFlag,
+    setPref,
+    setPrefs,
+    setPrefIfAbsent,
+  } = useSessionDoc({
+    agentId,
+    sessionId,
+    userId: meUser?.id ?? null,
+    name: meUser?.name ?? "",
+    textareaRef: composerRef,
+    onValueChange: setInput,
+    onPrefsChange: (prefs) => applyRemotePrefsRef.current(prefs),
+  });
+  applyRemotePrefsRef.current = (prefs) => {
+    const live = liveRef.current;
+    const seedKey = `${agentId ?? ""}:${sessionId ?? ""}`;
+    const seeding = prefsSeededKeyRef.current !== seedKey;
+    if (seeding) prefsSeededKeyRef.current = seedKey;
+    const flashes: Array<keyof ComposerRemoteFlash> = [];
+    if (typeof prefs.model === "string") {
+      const nextRoute = prefs.modelRouteId || null;
+      if (prefs.model !== live.model || nextRoute !== live.modelRouteId) {
+        flashes.push("model");
+        live.model = prefs.model;
+        live.modelRouteId = nextRoute;
+      }
+      setModel(prefs.model);
+      setModelRouteId(nextRoute);
+    }
+    if (typeof prefs.reasoning === "string" && prefs.reasoning) {
+      if (prefs.reasoning !== live.reasoning) {
+        flashes.push("reasoning");
+        live.reasoning = prefs.reasoning as ComposerReasoningValue;
+      }
+      setReasoning(prefs.reasoning as ComposerReasoningValue);
+    }
+    const skills = parsePrefList(prefs.skills);
+    if (skills) {
+      if (!sameArr(skills, live.skills)) {
+        flashes.push("extras");
+        live.skills = skills;
+      }
+      setSelectedSkills(skills);
+    }
+    const groups = parsePrefList(prefs.disabledGroups);
+    if (groups) {
+      if (!sameArr(groups, live.groups)) {
+        if (!flashes.includes("extras")) flashes.push("extras");
+        live.groups = groups;
+      }
+      setDisabledGroupIds(groups);
+    }
+    if (prefs.pane) setMainPane(normalizePresencePane(prefs.pane));
+    if (typeof prefs.filePath === "string" && prefs.filePath) {
+      const dir = prefs.fileDir === "1";
+      setCollabFile({ path: prefs.filePath, dir });
+      setFileRequest((prev) => {
+        if (prev?.path === prefs.filePath && Boolean(prev?.dir) === dir) return prev;
+        fileNonceRef.current += 1;
+        return { path: prefs.filePath, nonce: fileNonceRef.current, dir };
+      });
+    }
+    if ("project" in prefs) {
+      const p = prefs.project || null;
+      if (p !== live.project) {
+        flashes.push("project");
+        live.project = p;
+      }
+      setDraftProject(p);
+    }
+    if (typeof prefs.runtimeId === "string" && prefs.runtimeId) {
+      if (prefs.runtimeId !== live.runtimeId) {
+        flashes.push("runtime");
+        live.runtimeId = prefs.runtimeId;
+      }
+      setDraftRuntimeId(prefs.runtimeId);
+    }
+    if (!seeding) bumpFlash(flashes);
+  };
+  const goPane = useCallback(
+    (next: PresencePane) => {
+      setFollowUserId(null);
+      setMainPane(next);
+      setPref("pane", next);
+    },
+    [setPref],
+  );
+  const workingIds = useMemo(
+    () => activeSessionIds(peers, meUser?.id ?? ""),
+    [peers, meUser?.id],
+  );
   const agent = agents.find((a) => a.id === agentId) ?? null;
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
   // Older cloud sessions may have a null/undefined origin after schema
@@ -337,6 +506,27 @@ export function ChatApp() {
     () => buildConversationTurns(events, { variantByMessage, branchByParent }),
     [events, variantByMessage, branchByParent],
   );
+  const presenceTurns = useMemo(
+    () =>
+      turns.map((t) => ({
+        seq: t.message.seq,
+        messageId: t.message.id,
+        parentKey: t.message.parentKey,
+        runId: t.activeRunId,
+        siblings: t.siblings,
+        variants: t.variants,
+      })),
+    [turns],
+  );
+  useEffect(() => {
+    setView(
+      turns.map((t) => ({
+        messageId: t.message.id,
+        parentKey: t.message.parentKey,
+        runId: t.activeRunId,
+      })),
+    );
+  }, [setView, turns]);
   const currentModelItem = useMemo(() => {
     if (!models.length) return undefined;
     if (!model) return models.find((m) => m.isDefault) ?? models[0];
@@ -347,15 +537,17 @@ export function ChatApp() {
     [events, currentModelItem],
   );
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
-  const unboundGrouped = useMemo(
-    () =>
-      groupSessions(
-        sessions.filter(
+  const listedForSidebar = useMemo(() => {
+    const raw = activeProject
+      ? sessions.filter(
+          (s) => s.project === activeProject && (kindFilter === "all" || s.kind === kindFilter),
+        )
+      : sessions.filter(
           (s) => !s.project && (kindFilter === "all" || s.kind === kindFilter),
-        ),
-      ),
-    [sessions, kindFilter],
-  );
+        );
+    const viewing = sessionId ? sessions.find((s) => s.id === sessionId) : null;
+    return pinViewingSession(raw, viewing);
+  }, [activeProject, sessions, kindFilter, sessionId]);
   const projectRows = useMemo(() => {
     const by = new Map<string, CloudSession[]>();
     for (const s of sessions) {
@@ -364,39 +556,58 @@ export function ChatApp() {
       list.push(s);
       by.set(s.project, list);
     }
-    const names = new Set([...projects.map((p) => p.name), ...by.keys()]);
-    return [...names]
-      .sort((a, b) => a.localeCompare(b))
-      .map((name) => ({
-        name,
-        missing: !projects.some((p) => p.name === name),
-        sessions: by.get(name) ?? [],
-      }));
+    const slugs = new Set([...projects.map((p) => p.slug), ...by.keys()]);
+    return [...slugs]
+      .sort((a, b) => {
+        const an = projects.find((p) => p.slug === a)?.name ?? a;
+        const bn = projects.find((p) => p.slug === b)?.name ?? b;
+        return an.localeCompare(bn);
+      })
+      .map((slug) => {
+        const rec = projects.find((p) => p.slug === slug);
+        return {
+          slug,
+          name: rec?.name ?? slug,
+          missing: !rec,
+          sessions: by.get(slug) ?? [],
+        };
+      });
   }, [projects, sessions]);
-  const searching = searchQ.trim().length > 0;
-  /**
-   * 本地模糊命中：已经拉到的会话直接在前端 Fuse 一遍。
-   * 服务端搜索有 250ms 防抖 + 往返，本地这层让「刚敲完就有结果」，
-   * 也能容忍标题里的错字（服务端的 ILIKE 做不到）。
-   */
-  const localSessionHits = useFuzzySearch(sessions, searchQ, {
-    keys: ["title"],
-    emptyReturnsAll: false,
-    limit: 8,
-  });
-  /** 服务端结果为准，本地独有的标题命中补在后面 */
-  const mergedHits = useMemo<CloudSearchHit[] | null>(() => {
-    if (!searching) return null;
-    const local: CloudSearchHit[] = localSessionHits.map((s) => ({
-      ...s,
-      snippet: null,
-      agentName: agent?.name ?? null,
-      agentSlug: agent?.slug ?? null,
-    }));
-    if (searchHits === null) return local;
-    const seen = new Set(searchHits.map((h) => h.id));
-    return [...searchHits, ...local.filter((h) => !seen.has(h.id))];
-  }, [searching, localSessionHits, searchHits, agent?.name, agent?.slug]);
+  const listedProjects = useMemo(() => {
+    const have = new Set(projects.map((p) => p.slug));
+    const extra: AgentProject[] = projectRows
+      .filter((r) => !have.has(r.slug))
+      .map((r) => ({
+        slug: r.slug,
+        name: r.name,
+        description: "",
+        instructions: "",
+        hasWorkspace: false,
+        path: null,
+      }));
+    return [...projects, ...extra].sort((a, b) => a.name.localeCompare(b.name));
+  }, [projects, projectRows]);
+  const sessionCountBySlug = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const row of projectRows) m.set(row.slug, row.sessions.length);
+    return m;
+  }, [projectRows]);
+  const activeProjectRow = activeProject
+    ? (projectRows.find((r) => r.slug === activeProject) ?? null)
+    : null;
+  const settingsProjectRec = settingsProject
+    ? (listedProjects.find((p) => p.slug === settingsProject) ?? null)
+    : null;
+  const sidebarSessions = useMemo(
+    () => groupSessions(listedForSidebar, workingIds),
+    [listedForSidebar, workingIds],
+  );
+  const peersByProject = useMemo(() => {
+    const m = new Map<string, PresenceLocation[]>();
+    const self = meUser?.id ?? "";
+    for (const row of projectRows) m.set(row.slug, othersOnProject(peers, row.slug, self));
+    return m;
+  }, [meUser?.id, peers, projectRows]);
   /** 尚未开始的对话：输入框上浮到视觉中线，首条消息发出后再流动回底部 */
   const emptyConversation = turns.length === 0;
   /**
@@ -407,6 +618,42 @@ export function ChatApp() {
   const switchingSession = pendingSessionId !== null && pendingSessionId !== sessionId;
   const isNewSession = !events.some((ev) => ev.type === "user_message");
   const sessionProject = activeSession?.project ?? draftProject;
+  liveRef.current = {
+    model,
+    modelRouteId,
+    reasoning,
+    runtimeId: draftRuntimeId,
+    project: sessionProject,
+    skills: selectedSkills,
+    groups: disabledGroupIds,
+    acpMode: acpRuntime?.modes?.currentId,
+    acpModel: acpRuntime?.models?.currentId,
+    acpReasoning: acpRuntime?.reasoning?.current,
+  };
+  useEffect(() => {
+    setRemoteFlash({});
+    prefsSeededKeyRef.current = "";
+  }, [agentId, sessionId]);
+  useEffect(() => {
+    if (!yjsReady) return;
+    const patch: Record<string, string> = {
+      reasoning,
+      runtimeId: draftRuntimeId,
+      skills: JSON.stringify(selectedSkills),
+      disabledGroups: JSON.stringify(disabledGroupIds),
+      pane: mainPane,
+    };
+    if (model) patch.model = model;
+    if (modelRouteId) patch.modelRouteId = modelRouteId;
+    if (collabFile?.path) {
+      patch.filePath = collabFile.path;
+      if (collabFile.dir) patch.fileDir = "1";
+    }
+    if (sessionProject) patch.project = sessionProject;
+    setPrefIfAbsent(patch);
+    // 只在接入文档时填空，避免把本地默认值盖到对端已写入的键上
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [yjsReady, sessionId]);
   const {
     scrollRef,
     contentRef,
@@ -414,7 +661,7 @@ export function ChatApp() {
     atBottom,
     scrollToBottom,
     sync: syncScroll,
-  } = useStickToBottom<HTMLDivElement, HTMLDivElement>();
+  } = useStickToBottom<HTMLDivElement, HTMLDivElement>(140, Boolean(followUserId));
 
   // 初始按视口决定：桌面展开，移动端收起（覆盖式抽屉，避免首帧闪现）
   useEffect(() => {
@@ -456,7 +703,15 @@ export function ChatApp() {
     let cancelled = false;
     (async () => {
       try {
-        await api("/api/me");
+                    const me = await api<{
+                      user: { id: string; name?: string | null; email: string; avatarRev?: number };
+                    }>("/api/me");
+                    setMeUser({
+                      id: me.user.id,
+                      name: me.user.name?.trim() || me.user.email,
+                      email: me.user.email,
+                      avatarRev: me.user.avatarRev ?? 0,
+                    });
         const list = await fetchAgents();
         if (cancelled) return;
         setAgents(list);
@@ -588,6 +843,24 @@ export function ChatApp() {
             ...(p.acpModels ? { models: p.acpModels } : {}),
             ...(p.acpReasoning ? { reasoning: p.acpReasoning } : {}),
           }));
+          if (!acpControlPendingRef.current) {
+            const live = liveRef.current;
+            const flashes: Array<keyof ComposerRemoteFlash> = [];
+            if (p.acpModels?.currentId && p.acpModels.currentId !== live.acpModel) {
+              flashes.push("acpModel");
+              live.acpModel = p.acpModels.currentId;
+            }
+            if (p.acpReasoning?.current && p.acpReasoning.current !== live.acpReasoning) {
+              flashes.push("acpReasoning");
+              live.acpReasoning = p.acpReasoning.current;
+            }
+            const nextMode = p.acpModes?.currentId ?? p.acpModeId;
+            if (nextMode && nextMode !== live.acpMode) {
+              flashes.push("acpMode");
+              live.acpMode = nextMode;
+            }
+            bumpFlash(flashes);
+          }
         }
         if (p.acpError) {
           setAcpPreparingProfileId(null);
@@ -611,12 +884,13 @@ export function ChatApp() {
         void refreshSessions();
       }
     },
-    [refreshSessions],
+    [refreshSessions, bumpFlash],
   );
 
   const loadSessionInner = useCallback(
-    async (aid: string, sid: string) => {
+    async (aid: string, sid: string, requestId: number) => {
       const res = await getCloudSession(aid, sid, 0);
+      if (requestId !== pendingSessionRequestRef.current) return;
       setSessionId(sid);
       sessionIdRef.current = sid;
       setEvents(res.events);
@@ -757,8 +1031,9 @@ export function ChatApp() {
     async (aid: string, sid: string) => {
       const requestId = ++pendingSessionRequestRef.current;
       setPendingSessionId(sid);
+      setMainPane("chat");
       try {
-        await loadSessionInner(aid, sid);
+        await loadSessionInner(aid, sid, requestId);
       } catch (err) {
         if (requestId === pendingSessionRequestRef.current) {
           toast.error(
@@ -814,6 +1089,89 @@ export function ChatApp() {
     }
   }, [agentId, scrollEl]);
 
+  const ensureSeqLoaded = useCallback(async (seq: number) => {
+    if (eventsRef.current.some((e) => e.seq === seq)) return true;
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid || seq < 1) return false;
+    try {
+      const res = await getCloudSession(aid, sid, { aroundSeq: seq });
+      if (res.events.length === 0) return false;
+      setEvents((prev) => {
+        const seen = new Set(prev.map((e) => e.seq));
+        const extra = res.events.filter((e) => !seen.has(e.seq));
+        if (extra.length === 0) return prev;
+        const merged = [...prev, ...extra].sort((a, b) => a.seq - b.seq);
+        oldestSeqRef.current = merged[0]?.seq ?? oldestSeqRef.current;
+        return merged;
+      });
+      if (res.hasMore) {
+        hasMoreHistoryRef.current = true;
+        setHasMoreHistory(true);
+      }
+      return true;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "无法定位协同位置");
+      return false;
+    }
+  }, [agentId]);
+
+  const applyPeerLocation = useCallback(
+    (peer: PresenceLocation, force = false) => {
+      const key = [
+        peer.agentId ?? "",
+        peer.sessionId ?? "",
+        peer.project ?? "",
+        peer.pane,
+        peer.filePath ?? "",
+        peer.fileDir ? "1" : "0",
+      ].join("|");
+      if (!force && key === lastFollowKeyRef.current) return;
+      lastFollowKeyRef.current = key;
+      setMainPane(peer.pane);
+      setActiveProject(peer.project);
+      if (peer.pane === "files" && peer.filePath) {
+        const dir = Boolean(peer.fileDir);
+        setCollabFile({ path: peer.filePath, dir });
+        setFileRequest((prev) => {
+          if (prev?.path === peer.filePath && Boolean(prev?.dir) === dir) return prev;
+          fileNonceRef.current += 1;
+          return { path: peer.filePath!, nonce: fileNonceRef.current, dir };
+        });
+      }
+      if (!peer.sessionId || !peer.agentId) return;
+      if (peer.agentId === agentId) {
+        if (peer.sessionId !== sessionId) void loadSession(peer.agentId, peer.sessionId);
+        return;
+      }
+      pendingSessionRef.current = { agentId: peer.agentId, sessionId: peer.sessionId };
+      setAgentId(peer.agentId);
+    },
+    [agentId, loadSession, sessionId],
+  );
+
+  const goToPeer = useCallback(
+    (userId: string) => {
+      const peer = peers.find((p) => p.userId === userId);
+      if (!peer) return;
+      closeNavOnMobile();
+      setFollowUserId(userId);
+      lastFollowKeyRef.current = "";
+      applyPeerLocation(peer, true);
+    },
+    [applyPeerLocation, closeNavOnMobile, peers],
+  );
+
+  useEffect(() => {
+    if (!followUserId) {
+      lastFollowKeyRef.current = "";
+      return;
+    }
+    const peer = peers.find((p) => p.userId === followUserId);
+    if (!peer || peer.idle) return;
+    applyPeerLocation(peer);
+  }, [applyPeerLocation, followUserId, peers]);
+
   const resetConversationEvents = useCallback(() => {
     setEvents([]);
     setHasMoreHistory(false);
@@ -826,9 +1184,47 @@ export function ChatApp() {
     const onScroll = () => {
       if (scrollEl.scrollTop < 120) void loadOlderMessages();
     };
+    const unfollowIfUser = () => {
+      if (followUserId) setFollowUserId(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!followUserId) return;
+      if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "PageUp" || e.key === "PageDown" || e.key === "Home" || e.key === "End") {
+        unfollowIfUser();
+      }
+    };
     scrollEl.addEventListener("scroll", onScroll, { passive: true });
-    return () => scrollEl.removeEventListener("scroll", onScroll);
-  }, [scrollEl, loadOlderMessages]);
+    scrollEl.addEventListener("wheel", unfollowIfUser, { passive: true });
+    scrollEl.addEventListener("touchmove", unfollowIfUser, { passive: true });
+    scrollEl.addEventListener("keydown", onKey);
+    return () => {
+      scrollEl.removeEventListener("scroll", onScroll);
+      scrollEl.removeEventListener("wheel", unfollowIfUser);
+      scrollEl.removeEventListener("touchmove", unfollowIfUser);
+      scrollEl.removeEventListener("keydown", onKey);
+    };
+  }, [scrollEl, loadOlderMessages, followUserId]);
+
+  useEffect(() => {
+    if (!followUserId) return;
+    const r = remotes.find((x) => x.user.id === followUserId);
+    const ptr = r?.pointer;
+    if (!ptr || !scrollEl) return;
+    if (ptr.seq < 1) return;
+    let cancelled = false;
+    void (async () => {
+      const ok = await ensureSeqLoaded(ptr.seq);
+      if (!ok || cancelled) return;
+      const el = scrollEl.querySelector(`[data-turn-seq="${ptr.seq}"]`);
+      if (!(el instanceof HTMLElement)) return;
+      const box = el.getBoundingClientRect();
+      const host = scrollEl.getBoundingClientRect();
+      scrollEl.scrollTop += box.top - host.top + ptr.y * box.height - host.height * 0.35;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureSeqLoaded, followUserId, remotes, scrollEl]);
 
   // 首屏未撑满视口时继续回拉，避免「还有历史但滚不到顶」
   useEffect(() => {
@@ -904,6 +1300,8 @@ export function ChatApp() {
           });
         setSessions(list);
         setProjects(projectRes.projects);
+        setActiveProject(null);
+        setSettingsProject(null);
         setHasChatRoute(cfg.hasChatRoute);
         setSystemPrompt(cfg.cloud.systemPrompt ?? "");
         setModel(cfg.cloud.model ?? "");
@@ -985,7 +1383,7 @@ export function ChatApp() {
         toast.error(err instanceof Error ? err.message : String(err));
       } finally {
         setSending(false);
-        setInput("");
+        bindValueChange("");
       }
     })();
   }, [agentId, agentReady, authed, loadSession, refreshSessions, resetConversationEvents]);
@@ -1041,20 +1439,100 @@ export function ChatApp() {
     return subscribePlatformEvents(
       (ev) => {
         if (ev.type === "cloud_session_changed" && ev.agentId === agentId) {
-          void refreshSessions();
+          void refreshSessions().then((list) => {
+            const cur = list.find((s) => s.id === sessionIdRef.current);
+            if (!cur) return;
+            const live = liveRef.current;
+            const flashes: Array<keyof ComposerRemoteFlash> = [];
+            if (cur.kind !== "acp") {
+              if (cur.model) {
+                if (cur.model !== live.model || cur.modelRouteId !== live.modelRouteId) {
+                  flashes.push("model");
+                  live.model = cur.model;
+                  live.modelRouteId = cur.modelRouteId;
+                }
+                setModel(cur.model);
+                setModelRouteId(cur.modelRouteId);
+              }
+            }
+            if (cur.reasoning) {
+              if (cur.reasoning !== live.reasoning) {
+                flashes.push("reasoning");
+                live.reasoning = cur.reasoning as ComposerReasoningValue;
+              }
+              setReasoning(cur.reasoning as ComposerReasoningValue);
+            }
+            if (sessionIdRef.current === cur.id) {
+              const nextProject = cur.project ?? null;
+              if (nextProject !== live.project) {
+                flashes.push("project");
+                live.project = nextProject;
+              }
+              setDraftProject(nextProject);
+            }
+            bumpFlash(flashes);
+          });
         }
         if (ev.type === "agent_fs_changed" && ev.agentId === agentId) {
           if (ev.path === "/projects" || ev.path.startsWith("/projects/")) {
             void refreshProjects();
           }
         }
+        if (ev.type === "agent_config_changed" && ev.agentId === agentId) {
+          void getCloudConfig(agentId)
+            .then((cfg) => {
+              setHasChatRoute(cfg.hasChatRoute);
+              setSystemPrompt(cfg.cloud.systemPrompt ?? "");
+              agentDefaultsRef.current = {
+                model: cfg.cloud.model ?? "",
+                modelRouteId: cfg.cloud.modelRouteId ?? null,
+              };
+              if (!sessionIdRef.current) {
+                const nextModel = cfg.cloud.model ?? "";
+                const nextRoute = cfg.cloud.modelRouteId ?? null;
+                const live = liveRef.current;
+                if (nextModel !== live.model || nextRoute !== live.modelRouteId) {
+                  live.model = nextModel;
+                  live.modelRouteId = nextRoute;
+                  bumpFlash(["model"]);
+                }
+                setModel(nextModel);
+                setModelRouteId(nextRoute);
+              }
+              setEnableTools(cfg.cloud.enableTools !== false);
+              setAutoMemory(cfg.cloud.autoMemory !== false);
+              setAutoTitle(cfg.cloud.autoTitle !== false);
+              setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
+              setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
+            })
+            .catch(() => {});
+        }
       },
       () => {
         void refreshSessions();
         void refreshProjects();
+        void getCloudConfig(agentId)
+          .then((cfg) => {
+            setHasChatRoute(cfg.hasChatRoute);
+            setSystemPrompt(cfg.cloud.systemPrompt ?? "");
+            agentDefaultsRef.current = {
+              model: cfg.cloud.model ?? "",
+              modelRouteId: cfg.cloud.modelRouteId ?? null,
+            };
+            if (!sessionIdRef.current) {
+              setModel(cfg.cloud.model ?? "");
+              setModelRouteId(cfg.cloud.modelRouteId ?? null);
+            }
+            setEnableTools(cfg.cloud.enableTools !== false);
+            setAutoMemory(cfg.cloud.autoMemory !== false);
+            setAutoTitle(cfg.cloud.autoTitle !== false);
+            setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
+            setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
+          })
+          .catch(() => {});
       },
     );
-  }, [agentId, authed, refreshSessions, refreshProjects]);
+  }, [agentId, authed, refreshSessions, refreshProjects, bumpFlash]);
 
   // 新内容到达时跟随到底部（用户已向上翻阅时不打扰）
   useEffect(() => {
@@ -1086,13 +1564,14 @@ export function ChatApp() {
     }
     // sessionId 变化时，恢复 effect 还需要先切换 draftKey，避免把旧输入短暂写进新会话。
     if (!sessionId) return;
+    if (yjsReady) return;
     const timer = window.setTimeout(() => {
       void updateCloudSession(agentId, sessionId, { draftText: input }).catch((err) => {
         toast.error(err instanceof Error ? err.message : String(err));
       });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [agentId, input, sessionId]);
+  }, [agentId, input, sessionId, yjsReady]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1128,23 +1607,22 @@ export function ChatApp() {
     };
   }, []);
 
-  // —— 搜索（防抖） ——
+  // —— 搜索弹框：⌘K / Ctrl+K ——
   useEffect(() => {
-    const q = searchQ.trim();
-    if (!q) {
-      setSearchHits(null);
-      return;
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
     }
-    const timer = setTimeout(() => {
-      void searchCloudSessions(q)
-        .then((r) => setSearchHits(r.results))
-        .catch(() => setSearchHits([]));
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [searchQ]);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  async function openSearchHit(hit: CloudSearchHit) {    setSearchQ("");
-    setSearchHits(null);
+  async function openSearchHit(hit: CloudSearchHit) {
+    setActiveProject(hit.project ?? null);
+    setDraftProject(hit.project ?? null);
+    setMainPane("chat");
     if (hit.agentId !== agentId) {
       pendingSessionRef.current = { agentId: hit.agentId, sessionId: hit.id };
       setAgentId(hit.agentId);
@@ -1154,7 +1632,7 @@ export function ChatApp() {
   }
 
   /** 进入「新对话」草稿态：不落库，发消息时再创建会话 */
-  function handleNewSession() {
+  function handleNewSession(project: string | null = activeProject) {
     if (!agentId) return;
     const sid = sessionIdRef.current;
     const current = sessions.find((s) => s.id === sid);
@@ -1163,6 +1641,9 @@ export function ChatApp() {
     if (sid && current?.kind === "acp" && !events.some((e) => e.type === "user_message")) {
       void discardUnusedAcpDraft(agentId, sid);
     }
+    pendingSessionRequestRef.current += 1;
+    setPendingSessionId(null);
+    setAcpPreparingProfileId(null);
     setSessionId(null);
     sessionIdRef.current = null;
     resetConversationEvents();
@@ -1174,10 +1655,28 @@ export function ChatApp() {
     setEditingTarget(null);
     setAcpRuntime(null);
     setDraftRuntimeId(defaultRuntimeRef.current);
-    setDraftProject(null);
+    setDraftProject(project);
     clearAttachments();
     setSelectedSkills([]);
+    setMainPane("chat");
     composerRef.current?.focus();
+  }
+
+  function enterProject(slug: string) {
+    setActiveProject(slug);
+    const current = sessions.find((s) => s.id === sessionId);
+    if (!current || current.project !== slug) {
+      handleNewSession(slug);
+    } else {
+      setDraftProject(slug);
+      setMainPane("chat");
+    }
+  }
+
+  function leaveProject() {
+    setActiveProject(null);
+    const current = sessions.find((s) => s.id === sessionId);
+    if (!current) setDraftProject(null);
   }
 
   async function discardUnusedAcpDraft(aid: string, sid: string) {
@@ -1197,12 +1696,12 @@ export function ChatApp() {
       "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
       "若任务会写文件，create_schedule 必须带 project（工作区项目 slug）。",
       projects.length
-        ? `当前项目：${projects.map((p) => p.name).join("、")}`
-        : "还没有项目时，先在 /workspace/projects/<名>/ 建目录再绑 project。",
+        ? `当前项目：${projects.map((p) => `${p.name}（${p.slug}）`).join("、")}`
+        : "还没有项目时，可先在主页创建项目。写文件的任务再绑有工作区的项目。",
       "",
       goal.trim(),
     ].join("\n");
-    setSidebarMode("chats");
+    setMainPane("chat");
     handleNewSession();
     closeNavOnMobile();
     void (async () => {
@@ -1223,7 +1722,7 @@ export function ChatApp() {
         toast.error(err instanceof Error ? err.message : String(err));
       } finally {
         setSending(false);
-        setInput("");
+        bindValueChange("");
       }
     })();
   }
@@ -1298,9 +1797,11 @@ export function ChatApp() {
     const title = renameValue.trim();
     setRenamingId(null);
     if (!sid || !title || !agentId) return;
+    const current = sessions.find((s) => s.id === sid);
+    if (current?.title === title) return;
     try {
       const updated = await updateCloudSession(agentId, sid, { title });
-      setSessions((prev) => prev.map((s) => (s.id === sid ? updated : s)));
+      setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, ...updated } : s)));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -1318,6 +1819,9 @@ export function ChatApp() {
 
   async function handleSessionProjectChange(next: string | null) {
     setDraftProject(next);
+    setActiveProject(next);
+    liveRef.current.project = next;
+    setPref("project", next ?? "");
     const sid = sessionIdRef.current;
     if (!agentId || !sid) return;
     const current = sessions.find((s) => s.id === sid);
@@ -1350,27 +1854,6 @@ export function ChatApp() {
     await handleMoveSession(sid, next);
   }
 
-  async function handleNewProjectSession(project: string) {
-    if (!agentId) return;
-    try {
-      const created = await createCloudSession(agentId, undefined, { project });
-      setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
-      await loadSession(agentId, created.id);
-      closeNavOnMobile();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  function toggleProjectCollapsed(name: string) {
-    setCollapsedProjects((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
   async function submitNewProject() {
     if (!agentId) return;
     const name = newProjectName.trim();
@@ -1382,14 +1865,19 @@ export function ChatApp() {
     try {
       const res = await createAgentProject(agentId, {
         name,
+        description: newProjectDesc.trim() || undefined,
+        withWorkspace: newProjectWithWorkspace || Boolean(newProjectGit.trim()),
         ...(newProjectGit.trim() ? { gitUrl: newProjectGit.trim() } : {}),
       });
       if (res.cloneError) toast.error(`项目已创建，克隆失败：${res.cloneError}`);
       else toast.success("已创建项目");
       setNewProjectOpen(false);
       setNewProjectName("");
+      setNewProjectDesc("");
       setNewProjectGit("");
+      setNewProjectWithWorkspace(false);
       await refreshProjects();
+      enterProject(res.project.slug);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1397,71 +1885,41 @@ export function ChatApp() {
     }
   }
 
-  async function commitRenameProject() {
-    if (!agentId) return;
-    const from = renamingProject;
-    const to = renameProjectValue.trim();
-    setRenamingProject(null);
-    if (!from || !to || to === from) return;
-    try {
-      const res = await renameAgentProject(agentId, from, to);
-      setProjects((prev) =>
-        prev.map((p) => (p.name === from ? res.project : p)).sort((a, b) => a.name.localeCompare(b.name)),
-      );
-      setSessions((prev) => prev.map((s) => (s.project === from ? { ...s, project: to } : s)));
-      setCollapsedProjects((prev) => {
-        if (!prev.has(from)) return prev;
-        const next = new Set(prev);
-        next.delete(from);
-        next.add(to);
-        return next;
-      });
-      if (configProject === from) setConfigProject(to);
-      toast.success(`已重命名为 ${to}`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-      await refreshProjects();
-    }
-  }
-
   async function handleDeleteProject(slug: string) {
     if (!agentId) return;
+    const rec = projects.find((p) => p.slug === slug);
     const ok = await confirm({
-      title: `删除项目 ${slug}？`,
-      description: `将删除工作区目录 /workspace/projects/${slug} 及其文件。该项目下的对话（含子代理）和定时任务会解绑，不会被删掉。`,
-      confirmLabel: "删除目录",
+      title: `删除项目 ${rec?.name ?? slug}？`,
+      description: rec?.hasWorkspace
+        ? `将删除项目记录和工作区目录 ${rec.path}。该项目下的对话（含子代理）和定时任务会解绑，不会被删掉。`
+        : "将删除项目记录。该项目下的对话（含子代理）和定时任务会解绑，不会被删掉。",
+      confirmLabel: "删除",
       destructive: true,
     });
     if (!ok) return;
     try {
       await deleteAgentProject(agentId, slug);
-      setProjects((prev) => prev.filter((p) => p.name !== slug));
+      setProjects((prev) => prev.filter((p) => p.slug !== slug));
       setSessions((prev) => prev.map((s) => (s.project === slug ? { ...s, project: null } : s)));
-      setCollapsedProjects((prev) => {
-        if (!prev.has(slug)) return prev;
-        const next = new Set(prev);
-        next.delete(slug);
-        return next;
-      });
-      if (configProject === slug) setConfigProject(null);
-      toast.success("已删除项目目录");
+      if (activeProject === slug) setActiveProject(null);
+      if (settingsProject === slug) {
+        setSettingsProject(null);
+        setMainPane("projects");
+      }
+      toast.success("已删除项目");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
   function openProjectDir(slug: string) {
-    setFilePanelOpen(true);
+    goPane("files");
     fileNonceRef.current += 1;
-    setFileRequest({ path: `/projects/${slug}`, nonce: fileNonceRef.current, dir: true });
-  }
-
-  function copyProjectPath(slug: string) {
-    const path = `/workspace/projects/${slug}`;
-    void navigator.clipboard.writeText(path).then(
-      () => toast.success("已复制路径"),
-      () => toast.error("复制失败"),
-    );
+    const path = `/projects/${slug}`;
+    setFileRequest({ path, nonce: fileNonceRef.current, dir: true });
+    setCollabFile({ path, dir: true });
+    setPref("filePath", path);
+    setPref("fileDir", "1");
   }
 
   function parentForSend(): string | null | undefined {
@@ -1472,10 +1930,13 @@ export function ChatApp() {
 
   /** 稳定引用：工具行会以它作为 memo 依赖，重建会让缓存全部失效 */
   const openFileInPanel = useCallback((path: string) => {
-    setFilePanelOpen(true);
+    goPane("files");
     fileNonceRef.current += 1;
     setFileRequest({ path, nonce: fileNonceRef.current });
-  }, []);
+    setCollabFile({ path, dir: false });
+    setPref("filePath", path);
+    setPref("fileDir", "");
+  }, [goPane, setPref]);
 
   /** 图片附件的本地预览：object URL 由 previewsRef 统一持有并释放 */
   function dropPreview(path: string) {
@@ -1510,7 +1971,7 @@ export function ChatApp() {
       return;
     }
     setQueue((prev) => prev.filter((m) => m.messageId !== messageId));
-    setInput(item.content);
+    bindValueChange(item.content);
     latestInputRef.current = item.content;
     if (item.attachments?.length) setAttachments(item.attachments);
     void removeQueuedMessage(aid, sid, messageId).catch((err) => {
@@ -1565,7 +2026,7 @@ export function ChatApp() {
       return;
     }
     setEditingTarget({ messageId, parentKey });
-    setInput(content);
+    bindValueChange(content);
     latestInputRef.current = content;
     setAttachments(msgAttachments);
     composerRef.current?.focus();
@@ -1574,7 +2035,7 @@ export function ChatApp() {
   /** 取消编辑：清空召回的内容，回到普通输入态 */
   function handleEditCancel() {
     setEditingTarget(null);
-    setInput("");
+    bindValueChange("");
     latestInputRef.current = "";
     setAttachments([]);
   }
@@ -1786,7 +2247,7 @@ export function ChatApp() {
       for (const url of Object.values(sentPreviews)) URL.revokeObjectURL(url);
     } catch (err) {
       // 还原输入与附件（含图片预览），用户可修改后重发
-      setInput(content);
+      bindValueChange(content);
       latestInputRef.current = content;
       setAttachments(sentAttachments);
       previewsRef.current = { ...previewsRef.current, ...sentPreviews };
@@ -1810,7 +2271,7 @@ export function ChatApp() {
     const sentPreviews = previewsRef.current;
     const sentSkills = selectedSkills;
     const parentRunId = parentForSend();
-    setInput("");
+    bindValueChange("");
     latestInputRef.current = "";
     draftsRef.current.delete(draftKeyRef.current);
     previewsRef.current = {};
@@ -1934,6 +2395,12 @@ export function ChatApp() {
     if (!agentId || !value) return;
     setModel(value);
     setModelRouteId(routeId);
+    liveRef.current.model = value;
+    liveRef.current.modelRouteId = routeId;
+    setPrefs({
+      model: value,
+      modelRouteId: routeId || "",
+    });
     try {
       if (sessionId) {
         await updateCloudSession(agentId, sessionId, {
@@ -1954,6 +2421,8 @@ export function ChatApp() {
 
   function handleReasoningChange(value: ComposerReasoningValue) {
     setReasoning(value);
+    liveRef.current.reasoning = value;
+    setPref("reasoning", value);
     if (sessionId && agentId) {
       void updateCloudSession(agentId, sessionId, { reasoning: value }).catch((err) => {
         toast.error(err instanceof Error ? err.message : String(err));
@@ -2032,15 +2501,12 @@ export function ChatApp() {
   );
 
   useEffect(() => {
+    if (reasoningItems.length === 0) return;
     if (!reasoningItems.some((item) => item.value === reasoning)) {
+      // 只改本地展示：对端改模型时本端列表会短暂对不上，写回会把对端的思考等级打掉
       setReasoning("default");
-      if (sessionId && agentId) {
-        void updateCloudSession(agentId, sessionId, { reasoning: "default" });
-      } else {
-        localStorage.setItem(REASONING_KEY, "default");
-      }
     }
-  }, [agentId, reasoning, reasoningItems, sessionId]);
+  }, [reasoning, reasoningItems]);
 
   if (!authed) {
     return <PageLoading />;
@@ -2068,6 +2534,9 @@ export function ChatApp() {
         onMove={handleMoveSession}
         onArchive={handleArchiveSession}
         onDelete={handleDeleteSession}
+        peers={othersOnSession(peers, s.id, meUser?.id ?? "")}
+        onPickUser={goToPeer}
+        listProject={activeProject}
       />
     );
   }
@@ -2084,7 +2553,7 @@ export function ChatApp() {
       )}
       <aside
         className={cn(
-          "chat-sidebar flex h-full shrink-0 flex-col border-r border-border/50",
+          "chat-sidebar flex h-full shrink-0 flex-col border-r border-border/40",
           "md:transition-[width] md:duration-200",
           "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[290px] max-md:shadow-xl max-md:transition-transform max-md:duration-200",
           sidebarOpen
@@ -2103,7 +2572,7 @@ export function ChatApp() {
                 />
               }
             >
-              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold text-foreground">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold text-foreground">
                 {agent?.name?.slice(0, 1) ?? <Bot className="h-4 w-4" />}
               </span>
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -2116,6 +2585,7 @@ export function ChatApp() {
                 <DropdownMenuItem
                   key={a.id}
                   onClick={() => {
+                    setFollowUserId(null);
                     setAgentId(a.id);
                     closeNavOnMobile();
                   }}
@@ -2131,59 +2601,65 @@ export function ChatApp() {
           </DropdownMenu>
         </div>
 
-        {/* 侧栏分区：对话 | 任务 */}
-        <div className="flex gap-3 border-b border-border/60 px-3">
-          {(
-            [
-              { id: "chats" as const, label: "对话" },
-              { id: "tasks" as const, label: "任务" },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setSidebarMode(tab.id)}
-              className={cn(
-                "-mb-px border-b-2 px-0.5 pb-2 pt-2 text-sm transition-colors",
-                sidebarMode === tab.id
-                  ? "border-foreground font-medium text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {sidebarMode === "chats" ? (
-        <>
         {/* 新对话 + 搜索 */}
         <div className="flex flex-col gap-1 p-2">
+          {activeProject ? (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={leaveProject}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+              >
+                <ArrowLeft className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 truncate">
+                  {activeProjectRow?.name ?? activeProject}
+                </span>
+              </button>
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="ghost"
+                aria-label="项目设置"
+                className="shrink-0 text-muted-foreground"
+                onClick={() => {
+                  setSettingsProject(activeProject);
+                  goPane("project-settings");
+                }}
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={() => {
-              handleNewSession();
+              handleNewSession(activeProject);
               closeNavOnMobile();
             }}
             className={cn(
               "press group/new flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors duration-150 ease-fluid",
               sessionId === null
-                ? "bg-muted text-foreground"
-                : "text-foreground hover:bg-muted/60",
+                ? "text-foreground"
+                : "text-foreground/80 hover:bg-muted/40 hover:text-foreground",
             )}
           >
             <SquarePen className="h-4 w-4 transition-transform duration-300 ease-overshoot group-hover/new:-rotate-12" />
             新对话
           </button>
           <div className="flex items-center gap-1">
-            {/* 统一搜索框（含清空 + Esc 清空），与其余列表页保持一致 */}
-            <SearchField
-              value={searchQ}
-              onValueChange={setSearchQ}
-              placeholder="搜索对话"
-              className="min-w-0 flex-1"
-            />
-            {/* 会话类型过滤：查看子代理/委派/系统产生的对话记录 */}
+            <button
+              type="button"
+              onClick={() => setSearchOpen(true)}
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            >
+              <Search className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-left">搜索对话</span>
+              <kbd className="hidden shrink-0 rounded border border-border/60 px-1 text-[10px] text-muted-foreground/80 md:inline">
+                {typeof navigator !== "undefined" && /Mac|iPhone/.test(navigator.userAgent)
+                  ? "⌘K"
+                  : "Ctrl+K"}
+              </kbd>
+            </button>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -2221,216 +2697,69 @@ export function ChatApp() {
           </div>
         </div>
 
-        {/* 会话列表 / 搜索结果 */}
+        {/* 会话列表 */}
         <ScrollArea className="min-h-0 flex-1">
-          {searching ? (
-            <div className="flex flex-col gap-0.5 p-2 pt-0">
-              {mergedHits === null || (mergedHits.length === 0 && searchHits === null) ? (
-                <div className="px-2 py-3 text-xs text-muted-foreground">搜索中…</div>
-              ) : mergedHits.length === 0 ? (
-                <div className="px-2 py-3 text-xs text-muted-foreground">无结果</div>
-              ) : (
-                mergedHits.map((hit) => (
-                  <button
-                    key={hit.id}
-                    type="button"
-                    onClick={() => {
-                      void openSearchHit(hit);
-                      closeNavOnMobile();
-                    }}
-                    className="animate-rise flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-150 ease-fluid hover:bg-muted/60"
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <span className="min-w-0 flex-1 truncate text-sm">{hit.title}</span>
-                      {hit.agentName && hit.agentId !== agentId && (
-                        <span className="shrink-0 rounded bg-muted px-1 text-[10px] text-muted-foreground">
-                          {hit.agentName}
-                        </span>
-                      )}
-                    </span>
-                    {hit.snippet && (
-                      <span className="line-clamp-1 text-xs text-muted-foreground">
-                        {hit.snippet}
-                      </span>
-                    )}
-                  </button>
-                ))
-              )}
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3 p-2 pt-0">
-              <div>
-                <div className="flex items-center px-2 pb-0.5 pt-1">
-                  <div className="flex-1 text-[11px] text-muted-foreground/60">项目</div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    title="新建项目"
-                    onClick={() => setNewProjectOpen(true)}
-                    className="size-6 text-muted-foreground hover:text-foreground"
-                  >
-                    <FolderPlus className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-                {projectRows.length === 0 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setNewProjectOpen(true)}
-                    className="h-auto w-full justify-start rounded-lg px-2 py-2 text-xs font-normal text-muted-foreground hover:text-foreground"
-                  >
-                    暂无项目，点此创建
-                  </Button>
-                ) : (
-                  projectRows.map((row) => {
-                    const collapsed = collapsedProjects.has(row.name);
-                    const renaming = renamingProject === row.name;
-                    return (
-                      <div key={row.name}>
-                        <div className="group flex items-center rounded-lg hover:bg-muted/50">
-                          {renaming ? (
-                            <Input
-                              autoFocus
-                              value={renameProjectValue}
-                              onChange={(e) => setRenameProjectValue(e.target.value)}
-                              onBlur={() => void commitRenameProject()}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") void commitRenameProject();
-                                if (e.key === "Escape") setRenamingProject(null);
-                              }}
-                              className="mx-1 my-0.5 h-6 px-1 text-sm"
-                            />
-                          ) : (
-                            <>
-                          <button
-                            type="button"
-                            className="flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1 text-left text-sm"
-                            onClick={() => toggleProjectCollapsed(row.name)}
-                          >
-                            {collapsed ? (
-                              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                            )}
-                            <span className="min-w-0 truncate font-medium">{row.name}</span>
-                            {row.missing ? (
-                              <span className="shrink-0 text-[10px] text-muted-foreground">
-                                目录已删
-                              </span>
-                            ) : null}
-                            <span className="shrink-0 text-[10px] text-muted-foreground">
-                              {row.sessions.length}
-                            </span>
-                          </button>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger
-                              render={
-                                <button
-                                  type="button"
-                                  aria-label="项目操作"
-                                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100 md:data-[popup-open]:opacity-100"
-                                />
-                              }
-                            >
-                              <MoreHorizontal className="h-3.5 w-3.5" />
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="start" className="min-w-32">
-                              <DropdownMenuItem onClick={() => setConfigProject(row.name)}>
-                                <Settings2 />
-                                配置
-                              </DropdownMenuItem>
-                              {row.missing ? null : (
-                                <DropdownMenuItem onClick={() => openProjectDir(row.name)}>
-                                  <FolderOpen />
-                                  打开目录
-                                </DropdownMenuItem>
-                              )}
-                              <DropdownMenuItem onClick={() => copyProjectPath(row.name)}>
-                                <ExternalLink />
-                                复制路径
-                              </DropdownMenuItem>
-                              {row.missing ? null : (
-                                <DropdownMenuItem
-                                  onClick={() => {
-                                    setRenamingProject(row.name);
-                                    setRenameProjectValue(row.name);
-                                  }}
-                                >
-                                  <Pencil />
-                                  重命名
-                                </DropdownMenuItem>
-                              )}
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onClick={() => void handleDeleteProject(row.name)}
-                              >
-                                <Trash2 />
-                                删除
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                          <button
-                            type="button"
-                            title="在此项目新对话"
-                            onClick={() => void handleNewProjectSession(row.name)}
-                            className="mr-1 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100"
-                          >
-                            <Plus className="h-3.5 w-3.5" />
-                          </button>
-                            </>
-                          )}
-                        </div>
-                        {collapsed ? null : (
-                          <div className="flex flex-col pl-2">
-                            {row.sessions.length === 0 ? (
-                              <div className="px-2 py-1 text-[11px] text-muted-foreground">
-                                还没有对话
-                              </div>
-                            ) : (
-                              row.sessions.map((s) => sessionRow(s))
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
+          <div className="flex flex-col gap-3 p-2 pt-0">
+            {sidebarSessions.length === 0 && (activeProject || projectRows.length === 0) ? (
+              <div className="px-2 py-3 text-xs text-muted-foreground">
+                {activeProject ? "这个项目还没有对话" : "还没有对话"}
               </div>
-              {unboundGrouped.map((g) => (
+            ) : (
+              <>
+                {!activeProject && projectRows.length > 0 ? (
+                  <div>
+                    <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
+                      项目
+                    </div>
+                    <div className="flex flex-col">
+                      {projectRows.map((row) => (
+                        <ChatProjectRow
+                          key={row.slug}
+                          slug={row.slug}
+                          name={row.name}
+                          sessionCount={row.sessions.length}
+                          peers={othersOnProject(peers, row.slug, meUser?.id ?? "")}
+                          onOpen={enterProject}
+                          onPickUser={goToPeer}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {sidebarSessions.map((g) => (
                 <div key={g.label}>
                   <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
-                    {g.label === unboundGrouped[0]?.label ? `${g.label}` : g.label}
+                    {g.label}
                   </div>
                   <div className="flex flex-col">{g.items.map((s) => sessionRow(s))}</div>
                 </div>
-              ))}
-            </div>
-          )}
+                ))}
+              </>
+            )}
+          </div>
         </ScrollArea>
-        </>
-        ) : (
-          <AutomationPanel
-            agentId={agentId}
-            projects={projects.map((p) => p.name)}
-            className="min-h-0 flex-1"
-            onAskAgentCreate={handleAskAgentCreateSchedule}
-            onOpenSession={(sid) => {
-              if (!agentId) return;
-              setSidebarMode("chats");
-              setKindFilter("system");
-              void loadSession(agentId, sid);
-              closeNavOnMobile();
-            }}
-          />
-        )}
 
         {/* 底部 */}
-        <div className="border-t border-border/50 p-2">
+        <div className="border-t border-sidebar-border p-2">
+          {meUser ? (
+            <Link
+              href="/dashboard/settings/account"
+              className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground/80 hover:bg-muted/40 hover:text-foreground"
+            >
+              <UserAvatar
+                userId={meUser.id}
+                name={meUser.name}
+                email={meUser.email}
+                avatarRev={meUser.avatarRev}
+                size="sm"
+                className="size-6"
+              />
+              <span className="min-w-0 flex-1 truncate">{meUser.name}</span>
+            </Link>
+          ) : null}
           <Link
             href="/dashboard/agents"
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground"
           >
             <LayoutDashboard className="h-4 w-4" />
             控制台
@@ -2440,8 +2769,10 @@ export function ChatApp() {
 
       {/* ===== 主区 ===== */}
       <div className="relative flex h-full min-w-0 flex-1 flex-col">
-        <MessageNavigator turns={turns} scrollEl={scrollEl ?? null} />
-        <header className="flex h-12 shrink-0 items-center gap-1.5 px-3">
+        {mainPane === "chat" ? (
+          <MessageNavigator turns={turns} scrollEl={scrollEl ?? null} />
+        ) : null}
+        <header className="flex h-11 shrink-0 items-center gap-1.5 px-3">
           <Button
             size="icon-sm"
             variant="ghost"
@@ -2450,9 +2781,33 @@ export function ChatApp() {
           >
             <PanelLeft className="h-4 w-4" />
           </Button>
-          <span className="truncate text-sm font-medium text-foreground/90">
-            {agent?.name}
+          <span className="min-w-0 truncate text-sm text-foreground/90">
+            {mainPane === "files"
+              ? "文件"
+              : mainPane === "tasks"
+                ? "任务"
+                : mainPane === "projects"
+                  ? "项目"
+                  : mainPane === "project-settings"
+                    ? (settingsProjectRec?.name ?? "项目设置")
+                    : activeProjectRow
+                      ? `${agent?.name ?? ""} · ${activeProjectRow.name}`
+                      : agent?.name}
           </span>
+          {followUserId ? (
+            <FollowChip
+              userId={followUserId}
+              name={peers.find((p) => p.userId === followUserId)?.name ?? remotes.find((r) => r.user.id === followUserId)?.user.name ?? "成员"}
+              onStop={() => setFollowUserId(null)}
+            />
+          ) : null}
+          <PresenceAvatars
+            peers={othersOnSession(peers, sessionId, meUser?.id ?? "")}
+            onPick={(id) => {
+              if (followUserId === id) setFollowUserId(null);
+              else goToPeer(id);
+            }}
+          />
           {realtimeOffline ? (
             <span
               role="status"
@@ -2464,7 +2819,7 @@ export function ChatApp() {
             </span>
           ) : null}
           <div className="flex-1" />
-          {runActive && (
+          {runActive && mainPane === "chat" && (
             <Button size="sm" variant="ghost" onClick={() => void handleCancel()}>
               <Square className="h-3.5 w-3.5" />
               停止
@@ -2473,11 +2828,35 @@ export function ChatApp() {
           <Button
             size="icon-sm"
             variant="ghost"
+            aria-label="项目"
+            className={cn(
+              (mainPane === "projects" || mainPane === "project-settings" || activeProject) &&
+                "bg-muted text-foreground",
+            )}
+            onClick={() => {
+              setSettingsProject(null);
+              goPane(mainPane === "projects" ? "chat" : "projects");
+            }}
+          >
+            <FolderKanban className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
             aria-label="文件"
-            className={cn(filePanelOpen && "bg-muted text-foreground")}
-            onClick={() => setFilePanelOpen((v) => !v)}
+            className={cn(mainPane === "files" && "bg-muted text-foreground")}
+            onClick={() => goPane(mainPane === "files" ? "chat" : "files")}
           >
             <FolderOpen className="h-4 w-4" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            aria-label="任务"
+            className={cn(mainPane === "tasks" && "bg-muted text-foreground")}
+            onClick={() => goPane(mainPane === "tasks" ? "chat" : "tasks")}
+          >
+            <AlarmClock className="h-4 w-4" />
           </Button>
           <Button
             size="icon-sm"
@@ -2498,8 +2877,44 @@ export function ChatApp() {
         </header>
 
         <div
+          ref={setPointerHost}
+          className={cn("relative flex min-h-0 flex-1 flex-col", mainPane !== "chat" && "hidden")}
+          onPointerMove={(e) => {
+            if (document.visibilityState !== "visible") {
+              setPointer(null);
+              return;
+            }
+            const host = e.currentTarget;
+            const turn = (e.target as HTMLElement | null)?.closest?.("[data-turn-seq]");
+            if (turn instanceof HTMLElement && host.contains(turn)) {
+              const seq = Number(turn.getAttribute("data-turn-seq"));
+              if (!Number.isFinite(seq)) return;
+              const box = turn.getBoundingClientRect();
+              const x = box.width <= 0 ? 0 : (e.clientX - box.left) / box.width;
+              const y = box.height <= 0 ? 0 : (e.clientY - box.top) / box.height;
+              setPointer({
+                seq,
+                x: Math.min(1, Math.max(0, x)),
+                y: Math.min(1, Math.max(0, y)),
+              });
+              return;
+            }
+            const box = host.getBoundingClientRect();
+            const x = box.width <= 0 ? 0 : (e.clientX - box.left) / box.width;
+            const y = box.height <= 0 ? 0 : (e.clientY - box.top) / box.height;
+            setPointer({
+              seq: 0,
+              x: Math.min(1, Math.max(0, x)),
+              y: Math.min(1, Math.max(0, y)),
+            });
+          }}
+          onPointerLeave={() => setPointer(null)}
+        >
+          <PresencePointers remotes={remotes} followUserId={followUserId} container={pointerHost} turns={presenceTurns} />
+
+        <div
           ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
         >
           <div ref={contentRef} className="flex min-h-full flex-col">
             {switchingSession ? (
@@ -2536,6 +2951,10 @@ export function ChatApp() {
                 setBranchByParent((prev) => ({ ...prev, [parentKey]: mid }))
               }
               onOpenFile={openFileInPanel}
+              ui={ui}
+              setUiFlag={setUiFlag}
+              remotes={remotes}
+              peers={peers}
               onPermission={(requestId, optionId, cancelled) => {
                 if (!agentId || !sessionId) return;
                 void resolveAcpPermission(agentId, sessionId, {
@@ -2570,7 +2989,7 @@ export function ChatApp() {
               variant="outline"
               size="sm"
               onClick={() => scrollToBottom("smooth")}
-              className="animate-pop absolute top-0 left-1/2 z-10 h-auto -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-lg border-border/70 bg-background/90 px-3 py-1.5 text-xs font-normal text-muted-foreground shadow-[var(--shadow-soft)] backdrop-blur hover:text-foreground"
+              className="animate-pop absolute top-0 left-1/2 z-10 h-auto -translate-x-1/2 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-lg border-border/50 bg-background/90 px-3 py-1.5 text-xs font-normal text-muted-foreground hover:text-foreground"
             >
               <ArrowDown className="size-3.5" />
               回到底部
@@ -2578,7 +2997,9 @@ export function ChatApp() {
           )}
           <Composer
             value={input}
-            onValueChange={setInput}
+            onValueChange={bindValueChange}
+            remotes={remotes}
+            remoteFlash={remoteFlash}
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
             showContinue={canContinue}
@@ -2600,7 +3021,7 @@ export function ChatApp() {
                 ? "正在启动 Agent…"
                 : "对话已绑定执行方，不能切换；请新建对话后再选"
             }
-            projects={projects.map((p) => p.name)}
+            projects={projects.map((p) => p.slug)}
             project={sessionProject}
             isNewSession={isNewSession}
             onProjectChange={(next) => void handleSessionProjectChange(next)}
@@ -2616,6 +3037,8 @@ export function ChatApp() {
                   sessions.find((s) => s.id === previousSessionId)?.kind === "acp" &&
                   !events.some((e) => e.type === "user_message");
                 setDraftRuntimeId(id);
+                liveRef.current.runtimeId = id;
+                setPref("runtimeId", id);
                 if (id === ZAKURA_RUNTIME_ID) {
                   setAcpRuntime(null);
                   if (agentId && previousSessionId && previousUnused) {
@@ -2652,8 +3075,10 @@ export function ChatApp() {
                     if (prepared.runtime.state !== "starting") {
                       setAcpPreparingProfileId(null);
                     }
+                    setPref("runtimeId", id);
                   } catch (err) {
                     setDraftRuntimeId(ZAKURA_RUNTIME_ID);
+                    liveRef.current.runtimeId = ZAKURA_RUNTIME_ID;
                     setAcpRuntime(null);
                     setAcpPreparingProfileId(null);
                     toast.error(err instanceof Error ? err.message : String(err));
@@ -2671,6 +3096,7 @@ export function ChatApp() {
             acpControlPending={acpControlPending}
             onAcpModeChange={(modeId) => {
               if (!agentId || !sessionId || acpControlPending) return;
+              liveRef.current.acpMode = modeId;
               setAcpControlPending("mode");
               void setAcpMode(agentId, sessionId, modeId)
                 .then((status) => {
@@ -2688,6 +3114,7 @@ export function ChatApp() {
             }}
             onAcpModelChange={(modelId) => {
               if (!agentId || !sessionId || acpControlPending) return;
+              liveRef.current.acpModel = modelId;
               setAcpControlPending("model");
               void setAcpModel(agentId, sessionId, modelId)
                 .then((status) => {
@@ -2711,6 +3138,7 @@ export function ChatApp() {
               if (!agentId || !sessionId || acpControlPending) return;
               const configId = acpRuntime?.reasoning?.configId;
               if (!configId) return;
+              liveRef.current.acpReasoning = value;
               setAcpControlPending("reasoning");
               void setAcpConfigOption(agentId, sessionId, configId, value)
                 .then((status) => {
@@ -2758,16 +3186,22 @@ export function ChatApp() {
             skills={composerCap.skills}
             selectedSkills={selectedSkills}
             onToggleSkill={(name) =>
-              setSelectedSkills((prev) =>
-                prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name],
-              )
+              setSelectedSkills((prev) => {
+                const next = prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name];
+                liveRef.current.skills = next;
+                setPref("skills", JSON.stringify(next));
+                return next;
+              })
             }
             toolGroups={composerCap.groups}
             disabledGroupIds={disabledGroupIds}
             onToggleGroup={(id) =>
-              setDisabledGroupIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-              )
+              setDisabledGroupIds((prev) => {
+                const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+                liveRef.current.groups = next;
+                setPref("disabledGroups", JSON.stringify(next));
+                return next;
+              })
             }
             models={modelItems}
             model={displayModel}
@@ -2794,42 +3228,103 @@ export function ChatApp() {
         />
       </div>
 
-      {/* ===== 文件面板（移动端全屏覆盖） ===== */}
-      {filePanelOpen && agentId && (
-        <FilePanel
-          agentId={agentId}
-          fsEnabled={Boolean(agent?.enableComputer)}
-          openRequest={fileRequest}
-          projectPath={activeSession?.project ?? null}
-          overlay={isMobile}
-          onClose={() => setFilePanelOpen(false)}
-        />
-      )}
+      {agentId && mainPane === "files" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <FilePanel
+            agentId={agentId}
+            fsEnabled={Boolean(agent?.enableComputer)}
+            openRequest={fileRequest}
+            projectPath={activeSession?.project ?? null}
+            layout="page"
+            onClose={() => goPane("chat")}
+            onOpenPath={(path, dir) => {
+              setCollabFile(path ? { path, dir } : null);
+              setPref("filePath", path);
+              setPref("fileDir", dir ? "1" : "");
+              setPref("pane", "files");
+            }}
+          />
+        </div>
+      ) : null}
+
+      {mainPane === "tasks" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <AutomationPanel
+            agentId={agentId}
+            projects={projects.map((p) => p.slug)}
+            layout="page"
+            className="h-full"
+            onAskAgentCreate={(goal) => {
+              goPane("chat");
+              handleAskAgentCreateSchedule(goal);
+            }}
+            onOpenSession={(sid) => {
+              if (!agentId) return;
+              goPane("chat");
+              setKindFilter("system");
+              void loadSession(agentId, sid);
+              closeNavOnMobile();
+            }}
+          />
+        </div>
+      ) : null}
+
+      {mainPane === "projects" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <ProjectListPane
+            projects={listedProjects}
+            sessionCountBySlug={sessionCountBySlug}
+            onOpen={(slug) => {
+              enterProject(slug);
+              closeNavOnMobile();
+            }}
+            onSettings={(slug) => {
+              setSettingsProject(slug);
+              goPane("project-settings");
+            }}
+            onCreate={() => setNewProjectOpen(true)}
+            peersByProject={peersByProject}
+            onPickUser={goToPeer}
+          />
+        </div>
+      ) : null}
+
+      {mainPane === "project-settings" && agentId && settingsProjectRec ? (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <ProjectSettingsPane
+            agentId={agentId}
+            project={settingsProjectRec}
+            onSaved={(next) => {
+              setProjects((prev) =>
+                prev
+                  .map((p) => (p.slug === settingsProjectRec.slug ? next : p))
+                  .sort((a, b) => a.name.localeCompare(b.name)),
+              );
+              if (settingsProject !== next.slug) setSettingsProject(next.slug);
+              if (activeProject === settingsProjectRec.slug) setActiveProject(next.slug);
+            }}
+            onOpenDir={openProjectDir}
+            onDelete={(slug) => void handleDeleteProject(slug)}
+          />
+        </div>
+      ) : null}
+      </div>
 
       <Dialog open={newProjectOpen} onOpenChange={setNewProjectOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-base">新建项目</DialogTitle>
           </DialogHeader>
-          <div className="space-y-2 py-1">
-            <Label htmlFor="np-name">名称</Label>
-            <Input
-              id="np-name"
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              placeholder="my-app"
-            />
-            <Label htmlFor="np-git">Git 地址（可选）</Label>
-            <Input
-              id="np-git"
-              value={newProjectGit}
-              onChange={(e) => setNewProjectGit(e.target.value)}
-              placeholder="https://github.com/org/repo.git"
-            />
-            <p className="text-[11px] text-muted-foreground">
-              会创建 /workspace/projects/名称；填写 Git 地址则克隆进去。
-            </p>
-          </div>
+          <NewProjectFields
+            name={newProjectName}
+            onNameChange={setNewProjectName}
+            description={newProjectDesc}
+            onDescriptionChange={setNewProjectDesc}
+            gitUrl={newProjectGit}
+            onGitUrlChange={setNewProjectGit}
+            withWorkspace={newProjectWithWorkspace}
+            onWithWorkspaceChange={setNewProjectWithWorkspace}
+          />
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setNewProjectOpen(false)}>
               取消
@@ -2842,20 +3337,17 @@ export function ChatApp() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!configProject} onOpenChange={(open) => !open && setConfigProject(null)}>
-        <DialogContent className="flex max-h-[min(90vh,44rem)] flex-col sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="text-base">项目 · {configProject}</DialogTitle>
-          </DialogHeader>
-          {agentId && configProject ? (
-            <ProjectConfigPanel
-              agentId={agentId}
-              slug={configProject}
-              className="min-h-0 flex-1 overflow-y-auto pr-1"
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <SessionSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        agentId={agentId}
+        agentName={agent?.name}
+        sessions={sessions}
+        onPick={(hit) => {
+          closeNavOnMobile();
+          void openSearchHit(hit);
+        }}
+      />
 
       <RunLogDrawer open={logOpen} onOpenChange={setLogOpen} events={events} />
 

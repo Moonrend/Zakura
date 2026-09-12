@@ -73,6 +73,8 @@ export const users = pgTable(
      * 早于该时间签发的会话会被 services/user-sessions.ts 判定为失效。
      */
     passwordUpdatedAt: timestamp("password_updated_at", { withTimezone: true }),
+    /** TOTP 启用时间；非空即登录需第二因素。 */
+    totpEnabledAt: timestamp("totp_enabled_at", { withTimezone: true }),
     /**
      * 平台封号：非空即视为已封禁。会话仍可能有效，但鉴权中间件会拒绝。
      * 由 services/account-status.ts 统一读取并缓存。
@@ -80,6 +82,8 @@ export const users = pgTable(
     suspendedAt: timestamp("suspended_at", { withTimezone: true }),
     suspendedReason: text("suspended_reason"),
     suspendedByUserId: text("suspended_by_user_id"),
+    /** 自定义头像写入时间；空则用 identicon。文件在 dataDir/avatars/<userId> */
+    avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
     ...timestamps,
   },
   (t) => [uniqueIndex("users_email").on(t.email)],
@@ -168,6 +172,228 @@ export const tenantInvites = pgTable(
   (t) => [
     uniqueIndex("tenant_invites_token").on(t.tokenHash),
     index("tenant_invites_tenant_email").on(t.tenantId, t.email),
+  ],
+);
+
+/** 邮箱验证 / 重置密码 / MFA 登录票据。只存 hash。 */
+export const authTokens = pgTable(
+  "auth_tokens",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** email_verify | password_reset | mfa_login | sso_exchange */
+    kind: text("kind").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    metaJson: text("meta_json").notNull().default("{}"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("auth_tokens_hash").on(t.tokenHash),
+    index("auth_tokens_user_kind").on(t.userId, t.kind),
+    index("auth_tokens_expires").on(t.expiresAt),
+  ],
+);
+
+/** 服务端会话行。HMAC payload.sid 指向本表。 */
+export const userSessions = pgTable(
+  "user_sessions",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role").notNull(),
+    isPlatformAdmin: boolean("is_platform_admin").notNull().default(false),
+    userAgent: text("user_agent"),
+    ip: text("ip"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("user_sessions_user").on(t.userId, t.createdAt),
+    index("user_sessions_expires").on(t.expiresAt),
+  ],
+);
+
+export const userTotp = pgTable("user_totp", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  secretEnc: text("secret_enc").notNull(),
+  enabledAt: timestamp("enabled_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const userRecoveryCodes = pgTable(
+  "user_recovery_codes",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("user_recovery_codes_user").on(t.userId)],
+);
+
+export const userWebauthnCredentials = pgTable(
+  "user_webauthn_credentials",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    credentialId: text("credential_id").notNull(),
+    publicKey: text("public_key").notNull(),
+    counter: integer("counter").notNull().default(0),
+    name: text("name"),
+    transportsJson: text("transports_json").notNull().default("[]"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("user_webauthn_credential_id").on(t.credentialId),
+    index("user_webauthn_user").on(t.userId),
+  ],
+);
+
+/**
+ * 租户验证域名。join_mode: invite_only | auto_join | sso_required
+ * 已验证域名全局唯一。
+ */
+export const tenantDomains = pgTable(
+  "tenant_domains",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    txtToken: text("txt_token").notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    joinMode: text("join_mode").notNull().default("invite_only"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("tenant_domains_domain").on(t.domain),
+    index("tenant_domains_tenant").on(t.tenantId),
+  ],
+);
+
+/** 每租户一条企业 SSO。protocol: oidc | saml */
+export const tenantSsoConfigs = pgTable(
+  "tenant_sso_configs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    protocol: text("protocol").notNull().default("oidc"),
+    issuer: text("issuer"),
+    clientId: text("client_id"),
+    clientSecretEnc: text("client_secret_enc"),
+    authorizeUrl: text("authorize_url"),
+    tokenUrl: text("token_url"),
+    jwksUrl: text("jwks_url"),
+    userinfoUrl: text("userinfo_url"),
+    scopes: text("scopes").notNull().default("openid email profile"),
+    idpEntityId: text("idp_entity_id"),
+    idpSsoUrl: text("idp_sso_url"),
+    idpCertificateEnc: text("idp_certificate_enc"),
+    jitEnabled: boolean("jit_enabled").notNull().default(true),
+    enforceSso: boolean("enforce_sso").notNull().default(false),
+    defaultRole: text("default_role").notNull().default("member"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("tenant_sso_configs_tenant").on(t.tenantId)],
+);
+
+export const ssoLoginStates = pgTable(
+  "sso_login_states",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    protocol: text("protocol").notNull(),
+    codeVerifier: text("code_verifier"),
+    nonce: text("nonce"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("sso_login_states_expires").on(t.expiresAt)],
+);
+
+export const tenantScimTokens = pgTable(
+  "tenant_scim_tokens",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull().default("SCIM"),
+    tokenHash: text("token_hash").notNull(),
+    tokenPrefix: text("token_prefix").notNull(),
+    groupRoleMap: text("group_role_map").notNull().default("{}"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_scim_tokens_hash").on(t.tokenHash),
+    index("tenant_scim_tokens_tenant").on(t.tenantId),
+  ],
+);
+
+export const scimUserMappings = pgTable(
+  "scim_user_mappings",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    externalId: text("external_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("scim_user_mappings_ext").on(t.tenantId, t.externalId),
+    uniqueIndex("scim_user_mappings_user").on(t.tenantId, t.userId),
+  ],
+);
+
+/** 账户 / SSO / SCIM / 成员变更审计。网络审计仍用 network_audit_logs。 */
+export const securityAuditLogs = pgTable(
+  "security_audit_logs",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** user | scim | system | admin */
+    actorType: text("actor_type").notNull(),
+    actorId: text("actor_id"),
+    action: text("action").notNull(),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    detailJson: text("detail_json").notNull().default("{}"),
+    ip: text("ip"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("security_audit_tenant_time").on(t.tenantId, t.createdAt),
+    index("security_audit_action").on(t.tenantId, t.action),
   ],
 );
 
@@ -1640,6 +1866,17 @@ export const schema = {
   oauthLoginStates,
   tenantMemberships,
   tenantInvites,
+  authTokens,
+  userSessions,
+  userTotp,
+  userRecoveryCodes,
+  userWebauthnCredentials,
+  tenantDomains,
+  tenantSsoConfigs,
+  ssoLoginStates,
+  tenantScimTokens,
+  scimUserMappings,
+  securityAuditLogs,
   memoryProviders,
   modelUpstreams,
   modelRoutes,
@@ -1699,6 +1936,12 @@ export type OauthIdentity = typeof oauthIdentities.$inferSelect;
 export type OauthLoginState = typeof oauthLoginStates.$inferSelect;
 export type TenantMembership = typeof tenantMemberships.$inferSelect;
 export type TenantInvite = typeof tenantInvites.$inferSelect;
+export type AuthToken = typeof authTokens.$inferSelect;
+export type UserSessionRow = typeof userSessions.$inferSelect;
+export type TenantDomain = typeof tenantDomains.$inferSelect;
+export type TenantSsoConfig = typeof tenantSsoConfigs.$inferSelect;
+export type TenantScimToken = typeof tenantScimTokens.$inferSelect;
+export type SecurityAuditLog = typeof securityAuditLogs.$inferSelect;
 export type MemoryProvider = typeof memoryProviders.$inferSelect;
 export type ModelUpstream = typeof modelUpstreams.$inferSelect;
 export type ModelRoute = typeof modelRoutes.$inferSelect;
@@ -1866,6 +2109,35 @@ export const agentAutomationRuns = pgTable(
   ],
 );
 
+/**
+ * Agent 项目：对话分组 + 说明，不必先有工作区目录。
+ * slug 与会话/定时任务的 project 字段对齐；hasWorkspace 才对应 /workspace/projects/<slug>。
+ */
+export const agentProjects = pgTable(
+  "agent_projects",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    /** 注入对话的项目说明；与目录里的 AGENTS.md 独立，可叠加 */
+    instructions: text("instructions").notNull().default(""),
+    hasWorkspace: boolean("has_workspace").notNull().default(false),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agent_projects_agent_slug").on(t.agentId, t.slug),
+    index("agent_projects_agent").on(t.agentId),
+    index("agent_projects_tenant").on(t.tenantId),
+  ],
+);
+
 export type PortExposure = typeof portExposures.$inferSelect;
 export type NetworkAuditLog = typeof networkAuditLogs.$inferSelect;
 export type CloudAgentSession = typeof cloudAgentSessions.$inferSelect;
@@ -1879,4 +2151,5 @@ export type SkillSourceTokenRow = typeof skillSourceTokens.$inferSelect;
 export type AgentSchedule = typeof agentSchedules.$inferSelect;
 export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
+export type AgentProjectRow = typeof agentProjects.$inferSelect;
 

@@ -18,7 +18,7 @@ import { toast } from "sonner";
 import { api, setSession } from "@/lib/api";
 import { useMe } from "@/components/me-context";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { UserAvatar } from "@/components/user-avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -70,10 +70,6 @@ type Invite = {
 
 const roleLabels = { owner: "所有者", admin: "管理员", member: "成员" } as const;
 
-function initials(name: string | null, email: string) {
-  return (name?.trim() || email).slice(0, 2).toUpperCase();
-}
-
 export default function TeamSettingsPage() {
   const me = useMe();
   const router = useRouter();
@@ -88,6 +84,7 @@ export default function TeamSettingsPage() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"member" | "admin">("member");
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [inviteEmailed, setInviteEmailed] = useState(false);
   const [inviteBusy, setInviteBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -160,14 +157,15 @@ export default function TeamSettingsPage() {
     if (!inviteEmail.trim()) return toast.error("请填写邮箱");
     setInviteBusy(true);
     try {
-      const result = await api<{ acceptUrl: string }>("/api/tenant/invites", {
+      const result = await api<{ acceptUrl: string; emailed?: boolean }>("/api/tenant/invites", {
         method: "POST",
         json: { email: inviteEmail.trim(), role: inviteRole },
       });
       setInviteUrl(result.acceptUrl);
+      setInviteEmailed(Boolean(result.emailed));
       setInviteEmail("");
       await load();
-      toast.success("邀请已创建");
+      toast.success(result.emailed ? "邀请邮件已发送" : "邀请已创建");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -267,12 +265,16 @@ export default function TeamSettingsPage() {
         <SettingsSection
           title="成员"
           description={memberSummary}
-          action={<Button size="sm" onClick={() => { setInviteUrl(null); setInviteOpen(true); }}><MailPlus className="size-3.5" />邀请成员</Button>}
+          action={<Button size="sm" onClick={() => { setInviteUrl(null); setInviteEmailed(false); setInviteOpen(true); }}><MailPlus className="size-3.5" />邀请成员</Button>}
         >
           <div className="divide-y">
             {members.map((member) => (
               <div key={member.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                <Avatar><AvatarFallback>{initials(member.user.name, member.user.email)}</AvatarFallback></Avatar>
+                <UserAvatar
+                  userId={member.user.id}
+                  name={member.user.name}
+                  email={member.user.email}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{member.user.name || member.user.email}</div>
                   <div className="truncate text-xs text-muted-foreground">{member.user.email}</div>
@@ -349,7 +351,11 @@ export default function TeamSettingsPage() {
           <DialogHeader><DialogTitle>邀请成员加入 {team.name}</DialogTitle></DialogHeader>
           {inviteUrl ? (
             <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">复制邀请链接并发送给成员。链接仅在这里显示一次。</p>
+              <p className="text-sm text-muted-foreground">
+                {inviteEmailed
+                  ? "邀请邮件已发送，仍可复制链接发给对方。链接仅在这里显示一次。"
+                  : "复制邀请链接并发送给成员。若已配置系统邮件，对方也会收到邮件。链接仅在这里显示一次。"}
+              </p>
               <code className="block break-all rounded-lg border bg-muted/40 p-3 font-mono text-xs">{inviteUrl}</code>
               <Button variant="outline" onClick={async () => { await navigator.clipboard.writeText(inviteUrl); toast.success("邀请链接已复制"); }}><Copy className="size-3.5" />复制链接</Button>
             </div>

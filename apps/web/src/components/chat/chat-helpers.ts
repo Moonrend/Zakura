@@ -9,6 +9,7 @@ import {
   estimateEventPayloadTokens,
   estimateTextTokens,
   estimateTokensFromChars,
+  splitActiveSessions,
 } from "@zakura/shared";
 import type { CloudAgentEvent } from "@zakura/shared";
 import {
@@ -56,24 +57,41 @@ export const KIND_FILTER_OPTIONS: Array<{ value: CloudAgentSessionKind | "all"; 
   { value: "all", label: "全部类型" },
 ];
 
-export function groupSessions(sessions: CloudSession[]): Array<{
+/** 正在看的会话即使被移出当前文件夹也钉在列表里，避免行卸载打断重命名。 */
+export function pinViewingSession<T extends { id: string }>(
+  listed: T[],
+  viewing: T | null | undefined,
+): T[] {
+  if (!viewing) return listed;
+  if (listed.some((s) => s.id === viewing.id)) return listed;
+  return [viewing, ...listed];
+}
+
+export function groupSessions(
+  sessions: CloudSession[],
+  activeIds?: Iterable<string>,
+): Array<{
   label: string;
   items: CloudSession[];
 }> {
+  const { active, rest } = activeIds
+    ? splitActiveSessions(sessions, activeIds)
+    : { active: [] as CloudSession[], rest: sessions };
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const groups = [
+    { label: "正在查看", items: active },
     { label: "今天", items: [] as CloudSession[] },
     { label: "昨天", items: [] as CloudSession[] },
     { label: "近 7 天", items: [] as CloudSession[] },
     { label: "更早", items: [] as CloudSession[] },
   ];
-  for (const s of sessions) {
+  for (const s of rest) {
     const t = +new Date(s.updatedAt);
-    if (t >= startOfDay) groups[0]!.items.push(s);
-    else if (t >= startOfDay - 86_400_000) groups[1]!.items.push(s);
-    else if (t >= startOfDay - 6 * 86_400_000) groups[2]!.items.push(s);
-    else groups[3]!.items.push(s);
+    if (t >= startOfDay) groups[1]!.items.push(s);
+    else if (t >= startOfDay - 86_400_000) groups[2]!.items.push(s);
+    else if (t >= startOfDay - 6 * 86_400_000) groups[3]!.items.push(s);
+    else groups[4]!.items.push(s);
   }
   return groups.filter((g) => g.items.length > 0);
 }

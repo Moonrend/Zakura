@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, Loader2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import {
   MODEL_UPSTREAM_DEFAULT_BASE_URLS,
+  isAgentSubscriptionProtocol,
   type ModelUpstreamProtocol,
 } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,11 @@ export function StepAiProvider({
     const source = protocols.length
       ? protocols
       : SUGGESTED_PROTOCOLS.map((protocol) => ({ protocol, name: protocol }));
-    const suggested = source.filter((item) => SUGGESTED_PROTOCOLS.includes(item.protocol));
+    const suggested = source.filter(
+      (item) =>
+        SUGGESTED_PROTOCOLS.includes(item.protocol) &&
+        !isAgentSubscriptionProtocol(item.protocol),
+    );
     return suggested.length ? suggested : source;
   }, [protocols]);
 

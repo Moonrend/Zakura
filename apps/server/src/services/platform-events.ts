@@ -54,6 +54,7 @@ export type PlatformEvent =
     }
   | { type: "runner_node"; ts: number; nodeId: string }
   | { type: "agent_fs_changed"; ts: number; agentId: string; path: string }
+  | { type: "agent_config_changed"; ts: number; agentId: string }
   | {
       /** Cloud Agent / Gateway 会话列表变化（新建或有实质消息） */
       type: "cloud_session_changed";
@@ -99,6 +100,7 @@ type PlatformEventInput =
   | Omit<Extract<PlatformEvent, { type: "platform_service_progress" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "runner_node" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "agent_fs_changed" }>, "ts">
+  | Omit<Extract<PlatformEvent, { type: "agent_config_changed" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "cloud_session_changed" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "connector_inbound" }>, "ts">
   | Omit<Extract<PlatformEvent, { type: "browser_notify" }>, "ts">

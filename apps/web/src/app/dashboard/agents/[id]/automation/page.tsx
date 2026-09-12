@@ -20,7 +20,7 @@ export default function AgentAutomationPage() {
     let cancelled = false;
     listAgentProjects(id)
       .then((res) => {
-        if (!cancelled) setProjects(res.projects.map((p) => p.name));
+        if (!cancelled) setProjects(res.projects.map((p) => p.slug));
       })
       .catch(() => {
         if (!cancelled) setProjects([]);

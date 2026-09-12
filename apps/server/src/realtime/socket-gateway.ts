@@ -8,16 +8,36 @@
  * - 跨实例扇出沿用既有设施：会话事件由 CloudAgentSessionStore 的 Redis
  *   pub/sub 负责，平台事件仍是进程内 bus（与迁移前一致）。
  */
+import { eq } from "drizzle-orm";
 import type { Server as HttpServer } from "node:http";
 import { Server as SocketIoServer, type Socket } from "socket.io";
 import type { Db } from "../db/client.js";
 import type { AppConfig } from "../config.js";
 import type { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
 import { getTelemetry, idsFromSession, recordPlatformFault, withLogContext } from "@zakura/core";
-import type { CloudAgentEvent } from "@zakura/shared";
+import { isPresenceUser, type CloudAgentEvent } from "@zakura/shared";
 import { platformEvents, type PlatformEvent } from "../services/platform-events.js";
 import { authenticateApiKey, verifySession } from "../services/auth.js";
 import { checkSessionSuspended } from "../services/account-status.js";
+import { users } from "../db/schema.js";
+import {
+  onPresenceFanout,
+  parsePresencePatch,
+  removePresence,
+  snapshotPresence,
+  upsertPresence,
+} from "./presence.js";
+import {
+  applyYjsUpdate,
+  decodeYjsUpdate,
+  encodeYjsUpdate,
+  onYjsAwareness,
+  onYjsUpdate,
+  relayYjsAwareness,
+  subscribeYjs,
+  unsubscribeYjs,
+  yjsDiffAgainst,
+} from "./yjs-sync.js";
 
 /** 握手通过后挂在 socket 上的身份 */
 type SocketSession = {
@@ -37,12 +57,17 @@ type SubscribeAck = (res: { ok: true; afterSeq: number } | { ok: false; error: s
 
 const tenantRoom = (tenantId: string) => `tenant:${tenantId}`;
 const sessionRoom = (sessionId: string) => `session:${sessionId}`;
+const syncRoom = (sessionId: string) => `sync:${sessionId}`;
+
+const PRESENCE_MIN_MS = 150;
 
 /** 网关实际用到的 store 能力面（收窄以便测试注入假实现） */
 export type SocketGatewayStore = Pick<
   CloudAgentSessionStore,
   "getSession" | "listEvents" | "subscribe"
->;
+> & {
+  updateSession?: CloudAgentSessionStore["updateSession"];
+};
 
 export function createSocketGateway(
   httpServer: HttpServer,
@@ -137,6 +162,35 @@ export function createSocketGateway(
     entry.unsub();
   }
 
+  const stopPresence = onPresenceFanout((msg) => {
+    if (msg.kind === "update") {
+      io.to(tenantRoom(msg.tenantId)).emit("presence:update", msg.loc);
+      return;
+    }
+    io.to(tenantRoom(msg.tenantId)).emit("presence:leave", { userId: msg.userId });
+  });
+
+  const stopYjs = onYjsUpdate((sessionId, update, fromSocketId) => {
+    io.to(syncRoom(sessionId)).emit("sync:update", {
+      sessionId,
+      update: encodeYjsUpdate(update),
+      from: fromSocketId,
+    });
+  });
+  const stopAwareness = onYjsAwareness((sessionId, update, fromSocketId) => {
+    io.to(syncRoom(sessionId)).emit("sync:awareness", {
+      sessionId,
+      update: encodeYjsUpdate(update),
+      from: fromSocketId,
+    });
+  });
+
+  io.engine.on("close", () => {
+    stopPresence();
+    stopYjs();
+    stopAwareness();
+  });
+
   io.on("connection", (socket: Socket) => {
     const session = socket.data.session as SocketSession | undefined;
     if (!session) {
@@ -149,6 +203,28 @@ export function createSocketGateway(
 
     /** sessionId → 取消 store 订阅 */
     const sessionSubs = new Map<string, () => void>();
+    const yjsSubs = new Set<string>();
+    let lastPresenceAt = 0;
+    let profile = { name: session.email, email: session.email, avatarRev: 0 };
+
+    if (isPresenceUser(session.userId)) {
+      void (async () => {
+        try {
+          const user = await db.query.users.findFirst({
+            where: eq(users.id, session.userId),
+          });
+          profile = {
+            name: user?.name?.trim() || session.email,
+            email: user?.email || session.email,
+            avatarRev: user?.avatarUpdatedAt ? user.avatarUpdatedAt.getTime() : 0,
+          };
+          const snap = await snapshotPresence(session.tenantId);
+          socket.emit("presence:state", snap);
+        } catch (err) {
+          recordPlatformFault("presence.snapshot", err, { subsystem: "realtime" });
+        }
+      })();
+    }
 
     const dropSession = (sessionId: string) => {
       const unsub = sessionSubs.get(sessionId);
@@ -218,6 +294,88 @@ export function createSocketGateway(
       if (sessionId) dropSession(sessionId);
     });
 
+    socket.on("presence:update", (payload: unknown) => {
+      if (!isPresenceUser(session.userId)) return;
+      const now = Date.now();
+      if (now - lastPresenceAt < PRESENCE_MIN_MS) return;
+      lastPresenceAt = now;
+      const patch = parsePresencePatch(payload);
+      void upsertPresence(session.tenantId, socket.id, session.userId, {
+        ...patch,
+        name: profile.name,
+        email: profile.email,
+      });
+    });
+
+    const dropYjs = (sessionId: string) => {
+      if (!yjsSubs.has(sessionId)) return;
+      yjsSubs.delete(sessionId);
+      unsubscribeYjs(sessionId, store);
+      void socket.leave(syncRoom(sessionId));
+    };
+
+    socket.on(
+      "sync:sub",
+      (
+        payload: { agentId?: unknown; sessionId?: unknown; sv?: unknown },
+        ack?: (res: { ok: true; update: string; sv: string } | { ok: false; error: string }) => void,
+      ) => {
+        void withLogContext(idsFromSession(session), async () => {
+          const agentId = typeof payload?.agentId === "string" ? payload.agentId : "";
+          const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+          if (!agentId || !sessionId) {
+            ack?.({ ok: false, error: "agentId 与 sessionId 必填" });
+            return;
+          }
+          const sv = decodeYjsUpdate(payload?.sv);
+          // 同连接重复 sub（含客户端 connect 重放）只回差量，避免 refs 泄漏
+          if (yjsSubs.has(sessionId)) {
+            const diff = yjsDiffAgainst(sessionId, sv);
+            if (diff) {
+              ack?.({
+                ok: true,
+                update: encodeYjsUpdate(diff.update),
+                sv: encodeYjsUpdate(diff.sv),
+              });
+              return;
+            }
+          }
+          const res = await subscribeYjs(session.tenantId, agentId, sessionId, store, sv);
+          if (!res.ok) {
+            ack?.(res);
+            return;
+          }
+          yjsSubs.add(sessionId);
+          void socket.join(syncRoom(sessionId));
+          ack?.({
+            ok: true,
+            update: encodeYjsUpdate(res.update),
+            sv: encodeYjsUpdate(res.sv),
+          });
+        });
+      },
+    );
+
+    socket.on("sync:unsub", (payload: { sessionId?: unknown }) => {
+      const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+      if (sessionId) dropYjs(sessionId);
+    });
+
+    socket.on("sync:update", (payload: { sessionId?: unknown; update?: unknown }) => {
+      // 差量不能丢：连续 setPref / 快速输入若被节流，对端会永远缺那一帧。
+      const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+      const update = decodeYjsUpdate(payload?.update);
+      if (!sessionId || !update || !yjsSubs.has(sessionId)) return;
+      applyYjsUpdate(sessionId, update, socket.id, store);
+    });
+
+    socket.on("sync:awareness", (payload: { sessionId?: unknown; update?: unknown }) => {
+      const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
+      const update = decodeYjsUpdate(payload?.update);
+      if (!sessionId || !update || !yjsSubs.has(sessionId)) return;
+      relayYjsAwareness(sessionId, update, socket.id);
+    });
+
     socket.on("disconnect", () => {
       withLogContext(idsFromSession(session), () => {
         for (const unsub of sessionSubs.values()) {
@@ -228,7 +386,12 @@ export function createSocketGateway(
           }
         }
         sessionSubs.clear();
+        for (const sid of yjsSubs) unsubscribeYjs(sid, store);
+        yjsSubs.clear();
         releaseTenant(session.tenantId);
+        if (isPresenceUser(session.userId)) {
+          void removePresence(session.tenantId, socket.id);
+        }
       });
     });
   });

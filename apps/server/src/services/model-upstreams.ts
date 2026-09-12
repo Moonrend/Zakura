@@ -1,9 +1,11 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
   OPENAI_COMPATIBLE_PROTOCOLS,
+  AGENT_SUBSCRIPTION_PROTOCOLS,
   MODEL_UPSTREAM_PROTOCOLS,
   MODEL_UPSTREAM_PROTOCOL_META,
   applyUpstreamProtocolDefaults,
+  isAgentSubscriptionProtocol,
   type ModelUpstreamProtocol,
 } from "@zakura/shared";
 import type { Db } from "../db/client.js";
@@ -27,6 +29,7 @@ function slugify(name: string): string {
 const OPTIONAL_API_KEY_PROTOCOLS = new Set<ModelUpstreamProtocol>([
   "custom",
   "ollama",
+  ...AGENT_SUBSCRIPTION_PROTOCOLS,
 ]);
 
 function requiresApiKey(protocol: ModelUpstreamProtocol): boolean {
@@ -43,15 +46,28 @@ function requiresApiKey(protocol: ModelUpstreamProtocol): boolean {
 
 export function serializeUpstream(row: ModelUpstream) {
   const protocol = row.protocol as ModelUpstreamProtocol;
-  const config = parseUpstreamConfig(parseJsonRecord(row.configJson), protocol);
+  const raw = parseJsonRecord(row.configJson);
+  const publicConfig = { ...raw };
+  delete publicConfig.oauthEnc;
+  const config = parseUpstreamConfig(publicConfig, protocol);
+  const oauth = config.oauth;
   return {
     id: row.id,
     tenantId: row.tenantId,
     name: row.name,
     slug: row.slug,
     protocol,
-    config: parseJsonRecord(row.configJson),
-    resolvedConfig: config,
+    config: publicConfig,
+    resolvedConfig: { ...config, oauthEnc: undefined },
+    auth: oauth?.loggedIn
+      ? {
+          loggedIn: true,
+          email: oauth.email,
+          expiresAt: oauth.expiresAt,
+          accountId: oauth.accountId,
+          loginKind: oauth.loginKind,
+        }
+      : { loggedIn: false },
     status: row.status,
     lastError: row.lastError,
     createdAt: row.createdAt,
@@ -130,6 +146,8 @@ export class ModelUpstreamsService {
       region: parsed.region,
       extraHeaders: parsed.extraHeaders,
       timeoutMs: parsed.timeoutMs,
+      oauthEnc: parsed.oauthEnc ?? (typeof config.oauthEnc === "string" ? config.oauthEnc : undefined),
+      oauth: parsed.oauth ?? (config.oauth && typeof config.oauth === "object" ? config.oauth : undefined),
     };
   }
 
@@ -198,6 +216,8 @@ export class ModelUpstreamsService {
       ) {
         merged.apiKey = prev.apiKey;
       }
+      merged.oauthEnc = prev.oauthEnc;
+      merged.oauth = prev.oauth;
       updates.configJson = JSON.stringify(this.validateConfig(protocol, merged));
     }
     const [next] = await this.db
@@ -235,6 +255,20 @@ export class ModelUpstreamsService {
     const cfg = parseUpstreamConfig(parseJsonRecord(row.configJson), protocol);
     if (!cfg.baseUrl) {
       return { status: "unhealthy" as const, message: "baseUrl 未配置" };
+    }
+    if (isAgentSubscriptionProtocol(protocol)) {
+      const { tryBearerFromConfig } = await import("./model-upstream-auth/tokens.js");
+      const ok = Boolean(cfg.oauth?.loggedIn || tryBearerFromConfig(cfg));
+      const message = ok ? "已登录" : "尚未登录订阅";
+      await this.db
+        .update(modelUpstreams)
+        .set({
+          status: ok ? "ready" : "error",
+          lastError: ok ? null : message,
+          updatedAt: new Date(),
+        })
+        .where(eq(modelUpstreams.id, id));
+      return { status: ok ? ("healthy" as const) : ("unhealthy" as const), message };
     }
     try {
       const headers: Record<string, string> = { Accept: "application/json" };
@@ -340,6 +374,11 @@ export class ModelUpstreamsService {
     const protocol = row.protocol as ModelUpstreamProtocol;
     const cfg = parseUpstreamConfig(parseJsonRecord(row.configJson), protocol);
     if (!cfg.baseUrl) throw new Error("baseUrl 未配置");
+
+    if (isAgentSubscriptionProtocol(protocol)) {
+      const { listAgentRemoteModels } = await import("./model-upstream-auth/remote-models.js");
+      return listAgentRemoteModels(protocol, cfg);
+    }
 
     if (protocol === "anthropic") {
       return {

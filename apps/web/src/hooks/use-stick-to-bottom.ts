@@ -15,7 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export function useStickToBottom<
   TScroll extends HTMLElement,
   TContent extends HTMLElement,
->(threshold = 140) {
+>(threshold = 140, paused = false) {
   const [scrollEl, setScrollEl] = useState<TScroll | null>(null);
   const [contentEl, setContentEl] = useState<TContent | null>(null);
   const stickRef = useRef(true);
@@ -48,7 +48,7 @@ export function useStickToBottom<
   );
 
   useEffect(() => {
-    if (!scrollEl) return;
+    if (!scrollEl || paused) return;
     const onScroll = () => {
       const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
       const near = distance <= threshold;
@@ -58,17 +58,17 @@ export function useStickToBottom<
     onScroll();
     scrollEl.addEventListener("scroll", onScroll, { passive: true });
     return () => scrollEl.removeEventListener("scroll", onScroll);
-  }, [scrollEl, threshold]);
+  }, [scrollEl, threshold, paused]);
 
   useEffect(() => {
-    if (!scrollEl || !contentEl || typeof ResizeObserver === "undefined") return;
+    if (paused || !scrollEl || !contentEl || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       if (!stickRef.current) return;
       scrollEl.scrollTop = scrollEl.scrollHeight;
     });
     observer.observe(contentEl);
     return () => observer.disconnect();
-  }, [scrollEl, contentEl]);
+  }, [scrollEl, contentEl, paused]);
 
   return { scrollRef, contentRef, scrollEl, atBottom, scrollToBottom, sync };
 }

@@ -40,9 +40,17 @@ import type {
   TimelineMemoryItem,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
+import {
+  remoteOnOtherSibling,
+  remoteOnOtherVariant,
+  type PresenceLocation,
+} from "@zakura/shared";
 import { ChatMarkdown } from "@/components/markdown/chat-markdown";
 import { ToolActivity, type ActivityStep } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
+import { UserAvatar } from "@/components/user-avatar";
+import { peopleFromRemotes, PresencePeekAvatars } from "./presence-avatars";
+import type { RemoteAwareness } from "@/lib/sync/session-doc";
 
 function isImageMime(mime: string, fileName: string): boolean {
   if (mime.startsWith("image/")) return true;
@@ -66,7 +74,7 @@ function AttachmentChips({
           variant="outline"
           size="sm"
           onClick={() => onOpenFile?.(a.path)}
-          className="h-auto gap-1.5 rounded-lg border-border/60 bg-muted/30 px-2.5 py-1.5 text-xs font-normal text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+          className="h-auto gap-1.5 rounded-lg border-border/40 bg-transparent px-2.5 py-1.5 text-xs font-normal text-muted-foreground hover:bg-muted/40 hover:text-foreground"
           title={a.path}
         >
           {a.kind === "image" ? (
@@ -122,11 +130,11 @@ function SharedFileCards({
         return (
           <div
             key={f.shareId || f.url}
-            className="overflow-hidden rounded-lg border border-border/70 bg-muted/20"
+            className="overflow-hidden rounded-xl border border-border/50"
           >
             {image ? <SharedFilePreview url={f.url} fileName={f.fileName} /> : null}
             <div className="flex items-center gap-2.5 px-3 py-2.5">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-background/80 text-muted-foreground">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground">
                 {image ? (
                   <ImageIcon className="h-4 w-4" />
                 ) : (
@@ -223,38 +231,45 @@ function Pager({
   total,
   onSelect,
   disabled,
+  aside,
 }: {
   index: number;
   total: number;
   onSelect: (nextIndex: number) => void;
   disabled?: boolean;
+  aside?: ReactNode;
 }) {
-  if (total <= 1) return null;
+  if (total <= 1 && !aside) return null;
   return (
-    <span className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        className="text-muted-foreground"
-        disabled={disabled || index <= 0}
-        onClick={() => onSelect(index - 1)}
-        aria-label="上一个"
-      >
-        <ChevronLeft />
-      </Button>
-      <span className="min-w-8 text-center tabular-nums">
-        {index + 1}/{total}
-      </span>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        className="text-muted-foreground"
-        disabled={disabled || index >= total - 1}
-        onClick={() => onSelect(index + 1)}
-        aria-label="下一个"
-      >
-        <ChevronRight />
-      </Button>
+    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+      {total > 1 ? (
+        <>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="text-muted-foreground"
+            disabled={disabled || index <= 0}
+            onClick={() => onSelect(index - 1)}
+            aria-label="上一个"
+          >
+            <ChevronLeft />
+          </Button>
+          <span className="min-w-8 text-center tabular-nums">
+            {index + 1}/{total}
+          </span>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            className="text-muted-foreground"
+            disabled={disabled || index >= total - 1}
+            onClick={() => onSelect(index + 1)}
+            aria-label="下一个"
+          >
+            <ChevronRight />
+          </Button>
+        </>
+      ) : null}
+      {aside}
     </span>
   );
 }
@@ -300,6 +315,7 @@ function AnswerToolbar({
   onRegenerate,
   onSelectVariant,
   onOpenSources,
+  pagerAside,
 }: {
   copyText: string;
   sources: CloudAgentContextSourceItem[];
@@ -312,13 +328,14 @@ function AnswerToolbar({
   onRegenerate: () => void;
   onSelectVariant: (runId: string) => void;
   onOpenSources: () => void;
+  pagerAside?: ReactNode;
 }) {
   const hasLeft =
     Boolean(copyText) ||
     showRegenerate ||
     sources.length > 0 ||
     memoryItems.length > 0;
-  const hasRight = variants.length > 1;
+  const hasRight = variants.length > 1 || Boolean(pagerAside);
   if (!hasLeft && !hasRight) return null;
 
   return (
@@ -354,6 +371,7 @@ function AnswerToolbar({
         index={variantIndex}
         total={variants.length}
         disabled={runActive}
+        aside={pagerAside}
         onSelect={(i) => {
           const target = variants[i];
           if (target) onSelectVariant(target);
@@ -394,7 +412,7 @@ function ElicitationCard({
   const [values, setValues] = useState<Record<string, string>>({});
   const fields = item.fields ?? [];
   return (
-    <div className="my-2 space-y-2 rounded-lg border border-border bg-card px-3 py-2.5 text-sm">
+    <div className="my-2 space-y-2 rounded-lg border border-border/50 px-3 py-2.5 text-sm">
       <div className="font-medium">
         {item.message || (item.mode === "url" ? "需要打开链接" : "需要补充信息")}
       </div>
@@ -498,6 +516,9 @@ function renderRunItems(
     sessionId?: string | null;
     onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
     onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
+    uiKey?: string;
+    ui?: Record<string, boolean>;
+    setUiFlag?: (key: string, value: boolean) => void;
   },
 ) {
   const blocks: ReactNode[] = [];
@@ -512,6 +533,9 @@ function renderRunItems(
         onOpenFile={opts.onOpenFile}
         agentId={opts.agentId}
         sessionId={opts.sessionId}
+        uiKey={opts.uiKey}
+        ui={opts.ui}
+        setUiFlag={opts.setUiFlag}
       />,
     );
     stepBuf = [];
@@ -610,7 +634,7 @@ function renderRunItems(
           {it.attachments?.length ? (
             <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
           ) : null}
-          <div className="max-w-[min(85%,36rem)] rounded-xl bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
+          <div className="surface-2 max-w-[min(85%,36rem)] rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground">
             <div className="whitespace-pre-wrap break-words">{it.content}</div>
           </div>
         </div>,
@@ -628,7 +652,7 @@ function renderRunItems(
       blocks.push(
         <ol
           key={`plan-${it.id}`}
-          className="my-2 space-y-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm"
+          className="my-2 space-y-1 rounded-lg px-1 py-1 text-sm"
         >
           {it.entries.map((e, i) => (
             <li key={`${it.id}-${i}`} className="flex gap-2 text-muted-foreground">
@@ -642,7 +666,7 @@ function renderRunItems(
       blocks.push(
         <div
           key={`perm-${it.id}`}
-          className="my-2 space-y-2 rounded-lg border border-border bg-card px-3 py-2.5 text-sm"
+          className="my-2 space-y-2 rounded-lg border border-border/50 px-3 py-2.5 text-sm"
         >
           <div className="font-medium">{it.title || "需要授权"}</div>
           {it.resolved ? (
@@ -797,6 +821,10 @@ export function ChatMessages({
   onOpenFile,
   onPermission,
   onElicitation,
+  ui,
+  setUiFlag,
+  remotes = [],
+  peers = [],
 }: {
   turns: ConversationTurn[];
   runActive: boolean;
@@ -820,6 +848,10 @@ export function ChatMessages({
   onOpenFile?: (path: string) => void;
   onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
   onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
+  ui?: Record<string, boolean>;
+  setUiFlag?: (key: string, value: boolean) => void;
+  remotes?: RemoteAwareness[];
+  peers?: PresenceLocation[];
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
@@ -864,30 +896,39 @@ export function ChatMessages({
           const sharedFiles = collectTurnSharedFiles(runItems);
           const copyText = turnAssistantText(runItems);
           const memoryItems = turnMemoryItems(runItems);
+          const otherVariantPeople = peopleFromRemotes(remotes, peers, (r) =>
+            remoteOnOtherVariant(r.view, {
+              messageId: turn.message.id,
+              runId: turn.activeRunId,
+              variants: turn.variants,
+            }),
+          );
           const showActions =
-            !turnRunning &&
-            (Boolean(copyText) ||
-              sources.length > 0 ||
-              memoryItems.length > 0 ||
-              turn.variants.length > 1 ||
-              (isLast && canAct));
+            otherVariantPeople.length > 0 ||
+            (!turnRunning &&
+              (Boolean(copyText) ||
+                sources.length > 0 ||
+                memoryItems.length > 0 ||
+                turn.variants.length > 1 ||
+                (isLast && canAct)));
 
           return (
             <div
               key={turn.message.id}
               id={`turn-${turn.message.id}`}
-              className="animate-rise flex flex-col gap-3"
+              data-turn-seq={turn.message.seq}
+              className="animate-rise relative flex flex-col gap-3"
               style={{ contentVisibility: "auto", containIntrinsicSize: "auto 200px" }}
             >
               {turn.message.continue ? null : editing ? (
-                <div className="animate-rise ml-auto flex items-center gap-2 rounded-full border border-primary/35 bg-primary/10 px-3 py-1.5 text-xs text-muted-foreground">
-                  <Pencil className="size-3 shrink-0 text-primary" />
+                <div className="animate-rise ml-auto flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground">
+                  <Pencil className="size-3 shrink-0" />
                   <span>正在下方输入框编辑这条消息</span>
                 </div>
               ) : (
                 <div className="group flex flex-col items-end gap-1.5">
                   <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
-                  <div className="flex items-end justify-end gap-1">
+                  <div className="flex items-end justify-end gap-1.5">
                     <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:translate-x-1.5 md:opacity-0 md:transition-[opacity,transform] md:duration-200 md:ease-fluid md:group-hover:translate-x-0 md:group-hover:opacity-100 md:focus-within:translate-x-0 md:focus-within:opacity-100">
                       <CopyButton text={turn.message.content} />
                       <Tooltip>
@@ -915,10 +956,35 @@ export function ChatMessages({
                         <TooltipContent>编辑</TooltipContent>
                       </Tooltip>
                     </div>
-                    <div className="max-w-[min(85%,36rem)] rounded-xl bg-muted/90 px-4 py-2.5 text-[15px] leading-7 tracking-[-0.01em] text-foreground shadow-[inset_0_1px_0_oklch(1_0_0/6%)]">
-                      <div className="whitespace-pre-wrap break-words">
-                        {turn.message.content}
+                    <div className="relative">
+                      <div className="surface-2 max-w-[min(85%,36rem)] rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground">
+                        <div className="whitespace-pre-wrap break-words">
+                          {turn.message.content}
+                        </div>
                       </div>
+                      {turn.message.userId ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                className="absolute right-1 bottom-1 rounded-full opacity-0 transition-opacity duration-200 ease-fluid group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-70"
+                                aria-label={turn.message.userName || "发送者"}
+                              />
+                            }
+                          >
+                            <UserAvatar
+                              userId={turn.message.userId}
+                              name={turn.message.userName}
+                              size="sm"
+                              className="size-4"
+                            />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {turn.message.userName || "成员"}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : null}
                     </div>
                   </div>
                   {turn.siblings.length > 1 && (
@@ -926,6 +992,24 @@ export function ChatMessages({
                       index={turn.siblingIndex}
                       total={turn.siblings.length}
                       disabled={runActive}
+                      aside={
+                        <PresencePeekAvatars
+                          people={peopleFromRemotes(remotes, peers, (r) =>
+                            remoteOnOtherSibling(r.view, {
+                              messageId: turn.message.id,
+                              parentKey: turn.message.parentKey,
+                              siblings: turn.siblings,
+                            }),
+                          )}
+                          hint="在看另一页"
+                          onPick={(userId) => {
+                            const hit = remotes
+                              .find((r) => r.user.id === userId)
+                              ?.view?.find((v) => v.parentKey === turn.message.parentKey);
+                            if (hit) onSelectBranch(turn.message.parentKey, hit.messageId);
+                          }}
+                        />
+                      }
                       onSelect={(i) => {
                         const target = turn.siblings[i];
                         if (target) onSelectBranch(turn.message.parentKey, target);
@@ -944,6 +1028,9 @@ export function ChatMessages({
                 sessionId,
                 onPermission,
                 onElicitation,
+                uiKey: turn.message.id,
+                ui,
+                setUiFlag,
               })}
 
               {sharedFiles.length > 0 && (
@@ -963,6 +1050,18 @@ export function ChatMessages({
                   onRegenerate={() => onRegenerate(turn.message.id)}
                   onSelectVariant={(runId) => onSelectVariant(turn.message.id, runId)}
                   onOpenSources={() => setSourcesFor({ messageId: turn.message.id, items: sources })}
+                  pagerAside={
+                    <PresencePeekAvatars
+                      people={otherVariantPeople}
+                      hint="在看另一页"
+                      onPick={(userId) => {
+                        const hit = remotes
+                          .find((r) => r.user.id === userId)
+                          ?.view?.find((v) => v.messageId === turn.message.id);
+                        if (hit?.runId) onSelectVariant(turn.message.id, hit.runId);
+                      }}
+                    />
+                  }
                 />
               )}
             </div>

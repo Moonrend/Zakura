@@ -58,6 +58,7 @@ async function injectPendingSteers(
         content: item.content,
         steer: true,
         ...(item.attachments?.length ? { attachments: item.attachments } : {}),
+        ...(item.userId ? { userId: item.userId, ...(item.userName ? { userName: item.userName } : {}) } : {}),
       },
     });
     messages.push(buildUserMessage(item.content, item.attachments ?? []));

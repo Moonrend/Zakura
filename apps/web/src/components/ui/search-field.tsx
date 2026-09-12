@@ -24,7 +24,7 @@ export function SearchField({
   "aria-label"?: string;
 }) {
   return (
-    <div className={cn("relative", className)}>
+    <div className={cn("relative min-w-0", className)}>
       <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
       <input
         type="text"

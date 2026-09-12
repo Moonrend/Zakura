@@ -17,7 +17,7 @@ import type { ResolvedRoute } from "../types.js";
 
 function apiKey(route: ResolvedRoute): string {
   const key = route.upstream.config.apiKey;
-  if (!key) throw new Error("Anthropic 上游需要配置 apiKey");
+  if (!key) throw new Error("Anthropic 上游需要配置 apiKey 或完成订阅登录");
   return key;
 }
 
@@ -175,12 +175,18 @@ function buildBody(
 }
 
 function buildRequestHeaders(route: ResolvedRoute): Record<string, string> {
-  return {
+  const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "x-api-key": apiKey(route),
     "anthropic-version": version(route),
     ...(route.upstream.config.extraHeaders ?? {}),
   };
+  if (route.upstream.protocol === "claude-code") {
+    headers.Authorization = `Bearer ${apiKey(route)}`;
+    headers["anthropic-beta"] = headers["anthropic-beta"] || "oauth-2025-04-20";
+  } else {
+    headers["x-api-key"] = apiKey(route);
+  }
+  return headers;
 }
 
 async function chat(
@@ -209,7 +215,18 @@ async function chat(
     body: JSON.stringify(body),
     timeoutMs: timeout(route),
   });
-  if (!res.ok) throw apiError("anthropic chat", res.status, res.data, res.text);
+  if (!res.ok) {
+    const err = apiError("anthropic chat", res.status, res.data, res.text);
+    if (
+      route.upstream.protocol === "claude-code" &&
+      /only authorized for use with Claude Code/i.test(err.message)
+    ) {
+      throw new Error(
+        "该凭证仅限 Claude Code 使用。请改用 Anthropic API Key，或粘贴 setup-token 后若仍失败则无法作为模型上游。",
+      );
+    }
+    throw err;
+  }
 
   const blocks = res.data?.content ?? [];
   const textParts: string[] = [];
@@ -423,6 +440,13 @@ async function chatStream(
 
 export const anthropicAdapter: ModelProtocolAdapter = {
   protocol: "anthropic",
+  supportedCapabilities: ["chat"],
+  chat,
+  chatStream,
+};
+
+export const claudeCodeAdapter: ModelProtocolAdapter = {
+  protocol: "claude-code",
   supportedCapabilities: ["chat"],
   chat,
   chatStream,

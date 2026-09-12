@@ -181,6 +181,8 @@ export type MemoryProviderKind = (typeof MEMORY_PROVIDER_KINDS)[number];
 export {
   MODEL_UPSTREAM_PROTOCOLS,
   OPENAI_COMPATIBLE_PROTOCOLS,
+  AGENT_SUBSCRIPTION_PROTOCOLS,
+  isAgentSubscriptionProtocol,
   MODEL_CAPABILITIES,
   MODEL_ROUTE_STRATEGIES,
   MODEL_CATALOG_SOURCES,
@@ -198,6 +200,7 @@ export {
   type ModelReasoningEffort,
   type ModelReasoningOptions,
   type ModelUpstreamConfig,
+  type ModelUpstreamOauthSnapshot,
   type ModelUpstreamFormField,
   type ModelUpstreamRegion,
   type ModelUpstreamProtocolMeta,
@@ -869,3 +872,37 @@ export type {
   ContextSizeReport,
   ContextWindowBudget,
 } from "./context-accounting.js";
+
+export {
+  hash32,
+  identiconFromId,
+  identiconColor,
+} from "./identicon.js";
+export type { IdenticonGrid } from "./identicon.js";
+
+export {
+  PRESENCE_TTL_MS,
+  PRESENCE_HEARTBEAT_MS,
+  PRESENCE_LOCATION_THROTTLE_MS,
+  POINTER_THROTTLE_MS,
+  isPresenceUser,
+  normalizePresencePane,
+  mergePresenceByUser,
+  othersOnSession,
+  othersOnProject,
+  activeSessionIds,
+  splitActiveSessions,
+  remoteOnOtherSibling,
+  remoteOnOtherVariant,
+  pointerHiddenForView,
+} from "./presence.js";
+export type {
+  PresencePane,
+  PresenceLocation,
+  PresencePointer,
+  PresenceViewTurn,
+  PresenceTurnPage,
+  PresenceAwareness,
+} from "./presence.js";
+
+export { textDiff } from "./text-diff.js";

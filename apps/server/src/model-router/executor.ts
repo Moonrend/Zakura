@@ -11,6 +11,7 @@ import type {
 import type { ChatStreamCallbacks, ModelProtocolAdapter } from "./adapter.js";
 import { isRetryableModelError, withModelRetries } from "./http.js";
 import { normalizeToolCallHistory } from "./messages.js";
+import { hydrateRoute, isUnauthorizedUpstream } from "./oauth-hook.js";
 import { resolveAdapterForCapability } from "./registry.js";
 import type { ResolvedRoute } from "./types.js";
 
@@ -23,11 +24,18 @@ function assertCapability(route: ResolvedRoute, expected: ModelCapability): void
 async function invokeWithAdapter<T>(
   route: ResolvedRoute,
   capability: ModelCapability,
-  run: (adapter: ModelProtocolAdapter) => Promise<T>,
+  run: (adapter: ModelProtocolAdapter, route: ResolvedRoute) => Promise<T>,
 ): Promise<T> {
   assertCapability(route, capability);
-  const adapter = resolveAdapterForCapability(route.upstream.protocol, capability);
-  return run(adapter);
+  let current = await hydrateRoute(route);
+  const adapter = resolveAdapterForCapability(current.upstream.protocol, capability);
+  try {
+    return await run(adapter, current);
+  } catch (err) {
+    if (!isUnauthorizedUpstream(err)) throw err;
+    current = await hydrateRoute(current, { forceRefresh: true });
+    return run(adapter, current);
+  }
 }
 
 function normalizeInvokeReasoning(
@@ -84,9 +92,9 @@ export async function executeChat(
   options?: ModelChatInvokeOptions,
 ): Promise<ModelChatResult> {
   const normalizedMessages = normalizeToolCallHistory(messages);
-  return invokeWithAdapter(route, "chat", async (adapter) => {
+  return invokeWithAdapter(route, "chat", async (adapter, current) => {
     if (!adapter.chat) throw new Error(`协议 ${adapter.protocol} 未实现 chat`);
-    return adapter.chat(applyInvokeRouteOptions(route, options), normalizedMessages, options);
+    return adapter.chat(applyInvokeRouteOptions(current, options), normalizedMessages, options);
   });
 }
 
@@ -101,8 +109,8 @@ export async function executeChatStream(
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
   const normalizedMessages = normalizeToolCallHistory(messages);
-  return invokeWithAdapter(route, "chat", async (adapter) => {
-    const nextRoute = applyInvokeRouteOptions(route, options);
+  return invokeWithAdapter(route, "chat", async (adapter, current) => {
+    const nextRoute = applyInvokeRouteOptions(current, options);
     if (adapter.chatStream) {
       return adapter.chatStream(nextRoute, normalizedMessages, options, callbacks);
     }
@@ -117,9 +125,9 @@ export async function executeEmbed(
   route: ResolvedRoute,
   texts: string[],
 ): Promise<ModelEmbeddingResult> {
-  return invokeWithAdapter(route, "embedding", async (adapter) => {
+  return invokeWithAdapter(route, "embedding", async (adapter, current) => {
     if (!adapter.embed) throw new Error(`协议 ${adapter.protocol} 未实现 embed`);
-    return adapter.embed(route, texts);
+    return adapter.embed(current, texts);
   });
 }
 
@@ -128,9 +136,9 @@ export async function executeRerank(
   query: string,
   documents: string[],
 ): Promise<ModelRerankResult> {
-  return invokeWithAdapter(route, "rerank", async (adapter) => {
+  return invokeWithAdapter(route, "rerank", async (adapter, current) => {
     if (!adapter.rerank) throw new Error(`协议 ${adapter.protocol} 未实现 rerank`);
-    return adapter.rerank(route, query, documents);
+    return adapter.rerank(current, query, documents);
   });
 }
 
@@ -138,11 +146,11 @@ export async function executeImage(
   route: ResolvedRoute,
   prompt: string,
 ): Promise<ModelImageResult> {
-  return invokeWithAdapter(route, "image", async (adapter) => {
+  return invokeWithAdapter(route, "image", async (adapter, current) => {
     if (!adapter.generateImage) {
       throw new Error(`协议 ${adapter.protocol} 未实现 generateImage`);
     }
-    return adapter.generateImage(route, prompt);
+    return adapter.generateImage(current, prompt);
   });
 }
 

@@ -541,6 +541,11 @@
   .animate-slide-in-right {
     animation: slide-in-right 320ms var(--ease-fluid) both;
   }
+
+  /* 对端改了模型/思考等：控件自己闪一下，不另加彩色光晕 */
+  .animate-remote-nudge {
+    animation: remote-nudge 1.1s var(--ease-out-soft);
+  }
 }
 
 @keyframes fluid-rise {
@@ -585,60 +590,84 @@
   }
 }
 
+@keyframes remote-nudge {
+  0% {
+    background-color: color-mix(in oklch, var(--foreground) 16%, transparent);
+    color: var(--foreground);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
 /* ==========================================================================
-   聊天页配色：对齐 shadcn dark（深炭灰），侧栏再深一档
+   聊天页：同底、轻边。侧栏不再做成更深的色块，减少视觉分区。
+   表面抬升用前景色混入，明暗模式同一套，避免卡片「贴」在页面上。
    ========================================================================== */
 
 .chat-shell {
-  --background: oklch(0.985 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.18 0 0);
+  --card: oklch(0.99 0 0);
+  --card-foreground: oklch(0.18 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chat-sidebar: oklch(0.97 0 0);
+  --popover-foreground: oklch(0.18 0 0);
+  --primary: oklch(0.22 0 0);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.965 0 0);
+  --secondary-foreground: oklch(0.22 0 0);
+  --muted: oklch(0.965 0 0);
+  --muted-foreground: oklch(0.5 0 0);
+  --accent: oklch(0.965 0 0);
+  --accent-foreground: oklch(0.22 0 0);
+  --border: oklch(0.18 0 0 / 8%);
+  --input: oklch(0.18 0 0 / 10%);
+  --ring: oklch(0.55 0 0);
+  --chat-sidebar: var(--background);
+  --surface-2: color-mix(in oklch, var(--foreground) 4.5%, var(--background));
+  --surface-3: color-mix(in oklch, var(--foreground) 7%, var(--background));
+  --shadow-soft: 0 1px 1px oklch(0 0 0 / 3%);
   color-scheme: light;
 }
 
 .dark .chat-shell {
-  /* 与 shadcn neutral dark 同档：主区深炭，不是浅灰 */
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
+  --background: oklch(0.185 0 0);
+  --foreground: oklch(0.93 0 0);
   --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --card-foreground: oklch(0.93 0 0);
+  --popover: oklch(0.22 0 0);
+  --popover-foreground: oklch(0.93 0 0);
+  --primary: oklch(0.93 0 0);
+  --primary-foreground: oklch(0.18 0 0);
+  --secondary: oklch(0.24 0 0);
+  --secondary-foreground: oklch(0.93 0 0);
+  --muted: oklch(0.24 0 0);
+  --muted-foreground: oklch(0.68 0 0);
+  --accent: oklch(0.24 0 0);
+  --accent-foreground: oklch(0.93 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  /* 侧栏比主区更深 */
-  --chat-sidebar: oklch(0.11 0 0);
-  --shadow-soft: 0 1px 2px oklch(0 0 0 / 28%), 0 8px 28px oklch(0 0 0 / 36%);
+  --border: oklch(1 0 0 / 7%);
+  --input: oklch(1 0 0 / 9%);
+  --ring: oklch(0.55 0 0);
+  --chat-sidebar: var(--background);
+  --surface-2: color-mix(in oklch, var(--foreground) 6%, var(--background));
+  --surface-3: color-mix(in oklch, var(--foreground) 9%, var(--background));
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 18%);
   color-scheme: dark;
 }
 
 .chat-shell .chat-sidebar {
   background: var(--chat-sidebar);
+}
+
+@layer utilities {
+  .surface-2 {
+    background: var(--surface-2, color-mix(in oklch, var(--foreground) 4.5%, var(--background)));
+  }
+
+  .surface-3 {
+    background: var(--surface-3, color-mix(in oklch, var(--foreground) 7%, var(--background)));
+  }
 }
 
 /* ==========================================================================

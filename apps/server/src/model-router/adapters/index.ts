@@ -1,5 +1,5 @@
 import { registerModelAdapter } from "../registry.js";
-import { anthropicAdapter } from "./anthropic.js";
+import { anthropicAdapter, claudeCodeAdapter } from "./anthropic.js";
 import { bailianAdapter } from "./bailian.js";
 import {
   createOpenAiCompatibleAdapters,
@@ -7,7 +7,9 @@ import {
   customAdapter,
   openAiAdapter,
 } from "./openai-compatible.js";
-import { geminiAdapter } from "./gemini.js";
+import { geminiAdapter, geminiCliAdapter } from "./gemini.js";
+import { codexAdapter } from "./codex.js";
+import { cursorAdapter } from "./cursor.js";
 
 let registered = false;
 
@@ -19,7 +21,11 @@ export function registerBuiltinModelAdapters(): void {
   }
   registerModelAdapter(bailianAdapter);
   registerModelAdapter(anthropicAdapter);
+  registerModelAdapter(claudeCodeAdapter);
   registerModelAdapter(geminiAdapter);
+  registerModelAdapter(geminiCliAdapter);
+  registerModelAdapter(codexAdapter);
+  registerModelAdapter(cursorAdapter);
   registered = true;
 }
 
@@ -29,5 +35,9 @@ export {
   azureOpenAiAdapter,
   customAdapter,
   anthropicAdapter,
+  claudeCodeAdapter,
   geminiAdapter,
+  geminiCliAdapter,
+  codexAdapter,
+  cursorAdapter,
 };

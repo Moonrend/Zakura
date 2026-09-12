@@ -121,7 +121,9 @@ export function FilePanel({
   openRequest,
   projectPath,
   overlay = false,
+  layout = "dock",
   onClose,
+  onOpenPath,
 }: {
   agentId: string;
   fsEnabled: boolean;
@@ -131,8 +133,13 @@ export function FilePanel({
   projectPath?: string | null;
   /** 移动端全屏覆盖模式 */
   overlay?: boolean;
-  onClose: () => void;
+  /** dock=窄栏树/编辑互斥；page=主区树+编辑并排 */
+  layout?: "dock" | "page";
+  onClose?: () => void;
+  /** 用户打开文件时回传，供协同同步 */
+  onOpenPath?: (path: string, dir?: boolean) => void;
 }) {
+  const isPage = layout === "page";
   const { confirm } = useConfirmDialog();
   const { resolvedTheme } = useTheme();
   const [dirCache, setDirCache] = useState<Map<string, FsEntry[]>>(new Map());
@@ -150,6 +157,8 @@ export function FilePanel({
   const uploadRef = useRef<HTMLInputElement>(null);
   const objectUrlRef = useRef<string | null>(null);
   const handledNonce = useRef(0);
+  const fileRef = useRef<OpenFile | null>(null);
+  fileRef.current = file;
 
   const loadDir = useCallback(
     async (dir: string, force = false) => {
@@ -195,6 +204,9 @@ export function FilePanel({
   dirCacheRef.current = dirCache;
   const loadDirRef = useRef(loadDir);
   loadDirRef.current = loadDir;
+  const openFileRef = useRef<(path: string) => Promise<void>>(async () => {});
+  const onOpenPathRef = useRef(onOpenPath);
+  onOpenPathRef.current = onOpenPath;
 
   useEffect(() => {
     if (!projectPath || !fsEnabled) return;
@@ -214,6 +226,10 @@ export function FilePanel({
       const p = normPath(ev.path);
       const dir = p.slice(0, p.lastIndexOf("/")) || "/";
       if (dirCacheRef.current.has(dir)) void loadDirRef.current(dir, true);
+      const cur = fileRef.current;
+      if (!cur || normPath(cur.path) !== p) return;
+      if (cur.kind === "text" && cur.dirty) return;
+      void openFileRef.current(cur.path);
     });
   }, [agentId, fsEnabled]);
 
@@ -241,6 +257,7 @@ export function FilePanel({
         } else {
           setFile({ kind: "binary", path: p });
         }
+        onOpenPathRef.current?.(p, false);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
       } finally {
@@ -249,6 +266,7 @@ export function FilePanel({
     },
     [agentId],
   );
+  openFileRef.current = openFile;
 
   // 外部打开请求（工具行点击文件路径；项目「打开目录」则展开树）
   useEffect(() => {
@@ -491,16 +509,239 @@ export function FilePanel({
     });
   }
 
+  const treeActions = (
+    <>
+      <input
+        ref={uploadRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          void handleUpload(e.target.files, "/");
+          e.target.value = "";
+        }}
+      />
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label="上传"
+        disabled={!fsEnabled}
+        onClick={() => uploadRef.current?.click()}
+      >
+        <Upload className="h-4 w-4" />
+      </Button>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label="新建文件"
+        disabled={!fsEnabled}
+        onClick={() => {
+          setDialog({ kind: "newFile", dir: "/", path: "" });
+          setDialogValue("");
+        }}
+      >
+        <FilePlus className="h-4 w-4" />
+      </Button>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label="刷新"
+        disabled={!fsEnabled}
+        onClick={() => {
+          setDirCache(new Map());
+          void loadDir("/", true);
+        }}
+      >
+        <RefreshCw className="h-4 w-4" />
+      </Button>
+    </>
+  );
+
+  const editorBody = file ? (
+    <div className="relative min-h-0 flex-1">
+      {file.kind === "text" && (
+        <Editor
+          height="100%"
+          path={file.path}
+          language={languageOf(file.path)}
+          value={file.content}
+          theme={resolvedTheme === "dark" ? "vs-dark" : "light"}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 13,
+            wordWrap: "on",
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            padding: { top: 12, bottom: 12 },
+          }}
+          onChange={(value) =>
+            setFile((prev) =>
+              prev?.kind === "text"
+                ? { ...prev, content: value ?? "", dirty: true }
+                : prev,
+            )
+          }
+          loading={
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              加载编辑器…
+            </div>
+          }
+        />
+      )}
+      {file.kind === "image" && (
+        <ScrollArea className="h-full">
+          <div className="flex min-h-full items-center justify-center p-4">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={file.url} alt={file.path} className="max-w-full rounded-md" />
+          </div>
+        </ScrollArea>
+      )}
+      {file.kind === "binary" && (
+        <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+          <FileIcon className="h-8 w-8 opacity-50" />
+          二进制文件，无法在线编辑
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void handleDownload({
+                name: file.path.split("/").pop() ?? file.path,
+                path: file.path,
+                size: 0,
+                mode: "",
+                modTime: "",
+                isDir: false,
+              })
+            }
+          >
+            <Download className="h-3.5 w-3.5" />
+            下载
+          </Button>
+        </div>
+      )}
+      {loadingFile && (
+        <div className="absolute inset-0 flex items-center justify-center bg-background/50">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        </div>
+      )}
+    </div>
+  ) : (
+    <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+      从左侧打开文件
+    </div>
+  );
+
+  const dialogBar = dialog ? (
+    <div className="border-t border-border/40 p-2">
+      <div className="mb-1 text-xs text-muted-foreground">
+        {dialog.kind === "newFile"
+          ? `新建文件于 ${dialog.dir}`
+          : dialog.kind === "newFolder"
+            ? `新建文件夹于 ${dialog.dir}`
+            : `重命名 ${dialog.path}`}
+      </div>
+      <div className="flex gap-1.5">
+        <Input
+          autoFocus
+          value={dialogValue}
+          onChange={(e) => setDialogValue(e.target.value)}
+          className="h-8 text-sm"
+          placeholder="名称"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void commitDialog();
+            if (e.key === "Escape") setDialog(null);
+          }}
+        />
+        <Button size="sm" onClick={() => void commitDialog()}>
+          确定
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setDialog(null)}>
+          取消
+        </Button>
+      </div>
+    </div>
+  ) : null;
+
+  if (isPage) {
+    return (
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
+        {!fsEnabled ? (
+          <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+            该 Agent 未开启电脑环境，暂无工作区文件。可在控制台为其启用。
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1">
+            <div
+              className={
+                file
+                  ? "hidden min-h-0 w-[260px] shrink-0 flex-col border-r border-border/40 md:flex"
+                  : "flex min-h-0 min-w-0 flex-1 flex-col md:w-[260px] md:flex-none md:border-r md:border-border/40"
+              }
+            >
+              <div className="flex h-11 shrink-0 items-center gap-1 px-2">
+                <span className="px-1.5 text-sm text-muted-foreground">工作区</span>
+                <div className="flex-1" />
+                {treeActions}
+              </div>
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="px-1.5 pb-3">{renderTree("/", 0)}</div>
+              </ScrollArea>
+              {dialogBar}
+            </div>
+            <div className={file ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden min-h-0 min-w-0 flex-1 flex-col md:flex"}>
+              <div className="flex h-11 shrink-0 items-center gap-1 px-2">
+                {file ? (
+                  <>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="返回文件列表"
+                      className="md:hidden"
+                      onClick={() => setFile(null)}
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                    </Button>
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
+                      {file.path}
+                    </span>
+                    {file.kind === "text" && (
+                      <Button
+                        size="sm"
+                        variant={file.dirty ? "default" : "ghost"}
+                        disabled={!file.dirty || saving}
+                        onClick={() => void handleSave()}
+                      >
+                        {saving ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Save className="h-3.5 w-3.5" />
+                        )}
+                        保存
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <span className="px-1.5 text-sm text-muted-foreground">选择文件查看或编辑</span>
+                )}
+              </div>
+              {editorBody}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <aside
       className={
         overlay
           ? "animate-rise fixed inset-0 z-50 flex flex-col bg-background"
-          : "animate-slide-in-right flex h-full w-[400px] shrink-0 flex-col border-l border-border/60 bg-muted/10"
+          : "animate-slide-in-right flex h-full w-[400px] shrink-0 flex-col border-l border-border/40"
       }
     >
-      {/* 头部 */}
-      <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border/50 px-2">
+      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border/40 px-2">
         {file ? (
           <>
             <Button
@@ -532,169 +773,30 @@ export function FilePanel({
           </>
         ) : (
           <>
-            <span className="px-2 text-sm font-medium">文件</span>
+            <span className="px-2 text-sm">文件</span>
             <div className="flex-1" />
-            <input
-              ref={uploadRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                void handleUpload(e.target.files, "/");
-                e.target.value = "";
-              }}
-            />
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label="上传"
-              disabled={!fsEnabled}
-              onClick={() => uploadRef.current?.click()}
-            >
-              <Upload className="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label="新建文件"
-              disabled={!fsEnabled}
-              onClick={() => {
-                setDialog({ kind: "newFile", dir: "/", path: "" });
-                setDialogValue("");
-              }}
-            >
-              <FilePlus className="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label="刷新"
-              disabled={!fsEnabled}
-              onClick={() => {
-                setDirCache(new Map());
-                void loadDir("/", true);
-              }}
-            >
-              <RefreshCw className="h-4 w-4" />
-            </Button>
+            {treeActions}
           </>
         )}
-        <Button size="icon-sm" variant="ghost" aria-label="关闭" onClick={onClose}>
-          <X className="h-4 w-4" />
-        </Button>
+        {onClose ? (
+          <Button size="icon-sm" variant="ghost" aria-label="关闭" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        ) : null}
       </div>
 
-      {/* 内容 */}
       {!fsEnabled ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
           该 Agent 未开启电脑环境，暂无工作区文件。可在控制台为其启用。
         </div>
       ) : file ? (
-        <div className="relative min-h-0 flex-1">
-          {file.kind === "text" && (
-            <Editor
-              height="100%"
-              path={file.path}
-              language={languageOf(file.path)}
-              value={file.content}
-              theme={resolvedTheme === "dark" ? "vs-dark" : "light"}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 12.5,
-                wordWrap: "on",
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                padding: { top: 8 },
-              }}
-              onChange={(value) =>
-                setFile((prev) =>
-                  prev?.kind === "text"
-                    ? { ...prev, content: value ?? "", dirty: true }
-                    : prev,
-                )
-              }
-              loading={
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  加载编辑器…
-                </div>
-              }
-            />
-          )}
-          {file.kind === "image" && (
-            <ScrollArea className="h-full">
-              <div className="flex min-h-full items-center justify-center p-4">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={file.url} alt={file.path} className="max-w-full rounded-md" />
-              </div>
-            </ScrollArea>
-          )}
-          {file.kind === "binary" && (
-            <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-              <FileIcon className="h-8 w-8 opacity-50" />
-              二进制文件，无法在线编辑
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  void handleDownload({
-                    name: file.path.split("/").pop() ?? file.path,
-                    path: file.path,
-                    size: 0,
-                    mode: "",
-                    modTime: "",
-                    isDir: false,
-                  })
-                }
-              >
-                <Download className="h-3.5 w-3.5" />
-                下载
-              </Button>
-            </div>
-          )}
-          {loadingFile && (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/50">
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            </div>
-          )}
-        </div>
+        editorBody
       ) : (
         <ScrollArea className="min-h-0 flex-1">
           <div className="p-1.5">{renderTree("/", 0)}</div>
         </ScrollArea>
       )}
-
-      {/* 新建/重命名内联对话 */}
-      {dialog && (
-        <div className="border-t border-border/50 p-2">
-          <div className="mb-1 text-xs text-muted-foreground">
-            {dialog.kind === "newFile"
-              ? `新建文件于 ${dialog.dir}`
-              : dialog.kind === "newFolder"
-                ? `新建文件夹于 ${dialog.dir}`
-                : `重命名 ${dialog.path}`}
-          </div>
-          <div className="flex gap-1.5">
-            <Input
-              autoFocus
-              value={dialogValue}
-              onChange={(e) => setDialogValue(e.target.value)}
-              className="h-8 text-sm"
-              placeholder="名称"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void commitDialog();
-                if (e.key === "Escape") setDialog(null);
-              }}
-            />
-            <Button size="sm" onClick={() => void commitDialog()}>
-              确定
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setDialog(null)}>
-              取消
-            </Button>
-          </div>
-        </div>
-      )}
+      {dialogBar}
     </aside>
   );
 }

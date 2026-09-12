@@ -45,6 +45,9 @@ const nextConfig = {
     "@opentelemetry/resources",
     "@opentelemetry/semantic-conventions",
     "@opentelemetry/core",
+    "yjs",
+    "y-protocols",
+    "lib0",
   ],
   turbopack: {
     resolveAlias: {

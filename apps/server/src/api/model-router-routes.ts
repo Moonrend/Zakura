@@ -15,6 +15,7 @@ import type { ModelRouterService } from "../services/model-router.js";
 import type { ModelRoutesService } from "../services/model-routes.js";
 import type { ModelUpstreamsService } from "../services/model-upstreams.js";
 import type { UpstreamModelsService } from "../services/upstream-models.js";
+import type { ModelUpstreamAuthService } from "../services/model-upstream-auth/index.js";
 import { parseRouteOptions } from "../model-router/types.js";
 
 type SessionVars = {
@@ -33,9 +34,10 @@ export function registerModelRouterRoutes(
     router: ModelRouterService;
     catalog?: ModelCatalogService;
     upstreamModels?: UpstreamModelsService;
+    auth?: ModelUpstreamAuthService;
   },
 ): void {
-  const { upstreams, routes, router, catalog, upstreamModels } = deps;
+  const { upstreams, routes, router, catalog, upstreamModels, auth } = deps;
 
   app.get("/api/model-router/meta", async (c) => {
     return c.json({
@@ -133,6 +135,68 @@ export function registerModelRouterRoutes(
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });
+
+  if (auth) {
+    app.post("/api/model-upstreams/:id/auth/start", async (c) => {
+      const session = c.get("session")!;
+      try {
+        return c.json(await auth.start(session.tenantId, c.req.param("id")));
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    });
+
+    app.post("/api/model-upstreams/:id/auth/poll", async (c) => {
+      const session = c.get("session")!;
+      const body = await c.req.json<{ loginId?: string }>().catch(() => ({ loginId: undefined }));
+      if (!body.loginId?.trim()) return c.json({ error: "loginId 必填" }, 400);
+      try {
+        return c.json(await auth.poll(session.tenantId, c.req.param("id"), body.loginId.trim()));
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    });
+
+    app.post("/api/model-upstreams/:id/auth/submit", async (c) => {
+      const session = c.get("session")!;
+      const body = await c.req.json<{
+        loginId?: string;
+        code?: string;
+        setupToken?: string;
+        credentialsJson?: string;
+      }>().catch(() => ({
+        loginId: undefined,
+        code: undefined,
+        setupToken: undefined,
+        credentialsJson: undefined,
+      }));
+      try {
+        return c.json(await auth.submit(session.tenantId, c.req.param("id"), body));
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    });
+
+    app.post("/api/model-upstreams/:id/auth/cancel", async (c) => {
+      const body = await c.req.json<{ loginId?: string }>().catch(() => ({ loginId: undefined }));
+      if (!body.loginId?.trim()) return c.json({ error: "loginId 必填" }, 400);
+      try {
+        return c.json(await auth.cancel(body.loginId.trim()));
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    });
+
+    app.post("/api/model-upstreams/:id/auth/logout", async (c) => {
+      const session = c.get("session")!;
+      try {
+        await auth.logout(session.tenantId, c.req.param("id"));
+        return c.json({ ok: true });
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      }
+    });
+  }
 
   app.post("/api/model-upstreams/:id/health", async (c) => {
     const session = c.get("session")!;

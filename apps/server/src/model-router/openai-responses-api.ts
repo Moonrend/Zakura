@@ -21,6 +21,9 @@ import type { ResolvedRoute } from "./types.js";
 
 export function responsesUrl(route: ResolvedRoute): string {
   const { config, protocol } = route.upstream;
+  if (protocol === "codex") {
+    return `${config.baseUrl}/backend-api/codex/responses`;
+  }
   if (protocol === "azure-openai") {
     const deployment = config.deploymentId ?? route.model;
     const ver = config.apiVersion ?? "2024-08-01-preview";
@@ -185,10 +188,15 @@ export async function responsesChat(
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
-    tools: packedTools,
+    ...(packedTools.length ? { tools: packedTools } : {}),
   };
-  if (options?.temperature != null) body.temperature = options.temperature;
-  if (options?.maxTokens != null) body.max_output_tokens = options.maxTokens;
+  if (route.upstream.protocol === "codex") {
+    body.store = false;
+    if (body.instructions == null) body.instructions = "";
+  } else {
+    if (options?.temperature != null) body.temperature = options.temperature;
+    if (options?.maxTokens != null) body.max_output_tokens = options.maxTokens;
+  }
   const tc = mapToolChoice(options?.toolChoice);
   if (tc !== undefined) body.tool_choice = tc;
 
@@ -261,11 +269,16 @@ export async function responsesChatStream(
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
-    tools: packedTools,
+    ...(packedTools.length ? { tools: packedTools } : {}),
     stream: true,
   };
-  if (options?.temperature != null) body.temperature = options.temperature;
-  if (options?.maxTokens != null) body.max_output_tokens = options.maxTokens;
+  if (route.upstream.protocol === "codex") {
+    body.store = false;
+    if (body.instructions == null) body.instructions = "";
+  } else {
+    if (options?.temperature != null) body.temperature = options.temperature;
+    if (options?.maxTokens != null) body.max_output_tokens = options.maxTokens;
+  }
   const tc = mapToolChoice(options?.toolChoice);
   if (tc !== undefined) body.tool_choice = tc;
 

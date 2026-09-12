@@ -15,7 +15,7 @@ import { PageLoading } from "@/components/ui/progress-linear";
 import { ImageUpdateProvider } from "@/components/image-update-status";
 
 type MeResponse = MeInfo & {
-  user?: { id: string };
+  user?: { id: string; name?: string | null; email?: string; avatarRev?: number };
   tenant: MeInfo["tenant"] & { id?: string; onboardingCompleted?: boolean };
 };
 
@@ -48,7 +48,9 @@ export default function DashboardLayout({
         const res = await api<MeResponse>("/api/me");
         if (cancelled) return;
         const info: MeInfo = {
-          user: res.user?.id ? { id: res.user.id } : undefined,
+          user: res.user?.id
+            ? { id: res.user.id, name: res.user.name, email: res.user.email, avatarRev: res.user.avatarRev }
+            : undefined,
           tenant: res.tenant,
           isPlatformAdmin: !!res.isPlatformAdmin && !!res.multiTenant,
           multiTenant: !!res.multiTenant,

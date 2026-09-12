@@ -106,6 +106,8 @@ export type TimelineItem =
       content: string;
       seq: number;
       attachments?: CloudAgentAttachment[];
+      userId?: string;
+      userName?: string;
     }
   | {
       kind: "assistant";
@@ -523,6 +525,8 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         content: typeof p.content === "string" ? p.content : "",
         seq: ev.seq,
         ...(attachments.length ? { attachments } : {}),
+        ...(typeof p.userId === "string" ? { userId: p.userId } : {}),
+        ...(typeof p.userName === "string" ? { userName: p.userName } : {}),
       });
       continue;
     }
@@ -946,6 +950,8 @@ export type ConversationTurn = {
     parentKey: string;
     /** 从中断处接着做：不展示用户气泡 */
     continue?: boolean;
+    userId?: string;
+    userName?: string;
   };
   /** 兄弟用户消息 id（含自身，seq 升序） */
   siblings: string[];
@@ -973,6 +979,8 @@ export function buildConversationTurns(
     seq: number;
     parentKey: string;
     continue?: boolean;
+    userId?: string;
+    userName?: string;
     event: CloudAgentEvent;
   };
   const userMsgs = new Map<string, UserNode>();
@@ -1005,6 +1013,8 @@ export function buildConversationTurns(
         seq: ev.seq,
         parentKey,
         ...(p.continue === true ? { continue: true } : {}),
+        ...(typeof p.userId === "string" ? { userId: p.userId } : {}),
+        ...(typeof p.userName === "string" ? { userName: p.userName } : {}),
         event: ev,
       };
       userMsgs.set(mid, node);
@@ -1124,6 +1134,8 @@ export function buildConversationTurns(
         seq: node.seq,
         parentKey,
         ...(node.continue ? { continue: true } : {}),
+        ...(node.userId ? { userId: node.userId } : {}),
+        ...(node.userName ? { userName: node.userName } : {}),
       },
       siblings,
       siblingIndex: siblings.indexOf(chosenId),
@@ -1207,18 +1219,21 @@ export async function createCloudSession(
 export async function getCloudSession(
   agentId: string,
   sessionId: string,
-  opts: number | { afterSeq?: number; beforeSeq?: number } = 0,
+  opts: number | { afterSeq?: number; beforeSeq?: number; aroundSeq?: number } = 0,
 ) {
   const afterSeq = typeof opts === "number" ? opts : (opts.afterSeq ?? 0);
   const beforeSeq = typeof opts === "number" ? undefined : opts.beforeSeq;
+  const aroundSeq = typeof opts === "number" ? undefined : opts.aroundSeq;
   const qs = new URLSearchParams();
-  if (beforeSeq != null && beforeSeq > 0) qs.set("beforeSeq", String(beforeSeq));
+  if (aroundSeq != null && aroundSeq > 0) qs.set("aroundSeq", String(aroundSeq));
+  else if (beforeSeq != null && beforeSeq > 0) qs.set("beforeSeq", String(beforeSeq));
   else qs.set("afterSeq", String(afterSeq));
   return api<{
     session: CloudSession;
     events: CloudAgentEvent[];
     /** 是否还有更早事件可翻页 */
     hasMore?: boolean;
+    hasMoreAfter?: boolean;
     /** 服务端排队中的后续消息（跨设备同步） */
     queue?: CloudAgentQueuedMessage[];
   }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}?${qs}`, {
@@ -1442,9 +1457,10 @@ export type CloudSearchHit = CloudSession & {
 };
 
 /** 跨 Agent 会话搜索（标题+内容） */
-export async function searchCloudSessions(q: string, agentId?: string) {
+export async function searchCloudSessions(q: string, agentId?: string, limit = 50) {
   const params = new URLSearchParams({ q });
   if (agentId) params.set("agentId", agentId);
+  if (limit) params.set("limit", String(limit));
   return api<{ results: CloudSearchHit[] }>(`/api/cloud/search?${params.toString()}`, {
     cacheTtlMs: false,
   });

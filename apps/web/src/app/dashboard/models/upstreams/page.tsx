@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/sheet";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { UpstreamModelSetup } from "@/components/models/upstream-model-setup";
+import { UpstreamAuthPanel, type UpstreamAuthSnap } from "@/components/models/upstream-auth-panel";
 import {
   Select,
   SelectContent,
@@ -40,6 +41,7 @@ import {
   MODEL_UPSTREAM_DEFAULT_BASE_URLS,
   MODEL_UPSTREAM_PROTOCOL_META,
   MODEL_UPSTREAM_PROTOCOLS,
+  isAgentSubscriptionProtocol,
   type ModelUpstreamProtocol,
 } from "@zakura/shared";
 
@@ -58,6 +60,8 @@ type ProtocolMeta = {
   description: string;
   fields: FormField[];
   keywords?: string[];
+  group?: "agent";
+  authKind?: "device" | "pkce" | "sdk" | "paste";
 };
 
 type Upstream = {
@@ -69,6 +73,7 @@ type Upstream = {
   resolvedConfig?: { baseUrl?: string };
   status: string;
   meta?: ProtocolMeta;
+  auth?: UpstreamAuthSnap;
 };
 
 const FALLBACK_PROTOCOLS: ProtocolMeta[] = MODEL_UPSTREAM_PROTOCOLS.map((protocol) => ({
@@ -125,15 +130,18 @@ export default function ModelUpstreamsPage() {
   const [rerankBaseUrl, setRerankBaseUrl] = useState("");
   const [region, setRegion] = useState("cn");
 
-  const protocolItems = useMemo(
-    () =>
-      protocols.map((p) => ({
-        value: p.protocol,
-        label: p.name,
-        keywords: p.keywords,
-      })),
-    [protocols],
-  );
+  const protocolItems = useMemo(() => {
+    const items = protocols.map((p) => ({
+      value: p.protocol,
+      label: p.group === "agent" ? `订阅 · ${p.name}` : p.name,
+      keywords: [...(p.keywords ?? []), ...(p.group === "agent" ? ["agent", "订阅"] : [])],
+      group: p.group,
+    }));
+    return [
+      ...items.filter((item) => item.group !== "agent"),
+      ...items.filter((item) => item.group === "agent"),
+    ];
+  }, [protocols]);
 
   const visibleFields = useMemo(
     () => new Set(fieldsFor(protocol, protocols)),
@@ -153,8 +161,12 @@ export default function ModelUpstreamsPage() {
       if (res.protocols?.length) {
         setProtocols(
           res.protocols.map((p) => {
+            const isAgent = p.group === "agent";
+            const rawFields = Array.isArray(p.fields) ? p.fields : undefined;
             const fields = new Set<FormField>(
-              (p.fields?.length ? p.fields : ["baseUrl", "apiKey"]) as FormField[],
+              rawFields && (rawFields.length > 0 || isAgent)
+                ? (rawFields as FormField[])
+                : ["baseUrl", "apiKey"],
             );
             fields.add("baseUrl");
             return {
@@ -206,7 +218,7 @@ export default function ModelUpstreamsPage() {
     const fields = fieldsFor(protocol, protocols);
     const config: Record<string, unknown> = {};
     if (fields.includes("apiKey") && apiKey.trim()) config.apiKey = apiKey.trim();
-    config.baseUrl = baseUrl.trim();
+    config.baseUrl = baseUrl.trim() || defaultBaseUrlFor(protocol, region);
     if (fields.includes("apiVersion")) config.apiVersion = apiVersion.trim();
     if (fields.includes("anthropicVersion")) {
       config.anthropicVersion = anthropicVersion.trim() || "2023-06-01";
@@ -227,11 +239,12 @@ export default function ModelUpstreamsPage() {
       return;
     }
     const fields = fieldsFor(protocol, protocols);
-    if (!edit && fields.includes("apiKey") && !apiKey.trim() && protocol !== "custom") {
+    const agent = isAgentSubscriptionProtocol(protocol);
+    if (!edit && fields.includes("apiKey") && !apiKey.trim() && protocol !== "custom" && !agent) {
       toast.error("请填写 API Key");
       return;
     }
-    if (!baseUrl.trim()) {
+    if (!baseUrl.trim() && !defaultBaseUrlFor(protocol, region)) {
       toast.error("请填写 API 地址");
       return;
     }
@@ -307,6 +320,21 @@ export default function ModelUpstreamsPage() {
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function refreshEdit() {
+    if (!edit) {
+      await load();
+      return;
+    }
+    const id = edit.id;
+    await load();
+    try {
+      const refreshed = await api<Upstream>(`/api/model-upstreams/${id}`, { cacheTtlMs: false });
+      resetForm(refreshed);
+    } catch {
+      // 列表已刷新
     }
   }
 
@@ -404,6 +432,9 @@ export default function ModelUpstreamsPage() {
                 <Badge variant={u.status === "ready" ? "secondary" : "destructive"}>
                   {u.status}
                 </Badge>
+                {u.auth?.loggedIn ? (
+                  <span className="ml-1 text-[11px] text-muted-foreground">已登录</span>
+                ) : null}
               </TableCell>
               <TableCell>
                 <TableActions>
@@ -591,6 +622,20 @@ export default function ModelUpstreamsPage() {
                     onChange={(e) => setRerankBaseUrl(e.target.value)}
                   />
                 </div>
+              ) : null}
+
+              {isAgentSubscriptionProtocol(protocol) && edit ? (
+                <UpstreamAuthPanel
+                  upstreamId={edit.id}
+                  authKind={
+                    edit.meta?.authKind ??
+                    protocols.find((p) => p.protocol === protocol)?.authKind
+                  }
+                  auth={edit.auth}
+                  onChanged={() => void refreshEdit()}
+                />
+              ) : isAgentSubscriptionProtocol(protocol) ? (
+                <p className="text-xs text-muted-foreground">创建上游后即可在此登录订阅。</p>
               ) : null}
 
               <div className="flex justify-end gap-2">

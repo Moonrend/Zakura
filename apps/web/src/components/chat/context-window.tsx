@@ -159,7 +159,7 @@ export function ContextWindowButton({
               </div>
             </div>
 
-            <div className="divide-y divide-border/70 rounded-lg border border-border/70">
+            <div className="divide-y divide-border/50">
               <div className="flex items-center justify-between px-3 py-2">
                 <span className="text-muted-foreground">消息</span>
                 <span className="font-medium tabular-nums">
@@ -181,7 +181,7 @@ export function ContextWindowButton({
             </div>
 
             {info.lastSummary ? (
-              <div className="rounded-lg border border-border/70 p-3">
+              <div className="rounded-lg px-0.5 py-1">
                 <div className="mb-1 text-xs text-muted-foreground">最近摘要</div>
                 <p className="line-clamp-6 whitespace-pre-wrap leading-6">
                   {info.lastSummary}

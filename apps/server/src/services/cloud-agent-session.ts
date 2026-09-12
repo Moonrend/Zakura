@@ -162,6 +162,7 @@ function normalizeQueuedMessage(item: CloudAgentQueuedMessage): CloudAgentQueued
     mode: item.mode === "queue" ? "queue" : "steer",
     ...(item.interrupt ? { interrupt: true } : {}),
     createdAt: item.createdAt || new Date().toISOString(),
+    ...(item.userId ? { userId: item.userId, ...(item.userName ? { userName: item.userName } : {}) } : {}),
   };
 }
 
@@ -324,7 +325,7 @@ export class CloudAgentSessionStore {
   ): Promise<CloudSessionSearchHit[]> {
     const q = query.trim();
     if (!q) return [];
-    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 50);
+    const limit = Math.min(Math.max(opts?.limit ?? 20, 1), 80);
     const pattern = `%${escapeLike(q)}%`;
     const trgmOk = await this.ensureTrgm();
 
@@ -391,7 +392,7 @@ export class CloudAgentSessionStore {
         )
         .orderBy(desc(cloudAgentEvents.seq))
         .limit(1);
-      hits.push({ session, snippet: ev ? extractSnippet(ev.payloadJson, q) : null });
+      hits.push({ session, snippet: ev ? extractSnippet(ev.payloadJson, q, 80) : null });
     }
     return hits;
   }
@@ -826,7 +827,10 @@ export class CloudAgentSessionStore {
       patch.title !== undefined ||
       patch.status !== undefined ||
       patch.kind !== undefined ||
-      patch.project !== undefined;
+      patch.project !== undefined ||
+      patch.model !== undefined ||
+      patch.modelRouteId !== undefined ||
+      patch.reasoning !== undefined;
     await this.db
       .update(cloudAgentSessions)
       .set({
@@ -1415,6 +1419,134 @@ export class CloudAgentSessionStore {
     return { events, hasMore: await this.hasEventsBefore(sessionId, oldest) };
   }
 
+  /**
+   * 跟随协同指针：取 aroundSeq 附近一段（按 user_message 对齐）。
+   * 长对话未加载区域用这个跳载，而不是连翻 beforeSeq。
+   */
+  async listEventsAround(
+    sessionId: string,
+    opts: { aroundSeq: number; keepUserMessages?: number; maxEvents?: number },
+  ): Promise<{ events: CloudAgentEvent[]; hasMore: boolean; hasMoreAfter: boolean }> {
+    await this.flushPending(sessionId);
+    const aroundSeq = opts.aroundSeq;
+    if (!Number.isFinite(aroundSeq) || aroundSeq < 1) {
+      return { events: [], hasMore: false, hasMoreAfter: false };
+    }
+    const keepUserMessages = Math.min(Math.max(opts.keepUserMessages ?? 30, 1), 500);
+    const maxEvents = Math.min(Math.max(opts.maxEvents ?? 5_000, 500), 50_000);
+    const half = Math.max(1, Math.floor(keepUserMessages / 2));
+
+    const pivotRows = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+          lt(cloudAgentEvents.seq, aroundSeq + 1),
+        ),
+      )
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(1);
+    let pivot = pivotRows[0]?.seq;
+    if (pivot == null) {
+      const next = await this.db
+        .select({ seq: cloudAgentEvents.seq })
+        .from(cloudAgentEvents)
+        .where(
+          and(
+            eq(cloudAgentEvents.sessionId, sessionId),
+            eq(cloudAgentEvents.type, "user_message"),
+            gt(cloudAgentEvents.seq, aroundSeq - 1),
+          ),
+        )
+        .orderBy(asc(cloudAgentEvents.seq))
+        .limit(1);
+      pivot = next[0]?.seq;
+    }
+    if (pivot == null) {
+      const events = slimToolEventsForUi(
+        await this.listEvents(sessionId, { limit: Math.min(maxEvents, 2000), skipFlush: true }),
+      );
+      const oldest = events[0]?.seq ?? 0;
+      const newest = events[events.length - 1]?.seq ?? 0;
+      return {
+        events,
+        hasMore: await this.hasEventsBefore(sessionId, oldest),
+        hasMoreAfter: await this.hasEventsAfter(sessionId, newest),
+      };
+    }
+
+    const before = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+          lt(cloudAgentEvents.seq, pivot),
+        ),
+      )
+      .orderBy(desc(cloudAgentEvents.seq))
+      .limit(half);
+    const after = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+          gt(cloudAgentEvents.seq, pivot),
+        ),
+      )
+      .orderBy(asc(cloudAgentEvents.seq))
+      .limit(half);
+
+    const fromSeq = before[before.length - 1]?.seq ?? pivot;
+    const lastUser = after[after.length - 1]?.seq ?? pivot;
+    const nextUser = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(
+        and(
+          eq(cloudAgentEvents.sessionId, sessionId),
+          eq(cloudAgentEvents.type, "user_message"),
+          gt(cloudAgentEvents.seq, lastUser),
+        ),
+      )
+      .orderBy(asc(cloudAgentEvents.seq))
+      .limit(1);
+    const until = nextUser[0]?.seq;
+
+    const rows = await this.db
+      .select()
+      .from(cloudAgentEvents)
+      .where(
+        until
+          ? and(
+              eq(cloudAgentEvents.sessionId, sessionId),
+              gt(cloudAgentEvents.seq, fromSeq - 1),
+              lt(cloudAgentEvents.seq, until),
+            )
+          : and(
+              eq(cloudAgentEvents.sessionId, sessionId),
+              gt(cloudAgentEvents.seq, fromSeq - 1),
+            ),
+      )
+      .orderBy(asc(cloudAgentEvents.seq))
+      .limit(maxEvents);
+    const events = slimToolEventsForUi(
+      sliceEventsPreferringUserMessage(rows.map(toEvent), maxEvents),
+    );
+    const oldest = events[0]?.seq ?? fromSeq;
+    const newest = events[events.length - 1]?.seq ?? lastUser;
+    return {
+      events,
+      hasMore: await this.hasEventsBefore(sessionId, oldest),
+      hasMoreAfter: await this.hasEventsAfter(sessionId, newest),
+    };
+  }
+
   private async hasEventsBefore(sessionId: string, seq: number): Promise<boolean> {
     if (!Number.isFinite(seq) || seq <= 1) return false;
     const rows = await this.db
@@ -1422,6 +1554,17 @@ export class CloudAgentSessionStore {
       .from(cloudAgentEvents)
       .where(and(eq(cloudAgentEvents.sessionId, sessionId), lt(cloudAgentEvents.seq, seq)))
       .orderBy(desc(cloudAgentEvents.seq))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  private async hasEventsAfter(sessionId: string, seq: number): Promise<boolean> {
+    if (!Number.isFinite(seq) || seq < 0) return false;
+    const rows = await this.db
+      .select({ seq: cloudAgentEvents.seq })
+      .from(cloudAgentEvents)
+      .where(and(eq(cloudAgentEvents.sessionId, sessionId), gt(cloudAgentEvents.seq, seq)))
+      .orderBy(asc(cloudAgentEvents.seq))
       .limit(1);
     return rows.length > 0;
   }

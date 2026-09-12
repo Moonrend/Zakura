@@ -5,8 +5,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Db } from "../db/client.js";
 import {
   apiKeys,
+  newId,
   tenantMemberships,
   tenants,
+  userSessions,
   users,
   type ApiKey,
   type Tenant,
@@ -24,13 +26,24 @@ export interface SessionPayload {
   /** Tenant membership role: owner | admin | member | api_key */
   role: string;
   isPlatformAdmin?: boolean;
+  /** 服务端会话行 id；旧令牌可能没有。 */
+  sid?: string;
+  /** 签发时间（unix 秒）。配合 passwordUpdatedAt 使改密后旧令牌失效。 */
+  iat?: number;
   exp: number;
 }
+
+const DEFAULT_TTL_SEC = 60 * 60 * 24 * 7;
+
+export type SessionMeta = {
+  userAgent?: string | null;
+  ip?: string | null;
+};
 
 export function signSession(
   secret: string,
   payload: Omit<SessionPayload, "exp">,
-  ttlSec = 60 * 60 * 24 * 7,
+  ttlSec = DEFAULT_TTL_SEC,
 ) {
   const body: SessionPayload = { ...payload, exp: Math.floor(Date.now() / 1000) + ttlSec };
   const data = Buffer.from(JSON.stringify(body)).toString("base64url");
@@ -59,6 +72,36 @@ export type LoginResult = {
   tenant: Tenant;
   membership: TenantMembership;
 };
+
+export async function createUserSession(
+  db: Db,
+  secret: string,
+  input: {
+    userId: string;
+    tenantId: string;
+    email: string;
+    role: string;
+    isPlatformAdmin?: boolean;
+  },
+  meta?: SessionMeta,
+  ttlSec = DEFAULT_TTL_SEC,
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const sid = newId();
+  await db.insert(userSessions).values({
+    id: sid,
+    userId: input.userId,
+    tenantId: input.tenantId,
+    email: input.email,
+    role: input.role,
+    isPlatformAdmin: Boolean(input.isPlatformAdmin),
+    userAgent: meta?.userAgent ?? null,
+    ip: meta?.ip ?? null,
+    expiresAt: new Date((now + ttlSec) * 1000),
+    createdAt: new Date(now * 1000),
+  });
+  return signSession(secret, { ...input, sid, iat: now }, ttlSec);
+}
 
 /** 密码正确但账号/团队被封时抛出；路由层映射为 403 + code。 */
 export class LoginBlockedError extends Error {
@@ -143,10 +186,12 @@ export async function loginUser(
   };
 }
 
-export function sessionFromLogin(
+export async function sessionFromLogin(
+  db: Db,
   secret: string,
   result: LoginResult,
-): string {
+  meta?: SessionMeta,
+): Promise<string> {
   recordUserUsage({
     tenantId: result.tenant.id,
     userId: result.user.id,
@@ -154,13 +199,18 @@ export function sessionFromLogin(
     action: "login",
     summary: "session",
   });
-  return signSession(secret, {
-    userId: result.user.id,
-    tenantId: result.tenant.id,
-    email: result.user.email,
-    role: result.membership.role,
-    isPlatformAdmin: result.user.isPlatformAdmin,
-  });
+  return createUserSession(
+    db,
+    secret,
+    {
+      userId: result.user.id,
+      tenantId: result.tenant.id,
+      email: result.user.email,
+      role: result.membership.role,
+      isPlatformAdmin: result.user.isPlatformAdmin,
+    },
+    meta,
+  );
 }
 
 export async function switchTenantSession(
@@ -185,7 +235,7 @@ export async function switchTenantSession(
   });
   if (!tenant) return null;
   if (tenant.suspendedAt) return null;
-  return signSession(secret, {
+  return createUserSession(db, secret, {
     userId: user.id,
     tenantId: tenant.id,
     email: user.email,

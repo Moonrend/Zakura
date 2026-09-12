@@ -57,6 +57,8 @@ export function SessionContextBar({
   runtimeLoading,
   runtimeDisabledHint,
   onRuntimeChange,
+  flashProject,
+  flashRuntime,
 }: {
   isNew: boolean;
   project: string | null;
@@ -68,6 +70,8 @@ export function SessionContextBar({
   runtimeLoading?: boolean;
   runtimeDisabledHint?: string;
   onRuntimeChange: (id: string) => void;
+  flashProject?: number;
+  flashRuntime?: number;
 }) {
   const current = runtimes.find((r) => r.id === runtimeId) ?? runtimes[0];
   const projectNames =
@@ -78,13 +82,14 @@ export function SessionContextBar({
       {project ? (
         <>
           <span>{isNew ? "新会话位于" : "位于"}</span>
-          <DropdownMenu>
+          <DropdownMenu key={flashProject ? `project-${flashProject}` : "project"}>
             <DropdownMenuTrigger
               render={
                 <ContextTrigger
                   icon={<FolderGit2 className="size-3.5 shrink-0" />}
                   label={project}
                   title="更换项目"
+                  className={flashProject ? "animate-remote-nudge" : undefined}
                 />
               }
             />
@@ -112,7 +117,7 @@ export function SessionContextBar({
       )}
 
       {runtimes.length > 1 || (!project && projects.length > 0) ? (
-        <DropdownMenu>
+        <DropdownMenu key={flashRuntime ? `runtime-${flashRuntime}` : "runtime"}>
           <DropdownMenuTrigger
             disabled={runtimeDisabled}
             title={runtimeDisabled ? runtimeDisabledHint : "选择执行 Agent"}
@@ -127,6 +132,7 @@ export function SessionContextBar({
                 }
                 label={current?.label ?? runtimeId}
                 disabled={runtimeDisabled}
+                className={flashRuntime ? "animate-remote-nudge" : undefined}
               />
             }
           />
@@ -158,7 +164,13 @@ export function SessionContextBar({
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
-        <span className="inline-flex items-center gap-1 px-1 text-foreground/85">
+        <span
+          key={flashRuntime ?? "runtime-label"}
+          className={cn(
+            "inline-flex items-center gap-1 rounded-md px-1 text-foreground/85",
+            flashRuntime && "animate-remote-nudge",
+          )}
+        >
           {runtimeLoading ? (
             <Loader2 className="size-3.5 animate-spin" />
           ) : (

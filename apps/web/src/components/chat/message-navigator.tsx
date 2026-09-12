@@ -107,7 +107,7 @@ export function MessageNavigator({
           hovered ? "w-56 opacity-100" : "w-0 opacity-0 pointer-events-none",
         )}
       >
-        <div className="mr-1 max-h-[min(70vh,480px)] overflow-y-auto rounded-lg border border-border/60 bg-background/96 shadow-[var(--shadow-soft)] backdrop-blur-sm">
+        <div className="mr-1 max-h-[min(70vh,480px)] overflow-y-auto rounded-lg border border-border/40 bg-background/90">
           <div className="flex flex-col py-1">
             {turns.map((turn, i) => {
               const isActive = turn.message.id === activeTurnId;

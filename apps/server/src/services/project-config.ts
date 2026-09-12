@@ -57,6 +57,8 @@ export type LoadedProjectContext = {
   skillsSummary: string;
   skills: ProjectSkillMeta[];
   hookPackages: AgentHookPackage[];
+  /** 有工作区目录时才把 cwd 指到 /workspace/projects/<slug> */
+  hasWorkspace?: boolean;
 };
 
 async function readOptionalText(fs: WorkspaceFs, rel: string): Promise<string | null> {

@@ -47,9 +47,11 @@ import {
   deleteSchedule,
   describePattern,
   formatRelativeTime,
+  formatAbsoluteTime,
   listSchedules,
   patternFromWhenPreset,
   runScheduleNow,
+  statusLabel,
   updateSchedule,
   whenPresetFromPattern,
 } from "@/lib/automation";
@@ -69,6 +71,7 @@ export function AutomationPanel({
   onAskAgentCreate,
   onOpenSession,
   className,
+  layout = "rail",
 }: {
   agentId: string | null;
   projects?: string[];
@@ -76,6 +79,8 @@ export function AutomationPanel({
   onAskAgentCreate: (goal: string) => void;
   onOpenSession?: (sessionId: string) => void;
   className?: string;
+  /** rail=侧栏列表；page=主区完整表 */
+  layout?: "rail" | "page";
 }) {
   const { confirm } = useConfirmDialog();
   const [schedules, setSchedules] = useState<AgentSchedule[]>([]);
@@ -260,6 +265,79 @@ export function AutomationPanel({
 
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col", className)}>
+      {layout === "page" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-10 pt-4 md:px-8">
+          <div className="mb-6 flex items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-medium tracking-tight">定时任务</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                到点自动跑，结果会出现在对话里。
+              </p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={openCreate}>
+              <Plus className="size-3.5" />
+              新建
+            </Button>
+          </div>
+          {schedules.length === 0 ? (
+            <button
+              type="button"
+              onClick={openCreate}
+              className="w-full max-w-lg rounded-xl border border-dashed border-border/60 px-4 py-10 text-left text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+            >
+              还没有定时任务。描述想定期做的事，交给 Agent 创建。
+            </button>
+          ) : (
+            <div className="flex flex-col">
+              <div className="mb-1 hidden grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7.5rem_5.5rem_auto] gap-3 px-2 text-[11px] text-muted-foreground md:grid">
+                <span>名称</span>
+                <span>何时</span>
+                <span>下次</span>
+                <span>上次</span>
+                <span />
+              </div>
+              {groupedSchedules.named.map(([name, items]) => (
+                <div key={name} className="mb-4">
+                  <div className="px-2 pb-1 pt-2 text-[11px] text-muted-foreground/70">{name}</div>
+                  <ul>
+                    {items.map((s) => (
+                      <li key={s.id}>
+                        <TaskPageRow
+                          schedule={s}
+                          busy={busyId === s.id}
+                          onOpen={() => openEdit(s)}
+                          onToggle={(on) => void toggleSchedule(s, on)}
+                          onRun={() => void runSchedule(s)}
+                          onDelete={() => void removeSchedule(s)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+              {groupedSchedules.unbound.length > 0 ? (
+                <div>
+                  <div className="px-2 pb-1 pt-2 text-[11px] text-muted-foreground/70">其他任务</div>
+                  <ul>
+                    {groupedSchedules.unbound.map((s) => (
+                      <li key={s.id}>
+                        <TaskPageRow
+                          schedule={s}
+                          busy={busyId === s.id}
+                          onOpen={() => openEdit(s)}
+                          onToggle={(on) => void toggleSchedule(s, on)}
+                          onRun={() => void runSchedule(s)}
+                          onDelete={() => void removeSchedule(s)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 pt-2">
         <div className="mb-1 flex items-center justify-between gap-2 px-1">
           <h3 className="text-xs font-medium text-muted-foreground">定时任务</h3>
@@ -324,6 +402,7 @@ export function AutomationPanel({
           </div>
         )}
       </div>
+      )}
 
       {/* 新建：自然语言 → Agent */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -566,6 +645,90 @@ function TaskRow({
                 type="button"
                 aria-label="更多"
                 className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+              />
+            }
+          >
+            <MoreHorizontal className="size-3.5" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-28">
+            <DropdownMenuItem onClick={onOpen}>编辑</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onToggle(!s.enabled)}>
+              {s.enabled ? "暂停" : "启用"}
+            </DropdownMenuItem>
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2 />
+              删除
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  );
+}
+
+function TaskPageRow({
+  schedule: s,
+  busy,
+  onOpen,
+  onToggle,
+  onRun,
+  onDelete,
+}: {
+  schedule: AgentSchedule;
+  busy: boolean;
+  onOpen: () => void;
+  onToggle: (on: boolean) => void;
+  onRun: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className={cn(
+        "group grid grid-cols-1 items-center gap-1 rounded-lg px-2 py-2.5 transition-colors duration-150 ease-fluid hover:bg-muted/35",
+        "md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_7.5rem_5.5rem_auto] md:gap-3",
+        !s.enabled && "opacity-55",
+      )}
+    >
+      <button type="button" onClick={onOpen} className="min-w-0 text-left">
+        <div className="truncate text-sm">{s.name}</div>
+        <div className="mt-0.5 truncate text-[11px] text-muted-foreground md:hidden">
+          {describePattern(s.pattern)}
+          {s.enabled && s.nextRunAt ? ` · ${formatRelativeTime(s.nextRunAt)}` : null}
+        </div>
+      </button>
+      <div className="hidden truncate text-sm text-muted-foreground md:block">
+        {describePattern(s.pattern)}
+      </div>
+      <div className="hidden text-sm text-muted-foreground md:block">
+        {s.enabled ? formatRelativeTime(s.nextRunAt) : "已暂停"}
+      </div>
+      <div
+        className="hidden text-sm text-muted-foreground md:block"
+        title={formatAbsoluteTime(s.lastRunAt)}
+      >
+        {statusLabel(s.lastStatus)}
+      </div>
+      <div className="flex shrink-0 items-center justify-end">
+        <button
+          type="button"
+          title="立即运行"
+          disabled={busy}
+          onClick={onRun}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Play className="size-3.5" />
+          )}
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                aria-label="更多"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
               />
             }
           >

@@ -13,7 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Sheet,
   SheetContent,
@@ -21,8 +22,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { SettingsRow, SettingsSaveIndicator } from "@/components/settings-shell";
 
 /** 会话内快捷设置。完整分类见 Agent 设置页 */
@@ -71,7 +70,7 @@ export function ChatSettingsSheet({
 }: ChatSettingsSheetProps) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="sm:max-w-md">
+      <SheetContent className="bg-background shadow-none sm:max-w-md">
         <SheetHeader>
           <div className="flex items-start justify-between gap-2 pr-6">
             <SheetTitle>{agentName ?? "Agent"} 设置</SheetTitle>
@@ -90,19 +89,15 @@ export function ChatSettingsSheet({
                 className="min-h-28"
               />
             </div>
-            <Separator />
             <SettingsRow label="工具调用">
               <Switch checked={enableTools} onCheckedChange={onEnableToolsChange} />
             </SettingsRow>
-            <Separator />
             <SettingsRow label="自动记忆">
               <Switch checked={autoMemory} onCheckedChange={onAutoMemoryChange} />
             </SettingsRow>
-            <Separator />
             <SettingsRow label="自动标题">
               <Switch checked={autoTitle} onCheckedChange={onAutoTitleChange} />
             </SettingsRow>
-            <Separator />
             <div className="flex items-center justify-between gap-4 py-3">
               <div className="min-w-0 space-y-0.5">
                 <Label>执行中发消息</Label>
@@ -130,7 +125,6 @@ export function ChatSettingsSheet({
                 </SelectContent>
               </Select>
             </div>
-            <Separator />
             <div className="flex items-center justify-between gap-4 py-3">
               <Label>子代理深度</Label>
               <Select
@@ -155,7 +149,7 @@ export function ChatSettingsSheet({
             </div>
             {agentId ? (
               <Button
-                variant="outline"
+                variant="ghost"
                 className="mt-2 w-full"
                 nativeButton={false}
                 render={<Link href={`/dashboard/agents/${agentId}/overview`} />}

@@ -435,6 +435,8 @@ export class AcpSessionService {
     /** 随消息一同发送的附件；按 agent 的 promptCapabilities 内联或降级为 resource_link */
     attachments?: CloudAgentAttachment[] | null;
     parentRunId?: string | null;
+    userId?: string | null;
+    userName?: string | null;
   }): Promise<{ runId: string }> {
     const session = await this.deps.store.getSession(
       input.tenantId,
@@ -472,6 +474,9 @@ export class AcpSessionService {
         messageId,
         content,
         ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
+        ...(input.userId && input.userId !== "api-key"
+          ? { userId: input.userId, ...(input.userName ? { userName: input.userName } : {}) }
+          : {}),
       },
     });
     await this.deps.store.appendEvent({
@@ -741,7 +746,13 @@ export class AcpSessionService {
         (await this.deps.store.takeNextQueued(sessionId));
       if (!taken?.content.trim()) return;
       try {
-        await this.prompt({ tenantId, agentId, sessionId, content: taken.content });
+        await this.prompt({
+          tenantId,
+          agentId,
+          sessionId,
+          content: taken.content,
+          ...(taken.userId ? { userId: taken.userId, userName: taken.userName } : {}),
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (message === RUN_BUSY_MESSAGE) {

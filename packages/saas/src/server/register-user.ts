@@ -41,6 +41,7 @@ export async function registerSaasUser(
     password: string;
     name?: string;
     tenantName?: string;
+    joinTenant?: { tenantId: string; role: "member" | "admin" };
   },
 ) {
   // Host drizzle client + table objects
@@ -87,19 +88,29 @@ export async function registerSaasUser(
   const passwordHash = await bcrypt.hash(input.password, 12);
 
   return db.transaction(async (tx) => {
-    const [tenant] = await tx
-      .insert(schema.tenants)
-      .values({
-        id: schema.newId(),
-        slug,
-        name: tenantName,
-        isDefault: false,
-        onboardingCompleted: false,
-        onboardingSteps: "{}",
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    let tenant: Record<string, unknown>;
+    if (input.joinTenant) {
+      const found = await db.query.tenants.findFirst({
+        where: eq(tenants.id as never, input.joinTenant.tenantId),
+      });
+      if (!found) throw new RegisterError("加入的团队不存在", 400);
+      tenant = found as Record<string, unknown>;
+    } else {
+      const [created] = await tx
+        .insert(schema.tenants)
+        .values({
+          id: schema.newId(),
+          slug,
+          name: tenantName,
+          isDefault: false,
+          onboardingCompleted: false,
+          onboardingSteps: "{}",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      tenant = created;
+    }
 
     const [user] = await tx
       .insert(schema.users)
@@ -121,7 +132,7 @@ export async function registerSaasUser(
         id: schema.newId(),
         tenantId: (tenant as { id: string }).id,
         userId: (user as { id: string }).id,
-        role: "owner",
+        role: input.joinTenant?.role ?? "owner",
         status: "active",
         createdAt: now,
         updatedAt: now,

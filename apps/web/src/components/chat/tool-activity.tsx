@@ -215,7 +215,7 @@ function MarkdownDocBlock({ doc }: { doc: MarkdownDoc }) {
   const domain = doc.url ? hostOf(doc.url) : "";
   const heading = doc.title || domain;
   return (
-    <div className="overflow-hidden rounded-lg border border-border/60 bg-muted/15">
+    <div className="overflow-hidden rounded-xl border border-border/40">
       {heading ? (
         <div className="flex items-center gap-2 border-b border-border/50 px-2.5 py-1.5">
           {domain ? (
@@ -326,7 +326,7 @@ function MemoryCards({ items }: { items: MemoryItem[] }) {
       {items.map((m, i) => (
         <div
           key={m.id ?? i}
-          className="rounded-lg border border-border/50 bg-muted/20 px-2.5 py-1.5"
+          className="rounded-lg border border-border/40 px-2.5 py-1.5"
         >
           <div className="line-clamp-4 text-[12.5px] leading-relaxed whitespace-pre-wrap text-foreground/85">
             {m.content}
@@ -917,13 +917,17 @@ function ToolRow({
   onOpenFile,
   agentId,
   sessionId,
+  open: openRemote,
+  onOpenChange,
 }: {
   call: TimelineToolCall;
   onOpenFile?: (path: string) => void;
   agentId?: string | null;
   sessionId?: string | null;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [openLocal, setOpenLocal] = useState(false);
   /** 展开过才真正挂载详情：抓回来的整篇正文不该在折叠状态下白渲染一遍 */
   const [mounted, setMounted] = useState(false);
   const [hydrated, setHydrated] = useState<{
@@ -981,10 +985,17 @@ function ToolRow({
         ? formatMs(call.durationMs)
         : "";
 
+  const open = (running && live) || (openRemote ?? openLocal);
+  const setOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    const value = typeof next === "function" ? next(open) : next;
+    setOpenLocal(value);
+    onOpenChange?.(value);
+  };
+
   useEffect(() => {
     if (!running || !live) return;
     setMounted(true);
-    setOpen(true);
+    setOpenLocal(true);
   }, [running, live]);
 
   const ensureDetail = async () => {
@@ -1008,6 +1019,13 @@ function ToolRow({
       setLoadingDetail(false);
     }
   };
+
+  useEffect(() => {
+    if (!open) return;
+    setMounted(true);
+    void ensureDetail();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   return (
     <div className="flex max-w-full min-w-0 flex-col items-start">
@@ -1110,6 +1128,9 @@ export function ToolActivity({
   autoCollapse = false,
   agentId,
   sessionId,
+  uiKey,
+  ui,
+  setUiFlag,
 }: {
   steps: ActivityStep[];
   onOpenFile?: (path: string) => void;
@@ -1117,6 +1138,9 @@ export function ToolActivity({
   autoCollapse?: boolean;
   agentId?: string | null;
   sessionId?: string | null;
+  uiKey?: string;
+  ui?: Record<string, boolean>;
+  setUiFlag?: (key: string, value: boolean) => void;
 }) {
   const visibleSteps = useMemo(() => {
     const out: ActivityStep[] = [];
@@ -1135,7 +1159,14 @@ export function ToolActivity({
   }, [steps]);
 
   const [showAll, setShowAll] = useState(false);
-  const [expanded, setExpanded] = useState(!autoCollapse);
+  const groupKey = uiKey ? `t:${uiKey}` : null;
+  const [expandedLocal, setExpandedLocal] = useState(!autoCollapse);
+  const expanded = groupKey && ui && groupKey in ui ? ui[groupKey]! : expandedLocal;
+  const setExpanded = (next: boolean | ((prev: boolean) => boolean)) => {
+    const value = typeof next === "function" ? next(expanded) : next;
+    setExpandedLocal(value);
+    if (groupKey) setUiFlag?.(groupKey, value);
+  };
   const [detailMap, setDetailMap] = useState<
     Record<string, { arguments?: string; resultText?: string }>
   >({});
@@ -1206,7 +1237,13 @@ export function ToolActivity({
   };
 
   const compact =
-    autoCollapse && !expanded && !hasRunning && hydratedSteps.length > 1;
+    autoCollapse &&
+    !expanded &&
+    !hasRunning &&
+    hydratedSteps.length > 1 &&
+    !hydratedSteps
+      .slice(1)
+      .some((s) => s.kind === "tool" && ui?.[`c:${s.call.toolCallId}`]);
 
   const collapsible =
     !compact &&
@@ -1231,6 +1268,8 @@ export function ToolActivity({
           id={s.id}
           content={s.content}
           active={s.active}
+          open={ui?.[`r:${s.id}`]}
+          onOpenChange={(next) => setUiFlag?.(`r:${s.id}`, next)}
         />
       );
     }
@@ -1244,6 +1283,11 @@ export function ToolActivity({
         onOpenFile={onOpenFile}
         agentId={agentId}
         sessionId={sessionId}
+        open={ui?.[`c:${s.call.toolCallId}`]}
+        onOpenChange={(next) => {
+          setUiFlag?.(`c:${s.call.toolCallId}`, next);
+          if (next) setExpanded(true);
+        }}
       />
     );
   };
@@ -1279,6 +1323,9 @@ export function ToolActivity({
   const tail = collapsible
     ? hydratedSteps.slice(hydratedSteps.length - TAIL_ROWS)
     : [];
+  const middleOpen =
+    showAll ||
+    middle.some((s) => s.kind === "tool" && ui?.[`c:${s.call.toolCallId}`]);
 
   return (
     <div className="relative flex w-full min-w-0 flex-col items-start">
@@ -1291,13 +1338,20 @@ export function ToolActivity({
         <>
           <MoreStepsRow
             count={middle.length}
-            open={showAll}
+            open={middleOpen}
             onToggle={() => {
-              setShowAll((v) => !v);
-              if (!showAll) void prefetchPending();
+              if (middleOpen) {
+                setShowAll(false);
+                for (const s of middle) {
+                  if (s.kind === "tool") setUiFlag?.(`c:${s.call.toolCallId}`, false);
+                }
+              } else {
+                setShowAll(true);
+                void prefetchPending();
+              }
             }}
           />
-          <Disclosure open={showAll} className="w-full">
+          <Disclosure open={middleOpen} className="w-full">
             <div className="flex flex-col items-start">
               {middle.map((s, i) => row(s, i + HEAD_ROWS))}
             </div>
@@ -1308,7 +1362,12 @@ export function ToolActivity({
       {autoCollapse && expanded && hydratedSteps.length > 1 && !hasRunning && (
         <button
           type="button"
-          onClick={() => setExpanded(false)}
+          onClick={() => {
+            setExpanded(false);
+            for (const s of hydratedSteps.slice(1)) {
+              if (s.kind === "tool") setUiFlag?.(`c:${s.call.toolCallId}`, false);
+            }
+          }}
           className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"
         >
           <span className="relative z-10 flex size-[18px] shrink-0 items-center justify-center rounded-full bg-background">
@@ -1425,20 +1484,37 @@ function ReasoningStepRow({
   id,
   content,
   active,
+  open: openRemote,
+  onOpenChange,
 }: {
   id: string;
   content: string;
   active: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(active);
+  const [openLocal, setOpenLocal] = useState(active);
   const wasActiveRef = useRef(active);
+  const open = openRemote ?? openLocal;
 
   useEffect(() => {
     const wasActive = wasActiveRef.current;
-    if (active && !wasActive) setOpen(true);
-    else if (!active && wasActive) setOpen(false);
+    if (active && !wasActive) {
+      setOpenLocal(true);
+      onOpenChange?.(true);
+    } else if (!active && wasActive && openRemote === undefined) {
+      setOpenLocal(false);
+    }
     wasActiveRef.current = active;
-  }, [active]);
+    // ponytail: onOpenChange 故意不进依赖，避免协同回写循环
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, openRemote]);
+
+  const toggle = () => {
+    const next = !open;
+    setOpenLocal(next);
+    onOpenChange?.(next);
+  };
 
   return (
     <div className="flex max-w-full min-w-0 flex-col items-start">
@@ -1446,7 +1522,7 @@ function ReasoningStepRow({
         type="button"
         aria-expanded={open}
         aria-controls={`reasoning-${id}`}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         className={cn(
           "group/row -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[13px] text-muted-foreground/85",
           "transition-colors duration-150 ease-fluid hover:text-foreground",

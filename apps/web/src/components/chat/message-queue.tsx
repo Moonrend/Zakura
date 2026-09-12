@@ -40,8 +40,8 @@ export function MessageQueue({
         <div
           key={item.messageId}
           className={cn(
-            "flex max-w-[min(100%,28rem)] items-center gap-2 rounded-lg border border-border bg-muted/40 py-1 pr-1 pl-2.5",
-            item.interrupt && "border-ring/40",
+            "flex max-w-[min(100%,28rem)] items-center gap-2 py-0.5 pr-0.5 pl-1",
+            item.interrupt && "text-foreground",
           )}
         >
           <span className="min-w-0 flex-1 truncate text-sm text-foreground/90">

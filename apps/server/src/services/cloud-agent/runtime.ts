@@ -11,6 +11,11 @@
  */
 import { loadProjectContext, type LoadedProjectContext } from "../project-config.js";
 import {
+  getAgentProject,
+  mergeProjectInstructions,
+} from "../agent-projects.js";
+import type { Db } from "../../db/client.js";
+import {
   lastCancelledRunId,
   parseCloudAgentConfig,
   projectDefaultWorkingDir,
@@ -195,6 +200,8 @@ export type CloudAgentRuntimeDeps = {
   automation?: AgentAutomationService | null;
   /** 第三方 ACP Agent（可选；主 chat 注入 list/spawn_acp_agent） */
   acp?: AcpSessionService | null;
+  /** 项目记录（可选；缺省时只读目录里的 AGENTS.md） */
+  db?: Db | null;
 };
 
 export class CloudAgentRuntime {
@@ -320,8 +327,8 @@ export class CloudAgentRuntime {
     // 标明自动触发，避免 Agent 当成用户实时对话去追问/寒暄
     const name = input.scheduleName?.trim();
     const cwdHint = input.project
-      ? `请在 ${projectDefaultWorkingDir(input.project)} 内完成，产物不要写到工作区根。`
-      : "若任务会写文件，先在 /workspace/projects/<名>/ 下工作，不要写到工作区根。";
+      ? `若任务会写文件，优先在项目「${input.project}」相关目录内完成。`
+      : "若任务会写文件，先确认项目或工作目录，不要随便写到工作区根。";
     const content =
       input.kind === "schedule"
         ? [
@@ -367,6 +374,8 @@ export class CloudAgentRuntime {
     attachments?: CloudAgentAttachment[];
     /** 本次用户触发 Run 的调用时模型选项。 */
     options?: CloudAgentRunOptions;
+    userId?: string | null;
+    userName?: string | null;
   }): Promise<{ runId: string }> {
     const attachments = parseAttachments(input.attachments);
     const isContinue = Boolean(input.continue);
@@ -460,6 +469,9 @@ export class CloudAgentRuntime {
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(isContinue ? { continue: true } : {}),
+          ...(input.userId && input.userId !== "api-key"
+            ? { userId: input.userId, ...(input.userName ? { userName: input.userName } : {}) }
+            : {}),
         },
       });
     }
@@ -545,6 +557,8 @@ export class CloudAgentRuntime {
     content?: string;
     attachments?: CloudAgentAttachment[];
     mode?: CloudAgentFollowUpMode;
+    userId?: string | null;
+    userName?: string | null;
   }): Promise<{ messageId: string; mode: CloudAgentFollowUpMode }> {
     const content = input.content?.trim() ?? "";
     const attachments = parseAttachments(input.attachments);
@@ -567,6 +581,9 @@ export class CloudAgentRuntime {
       attachments,
       mode,
       createdAt: new Date().toISOString(),
+      ...(input.userId && input.userId !== "api-key"
+        ? { userId: input.userId, ...(input.userName ? { userName: input.userName } : {}) }
+        : {}),
     });
     if (!session.activeRunId) {
       void this.startNextQueued({
@@ -611,6 +628,7 @@ export class CloudAgentRuntime {
             sessionId: input.sessionId,
             content: taken.content,
             ...(taken.attachments?.length ? { attachments: taken.attachments } : {}),
+            ...(taken.userId ? { userId: taken.userId, userName: taken.userName } : {}),
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -1727,7 +1745,9 @@ export class CloudAgentRuntime {
       return {
         extraPackages: ctx.hookPackages,
         sessionId,
-        ...(slug ? { workingDir: projectDefaultWorkingDir(slug) } : {}),
+        ...(slug && ctx.hasWorkspace !== false
+          ? { workingDir: projectDefaultWorkingDir(slug) }
+          : {}),
       };
     };
 
@@ -1818,7 +1838,7 @@ export class CloudAgentRuntime {
     const projectHookRunOpts = {
       extraPackages: projectCtx.hookPackages,
       sessionId,
-      ...(sessionPreferences?.project
+      ...(sessionPreferences?.project && projectCtx.hasWorkspace !== false
         ? { workingDir: projectDefaultWorkingDir(sessionPreferences.project) }
         : {}),
     };
@@ -1854,9 +1874,10 @@ export class CloudAgentRuntime {
       memoryInjected: Boolean(memoryContext),
     });
 
-    const defaultWorkingDir = sessionPreferences?.project
-      ? projectDefaultWorkingDir(sessionPreferences.project)
-      : undefined;
+    const defaultWorkingDir =
+      sessionPreferences?.project && projectCtx.hasWorkspace !== false
+        ? projectDefaultWorkingDir(sessionPreferences.project)
+        : undefined;
     const result = await runAgentLoop(this.loopDeps, {
       tenantId,
       agent,
@@ -2160,19 +2181,36 @@ export class CloudAgentRuntime {
     agent: Agent,
     slug: string,
   ): Promise<LoadedProjectContext> {
-    const empty: LoadedProjectContext = { skillsSummary: "", skills: [], hookPackages: [] };
-    const provider = this.deps.workspaceFsProvider;
-    if (!provider) return empty;
-    try {
-      const fs = await provider.forAgentBinding({
-        id: agent.id,
-        tenantId: agent.tenantId,
-        runtimeNodeId: agent.runtimeNodeId,
-      });
-      return await loadProjectContext(fs, slug);
-    } catch {
-      return empty;
+    const empty: LoadedProjectContext = {
+      skillsSummary: "",
+      skills: [],
+      hookPackages: [],
+      hasWorkspace: false,
+    };
+    const row = this.deps.db
+      ? await getAgentProject(this.deps.db, agent.id, slug).catch(() => null)
+      : null;
+    let fsCtx = empty;
+    if (row ? row.hasWorkspace : true) {
+      const provider = this.deps.workspaceFsProvider;
+      if (provider) {
+        try {
+          const fs = await provider.forAgentBinding({
+            id: agent.id,
+            tenantId: agent.tenantId,
+            runtimeNodeId: agent.runtimeNodeId,
+          });
+          fsCtx = await loadProjectContext(fs, slug);
+        } catch {
+          // 目录读失败时仍可用 DB 说明
+        }
+      }
     }
+    return {
+      ...fsCtx,
+      hasWorkspace: row ? row.hasWorkspace : true,
+      instructions: mergeProjectInstructions(row?.instructions ?? "", fsCtx.instructions),
+    };
   }
 
   /**
@@ -2424,7 +2462,9 @@ export class CloudAgentRuntime {
       const projectHookRunOpts = {
         extraPackages: projectCtx.hookPackages,
         sessionId: session.id,
-        ...(opts.project ? { workingDir: projectDefaultWorkingDir(opts.project) } : {}),
+        ...(opts.project && projectCtx.hasWorkspace !== false
+          ? { workingDir: projectDefaultWorkingDir(opts.project) }
+          : {}),
       };
       const hookFns = this.makeHookLoopFns(agent, projectHookRunOpts);
       const result = await runAgentLoop(this.loopDeps, {
@@ -2446,7 +2486,9 @@ export class CloudAgentRuntime {
             lastText ? `最后进展：${lastText.slice(0, 2000)}` : "可在 Agent 设置里调高或清空「最大工具轮次」。"
           }`,
         ...(opts.isCancelled ? { isCancelled: opts.isCancelled } : {}),
-        ...(opts.project ? { defaultWorkingDir: projectDefaultWorkingDir(opts.project) } : {}),
+        ...(opts.project && projectCtx.hasWorkspace !== false
+          ? { defaultWorkingDir: projectDefaultWorkingDir(opts.project) }
+          : {}),
         ...(opts.project ? { projectSlug: opts.project } : {}),
         hooks: {
           ...(compactHook

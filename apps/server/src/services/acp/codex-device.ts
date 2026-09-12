@@ -10,10 +10,16 @@ import {
 import { newId } from "../../db/schema.js";
 import type { Agent } from "../../db/schema.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
+import { defaultJsonHttp, type JsonHttp } from "../model-upstream-auth/http.js";
+import {
+  CODEX_OAUTH_CLIENT_ID,
+  CODEX_OAUTH_ISSUER,
+  CODEX_VERIFICATION_URL,
+  pollCodexDeviceToken,
+  requestCodexUserCode,
+} from "../model-upstream-auth/providers/codex.js";
 
-export const CODEX_OAUTH_ISSUER = "https://auth.openai.com";
-/** 公开 Codex CLI 的 OAuth client_id（openai/codex 源码常量）。 */
-export const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export { CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_ISSUER };
 
 export type CodexDeviceStatus = "pending" | "complete" | "error" | "cancelled";
 
@@ -43,52 +49,42 @@ type PendingLogin = {
   error?: string;
 };
 
-const DEFAULT_INTERVAL = 5;
 const EXPIRES_MS = 15 * 60 * 1000;
 
-export function defaultCodexDeviceHttp(): CodexDeviceHttp {
+function asJsonHttp(http: CodexDeviceHttp): JsonHttp {
+  const fallback = defaultJsonHttp();
   return {
-    async postJson(url, body) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json().catch(() => null);
-      return { status: res.status, json };
-    },
+    postJson: http.postJson.bind(http),
+    getJson: fallback.getJson,
+    postForm: fallback.postForm,
   };
+}
+
+export function defaultCodexDeviceHttp(): CodexDeviceHttp {
+  return defaultJsonHttp();
 }
 
 export class CodexDeviceAuth {
   private readonly pending = new Map<string, PendingLogin>();
+  private readonly jsonHttp: JsonHttp;
 
   constructor(
     private readonly workspace: AgentWorkspaceService,
-    private readonly http: CodexDeviceHttp = defaultCodexDeviceHttp(),
-  ) {}
+    http: CodexDeviceHttp = defaultCodexDeviceHttp(),
+  ) {
+    this.jsonHttp = asJsonHttp(http);
+  }
 
   async start(agent: Agent): Promise<CodexDeviceSnapshot> {
     this.dropExpired();
-    const started = await this.http.postJson(
-      `${CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode`,
-      { client_id: CODEX_OAUTH_CLIENT_ID },
-    );
-    if (started.status < 200 || started.status >= 300) {
-      throw new Error(`Codex 设备码申请失败（HTTP ${started.status}）`);
-    }
-    const rec = asRecord(started.json);
-    const deviceAuthId = str(rec?.device_auth_id);
-    const userCode = str(rec?.user_code) || str(rec?.usercode);
-    if (!deviceAuthId || !userCode) throw new Error("Codex 设备码响应缺少 user_code");
-    const interval = Math.max(1, Number(rec?.interval) || DEFAULT_INTERVAL);
+    const started = await requestCodexUserCode(this.jsonHttp);
     const row: PendingLogin = {
       id: newId(),
       agentId: agent.id,
-      deviceAuthId,
-      userCode,
-      verificationUrl: `${CODEX_OAUTH_ISSUER}/codex/device`,
-      interval,
+      deviceAuthId: started.deviceAuthId,
+      userCode: started.userCode,
+      verificationUrl: CODEX_VERIFICATION_URL,
+      interval: started.interval,
       expiresAt: Date.now() + EXPIRES_MS,
       status: "pending",
     };
@@ -105,24 +101,27 @@ export class CodexDeviceAuth {
       row.error = "设备码已过期";
       return snapshot(row);
     }
-    const polled = await this.http.postJson(
-      `${CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token`,
-      { device_auth_id: row.deviceAuthId, user_code: row.userCode },
-    );
-    if (polled.status === 403 || polled.status === 404) return snapshot(row);
-    if (polled.status < 200 || polled.status >= 300) {
+    const result = await pollCodexDeviceToken(this.jsonHttp, {
+      deviceAuthId: row.deviceAuthId,
+      userCode: row.userCode,
+    });
+    if (result.status === "pending") return snapshot(row);
+    if (result.status === "error") {
       row.status = "error";
-      row.error = `轮询失败（HTTP ${polled.status}）`;
+      row.error = result.error;
       return snapshot(row);
     }
-    try {
-      const tokens = await this.exchange(asRecord(polled.json) ?? {});
-      await writeDurableAuthJson(this.workspace, agent, buildCodexAuthJson(tokens));
-      row.status = "complete";
-    } catch (err) {
-      row.status = "error";
-      row.error = err instanceof Error ? err.message : String(err);
-    }
+    await writeDurableAuthJson(
+      this.workspace,
+      agent,
+      buildCodexAuthJson({
+        id_token: result.tokens.id_token ?? "",
+        access_token: result.tokens.access_token,
+        refresh_token: result.tokens.refresh_token ?? "",
+        account_id: result.tokens.account_id,
+      }),
+    );
+    row.status = "complete";
     return snapshot(row);
   }
 
@@ -131,40 +130,6 @@ export class CodexDeviceAuth {
     if (!row || row.agentId !== agent.id) throw new Error("没有进行中的设备码登录");
     row.status = "cancelled";
     return snapshot(row);
-  }
-
-  private async exchange(codeResp: Record<string, unknown>): Promise<{
-    id_token: string;
-    access_token: string;
-    refresh_token: string;
-    account_id?: string;
-  }> {
-    const authorizationCode = str(codeResp.authorization_code);
-    const codeVerifier = str(codeResp.code_verifier);
-    if (!authorizationCode || !codeVerifier) {
-      throw new Error("设备码尚未完成授权");
-    }
-    const exchanged = await this.http.postJson(`${CODEX_OAUTH_ISSUER}/oauth/token`, {
-      grant_type: "authorization_code",
-      client_id: CODEX_OAUTH_CLIENT_ID,
-      code: authorizationCode,
-      redirect_uri: `${CODEX_OAUTH_ISSUER}/deviceauth/callback`,
-      code_verifier: codeVerifier,
-    });
-    if (exchanged.status < 200 || exchanged.status >= 300) {
-      throw new Error(`换票失败（HTTP ${exchanged.status}）`);
-    }
-    const rec = asRecord(exchanged.json) ?? {};
-    const access = str(rec.access_token);
-    const refresh = str(rec.refresh_token);
-    const idToken = str(rec.id_token);
-    if (!access || !refresh || !idToken) throw new Error("换票响应缺少 token");
-    return {
-      id_token: idToken,
-      access_token: access,
-      refresh_token: refresh,
-      ...(str(rec.account_id) ? { account_id: str(rec.account_id) } : {}),
-    };
   }
 
   private dropExpired() {
@@ -210,14 +175,6 @@ function snapshot(row: PendingLogin): CodexDeviceSnapshot {
     status: row.status,
     ...(row.error ? { error: row.error } : {}),
   };
-}
-
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-
-function str(v: unknown): string {
-  return typeof v === "string" ? v.trim() : "";
 }
 
 function dirnamePosix(path: string): string {

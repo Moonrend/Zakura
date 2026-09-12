@@ -34,9 +34,29 @@ export const MODEL_UPSTREAM_PROTOCOLS = [
   "sambanova",
   "hyperbolic",
   "nebius",
+  "codex",
+  "claude-code",
+  "cursor",
+  "gemini-cli",
+  "grok-build",
   "custom",
 ] as const;
 export type ModelUpstreamProtocol = (typeof MODEL_UPSTREAM_PROTOCOLS)[number];
+
+/** 订阅登录类上游（设备码 / PKCE / SDK），apiKey 可选 */
+export const AGENT_SUBSCRIPTION_PROTOCOLS = [
+  "codex",
+  "claude-code",
+  "cursor",
+  "gemini-cli",
+  "grok-build",
+] as const satisfies readonly ModelUpstreamProtocol[];
+
+export function isAgentSubscriptionProtocol(
+  protocol: string,
+): protocol is (typeof AGENT_SUBSCRIPTION_PROTOCOLS)[number] {
+  return (AGENT_SUBSCRIPTION_PROTOCOLS as readonly string[]).includes(protocol);
+}
 
 /** 走 OpenAI 兼容适配器的协议 */
 export const OPENAI_COMPATIBLE_PROTOCOLS = [
@@ -72,6 +92,7 @@ export const OPENAI_COMPATIBLE_PROTOCOLS = [
   "sambanova",
   "hyperbolic",
   "nebius",
+  "grok-build",
 ] as const satisfies readonly ModelUpstreamProtocol[];
 
 /** 模型能力类型 */
@@ -114,6 +135,10 @@ export type ModelUpstreamProtocolMeta = {
   keywords?: string[];
   /** 来源标注，如 new-api ChannelType */
   source?: string;
+  /** UI 分组：agent = 订阅登录 */
+  group?: "agent";
+  /** 登录方式，给上游表单渲染登录块 */
+  authKind?: "device" | "pkce" | "sdk" | "paste";
 };
 
 /**
@@ -348,6 +373,48 @@ export const MODEL_UPSTREAM_PROTOCOL_META: Record<
     fields: ["baseUrl", "apiKey"],
     keywords: ["nebius", "ai studio"],
   },
+  codex: {
+    name: "Codex · ChatGPT 订阅",
+    description: "设备码登录 ChatGPT，走 Codex Responses",
+    fields: [],
+    keywords: ["codex", "chatgpt", "gpt", "订阅"],
+    source: "new-api:Codex",
+    group: "agent",
+    authKind: "device",
+  },
+  "claude-code": {
+    name: "Claude Code 订阅",
+    description: "粘贴授权码或 setup-token，走 Anthropic Messages",
+    fields: [],
+    keywords: ["claude", "anthropic", "订阅"],
+    source: "claude-code",
+    group: "agent",
+    authKind: "pkce",
+  },
+  cursor: {
+    name: "Cursor",
+    description: "浏览器登录官方 SDK，按 Agent harness 调用",
+    fields: [],
+    keywords: ["cursor", "composer", "订阅"],
+    group: "agent",
+    authKind: "sdk",
+  },
+  "gemini-cli": {
+    name: "Gemini CLI",
+    description: "粘贴本机 oauth_creds，走 Code Assist",
+    fields: [],
+    keywords: ["gemini", "google", "code assist", "订阅"],
+    group: "agent",
+    authKind: "paste",
+  },
+  "grok-build": {
+    name: "Grok Build",
+    description: "xAI 设备码登录 Grok CLI 订阅",
+    fields: [],
+    keywords: ["grok", "xai", "订阅"],
+    group: "agent",
+    authKind: "device",
+  },
   custom: {
     name: "自定义",
     description: "自定义",
@@ -394,6 +461,11 @@ export const MODEL_UPSTREAM_DEFAULT_BASE_URLS: Partial<
   sambanova: "https://api.sambanova.ai/v1",
   hyperbolic: "https://api.hyperbolic.xyz/v1",
   nebius: "https://api.studio.nebius.ai/v1",
+  codex: "https://chatgpt.com",
+  "claude-code": "https://api.anthropic.com",
+  cursor: "https://cursor.com",
+  "gemini-cli": "https://cloudcode-pa.googleapis.com",
+  "grok-build": "https://cli-chat-proxy.grok.com/v1",
 };
 
 /** 百炼 DashScope 区域端点 */
@@ -433,7 +505,19 @@ export interface ModelUpstreamConfig {
    * 模型来自用户配置的上游或手填；目录仅用于按 modelId 匹配元数据。
    */
   catalogProviderId?: string;
+  /** 加密后的订阅 token，仅服务端读写，API 响应会剥离 */
+  oauthEnc?: string;
+  /** 登录态快照（无密钥） */
+  oauth?: ModelUpstreamOauthSnapshot;
 }
+
+export type ModelUpstreamOauthSnapshot = {
+  loggedIn: boolean;
+  email?: string;
+  expiresAt?: number;
+  accountId?: string;
+  loginKind?: string;
+};
 
 /**
  * 按协议类型合并预设地址与用户输入。
@@ -474,6 +558,14 @@ export function applyUpstreamProtocolDefaults(
     timeoutMs:
       typeof input.timeoutMs === "number" && input.timeoutMs > 0
         ? Math.floor(input.timeoutMs)
+        : undefined,
+    oauthEnc:
+      typeof input.oauthEnc === "string" && input.oauthEnc.trim()
+        ? input.oauthEnc
+        : undefined,
+    oauth:
+      input.oauth && typeof input.oauth === "object"
+        ? (input.oauth as ModelUpstreamOauthSnapshot)
         : undefined,
   };
 
@@ -539,6 +631,33 @@ export function applyUpstreamProtocolDefaults(
       return {
         ...base,
         apiVersion: base.apiVersion || "2024-08-01-preview",
+      };
+    case "codex":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS.codex || "",
+      };
+    case "claude-code":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS["claude-code"] || "",
+        anthropicVersion: base.anthropicVersion || "2023-06-01",
+      };
+    case "cursor":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS.cursor || "",
+        timeoutMs: base.timeoutMs ?? 300_000,
+      };
+    case "gemini-cli":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS["gemini-cli"] || "",
+      };
+    case "grok-build":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS["grok-build"] || "",
       };
     case "custom":
     default:

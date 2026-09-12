@@ -141,4 +141,12 @@ export const REDIS_KEYS = {
   /** 危机支持邮件冷却（按用户邮箱，24h） */
   crisisSupport: (userKey: string) =>
     `zakura:email:crisis-support:${encodeURIComponent(userKey)}`,
+  /** 登录失败计数（邮箱+IP） */
+  loginFail: (id: string) => `zakura:auth:login-fail:${encodeURIComponent(id)}`,
+  /** 租户 presence HASH（socketId → JSON） */
+  presence: (tenantId: string) => `zakura:presence:tenant:${tenantId}`,
+  presenceChannel: (tenantId: string) => `zakura:presence:evt:${tenantId}`,
+  /** 会话协同 Y.Doc 快照 */
+  syncDoc: (sessionId: string) => `zakura:sync:doc:${sessionId}`,
+  syncChannel: (sessionId: string) => `zakura:sync:evt:${sessionId}`,
 } as const;

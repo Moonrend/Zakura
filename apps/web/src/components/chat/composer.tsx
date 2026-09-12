@@ -49,6 +49,8 @@ import {
 } from "./composer-plus-menu";
 import { SessionContextBar } from "./session-context-bar";
 import { SlashCommandPicker } from "./slash-command-picker";
+import { ComposerCarets } from "./presence-cursors";
+import type { RemoteAwareness } from "@/lib/sync/session-doc";
 import {
   applyComposerSlash,
   filterComposerSlashItems,
@@ -86,6 +88,30 @@ function pasteTextFile(text: string): File {
 export type ComposerModelItem = ModelRouteSelectorItem;
 
 export type ComposerReasoningValue = "default" | "off" | (string & {});
+
+export type ComposerRemoteFlash = Partial<
+  Record<
+    "model" | "reasoning" | "runtime" | "project" | "extras" | "acpMode" | "acpModel" | "acpReasoning",
+    number
+  >
+>;
+
+function RemoteNudge({
+  token,
+  className,
+  children,
+}: {
+  token?: number;
+  className?: string;
+  children: ReactNode;
+}) {
+  if (!token) return children;
+  return (
+    <span key={token} className={cn("inline-flex overflow-hidden animate-remote-nudge", className)}>
+      {children}
+    </span>
+  );
+}
 
 const REASONING_LABELS: Record<string, string> = {
   minimal: "Minimal",
@@ -159,11 +185,11 @@ function AttachmentChip({
     <span
       title={attachment.path}
       className={cn(
-        "animate-pop group/chip relative flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 py-1 pr-1 pl-1",
-        "transition-[background-color,border-color] duration-200 ease-fluid hover:border-border hover:bg-muted/70",
+        "animate-pop group/chip relative flex items-center gap-2 rounded-lg py-1 pr-1 pl-1",
+        "transition-colors duration-200 ease-fluid hover:bg-muted/50",
       )}
     >
-      <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/50 bg-background">
+      <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted/40">
         {isImage ? (
           /* eslint-disable-next-line @next/next/no-img-element */
           <img src={preview} alt="" className="size-full object-cover" />
@@ -205,14 +231,14 @@ function UploadingChip({
   return (
     <span
       title={upload.name}
-      className="animate-pop relative flex items-center gap-2 overflow-hidden rounded-lg border border-dashed border-border/60 bg-muted/20 py-1 pr-1 pl-1"
+      className="animate-pop relative flex items-center gap-2 overflow-hidden rounded-lg py-1 pr-1 pl-1"
     >
       <span
         aria-hidden
         className="absolute inset-y-0 left-0 bg-muted/70 transition-[width] duration-200 ease-fluid"
         style={{ width: `${percent}%` }}
       />
-      <span className="relative flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/40 bg-background">
+      <span className="relative flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/40">
         <Upload className="size-3.5 text-muted-foreground" />
       </span>
       <span className="relative flex min-w-0 flex-col leading-tight">
@@ -299,6 +325,8 @@ export function Composer({
   showContinue,
   onContinue,
   className,
+  remotes = [],
+  remoteFlash,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -368,6 +396,8 @@ export function Composer({
   showContinue?: boolean;
   onContinue?: () => void;
   className?: string;
+  remotes?: RemoteAwareness[];
+  remoteFlash?: ComposerRemoteFlash;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 输入法组字期间的回车属于「选词」，不能当发送 */
@@ -596,7 +626,7 @@ export function Composer({
             size="sm"
             disabled={!routeReady}
             onClick={() => onContinue?.()}
-            className="animate-pop absolute top-0 left-0 z-20 h-7 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-full border-border/70 bg-background/90 px-2.5 text-xs font-normal text-foreground/80 shadow-[var(--shadow-soft)] backdrop-blur hover:text-foreground"
+            className="animate-pop absolute top-0 left-0 z-20 h-7 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-full border-0 bg-background/90 px-2.5 text-xs font-normal text-foreground/80 hover:text-foreground"
           >
             <Play className="size-3 fill-current" />
             继续
@@ -615,6 +645,8 @@ export function Composer({
             runtimeLoading={runtimeLoading}
             runtimeDisabledHint={runtimeDisabledHint}
             onRuntimeChange={onRuntimeChange}
+            flashProject={remoteFlash?.project}
+            flashRuntime={remoteFlash?.runtime}
           />
         ) : null}
 
@@ -638,17 +670,17 @@ export function Composer({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={cn(
-            "relative z-10 rounded-lg border bg-background",
-            "transition-[border-color,box-shadow] duration-200 ease-out-soft",
+            "surface-2 relative z-10 rounded-2xl border",
+            "transition-[border-color] duration-200 ease-fluid",
             focused || editing
-              ? "border-ring/45 shadow-[var(--shadow-soft)]"
-              : "border-border/70 shadow-sm hover:border-border",
-            dragging && "border-dashed border-ring",
+              ? "border-border"
+              : "border-border/50 hover:border-border/80",
+            dragging && "border-dashed border-foreground/35",
           )}
         >
         {/* 拖放覆盖层 */}
         {dragging && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-lg border border-dashed border-ring/60 bg-background/95 text-sm text-foreground">
+          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-2xl border border-dashed border-foreground/30 bg-background/95 text-sm text-foreground">
             <Upload className="size-4" />
             {canAttach ? "松开即可上传到工作区" : "该 Agent 未开启电脑环境"}
           </div>
@@ -704,6 +736,7 @@ export function Composer({
           </div>
         </div>
 
+        <ComposerCarets remotes={remotes} value={value} />
         <textarea
           ref={textareaRef}
           value={value}
@@ -752,6 +785,7 @@ export function Composer({
             }}
           />
           <ComposerPlusMenu
+            nudgeToken={remoteFlash?.extras}
             canAttach={canAttach}
             attachHint={attachHint}
             onUpload={() => fileInputRef.current?.click()}
@@ -774,6 +808,7 @@ export function Composer({
               {/* 适配器未通过 session/new 公告模型列表时（如靠启动参数定模型的
                   CLI），不渲染死占位；模型到设置页的 profile 里配置。 */}
               {acpModels && acpModels.available.length > 0 && onAcpModelChange ? (
+                <RemoteNudge token={remoteFlash?.acpModel} className="rounded-full">
                 <ModelRouteSelector
                   items={acpModels.available.map((m) => ({ value: m.id, label: m.name }))}
                   value={acpModels.currentId || acpModels.available[0]?.id}
@@ -782,9 +817,12 @@ export function Composer({
                   }}
                   disabled={runtimeLoading}
                   side="top"
+                  className={remoteFlash?.acpModel ? "animate-remote-nudge" : undefined}
                 />
+                </RemoteNudge>
               ) : null}
               {acpReasoning && acpReasoning.available.length > 0 && onAcpReasoningChange ? (
+                <RemoteNudge token={remoteFlash?.acpReasoning} className="rounded-full">
                 <Select
                   value={acpReasoning.current || acpReasoning.available[0]?.id}
                   onValueChange={(v) => {
@@ -795,7 +833,10 @@ export function Composer({
                 >
                   <SelectTrigger
                     aria-label="ACP 思考强度"
-                    className="h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+                    className={cn(
+                      "h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground",
+                      remoteFlash?.acpReasoning && "animate-remote-nudge",
+                    )}
                   >
                     <Brain className="size-3.5 opacity-60" />
                     <SelectValue />
@@ -808,6 +849,7 @@ export function Composer({
                     ))}
                   </SelectContent>
                 </Select>
+                </RemoteNudge>
               ) : null}
               {acpControlPending ? (
                 <span
@@ -826,6 +868,7 @@ export function Composer({
             </>
           ) : (
             <>
+          <RemoteNudge token={remoteFlash?.model} className="rounded-full">
           <ModelRouteSelector
             items={models}
             value={model}
@@ -833,8 +876,11 @@ export function Composer({
             onSelectionChange={onModelSelection}
             disabled={models.length === 0}
             side="top"
+            className={remoteFlash?.model ? "animate-remote-nudge" : undefined}
           />
+          </RemoteNudge>
 
+          <RemoteNudge token={remoteFlash?.reasoning} className="rounded-full">
           <Select
             value={reasoning}
             onValueChange={(v) => {
@@ -848,6 +894,7 @@ export function Composer({
                 "h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none",
                 "transition-[background-color,color] duration-200 ease-fluid hover:bg-muted/70 hover:text-foreground",
                 "focus-visible:ring-2 focus-visible:ring-ring/50",
+                remoteFlash?.reasoning && "animate-remote-nudge",
               )}
             >
               <Brain className="size-3.5 opacity-60" />
@@ -861,6 +908,7 @@ export function Composer({
               ))}
             </SelectContent>
           </Select>
+          </RemoteNudge>
             </>
           )}
 
@@ -942,6 +990,7 @@ export function Composer({
 
         {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
           <div className="mt-1 flex items-center gap-1 px-0.5">
+            <RemoteNudge token={remoteFlash?.acpMode} className="rounded-md">
             <Select
               value={acpModes.currentId || acpModes.available[0]?.id}
               onValueChange={(v) => {
@@ -951,7 +1000,10 @@ export function Composer({
             >
               <SelectTrigger
                 aria-label="ACP 模式"
-                className="h-7 max-w-36 rounded-md border-0 px-1.5 text-[12px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground"
+                className={cn(
+                  "h-7 max-w-36 rounded-md border-0 px-1.5 text-[12px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground",
+                  remoteFlash?.acpMode && "animate-remote-nudge",
+                )}
               >
                 <SelectValue />
               </SelectTrigger>
@@ -963,6 +1015,7 @@ export function Composer({
                 ))}
               </SelectContent>
             </Select>
+            </RemoteNudge>
           </div>
         ) : null}
         </div>

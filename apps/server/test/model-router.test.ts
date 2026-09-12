@@ -56,6 +56,15 @@ describe("model-router registry", () => {
     const gemini = getModelAdapter("gemini");
     assert.equal(gemini.protocol, "gemini");
     assert.ok(!gemini.supportedCapabilities.includes("rerank"));
+
+    for (const protocol of ["codex", "claude-code", "cursor", "gemini-cli"] as const) {
+      const adapter = getModelAdapter(protocol);
+      assert.equal(adapter.protocol, protocol);
+      assert.deepEqual([...adapter.supportedCapabilities], ["chat"]);
+    }
+    const grokBuild = getModelAdapter("grok-build");
+    assert.equal(grokBuild.protocol, "grok-build");
+    assert.deepEqual([...grokBuild.supportedCapabilities], ["chat"]);
   });
 
   it("rejects unsupported capability for protocol", () => {
