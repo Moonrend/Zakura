@@ -62,12 +62,12 @@ export function formatHelp(allowed: boolean): string {
 export function formatStartWelcome(allowed: boolean, userKey: string): string {
   if (allowed) {
     return [
-      "你好，我是 reCloud Agent。",
+      "你好，我是 Zakura Agent。",
       "直接发消息即可对话；/help 查看指令，/new 开新会话，/stop 停止当前回复。",
     ].join("\n");
   }
   return [
-    "你好，我是 reCloud Agent。",
+    "你好，我是 Zakura Agent。",
     "当前连接已开启用户验证，你的账号尚未获批。",
     `你的用户 ID：\`${userKey}\``,
     "发送 /request 提交申请，管理员在控制台白名单中批准后即可使用。",

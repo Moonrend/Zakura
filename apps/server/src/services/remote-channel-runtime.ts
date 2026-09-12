@@ -27,7 +27,7 @@ import type {
 } from "./remote-agent-ingress.js";
 import {
   acknowledgeInboundMessage,
-  deliverRunToThread,
+  waitForRemoteRun,
 } from "./remote-channel-stream.js";
 import {
   REMOTE_SLASH_NAMES,
@@ -364,7 +364,7 @@ export class RemoteChannelRuntime {
     const adapter = adapterFactories[binding.platform](adapterConfig);
     const state = await this.stateFor(tenantId, binding.id);
     const bot = new Chat({
-      userName: `reCloud-${binding.platform}`,
+      userName: `zakura-${binding.platform}`,
       adapters: { [binding.platform]: adapter },
       state,
     } as never) as unknown as Bot;
@@ -533,13 +533,14 @@ export class RemoteChannelRuntime {
             channelId: String(thread.channelId ?? thread.channel?.id ?? thread.id),
             platform: binding.platform,
             bindingId: binding.id,
+            inboundMessageId: String(message?.id ?? "").trim() || undefined,
           });
         },
       };
       try {
         const result = await this.ingress.handleInbound(input);
         if (!result.accepted || result.duplicate || !("runId" in result)) return;
-        await deliverRunToThread(thread, this.store, result.sessionId, result.runId);
+        await waitForRemoteRun(thread, this.store, result.sessionId, result.runId);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         recordPlatformFault("remote_agent.inbound", error, { subsystem: "remote_agent" });

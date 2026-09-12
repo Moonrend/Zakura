@@ -142,7 +142,7 @@ export function StepAiProvider({
         返回选择
       </Button>
 
-      <SettingsHeader title="配置云端 Agent" description="连接提供商并选择默认模型" />
+      <SettingsHeader title="配置 Zakura Agent" description="连接提供商并选择默认模型" />
 
       <div className="rounded-lg border border-border/80 bg-card">
         <div className="p-4 sm:p-5">

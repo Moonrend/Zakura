@@ -65,7 +65,7 @@ export const SKILL_STORES: SkillStoreMeta[] = [
   {
     id: "builtin",
     name: "内置技能",
-    description: "Zakura 为云端 Agent 定制，贴合本平台的原生工具与工作区",
+    description: "为 Zakura Agent 定制，贴合本平台的原生工具与工作区",
     url: "https://agentskills.io",
     searchPlaceholder: "在内置技能里搜索…",
     local: true,

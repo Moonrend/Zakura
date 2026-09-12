@@ -54,7 +54,7 @@ export function StepReady({
           disabled={busy}
         >
           <Bot className="size-5 text-muted-foreground" aria-hidden="true" />
-          <span className="mt-5 text-sm font-medium">使用云端 Agent</span>
+          <span className="mt-5 text-sm font-medium">使用 Zakura Agent</span>
           <span className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
             {hasChatModel
               ? "AI 已连接，打开即可对话"

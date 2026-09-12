@@ -1928,7 +1928,8 @@ export class CloudAgentRuntime {
             return "自动化";
           }
           if (isRemoteChannelToolName(modelName)) {
-            if (modelName === "chat_post_message") return "发帖/回帖";
+            if (modelName === "chat_reply") return "回复消息";
+            if (modelName === "chat_post_message") return "发帖";
             if (modelName === "chat_post_channel_message") return "频道发帖";
             if (modelName === "chat_send_direct_message") return "发私信";
             if (modelName === "chat_add_reaction") return "添加反应";
@@ -2030,7 +2031,19 @@ export class CloudAgentRuntime {
                 },
               };
             }
-            return { result: await callRemoteChannelTool(handle, call.function.name, args) };
+            return { result: await callRemoteChannelTool(handle, call.function.name, args, {
+              readWorkspaceFile: async (path) => {
+                const provider = this.deps.workspaceFsProvider;
+                if (!provider) throw new Error("工作区未就绪，无法发送附件");
+                const fs = await provider.forAgentBinding({
+                  id: agent.id,
+                  tenantId: agent.tenantId,
+                  runtimeNodeId: agent.runtimeNodeId,
+                });
+                const file = await fs.readBytes(path);
+                return { data: file.data, name: file.name || path.split("/").pop() || "file" };
+              },
+            }) };
           }
           if (call.function.name !== DELEGATE_TOOL_NAME) return undefined;
           const res = await this.delegateToAgent(tenantId, agent, peerAgents, args, {

@@ -28,7 +28,7 @@ export function buildSystemPrompt(
     skills?: string;
     /** 用户本回合在 Composer 里显式点选的技能名 */
     requestedSkills?: string[];
-    /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_* 工具发帖 */
+    /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_reply 回复 */
     remoteChannel?: string;
     /** 会话绑定的项目 slug */
     project?: string | null;
@@ -39,14 +39,14 @@ export function buildSystemPrompt(
   const providers = getAgentProviders(agent);
   const now = new Date();
   const lines = [
-    `你是 Zakura 云端 Agent「${agent.name}」（slug: ${agent.slug}），运行在 Zakura 多 Agent 平台上。`,
+    `你是 Zakura Agent「${agent.name}」（slug: ${agent.slug}），运行在 Zakura 多 Agent 平台上。`,
     `当前时间：${now.toISOString()}。会话持久化保存，用户可能随时从其他设备继续。`,
     "",
     "# 工作方式",
     "- 遵循「理解目标 → 收集上下文 → 行动 → 验证 → 汇报」的循环。",
     "- 需要外部信息或执行操作时调用工具，不要假装已执行、不要凭空编造事实。",
     extra?.remoteChannel
-      ? "- 本会话在远程消息通道中：最终文本答复会自动流式发到外部线程；过程进度用 chat_post_message。不要把同一最终答复既写文本又工具重发。"
+      ? "- 本会话在远程消息通道中：不调用 chat_reply 就会保持静默。用 chat_reply（可多次）发 text / 附件 / 按钮；assistant 文本不会出现在聊天平台。"
       : "- 简单问题直接回答，不必为回答本身调用工具。",
     "- 工具失败时先阅读错误信息再调整重试；同一方法连续失败两次应换思路或向用户说明。",
     "- 多步任务先用一两句话说明计划再执行；执行过程中的关键发现要在最终回复中体现。",
@@ -123,7 +123,9 @@ export function buildSystemPrompt(
     "# 回复风格",
     "- 用简洁、准确的中文回复（用户使用其他语言时跟随用户）。",
     "- 使用 Markdown 排版；代码放代码块。",
-    "- 最终回复汇总结论与关键结果，不要倾倒原始 JSON 或全部中间过程。",
+    extra?.remoteChannel
+      ? "- 用户可见的最终结论必须通过 chat_reply 发出，不要倾倒原始 JSON 或全部中间过程。"
+      : "- 最终回复汇总结论与关键结果，不要倾倒原始 JSON 或全部中间过程。",
   );
   if (extra?.memoryContext) {
     lines.push(
@@ -167,7 +169,7 @@ export function buildSubagentPrompt(
   },
 ): string {
   const lines = [
-    `你是 Zakura 云端 Agent「${agent.name}」派生的子代理（Subagent），为完成一个明确的子任务而临时创建，任务结束即销毁。`,
+    `你是 Zakura Agent「${agent.name}」派生的子代理（Subagent），为完成一个明确的子任务而临时创建，任务结束即销毁。`,
     `当前时间：${new Date().toISOString()}。`,
     "",
     "# 任务契约",

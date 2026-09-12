@@ -693,7 +693,7 @@
     "verified": false,
     "featured": true,
     "manifest": {
-      "summary": "Chat SDK 入站：斜杠指令（/help /new /stop…）+ 默认用户验证；👀 确认 + post/edit 流式回复；Agent 可用 chat_* 工具发进度/私信/反应。"
+      "summary": "Chat SDK 入站：斜杠指令 + 用户验证；👀 确认。Agent 用 chat_reply（可多次）发 text/附件/按钮，不镜像 assistant 文本。"
     },
     "components": [
       {

@@ -117,5 +117,22 @@ describe("buildSystemPrompt requestedSkills", () => {
     assert.match(prompt, /本回合指定技能/);
     assert.match(prompt, /frontend-design/);
     assert.match(prompt, /re_read_skill/);
+    assert.match(prompt, /Zakura Agent/);
+    assert.doesNotMatch(prompt, /reCloud Agent/);
+  });
+
+  it("tells remote sessions to reply via chat_reply", () => {
+    const agent = {
+      name: "助手",
+      slug: "helper",
+      enableComputer: false,
+      enableBrowser: false,
+      enableMemory: false,
+      configJson: "{}",
+    } as Agent;
+    const prompt = buildSystemPrompt(agent, {}, { remoteChannel: "REMOTE_BLOCK" });
+    assert.match(prompt, /chat_reply/);
+    assert.match(prompt, /REMOTE_BLOCK/);
+    assert.doesNotMatch(prompt, /自动流式/);
   });
 });

@@ -30,6 +30,8 @@ assert.ok(!formatHelp(false).includes("/new"));
 assert.ok(formatHelp(true).includes("/new"));
 assert.ok(!formatHelp(true).includes("/approve"));
 assert.ok(formatStartWelcome(false, "42").includes("`42`"));
+assert.ok(formatStartWelcome(true, "42").includes("Zakura Agent"));
+assert.ok(formatStartWelcome(false, "42").includes("Zakura Agent"));
 assert.ok(accessDeniedHint("u1").includes("/request"));
 assert.ok(
   formatWhoami({
