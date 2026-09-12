@@ -10,15 +10,17 @@ import {
 } from "../services/auth.js";
 import { SecurityAuditService, auditToCsv } from "../services/identity/audit.js";
 import {
-  changeName,
   changePassword,
   clearUserAvatar,
   completePasswordReset,
   confirmEmailVerification,
+  getTenantPerson,
+  listTenantPeople,
   readUserAvatar,
   requestEmailVerification,
   requestPasswordReset,
   saveUserAvatar,
+  updateProfile,
 } from "../services/identity/account.js";
 import {
   addTenantDomain,
@@ -31,12 +33,15 @@ import {
 import {
   beginWebauthnLogin,
   beginWebauthnRegistration,
+  cancelTotpSetup,
   deleteWebauthnCredential,
   disableTotp,
   enableTotp,
   finishWebauthnLogin,
   finishWebauthnRegistration,
   mfaStatus,
+  regenerateRecoveryCodes,
+  renameWebauthnCredential,
   startTotpSetup,
   verifyUserTotp,
   consumeRecoveryCode,
@@ -319,9 +324,27 @@ export function registerIdentityRoutes(
   app.patch("/api/me", async (c) => {
     const session = c.get("session")!;
     if (session.userId === "api-key") return c.json({ error: "API keys cannot update profile" }, 403);
-    const body = await c.req.json<{ name?: string }>().catch(() => ({}) as never);
-    if (typeof body.name === "string") await changeName(db, session.userId, body.name);
-    return c.json({ ok: true });
+    const body = await c.req.json<{ name?: string; title?: string; bio?: string }>().catch(() => ({}) as never);
+    try {
+      await updateProfile(db, session.userId, body);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.get("/api/tenant/people", async (c) => {
+    const session = c.get("session")!;
+    if (session.userId === "api-key") return c.json({ error: "forbidden" }, 403);
+    return c.json({ people: await listTenantPeople(db, session.tenantId) });
+  });
+
+  app.get("/api/tenant/people/:id", async (c) => {
+    const session = c.get("session")!;
+    if (session.userId === "api-key") return c.json({ error: "forbidden" }, 403);
+    const person = await getTenantPerson(db, session.tenantId, c.req.param("id"));
+    if (!person) return c.json({ error: "not found" }, 404);
+    return c.json({ person });
   });
 
   app.post("/api/me/avatar", async (c) => {
@@ -420,7 +443,18 @@ export function registerIdentityRoutes(
     if (session.userId === "api-key") return c.json({ error: "forbidden" }, 403);
     const user = await db.query.users.findFirst({ where: eq(users.id, session.userId) });
     if (!user) return c.json({ error: "not found" }, 404);
-    return c.json(await startTotpSetup(db, config.secret, user));
+    try {
+      return c.json(await startTotpSetup(db, config.secret, user));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/me/mfa/totp/cancel", async (c) => {
+    const session = c.get("session")!;
+    if (session.userId === "api-key") return c.json({ error: "forbidden" }, 403);
+    await cancelTotpSetup(db, session.userId);
+    return c.json({ ok: true });
   });
 
   app.post("/api/me/mfa/totp/enable", async (c) => {
@@ -441,15 +475,34 @@ export function registerIdentityRoutes(
 
   app.post("/api/me/mfa/totp/disable", async (c) => {
     const session = c.get("session")!;
-    const body = await c.req.json<{ code?: string }>().catch(() => ({}) as never);
+    const body = await c.req.json<{ code?: string; recoveryCode?: string }>().catch(() => ({}) as never);
     try {
-      await disableTotp(db, session.userId, body.code ?? "", config.secret);
+      await disableTotp(db, session.userId, config.secret, {
+        code: body.code,
+        recoveryCode: body.recoveryCode,
+      });
       await audit.append(session.tenantId, "mfa.totp_disable", {
         actor: actor(session, clientIpFromHeaders((name) => c.req.header(name))),
         targetType: "user",
         targetId: session.userId,
       });
       return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  app.post("/api/me/mfa/totp/recovery", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{ code?: string }>().catch(() => ({}) as never);
+    try {
+      const recoveryCodes = await regenerateRecoveryCodes(db, config.secret, session.userId, body.code ?? "");
+      await audit.append(session.tenantId, "mfa.recovery_rotate", {
+        actor: actor(session, clientIpFromHeaders((name) => c.req.header(name))),
+        targetType: "user",
+        targetId: session.userId,
+      });
+      return c.json({ recoveryCodes });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
@@ -476,6 +529,13 @@ export function registerIdentityRoutes(
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
+  });
+
+  app.patch("/api/me/mfa/webauthn/:id", async (c) => {
+    const session = c.get("session")!;
+    const body = await c.req.json<{ name?: string }>().catch(() => ({}) as never);
+    const ok = await renameWebauthnCredential(db, session.userId, c.req.param("id"), body.name ?? "");
+    return c.json({ ok });
   });
 
   app.delete("/api/me/mfa/webauthn/:id", async (c) => {

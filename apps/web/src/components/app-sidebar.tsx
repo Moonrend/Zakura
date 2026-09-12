@@ -26,6 +26,7 @@ import {
   Settings2,
   Shield,
   SlidersHorizontal,
+  Contact,
   Users,
   UserRound,
   Wrench,
@@ -854,12 +855,17 @@ function PlatformSidebar({
         href: "/dashboard/settings/team",
         label: "设置",
         icon: Settings2,
-        isActive: (path) => path.startsWith("/dashboard/settings/"),
+        isActive: (path) => path.startsWith("/dashboard/settings/") || path.startsWith("/dashboard/people"),
         children: [
           {
             href: "/dashboard/settings/account",
             label: "账户",
             icon: UserRound,
+          },
+          {
+            href: "/dashboard/people",
+            label: "成员",
+            icon: Contact,
           },
           {
             href: "/dashboard/settings/team",

@@ -150,12 +150,14 @@ describe("drizzle migrations", () => {
               or (table_name = 'agent_schedules' and column_name = 'project')
               or (table_name = 'users' and column_name = 'suspended_at')
               or (table_name = 'users' and column_name = 'avatar_updated_at')
+              or (table_name = 'users' and column_name = 'title')
+              or (table_name = 'users' and column_name = 'bio')
               or (table_name = 'agent_channel_bindings' and column_name = 'config_enc')`,
         );
         const colRows =
           (cols as unknown as { rows?: unknown[] }).rows ??
           (cols as unknown as unknown[]);
-        assert.equal(colRows.length, 5, "0041/0044/0046/0050 的列没有全部建出");
+        assert.equal(colRows.length, 7, "0041/0044/0046/0050/0051 的列没有全部建出");
       } finally {
         await close();
       }

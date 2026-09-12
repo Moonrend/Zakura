@@ -1,12 +1,67 @@
 import bcrypt from "bcryptjs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
-import { users } from "../../db/schema.js";
+import { tenantMemberships, users } from "../../db/schema.js";
 import { consumeAuthToken, issueAuthToken } from "./tokens.js";
 import { sendResetPasswordEmail, sendVerifyEmail } from "./mail.js";
 import { revokeAllUserSessions } from "./sessions.js";
+
+export const TITLE_MAX = 80;
+export const BIO_MAX = 280;
+
+export type ProfilePatch = {
+  name?: string;
+  title?: string;
+  bio?: string;
+};
+
+export function normalizeProfilePatch(input: ProfilePatch): {
+  name?: string | null;
+  title?: string | null;
+  bio?: string | null;
+} {
+  const patch: { name?: string | null; title?: string | null; bio?: string | null } = {};
+  if (typeof input.name === "string") patch.name = input.name.trim() || null;
+  if (typeof input.title === "string") {
+    const title = input.title.trim();
+    if (title.length > TITLE_MAX) throw new Error(`头衔最多 ${TITLE_MAX} 字`);
+    patch.title = title || null;
+  }
+  if (typeof input.bio === "string") {
+    const bio = input.bio.trim();
+    if (bio.length > BIO_MAX) throw new Error(`简介最多 ${BIO_MAX} 字`);
+    patch.bio = bio || null;
+  }
+  return patch;
+}
+
+export function publicPerson(row: {
+  id: string;
+  email: string;
+  name: string | null;
+  title: string | null;
+  bio: string | null;
+  avatarUpdatedAt: Date | null;
+  lastLoginAt: Date | null;
+  createdAt: Date;
+  role: string;
+  joinedAt: Date;
+}) {
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    title: row.title,
+    bio: row.bio,
+    avatarRev: row.avatarUpdatedAt ? row.avatarUpdatedAt.getTime() : 0,
+    lastLoginAt: row.lastLoginAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    role: row.role,
+    joinedAt: row.joinedAt.toISOString(),
+  };
+}
 
 export async function requestEmailVerification(
   db: Db,
@@ -74,7 +129,62 @@ export async function changePassword(
 }
 
 export async function changeName(db: Db, userId: string, name: string): Promise<void> {
-  await db.update(users).set({ name: name.trim() || null, updatedAt: new Date() }).where(eq(users.id, userId));
+  await updateProfile(db, userId, { name });
+}
+
+export async function updateProfile(db: Db, userId: string, input: ProfilePatch): Promise<void> {
+  const patch = normalizeProfilePatch(input);
+  if (Object.keys(patch).length === 0) return;
+  await db.update(users).set({ ...patch, updatedAt: new Date() }).where(eq(users.id, userId));
+}
+
+export async function listTenantPeople(db: Db, tenantId: string) {
+  const rows = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      title: users.title,
+      bio: users.bio,
+      avatarUpdatedAt: users.avatarUpdatedAt,
+      lastLoginAt: users.lastLoginAt,
+      createdAt: users.createdAt,
+      role: tenantMemberships.role,
+      joinedAt: tenantMemberships.createdAt,
+    })
+    .from(tenantMemberships)
+    .innerJoin(users, eq(users.id, tenantMemberships.userId))
+    .where(and(eq(tenantMemberships.tenantId, tenantId), eq(tenantMemberships.status, "active")))
+    .orderBy(asc(tenantMemberships.createdAt));
+  return rows.map(publicPerson);
+}
+
+export async function getTenantPerson(db: Db, tenantId: string, userId: string) {
+  const rows = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      title: users.title,
+      bio: users.bio,
+      avatarUpdatedAt: users.avatarUpdatedAt,
+      lastLoginAt: users.lastLoginAt,
+      createdAt: users.createdAt,
+      role: tenantMemberships.role,
+      joinedAt: tenantMemberships.createdAt,
+    })
+    .from(tenantMemberships)
+    .innerJoin(users, eq(users.id, tenantMemberships.userId))
+    .where(
+      and(
+        eq(tenantMemberships.tenantId, tenantId),
+        eq(tenantMemberships.userId, userId),
+        eq(tenantMemberships.status, "active"),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  return row ? publicPerson(row) : null;
 }
 
 const AVATAR_ID = /^[\w-]{1,64}$/;

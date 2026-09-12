@@ -91,7 +91,7 @@ export function UserAvatar({
   name?: string | null;
   email?: string | null;
   avatarRev?: number;
-  size?: "default" | "sm" | "lg";
+  size?: "default" | "sm" | "lg" | "xl";
   className?: string;
   title?: string;
   onClick?: () => void;

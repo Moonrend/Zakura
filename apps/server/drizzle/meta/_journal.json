@@ -358,6 +358,13 @@
       "when": 1786800000000,
       "tag": "0050_user_avatar",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1786900000000,
+      "tag": "0051_user_profile",
+      "breakpoints": true
     }
   ]
 }

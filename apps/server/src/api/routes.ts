@@ -810,6 +810,9 @@ export async function createApiApp(deps: {
             canUseLocalRunner: user.canUseLocalRunner || user.isPlatformAdmin || !config.multiTenant,
             emailVerified: Boolean(user.emailVerifiedAt),
             totpEnabled: Boolean(user.totpEnabledAt),
+            hasPassword: Boolean(user.passwordHash),
+            title: user.title,
+            bio: user.bio,
             avatarRev: user.avatarUpdatedAt ? user.avatarUpdatedAt.getTime() : 0,
           }
         : { id: "api-key", email: session.email, isPlatformAdmin: false, canUseLocalRunner: false },

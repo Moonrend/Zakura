@@ -1,4 +1,5 @@
 import { eq, and } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
 import { Secret, TOTP } from "otpauth";
 import {
   generateAuthenticationOptions,
@@ -17,7 +18,7 @@ import {
   users,
 } from "../../db/schema.js";
 import { encryptJson, decryptJson } from "@zakura/core";
-import { hashToken, newSecretToken, rpFromWebUrl } from "./util.js";
+import { hashToken, rpFromWebUrl } from "./util.js";
 
 const pendingChallenge = new Map<string, { challenge: string; expiresAt: number }>();
 
@@ -45,13 +46,21 @@ export async function mfaStatus(db: Db, userId: string) {
   const creds = await db.query.userWebauthnCredentials.findMany({
     where: eq(userWebauthnCredentials.userId, userId),
   });
+  const recoveryRows = user?.totpEnabledAt
+    ? await db.query.userRecoveryCodes.findMany({
+        where: eq(userRecoveryCodes.userId, userId),
+      })
+    : [];
   return {
     totp: Boolean(user?.totpEnabledAt),
+    totpEnabledAt: user?.totpEnabledAt?.toISOString() ?? null,
     webauthn: creds.length > 0,
     methods: [
       ...(user?.totpEnabledAt ? (["totp"] as const) : []),
       ...(creds.length ? (["webauthn"] as const) : []),
     ] as Array<"totp" | "webauthn">,
+    recoveryRemaining: recoveryRows.filter((row) => !row.usedAt).length,
+    recoveryTotal: recoveryRows.length,
     credentials: creds.map((row) => ({
       id: row.id,
       name: row.name,
@@ -64,7 +73,14 @@ export function mfaRequired(status: { totp: boolean; webauthn: boolean }): boole
   return status.totp || status.webauthn;
 }
 
-export async function startTotpSetup(db: Db, secret: string, user: { id: string; email: string }) {
+export async function startTotpSetup(
+  db: Db,
+  secret: string,
+  user: { id: string; email: string; totpEnabledAt?: Date | null },
+) {
+  if (user.totpEnabledAt) throw new Error("验证器已启用，请先关闭再重新绑定");
+  const existing = await db.query.userTotp.findFirst({ where: eq(userTotp.userId, user.id) });
+  if (existing?.enabledAt) throw new Error("验证器已启用，请先关闭再重新绑定");
   const totpSecret = new Secret({ size: 20 });
   const totp = new TOTP({
     issuer: "Zakura",
@@ -75,7 +91,6 @@ export async function startTotpSetup(db: Db, secret: string, user: { id: string;
     secret: totpSecret,
   });
   const secretEnc = encryptJson(secret, totpSecret.base32);
-  const existing = await db.query.userTotp.findFirst({ where: eq(userTotp.userId, user.id) });
   if (existing) {
     await db.update(userTotp).set({ secretEnc, enabledAt: null }).where(eq(userTotp.userId, user.id));
   } else {
@@ -89,6 +104,12 @@ export async function startTotpSetup(db: Db, secret: string, user: { id: string;
   return { secret: totpSecret.base32, otpauthUrl: totp.toString() };
 }
 
+export async function cancelTotpSetup(db: Db, userId: string): Promise<void> {
+  const row = await db.query.userTotp.findFirst({ where: eq(userTotp.userId, userId) });
+  if (!row || row.enabledAt) return;
+  await db.delete(userTotp).where(eq(userTotp.userId, userId));
+}
+
 export async function enableTotp(db: Db, appSecret: string, userId: string, code: string) {
   const row = await db.query.userTotp.findFirst({ where: eq(userTotp.userId, userId) });
   if (!row) throw new Error("请先开始绑定验证器");
@@ -100,12 +121,28 @@ export async function enableTotp(db: Db, appSecret: string, userId: string, code
   return issueRecoveryCodes(db, userId);
 }
 
-export async function disableTotp(db: Db, userId: string, code: string, appSecret: string) {
+export async function disableTotp(
+  db: Db,
+  userId: string,
+  appSecret: string,
+  input: { code?: string; recoveryCode?: string },
+) {
+  const totpOk = input.code ? await verifyUserTotp(db, appSecret, userId, input.code) : false;
+  const recoveryOk =
+    !totpOk && input.recoveryCode ? await consumeRecoveryCode(db, userId, input.recoveryCode) : false;
+  if (!totpOk && !recoveryOk) throw new Error("验证码不正确");
+  await db.delete(userTotp).where(eq(userTotp.userId, userId));
+  await db.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
+  await db.update(users).set({ totpEnabledAt: null, updatedAt: new Date() }).where(eq(users.id, userId));
+}
+
+export async function regenerateRecoveryCodes(db: Db, appSecret: string, userId: string, code: string) {
   if (!(await verifyUserTotp(db, appSecret, userId, code))) {
     throw new Error("验证码不正确");
   }
-  await db.delete(userTotp).where(eq(userTotp.userId, userId));
-  await db.update(users).set({ totpEnabledAt: null, updatedAt: new Date() }).where(eq(users.id, userId));
+  const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
+  if (!user?.totpEnabledAt) throw new Error("尚未启用验证器");
+  return issueRecoveryCodes(db, userId);
 }
 
 export function verifyTotpCode(base32: string, code: string): boolean {
@@ -127,16 +164,26 @@ export async function verifyUserTotp(db: Db, appSecret: string, userId: string, 
   return verifyTotpCode(base32, code);
 }
 
+/** 10 位十六进制，写成 xxxxx-xxxxx，方便手抄。 */
+export function newRecoveryCode(): string {
+  const raw = randomBytes(5).toString("hex");
+  return `${raw.slice(0, 5)}-${raw.slice(5)}`;
+}
+
+export function normalizeRecoveryCode(code: string): string {
+  return code.trim().toLowerCase().replace(/[^a-f0-9]/g, "");
+}
+
 async function issueRecoveryCodes(db: Db, userId: string): Promise<string[]> {
   await db.delete(userRecoveryCodes).where(eq(userRecoveryCodes.userId, userId));
   const codes: string[] = [];
   for (let i = 0; i < 8; i++) {
-    const code = newSecretToken("rc", 5).replace("rc_", "").slice(0, 10);
+    const code = newRecoveryCode();
     codes.push(code);
     await db.insert(userRecoveryCodes).values({
       id: newId(),
       userId,
-      codeHash: hashToken(code.toLowerCase()),
+      codeHash: hashToken(normalizeRecoveryCode(code)),
       createdAt: new Date(),
     });
   }
@@ -144,7 +191,8 @@ async function issueRecoveryCodes(db: Db, userId: string): Promise<string[]> {
 }
 
 export async function consumeRecoveryCode(db: Db, userId: string, code: string): Promise<boolean> {
-  const hash = hashToken(code.trim().toLowerCase());
+  const hash = hashToken(normalizeRecoveryCode(code));
+  if (!hash || normalizeRecoveryCode(code).length < 8) return false;
   const rows = await db.query.userRecoveryCodes.findMany({
     where: eq(userRecoveryCodes.userId, userId),
   });
@@ -263,6 +311,21 @@ export async function finishWebauthnLogin(
 export async function deleteWebauthnCredential(db: Db, userId: string, credentialRowId: string): Promise<boolean> {
   const rows = await db
     .delete(userWebauthnCredentials)
+    .where(and(eq(userWebauthnCredentials.id, credentialRowId), eq(userWebauthnCredentials.userId, userId)))
+    .returning();
+  return rows.length > 0;
+}
+
+export async function renameWebauthnCredential(
+  db: Db,
+  userId: string,
+  credentialRowId: string,
+  name: string,
+): Promise<boolean> {
+  const next = name.trim().slice(0, 40) || "Passkey";
+  const rows = await db
+    .update(userWebauthnCredentials)
+    .set({ name: next })
     .where(and(eq(userWebauthnCredentials.id, credentialRowId), eq(userWebauthnCredentials.userId, userId)))
     .returning();
   return rows.length > 0;

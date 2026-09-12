@@ -84,6 +84,10 @@ export const users = pgTable(
     suspendedByUserId: text("suspended_by_user_id"),
     /** 自定义头像写入时间；空则用 identicon。文件在 dataDir/avatars/<userId> */
     avatarUpdatedAt: timestamp("avatar_updated_at", { withTimezone: true }),
+    /** 团队内展示的头衔，如「后端」。 */
+    title: text("title"),
+    /** 团队内展示的简介。 */
+    bio: text("bio"),
     ...timestamps,
   },
   (t) => [uniqueIndex("users_email").on(t.email)],
