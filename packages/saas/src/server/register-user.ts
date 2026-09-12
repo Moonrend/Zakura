@@ -56,7 +56,7 @@ export async function registerSaasUser(
     };
   };
   const users = schema.users as { email: unknown };
-  const tenants = schema.tenants as { slug: unknown };
+  const tenants = schema.tenants as { slug: unknown; id: unknown };
   const tenantMemberships = schema.tenantMemberships;
 
   const email = input.email.trim().toLowerCase();

@@ -577,7 +577,7 @@ export default function LoginPage() {
                       改用验证码
                     </button>
                   ) : null}
-                  {mfaMode !== "webauthn" && mfaMethods.includes("webauthn") ? (
+                  {mfaMethods.includes("webauthn") ? (
                     <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("webauthn"); passkeyTried.current = false; }}>
                       改用通行密钥
                     </button>
