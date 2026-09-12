@@ -63,7 +63,7 @@ const MAX_TEXTAREA_HEIGHT = 208;
 
 /** textarea 与远程 caret 镜像共用，避免换行/字号对不齐 */
 const COMPOSER_FIELD_CLASS =
-  "box-border px-4 pt-3.5 pb-1 font-sans text-base leading-[1.5] whitespace-pre-wrap break-words md:text-[15px]";
+  "box-border px-4 pt-3.5 pb-1 font-sans text-base leading-[1.5] whitespace-pre-wrap md:text-[15px]";
 
 /** 粘贴文本超过此阈值时改为附件，避免把大段内容塞进输入框 */
 const PASTE_AS_FILE_CHARS = 2000;
@@ -749,7 +749,6 @@ export function Composer({
           value={value}
           textareaRef={textareaRef}
           channel={caretChannel}
-          fieldClassName={COMPOSER_FIELD_CLASS}
         />
         <textarea
           ref={textareaRef}

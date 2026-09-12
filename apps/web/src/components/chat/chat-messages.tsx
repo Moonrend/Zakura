@@ -634,9 +634,7 @@ function renderRunItems(
           {it.attachments?.length ? (
             <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
           ) : null}
-          <div className="surface-2 max-w-[min(85%,36rem)] rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground">
-            <div className="whitespace-pre-wrap break-words">{it.content}</div>
-          </div>
+          <div className={cn(USER_BUBBLE_FRAME, USER_BUBBLE_BODY)}>{it.content}</div>
         </div>,
       );
     } else if (it.kind === "assistant") {
@@ -805,6 +803,11 @@ function pickEmptyWelcome() {
   return EMPTY_WELCOMES[Math.floor(Math.random() * EMPTY_WELCOMES.length)]!;
 }
 
+/** 相对整行限宽，避免 break-words 把中文 min-content 收成单字宽。 */
+const USER_BUBBLE_FRAME = "w-max max-w-[min(85%,36rem)]";
+const USER_BUBBLE_BODY =
+  "surface-2 whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground";
+
 export function ChatMessages({
   turns,
   runActive,
@@ -923,7 +926,7 @@ export function ChatMessages({
               {turn.message.continue ? null : (
                 <div
                   className={cn(
-                    "group flex flex-col items-end gap-1.5",
+                    "group flex w-full flex-col items-end gap-1.5",
                     editing && "opacity-70",
                   )}
                 >
@@ -934,7 +937,7 @@ export function ChatMessages({
                     </div>
                   ) : null}
                   <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
-                  <div className="flex items-end justify-end gap-1.5">
+                  <div className="flex w-full items-end justify-end gap-1.5">
                     {editing ? null : (
                     <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:translate-x-1.5 md:opacity-0 md:transition-[opacity,transform] md:duration-200 md:ease-fluid md:group-hover:translate-x-0 md:group-hover:opacity-100 md:focus-within:translate-x-0 md:focus-within:opacity-100">
                       <CopyButton text={turn.message.content} />
@@ -964,11 +967,9 @@ export function ChatMessages({
                       </Tooltip>
                     </div>
                     )}
-                    <div className="relative">
-                      <div className="surface-2 max-w-[min(85%,36rem)] rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground">
-                        <div className="whitespace-pre-wrap break-words">
-                          {turn.message.content}
-                        </div>
+                    <div className={cn("relative", USER_BUBBLE_FRAME)}>
+                      <div className={USER_BUBBLE_BODY}>
+                        {turn.message.content}
                       </div>
                       {turn.message.userId ? (
                         <Tooltip>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   pointerHiddenForView,
   sameCaretChannel,
@@ -91,83 +91,215 @@ export function PresencePointers({
   );
 }
 
-function CaretMark({ color, name }: { color: string; name: string }) {
-  return (
-    <span className="relative inline-block w-0 align-text-bottom" title={name}>
-      <span
-        className="absolute top-[0.12em] left-0 h-[1.15em] w-0.5 rounded-full"
-        style={{ background: color }}
-      />
-    </span>
-  );
+type CaretBox = { left: number; top: number; height: number };
+type SelBox = CaretBox & { width: number };
+type CaretMark = {
+  key: number;
+  color: string;
+  name: string;
+  caret: CaretBox;
+  sel: SelBox[];
+};
+
+const MIRROR_PROPS = [
+  "direction",
+  "box-sizing",
+  "overflow-x",
+  "overflow-y",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "font-style",
+  "font-variant",
+  "font-weight",
+  "font-stretch",
+  "font-size",
+  "line-height",
+  "font-family",
+  "text-align",
+  "text-transform",
+  "text-indent",
+  "letter-spacing",
+  "word-spacing",
+  "tab-size",
+  "-moz-tab-size",
+  "white-space",
+  "word-break",
+  "overflow-wrap",
+] as const;
+
+function copyTextareaStyle(ta: HTMLTextAreaElement, dest: HTMLElement) {
+  const cs = getComputedStyle(ta);
+  for (const prop of MIRROR_PROPS) {
+    const value = cs.getPropertyValue(prop);
+    if (value) dest.style.setProperty(prop, value);
+  }
+  dest.style.position = "absolute";
+  dest.style.visibility = "hidden";
+  dest.style.pointerEvents = "none";
+  dest.style.left = "0";
+  dest.style.top = "0";
+  dest.style.height = "auto";
+  dest.style.width = `${ta.clientWidth}px`;
+  dest.style.whiteSpace = "pre-wrap";
+  dest.style.overflowWrap = cs.overflowWrap || "break-word";
+  dest.style.overflow = "hidden";
+  dest.style.font = cs.font;
 }
 
-/** Composer 内远程 caret：叠在 textarea 内容盒上，跟随滚动。 */
+function lineHeightPx(cs: CSSStyleDeclaration, fallbackHeight: number) {
+  const raw = cs.lineHeight;
+  const n = Number.parseFloat(raw);
+  if (Number.isFinite(n) && raw !== "normal") return n;
+  const fs = Number.parseFloat(cs.fontSize);
+  return Number.isFinite(fs) ? fs * 1.2 : fallbackHeight || 18;
+}
+
+/** 用隐藏镜像量 textarea 里某个下标的像素，避免 div/textarea 换行对不齐。 */
+function measureIndex(ta: HTMLTextAreaElement, mirror: HTMLElement, index: number): CaretBox {
+  copyTextareaStyle(ta, mirror);
+  mirror.style.height = `${ta.clientHeight}px`;
+  const cs = getComputedStyle(ta);
+  const lh = lineHeightPx(cs, ta.clientHeight);
+  const i = Math.max(0, Math.min(ta.value.length, index));
+  mirror.textContent = ta.value.slice(0, i);
+  const marker = document.createElement("span");
+  marker.textContent = "\u200b";
+  mirror.appendChild(marker);
+  mirror.scrollTop = ta.scrollTop;
+  mirror.scrollLeft = ta.scrollLeft;
+  const m = marker.getBoundingClientRect();
+  const t = ta.getBoundingClientRect();
+  return {
+    left: m.left - t.left,
+    top: m.top - t.top,
+    height: m.height || lh,
+  };
+}
+
+function measureRange(ta: HTMLTextAreaElement, mirror: HTMLElement, from: number, to: number): SelBox[] {
+  if (from === to) return [];
+  copyTextareaStyle(ta, mirror);
+  mirror.style.height = `${ta.clientHeight}px`;
+  mirror.textContent = ta.value || "\u200b";
+  mirror.scrollTop = ta.scrollTop;
+  mirror.scrollLeft = ta.scrollLeft;
+  const node = mirror.firstChild;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return [];
+  const len = node.textContent?.length ?? 0;
+  const range = document.createRange();
+  range.setStart(node, Math.max(0, Math.min(len, from)));
+  range.setEnd(node, Math.max(0, Math.min(len, to)));
+  const host = ta.getBoundingClientRect();
+  return Array.from(range.getClientRects()).map((r) => ({
+    left: r.left - host.left,
+    top: r.top - host.top,
+    width: r.width,
+    height: r.height,
+  }));
+}
+
+/** Composer 内远程 caret：按 textarea 计算样式量像素，而不是叠一层透明字。 */
 export function ComposerCarets({
   remotes,
   value,
   textareaRef,
   channel,
-  fieldClassName,
 }: {
   remotes: RemoteAwareness[];
   value: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   channel?: string;
-  fieldClassName?: string;
 }) {
-  const [box, setBox] = useState({ w: 0, h: 0, scrollTop: 0 });
+  const [marks, setMarks] = useState<CaretMark[]>([]);
+  const remotesRef = useRef(remotes);
+  remotesRef.current = remotes;
+  const channelRef = useRef(channel);
+  channelRef.current = channel;
   const withCaret = remotes.filter((r) => r.caret && sameCaretChannel(channel, r.caret));
+  const caretKey = withCaret
+    .map((r) => `${r.clientId}:${r.caret!.anchor}:${r.caret!.head}`)
+    .join("|");
 
   useLayoutEffect(() => {
     const ta = textareaRef.current;
-    if (!ta || withCaret.length === 0) return;
-    const sync = () => {
-      setBox({ w: ta.clientWidth, h: ta.clientHeight, scrollTop: ta.scrollTop });
+    if (!ta || !caretKey) {
+      setMarks([]);
+      return;
+    }
+    const parent = ta.parentElement;
+    if (!parent) return;
+    const mirror = document.createElement("div");
+    mirror.setAttribute("aria-hidden", "true");
+    parent.appendChild(mirror);
+
+    const paint = () => {
+      const live = remotesRef.current.filter(
+        (r) => r.caret && sameCaretChannel(channelRef.current, r.caret),
+      );
+      setMarks(
+        live.map((r) => {
+          const caret = r.caret!;
+          const len = ta.value.length;
+          const anchor = Math.max(0, Math.min(len, caret.anchor));
+          const head = Math.max(0, Math.min(len, caret.head));
+          return {
+            key: r.clientId,
+            color: r.user.color,
+            name: r.user.name,
+            caret: measureIndex(ta, mirror, head),
+            sel: measureRange(ta, mirror, Math.min(anchor, head), Math.max(anchor, head)),
+          };
+        }),
+      );
     };
-    sync();
-    ta.addEventListener("scroll", sync, { passive: true });
-    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    paint();
+    ta.addEventListener("scroll", paint, { passive: true });
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(paint);
     ro?.observe(ta);
     return () => {
-      ta.removeEventListener("scroll", sync);
+      ta.removeEventListener("scroll", paint);
       ro?.disconnect();
+      mirror.remove();
     };
-  }, [textareaRef, value, withCaret.length]);
+  }, [textareaRef, value, caretKey]);
 
-  if (withCaret.length === 0 || box.w === 0) return null;
+  if (marks.length === 0) return null;
   return (
-    <div
-      aria-hidden
-      className="pointer-events-none absolute top-0 left-0 z-10 overflow-hidden"
-      style={{ width: box.w, height: box.h }}
-    >
-      {withCaret.map((r) => {
-        const caret = r.caret!;
-        const len = value.length;
-        const anchor = Math.max(0, Math.min(len, caret.anchor));
-        const head = Math.max(0, Math.min(len, caret.head));
-        const lo = Math.min(anchor, head);
-        const hi = Math.max(anchor, head);
-        const selected = lo !== hi;
-        const mark = <CaretMark color={r.user.color} name={r.user.name} />;
-        return (
-          <div
-            key={r.clientId}
-            className={cn("absolute top-0 left-0 w-full text-transparent", fieldClassName)}
-            style={{ transform: `translateY(${-box.scrollTop}px)` }}
-          >
-            {value.slice(0, lo)}
-            {head === lo ? mark : null}
-            {selected ? (
-              <span style={{ background: r.user.color, opacity: 0.28 }}>{value.slice(lo, hi)}</span>
-            ) : null}
-            {head === hi && selected ? mark : null}
-            {value.slice(hi)}
-            {"\n"}
-          </div>
-        );
-      })}
+    <div aria-hidden className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+      {marks.map((m) => (
+        <span key={m.key}>
+          {m.sel.map((box, i) => (
+            <span
+              key={i}
+              className="absolute"
+              style={{
+                left: box.left,
+                top: box.top,
+                width: box.width,
+                height: box.height,
+                background: m.color,
+                opacity: 0.28,
+              }}
+            />
+          ))}
+          <span
+            className="absolute w-0.5 rounded-sm"
+            title={m.name}
+            style={{
+              left: m.caret.left,
+              top: m.caret.top,
+              height: m.caret.height,
+              background: m.color,
+            }}
+          />
+        </span>
+      ))}
     </div>
   );
 }
