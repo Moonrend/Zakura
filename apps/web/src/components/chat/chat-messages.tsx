@@ -920,15 +920,22 @@ export function ChatMessages({
               className="animate-rise relative flex flex-col gap-3"
               style={{ contentVisibility: "auto", containIntrinsicSize: "auto 200px" }}
             >
-              {turn.message.continue ? null : editing ? (
-                <div className="animate-rise ml-auto flex items-center gap-2 px-1 py-1 text-xs text-muted-foreground">
-                  <Pencil className="size-3 shrink-0" />
-                  <span>正在下方输入框编辑这条消息</span>
-                </div>
-              ) : (
-                <div className="group flex flex-col items-end gap-1.5">
+              {turn.message.continue ? null : (
+                <div
+                  className={cn(
+                    "group flex flex-col items-end gap-1.5",
+                    editing && "opacity-70",
+                  )}
+                >
+                  {editing ? (
+                    <div className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+                      <Pencil className="size-3 shrink-0" />
+                      正在下方输入框编辑
+                    </div>
+                  ) : null}
                   <AttachmentChips attachments={attachments} onOpenFile={onOpenFile} />
                   <div className="flex items-end justify-end gap-1.5">
+                    {editing ? null : (
                     <div className="mb-0.5 flex items-center gap-0.5 max-md:opacity-70 md:translate-x-1.5 md:opacity-0 md:transition-[opacity,transform] md:duration-200 md:ease-fluid md:group-hover:translate-x-0 md:group-hover:opacity-100 md:focus-within:translate-x-0 md:focus-within:opacity-100">
                       <CopyButton text={turn.message.content} />
                       <Tooltip>
@@ -956,6 +963,7 @@ export function ChatMessages({
                         <TooltipContent>编辑</TooltipContent>
                       </Tooltip>
                     </div>
+                    )}
                     <div className="relative">
                       <div className="surface-2 max-w-[min(85%,36rem)] rounded-2xl px-4 py-2.5 text-[15px] leading-7 tracking-[-0.011em] text-foreground">
                         <div className="whitespace-pre-wrap break-words">

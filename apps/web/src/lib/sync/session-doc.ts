@@ -8,8 +8,10 @@ import {
   encodeAwarenessUpdate,
 } from "y-protocols/awareness";
 import {
+  DRAFT_CARET_CHANNEL,
   identiconColor,
   POINTER_THROTTLE_MS,
+  shiftIndex,
   textDiff,
   type PresenceAwareness,
   type PresencePointer,
@@ -47,6 +49,8 @@ export function useSessionDoc(opts: {
   remotes: RemoteAwareness[];
   setPointer: (pointer: PresencePointer | null) => void;
   setView: (view: PresenceViewTurn[]) => void;
+  setPaused: (paused: boolean) => void;
+  setCaretChannel: (channel: string) => void;
   ready: boolean;
   ui: Record<string, boolean>;
   setUiFlag: (key: string, value: boolean) => void;
@@ -69,6 +73,41 @@ export function useSessionDoc(opts: {
   const viewRef = useRef<PresenceViewTurn[]>([]);
   const lastPointerAt = useRef(0);
   const textareaRef = opts.textareaRef;
+  const pausedRef = useRef(false);
+  const composingRef = useRef(false);
+  const pendingRemoteRef = useRef<string | null>(null);
+  const caretChannelRef = useRef(DRAFT_CARET_CHANNEL);
+
+  const applyRemoteValue = useCallback(
+    (next: string, keepSelection: boolean) => {
+      if (pausedRef.current || composingRef.current) {
+        pendingRemoteRef.current = next;
+        return;
+      }
+      pendingRemoteRef.current = null;
+      const ta = textareaRef.current;
+      const prev = ta?.value ?? "";
+      if (prev === next) return;
+      let nextStart = 0;
+      let nextEnd = 0;
+      const restore = keepSelection && Boolean(ta) && document.activeElement === ta;
+      if (restore && ta) {
+        const { start, deleted, inserted } = textDiff(prev, next);
+        nextStart = shiftIndex(ta.selectionStart, start, deleted, inserted.length);
+        nextEnd = shiftIndex(ta.selectionEnd, start, deleted, inserted.length);
+      }
+      onValueChangeRef.current(next);
+      if (!restore || !ta) return;
+      const start = nextStart;
+      const end = nextEnd;
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el || document.activeElement !== el) return;
+        el.setSelectionRange(start, end);
+      });
+    },
+    [textareaRef],
+  );
 
   const pushAwareness = useCallback(() => {
     const awareness = awarenessRef.current;
@@ -77,7 +116,11 @@ export function useSessionDoc(opts: {
     const hidden = document.visibilityState !== "visible";
     const caret =
       !hidden && ta && document.activeElement === ta
-        ? { anchor: ta.selectionStart, head: ta.selectionEnd }
+        ? {
+            anchor: ta.selectionStart,
+            head: ta.selectionEnd,
+            channel: caretChannelRef.current,
+          }
         : undefined;
     awareness.setLocalState({
       user: { id: opts.userId, name: opts.name, color: identiconColor(opts.userId) },
@@ -123,7 +166,7 @@ export function useSessionDoc(opts: {
 
     const onYText = (_event: Y.YTextEvent, tr: Y.Transaction) => {
       if (!alive || tr.origin === LOCAL) return;
-      onValueChangeRef.current(ytext.toString());
+      applyRemoteValue(ytext.toString(), true);
     };
     ytext.observe(onYText);
 
@@ -211,7 +254,7 @@ export function useSessionDoc(opts: {
               socket.emit("sync:update", { sessionId, update: u8ToB64(diff) });
             }
           }
-          onValueChangeRef.current(ytext.toString());
+          applyRemoteValue(ytext.toString(), false);
           snapPrefs();
           setReady(true);
           pushAwareness();
@@ -227,13 +270,27 @@ export function useSessionDoc(opts: {
       if (document.visibilityState !== "visible") pointerRef.current = null;
       pushAwareness();
     };
+    const onCompStart = (e: Event) => {
+      if (e.target !== textareaRef.current) return;
+      composingRef.current = true;
+    };
+    const onCompEnd = (e: Event) => {
+      if (e.target !== textareaRef.current) return;
+      composingRef.current = false;
+      // 组字期间积压的远程快照已经过期：随后 onChange 会把选词写进 ytext。
+      pendingRemoteRef.current = null;
+    };
     document.addEventListener("selectionchange", onSel);
     document.addEventListener("visibilitychange", onVis);
+    document.addEventListener("compositionstart", onCompStart, true);
+    document.addEventListener("compositionend", onCompEnd, true);
 
     return () => {
       alive = false;
       document.removeEventListener("selectionchange", onSel);
       document.removeEventListener("visibilitychange", onVis);
+      document.removeEventListener("compositionstart", onCompStart, true);
+      document.removeEventListener("compositionend", onCompEnd, true);
       socket.off("connect", subscribe);
       socket.off("sync:update", onSyncUpdate);
       socket.off("sync:awareness", onSyncAwareness);
@@ -255,11 +312,15 @@ export function useSessionDoc(opts: {
       setUi({});
       release();
     };
-  }, [opts.agentId, opts.sessionId, opts.userId, opts.name, pushAwareness]);
+  }, [opts.agentId, opts.sessionId, opts.userId, opts.name, applyRemoteValue, pushAwareness, textareaRef]);
 
   const bindValueChange = useCallback(
     (next: string) => {
       onValueChangeRef.current(next);
+      if (pausedRef.current) {
+        pushAwareness();
+        return;
+      }
       const ytext = ytextRef.current;
       if (!ytext) return;
       const prev = ytext.toString();
@@ -269,6 +330,26 @@ export function useSessionDoc(opts: {
         if (deleted > 0) ytext.delete(start, deleted);
         if (inserted) ytext.insert(start, inserted);
       }, LOCAL);
+      pushAwareness();
+    },
+    [pushAwareness],
+  );
+
+  const setPaused = useCallback(
+    (paused: boolean) => {
+      pausedRef.current = paused;
+      if (paused) return;
+      pendingRemoteRef.current = null;
+      const ytext = ytextRef.current;
+      if (ytext) applyRemoteValue(ytext.toString(), false);
+    },
+    [applyRemoteValue],
+  );
+
+  const setCaretChannel = useCallback(
+    (channel: string) => {
+      if (caretChannelRef.current === channel) return;
+      caretChannelRef.current = channel;
       pushAwareness();
     },
     [pushAwareness],
@@ -338,5 +419,5 @@ export function useSessionDoc(opts: {
     }, LOCAL);
   }, []);
 
-  return { bindValueChange, remotes, setPointer, setView, ready, ui, setUiFlag, setPref, setPrefs, setPrefIfAbsent };
+  return { bindValueChange, remotes, setPointer, setView, setPaused, setCaretChannel, ready, ui, setUiFlag, setPref, setPrefs, setPrefIfAbsent };
 }

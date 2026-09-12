@@ -895,6 +895,9 @@ export {
   remoteOnOtherSibling,
   remoteOnOtherVariant,
   pointerHiddenForView,
+  DRAFT_CARET_CHANNEL,
+  caretChannelOf,
+  sameCaretChannel,
 } from "./presence.js";
 export type {
   PresencePane,
@@ -903,6 +906,7 @@ export type {
   PresenceViewTurn,
   PresenceTurnPage,
   PresenceAwareness,
+  PresenceCaret,
 } from "./presence.js";
 
-export { textDiff } from "./text-diff.js";
+export { textDiff, shiftIndex } from "./text-diff.js";

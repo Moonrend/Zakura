@@ -18,3 +18,15 @@ export function textDiff(
   }
   return { start, deleted: endPrev - start, inserted: next.slice(start, endNext) };
 }
+
+/** 对端在 start 处删 inserted 长的字后，本地下标该往哪挪。 */
+export function shiftIndex(
+  index: number,
+  start: number,
+  deleted: number,
+  insertedLen: number,
+): number {
+  if (index <= start) return index;
+  if (index >= start + deleted) return index - deleted + insertedLen;
+  return start + insertedLen;
+}

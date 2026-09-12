@@ -61,6 +61,10 @@ import {
 /** 约 8 行后转为内部滚动 */
 const MAX_TEXTAREA_HEIGHT = 208;
 
+/** textarea 与远程 caret 镜像共用，避免换行/字号对不齐 */
+const COMPOSER_FIELD_CLASS =
+  "box-border px-4 pt-3.5 pb-1 font-sans text-base leading-[1.5] whitespace-pre-wrap break-words md:text-[15px]";
+
 /** 粘贴文本超过此阈值时改为附件，避免把大段内容塞进输入框 */
 const PASTE_AS_FILE_CHARS = 2000;
 const PASTE_AS_FILE_LINES = 40;
@@ -327,6 +331,7 @@ export function Composer({
   className,
   remotes = [],
   remoteFlash,
+  caretChannel,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -398,6 +403,8 @@ export function Composer({
   className?: string;
   remotes?: RemoteAwareness[];
   remoteFlash?: ComposerRemoteFlash;
+  /** 与 awareness caret.channel 对齐；编辑已发送消息时为 `edit:${id}` */
+  caretChannel?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 输入法组字期间的回车属于「选词」，不能当发送 */
@@ -736,7 +743,14 @@ export function Composer({
           </div>
         </div>
 
-        <ComposerCarets remotes={remotes} value={value} />
+        <div className="relative">
+        <ComposerCarets
+          remotes={remotes}
+          value={value}
+          textareaRef={textareaRef}
+          channel={caretChannel}
+          fieldClassName={COMPOSER_FIELD_CLASS}
+        />
         <textarea
           ref={textareaRef}
           value={value}
@@ -766,10 +780,12 @@ export function Composer({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           className={cn(
-            "block max-h-52 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base outline-none",
-            "placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60 md:text-[15px]",
+            "block max-h-52 w-full resize-none bg-transparent outline-none",
+            COMPOSER_FIELD_CLASS,
+            "placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60",
           )}
         />
+        </div>
 
         {/* 工具行：添加 · 模型 ————— 发送 */}
         <div className="flex items-center gap-0.5 p-2 pl-2.5">

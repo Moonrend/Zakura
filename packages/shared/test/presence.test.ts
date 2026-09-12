@@ -9,6 +9,7 @@ import {
   pointerHiddenForView,
   remoteOnOtherSibling,
   remoteOnOtherVariant,
+  sameCaretChannel,
   splitActiveSessions,
   type PresenceLocation,
 } from "../src/presence.js";
@@ -163,5 +164,17 @@ describe("pointerHiddenForView / other page", () => {
       ),
       false,
     );
+  });
+});
+
+describe("sameCaretChannel", () => {
+  it("缺省都算草稿", () => {
+    assert.equal(sameCaretChannel(undefined, undefined), true);
+    assert.equal(sameCaretChannel("draft", {}), true);
+  });
+  it("编辑中的草稿 caret 不混画", () => {
+    assert.equal(sameCaretChannel("edit:m1", { channel: "draft" }), false);
+    assert.equal(sameCaretChannel("edit:m1", { channel: "edit:m1" }), true);
+    assert.equal(sameCaretChannel("edit:m1", { channel: "edit:m2" }), false);
   });
 });

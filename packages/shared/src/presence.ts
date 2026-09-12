@@ -45,12 +45,32 @@ export type PresenceViewTurn = {
   runId: string | null;
 };
 
+export type PresenceCaret = {
+  anchor: number;
+  head: number;
+  /** 不传视为普通草稿。编辑已发送消息时为 `edit:${messageId}`。 */
+  channel?: string;
+};
+
 export type PresenceAwareness = {
   user: { id: string; name: string; color: string };
-  caret?: { anchor: number; head: number };
+  caret?: PresenceCaret;
   pointer?: PresencePointer | null;
   view?: PresenceViewTurn[];
 };
+
+export const DRAFT_CARET_CHANNEL = "draft";
+
+export function caretChannelOf(caret: { channel?: string } | undefined | null): string {
+  return caret?.channel || DRAFT_CARET_CHANNEL;
+}
+
+export function sameCaretChannel(
+  local: string | undefined,
+  remote: { channel?: string } | undefined | null,
+): boolean {
+  return (local || DRAFT_CARET_CHANNEL) === caretChannelOf(remote);
+}
 
 const PANES: ReadonlySet<string> = new Set([
   "chat",

@@ -1,8 +1,9 @@
 "use client";
 
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useState, type RefObject } from "react";
 import {
   pointerHiddenForView,
+  sameCaretChannel,
   type PresenceTurnPage,
 } from "@zakura/shared";
 import type { RemoteAwareness } from "@/lib/sync/session-doc";
@@ -90,20 +91,56 @@ export function PresencePointers({
   );
 }
 
-/** Composer 内远程 caret：同一字体镜像定位。 */
+function CaretMark({ color, name }: { color: string; name: string }) {
+  return (
+    <span className="relative inline-block w-0 align-text-bottom" title={name}>
+      <span
+        className="absolute top-[0.12em] left-0 h-[1.15em] w-0.5 rounded-full"
+        style={{ background: color }}
+      />
+    </span>
+  );
+}
+
+/** Composer 内远程 caret：叠在 textarea 内容盒上，跟随滚动。 */
 export function ComposerCarets({
   remotes,
   value,
+  textareaRef,
+  channel,
+  fieldClassName,
 }: {
   remotes: RemoteAwareness[];
   value: string;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  channel?: string;
+  fieldClassName?: string;
 }) {
-  const withCaret = remotes.filter((r) => r.caret);
-  if (withCaret.length === 0) return null;
+  const [box, setBox] = useState({ w: 0, h: 0, scrollTop: 0 });
+  const withCaret = remotes.filter((r) => r.caret && sameCaretChannel(channel, r.caret));
+
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || withCaret.length === 0) return;
+    const sync = () => {
+      setBox({ w: ta.clientWidth, h: ta.clientHeight, scrollTop: ta.scrollTop });
+    };
+    sync();
+    ta.addEventListener("scroll", sync, { passive: true });
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
+    ro?.observe(ta);
+    return () => {
+      ta.removeEventListener("scroll", sync);
+      ro?.disconnect();
+    };
+  }, [textareaRef, value, withCaret.length]);
+
+  if (withCaret.length === 0 || box.w === 0) return null;
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 top-0 z-10 px-4 pt-3.5 pb-1 text-base md:text-[15px]"
+      className="pointer-events-none absolute top-0 left-0 z-10 overflow-hidden"
+      style={{ width: box.w, height: box.h }}
     >
       {withCaret.map((r) => {
         const caret = r.caret!;
@@ -113,25 +150,22 @@ export function ComposerCarets({
         const lo = Math.min(anchor, head);
         const hi = Math.max(anchor, head);
         const selected = lo !== hi;
-        const caretEl = (
-          <span
-            className="inline-block h-[1.1em] w-0.5 translate-y-0.5 align-text-bottom"
-            style={{ background: r.user.color }}
-            title={r.user.name}
-          />
-        );
+        const mark = <CaretMark color={r.user.color} name={r.user.name} />;
         return (
-          <pre
+          <div
             key={r.clientId}
-            className="absolute inset-x-0 top-0 whitespace-pre-wrap break-words font-sans text-transparent"
+            className={cn("absolute top-0 left-0 w-full text-transparent", fieldClassName)}
+            style={{ transform: `translateY(${-box.scrollTop}px)` }}
           >
             {value.slice(0, lo)}
-            {head === lo ? caretEl : null}
+            {head === lo ? mark : null}
             {selected ? (
               <span style={{ background: r.user.color, opacity: 0.28 }}>{value.slice(lo, hi)}</span>
             ) : null}
-            {head === hi && selected ? caretEl : null}
-          </pre>
+            {head === hi && selected ? mark : null}
+            {value.slice(hi)}
+            {"\n"}
+          </div>
         );
       })}
     </div>

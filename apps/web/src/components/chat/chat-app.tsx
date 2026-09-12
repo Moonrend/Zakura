@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
@@ -32,6 +32,7 @@ import type {
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
+  DRAFT_CARET_CHANNEL,
   estimateEventPayloadTokens,
   estimateTextTokens,
   estimateTokensFromChars,
@@ -324,6 +325,14 @@ export function ChatApp() {
     messageId: string;
     parentKey: string;
   } | null>(null);
+  type EditStash = {
+    input: string;
+    attachments: CloudAgentAttachment[];
+    previews: Record<string, string>;
+    skills: string[];
+  };
+  const editStashRef = useRef<EditStash | null>(null);
+  const [caretSnap, setCaretSnap] = useState(0);
   /** 上传中的请求，用于取消 */
   const uploadAbortsRef = useRef<Map<string, AbortController>>(new Map());
   /** 已应用的队列快照 seq：重放/乱序事件不回退队列 */
@@ -373,6 +382,8 @@ export function ChatApp() {
     remotes,
     setPointer,
     setView,
+    setPaused,
+    setCaretChannel,
     ready: yjsReady,
     ui,
     setUiFlag,
@@ -891,6 +902,7 @@ export function ChatApp() {
     async (aid: string, sid: string, requestId: number) => {
       const res = await getCloudSession(aid, sid, 0);
       if (requestId !== pendingSessionRequestRef.current) return;
+      const prevSid = sessionIdRef.current;
       setSessionId(sid);
       sessionIdRef.current = sid;
       setEvents(res.events);
@@ -1003,6 +1015,18 @@ export function ChatApp() {
       }
       setVariantByMessage({});
       setBranchByParent({});
+      if (prevSid === sid) {
+        const stash = editStashRef.current;
+        editStashRef.current = null;
+        setPaused(false);
+        setCaretChannel(DRAFT_CARET_CHANNEL);
+        if (stash) {
+          setAttachments(stash.attachments);
+          previewsRef.current = stash.previews;
+          setAttachmentPreviews({ ...stash.previews });
+          setSelectedSkills(stash.skills);
+        }
+      }
       setEditingTarget(null);
       const maxSeq = res.events.reduce((m, e) => Math.max(m, e.seq), 0);
       seqRef.current = maxSeq;
@@ -1016,7 +1040,7 @@ export function ChatApp() {
         );
       });
     },
-    [],
+    [setPaused, setCaretChannel],
   );
 
   /**
@@ -1549,15 +1573,26 @@ export function ChatApp() {
     latestInputRef.current = input;
   }, [input]);
 
+  useLayoutEffect(() => {
+    if (caretSnap === 0) return;
+    const el = composerRef.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    const n = el.value.length;
+    el.setSelectionRange(n, n);
+    el.scrollTop = el.scrollHeight;
+  }, [caretSnap]);
+
   // 草稿即时落本地，随后同步到服务端，保证刷新和多设备打开都能恢复。
   useEffect(() => {
     if (!agentId) return;
     const expectedKey = sessionId ?? "__new__";
     // 会话刚切换但恢复 effect 尚未执行时，不能把旧会话的输入写到新 key。
     if (draftKeyRef.current !== expectedKey) return;
+    const persistText = editStashRef.current?.input ?? input;
     const key = `${DRAFT_KEY_PREFIX}:${agentId}:${draftKeyRef.current}`;
     try {
-      if (input) localStorage.setItem(key, input);
+      if (persistText) localStorage.setItem(key, persistText);
       else localStorage.removeItem(key);
     } catch {
       // 存储空间不足时，服务端同步仍然继续。
@@ -1566,12 +1601,12 @@ export function ChatApp() {
     if (!sessionId) return;
     if (yjsReady) return;
     const timer = window.setTimeout(() => {
-      void updateCloudSession(agentId, sessionId, { draftText: input }).catch((err) => {
+      void updateCloudSession(agentId, sessionId, { draftText: persistText }).catch((err) => {
         toast.error(err instanceof Error ? err.message : String(err));
       });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [agentId, input, sessionId, yjsReady]);
+  }, [agentId, input, sessionId, yjsReady, editingTarget]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1582,9 +1617,16 @@ export function ChatApp() {
   useEffect(() => {
     const nextKey = sessionId ?? "__new__";
     if (draftKeyRef.current === nextKey) return;
-    const pending = latestInputRef.current;
+    const stash = editStashRef.current;
+    const pending = stash ? stash.input : latestInputRef.current;
     if (pending.trim()) draftsRef.current.set(draftKeyRef.current, pending);
     else draftsRef.current.delete(draftKeyRef.current);
+    if (stash) {
+      editStashRef.current = null;
+      setPaused(false);
+      setCaretChannel(DRAFT_CARET_CHANNEL);
+      setEditingTarget(null);
+    }
     draftKeyRef.current = nextKey;
     let restored = draftsRef.current.get(nextKey) ?? "";
     if (!restored && agentId) {
@@ -1596,7 +1638,7 @@ export function ChatApp() {
     }
     latestInputRef.current = restored;
     setInput(restored);
-  }, [agentId, sessionId]);
+  }, [agentId, sessionId, setPaused, setCaretChannel]);
 
   // 卸载时释放尚未发送的图片预览地址
   useEffect(() => {
@@ -1966,6 +2008,10 @@ export function ChatApp() {
     if (!aid || !sid) return;
     const item = queueRef.current.find((m) => m.messageId === messageId);
     if (!item) return;
+    if (editingTarget) {
+      toast.error("正在编辑历史消息，先发送或取消后再改排队消息");
+      return;
+    }
     if (latestInputRef.current.trim() || attachments.length > 0) {
       toast.error("输入框还有未发送的内容，先发送或清空后再编辑排队消息");
       return;
@@ -1977,7 +2023,7 @@ export function ChatApp() {
     void removeQueuedMessage(aid, sid, messageId).catch((err) => {
       toast.error(err instanceof Error ? err.message : String(err));
     });
-    composerRef.current?.focus();
+    setCaretSnap((n) => n + 1);
   }
 
   function handleQueuedRemove(messageId: string) {
@@ -2009,9 +2055,23 @@ export function ChatApp() {
     handleQueuedEdit(last.messageId);
   }
 
+  function leaveEditMode(restore: boolean) {
+    const stash = editStashRef.current;
+    editStashRef.current = null;
+    setCaretChannel(DRAFT_CARET_CHANNEL);
+    setPaused(false);
+    setEditingTarget(null);
+    if (!restore || !stash) return;
+    setAttachments(stash.attachments);
+    previewsRef.current = stash.previews;
+    setAttachmentPreviews({ ...stash.previews });
+    setSelectedSkills(stash.skills);
+  }
+
   /**
    * 编辑已发送消息：召回 Composer（复用附件/换行/模型选项等完整能力）。
    * 原消息不删除 —— 发送后按 parentKey 成为兄弟分支变体。
+   * 草稿留在 Yjs 里，不覆盖其他人正在输入的内容。
    */
   function handleEditStart(
     messageId: string,
@@ -2020,24 +2080,28 @@ export function ChatApp() {
     msgAttachments: CloudAgentAttachment[],
   ) {
     if (runActive) return;
-    // 已在编辑另一条时直接改目标；否则保护输入框里的未发送内容
-    if (!editingTarget && (latestInputRef.current.trim() || attachments.length > 0)) {
-      toast.error("输入框还有未发送的内容，先发送或清空后再编辑消息");
-      return;
+    if (!editStashRef.current) {
+      editStashRef.current = {
+        input: latestInputRef.current,
+        attachments: attachments,
+        previews: { ...previewsRef.current },
+        skills: selectedSkills,
+      };
     }
+    setPaused(true);
+    setCaretChannel(`edit:${messageId}`);
     setEditingTarget({ messageId, parentKey });
-    bindValueChange(content);
+    setInput(content);
     latestInputRef.current = content;
     setAttachments(msgAttachments);
-    composerRef.current?.focus();
+    setSelectedSkills([]);
+    setCaretSnap((n) => n + 1);
   }
 
-  /** 取消编辑：清空召回的内容，回到普通输入态 */
+  /** 取消编辑：恢复进入前的草稿，不写空进协同文档 */
   function handleEditCancel() {
-    setEditingTarget(null);
-    bindValueChange("");
-    latestInputRef.current = "";
-    setAttachments([]);
+    leaveEditMode(true);
+    setCaretSnap((n) => n + 1);
   }
 
   function removeAttachment(path: string) {
@@ -2271,6 +2335,17 @@ export function ChatApp() {
     const sentPreviews = previewsRef.current;
     const sentSkills = selectedSkills;
     const parentRunId = parentForSend();
+
+    // 编辑态：不追加新回合，而是按 parentKey 建分支变体；草稿仍留在协同文档里
+    const editing = editingTarget;
+    if (editing) {
+      leaveEditMode(true);
+      sendChainRef.current = sendChainRef.current
+        .catch(() => {})
+        .then(() => handleEditSend(editing.parentKey, content, sentAttachments));
+      return;
+    }
+
     bindValueChange("");
     latestInputRef.current = "";
     draftsRef.current.delete(draftKeyRef.current);
@@ -2278,16 +2353,6 @@ export function ChatApp() {
     setAttachmentPreviews({});
     setAttachments([]);
     setSelectedSkills([]);
-
-    // 编辑态：不追加新回合，而是按 parentKey 建分支变体
-    const editing = editingTarget;
-    if (editing) {
-      setEditingTarget(null);
-      sendChainRef.current = sendChainRef.current
-        .catch(() => {})
-        .then(() => handleEditSend(editing.parentKey, content, sentAttachments));
-      return;
-    }
 
     sendChainRef.current = sendChainRef.current
       .catch(() => {})
@@ -3000,6 +3065,9 @@ export function ChatApp() {
             onValueChange={bindValueChange}
             remotes={remotes}
             remoteFlash={remoteFlash}
+            caretChannel={
+              editingTarget ? `edit:${editingTarget.messageId}` : DRAFT_CARET_CHANNEL
+            }
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
             showContinue={canContinue}
