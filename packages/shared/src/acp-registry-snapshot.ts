@@ -743,7 +743,6 @@ export const ACP_REGISTRY_SNAPSHOT = {
       "description": "fx CLI（fx acp）— Vercel AI Gateway 驱动的编码代理",
       "homepage": "https://fx.sh",
       "integration": {
-        "preinstalled": true,
         "zakuraRoute": true
       }
     },

@@ -1113,13 +1113,9 @@ export class AcpSessionService {
   /**
    * 手动安装/更新一个 profile 的适配器。
    *
-   * 以前这里对 `builtin` 直接抛「已预装在镜像中」——那是 adapters 还烤进镜像时
-   * 的遗留。现在镜像只带 Node/uv，28 个内置 profile 全部按需装，于是那条分支
-   * 等于让每个内置 agent 的安装按钮必定失败。
-   *
-   * 现在按 profile 的实际来源分派：
-   *   - preinstalled（仅 fx@full 镜像）→ 无需安装，probe 一下确认可用即可
-   *   - registry 源 → 交给 AcpRegistryService，走 pin 版本 + sha256 + 原子切换
+   * 按 profile 的实际来源分派：
+   *   - registry 源 → 交给 AcpRegistryService 拉取适配器镜像
+   *   - 旧 preinstalled profile → 仅在无 registry 来源时探测工作区二进制
    *   - custom/自定义 → 沿用 installHint 白名单
    */
   async install(
@@ -1133,18 +1129,6 @@ export class AcpSessionService {
   ): Promise<{ ok: boolean; command: string; output: string }> {
     const setup = requireSetup(agent, profileId, true);
     const profile = publicProfileForSetup(setup);
-
-    if (profile.preinstalled) {
-      const probed = await this.probe(agent, profileId);
-      return {
-        ok: probed.installed,
-        command: probed.command,
-        output: probed.installed
-          ? `${profile.displayName} 随工作区镜像出厂，无需安装。\n${probed.output}`
-          : `${profile.displayName} 应随镜像出厂，但当前工作区里没找到。` +
-            `可能用的是 lite/shell 镜像，或镜像版本过旧。\n${probed.output}`,
-      };
-    }
 
     const registryId = acpRegistryIdForProfile(profileId);
     const registry = this.deps.acpRegistry;
@@ -1171,6 +1155,13 @@ export class AcpSessionService {
           ? `已在绑定电脑安装 ${profile.displayName} ${res.version}`
           : `${profile.displayName} ${res.version} 已在绑定电脑，跳过下载`,
       };
+    }
+
+    if (profile.preinstalled) {
+      const probed = await this.probe(agent, profileId);
+      if (probed.installed) {
+        return { ok: true, command: probed.command, output: probed.output };
+      }
     }
 
     if (!profile.installHint) throw new Error("该 profile 没有安装命令");

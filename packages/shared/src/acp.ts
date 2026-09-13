@@ -97,10 +97,7 @@ export type AcpPublicProfile = {
    * 必然抛错。现在这三个语义被拆成 `managed` / `preinstalled` / 安装路径本身。
    */
   managed: boolean;
-  /**
-   * 适配器随镜像出厂，无需 provision。当前只有 fx（且仅 full 镜像）满足。
-   * 其余 profile 一律按需装到 /workspace/.zakura/acp/<id>/<version>/。
-   */
+  /** @deprecated 旧工作区预装标记；registry 镜像适配器始终按需拉取。 */
   preinstalled?: boolean;
   command: string;
   args: string[];
@@ -638,10 +635,6 @@ function curatedAcpProfiles(): AcpPublicProfile[] {
           displayName: "fx",
           description: "Vercel fx — 轻量原生编码 Agent（fx acp）",
           managed: true,
-          // 唯一随镜像出厂的适配器（见 docker/workspace/Dockerfile 的 full 阶段）。
-          // lite/shell 镜像不含 fx，届时照常按需 provision——所以启动路径不读这个
-          // 字段，它只用于「是否需要走安装流程」的判断与 UI 文案。
-          preinstalled: true,
           command: "fx",
           args: ["acp"],
           setupModes: ["api_key", "oauth", "self"],
@@ -956,7 +949,9 @@ export function builtinAcpProfiles(): AcpPublicProfile[] {
       sessionModeId: integration.sessionModeId ?? base?.sessionModeId,
       supportsZakuraRoute: integration.zakuraRoute ?? false,
       forceHttpMcp: integration.forceHttpMcp ?? false,
-      preinstalled: integration.preinstalled ?? false,
+      // Older registry indexes marked fx as baked into the workspace. Its own
+      // adapter image still needs pulling, regardless of that legacy hint.
+      preinstalled: !agent.image && (integration.preinstalled ?? false),
       installHint: integration.installHint ?? base?.installHint,
     });
   }
