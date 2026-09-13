@@ -69,15 +69,23 @@ export class RuntimeNodeService {
     this.hub = hub;
   }
 
+  private withLiveStatus<T extends RuntimeNode>(node: T): T {
+    // DB heartbeats can outlive a server restart or come from a legacy HTTP
+    // runner. Only a ready Hub session can execute work on this control plane.
+    if (node.status === "draining") return node;
+    return { ...node, status: this.hub?.get(node.id) ? "online" : "offline" };
+  }
+
   /** @deprecated 隐式 local 节点已删除，调用方应改为选择在线 Go 代理 */
   async ensureLocalNode(_tenantId?: string): Promise<RuntimeNode> {
     throw new Error("隐式本机节点已移除。请安装 zakura-agent 并绑定电脑或服务器。");
   }
 
   async list(tenantId: string): Promise<RuntimeNode[]> {
-    return this.db.query.runtimeNodes.findMany({
+    const rows = await this.db.query.runtimeNodes.findMany({
       where: eq(runtimeNodes.tenantId, tenantId),
     });
+    return rows.map((node) => this.withLiveStatus(node));
   }
 
   /**
@@ -89,21 +97,21 @@ export class RuntimeNodeService {
     const shared = await listSharedRunnerNodes(this.db, tenantId);
     return [
       ...owned.map((n) => ({ ...n, access: "owned" as const })),
-      ...shared.map((n) => ({ ...n, access: "shared" as const })),
+      ...shared.map((n) => ({ ...this.withLiveStatus(n), access: "shared" as const })),
     ];
   }
 
   async get(tenantId: string, id: string): Promise<RuntimeNode | null> {
-    return (
-      (await this.db.query.runtimeNodes.findFirst({
-        where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.id, id)),
-      })) ?? null
-    );
+    const node = await this.db.query.runtimeNodes.findFirst({
+      where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.id, id)),
+    });
+    return node ? this.withLiveStatus(node) : null;
   }
 
   /** 本租户或共享节点 */
   async getAccessible(tenantId: string, id: string): Promise<RuntimeNode | null> {
-    return resolveAccessibleNode(this.db, tenantId, id);
+    const node = await resolveAccessibleNode(this.db, tenantId, id);
+    return node ? this.withLiveStatus(node) : null;
   }
 
   /** Create a remote runner node; returns one-time token. */
@@ -217,9 +225,10 @@ export class RuntimeNodeService {
 
   /** 平台管理：列出全部远程 runner（含共享状态） */
   async listAllRemote(): Promise<RuntimeNode[]> {
-    return this.db.query.runtimeNodes.findMany({
+    const rows = await this.db.query.runtimeNodes.findMany({
       where: ne(runtimeNodes.slug, "local"),
     });
+    return rows.map((node) => this.withLiveStatus(node));
   }
 
   async register(input: {
@@ -243,7 +252,7 @@ export class RuntimeNodeService {
     const [updated] = await this.db
       .update(runtimeNodes)
       .set({
-        status: "online",
+        status: this.withLiveStatus(node).status,
         endpoint: input.endpoint.replace(/\/$/, ""),
         hostInfoJson: JSON.stringify(input.hostInfo ?? {}),
         agentVersion: input.agentVersion ?? node.agentVersion,
@@ -272,7 +281,7 @@ export class RuntimeNodeService {
     const [updated] = await this.db
       .update(runtimeNodes)
       .set({
-        status: "online",
+        status: this.withLiveStatus(node).status,
         hostInfoJson: input.hostInfo
           ? JSON.stringify(input.hostInfo)
           : node.hostInfoJson,
@@ -397,7 +406,10 @@ export class RuntimeNodeService {
     }
     const session = this.hub?.get(node.id);
     if (!session) {
-      throw new Error(`「${node.name}」的 Go 代理未在线。请在该设备运行安装脚本。`);
+      if (node.isShared && node.tenantId !== tenantId) {
+        throw new Error(`共享节点「${node.name}」当前离线，请选择其他在线节点或联系平台管理员。`);
+      }
+      throw new Error(`「${node.name}」的 Go 代理当前离线。请在该设备启动 zakura-agent 并检查网络连接。`);
     }
     const workspaceKind =
       opts?.workspaceKind ?? (node.kind === "computer" ? "host" : "container");

@@ -37,10 +37,7 @@ import { enabledBackends, listFetchBackendMeta } from "../capabilities/web-fetch
 import type { WebSearchConfig } from "../capabilities/web-search/types.js";
 import type { WebFetchConfig } from "../capabilities/web-fetch/types.js";
 import { normalizeSlots } from "../capabilities/cred-slots.js";
-import {
-  assertNodeBindAllowed,
-  resolveAccessibleNode,
-} from "./runner-access.js";
+import { assertNodeBindAllowed } from "./runner-access.js";
 import {
   bindDefaultMcpsToAgent,
   ensureDefaultAgentMcps,
@@ -86,7 +83,7 @@ export class AgentService {
     private readonly db: Db,
     runtime: DockerRuntime,
     private readonly config: AppConfig,
-    nodes?: import("./runtime-nodes.js").RuntimeNodeService,
+    private readonly nodes?: import("./runtime-nodes.js").RuntimeNodeService,
   ) {
     this.workspace = new AgentWorkspaceService(db, runtime, config, nodes);
   }
@@ -279,18 +276,7 @@ export class AgentService {
         });
       }
       if (nodeId) {
-        const node = await resolveAccessibleNode(this.db, tenantId, nodeId);
-        if (!node) throw new Error("Runner 节点不存在");
-        if (node.kind !== "local") {
-          if (node.status === "offline") {
-            throw new Error(
-              `「${node.name}」当前离线。请在该设备启动 zakura-agent。`,
-            );
-          }
-          if (node.status === "draining") {
-            throw new Error(`「${node.name}」正在排空，暂不可用于新任务。`);
-          }
-        }
+        await this.assertNodeAvailable(tenantId, nodeId);
       }
       const [updated] = await this.db
         .update(agents)
@@ -310,6 +296,12 @@ export class AgentService {
       });
     }
 
+    // Preflight existing bindings too, before starting a background workspace
+    // job. A stale DB "online" flag is not an executable Go connection.
+    if (!(opts && "runtimeNodeId" in opts) && agent.runtimeNodeId) {
+      await this.assertNodeAvailable(tenantId, agent.runtimeNodeId);
+    }
+
     if (!needsContainer(agent)) {
       return this.workspace.start(agent);
     }
@@ -317,6 +309,14 @@ export class AgentService {
       recordPlatformFault("agent.workspace_start", err, { subsystem: "agent" });
     });
     return agent;
+  }
+
+  private async assertNodeAvailable(tenantId: string, nodeId: string): Promise<void> {
+    if (!this.nodes) throw new Error("运行节点服务不可用");
+    const { node } = await this.nodes.requireRunnerClient(tenantId, nodeId);
+    if (node.status === "draining") {
+      throw new Error(`「${node.name}」正在排空，暂不可用于新任务。`);
+    }
   }
 
   async update(
@@ -348,10 +348,9 @@ export class AgentService {
         nodeId: input.runtimeNodeId,
         excludeAgentId: agent.id,
       });
-      if (input.runtimeNodeId) {
-        const node = await resolveAccessibleNode(this.db, tenantId, input.runtimeNodeId);
-        if (!node) throw new Error("Runner 节点不存在");
-      }
+    }
+    if (input.runtimeNodeId && input.runtimeNodeId !== agent.runtimeNodeId) {
+      await this.assertNodeAvailable(tenantId, input.runtimeNodeId);
     }
 
     if (input.memoryProviderId) {

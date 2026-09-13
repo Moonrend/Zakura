@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { RunnerClient } from "@zakura/core";
+import { AgentWorkspaceService } from "../src/services/agent-workspace.js";
 
 /**
  * Regression guard for the ACP adapter login shell.
@@ -15,7 +17,6 @@ import { readFileSync } from "node:fs";
  */
 const SOURCES = [
   "src/services/agent-workspace.ts",
-  "../runner/src/docker-workspace.ts",
 ];
 
 function loginShellCommands(src: string): string[] {
@@ -26,6 +27,25 @@ function loginShellCommands(src: string): string[] {
 }
 
 describe("ACP adapter login shell", () => {
+  it("forwards the non-login shell through the Go runner", async () => {
+    let command: string[] = [];
+    const client = new RunnerClient({ workspaceKind: "host", hub: {
+      rpc: async <T>(method: string, params: unknown) => {
+        if (method === "sys.info") return { docker: { ok: true } } as T;
+        assert.equal(method, "host.exec.start");
+        command = (params as { command: string[] }).command;
+        return { id: "login", running: true, stdout: "", stderr: "", exitCode: null } as T;
+      },
+    } });
+    const workspace = Object.create(AgentWorkspaceService.prototype) as AgentWorkspaceService;
+    Object.assign(workspace, { requireRunnerClient: async () => ({ client }) });
+    await workspace.startAcpAdapterLoginShell({ id: "agent" } as never, "fx", "session");
+    assert.deepEqual(command, [
+      "docker", "exec", "-i", "zakura-acpa-agent-fx-session",
+      "/bin/sh", "-c", "exec /bin/bash -i || exec /bin/sh -i",
+    ]);
+  });
+
   for (const src of SOURCES) {
     it(`does not use a PATH-clobbering login shell in ${src}`, () => {
       const cmds = loginShellCommands(`../${src}`);

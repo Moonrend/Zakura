@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { managedContainers, runtimeNodes, users } from "../db/schema.js";
@@ -79,7 +79,8 @@ export async function resolveAccessibleNode(
     where: and(
       eq(runtimeNodes.id, nodeId),
       eq(runtimeNodes.isShared, true),
-      eq(runtimeNodes.kind, "runner"),
+      inArray(runtimeNodes.kind, ["runner", "computer", "server"]),
+      ne(runtimeNodes.slug, "local"),
     ),
   });
   return shared ?? null;
@@ -87,7 +88,11 @@ export async function resolveAccessibleNode(
 
 export async function listSharedRunnerNodes(db: Db, excludeTenantId?: string) {
   const rows = await db.query.runtimeNodes.findMany({
-    where: and(eq(runtimeNodes.isShared, true), eq(runtimeNodes.kind, "runner")),
+    where: and(
+      eq(runtimeNodes.isShared, true),
+      inArray(runtimeNodes.kind, ["runner", "computer", "server"]),
+      ne(runtimeNodes.slug, "local"),
+    ),
   });
   if (!excludeTenantId) return rows;
   return rows.filter((n) => n.tenantId !== excludeTenantId);

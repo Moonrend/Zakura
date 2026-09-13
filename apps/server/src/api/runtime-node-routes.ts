@@ -415,7 +415,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     if (!token) {
       return c.json({ error: "注册密钥已丢失，请重新注册节点" }, 400);
     }
-    const kind = node.kind === "server" ? "server" : "computer";
+    const kind = node.kind === "server" || node.kind === "runner" ? "server" : "computer";
     const go = buildGoAgentInstall({
       publicBaseUrl: config.publicBaseUrl,
       nodeId: node.id,
