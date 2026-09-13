@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -103,7 +102,8 @@ func volumeMountFlag(v Volume) string {
 	if v.HostPath == "" {
 		return ""
 	}
-	src := filepath.ToSlash(v.HostPath)
+	// 不用 filepath.ToSlash：Linux 上反斜杠不是分隔符，Windows 盘符路径过 CI 会被原样留下。
+	src := strings.ReplaceAll(v.HostPath, `\`, "/")
 	spec := "type=bind,source=" + src + ",target=" + v.ContainerPath
 	if v.ReadOnly {
 		spec += ",readonly"
