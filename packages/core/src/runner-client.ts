@@ -748,6 +748,7 @@ export class RunnerClient {
     const image = body.image || "sunwuyuan/zakura-acp-sidecar:latest";
     const docker = (await this.ping()).docker;
     if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法启动 ACP sidecar");
+    await this.rpc("docker.pull", { image }, 10 * 60_000);
     const mk = await this.rpc<{ abs?: string }>("host.fs.mkdir", { agentId: body.agentId, path: "/" });
     const hostPath = mk.abs || `${(await this.ping()).storageRoot ?? ""}/agents/${body.agentId}/workspace`;
     const running = await this.rpc<DockerInfo>("docker.run", {
@@ -800,9 +801,10 @@ export class RunnerClient {
       sessionKey: string;
       specHash?: string;
     },
-  ): Promise<{ dockerId: string; image: string; status: string }> {
+  ): Promise<{ dockerId: string; image: string; status: string; name: string }> {
     const docker = (await this.ping()).docker;
     if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法启动 ACP adapter");
+    await this.rpc("docker.pull", { image: body.image }, 10 * 60_000);
     const mk = await this.rpc<{ abs?: string }>("host.fs.mkdir", { agentId, path: "/" });
     const info = await this.ping();
     const hostPath = mk.abs || `${info.storageRoot ?? ""}/agents/${agentId}/workspace`;
@@ -822,7 +824,7 @@ export class RunnerClient {
       restart: "no",
       stdinOpen: true,
     });
-    return { dockerId: running.dockerId, image: running.image, status: running.status };
+    return { dockerId: running.dockerId, image: running.image, status: running.status, name };
   }
 
   async execDocker(
@@ -855,6 +857,22 @@ export class RunnerClient {
   async removeAcpAdapterContainer(agentId: string, adapterId: string, sessionKey: string): Promise<void> {
     const name = `zakura-acpa-${agentId}-${adapterId}-${sessionKey}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
     await this.rpc("docker.stop", { id: name, remove: true }).catch(() => undefined);
+  }
+
+  async pullImage(image: string): Promise<void> {
+    await this.rpc("docker.pull", { image }, 10 * 60_000);
+  }
+
+  async removeAcpAdapterContainers(agentId: string, adapterId: string): Promise<number> {
+    const list = await this.rpc<DockerInfo[]>("docker.list", { label: `zakura.agent=${agentId}` });
+    let n = 0;
+    for (const c of list ?? []) {
+      if (c.labels?.["zakura.purpose"] !== "acp-adapter") continue;
+      if (c.labels?.["zakura.adapter"] !== adapterId) continue;
+      await this.rpc("docker.stop", { id: c.dockerId, remove: true }).catch(() => undefined);
+      n++;
+    }
+    return n;
   }
 
   async startAcpAdapterLoginShell(

@@ -1168,8 +1168,8 @@ export class AcpSessionService {
         ok: true,
         command: [res.command, ...res.args].join(" "),
         output: res.installed
-          ? `已安装 ${profile.displayName} ${res.version}`
-          : `${profile.displayName} ${res.version} 已在本机，跳过下载`,
+          ? `已在绑定电脑安装 ${profile.displayName} ${res.version}`
+          : `${profile.displayName} ${res.version} 已在绑定电脑，跳过下载`,
       };
     }
 

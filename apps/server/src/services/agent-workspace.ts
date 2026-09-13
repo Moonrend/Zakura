@@ -905,7 +905,15 @@ export class AgentWorkspaceService {
       image,
       network: this.config.dockerNetwork,
     });
-    return { dockerId: result.dockerId, image };
+    await this.upsertManagedContainer(agent, {
+      dockerId: result.dockerId,
+      name: `zakura-acp-${agent.id}`.slice(0, 63),
+      image: result.image,
+      purpose: "acp-sidecar",
+      status: result.status,
+      labels: { "zakura.agent": agent.id, "zakura.purpose": "acp-sidecar" },
+    });
+    return { dockerId: result.dockerId, image: result.image };
   }
 
   /** Execute a command inside the ACP sidecar container. */
@@ -958,12 +966,15 @@ export class AgentWorkspaceService {
     onProgress?: (line: string, event?: DockerPullEvent) => void,
     opts: { forcePull?: boolean } = {},
   ): Promise<boolean> {
-    // 镜像由所选节点上的 docker.pull 拉取；控制面不再碰本机 Docker。
-    void onProgress;
-    void opts;
-    void image;
-    void agent;
-    return false;
+    const { client } = await this.requireRunnerClient(agent);
+    if (!opts.forcePull) {
+      const { images } = await client.checkImageUpdates({ images: [image] });
+      const row = images[0];
+      if (row?.localId && !row.error) return false;
+    }
+    onProgress?.(`正在绑定电脑拉取 ${image}`);
+    await client.pullImage(image);
+    return true;
   }
 
   /**
@@ -976,16 +987,27 @@ export class AgentWorkspaceService {
    * bug this exists to prevent.
    */
   async acpAdapterImagePresence(
-    _agent: Agent,
+    agent: Agent,
     images: string[],
   ): Promise<Map<string, boolean | undefined>> {
     const out = new Map<string, boolean | undefined>();
     const unique = [...new Set(images.filter(Boolean))];
     if (unique.length === 0) return out;
-
-    // Remote runners expose no image-query endpoint. Leave presence unknown
-    // rather than guessing; the runner pulls on create, so launch still works.
-    for (const image of unique) out.set(image, undefined);
+    if (!this.isRemoteAgent(agent)) {
+      for (const image of unique) out.set(image, undefined);
+      return out;
+    }
+    try {
+      const { client } = await this.requireRunnerClient(agent);
+      const { images: rows } = await client.checkImageUpdates({ images: unique });
+      const byImage = new Map(rows.map((row) => [row.image, row]));
+      for (const image of unique) {
+        const row = byImage.get(image);
+        out.set(image, Boolean(row?.localId) && !row?.error);
+      }
+    } catch {
+      for (const image of unique) out.set(image, undefined);
+    }
     return out;
   }
 
@@ -1014,6 +1036,18 @@ export class AgentWorkspaceService {
       env: opts?.env,
       sessionKey,
       specHash: opts?.specHash,
+    });
+    await this.upsertManagedContainer(agent, {
+      dockerId: result.dockerId,
+      name: result.name,
+      image: result.image,
+      purpose: "acp-adapter",
+      status: result.status,
+      labels: {
+        "zakura.agent": agent.id,
+        "zakura.purpose": "acp-adapter",
+        "zakura.adapter": adapterId,
+      },
     });
     return { dockerId: result.dockerId, image: result.image };
   }
@@ -1151,10 +1185,76 @@ export class AgentWorkspaceService {
       .catch(() => undefined);
   }
 
-  /** Remove local ACP containers that are no longer represented in session memory. */
-  async removeAcpAdapterContainers(_agent: Agent, adapterId: string): Promise<number> {
-    void adapterId;
-    return 0;
+  private async upsertManagedContainer(
+    agent: Agent,
+    row: {
+      dockerId: string;
+      name: string;
+      image: string;
+      purpose: string;
+      status: string;
+      labels: Record<string, string>;
+    },
+  ): Promise<void> {
+    const now = new Date();
+    const existing = await this.db
+      .select()
+      .from(managedContainers)
+      .where(and(eq(managedContainers.agentId, agent.id), eq(managedContainers.name, row.name)));
+    if (existing[0]) {
+      await this.db
+        .update(managedContainers)
+        .set({
+          dockerId: row.dockerId,
+          image: row.image,
+          status: row.status,
+          labelsJson: JSON.stringify(row.labels),
+          runtimeNodeId: agent.runtimeNodeId,
+          updatedAt: now,
+        })
+        .where(eq(managedContainers.id, existing[0].id));
+      return;
+    }
+    await this.db.insert(managedContainers).values({
+      id: newId(),
+      tenantId: agent.tenantId,
+      agentId: agent.id,
+      dockerId: row.dockerId,
+      name: row.name,
+      image: row.image,
+      purpose: row.purpose,
+      status: row.status,
+      labelsJson: JSON.stringify(row.labels),
+      portsJson: "[]",
+      allocatedTo: agent.id,
+      runtimeNodeId: agent.runtimeNodeId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /** Remove ACP adapter containers on the agent's bound computer. */
+  async removeAcpAdapterContainers(agent: Agent, adapterId: string): Promise<number> {
+    if (!this.isRemoteAgent(agent)) return 0;
+    const { client } = await this.requireRunnerClient(agent);
+    const n = await client.removeAcpAdapterContainers(agent.id, adapterId);
+    const rows = await this.db
+      .select()
+      .from(managedContainers)
+      .where(
+        and(eq(managedContainers.agentId, agent.id), eq(managedContainers.purpose, "acp-adapter")),
+      );
+    for (const row of rows) {
+      let labels: Record<string, string> = {};
+      try {
+        labels = JSON.parse(row.labelsJson || "{}") as Record<string, string>;
+      } catch {
+        labels = {};
+      }
+      if (labels["zakura.adapter"] !== adapterId) continue;
+      await this.db.delete(managedContainers).where(eq(managedContainers.id, row.id));
+    }
+    return n;
   }
 
   /**
