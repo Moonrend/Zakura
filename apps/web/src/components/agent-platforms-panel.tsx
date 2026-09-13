@@ -389,7 +389,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
             type="button"
             onClick={() => openBinding(b)}
             className={cn(
-              "group flex items-center gap-3 rounded-xl border border-border bg-card p-4 text-left",
+              "group flex items-center gap-3 rounded-xl bg-card shadow-surface-2 p-4 text-left",
               "surface-interactive hover:border-foreground/15",
               "transition-all duration-200 ease-out-soft",
             )}

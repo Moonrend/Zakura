@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * 对话侧栏 · 定时任务列表。
+ * 对话侧栏 · Routine 列表。
  * 新建走 Agent 对话创建；本面板只负责查看与管理。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
+  Copy,
   Loader2,
   MoreHorizontal,
   Play,
@@ -46,10 +47,12 @@ import {
   WHEN_PRESETS,
   deleteSchedule,
   describePattern,
+  describeTrigger,
   formatRelativeTime,
   formatAbsoluteTime,
   listSchedules,
   patternFromWhenPreset,
+  revealWebhookSecret,
   runScheduleNow,
   statusLabel,
   updateSchedule,
@@ -75,7 +78,7 @@ export function AutomationPanel({
 }: {
   agentId: string | null;
   projects?: string[];
-  /** 用自然语言描述，交给 Agent 创建定时任务 */
+  /** 用自然语言描述，交给 Agent 创建 Routine */
   onAskAgentCreate: (goal: string) => void;
   onOpenSession?: (sessionId: string) => void;
   className?: string;
@@ -146,7 +149,7 @@ export function AutomationPanel({
     }
     const bits = [goal];
     if (createProject.trim()) {
-      bits.push(`请把 create_schedule 的 project 设为 ${createProject.trim()}。`);
+      bits.push(`请把 create_routine 的 project 设为 ${createProject.trim()}。`);
     }
     setCreateOpen(false);
     onAskAgentCreate(bits.join("\n"));
@@ -174,8 +177,11 @@ export function AutomationPanel({
       toast.error("名称和内容不能为空");
       return;
     }
-    const pattern = patternFromWhenPreset(form.preset, form.customPattern);
-    if (!pattern) {
+    const isListener = editing.triggerKind === "listener";
+    const pattern = isListener
+      ? editing.pattern
+      : patternFromWhenPreset(form.preset, form.customPattern);
+    if (!isListener && !pattern) {
       toast.error("请选择执行时间");
       return;
     }
@@ -183,10 +189,10 @@ export function AutomationPanel({
     try {
       await updateSchedule(agentId, editing.id, {
         name,
-        pattern,
         prompt,
         enabled: form.enabled,
         project: form.project.trim() || null,
+        ...(isListener ? {} : { pattern }),
       });
       setEditOpen(false);
       await load();
@@ -269,9 +275,9 @@ export function AutomationPanel({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-10 pt-4 md:px-8">
           <div className="mb-6 flex items-end justify-between gap-3">
             <div>
-              <h2 className="text-lg font-medium tracking-tight">定时任务</h2>
+              <h2 className="text-lg font-medium tracking-tight">Routine</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                到点自动跑，结果会出现在对话里。
+                到点或事件触发时自动跑，你不在线也会执行。
               </p>
             </div>
             <Button size="sm" variant="ghost" onClick={openCreate}>
@@ -285,7 +291,7 @@ export function AutomationPanel({
               onClick={openCreate}
               className="w-full max-w-lg rounded-xl border border-dashed border-border/60 px-4 py-10 text-left text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground"
             >
-              还没有定时任务。描述想定期做的事，交给 Agent 创建。
+              还没有 Routine。描述什么时候 / 听什么 / 干完告诉谁，交给 Agent 创建。
             </button>
           ) : (
             <div className="flex flex-col">
@@ -340,7 +346,7 @@ export function AutomationPanel({
       ) : (
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 pt-2">
         <div className="mb-1 flex items-center justify-between gap-2 px-1">
-          <h3 className="text-xs font-medium text-muted-foreground">定时任务</h3>
+          <h3 className="text-xs font-medium text-muted-foreground">Routine</h3>
           <button
             type="button"
             onClick={openCreate}
@@ -357,7 +363,7 @@ export function AutomationPanel({
             onClick={openCreate}
             className="w-full rounded-lg px-2 py-4 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
           >
-            暂无定时任务，点此让 Agent 创建
+            暂无 Routine，点此让 Agent 创建
           </button>
         ) : (
           <div className="flex flex-col gap-3">
@@ -408,15 +414,15 @@ export function AutomationPanel({
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-base">新建定时任务</DialogTitle>
+            <DialogTitle className="text-base">新建 Routine</DialogTitle>
           </DialogHeader>
           <div className="space-y-2 py-1">
-            <Label htmlFor="at-goal">想让 Agent 定时做什么？</Label>
+            <Label htmlFor="at-goal">什么时候 / 听什么 / 做什么？</Label>
             <Textarea
               id="at-goal"
               rows={4}
               autoFocus
-              placeholder="例如：每个工作日早上 9 点检查工作区并写一份简短日报"
+              placeholder="例如：每个工作日早上 9 点汇总未读 GitHub 通知；或 moonrend/zakura 有 PR 合并就告诉我"
               value={createGoal}
               onChange={(e) => setCreateGoal(e.target.value)}
               onKeyDown={(e) => {
@@ -427,7 +433,7 @@ export function AutomationPanel({
               }}
             />
             <p className="text-[11px] text-muted-foreground">
-              Agent 会自行决定名称、周期和指令。⌘/Ctrl + Enter 发送
+              Agent 会自行决定名称、cron 或事件监听、以及任务意图。⌘/Ctrl + Enter 发送
             </p>
             {projects.length > 0 ? (
               <div className="space-y-1.5">
@@ -487,6 +493,12 @@ export function AutomationPanel({
               </div>
               <div className="space-y-1.5">
                 <Label>何时</Label>
+                {editing?.triggerKind === "listener" ? (
+                  <p className="text-sm text-muted-foreground">
+                    {editing.listenerSummary || "事件触发"}
+                  </p>
+                ) : (
+                  <>
                 <Select
                   value={form.preset}
                   onValueChange={(v) => {
@@ -519,7 +531,12 @@ export function AutomationPanel({
                     {describePattern(patternFromWhenPreset(form.preset, form.customPattern))}
                   </p>
                 )}
+                  </>
+                )}
               </div>
+              {editing?.triggerKind === "listener" && editing.webhookUrl ? (
+                <WebhookSecretBlock agentId={agentId} schedule={editing} />
+              ) : null}
               <div className="space-y-1.5">
                 <Label htmlFor="at-prompt">做什么</Label>
                 <Textarea
@@ -618,8 +635,11 @@ function TaskRow({
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="truncate text-sm">{s.name}</div>
         <div className="truncate text-[11px] text-muted-foreground">
-          {describePattern(s.pattern)}
-          {s.enabled && s.nextRunAt ? ` · ${formatRelativeTime(s.nextRunAt)}` : null}
+          {describeTrigger(s)}
+          {s.enabled && s.triggerKind === "cron" && s.nextRunAt
+            ? ` · ${formatRelativeTime(s.nextRunAt)}`
+            : null}
+          {s.enabled && s.triggerKind === "listener" ? " · 等事件" : null}
           {!s.enabled ? " · 已暂停" : null}
         </div>
       </button>
@@ -692,15 +712,21 @@ function TaskPageRow({
       <button type="button" onClick={onOpen} className="min-w-0 text-left">
         <div className="truncate text-sm">{s.name}</div>
         <div className="mt-0.5 truncate text-[11px] text-muted-foreground md:hidden">
-          {describePattern(s.pattern)}
-          {s.enabled && s.nextRunAt ? ` · ${formatRelativeTime(s.nextRunAt)}` : null}
+          {describeTrigger(s)}
+          {s.enabled && s.triggerKind === "cron" && s.nextRunAt
+            ? ` · ${formatRelativeTime(s.nextRunAt)}`
+            : null}
         </div>
       </button>
       <div className="hidden truncate text-sm text-muted-foreground md:block">
-        {describePattern(s.pattern)}
+        {describeTrigger(s)}
       </div>
       <div className="hidden text-sm text-muted-foreground md:block">
-        {s.enabled ? formatRelativeTime(s.nextRunAt) : "已暂停"}
+        {s.enabled
+          ? s.triggerKind === "listener"
+            ? "等事件"
+            : formatRelativeTime(s.nextRunAt)
+          : "已暂停"}
       </div>
       <div
         className="hidden text-sm text-muted-foreground md:block"
@@ -746,6 +772,67 @@ function TaskPageRow({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+    </div>
+  );
+}
+
+function WebhookSecretBlock({
+  agentId,
+  schedule,
+}: {
+  agentId: string | null;
+  schedule: AgentSchedule;
+}) {
+  const [secret, setSecret] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("已复制");
+    } catch {
+      toast.error("复制失败");
+    }
+  }
+  return (
+    <div className="space-y-1.5">
+      <Label>Webhook</Label>
+      <p className="break-all text-xs text-muted-foreground">{schedule.webhookUrl}</p>
+      <div className="flex flex-wrap gap-1.5">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void copy(schedule.webhookUrl ?? "")}
+        >
+          <Copy className="size-3.5" />
+          复制 URL
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={!agentId || busy}
+          onClick={() => {
+            if (!agentId) return;
+            setBusy(true);
+            void revealWebhookSecret(agentId, schedule.id)
+              .then((s) => {
+                setSecret(s);
+                return copy(s);
+              })
+              .catch((err) => toast.error(err instanceof Error ? err.message : String(err)))
+              .finally(() => setBusy(false));
+          }}
+        >
+          {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+          复制密钥
+        </Button>
+      </div>
+      {secret ? (
+        <p className="break-all font-mono text-[11px] text-muted-foreground">{secret}</p>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">密钥只在面板里，Agent 看不到。</p>
+      )}
     </div>
   );
 }

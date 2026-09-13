@@ -290,7 +290,7 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
 
   return (
     <div className="grid min-h-[560px] gap-3 lg:grid-cols-[minmax(260px,340px)_1fr]">
-      <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
+      <section className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-card shadow-surface-2">
         <div className="flex flex-wrap items-center gap-1 border-b px-2 py-1.5">
           <Button
             size="icon-sm"
@@ -504,7 +504,7 @@ export function AgentFileManager({ agentId, canWrite = true }: Props) {
         </div>
       </section>
 
-      <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card">
+      <section className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-card shadow-surface-2">
         <div className="flex items-center gap-2 border-b px-3 py-2">
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {openName ?? "未选择文件"}

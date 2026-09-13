@@ -759,7 +759,7 @@ export default function AgentAcpPage() {
           return (
             <div
               key={profile.id}
-              className="relative flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3.5 transition-colors hover:bg-muted/40"
+              className="relative flex flex-wrap items-center gap-3 rounded-lg bg-card p-3.5 shadow-surface-2 transition-colors"
             >
               <button
                 type="button"

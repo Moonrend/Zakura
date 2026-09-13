@@ -185,6 +185,25 @@ export type TimelineItem =
       seq: number;
     }
   | {
+      kind: "ask_user";
+      id: string;
+      requestId: string;
+      question: string;
+      options: Array<{ id: string; label: string; description?: string }>;
+      allowMultiple?: boolean;
+      secret?: boolean;
+      mode: "sync" | "async";
+      timeoutAction?: "skip" | "default";
+      defaultOptionIds?: string[];
+      placeholder?: string;
+      expiresAt?: string | null;
+      resolved?: {
+        status: "answered" | "skipped" | "timeout" | "cancelled";
+        selected?: string[];
+      };
+      seq: number;
+    }
+  | {
       kind: "plan";
       id: string;
       entries: Array<{ content: string; status?: string; priority?: string }>;
@@ -881,6 +900,57 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       }
       continue;
     }
+    if (ev.type === "ask_user_request") {
+      flushReasoning();
+      flushAssistant();
+      items.push({
+        kind: "ask_user",
+        id: ev.id,
+        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        question: typeof p.question === "string" ? p.question : "",
+        options: Array.isArray(p.options)
+          ? (p.options as Array<{ id?: string; label?: string; description?: string }>)
+              .filter((o) => typeof o.id === "string" && typeof o.label === "string")
+              .map((o) => ({
+                id: String(o.id),
+                label: String(o.label),
+                ...(typeof o.description === "string" ? { description: o.description } : {}),
+              }))
+          : [],
+        allowMultiple: p.allowMultiple === true,
+        secret: p.secret === true,
+        mode: p.mode === "async" ? "async" : "sync",
+        timeoutAction: p.timeoutAction === "default" ? "default" : "skip",
+        defaultOptionIds: Array.isArray(p.defaultOptionIds)
+          ? p.defaultOptionIds.filter((v): v is string => typeof v === "string")
+          : undefined,
+        placeholder: typeof p.placeholder === "string" ? p.placeholder : undefined,
+        expiresAt: typeof p.expiresAt === "string" ? p.expiresAt : null,
+        seq: ev.seq,
+      });
+      continue;
+    }
+    if (ev.type === "ask_user_resolved") {
+      const rid = typeof p.requestId === "string" ? p.requestId : "";
+      const card = items.find(
+        (it) => it.kind === "ask_user" && it.requestId === rid,
+      ) as Extract<TimelineItem, { kind: "ask_user" }> | undefined;
+      if (card) {
+        card.resolved = {
+          status:
+            p.status === "skipped" ||
+            p.status === "timeout" ||
+            p.status === "cancelled" ||
+            p.status === "answered"
+              ? p.status
+              : "answered",
+          selected: Array.isArray(p.selected)
+            ? p.selected.filter((v): v is string => typeof v === "string")
+            : undefined,
+        };
+      }
+      continue;
+    }
     if (ev.type === "acp_plan") {
       flushReasoning();
       flushAssistant();
@@ -1345,6 +1415,17 @@ export async function cancelCloudRun(agentId: string, sessionId: string, runId?:
   return api<{ ok: boolean }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}/cancel`, {
     method: "POST",
     json: { runId },
+  });
+}
+
+export async function resolveAskUser(
+  agentId: string,
+  sessionId: string,
+  body: { requestId: string; cancelled?: boolean; selected?: string[]; text?: string },
+) {
+  return api<{ ok: boolean }>(`/api/agents/${agentId}/sessions/${sessionId}/ask-user`, {
+    method: "POST",
+    json: body,
   });
 }
 

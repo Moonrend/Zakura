@@ -25,7 +25,7 @@ export function ListToolbar({
   return (
     <div
       className={cn(
-        "flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-2.5",
+        "flex flex-wrap items-center gap-2 rounded-lg bg-card p-2.5 shadow-surface-2",
         className,
       )}
     >

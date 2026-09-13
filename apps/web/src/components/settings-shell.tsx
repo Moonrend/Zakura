@@ -3,6 +3,7 @@
 import { Check, Loader2, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SaveStatus } from "@/hooks/use-auto-save";
+import { FluidItem, FluidList } from "@/components/ui/fluid-hover";
 
 /** Dashboard 内容区统一宽度；勿在页面再套一层 max-w / mx-auto */
 export function PageShell({
@@ -140,7 +141,7 @@ export function SettingsSection({
     <section
       id={id}
       className={cn(
-        "scroll-mt-20 space-y-3 rounded-lg border border-border bg-card p-4 transition-[border-color,background-color,box-shadow] duration-150 ease-fluid",
+        "scroll-mt-20 space-y-3 rounded-lg bg-card p-4 shadow-surface-2 transition-[box-shadow,background-color] duration-150 ease-fluid",
         className,
       )}
     >
@@ -240,7 +241,7 @@ export function SettingsCategoryNav({
   className?: string;
 }) {
   return (
-    <nav
+    <FluidList
       className={cn(
         "scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 flex gap-1 overflow-x-auto px-1 pb-1 md:mx-0 md:flex-col md:overflow-visible md:px-0 md:pb-0",
         className,
@@ -250,32 +251,32 @@ export function SettingsCategoryNav({
       {items.map((item) => {
         const active = activeId === item.id;
         return (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => {
-              onSelect?.(item.id);
-              const el = document.getElementById(`settings-${item.id}`);
-              el?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }}
-            className={cn(
-              "weight-hover shrink-0 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-              "hover:bg-accent hover:text-accent-foreground",
-              active
-                ? "bg-accent font-medium text-accent-foreground"
-                : "text-muted-foreground",
-            )}
-          >
-            <div>{item.label}</div>
-            {item.description ? (
-              <div className="mt-0.5 hidden text-[11px] font-normal opacity-80 md:block">
-                {item.description}
-              </div>
-            ) : null}
-          </button>
+          <FluidItem key={item.id} className="shrink-0 md:w-full">
+            <button
+              type="button"
+              onClick={() => {
+                onSelect?.(item.id);
+                const el = document.getElementById(`settings-${item.id}`);
+                el?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              className={cn(
+                "weight-hover w-full shrink-0 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                active
+                  ? "bg-selected/50 font-medium text-accent-foreground"
+                  : "text-muted-foreground",
+              )}
+            >
+              <div>{item.label}</div>
+              {item.description ? (
+                <div className="mt-0.5 hidden text-[11px] font-normal opacity-80 md:block">
+                  {item.description}
+                </div>
+              ) : null}
+            </button>
+          </FluidItem>
         );
       })}
-    </nav>
+    </FluidList>
   );
 }
 

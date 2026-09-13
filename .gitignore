@@ -13,6 +13,7 @@ coverage
 *.tsbuildinfo
 tmp-*
 .tmp-*
+.test-tmp/
 .playwright-cli/
 certs/
 *.pem

@@ -274,7 +274,7 @@ export default function PlatformServicesPage() {
 
       {!me.multiTenant ? <PlatformTransactionalEmailPanel /> : null}
 
-      <div className="divide-y rounded-lg border border-border bg-card">
+      <div className="divide-y rounded-lg bg-card shadow-surface-2">
         {data.services.map((s) => {
           const lc = s.lifecycle;
           const busy = Boolean(actionKey === s.key || lc.busy || s.progress?.running);

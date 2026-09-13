@@ -3,18 +3,32 @@
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
+import { FluidHoverHighlight } from "@/components/ui/fluid-hover-highlight"
+import {
+  FluidHoverContextOnly,
+  FluidHoverProvider,
+  useFluidHoverScope,
+  useFluidItem,
+  useOptionalFluidHover,
+} from "@/components/ui/fluid-hover"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({ className, children, ...props }: React.ComponentProps<"table">) {
+  const { ref, hover } = useFluidHoverScope({ gapClick: false })
   return (
     <div
+      ref={ref as React.RefObject<HTMLDivElement>}
       data-slot="table-container"
-      className="relative w-full overflow-x-auto rounded-lg border border-border"
+      className="relative w-full overflow-x-auto rounded-lg bg-card shadow-surface-2"
+      {...hover.handlers}
     >
+      <FluidHoverHighlight hover={hover} className="z-0 rounded-md" />
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
+        className={cn("relative z-[1] w-full caption-bottom text-sm", className)}
         {...props}
-      />
+      >
+        <FluidHoverContextOnly hover={hover}>{children}</FluidHoverContextOnly>
+      </table>
     </div>
   )
 }
@@ -29,13 +43,16 @@ function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
   )
 }
 
-function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
+function TableBody({ className, children, ...props }: React.ComponentProps<"tbody">) {
+  const hover = useOptionalFluidHover()
   return (
     <tbody
       data-slot="table-body"
       className={cn("[&_tr:last-child]:border-0", className)}
       {...props}
-    />
+    >
+      {hover ? <FluidHoverProvider hover={hover}>{children}</FluidHoverProvider> : children}
+    </tbody>
   )
 }
 
@@ -53,11 +70,14 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
 }
 
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
+  const ref = React.useRef<HTMLTableRowElement>(null)
+  useFluidItem(ref)
   return (
     <tr
+      ref={ref}
       data-slot="table-row"
       className={cn(
-        "border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        "relative z-[1] border-b transition-colors data-[state=selected]:bg-selected/40",
         className
       )}
       {...props}

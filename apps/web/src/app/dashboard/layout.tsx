@@ -111,7 +111,7 @@ export default function DashboardLayout({
             isPlatformAdmin={!!me.isPlatformAdmin}
           />
           <SidebarInset>
-            <header className="z-20 shrink-0 border-b border-border/80 bg-background">
+            <header className="z-20 shrink-0 bg-background/80 shadow-surface-1 backdrop-blur-sm">
               <div className="mx-auto flex h-12 w-full max-w-[var(--content-max)] items-center gap-2 px-4 md:px-6">
                 <SidebarTrigger className="-ml-0.5" />
                 <div className="min-w-0 truncate text-xs text-muted-foreground">

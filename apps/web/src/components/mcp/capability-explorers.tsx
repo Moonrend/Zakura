@@ -140,7 +140,7 @@ export function McpToolsExplorer({
 
       <section className="space-y-2">
         <h2 className="text-sm font-medium">工具试用</h2>
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
           {selected ? (
             <>
               <div>
@@ -248,7 +248,7 @@ export function McpResourcesExplorer({
 
         <section className="space-y-2">
           <h2 className="text-sm font-medium">读取内容</h2>
-          <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+          <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
             {selected ? (
               <>
                 <div>
@@ -415,7 +415,7 @@ export function McpPromptsExplorer({
 
       <section className="space-y-2">
         <h2 className="text-sm font-medium">获取 Prompt</h2>
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
           {selected ? (
             <>
               <div>
@@ -497,7 +497,7 @@ export function McpPromptCompletePanel({
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-card p-3">
+    <div className="space-y-2 rounded-lg bg-card shadow-surface-2 p-3">
       <Label className="text-xs">补全 · {argumentName}</Label>
       <div className="flex gap-2">
         <Input

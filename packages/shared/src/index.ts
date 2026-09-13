@@ -801,6 +801,22 @@ export {
   resolveFollowUpMode,
   lastCancelledRunId,
 } from "./cloud-agent.js";
+export {
+  ROUTINE_LISTENER_SOURCES,
+  GITHUB_ROUTINE_EVENTS,
+  RoutineListenerError,
+  parseRoutineListener,
+  matchRoutineListener,
+  inboundFromGithub,
+  inboundFromLinear,
+  inboundFromSentry,
+  inboundFromPagerDuty,
+  inboundFromTeams,
+  inboundFromSlack,
+  shouldAutoStopListener,
+  describeListener,
+  summarizeInbound,
+} from "./routine.js";
 export type {
   SilentAgentToolName,
   CloudAgentEventType,
@@ -838,6 +854,9 @@ export type {
   CloudAgentPermissionResolvedPayload,
   CloudAgentElicitationRequestPayload,
   CloudAgentElicitationResolvedPayload,
+  CloudAgentAskUserOption,
+  CloudAgentAskUserRequestPayload,
+  CloudAgentAskUserResolvedPayload,
   CloudAgentAcpPlanEntry,
   CloudAgentAcpPlanPayload,
   CloudAgentEventPayload,
@@ -849,6 +868,21 @@ export type {
   ComposerSkillOption,
   ComposerCapabilities,
 } from "./cloud-agent.js";
+export type {
+  RoutineListenerSource,
+  GithubRoutineEvent,
+  SlackRoutineMatch,
+  SlackListener,
+  GithubListener,
+  TeamsListener,
+  LinearListener,
+  SentryListener,
+  PagerDutyListener,
+  WebhookListener,
+  GroupListener,
+  RoutineListener,
+  RoutineInboundEvent,
+} from "./routine.js";
 
 export {
   DEFAULT_CONTEXT_RESERVE_TOKENS,

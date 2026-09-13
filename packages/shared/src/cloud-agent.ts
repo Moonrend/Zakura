@@ -10,7 +10,10 @@ import type { ModelToolCall } from "./model-router.js";
  * Agent 可调用、但不在任何用户界面展示的内部工具。
  * 事件仍会落库供模型历史重建；时间线 / 运行日志 / 工具卡片需过滤。
  */
-export const SILENT_AGENT_TOOL_NAMES = ["send_crisis_support_resources"] as const;
+export const SILENT_AGENT_TOOL_NAMES = [
+  "send_crisis_support_resources",
+  "ask_user",
+] as const;
 
 export type SilentAgentToolName = (typeof SILENT_AGENT_TOOL_NAMES)[number];
 
@@ -71,6 +74,9 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   /** ACP：结构化表单 / URL 交互 */
   "elicitation_request",
   "elicitation_resolved",
+  /** 一等公民：询问用户（选项卡 / 密钥 / 同步或异步） */
+  "ask_user_request",
+  "ask_user_resolved",
   /** ACP：执行计划 */
   "acp_plan",
 ] as const;
@@ -500,6 +506,34 @@ export type CloudAgentElicitationResolvedPayload = {
   cancelled?: boolean;
 };
 
+export type CloudAgentAskUserOption = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
+export type CloudAgentAskUserRequestPayload = {
+  requestId: string;
+  question: string;
+  options: CloudAgentAskUserOption[];
+  allowMultiple?: boolean;
+  secret?: boolean;
+  mode: "sync" | "async";
+  timeoutSeconds?: number | null;
+  timeoutAction?: "skip" | "default";
+  defaultOptionIds?: string[];
+  placeholder?: string;
+  expiresAt?: string | null;
+};
+
+export type CloudAgentAskUserResolvedPayload = {
+  requestId: string;
+  status: "answered" | "skipped" | "timeout" | "cancelled";
+  selected?: string[];
+  /** secret 问题时不回传正文 */
+  hasText?: boolean;
+};
+
 export type CloudAgentAcpPlanEntry = {
   content: string;
   status?: string;
@@ -535,6 +569,8 @@ export type CloudAgentEventPayload =
   | CloudAgentPermissionResolvedPayload
   | CloudAgentElicitationRequestPayload
   | CloudAgentElicitationResolvedPayload
+  | CloudAgentAskUserRequestPayload
+  | CloudAgentAskUserResolvedPayload
   | CloudAgentAcpPlanPayload;
 
 export type CloudAgentEvent = {

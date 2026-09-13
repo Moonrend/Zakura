@@ -2008,8 +2008,9 @@ export const storeCatalogEntries = pgTable(
 );
 
 /**
- * Agent 定时任务：按 cron / @every 模式触发云端对话。
- * next_run_at 由调度器推进；due 行被 claim 后立即写入下次时间，避免双发。
+ * Agent Routine：一条说明 + 一个触发条件（cron XOR listener）。
+ * cron 的 next_run_at 由调度器推进；due 行被 claim 后立即写入下次时间，避免双发。
+ * listener 不走 next_run_at，由入站事件/webhook 命中。
  */
 export const agentSchedules = pgTable(
   "agent_schedules",
@@ -2024,13 +2025,21 @@ export const agentSchedules = pgTable(
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
     /**
-     * 触发表达式：
-     * - 5 段 cron：`分 时 日 月 周`（UTC 或 timezone）
-     * - `@hourly` / `@daily` / `@weekly`
-     * - `@every_30m` / `@every_2h`
+     * 触发表达式（trigger_kind=cron）：
+     * - 5 段 cron：`分 时 日 月 周`
+     * - 可选 `CRON_TZ=Asia/Shanghai 0 9 * * 1-5`
+     * - `@hourly` / `@daily` / `@weekly` / `@monthly`
+     * - `@every 5m` / `@every_2h`（最短 5 分钟）
+     * listener 行可为空串。
      */
-    pattern: text("pattern").notNull(),
-    /** 触发时注入的用户消息（任务指令） */
+    pattern: text("pattern").notNull().default(""),
+    /** cron | listener */
+    triggerKind: text("trigger_kind").notNull().default("cron"),
+    /** RoutineListener JSON；cron 行为空对象 */
+    listenerJson: text("listener_json").notNull().default("{}"),
+    /** listener/webhook 验签密钥；不回传给模型 */
+    webhookSecret: text("webhook_secret"),
+    /** 触发时注入的用户消息（任务意图，不要写死某次工具调用） */
     prompt: text("prompt").notNull(),
     /** 绑定的工作区项目 slug；空 = 在工作区根执行 */
     project: text("project"),
@@ -2038,7 +2047,7 @@ export const agentSchedules = pgTable(
     /** null = 不限次 */
     maxRuns: integer("max_runs"),
     runCount: integer("run_count").notNull().default(0),
-    /** IANA 时区；空则 UTC */
+    /** IANA 时区；空则 UTC。也可写在 CRON_TZ= 前缀里 */
     timezone: text("timezone").notNull().default("UTC"),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
@@ -2050,6 +2059,46 @@ export const agentSchedules = pgTable(
     index("agent_schedules_agent").on(t.agentId, t.enabled),
     index("agent_schedules_due").on(t.enabled, t.nextRunAt),
     index("agent_schedules_tenant").on(t.tenantId),
+    index("agent_schedules_trigger").on(t.agentId, t.triggerKind, t.enabled),
+  ],
+);
+
+/** 一等公民询问用户：同步阻塞 / 异步稍后作答，可超时 skip 或默认 */
+export const agentUserQuestions = pgTable(
+  "agent_user_questions",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    runId: text("run_id"),
+    toolCallId: text("tool_call_id"),
+    question: text("question").notNull(),
+    optionsJson: text("options_json").notNull().default("[]"),
+    allowMultiple: boolean("allow_multiple").notNull().default(false),
+    secret: boolean("secret").notNull().default(false),
+    /** sync | async */
+    mode: text("mode").notNull().default("sync"),
+    timeoutSeconds: integer("timeout_seconds"),
+    /** skip | default */
+    timeoutAction: text("timeout_action").notNull().default("skip"),
+    defaultOptionIdsJson: text("default_option_ids_json").notNull().default("[]"),
+    placeholder: text("placeholder").notNull().default(""),
+    /** pending | answered | skipped | timeout | cancelled */
+    status: text("status").notNull().default("pending"),
+    answerJson: text("answer_json").notNull().default("{}"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_user_questions_session").on(t.sessionId, t.status),
+    index("agent_user_questions_due").on(t.status, t.expiresAt),
+    index("agent_user_questions_tenant").on(t.tenantId),
   ],
 );
 
@@ -2091,7 +2140,7 @@ export const agentAutomationRuns = pgTable(
     agentId: text("agent_id")
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
-    /** schedule | heartbeat */
+    /** schedule | heartbeat | listener */
     kind: text("kind").notNull(),
     scheduleId: text("schedule_id").references(() => agentSchedules.id, {
       onDelete: "set null",
@@ -2155,5 +2204,6 @@ export type SkillSourceTokenRow = typeof skillSourceTokens.$inferSelect;
 export type AgentSchedule = typeof agentSchedules.$inferSelect;
 export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
+export type AgentUserQuestion = typeof agentUserQuestions.$inferSelect;
 export type AgentProjectRow = typeof agentProjects.$inferSelect;
 

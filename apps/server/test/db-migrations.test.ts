@@ -140,6 +140,7 @@ describe("drizzle migrations", () => {
           "user_sessions",
           "tenant_domains",
           "security_audit_logs",
+          "agent_user_questions",
         ]) {
           assert.ok(tables.has(table), `缺表 ${table}`);
         }
@@ -148,6 +149,8 @@ describe("drizzle migrations", () => {
           `select table_name, column_name from information_schema.columns
            where (table_name = 'cloud_agent_sessions' and column_name = 'project')
               or (table_name = 'agent_schedules' and column_name = 'project')
+              or (table_name = 'agent_schedules' and column_name = 'trigger_kind')
+              or (table_name = 'agent_user_questions' and column_name = 'timeout_action')
               or (table_name = 'users' and column_name = 'suspended_at')
               or (table_name = 'users' and column_name = 'avatar_updated_at')
               or (table_name = 'users' and column_name = 'title')
@@ -157,7 +160,7 @@ describe("drizzle migrations", () => {
         const colRows =
           (cols as unknown as { rows?: unknown[] }).rows ??
           (cols as unknown as unknown[]);
-        assert.equal(colRows.length, 7, "0041/0044/0046/0050/0051 的列没有全部建出");
+        assert.equal(colRows.length, 9, "0041/0044/0046/0050/0051/0052 的列没有全部建出");
       } finally {
         await close();
       }

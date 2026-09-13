@@ -25,7 +25,7 @@ export function McpToolPermissionsPanel({
   return (
     <section className={className ?? "space-y-2"}>
       <h2 className="text-sm font-medium">工具权限</h2>
-      <div className="space-y-2 rounded-lg border border-border bg-card p-3">
+      <div className="space-y-2 rounded-lg bg-card shadow-surface-2 p-3">
         {rules.map((rule) => (
           <div
             key={rule.id}

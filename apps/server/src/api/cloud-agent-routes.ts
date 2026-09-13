@@ -132,9 +132,10 @@ export function registerCloudAgentRoutes(
     gateway?: McpGateway;
     skills?: SkillsService;
     acp?: import("../services/acp/session.js").AcpSessionService | null;
+    askUser?: import("../services/ask-user.js").AskUserService | null;
   },
 ) {
-  const { agentService, store, runtime, modelRouter, gateway, skills, acp } = deps;
+  const { agentService, store, runtime, modelRouter, gateway, skills, acp, askUser } = deps;
 
   async function startNextQueued(input: {
     tenantId: string;
@@ -853,11 +854,15 @@ export function registerCloudAgentRoutes(
     const row = await store.getSession(session.tenantId, c.req.param("id"), sid);
     if (!row) return c.json({ error: "Not found" }, 404);
     const body = await c.req.json<{ runId?: string }>().catch(() => ({} as { runId?: string }));
-    const ok = await store.requestCancel(sid, body.runId ?? row.activeRunId);
+    const runId = body.runId ?? row.activeRunId;
+    const ok = await store.requestCancel(sid, runId);
+    if (ok && askUser && runId) {
+      void askUser.cancelRun(runId);
+    }
     if (ok && row.kind === "acp" && acp) {
       await acp.cancel(sid).catch(() => undefined);
     }
-    return c.json({ ok, runId: body.runId ?? row.activeRunId });
+    return c.json({ ok, runId });
   });
 
   /** 手动压缩当前会话上下文；原始事件保留，后续 Run 优先使用摘要。 */
@@ -876,6 +881,38 @@ export function registerCloudAgentRoutes(
         sessionId: c.req.param("sid"),
       });
       return c.json(result);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /** 一等公民：回答 ask_user 卡片 */
+  app.post("/api/agents/:id/sessions/:sid/ask-user", async (c) => {
+    if (!askUser) return c.json({ error: "询问用户未启用" }, 400);
+    const session = c.get("session")!;
+    const agent = await requireAgent(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const body = await c.req
+      .json<{ requestId?: string; cancelled?: boolean; selected?: unknown; text?: string }>()
+      .catch(
+        () =>
+          ({}) as {
+            requestId?: string;
+            cancelled?: boolean;
+            selected?: unknown;
+            text?: string;
+          },
+      );
+    const requestId = String(body.requestId ?? "").trim();
+    if (!requestId) return c.json({ error: "requestId required" }, 400);
+    try {
+      await askUser.resolve(session.tenantId, agent.id, c.req.param("sid"), {
+        requestId,
+        cancelled: body.cancelled === true,
+        selected: body.selected,
+        text: typeof body.text === "string" ? body.text : undefined,
+      });
+      return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

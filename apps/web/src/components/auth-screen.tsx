@@ -19,7 +19,7 @@ export function AuthScreen({
   showBrand?: boolean;
 }) {
   return (
-    <div className="relative grid min-h-svh place-items-center p-6">
+    <div className="relative grid min-h-svh place-items-center bg-surface-1 p-6">
       <div className="absolute right-4 top-4">
         <ThemeToggle />
       </div>

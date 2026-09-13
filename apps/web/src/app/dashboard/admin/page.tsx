@@ -54,7 +54,7 @@ function StatCard({
   );
 
   const className =
-    "surface-interactive rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-ring/40";
+    "surface-interactive rounded-lg bg-card shadow-surface-2 p-3.5 transition-colors hover:border-ring/40";
 
   return href ? (
     <Link href={href} className={className}>

@@ -282,7 +282,7 @@ export function SkillStorePanel({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-border bg-card p-3 sm:p-4">
+      <div className="rounded-lg bg-card shadow-surface-2 p-3 sm:p-4">
         <div className="mb-2 flex items-center gap-2">
           <Terminal className="size-4 shrink-0 text-muted-foreground" />
           <span className="text-sm font-medium">从命令或链接安装</span>

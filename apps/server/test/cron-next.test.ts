@@ -40,6 +40,17 @@ describe("parseSchedulePattern", () => {
     assert.throws(() => assertValidSchedulePattern("not a cron"), CronParseError);
     assert.throws(() => assertValidSchedulePattern("@every_0m"), CronParseError);
   });
+
+  it("accepts @every 5m and CRON_TZ prefix", () => {
+    const m = parseSchedulePattern("@every 5m");
+    assert.equal(m.kind, "every");
+    if (m.kind === "every") assert.equal(m.everyMs, 5 * 60_000);
+    assert.equal(parseSchedulePattern("CRON_TZ=Asia/Shanghai 0 9 * * 1-5").kind, "cron");
+  });
+
+  it("rejects faster than 5 minutes", () => {
+    assert.throws(() => assertValidSchedulePattern("@every_1m"), CronParseError);
+  });
 });
 
 describe("nextRunAfter", () => {
@@ -60,6 +71,12 @@ describe("nextRunAfter", () => {
     // 2026-08-03 is Monday
     const from = new Date("2026-08-03T08:00:00.000Z");
     const next = nextRunAfter("0 9 * * 1-5", from);
+    assert.equal(next.toISOString(), "2026-08-03T09:00:00.000Z");
+  });
+
+  it("respects CRON_TZ=UTC+offset via IANA zone", () => {
+    const from = new Date("2026-08-03T00:00:00.000Z");
+    const next = nextRunAfter("CRON_TZ=UTC 0 9 * * 1-5", from);
     assert.equal(next.toISOString(), "2026-08-03T09:00:00.000Z");
   });
 });

@@ -103,6 +103,7 @@ import { registerRuntimeNodeRoutes } from "./runtime-node-routes.js";
 import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { AgentAutomationService } from "../services/agent-automation.js";
+import { AskUserService } from "../services/ask-user.js";
 import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
@@ -334,7 +335,10 @@ export async function createApiApp(deps: {
   let remoteIngress: RemoteAgentIngress | null = null;
   let remoteRuntime: RemoteChannelRuntime | null = null;
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
-  const automation = new AgentAutomationService(db);
+  const automation = new AgentAutomationService(db, {
+    publicBaseUrl: config.publicBaseUrl,
+  });
+  const askUser = new AskUserService(db, cloudSessionStore);
 
   mountPlatformProbes(app as unknown as import("hono").Hono);
 
@@ -364,6 +368,7 @@ export async function createApiApp(deps: {
     ]);
     const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
+    const isRoutineWebhook = /^\/api\/routines\/[^/]+\/hook$/.test(c.req.path);
     if (config.edition === "saas") {
       publicPaths.add("/api/auth/register");
     }
@@ -390,7 +395,8 @@ export async function createApiApp(deps: {
       isSsoPublic ||
       isScim ||
       isEmailInbound ||
-      isRemoteWebhook
+      isRemoteWebhook ||
+      isRoutineWebhook
     ) {
       // Optional session for invite accept
       if (isInvitePublic) {
@@ -2272,6 +2278,7 @@ export async function createApiApp(deps: {
         agentHooks,
         remoteChannels: remoteRuntime.sessions,
         automation,
+        askUser,
         acp: acpSessions,
         db,
       });
@@ -2280,6 +2287,9 @@ export async function createApiApp(deps: {
         startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
       });
       automation.start();
+      askUser.setFollowUp((input) => cloudRuntime.enqueueFollowUp(input));
+      askUser.start();
+      remoteIngress?.setAutomation(automation);
       void db
         .select({ id: tenants.id })
         .from(tenants)
@@ -2302,6 +2312,7 @@ export async function createApiApp(deps: {
         gateway,
         skills,
         acp: acpSessions,
+        askUser,
       });
       registerAutomationRoutes(app, { agentService, automation });
       emailInbound = new EmailInboundService(

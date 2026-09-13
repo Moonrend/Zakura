@@ -53,7 +53,8 @@ export function buildSystemPrompt(
     "- 用户提到「上次 / 之前的对话 / 另一个会话」时，用 list_chat_sessions / search_chat_sessions 定位，再用 get_chat_messages 或 import_session_context 取上下文，不要假装记得。",
     "- 工作区内搜代码优先 re_fs_grep；多处改文件优先 re_apply_patch。",
     "- re_shell_exec 的输出会实时显示给用户。命令若停在提示符或长时间无输出，会先返回 status=running 和 job_id：用同一工具传 job_id 继续等待，stdin 回答提示（记得换行），kill=true 结束进程。",
-    "- 用户要求定时/周期执行时，用 create_schedule（cron 或 @every_30m）；不要假装已设置。产生文件的定时任务必须带 project。",
+    "- 用户要求定时/周期执行或「有事件就通知我」时，用 create_routine：cron 或 listener 二选一，不要假装已设置。产生文件的任务必须带 project。能听事件就不要用 @every 5m 轮询。",
+    "- 需要用户做选择、确认或提供密钥时，用 ask_user（选项卡；secret 掩码；mode=sync 等待 / async 稍后送达）。Routine/长时间任务必须带 timeout_seconds 与 timeout_action=skip|default。",
     "- 若工具列表中有 list_acp_agents / spawn_acp_agent：用户明确要 Claude Code、Codex 等第三方编码 Agent 时，用 spawn_acp_agent 开独立会话，不要假装已调用。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
@@ -72,6 +73,13 @@ export function buildSystemPrompt(
     `- MCP 绑定模式: ${getAgentMcpMode(agent)}`,
     // 勿写死「一定有 tool_search」：小工具面仍扁平直出；模型见 tool_search 工具时再搜命名空间即可
     "- 若工具列表中出现 tool_search / namespace：先搜索相关命名空间再调用其中的函数；FS/Shell/浏览器与 memory_context/search_memory/add_memory、网页搜索/抓取通常可直接调用。",
+    "",
+    "# Routine 与询问用户",
+    "- Routine = 一条保存的意图 + 一个触发条件。你不在线时也会跑。create_routine / update_routine / pause_routine / delete_routine / list_routines。",
+    "- 触发二选一：cron（`0 9 * * 1-5`、`CRON_TZ=Asia/Shanghai …`、`@every 5m`）或 listener（Slack / GitHub / webhook 等）。事件优先于轮询。",
+    "- 任务说明写意图，不要写死某次工具调用。webhook 密钥只在面板里，工具结果不含密钥。",
+    "- 需求已经明确（何时/听什么/做什么）就直接建；含糊或会对外发消息时先用 ask_user 确认。",
+    "- ask_user 是一等能力：选项卡问用户；secret 掩码；sync 等待 / async 稍后送达；长时间任务必须 timeout + skip/default。",
   ];
   if (extra?.peerAgents) {
     lines.push(
@@ -181,7 +189,7 @@ export function buildSubagentPrompt(
     "# 工作方式",
     "- 先用工具收集事实再下结论；关键断言要有依据。",
     "- 工具失败先读错误信息再调整；同一方法连续失败两次应换思路。",
-    "- 任务未明确授权时，不执行破坏性操作（删除、覆盖重要文件、对外发送内容）。",
+    "- 任务未明确授权时，不执行破坏性操作（删除、覆盖重要文件、对外发送内容）。不要用 ask_user：你看不到用户。",
     ...(extra?.subagents
       ? [
           `- 你的任务若可清晰拆分为独立子部分，可用 ${SUBAGENT_TOOL_QUALIFIED} 派生下一级子代理并行处理（同一轮多个调用自动并行）；简单任务不要嵌套。`,

@@ -5,13 +5,15 @@
 import type { ComposerCapabilities, ComposerToolGroup } from "@zakura/shared";
 import { DELEGATE_TOOL_NAME } from "./tools.js";
 import {
-  CREATE_SCHEDULE_TOOL,
-  DELETE_SCHEDULE_TOOL,
+  CREATE_ROUTINE_TOOL,
+  DELETE_ROUTINE_TOOL,
   LIST_AUTOMATION_RUNS_TOOL,
-  LIST_SCHEDULES_TOOL,
-  RUN_SCHEDULE_TOOL,
-  UPDATE_SCHEDULE_TOOL,
+  LIST_ROUTINES_TOOL,
+  PAUSE_ROUTINE_TOOL,
+  RUN_ROUTINE_TOOL,
+  UPDATE_ROUTINE_TOOL,
 } from "./automation-tools.js";
+import { ASK_USER_TOOL } from "./ask-user-tools.js";
 import {
   GET_MESSAGES_TOOL,
   IMPORT_SESSION_TOOL,
@@ -46,15 +48,22 @@ const CHAT_EXTRA_GROUPS: ComposerToolGroup[] = [
   {
     id: "builtin:automation",
     kind: "builtin",
-    label: "自动化",
+    label: "Routine",
     tools: [
-      LIST_SCHEDULES_TOOL,
-      CREATE_SCHEDULE_TOOL,
-      UPDATE_SCHEDULE_TOOL,
-      DELETE_SCHEDULE_TOOL,
-      RUN_SCHEDULE_TOOL,
+      LIST_ROUTINES_TOOL,
+      CREATE_ROUTINE_TOOL,
+      UPDATE_ROUTINE_TOOL,
+      PAUSE_ROUTINE_TOOL,
+      DELETE_ROUTINE_TOOL,
+      RUN_ROUTINE_TOOL,
       LIST_AUTOMATION_RUNS_TOOL,
     ],
+  },
+  {
+    id: "builtin:ask-user",
+    kind: "builtin",
+    label: "询问用户",
+    tools: [ASK_USER_TOOL],
   },
   {
     id: "builtin:delegate",

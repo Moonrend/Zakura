@@ -42,7 +42,7 @@ export function SearchField({
         className={cn(
           "h-9 w-full rounded-lg border border-input bg-transparent pr-8 pl-8 text-sm outline-none",
           "transition-[border-color,box-shadow] duration-200 ease-fluid",
-          "placeholder:text-muted-foreground",
+          "placeholder:text-muted-foreground hover:border-foreground/20",
           "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
         )}
       />

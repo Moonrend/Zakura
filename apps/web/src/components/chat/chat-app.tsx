@@ -66,6 +66,7 @@ import {
 } from "@/components/ui/select";
 import { ChatSettingsSheet } from "./chat-settings-sheet";
 import { ChatSessionRow } from "./chat-session-row";
+import { FluidItem, FluidList } from "@/components/ui/fluid-hover";
 import { useAutoSave } from "@/hooks/use-auto-save";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -89,6 +90,7 @@ import {
   listCloudSessions,
   regenerateCloudRun,
   removeQueuedMessage,
+  resolveAskUser,
   saveCloudConfig,
   sendCloudMessage,
   subscribeCloudEvents,
@@ -1730,13 +1732,14 @@ export function ChatApp() {
     }
   }
 
-  /** 新建定时任务：开新对话，让 Agent 用 create_schedule 创建 */
+  /** 新建 Routine：开新对话，让 Agent 用 create_routine 创建 */
   function handleAskAgentCreateSchedule(goal: string) {
     if (!agentId || sending || runActive) return;
     const prompt = [
-      "请用 create_schedule 为我创建定时任务。",
-      "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
-      "若任务会写文件，create_schedule 必须带 project（工作区项目 slug）。",
+      "请用 create_routine 为我创建定时或事件任务（Routine）。",
+      "根据下面描述自行决定名称、触发方式（cron / @every / CRON_TZ=…，或 Slack/GitHub/webhook listener）和任务意图，创建后用一两句话确认。",
+      "任务说明写成意图，不要写死某次工具调用。能听事件就不要用短间隔轮询。",
+      "若任务会写文件，create_routine 必须带 project（工作区项目 slug）。",
       projects.length
         ? `当前项目：${projects.map((p) => `${p.name}（${p.slug}）`).join("、")}`
         : "还没有项目时，可先在主页创建项目。写文件的任务再绑有工作区的项目。",
@@ -2633,7 +2636,7 @@ export function ChatApp() {
               render={
                 <button
                   type="button"
-                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-muted/60"
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-hover"
                 />
               }
             >
@@ -2673,7 +2676,7 @@ export function ChatApp() {
               <button
                 type="button"
                 onClick={leaveProject}
-                className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-muted-foreground hover:bg-hover hover:text-foreground"
               >
                 <ArrowLeft className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 truncate">
@@ -2776,19 +2779,20 @@ export function ChatApp() {
                     <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
                       项目
                     </div>
-                    <div className="flex flex-col">
+                    <FluidList className="flex flex-col">
                       {projectRows.map((row) => (
-                        <ChatProjectRow
-                          key={row.slug}
-                          slug={row.slug}
-                          name={row.name}
-                          sessionCount={row.sessions.length}
-                          peers={othersOnProject(peers, row.slug, meUser?.id ?? "")}
-                          onOpen={enterProject}
-                          onPickUser={goToPeer}
-                        />
+                        <FluidItem key={row.slug}>
+                          <ChatProjectRow
+                            slug={row.slug}
+                            name={row.name}
+                            sessionCount={row.sessions.length}
+                            peers={othersOnProject(peers, row.slug, meUser?.id ?? "")}
+                            onOpen={enterProject}
+                            onPickUser={goToPeer}
+                          />
+                        </FluidItem>
                       ))}
-                    </div>
+                    </FluidList>
                   </div>
                 ) : null}
                 {sidebarSessions.map((g) => (
@@ -2796,7 +2800,13 @@ export function ChatApp() {
                   <div className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground/60">
                     {g.label}
                   </div>
-                  <div className="flex flex-col">{g.items.map((s) => sessionRow(s))}</div>
+                  <div className="flex flex-col">
+                    <FluidList>
+                      {g.items.map((s) => (
+                        <FluidItem key={s.id}>{sessionRow(s)}</FluidItem>
+                      ))}
+                    </FluidList>
+                  </div>
                 </div>
                 ))}
               </>
@@ -2809,7 +2819,7 @@ export function ChatApp() {
           {meUser ? (
             <Link
               href="/dashboard/settings/account"
-              className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground/80 hover:bg-muted/40 hover:text-foreground"
+              className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground/80 hover:bg-hover hover:text-foreground"
             >
               <UserAvatar
                 userId={meUser.id}
@@ -3037,6 +3047,12 @@ export function ChatApp() {
                   cancelled,
                   content,
                 }).catch((err) =>
+                  toast.error(err instanceof Error ? err.message : String(err)),
+                );
+              }}
+              onAskUser={(input) => {
+                if (!agentId || !sessionId) return;
+                void resolveAskUser(agentId, sessionId, input).catch((err) =>
                   toast.error(err instanceof Error ? err.message : String(err)),
                 );
               }}

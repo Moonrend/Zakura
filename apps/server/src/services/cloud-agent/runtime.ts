@@ -117,11 +117,17 @@ import {
   listAutomationToolDefinitions,
 } from "./automation-tools.js";
 import {
+  callAskUserTool,
+  isAskUserToolName,
+  listAskUserToolDefinitions,
+} from "./ask-user-tools.js";
+import {
   callCrisisSupportTool,
   isCrisisSupportToolName,
   listCrisisSupportToolDefinitions,
 } from "./crisis-support-tools.js";
 import type { AgentAutomationService } from "../agent-automation.js";
+import type { AskUserService } from "../ask-user.js";
 import {
   callAcpTool,
   isAcpToolName,
@@ -196,8 +202,10 @@ export type CloudAgentRuntimeDeps = {
   agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
   /** 远程 Chat SDK 通道工具（可选；远程会话注入 chat_* 发帖/回帖工具） */
   remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
-  /** 定时任务自动化（可选；主 chat 注入 schedule 工具） */
+  /** 定时/事件 Routine（可选；主 chat 注入 routine 工具） */
   automation?: AgentAutomationService | null;
+  /** 询问用户（可选；chat + system 注入 ask_user） */
+  askUser?: AskUserService | null;
   /** 第三方 ACP Agent（可选；主 chat 注入 list/spawn_acp_agent） */
   acp?: AcpSessionService | null;
   /** 项目记录（可选；缺省时只读目录里的 AGENTS.md） */
@@ -298,10 +306,11 @@ export class CloudAgentRuntime {
     agentId: string;
     prompt: string;
     title: string;
-    kind: "schedule" | "heartbeat";
+    kind: "schedule" | "heartbeat" | "listener";
     scheduleId?: string;
     scheduleName?: string;
     project?: string | null;
+    eventSummary?: string;
   }): Promise<{ sessionId: string; runId: string }> {
     const prompt = input.prompt.trim();
     if (!prompt) throw new Error("automation prompt is empty");
@@ -330,23 +339,29 @@ export class CloudAgentRuntime {
       ? `若任务会写文件，优先在项目「${input.project}」相关目录内完成。`
       : "若任务会写文件，先确认项目或工作目录，不要随便写到工作区根。";
     const content =
-      input.kind === "schedule"
+      input.kind === "heartbeat"
         ? [
-            `【定时任务】这是系统按计划自动触发的定时任务${name ? `「${name}」` : ""}，不是用户正在与你实时对话。`,
-            "请直接执行下方任务内容，完成后简要汇报结果；不要反问「需要我做什么」或等待用户回复。",
+            "【心跳任务】这是系统自动触发的心跳检查，不是用户正在与你实时对话。",
+            "请直接执行下方内容，完成后简要汇报。需要用户拍板时用 ask_user，并设置 timeout_seconds + timeout_action（skip 或 default），不要干等。",
             cwdHint,
             "",
             "## 任务内容",
             prompt,
           ].join("\n")
         : [
-            "【心跳任务】这是系统自动触发的心跳检查，不是用户正在与你实时对话。",
-            "请直接执行下方内容，完成后简要汇报；不要反问或等待用户回复。",
+            input.kind === "listener"
+              ? `【事件任务】这是系统因外部事件自动触发的 Routine${name ? `「${name}」` : ""}，不是用户正在与你实时对话。`
+              : `【定时任务】这是系统按计划自动触发的 Routine${name ? `「${name}」` : ""}，不是用户正在与你实时对话。`,
+            "请直接执行下方任务内容，完成后简要汇报结果。",
+            "需要用户选择或密钥时用 ask_user（可 sync/async）。长期任务必须设 timeout_seconds 与 timeout_action（skip 或 default），超时不要挂起。",
             cwdHint,
+            input.eventSummary ? `\n## 触发事件\n${input.eventSummary}` : "",
             "",
             "## 任务内容",
             prompt,
-          ].join("\n");
+          ]
+            .filter((line) => line !== "")
+            .join("\n");
 
     const { runId } = await this.startTurn({
       tenantId: input.tenantId,
@@ -670,6 +685,9 @@ export class CloudAgentRuntime {
     if (!hit) return { ok: false };
     if (session.activeRunId) {
       await this.store.requestCancel(input.sessionId, session.activeRunId);
+      if (this.deps.askUser) {
+        void this.deps.askUser.cancelRun(session.activeRunId);
+      }
     } else {
       void this.startNextQueued({
         tenantId: input.tenantId,
@@ -1675,6 +1693,18 @@ export class CloudAgentRuntime {
         }
       }
 
+      if (
+        this.deps.askUser &&
+        (sessionKind === "chat" || sessionKind === "system") &&
+        allow("ask_user")
+      ) {
+        for (const def of listAskUserToolDefinitions()) {
+          if (definitions.some((d) => d.function.name === def.function.name)) continue;
+          definitions.push(def);
+          nameMap.set(def.function.name, def.function.name);
+        }
+      }
+
       for (const def of listCrisisSupportToolDefinitions()) {
         if (definitions.some((d) => d.function.name === def.function.name)) continue;
         definitions.push(def);
@@ -1923,10 +1953,8 @@ export class CloudAgentRuntime {
             if (modelName === "import_session_context") return "导入会话上下文";
             return "会话工具";
           }
-          if (isAutomationToolName(modelName)) {
-            if (modelName.includes("schedule")) return "定时任务";
-            return "自动化";
-          }
+          if (isAutomationToolName(modelName)) return "Routine";
+          if (isAskUserToolName(modelName)) return "询问用户";
           if (isRemoteChannelToolName(modelName)) {
             if (modelName === "chat_reply") return "回复消息";
             if (modelName === "chat_post_message") return "发帖";
@@ -1991,6 +2019,34 @@ export class CloudAgentRuntime {
               args,
               sessionId,
             );
+            return {
+              result: {
+                content: [{ type: "text", text: out.text }],
+                isError: out.isError === true,
+              },
+            };
+          }
+          if (isAskUserToolName(call.function.name)) {
+            if (
+              !this.deps.askUser ||
+              (sessionKind !== "chat" && sessionKind !== "system")
+            ) {
+              return {
+                result: {
+                  content: [{ type: "text", text: "询问用户未启用" }],
+                  isError: true,
+                },
+              };
+            }
+            const out = await callAskUserTool(this.deps.askUser, {
+              tenantId,
+              agentId: agent.id,
+              sessionId,
+              runId,
+              toolCallId: call.id,
+              sessionKind,
+              args,
+            });
             return {
               result: {
                 content: [{ type: "text", text: out.text }],

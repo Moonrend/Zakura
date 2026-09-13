@@ -24,6 +24,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { PanelLeftIcon } from "lucide-react"
+import { FluidHoverHighlight } from "@/components/ui/fluid-hover-highlight"
+import {
+  FluidHoverContextOnly,
+  useFluidHoverScope,
+  useFluidItem,
+} from "@/components/ui/fluid-hover"
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
@@ -234,7 +240,7 @@ function Sidebar({
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
-            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
+            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:shadow-surface-1 group-data-[side=right]:shadow-surface-1",
           className
         )}
         {...props}
@@ -453,14 +459,31 @@ function SidebarGroupContent({
   )
 }
 
-function SidebarMenu({ className, ...props }: React.ComponentProps<"ul">) {
+function SidebarMenu({ className, children, ...props }: React.ComponentProps<"ul">) {
+  const { ref, hover, alloc } = useFluidHoverScope({
+    gapClick: false,
+    isItemDisabled: (el) =>
+      el.offsetHeight < 2 ||
+      !!el.closest("[hidden], [data-closed], [data-ending-style]"),
+  })
   return (
-    <ul
-      data-slot="sidebar-menu"
-      data-sidebar="menu"
-      className={cn("flex w-full min-w-0 flex-col gap-0", className)}
-      {...props}
-    />
+    <div
+      ref={ref as React.RefObject<HTMLDivElement>}
+      className="relative"
+      {...hover.handlers}
+    >
+      <FluidHoverHighlight hover={hover} className="z-0 rounded-md" />
+      <ul
+        data-slot="sidebar-menu"
+        data-sidebar="menu"
+        className={cn("relative z-[1] flex w-full min-w-0 flex-col gap-0", className)}
+        {...props}
+      >
+        <FluidHoverContextOnly hover={hover} alloc={alloc}>
+          {children}
+        </FluidHoverContextOnly>
+      </ul>
+    </div>
   )
 }
 
@@ -476,13 +499,13 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
 }
 
 const sidebarMenuButtonVariants = cva(
-  "peer/menu-button group/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm ring-sidebar-ring outline-hidden transition-[width,height,padding,background-color,color] duration-150 ease-out-soft group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:scale-[0.98] active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-open:hover:bg-sidebar-accent data-open:hover:text-sidebar-accent-foreground data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-accent-foreground [&_svg]:size-4 [&_svg]:shrink-0 [&>span:last-child]:truncate",
+  "peer/menu-button group/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm ring-sidebar-ring outline-hidden transition-[width,height,padding,color,background-color,font-variation-settings] duration-150 ease-fluid group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! hover:text-sidebar-accent-foreground focus-visible:ring-2 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-active:bg-selected/50 data-active:font-medium data-active:text-sidebar-accent-foreground [font-variation-settings:'wght'_400,'opsz'_14] hover:[font-variation-settings:'wght'_450,'opsz'_15] data-active:[font-variation-settings:'wght'_550,'opsz'_18] [&_svg]:size-4 [&_svg]:shrink-0 [&>span:last-child]:truncate",
   {
     variants: {
       variant: {
-        default: "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        default: "hover:text-sidebar-accent-foreground",
         outline:
-          "bg-background shadow-[0_0_0_1px_var(--sidebar-border)] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground hover:shadow-[0_0_0_1px_var(--sidebar-accent)]",
+          "bg-background shadow-surface-1 hover:text-sidebar-accent-foreground",
       },
       size: {
         default: "h-8 text-sm",
@@ -511,6 +534,8 @@ function SidebarMenuButton({
     tooltip?: string | React.ComponentProps<typeof TooltipContent>
   } & VariantProps<typeof sidebarMenuButtonVariants>) {
   const { isMobile, state } = useSidebar()
+  const hoverRef = React.useRef<HTMLDivElement>(null)
+  useFluidItem(hoverRef)
   const comp = useRender({
     defaultTagName: "button",
     props: mergeProps<"button">(
@@ -528,17 +553,13 @@ function SidebarMenuButton({
     },
   })
 
-  if (!tooltip) {
-    return comp
-  }
-
   if (typeof tooltip === "string") {
     tooltip = {
       children: tooltip,
     }
   }
 
-  return (
+  const inner = tooltip ? (
     <Tooltip>
       {comp}
       <TooltipContent
@@ -548,6 +569,15 @@ function SidebarMenuButton({
         {...tooltip}
       />
     </Tooltip>
+  ) : (
+    comp
+  )
+
+  // 测量这一行按钮本身，不要量整个含折叠子项的 <li>。
+  return (
+    <div ref={hoverRef} className="w-full min-w-0">
+      {inner}
+    </div>
   )
 }
 
@@ -654,8 +684,11 @@ function SidebarMenuSubItem({
   className,
   ...props
 }: React.ComponentProps<"li">) {
+  const ref = React.useRef<HTMLLIElement>(null)
+  useFluidItem(ref)
   return (
     <li
+      ref={ref}
       data-slot="sidebar-menu-sub-item"
       data-sidebar="menu-sub-item"
       className={cn("group/menu-sub-item relative", className)}
@@ -680,7 +713,7 @@ function SidebarMenuSubButton({
     props: mergeProps<"a">(
       {
         className: cn(
-          "flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground ring-sidebar-ring outline-hidden group-data-[collapsible=icon]:hidden hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[size=md]:text-sm data-[size=sm]:text-xs data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground",
+          "flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground ring-sidebar-ring outline-hidden group-data-[collapsible=icon]:hidden hover:text-sidebar-accent-foreground focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[size=md]:text-sm data-[size=sm]:text-xs data-active:bg-selected/50 data-active:font-medium data-active:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
           className
         ),
       },

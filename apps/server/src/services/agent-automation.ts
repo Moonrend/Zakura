@@ -1,9 +1,20 @@
 /**
- * Agent 自动化：定时任务（cron / @every）。
- * 进程内轮询 due 行，claim 后创建 system 会话并 startTurn。
+ * Agent Routine：定时（cron）与事件（listener）触发云端对话。
+ * cron 进程内轮询 due 行；listener 由 webhook / Slack 入站命中。
  */
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { log, recordPlatformFault } from "@zakura/core";
 import { and, asc, desc, eq, lte, sql } from "drizzle-orm";
+import {
+  describeListener,
+  matchRoutineListener,
+  parseRoutineListener,
+  RoutineListenerError,
+  shouldAutoStopListener,
+  summarizeInbound,
+  type RoutineInboundEvent,
+  type RoutineListener,
+} from "@zakura/shared";
 import type { Db } from "../db/client.js";
 import {
   agentAutomationRuns,
@@ -17,6 +28,7 @@ import {
   assertValidSchedulePattern,
   CronParseError,
   nextRunAfter,
+  splitCronTimezone,
 } from "./cron-next.js";
 
 const TICK_MS = 20_000;
@@ -25,7 +37,7 @@ const CLAIM_BATCH = 20;
 export type AutomationTrigger = {
   tenantId: string;
   agentId: string;
-  kind: "schedule" | "heartbeat";
+  kind: "schedule" | "heartbeat" | "listener";
   scheduleId?: string;
   scheduleName?: string;
   prompt: string;
@@ -38,20 +50,61 @@ export type AutomationRunner = {
     agentId: string;
     prompt: string;
     title: string;
-    kind: "schedule" | "heartbeat";
+    kind: "schedule" | "heartbeat" | "listener";
     scheduleId?: string;
     scheduleName?: string;
     project?: string | null;
+    eventSummary?: string;
   }) => Promise<{ sessionId: string; runId: string }>;
 };
 
-function scheduleDto(row: AgentSchedule) {
+function parseListenerJson(raw: string): RoutineListener | null {
+  const t = raw.trim();
+  if (!t || t === "{}") return null;
+  try {
+    return parseRoutineListener(JSON.parse(t));
+  } catch {
+    return null;
+  }
+}
+
+function newWebhookSecret(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+function secretsEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  try {
+    return timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+
+function verifyGithubHmac(secret: string, rawBody: string, signature: string): boolean {
+  const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  return secretsEqual(expected, signature.trim());
+}
+
+function scheduleDto(row: AgentSchedule, publicBaseUrl?: string) {
+  const listener = parseListenerJson(row.listenerJson);
+  const base = (publicBaseUrl ?? "").replace(/\/$/, "");
   return {
     id: row.id,
     agentId: row.agentId,
     name: row.name,
     description: row.description,
+    triggerKind: (row.triggerKind === "listener" ? "listener" : "cron") as "cron" | "listener",
     pattern: row.pattern,
+    listener,
+    listenerSummary: listener ? describeListener(listener) : null,
+    webhookUrl:
+      row.triggerKind === "listener" && base
+        ? `${base}/api/routines/${row.id}/hook`
+        : null,
+    hasWebhookSecret: Boolean(row.webhookSecret),
     prompt: row.prompt,
     project: row.project,
     enabled: row.enabled,
@@ -90,7 +143,14 @@ export class AgentAutomationService {
   private ticking = false;
   private runner: AutomationRunner | null = null;
 
-  constructor(private readonly db: Db) {}
+  constructor(
+    private readonly db: Db,
+    private readonly opts?: { publicBaseUrl?: string },
+  ) {}
+
+  private dto(row: AgentSchedule) {
+    return scheduleDto(row, this.opts?.publicBaseUrl);
+  }
 
   setRunner(runner: AutomationRunner | null): void {
     this.runner = runner;
@@ -119,7 +179,7 @@ export class AgentAutomationService {
       .from(agentSchedules)
       .where(and(eq(agentSchedules.tenantId, tenantId), eq(agentSchedules.agentId, agentId)))
       .orderBy(desc(agentSchedules.updatedAt));
-    return rows.map(scheduleDto);
+    return rows.map((row) => this.dto(row));
   }
 
   async getSchedule(
@@ -143,7 +203,9 @@ export class AgentAutomationService {
     input: {
       name: string;
       description?: string;
-      pattern: string;
+      triggerKind?: "cron" | "listener";
+      pattern?: string;
+      listener?: unknown;
       prompt: string;
       project?: string | null;
       enabled?: boolean;
@@ -153,19 +215,41 @@ export class AgentAutomationService {
   ): Promise<ReturnType<typeof scheduleDto>> {
     const name = input.name.trim();
     const prompt = input.prompt.trim();
-    const pattern = input.pattern.trim();
     if (!name) throw new Error("name is required");
     if (!prompt) throw new Error("prompt is required");
-    assertValidSchedulePattern(pattern);
 
     const agent = await this.db.query.agents.findFirst({
       where: and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
     });
     if (!agent) throw new Error("Agent not found");
 
+    const triggerKind: "cron" | "listener" =
+      input.triggerKind === "listener" || input.listener ? "listener" : "cron";
+    if (triggerKind === "cron" && input.listener) {
+      throw new Error("cron 与 listener 不能同时配置");
+    }
+
+    let pattern = (input.pattern ?? "").trim();
+    let timezone = (input.timezone ?? "UTC").trim() || "UTC";
+    let listenerJson = "{}";
+    let webhookSecret: string | null = null;
+    let nextRunAt: Date | null = null;
     const enabled = input.enabled !== false;
     const now = new Date();
-    const nextRunAt = enabled ? nextRunAfter(pattern, now) : null;
+
+    if (triggerKind === "listener") {
+      const listener = parseRoutineListener(input.listener);
+      listenerJson = JSON.stringify(listener);
+      webhookSecret = newWebhookSecret();
+      pattern = "";
+    } else {
+      if (!pattern) throw new Error("pattern is required");
+      const split = splitCronTimezone(pattern);
+      if (split.timezone) timezone = split.timezone;
+      assertValidSchedulePattern(pattern);
+      nextRunAt = enabled ? nextRunAfter(pattern, now, { timezone }) : null;
+    }
+
     const id = newId();
     await this.db.insert(agentSchedules).values({
       id,
@@ -173,7 +257,10 @@ export class AgentAutomationService {
       agentId,
       name,
       description: (input.description ?? "").trim(),
+      triggerKind,
       pattern,
+      listenerJson,
+      webhookSecret,
       prompt,
       project: input.project ?? null,
       enabled,
@@ -182,14 +269,14 @@ export class AgentAutomationService {
           ? Math.floor(input.maxRuns)
           : null,
       runCount: 0,
-      timezone: (input.timezone ?? "UTC").trim() || "UTC",
+      timezone,
       nextRunAt,
       createdAt: now,
       updatedAt: now,
     });
     const row = await this.getSchedule(tenantId, agentId, id);
     if (!row) throw new Error("create schedule failed");
-    return scheduleDto(row);
+    return this.dto(row);
   }
 
   async updateSchedule(
@@ -199,7 +286,9 @@ export class AgentAutomationService {
     patch: {
       name?: string;
       description?: string;
+      triggerKind?: "cron" | "listener";
       pattern?: string;
+      listener?: unknown;
       prompt?: string;
       project?: string | null;
       enabled?: boolean;
@@ -210,13 +299,51 @@ export class AgentAutomationService {
     const existing = await this.getSchedule(tenantId, agentId, scheduleId);
     if (!existing) return null;
 
-    const pattern = patch.pattern !== undefined ? patch.pattern.trim() : existing.pattern;
-    if (patch.pattern !== undefined) assertValidSchedulePattern(pattern);
+    const triggerKind: "cron" | "listener" =
+      patch.triggerKind ??
+      (patch.listener !== undefined
+        ? "listener"
+        : existing.triggerKind === "listener"
+          ? "listener"
+          : "cron");
+    if (triggerKind === "cron" && patch.listener) {
+      throw new Error("cron 与 listener 不能同时配置");
+    }
+
     const enabled = patch.enabled !== undefined ? patch.enabled : existing.enabled;
     const now = new Date();
+    let pattern = patch.pattern !== undefined ? patch.pattern.trim() : existing.pattern;
+    let timezone =
+      patch.timezone !== undefined ? patch.timezone.trim() || "UTC" : existing.timezone;
+    let listenerJson = existing.listenerJson;
+    let webhookSecret = existing.webhookSecret;
     let nextRunAt = existing.nextRunAt;
-    if (patch.pattern !== undefined || patch.enabled !== undefined) {
-      nextRunAt = enabled ? nextRunAfter(pattern, now, { lastRunAt: existing.lastRunAt }) : null;
+
+    if (triggerKind === "listener") {
+      if (patch.listener !== undefined) {
+        listenerJson = JSON.stringify(parseRoutineListener(patch.listener));
+      } else if (!parseListenerJson(existing.listenerJson)) {
+        throw new Error("listener 不能为空");
+      }
+      pattern = "";
+      nextRunAt = null;
+      if (!webhookSecret) webhookSecret = newWebhookSecret();
+    } else {
+      listenerJson = "{}";
+      if (!pattern) throw new Error("pattern is required");
+      const split = splitCronTimezone(pattern);
+      if (split.timezone) timezone = split.timezone;
+      if (patch.pattern !== undefined) assertValidSchedulePattern(pattern);
+      if (
+        patch.pattern !== undefined ||
+        patch.enabled !== undefined ||
+        patch.timezone !== undefined ||
+        existing.triggerKind === "listener"
+      ) {
+        nextRunAt = enabled
+          ? nextRunAfter(pattern, now, { lastRunAt: existing.lastRunAt, timezone })
+          : null;
+      }
     }
 
     await this.db
@@ -226,7 +353,10 @@ export class AgentAutomationService {
         ...(patch.description !== undefined
           ? { description: patch.description.trim() }
           : {}),
-        ...(patch.pattern !== undefined ? { pattern } : {}),
+        triggerKind,
+        pattern,
+        listenerJson,
+        webhookSecret,
         ...(patch.prompt !== undefined ? { prompt: patch.prompt.trim() || existing.prompt } : {}),
         ...(patch.project !== undefined ? { project: patch.project } : {}),
         ...(patch.enabled !== undefined ? { enabled } : {}),
@@ -238,16 +368,23 @@ export class AgentAutomationService {
                   : null,
             }
           : {}),
-        ...(patch.timezone !== undefined
-          ? { timezone: patch.timezone.trim() || "UTC" }
-          : {}),
+        timezone,
         nextRunAt,
         updatedAt: now,
       })
       .where(eq(agentSchedules.id, scheduleId));
 
     const row = await this.getSchedule(tenantId, agentId, scheduleId);
-    return row ? scheduleDto(row) : null;
+    return row ? this.dto(row) : null;
+  }
+
+  async revealWebhookSecret(
+    tenantId: string,
+    agentId: string,
+    scheduleId: string,
+  ): Promise<string | null> {
+    const row = await this.getSchedule(tenantId, agentId, scheduleId);
+    return row?.webhookSecret ?? null;
   }
 
   async deleteSchedule(tenantId: string, agentId: string, scheduleId: string): Promise<boolean> {
@@ -320,6 +457,7 @@ export class AgentAutomationService {
 
     let n = 0;
     for (const row of due) {
+      if (row.triggerKind === "listener") continue;
       if (row.maxRuns != null && row.runCount >= row.maxRuns) {
         await this.db
           .update(agentSchedules)
@@ -336,7 +474,7 @@ export class AgentAutomationService {
       // claim：把 next 推到将来，避免并发 tick 双发
       let next: Date;
       try {
-        next = nextRunAfter(row.pattern, now, { lastRunAt: now });
+        next = nextRunAfter(row.pattern, now, { lastRunAt: now, timezone: row.timezone });
       } catch (err) {
         await this.db
           .update(agentSchedules)
@@ -378,16 +516,17 @@ export class AgentAutomationService {
 
   private async fireSchedule(
     row: AgentSchedule,
-    opts: { manual: boolean },
+    opts: { manual: boolean; eventSummary?: string; inbound?: RoutineInboundEvent },
   ): Promise<ReturnType<typeof runDto>> {
     if (!this.runner) throw new Error("automation runner not configured");
+    const isListener = row.triggerKind === "listener";
     const logId = newId();
     const now = new Date();
     await this.db.insert(agentAutomationRuns).values({
       id: logId,
       tenantId: row.tenantId,
       agentId: row.agentId,
-      kind: "schedule",
+      kind: isListener ? "listener" : "schedule",
       scheduleId: row.id,
       status: "running",
       prompt: row.prompt,
@@ -396,16 +535,17 @@ export class AgentAutomationService {
     });
 
     try {
-      const title = `定时：${row.name}`.slice(0, 80);
+      const title = `${isListener ? "事件" : "定时"}：${row.name}`.slice(0, 80);
       const { sessionId, runId } = await this.runner.startAutomationTurn({
         tenantId: row.tenantId,
         agentId: row.agentId,
         prompt: row.prompt,
         title,
-        kind: "schedule",
+        kind: isListener ? "listener" : "schedule",
         scheduleId: row.id,
         scheduleName: row.name,
         project: row.project,
+        ...(opts.eventSummary ? { eventSummary: opts.eventSummary } : {}),
       });
       await this.db
         .update(agentAutomationRuns)
@@ -420,8 +560,12 @@ export class AgentAutomationService {
 
       const disable =
         !opts.manual &&
-        row.maxRuns != null &&
-        row.runCount + 1 >= row.maxRuns;
+        ((row.maxRuns != null && row.runCount + 1 >= row.maxRuns) ||
+          (opts.inbound &&
+            (() => {
+              const listener = parseListenerJson(row.listenerJson);
+              return listener ? shouldAutoStopListener(listener, opts.inbound!) : false;
+            })()));
 
       await this.db
         .update(agentSchedules)
@@ -461,6 +605,91 @@ export class AgentAutomationService {
       throw err;
     }
   }
+
+  /**
+   * Slack 等已接入的入站消息：扫该 agent 的 listener routine。
+   * 命中则另开 system 会话执行任务说明（与频道对话独立）。
+   */
+  async matchInbound(
+    tenantId: string,
+    agentId: string,
+    ev: RoutineInboundEvent,
+  ): Promise<number> {
+    const rows = await this.db
+      .select()
+      .from(agentSchedules)
+      .where(
+        and(
+          eq(agentSchedules.tenantId, tenantId),
+          eq(agentSchedules.agentId, agentId),
+          eq(agentSchedules.enabled, true),
+          eq(agentSchedules.triggerKind, "listener"),
+        ),
+      );
+    let n = 0;
+    for (const row of rows) {
+      const listener = parseListenerJson(row.listenerJson);
+      if (!listener || !matchRoutineListener(listener, ev)) continue;
+      if (row.maxRuns != null && row.runCount >= row.maxRuns) continue;
+      void this.fireSchedule(row, {
+        manual: false,
+        eventSummary: summarizeInbound(ev),
+        inbound: ev,
+      }).catch((err: unknown) => {
+        recordPlatformFault("automation.listener", err, { subsystem: "automation" });
+      });
+      n += 1;
+    }
+    return n;
+  }
+
+  /** 公开 webhook：验签后按这条 routine 的 listener 过滤并触发 */
+  async handleWebhook(
+    scheduleId: string,
+    input: {
+      secret?: string | null;
+      authorized?: boolean;
+      githubSignature?: string | null;
+      rawBody?: string | null;
+      events: RoutineInboundEvent[];
+    },
+  ): Promise<{ ok: true; matched: number } | { ok: false; error: string; status: 401 | 404 | 400 }> {
+    const row = await this.db.query.agentSchedules.findFirst({
+      where: eq(agentSchedules.id, scheduleId),
+    });
+    if (!row || row.triggerKind !== "listener") {
+      return { ok: false, error: "not found", status: 404 };
+    }
+    const authed =
+      input.authorized === true ||
+      Boolean(row.webhookSecret && input.secret && secretsEqual(row.webhookSecret, input.secret)) ||
+      Boolean(
+        row.webhookSecret &&
+          input.githubSignature &&
+          input.rawBody != null &&
+          verifyGithubHmac(row.webhookSecret, input.rawBody, input.githubSignature),
+      );
+    if (!authed) return { ok: false, error: "unauthorized", status: 401 };
+    if (!row.enabled) return { ok: true, matched: 0 };
+    const listener = parseListenerJson(row.listenerJson);
+    if (!listener) return { ok: false, error: "invalid listener", status: 400 };
+    const hits = input.events.filter((ev) => matchRoutineListener(listener, ev));
+    // webhook 源：空 events 也视为一次触发（外部系统随便 POST）
+    const toFire =
+      hits.length > 0
+        ? hits
+        : listener.source === "webhook"
+          ? [{ source: "webhook" as const, type: "post" }]
+          : [];
+    for (const ev of toFire.slice(0, 1)) {
+      await this.fireSchedule(row, {
+        manual: false,
+        eventSummary: summarizeInbound(ev),
+        inbound: ev,
+      });
+    }
+    return { ok: true, matched: toFire.length };
+  }
 }
 
-export { CronParseError };
+export { CronParseError, RoutineListenerError };

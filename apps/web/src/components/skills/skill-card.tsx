@@ -31,7 +31,7 @@ export function SkillCard({
       type="button"
       onClick={onOpen}
       className={cn(
-        "group flex w-full flex-col gap-2 rounded-lg border border-border bg-card p-3.5 text-left surface-interactive hover:border-foreground/15 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none sm:p-4",
+        "group flex w-full flex-col gap-2 rounded-lg bg-card p-3.5 text-left shadow-surface-2 transition-[box-shadow] duration-150 ease-fluid hover:shadow-surface-3 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none sm:p-4",
         className,
       )}
     >
@@ -42,7 +42,7 @@ export function SkillCard({
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span
-              className="truncate text-sm font-medium group-hover:underline"
+              className="truncate text-sm font-medium"
               title={item.name}
             >
               {item.name}
@@ -101,7 +101,7 @@ export function SkillCard({
 
 export function SkillCardSkeleton() {
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3.5 sm:p-4">
+    <div className="flex flex-col gap-2 rounded-lg bg-card shadow-surface-2 p-3.5 sm:p-4">
       <PageLoading />
     </div>
   );

@@ -289,7 +289,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
       </div>
 
       {mode === "url" ? (
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
           <div className="space-y-1.5">
             <Label>MCP URL</Label>
             <Input
@@ -370,7 +370,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
       ) : null}
 
       {mode === "vscode" ? (
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <Label>粘贴 mcp.json</Label>
@@ -469,7 +469,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
       ) : null}
 
       {mode === "stdio" ? (
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <div className="space-y-3 rounded-lg bg-card shadow-surface-2 p-4">
           <div className="space-y-1.5">
             <Label>包管理器</Label>
             <div className="flex gap-1">

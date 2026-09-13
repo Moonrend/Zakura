@@ -167,17 +167,17 @@ export default function RunnersPage() {
       />
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
           <div className="text-xs text-muted-foreground">节点总数</div>
           <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{rows.length}</div>
         </div>
-        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
           <div className="text-xs text-muted-foreground">在线</div>
           <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-success">
             {onlineCount}
           </div>
         </div>
-        <div className="surface-interactive rounded-lg border border-border bg-card p-4">
+        <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
           <div className="text-xs text-muted-foreground">远程 Runner</div>
           <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
             {rows.filter((r) => r.kind === "runner").length}

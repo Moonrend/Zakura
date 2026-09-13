@@ -30,7 +30,7 @@ export function StepReady({
     <div className="mx-auto w-full max-w-2xl space-y-4">
       <SettingsHeader title="开始使用" />
 
-      <div className="onboarding-choice-enter overflow-hidden rounded-lg border border-border bg-card sm:grid sm:grid-cols-2 sm:divide-x sm:divide-border">
+      <div className="onboarding-choice-enter overflow-hidden rounded-lg bg-card shadow-surface-2 sm:grid sm:grid-cols-2 sm:divide-x sm:divide-border">
         <button
           type="button"
           className="group flex min-h-44 w-full flex-col p-5 text-left surface-interactive focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"

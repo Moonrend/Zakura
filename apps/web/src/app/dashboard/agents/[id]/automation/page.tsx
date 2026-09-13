@@ -38,17 +38,17 @@ export default function AgentAutomationPage() {
     <div className="space-y-4">
       <SettingsHeader
         title="自动化"
-        description="定时任务"
+        description="定时与事件任务（Routine）"
       />
-      <div className="max-w-md overflow-hidden rounded-lg border border-border bg-card">
+      <div className="max-w-md overflow-hidden rounded-lg bg-card shadow-surface-2">
         <AutomationPanel
           agentId={id}
           projects={projects}
           className="max-h-[min(70vh,36rem)]"
           onAskAgentCreate={(goal) => {
             const prompt = [
-              "请用 create_schedule 为我创建定时任务。",
-              "根据下面描述自行决定名称、执行周期（cron 或 @every_…）和任务指令，创建后用一两句话确认。",
+              "请用 create_routine 为我创建定时或事件任务（Routine）。",
+              "根据下面描述自行决定名称、触发方式（cron 或 listener）和任务意图，创建后用一两句话确认。",
               "",
               goal.trim(),
             ].join("\n");

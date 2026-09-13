@@ -85,7 +85,7 @@ export default function AgentOverviewPage() {
                 key={item.href}
                 href={`/dashboard/agents/${id}/${item.href}`}
                 className={cn(
-                  "animate-rise group flex min-h-[4.5rem] items-start gap-3 rounded-lg border border-border bg-card p-3",
+                  "animate-rise group flex min-h-[4.5rem] items-start gap-3 rounded-lg bg-card p-3 shadow-surface-2",
                   "surface-interactive hover:border-foreground/15",
                 )}
               >

@@ -65,7 +65,7 @@ export function McpServerCard({
   return (
     <div
       className={cn(
-        "relative flex flex-col gap-2 overflow-hidden rounded-lg border border-border bg-card p-4",
+        "relative flex flex-col gap-2 overflow-hidden rounded-lg bg-card shadow-surface-2 p-4",
         className,
       )}
     >

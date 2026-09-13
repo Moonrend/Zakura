@@ -415,7 +415,7 @@ export function McpStorePanel() {
       )}
 
       {!loading && !items.length ? (
-        <div className="rounded-lg border border-border bg-card p-8 text-center text-sm text-muted-foreground">
+        <div className="rounded-lg bg-card shadow-surface-2 p-8 text-center text-sm text-muted-foreground">
           暂无结果
         </div>
       ) : null}

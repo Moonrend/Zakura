@@ -5,7 +5,8 @@
  * - 5 段 cron：分 时 日 月 周（0-59 0-23 1-31 1-12 0-6，0=周日）
  * - 字段内：星号、n、a-b、a-b/s、星号/s、a,b,c
  * - 别名：@hourly @daily @weekly @monthly
- * - 周期：@every_15m @every_2h（m=分钟 1-10080，h=小时 1-168）
+ * - 周期：@every 5m / @every_5m / @every_2h（最短 5 分钟）
+ * - 时区：前缀 `CRON_TZ=Asia/Shanghai`，或 nextRunAfter({ timezone })
  */
 
 const MAX_SCAN_MINUTES = 366 * 24 * 60; // ~1 year
@@ -65,21 +66,42 @@ export type ParsedSchedule =
   | { kind: "cron"; minute: FieldSet; hour: FieldSet; dom: FieldSet; month: FieldSet; dow: FieldSet }
   | { kind: "every"; everyMs: number };
 
-export function parseSchedulePattern(pattern: string): ParsedSchedule {
+const MIN_EVERY_MS = 5 * 60_000;
+
+export type PatternMeta = {
+  timezone: string | null;
+  body: string;
+};
+
+/** 剥掉 `CRON_TZ=Area/City` 前缀。 */
+export function splitCronTimezone(pattern: string): PatternMeta {
   const raw = pattern.trim();
+  const m = raw.match(/^CRON_TZ=(\S+)\s+(.+)$/i);
+  if (!m) return { timezone: null, body: raw };
+  return { timezone: m[1]!, body: m[2]!.trim() };
+}
+
+export function parseSchedulePattern(pattern: string): ParsedSchedule {
+  const { body: raw } = splitCronTimezone(pattern);
   if (!raw) throw new CronParseError("pattern is empty");
 
-  const every = raw.match(/^@every_(\d+)(m|h)$/i);
+  const every = raw.match(/^@every(?:_| )(\d+)\s*(m|h)$/i) ?? raw.match(/^@every_(\d+)(m|h)$/i);
   if (every) {
     const n = Number(every[1]);
     const unit = every[2]!.toLowerCase();
     if (!Number.isInteger(n) || n < 1) throw new CronParseError("invalid @every interval");
+    let everyMs: number;
     if (unit === "m") {
       if (n > 10_080) throw new CronParseError("@every minutes max 10080 (7d)");
-      return { kind: "every", everyMs: n * 60_000 };
+      everyMs = n * 60_000;
+    } else {
+      if (n > 168) throw new CronParseError("@every hours max 168 (7d)");
+      everyMs = n * 3_600_000;
     }
-    if (n > 168) throw new CronParseError("@every hours max 168 (7d)");
-    return { kind: "every", everyMs: n * 3_600_000 };
+    if (everyMs < MIN_EVERY_MS) {
+      throw new CronParseError("shortest interval is @every 5m");
+    }
+    return { kind: "every", everyMs };
   }
 
   const alias: Record<string, string> = {
@@ -92,7 +114,7 @@ export function parseSchedulePattern(pattern: string): ParsedSchedule {
   const fields = five.split(/\s+/);
   if (fields.length !== 5) {
     throw new CronParseError(
-      "expected 5-field cron (m h dom mon dow), @hourly/@daily/@weekly/@monthly, or @every_Nm/@every_Nh",
+      "expected 5-field cron (m h dom mon dow), CRON_TZ=..., @hourly/@daily/@weekly/@monthly, or @every 5m/@every_2h",
     );
   }
   return {
@@ -110,6 +132,40 @@ export function assertValidSchedulePattern(pattern: string): void {
   parseSchedulePattern(pattern);
 }
 
+const DOW_MAP: Record<string, number> = {
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
+};
+
+function zonedParts(
+  date: Date,
+  timeZone: string,
+): { minute: number; hour: number; dom: number; month: number; dow: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    minute: "2-digit",
+    hour: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+    weekday: "short",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  const dow = DOW_MAP[get("weekday").slice(0, 3).toLowerCase()] ?? date.getUTCDay();
+  return {
+    minute: Number(get("minute")),
+    hour: Number(get("hour")),
+    dom: Number(get("day")),
+    month: Number(get("month")),
+    dow,
+  };
+}
+
 /**
  * Next fire time strictly after `from` (usually now).
  * For `@every_*`, next = from + interval (rounded up if alignFrom provided as last run).
@@ -117,34 +173,40 @@ export function assertValidSchedulePattern(pattern: string): void {
 export function nextRunAfter(
   pattern: string,
   from: Date = new Date(),
-  opts?: { lastRunAt?: Date | null },
+  opts?: { lastRunAt?: Date | null; timezone?: string | null },
 ): Date {
+  const { timezone: tzPrefix } = splitCronTimezone(pattern);
   const parsed = parseSchedulePattern(pattern);
   if (parsed.kind === "every") {
     const base = opts?.lastRunAt?.getTime() ?? from.getTime();
     let next = base + parsed.everyMs;
-    // 若 lastRun 很久以前，跳到「从 now 起的下一个整周期」
     while (next <= from.getTime()) next += parsed.everyMs;
     return new Date(next);
   }
 
-  // 从下一分钟整点开始扫
+  const tz = (tzPrefix || opts?.timezone || "UTC").trim() || "UTC";
+  const useZone = tz !== "UTC";
+
   const cursor = new Date(from.getTime());
   cursor.setUTCSeconds(0, 0);
   cursor.setUTCMinutes(cursor.getUTCMinutes() + 1);
 
   for (let i = 0; i < MAX_SCAN_MINUTES; i += 1) {
-    const m = cursor.getUTCMinutes();
-    const h = cursor.getUTCHours();
-    const dom = cursor.getUTCDate();
-    const mon = cursor.getUTCMonth() + 1;
-    const dow = cursor.getUTCDay(); // 0=Sun
+    const parts = useZone
+      ? zonedParts(cursor, tz)
+      : {
+          minute: cursor.getUTCMinutes(),
+          hour: cursor.getUTCHours(),
+          dom: cursor.getUTCDate(),
+          month: cursor.getUTCMonth() + 1,
+          dow: cursor.getUTCDay(),
+        };
     if (
-      parsed.minute.has(m) &&
-      parsed.hour.has(h) &&
-      parsed.dom.has(dom) &&
-      parsed.month.has(mon) &&
-      parsed.dow.has(dow)
+      parsed.minute.has(parts.minute) &&
+      parsed.hour.has(parts.hour) &&
+      parsed.dom.has(parts.dom) &&
+      parsed.month.has(parts.month) &&
+      parsed.dow.has(parts.dow)
     ) {
       return new Date(cursor.getTime());
     }

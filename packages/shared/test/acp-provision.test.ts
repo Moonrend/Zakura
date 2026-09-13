@@ -75,12 +75,16 @@ function runInstallScript(file: string): void {
     return;
   }
   const dir = mkdtempSync(join(scratchRoot(), "acp-nodeshim-"));
-  const shim = join(dir, "node");
-  writeFileSync(shim, '#!/bin/sh\nexec node.exe "$@"\n');
-  chmodSync(shim, 0o755);
-  execFileSync("bash", ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
-    stdio: "pipe",
-  });
+  try {
+    const shim = join(dir, "node");
+    writeFileSync(shim, '#!/bin/sh\nexec node.exe "$@"\n');
+    chmodSync(shim, 0o755);
+    execFileSync("bash", ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
+      stdio: "pipe",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function assertValidBash(script: string, label: string): void {

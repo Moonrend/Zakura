@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { decryptJson, encryptJson } from "@zakura/core";
 import type { CloudAgentSessionOrigin } from "@zakura/shared";
-import { parseCloudAgentConfig } from "@zakura/shared";
+import { inboundFromSlack, inboundFromTeams, parseCloudAgentConfig } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
@@ -174,6 +174,8 @@ export type RemoteBindingView = {
 };
 
 export class RemoteAgentIngress {
+  private automation: import("./agent-automation.js").AgentAutomationService | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly agentService: AgentService,
@@ -181,6 +183,10 @@ export class RemoteAgentIngress {
     private readonly runtime: Pick<CloudAgentRuntime, "startTurn">,
     private readonly appConfig: AppConfig,
   ) {}
+
+  setAutomation(automation: import("./agent-automation.js").AgentAutomationService | null): void {
+    this.automation = automation;
+  }
 
   async listBindings(tenantId: string, platform?: string) {
     return this.db
@@ -772,6 +778,22 @@ export class RemoteAgentIngress {
         title: (input.title || `${input.platform} 新消息`).slice(0, 80),
         preview: input.text.trim().slice(0, 160) || undefined,
       });
+      if (this.automation && (input.platform === "slack" || input.platform === "teams")) {
+        const mentioned = /@(zakura|cursor|agent)\b/i.test(input.text);
+        const ev =
+          input.platform === "teams"
+            ? inboundFromTeams({
+                teamId: input.externalThreadKey,
+                text: input.text,
+              })
+            : inboundFromSlack({
+                channel: input.externalThreadKey,
+                text: input.text,
+                user: input.externalUserKey,
+                mentioned,
+              });
+        void this.automation.matchInbound(input.tenantId, binding.agentId, ev).catch(() => {});
+      }
       return { accepted: true, duplicate: false, sessionId: thread.sessionId, runId };
     } catch (error) {
       await this.db.delete(agentChannelEvents).where(eq(agentChannelEvents.id, event.id));

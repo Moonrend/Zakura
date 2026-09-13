@@ -677,12 +677,10 @@ export function Composer({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={cn(
-            "surface-2 relative z-10 rounded-2xl border",
-            "transition-[border-color] duration-200 ease-fluid",
-            focused || editing
-              ? "border-border"
-              : "border-border/50 hover:border-border/80",
-            dragging && "border-dashed border-foreground/35",
+            "relative z-10 rounded-2xl bg-card shadow-surface-2",
+            "transition-[box-shadow] duration-200 ease-fluid",
+            focused || editing ? "shadow-surface-3" : "",
+            dragging && "shadow-surface-3",
           )}
         >
         {/* 拖放覆盖层 */}

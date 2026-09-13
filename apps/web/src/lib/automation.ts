@@ -9,7 +9,12 @@ export type AgentSchedule = {
   agentId: string;
   name: string;
   description: string;
+  triggerKind: "cron" | "listener";
   pattern: string;
+  listener: unknown | null;
+  listenerSummary: string | null;
+  webhookUrl: string | null;
+  hasWebhookSecret: boolean;
   prompt: string;
   project: string | null;
   enabled: boolean;
@@ -27,7 +32,7 @@ export type AgentSchedule = {
 export type AutomationRun = {
   id: string;
   agentId: string;
-  kind: "schedule" | "heartbeat";
+  kind: "schedule" | "heartbeat" | "listener";
   scheduleId: string | null;
   sessionId: string | null;
   cloudRunId: string | null;
@@ -111,7 +116,11 @@ export function whenPresetFromPattern(pattern: string): {
   return { preset: "custom", custom: p };
 }
 
-/** pattern → 人话说明 */
+/** pattern / listener → 人话说明 */
+export function describeTrigger(s: Pick<AgentSchedule, "triggerKind" | "pattern" | "listenerSummary">): string {
+  if (s.triggerKind === "listener") return s.listenerSummary || "事件触发";
+  return describePattern(s.pattern);
+}
 export function describePattern(pattern: string): string {
   const p = pattern.trim();
   if (p === "@every_15m") return "每 15 分钟";
@@ -122,7 +131,7 @@ export function describePattern(pattern: string): string {
   if (p === "@weekly" || p === "0 0 * * 0") return "每周日 00:00（UTC）";
   if (p === "@monthly" || p === "0 0 1 * *") return "每月 1 日 00:00（UTC）";
 
-  const every = p.match(/^@every_(\d+)(m|h)$/i);
+  const every = p.match(/^@every[_\s](\d+)(m|h)$/i);
   if (every) {
     const n = every[1];
     return every[2]!.toLowerCase() === "m" ? `每 ${n} 分钟` : `每 ${n} 小时`;
@@ -228,7 +237,7 @@ export function statusTone(
 
 export async function listSchedules(agentId: string) {
   const res = await api<{ schedules: AgentSchedule[] }>(
-    `/api/agents/${agentId}/schedules`,
+    `/api/agents/${agentId}/routines`,
   );
   return res.schedules;
 }
@@ -246,7 +255,7 @@ export async function createSchedule(
   },
 ) {
   const res = await api<{ schedule: AgentSchedule }>(
-    `/api/agents/${agentId}/schedules`,
+    `/api/agents/${agentId}/routines`,
     { method: "POST", json: body },
   );
   return res.schedule;
@@ -266,21 +275,28 @@ export async function updateSchedule(
   }>,
 ) {
   const res = await api<{ schedule: AgentSchedule }>(
-    `/api/agents/${agentId}/schedules/${scheduleId}`,
+    `/api/agents/${agentId}/routines/${scheduleId}`,
     { method: "PATCH", json: body },
   );
   return res.schedule;
 }
 
 export async function deleteSchedule(agentId: string, scheduleId: string) {
-  await api(`/api/agents/${agentId}/schedules/${scheduleId}`, {
+  await api(`/api/agents/${agentId}/routines/${scheduleId}`, {
     method: "DELETE",
   });
 }
 
+export async function revealWebhookSecret(agentId: string, scheduleId: string) {
+  const res = await api<{ secret: string }>(
+    `/api/agents/${agentId}/routines/${scheduleId}/webhook-secret`,
+  );
+  return res.secret;
+}
+
 export async function runScheduleNow(agentId: string, scheduleId: string) {
   const res = await api<{ run: AutomationRun }>(
-    `/api/agents/${agentId}/schedules/${scheduleId}/run`,
+    `/api/agents/${agentId}/routines/${scheduleId}/run`,
     { method: "POST" },
   );
   return res.run;

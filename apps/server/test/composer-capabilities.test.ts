@@ -71,7 +71,13 @@ describe("groupComposerTools", () => {
     ]);
     assert.ok(groups.some((g) => g.id === "builtin:sessions"));
     assert.ok(groups.some((g) => g.id === "builtin:automation"));
+    assert.ok(groups.some((g) => g.id === "builtin:ask-user"));
     assert.ok(groups.some((g) => g.id === "builtin:delegate"));
+    const auto = groups.find((g) => g.id === "builtin:automation");
+    assert.ok(auto?.tools.includes("create_routine"));
+    assert.ok(!auto?.tools.includes("create_schedule"));
+    const ask = groups.find((g) => g.id === "builtin:ask-user");
+    assert.ok(ask?.tools.includes("ask_user"));
     assert.ok(!groups.some((g) => g.tools.includes("send_crisis_support_resources")));
   });
 });

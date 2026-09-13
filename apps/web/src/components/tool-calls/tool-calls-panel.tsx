@@ -130,7 +130,7 @@ function StatCard({
   return (
     <div
       className={cn(
-        "rounded-lg border border-border bg-card p-3",
+        "rounded-lg bg-card shadow-surface-2 p-3",
         tone === "danger" && "ring-destructive/25",
         tone === "ok" && "ring-success/25",
       )}
@@ -366,7 +366,7 @@ export function ToolCallsPanel({
 
       {(stats?.byTool.length || stats?.byApiKey.length) ? (
         <div className="grid gap-2 lg:grid-cols-2">
-          <div className="rounded-lg border border-border bg-card p-3">
+          <div className="rounded-lg bg-card shadow-surface-2 p-3">
             <div className="mb-2 text-[11px] font-medium text-muted-foreground">按工具</div>
             <div className="space-y-1.5">
               {(stats?.byTool ?? []).slice(0, 6).map((t) => {
@@ -401,7 +401,7 @@ export function ToolCallsPanel({
               ) : null}
             </div>
           </div>
-          <div className="rounded-lg border border-border bg-card p-3">
+          <div className="rounded-lg bg-card shadow-surface-2 p-3">
             <div className="mb-2 text-[11px] font-medium text-muted-foreground">按 API Key</div>
             <div className="space-y-1.5">
               {(stats?.byApiKey ?? []).slice(0, 6).map((k, i) => (
@@ -433,7 +433,7 @@ export function ToolCallsPanel({
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border bg-card p-2.5">
+      <div className="flex flex-wrap items-end gap-2 rounded-lg bg-card shadow-surface-2 p-2.5">
         <form
           className="flex min-w-[200px] flex-1 gap-1.5"
           onSubmit={(e) => {
@@ -532,7 +532,7 @@ export function ToolCallsPanel({
         </Select>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <div className="overflow-hidden rounded-lg bg-card shadow-surface-2">
         {loading && !items.length ? (
           <div className="px-3 py-10 text-center text-xs text-muted-foreground">加载中…</div>
         ) : items.length === 0 ? (

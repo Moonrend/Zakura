@@ -731,7 +731,7 @@ function McpServerDetailInner() {
       />
 
       <div className="grid gap-3">
-        <div className="rounded-lg border border-border bg-card p-3.5">
+        <div className="rounded-lg bg-card p-3.5 shadow-surface-2">
           <div className="text-[11px] text-muted-foreground">上游地址</div>
           <code className="mt-1 block break-all font-mono text-[11px]">
             {remoteUrl || "—"}

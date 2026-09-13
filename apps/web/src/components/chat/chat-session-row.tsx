@@ -82,8 +82,8 @@ export function ChatSessionRow({
         "group animate-rise relative flex items-center rounded-lg text-sm",
         "transition-colors duration-150 ease-fluid",
         isActive
-          ? "text-foreground session-row-active"
-          : "text-foreground/70 hover:bg-muted/40 hover:text-foreground",
+          ? "bg-selected/40 text-foreground session-row-active"
+          : "text-foreground/70 hover:text-foreground",
       )}
     >
       {isActive && (

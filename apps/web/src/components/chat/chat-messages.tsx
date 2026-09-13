@@ -13,6 +13,7 @@ import {
   Pencil,
   RefreshCw,
 } from "lucide-react";
+import { AskUserCard } from "@/components/chat/ask-user-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -516,6 +517,12 @@ function renderRunItems(
     sessionId?: string | null;
     onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
     onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
+    onAskUser?: (input: {
+      requestId: string;
+      cancelled?: boolean;
+      selected?: string[];
+      text?: string;
+    }) => void;
     uiKey?: string;
     ui?: Record<string, boolean>;
     setUiFlag?: (key: string, value: boolean) => void;
@@ -707,6 +714,14 @@ function renderRunItems(
           onElicitation={opts.onElicitation}
         />,
       );
+    } else if (it.kind === "ask_user") {
+      blocks.push(
+        <AskUserCard
+          key={`ask-${it.id}`}
+          item={it}
+          onResolve={opts.onAskUser}
+        />,
+      );
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -824,6 +839,7 @@ export function ChatMessages({
   onOpenFile,
   onPermission,
   onElicitation,
+  onAskUser,
   ui,
   setUiFlag,
   remotes = [],
@@ -851,6 +867,12 @@ export function ChatMessages({
   onOpenFile?: (path: string) => void;
   onPermission?: (requestId: string, optionId?: string, cancelled?: boolean) => void;
   onElicitation?: (requestId: string, cancelled?: boolean, content?: unknown) => void;
+  onAskUser?: (input: {
+    requestId: string;
+    cancelled?: boolean;
+    selected?: string[];
+    text?: string;
+  }) => void;
   ui?: Record<string, boolean>;
   setUiFlag?: (key: string, value: boolean) => void;
   remotes?: RemoteAwareness[];
@@ -1037,6 +1059,7 @@ export function ChatMessages({
                 sessionId,
                 onPermission,
                 onElicitation,
+                onAskUser,
                 uiKey: turn.message.id,
                 ui,
                 setUiFlag,
