@@ -113,7 +113,7 @@ function applyEdit(raw: string, oldText: string, newText: string): string {
 }
 
 /**
- * Local disk WorkspaceFs — used by Server local Runner and apps/runner.
+ * Local disk WorkspaceFs — 仅用于本机路径工具 / 迁移解包。
  */
 export class LocalWorkspaceFs implements WorkspaceFs {
   constructor(private readonly root: string) {

@@ -1,0 +1,27 @@
+version: 2
+project_name: zakura-agent
+builds:
+  - id: zakura-agent
+    main: ./cmd/zakura-agent
+    binary: zakura-agent
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X zakura.dev/agent/internal/sys.Version={{.Version}}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+archives:
+  - id: tarball
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  # 裸二进制名必须和控制面 agentBinaryFileName 一致（Windows 带 .exe）
+  - id: binary
+    formats: [binary]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+checksum:
+  name_template: checksums.txt
+changelog:
+  sort: asc

@@ -168,11 +168,11 @@ export default function UpgradesPage() {
       try {
         const { kind, result } = await upgradeNodeImage(node.id, entry);
         if (kind === "runner") {
-          toast.success(`${node.name} 的 Runner 镜像已调度更新，Runner 将短暂重连`);
+          toast.success(`${node.name} 的代理已调度更新，设备将短暂重连`);
         } else {
           const r = result as { recreated: unknown[] };
           toast.success(
-            `${node.name} 的工作区镜像已刷新${r.recreated?.length ? `，已重建 ${r.recreated.length} 个工作区` : ""}`,
+            `${node.name} 的容器已刷新${r.recreated?.length ? `，已重建 ${r.recreated.length} 个` : ""}`,
           );
         }
         setUpgraded((prev) => ({ ...prev, [key]: true }));
@@ -234,7 +234,7 @@ export default function UpgradesPage() {
     );
     setUpgradingAll(false);
     if (failCount === 0) {
-      toast.success(`已升级 ${okCount} 项镜像`);
+      toast.success(`已升级 ${okCount} 项`);
     } else {
       toast.error(`升级完成：${okCount} 成功，${failCount} 失败`);
     }
@@ -398,7 +398,7 @@ function NodeCard({
         </div>
       ) : !img ? (
         <p className="py-3 text-xs text-muted-foreground">
-          尚未检查。点击「检查」探测该节点镜像版本。
+          尚未检查。点击「检查」探测该节点的代理版本和容器镜像。
         </p>
       ) : img.entries.length === 0 ? (
         <p className="py-3 text-xs text-muted-foreground">
@@ -459,7 +459,7 @@ function EntryRow({
       ) : (
         <RefreshCw className="size-3" />
       )}
-      {runnerImage ? "更新 Runner" : "刷新并重建"}
+      {runnerImage ? "更新代理" : "刷新容器"}
     </Button>
   );
 
@@ -472,7 +472,7 @@ function EntryRow({
         <div className="mt-0.5 flex items-center gap-1.5">
           {runnerImage ? (
             <Badge variant="outline" className="text-[10px]">
-              Runner
+              代理
             </Badge>
           ) : null}
           {entry.runningStale ? (

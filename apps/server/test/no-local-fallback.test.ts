@@ -63,7 +63,7 @@ describe("no silent local fallback when Runner offline", () => {
       tenantId,
       name: "Offline Runner",
       slug: "offline-r",
-      kind: "runner",
+      kind: "computer",
       status: "offline",
       endpoint: null,
       capabilitiesJson: "{}",
@@ -124,7 +124,7 @@ describe("no silent local fallback when Runner offline", () => {
     const localPath = join(dataDir, "agents", agentId, "workspace");
     await assert.rejects(
       () => provider.forAgent(agentId, tenantId),
-      /离线|注册|不存在|鉴权|无法连接/i,
+      /离线|注册|不存在|鉴权|无法连接|未在线|安装脚本/i,
     );
     assert.equal(
       existsSync(localPath),
@@ -138,7 +138,7 @@ describe("no silent local fallback when Runner offline", () => {
     assert.ok(agent);
     assert.equal(agent!.runtimeNodeId, nodeId);
 
-    await assert.rejects(() => workspace.start(agent!), /离线|注册|不存在|鉴权|无法连接/i);
+    await assert.rejects(() => workspace.start(agent!), /离线|注册|不存在|鉴权|无法连接|未在线|安装脚本/i);
 
     const localPath = join(dataDir, "agents", agentId, "workspace");
     // ensureLocal must not have been used as a successful fallback path

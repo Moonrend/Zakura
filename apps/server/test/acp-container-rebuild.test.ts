@@ -4,40 +4,15 @@ import test from "node:test";
 import { AgentWorkspaceService } from "../src/services/agent-workspace.js";
 import { AcpSessionService } from "../src/services/acp/session.js";
 
-test("ACP rebuild cleanup removes only containers for the requested agent/profile", async () => {
-  const removed: string[] = [];
-  let receivedFilters: unknown;
+test("ACP rebuild cleanup 无绑定节点时不碰本机 docker", async () => {
   const service = Object.create(AgentWorkspaceService.prototype) as AgentWorkspaceService;
   Object.assign(service, {
     runtime: {
-      list: async (filters: unknown) => {
-        receivedFilters = filters;
-        return [
-          {
-            id: "target",
-            labels: {
-              "zakura.acp_adapter": "pi",
-              "zakura.agent": "agent-a",
-            },
-          },
-          {
-            id: "other-profile",
-            labels: {
-              "zakura.acp_adapter": "hermes",
-              "zakura.agent": "agent-a",
-            },
-          },
-          {
-            id: "other-agent",
-            labels: {
-              "zakura.acp_adapter": "pi",
-              "zakura.agent": "agent-b",
-            },
-          },
-        ];
+      list: async () => {
+        throw new Error("local runtime must not be queried");
       },
-      remove: async (id: string) => {
-        removed.push(id);
+      remove: async () => {
+        throw new Error("local runtime must not be removed");
       },
     },
   });
@@ -47,12 +22,7 @@ test("ACP rebuild cleanup removes only containers for the requested agent/profil
     "pi",
   );
 
-  assert.equal(count, 1);
-  assert.deepEqual(removed, ["target"]);
-  assert.deepEqual(receivedFilters, {
-    tenantId: "tenant-a",
-    purpose: "acp-adapter",
-  });
+  assert.equal(count, 0);
 });
 
 test("ACP rebuild cleanup never touches local runtime for a remote agent", async () => {

@@ -8,11 +8,22 @@ import type { NetworkSettingsService } from "../services/network-settings.js";
 import type { Orchestrator } from "../services/orchestrator.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { ImageUpdateChecker } from "../services/image-update-checker.js";
+import { collectNodeImages } from "../services/image-update-checker.js";
 import { hashRunnerToken } from "@zakura/core";
 import { platformEvents } from "../services/platform-events.js";
 import type { RunnerHostInfo, RunnerInstallPackage } from "@zakura/shared";
-import { rmSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { buildGoAgentInstall } from "@zakura/shared";
+import {
+  findAgentBinary,
+  openAgentBinaryStream,
+  resolveAgentUpdateTarget,
+  normalizeAgentArch,
+  normalizeAgentOs,
+} from "../services/agent-binaries.js";
+import { Readable } from "node:stream";
+import { readFileSync, existsSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { agents, managedContainers, runtimeNodes } from "../db/schema.js";
@@ -34,25 +45,6 @@ type SessionVars = {
     isPlatformAdmin?: boolean;
   };
 };
-
-function attachRunnerInstallCommands(
-  install: RunnerInstallPackage & {
-    hasAuthKey?: boolean;
-    meshConnected?: boolean;
-    tags?: string[];
-  },
-  opts: { publicBaseUrl: string; nodeId: string; token: string },
-) {
-  const base = opts.publicBaseUrl.replace(/\/$/, "");
-  const tsFlag = install.enableTailscale ? "1" : "0";
-  const bootstrapUrl = `${base}/api/runtime-nodes/${opts.nodeId}/bootstrap.sh?token=${encodeURIComponent(opts.token)}&tailscale=${tsFlag}`;
-  return {
-    ...install,
-    /** curl | sudo bash — pulls the install script from this server */
-    installCurl: `curl -fsSL ${JSON.stringify(bootstrapUrl)} | sudo bash`,
-    bootstrapUrl,
-  };
-}
 
 async function listContainersForNode(
   db: Db,
@@ -256,11 +248,13 @@ export function registerRuntimeNodeRoutes(
     const session = c.get("session")!;
     type CreateBody = {
       name?: string;
+      kind?: "computer" | "server";
       labels?: Record<string, unknown>;
       enableTailscale?: boolean;
     };
     const body = (await c.req.json().catch(() => ({}))) as CreateBody;
     if (!body.name?.trim()) return c.json({ error: "name is required" }, 400);
+    const kind = body.kind === "server" ? "server" : "computer";
 
     const enableTailscale = Boolean(body.enableTailscale);
     if (enableTailscale && network) {
@@ -274,70 +268,111 @@ export function registerRuntimeNodeRoutes(
 
     const { node, token } = await nodes.create(session.tenantId, {
       name: body.name,
+      kind,
       labels,
       createdByUserId: session.userId === "api-key" ? null : session.userId,
     });
 
-    let install: ReturnType<typeof attachRunnerInstallCommands> | null = null;
-    let installTailscale: ReturnType<typeof attachRunnerInstallCommands> | null = null;
-    let hostJoinsTailscale = !config.multiTenant;
-    if (network) {
-      try {
-        const variants = await network.buildRunnerInstallVariants(session.tenantId, {
-          token,
-          slug: node.slug,
-          mintAuthKeyIfMissing: true,
-          actorId: session.userId,
-        });
-        hostJoinsTailscale = variants.hostJoinsTailscale;
-        const attach = (pack: NonNullable<typeof variants.plain>) =>
-          attachRunnerInstallCommands(pack, {
-            publicBaseUrl: config.publicBaseUrl,
-            nodeId: node.id,
-            token,
-          });
-        const plain = attach(variants.plain);
-        installTailscale = variants.withTailscale ? attach(variants.withTailscale) : null;
-        if (enableTailscale) {
-          if (!installTailscale) {
-            return c.json(
-              {
-                error: variants.tailscaleError ?? "无法生成 Tailscale 安装包",
-                node: mapRuntimeNode(node),
-                token,
-                install: plain,
-                installTailscale: null,
-                hostJoinsTailscale,
-              },
-              400,
-            );
-          }
-          install = installTailscale;
-        } else {
-          install = plain;
-        }
-      } catch (err) {
-        return c.json(
-          {
-            error: err instanceof Error ? err.message : String(err),
-            node: mapRuntimeNode(node),
-            token,
-          },
-          400,
-        );
-      }
-    }
+    const go = buildGoAgentInstall({
+      publicBaseUrl: config.publicBaseUrl,
+      nodeId: node.id,
+      token,
+      kind,
+    });
+    const goInstall: RunnerInstallPackage = {
+      compose: "",
+      filename: "install.sh",
+      script: go.script,
+      dockerRun: "",
+      enableTailscale,
+      tsHostname: null,
+      slug: node.slug,
+      installCurl: go.installCurl,
+      installShUrl: go.installShUrl,
+      installPs1Url: go.installPs1Url,
+      needsReinstall: false,
+    };
 
     return c.json(
       {
         node: mapRuntimeNode(node),
         token,
-        install,
-        installTailscale,
-        hostJoinsTailscale,
+        install: goInstall,
+        installTailscale: null,
+        hostJoinsTailscale: false,
       },
       201,
     );
+  });
+
+  app.get("/api/runtime-nodes/:id/install.sh", async (c) => {
+    const token = (c.req.query("token") ?? "").trim();
+    const kind = c.req.query("kind") === "server" ? "server" : "computer";
+    if (!token.startsWith("rnr_")) return c.text("token required", 401);
+    const node = await db.query.runtimeNodes.findFirst({
+      where: eq(runtimeNodes.id, c.req.param("id")),
+    });
+    if (!node || node.tokenHash !== hashRunnerToken(token)) return c.text("Unauthorized", 401);
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "../../../../go/agent/install/install.sh"),
+      join(process.cwd(), "go/agent/install/install.sh"),
+      join(process.cwd(), "../../go/agent/install/install.sh"),
+    ];
+    const file = candidates.find((p) => existsSync(p));
+    const body = file
+      ? readFileSync(file, "utf8")
+      : "#!/bin/sh\necho 'install.sh missing' >&2\nexit 1\n";
+    const prelude = `export ZAKURA_AGENT_SERVER=${JSON.stringify(config.publicBaseUrl.replace(/\/$/, ""))}
+export ZAKURA_AGENT_TOKEN=${JSON.stringify(token)}
+export ZAKURA_AGENT_KIND=${JSON.stringify(kind)}
+`;
+    return c.text(prelude + body, 200, { "content-type": "text/x-shellscript; charset=utf-8" });
+  });
+
+  app.get("/api/runtime-nodes/:id/install.ps1", async (c) => {
+    const token = (c.req.query("token") ?? "").trim();
+    const kind = c.req.query("kind") === "server" ? "server" : "computer";
+    if (!token.startsWith("rnr_")) return c.text("token required", 401);
+    const node = await db.query.runtimeNodes.findFirst({
+      where: eq(runtimeNodes.id, c.req.param("id")),
+    });
+    if (!node || node.tokenHash !== hashRunnerToken(token)) return c.text("Unauthorized", 401);
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, "../../../../go/agent/install/install.ps1"),
+      join(process.cwd(), "go/agent/install/install.ps1"),
+    ];
+    const file = candidates.find((p) => existsSync(p));
+    const body = file ? readFileSync(file, "utf8") : "Write-Error 'install.ps1 missing'";
+    const prelude = `$env:ZAKURA_AGENT_SERVER = ${JSON.stringify(config.publicBaseUrl.replace(/\/$/, ""))}
+$env:ZAKURA_AGENT_TOKEN = ${JSON.stringify(token)}
+$env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
+`;
+    return c.text(prelude + body, 200, { "content-type": "text/plain; charset=utf-8" });
+  });
+
+  app.get("/api/runtime-nodes/agent-binaries/:os/:arch", async (c) => {
+    const bin = findAgentBinary(c.req.param("os"), c.req.param("arch"));
+    if (!bin) {
+      return c.json(
+        {
+          error: "二进制尚未发布。请在仓库 go/agent 执行 goreleaser 或 go build，并设置 ZAKURA_AGENT_BINARIES_DIR。",
+        },
+        404,
+      );
+    }
+    const etag = `"${bin.sha256}"`;
+    if (c.req.header("if-none-match") === etag) return c.body(null, 304);
+    const filename = bin.os === "windows" ? "zakura-agent.exe" : "zakura-agent";
+    return c.body(Readable.toWeb(openAgentBinaryStream(bin)) as unknown as ReadableStream, 200, {
+      "content-type": "application/octet-stream",
+      "content-disposition": `attachment; filename="${filename}"`,
+      etag,
+      "cache-control": "public, max-age=60",
+      "x-zakura-agent-sha256": bin.sha256,
+      "x-zakura-agent-version": bin.version,
+    });
   });
 
   /**
@@ -346,52 +381,12 @@ export function registerRuntimeNodeRoutes(
    */
   app.get("/api/runtime-nodes/:id/bootstrap.sh", async (c) => {
     const token = (c.req.query("token") ?? "").trim();
-    if (!token.startsWith("rnr_")) {
-      return c.text("token query required (rnr_*)", 401);
-    }
-    if (!network) return c.text("Network service unavailable", 503);
-
-    const nodeId = c.req.param("id");
-    const node = await db.query.runtimeNodes.findFirst({
-      where: eq(runtimeNodes.id, nodeId),
-    });
-    if (!node || node.kind === "local") return c.text("Not found", 404);
-    if (!node.tokenHash || node.tokenHash !== hashRunnerToken(token)) {
-      return c.text("Unauthorized", 401);
-    }
-
-    let labels: Record<string, unknown> = {};
-    try {
-      labels = JSON.parse(node.labelsJson || "{}") as Record<string, unknown>;
-    } catch {
-      labels = {};
-    }
-    const q = (c.req.query("tailscale") ?? "").trim().toLowerCase();
-    const enableTailscale =
-      q === "1" || q === "true"
-        ? true
-        : q === "0" || q === "false"
-          ? false
-          : Boolean(labels.enableTailscale);
-
-    try {
-      const install = await network.buildRunnerInstallPackage(node.tenantId, {
-        token,
-        slug: node.slug,
-        enableTailscale,
-        mintAuthKeyIfMissing: enableTailscale,
-      });
-      const res = c.text(install.script, 200);
-      res.headers.set("Content-Type", "text/x-shellscript; charset=utf-8");
-      res.headers.set(
-        "Content-Disposition",
-        `inline; filename="zakura-runner-${node.slug}.sh"`,
-      );
-      res.headers.set("Cache-Control", "no-store");
-      return res;
-    } catch (err) {
-      return c.text(err instanceof Error ? err.message : String(err), 400);
-    }
+    const kind = c.req.query("kind") === "server" ? "server" : "computer";
+    const url = new URL(c.req.url);
+    url.pathname = url.pathname.replace(/bootstrap\.sh$/, "install.sh");
+    url.searchParams.set("token", token);
+    url.searchParams.set("kind", kind);
+    return c.redirect(url.pathname + url.search, 302);
   });
 
   /**
@@ -400,7 +395,6 @@ export function registerRuntimeNodeRoutes(
    */
   app.get("/api/runtime-nodes/:id/install", async (c) => {
     const session = c.get("session")!;
-    if (!network) return c.json({ error: "Network service unavailable" }, 503);
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
     try {
@@ -417,33 +411,27 @@ export function registerRuntimeNodeRoutes(
     if (!token) {
       return c.json({ error: "注册密钥已丢失，请重新注册节点" }, 400);
     }
-
-    try {
-      const variants = await network.buildRunnerInstallVariants(session.tenantId, {
-        token,
+    const kind = node.kind === "server" ? "server" : "computer";
+    const go = buildGoAgentInstall({
+      publicBaseUrl: config.publicBaseUrl,
+      nodeId: node.id,
+      token,
+      kind,
+    });
+    return c.json({
+      node: mapRuntimeNode(node),
+      token,
+      install: {
+        compose: "",
+        filename: "install.sh",
+        dockerRun: "",
+        enableTailscale: false,
+        tsHostname: null,
         slug: node.slug,
-        mintAuthKeyIfMissing: true,
-        actorId: session.userId,
-      });
-      const attach = (pack: typeof variants.plain) =>
-        attachRunnerInstallCommands(pack, {
-          publicBaseUrl: config.publicBaseUrl,
-          nodeId: node.id,
-          token,
-        });
-      return c.json({
-        node: mapRuntimeNode(node),
-        install: attach(variants.plain),
-        installTailscale: variants.withTailscale ? attach(variants.withTailscale) : null,
-        meshConnected: variants.meshConnected,
-        hostJoinsTailscale: variants.hostJoinsTailscale,
-        meshProvider: variants.meshProvider,
-        tailscaleError: variants.tailscaleError,
-        tokenHint: `${token.slice(0, 8)}…`,
-      });
-    } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
-    }
+        ...go,
+        needsReinstall: node.kind === "local" || node.kind === "runner",
+      },
+    });
   });
 
   /** Runner 详情页首屏：node + containers + mesh 摘要（不含安装包拼装） */
@@ -653,19 +641,53 @@ export function registerRuntimeNodeRoutes(
       throw err;
     }
     const body = await c.req
-      .json<{ image?: string; recreateDelayMs?: number }>()
-      .catch(() => ({} as { image?: string; recreateDelayMs?: number }));
-    const target = body.image?.trim();
-    if (!target) {
-      return c.json({ error: "image is required" }, 400);
+      .json<{
+        image?: string;
+        url?: string;
+        sha256?: string;
+        version?: string;
+        recreateDelayMs?: number;
+      }>()
+      .catch(
+        () =>
+          ({}) as {
+            image?: string;
+            url?: string;
+            sha256?: string;
+            version?: string;
+            recreateDelayMs?: number;
+          },
+      );
+    const host = (JSON.parse(node.hostInfoJson || "{}") as {
+      platform?: string;
+      arch?: string;
+    }) ?? {};
+    const os = normalizeAgentOs(host.platform) ?? "linux";
+    const arch = normalizeAgentArch(host.arch) ?? "amd64";
+    let target: ReturnType<typeof resolveAgentUpdateTarget>;
+    try {
+      target = resolveAgentUpdateTarget({
+        publicBaseUrl: config.publicBaseUrl,
+        os,
+        arch,
+        url: body.url,
+        image: body.image,
+        sha256: body.sha256,
+        version: body.version,
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
     const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
     try {
       const result = await client.updateRunner({
-        image: target,
+        image: target.url,
+        url: target.url,
+        sha256: target.sha256,
+        version: target.version,
         recreateDelayMs: body.recreateDelayMs,
       });
-      return c.json(result);
+      return c.json({ ...result, version: target.version, sha256: target.sha256 });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },
@@ -689,40 +711,24 @@ export function registerRuntimeNodeRoutes(
     const body = await c.req
       .json<{ image?: string; recreateRunning?: boolean }>()
       .catch(() => ({} as { image?: string; recreateRunning?: boolean }));
-    const target = body.image?.trim();
-    if (!target) {
-      return c.json({ error: "image is required" }, 400);
-    }
-
-    // Local node: pull + recreate in-process via the Docker adapter.
-    if (node.kind === "local" || node.slug === "local") {
-      if (!runtime) return c.json({ error: "本地 Docker 不可用" }, 503);
-      try {
-        // Force a pull, not ensureImage: the local tag may already exist but
-        // point at a stale manifest. ensureImage short-circuits on "tag present"
-        // and never fetches the new layers, so recreateWorkspaces rebuilds on the
-        // same old image id and the refresh silently does nothing.
-        await runtime.pullImage(target);
-        let recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
-        if (body.recreateRunning !== false) {
-          recreated = await runtime.recreateWorkspaces(target);
-        }
-        return c.json({ image: target, status: "updated", recreated });
-      } catch (err) {
-        return c.json(
-          { error: err instanceof Error ? err.message : String(err) },
-          502,
-        );
-      }
+    const images = body.image?.trim()
+      ? [body.image.trim()]
+      : (await collectNodeImages(db, node.id, { isLocal: false })).map((w) => w.image);
+    if (!images.length) {
+      return c.json({ error: "没有可刷新的容器镜像" }, 400);
     }
 
     const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
     try {
-      const result = await client.refreshWorkspaceImage({
-        image: target,
-        recreateRunning: body.recreateRunning,
-      });
-      return c.json(result);
+      const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+      for (const image of images) {
+        const result = await client.refreshWorkspaceImage({
+          image,
+          recreateRunning: body.recreateRunning,
+        });
+        recreated.push(...(result.recreated ?? []));
+      }
+      return c.json({ image: images[0], images, status: "updated", recreated });
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },

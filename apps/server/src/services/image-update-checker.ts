@@ -10,12 +10,12 @@
 import { log } from "@zakura/core";
 import { eq, inArray } from "drizzle-orm";
 import {
-  DEFAULT_RUNNER_IMAGE,
   DEFAULT_WORKSPACE_IMAGE,
   type ImageUpdateEntry,
   type ImageUpdateKind,
   type NodeImageUpdateStatus,
 } from "@zakura/shared";
+import { findAgentBinary } from "./agent-binaries.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { RuntimeNodeService } from "./runtime-nodes.js";
 import type { Db } from "../db/client.js";
@@ -28,27 +28,16 @@ const NODE_PROBE_TIMEOUT_MS = 60_000;
 
 export type { ImageUpdateEntry, NodeImageUpdateStatus };
 
-/** A node's runner image, honoring a per-node override. */
-export function runnerImageForNode(node: { runnerImage?: string | null }): string {
-  return node.runnerImage?.trim() || DEFAULT_RUNNER_IMAGE;
-}
-
 /**
- * Images worth probing for a node: its runner image (remote nodes only — a local
- * node has no runner container) plus the workspace default and any per-agent
- * override, tagged with what each one *is* so clients don't have to guess.
- *
- * Shared with `GET /api/runtime-nodes/:id/image-updates`, which used to carry its
- * own near-copy that disagreed about the runner-image override — so the banner and
- * the node detail page could legitimately disagree about the same node.
+ * Images worth probing for a node: workspace default plus any per-agent override.
+ * Go 代理本身不在这里，由 probeNode 按二进制摘要单独加一条 kind=runner。
  */
 export async function collectNodeImages(
   db: Db,
   nodeId: string,
-  opts: { isLocal: boolean; runnerImage?: string | null },
+  _opts: { isLocal: boolean; runnerImage?: string | null },
 ): Promise<Array<{ image: string; kind: ImageUpdateKind }>> {
   const out = new Map<string, ImageUpdateKind>();
-  if (!opts.isLocal) out.set(runnerImageForNode(opts), "runner");
   out.set(DEFAULT_WORKSPACE_IMAGE, "workspace");
 
   const bound = await db
@@ -57,7 +46,6 @@ export async function collectNodeImages(
     .where(eq(agents.runtimeNodeId, nodeId));
   for (const row of bound) {
     const img = row.workspaceImage?.trim();
-    // Never let an agent override downgrade the runner entry's kind.
     if (img && !out.has(img)) out.set(img, "workspace");
   }
   return [...out].map(([image, kind]) => ({ image, kind }));
@@ -89,8 +77,10 @@ export class ImageUpdateChecker {
   constructor(
     private readonly db: Db,
     private readonly nodes: RuntimeNodeService,
-    private readonly docker?: DockerRuntime,
-  ) {}
+    _docker?: DockerRuntime,
+  ) {
+    void _docker;
+  }
 
   start(): void {
     if (this.timer) return;
@@ -138,12 +128,10 @@ export class ImageUpdateChecker {
     this.ticking = true;
     try {
       const nodes = await this.db.query.runtimeNodes.findMany({
-        where: inArray(runtimeNodes.kind, ["runner", "local"]),
+        where: inArray(runtimeNodes.kind, ["computer", "server", "runner"]),
       });
       for (const node of nodes) {
         if (node.status !== "online") continue;
-        // A local probe needs a DockerRuntime adapter; skip when absent (tests).
-        if (node.kind === "local" && !this.docker) continue;
         try {
           const status = await withTimeout(
             this.probeNode(node.id),
@@ -186,36 +174,53 @@ export class ImageUpdateChecker {
       });
       const kindByImage = new Map(wanted.map((w) => [w.image, w.kind]));
       const images = wanted.map((w) => w.image);
-      let entries: ImageUpdateEntry[];
+      let entries: ImageUpdateEntry[] = [];
 
-      if (isLocal) {
-        if (!this.docker) throw new Error("local image probe requires a Docker runtime");
-        entries = await this.docker.checkImageUpdates(images, {
-          allowPullFallback: opts?.allowPullFallback === true,
+      const { client } = await this.nodes.requireRunnerClient(node.tenantId, nodeId, {
+        allowOffline: true,
+        skipHeartbeatRefresh: true,
+      });
+      const info = await client.ping();
+      const host = info.hostInfo as { platform?: string; arch?: string } | undefined;
+      const extra = info as { sha256?: string; goos?: string; goarch?: string };
+      const os = extra.goos ?? host?.platform ?? "linux";
+      const arch = extra.goarch ?? host?.arch ?? "amd64";
+      const bin = findAgentBinary(os, arch);
+      if (bin) {
+        const currentSha = extra.sha256;
+        const currentVer = info.version ?? node.agentVersion ?? "";
+        const updateAvailable = currentSha
+          ? currentSha.toLowerCase() !== bin.sha256.toLowerCase()
+          : Boolean(bin.version && currentVer && bin.version !== "dev" && currentVer !== bin.version);
+        entries.push({
+          image: `zakura-agent:${bin.version}`,
+          localId: currentVer || null,
+          localDigest: currentSha ?? currentVer ?? null,
+          remoteDigest: bin.sha256,
+          updateAvailable,
+          runningStale: false,
+          error: null,
+          kind: "runner",
         });
-      } else {
-        const { client } = await this.nodes.requireRunnerClient(node.tenantId, nodeId, {
-          allowOffline: true,
-          skipHeartbeatRefresh: true,
-        });
-        const result = await client.checkImageUpdates({
-          images,
-          allowPullFallback: opts?.allowPullFallback === true,
-        });
-        entries = result.images ?? [];
       }
 
-      const decorated = entries.map((e) => ({
-        ...e,
-        kind: kindByImage.get(e.image) ?? ("workspace" as ImageUpdateKind),
-      }));
+      const result = await client.checkImageUpdates({
+        images,
+        allowPullFallback: opts?.allowPullFallback === true,
+      });
+      entries = entries.concat(
+        (result.images ?? []).map((e) => ({
+          ...e,
+          kind: kindByImage.get(e.image) ?? ("workspace" as ImageUpdateKind),
+        })),
+      );
 
       return {
         nodeId,
         checkedAt: Date.now(),
-        entries: decorated,
-        hasUpdates: decorated.some((e) => e.updateAvailable),
-        hasRunningStale: decorated.some((e) => e.runningStale),
+        entries,
+        hasUpdates: entries.some((e) => e.updateAvailable),
+        hasRunningStale: entries.some((e) => e.runningStale),
         error: null,
       };
     } catch (err) {

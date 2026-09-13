@@ -281,19 +281,14 @@ export class AgentService {
       if (nodeId) {
         const node = await resolveAccessibleNode(this.db, tenantId, nodeId);
         if (!node) throw new Error("Runner 节点不存在");
-        if (node.kind === "runner") {
+        if (node.kind !== "local") {
           if (node.status === "offline") {
             throw new Error(
-              `「${node.name}」当前离线，无法启动。请等待节点上线，或选择其他可用节点。`,
+              `「${node.name}」当前离线。请在该设备启动 zakura-agent。`,
             );
           }
           if (node.status === "draining") {
             throw new Error(`「${node.name}」正在排空，暂不可用于新任务。`);
-          }
-          if (!node.endpoint) {
-            throw new Error(
-              `「${node.name}」尚未完成注册，请先在该设备启动 Runner。`,
-            );
           }
         }
       }
@@ -334,8 +329,9 @@ export class AgentService {
       enableMemory?: boolean;
       memoryProviderId?: string | null;
       workspaceImage?: string | null;
-      /** Bind agent to a runtime node; null = local */
+      /** Bind agent to a runtime node */
       runtimeNodeId?: string | null;
+      workspaceKind?: "host" | "container";
       config?: Record<string, unknown>;
       /** Restart workspace after feature change when container-backed */
       restart?: boolean;
@@ -403,6 +399,9 @@ export class AgentService {
           : {}),
         ...(input.runtimeNodeId !== undefined
           ? { runtimeNodeId: input.runtimeNodeId }
+          : {}),
+        ...(input.workspaceKind !== undefined
+          ? { workspaceKind: input.workspaceKind }
           : {}),
         ...(input.config !== undefined ? { configJson: JSON.stringify(input.config) } : {}),
         updatedAt: new Date(),
@@ -899,6 +898,7 @@ export class AgentService {
       memoryProviderId: agent.memoryProviderId,
       workspaceImage: agent.workspaceImage,
       runtimeNodeId: agent.runtimeNodeId ?? null,
+      workspaceKind: (agent as Agent & { workspaceKind?: string }).workspaceKind ?? "container",
       workspaceStatus: agent.workspaceStatus ?? "ready",
       workspaceRevision: agent.workspaceRevision ?? null,
       lastMigrationId: agent.lastMigrationId ?? null,

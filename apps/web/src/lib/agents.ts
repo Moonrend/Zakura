@@ -17,8 +17,8 @@ export type AgentListItem = {
   enableComputer: boolean;
   enableMemory: boolean;
   memoryProviderId?: string | null;
-  /** Bound runtime node; null = implicit local */
   runtimeNodeId?: string | null;
+  workspaceKind?: "host" | "container";
   workspaceStatus?: string;
   lastError?: string | null;
   mcpAgentUrl: string;

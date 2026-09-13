@@ -1,5 +1,12 @@
 # syntax=docker/dockerfile:1
 
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS agent
+WORKDIR /src
+ARG ZAKURA_AGENT_VERSION=dev
+ENV ZAKURA_AGENT_VERSION=$ZAKURA_AGENT_VERSION
+COPY go/agent/ ./
+RUN bash scripts/pack.sh
+
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 RUN corepack enable
@@ -25,6 +32,7 @@ ENV NODE_ENV=production
 ENV ZAKURA_DATA_DIR=/data
 ENV HOST=0.0.0.0
 ENV PORT=8787
+ENV ZAKURA_AGENT_BINARIES_DIR=/app/go/agent/dist
 RUN corepack enable \
  && apt-get update \
  && apt-get install -y --no-install-recommends openssl ca-certificates curl \
@@ -35,6 +43,7 @@ RUN corepack enable \
  && mkdir -p /data
 
 COPY --from=build /app /app
+COPY --from=agent /src/dist /app/go/agent/dist
 
 EXPOSE 8787 3000
 

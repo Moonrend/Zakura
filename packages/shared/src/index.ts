@@ -285,7 +285,7 @@ export const DEFAULT_WORKSPACE_LITE_IMAGE = "sunwuyuan/zakura-workspace-lite-dev
 /** Default ACP sidecar image (minimal container for adapter execution). */
 export const DEFAULT_ACP_SIDECAR_IMAGE = "sunwuyuan/zakura-acp-sidecar-dev:latest";
 
-/** Default remote Runner Agent image (docker/runner → Docker Hub *-dev). */
+/** @deprecated 旧 TS Runner 镜像名，Go 代理不再使用。 */
 export const DEFAULT_RUNNER_IMAGE = "sunwuyuan/zakura-runner-dev:latest";
 
 export {
@@ -439,6 +439,7 @@ export {
   DEFAULT_MIGRATION_EXCLUDE_PATTERNS,
   buildRunnerComposeSnippet,
   buildRunnerInstallPackage,
+  buildGoAgentInstall,
 } from "./runner.js";
 export type {
   RuntimeNodeKind,

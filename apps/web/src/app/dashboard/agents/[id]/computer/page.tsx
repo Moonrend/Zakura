@@ -30,6 +30,7 @@ import {
   statusVariant,
   type RuntimeNode,
 } from "@/lib/runners";
+// kindLabel 用于电脑/服务器区分
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { AgentFileManager } from "@/components/agent-files/file-manager";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
@@ -62,8 +63,6 @@ const WorkspaceTerminalDialog = dynamic(
 );
 import { WorkspaceDesktop } from "@/components/workspace-desktop";
 
-const LOCAL_VALUE = "__local__";
-
 export default function AgentComputerPage() {
   const { confirm } = useConfirmDialog();
   const { id, agent, refresh, patchAgent } = useAgentDetail();
@@ -74,7 +73,7 @@ export default function AgentComputerPage() {
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [wsStatus, setWsStatus] = useState("idle");
   const [createOpen, setCreateOpen] = useState(false);
-  const [createNodeId, setCreateNodeId] = useState(LOCAL_VALUE);
+  const [createNodeId, setCreateNodeId] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
   const [migrateTarget, setMigrateTarget] = useState("");
   const [migrateBusy, setMigrateBusy] = useState(false);
@@ -145,9 +144,7 @@ export default function AgentComputerPage() {
   }, [progress?.events.length]);
 
   const currentNode = useMemo(() => {
-    if (!agent?.runtimeNodeId) {
-      return nodes.find((n) => n.kind === "local") ?? null;
-    }
+    if (!agent?.runtimeNodeId) return null;
     return nodes.find((n) => n.id === agent.runtimeNodeId) ?? null;
   }, [agent?.runtimeNodeId, nodes]);
 
@@ -156,47 +153,47 @@ export default function AgentComputerPage() {
     [nodes],
   );
 
-  const hasLocal = useMemo(() => nodes.some((n) => n.kind === "local"), [nodes]);
-
   useEffect(() => {
-    if (hasLocal) return;
-    const firstRemote = nodes.find((n) => n.kind !== "local");
-    if (firstRemote) setCreateNodeId(firstRemote.id);
-  }, [hasLocal, nodes]);
+    const first = nodes.find((n) => n.kind === "computer" || n.kind === "server");
+    if (first) setCreateNodeId(first.id);
+  }, [nodes]);
 
   const createItems = useMemo(
-    () => [
-      ...(hasLocal ? [{ value: LOCAL_VALUE, label: "本机" }] : []),
-      ...remoteNodes.map((n) => ({
+    () =>
+      remoteNodes.map((n) => ({
         value: n.id,
-        label: `${n.name}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
+        label: `${n.name} · ${kindLabel(n.kind)}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
       })),
-    ],
-    [hasLocal, remoteNodes],
+    [remoteNodes],
   );
 
   const migrateItems = useMemo(() => {
-    const current = agent?.runtimeNodeId || LOCAL_VALUE;
-    return [
-      ...(hasLocal ? [{ value: LOCAL_VALUE, label: "本机 (local)" }] : []),
-      ...remoteNodes.map((n) => ({
+    const current = agent?.runtimeNodeId || "";
+    return remoteNodes
+      .map((n) => ({
         value: n.id,
-        label: `${n.name}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
-      })),
-    ].filter((i) => i.value !== current);
-  }, [agent?.runtimeNodeId, hasLocal, remoteNodes]);
+        label: `${n.name} · ${kindLabel(n.kind)} · ${statusLabel(n.status)}`,
+      }))
+      .filter((i) => i.value !== current);
+  }, [agent?.runtimeNodeId, remoteNodes]);
 
   async function createComputer() {
     setCreating(true);
     try {
-      const runtimeNodeId = createNodeId === LOCAL_VALUE ? null : createNodeId;
+      const runtimeNodeId = createNodeId || null;
+      if (!runtimeNodeId) {
+        toast.error("请选择一台电脑或服务器");
+        return;
+      }
+      const node = nodes.find((n) => n.id === runtimeNodeId);
+      const workspaceKind = node?.kind === "computer" ? "host" : "container";
       await api(`/api/agents/${id}`, {
         method: "PATCH",
-        json: { enableComputer: true, restart: false },
+        json: { enableComputer: true, restart: false, runtimeNodeId, workspaceKind },
       });
       await api(`/api/agents/${id}/start`, {
         method: "POST",
-        json: { runtimeNodeId },
+        json: { runtimeNodeId, workspaceKind },
       });
       toast.success("已创建电脑");
       setCreateOpen(false);
@@ -273,10 +270,7 @@ export default function AgentComputerPage() {
         /* ignore */
       }
 
-      const targetNodeId =
-        migrateTarget === LOCAL_VALUE
-          ? nodes.find((n) => n.kind === "local")?.id
-          : migrateTarget;
+      const targetNodeId = migrateTarget;
       if (!targetNodeId) throw new Error("找不到目标节点");
 
       const res = await api<{ migration: { id: string; status: string } }>(
@@ -418,7 +412,7 @@ export default function AgentComputerPage() {
               </>
             ) : (
               <span className="text-muted-foreground">
-                {agent.runtimeNodeId ? `节点 ${agent.runtimeNodeId}` : "本机"}
+                {agent.runtimeNodeId ? `节点 ${agent.runtimeNodeId}` : "未绑定"}
               </span>
             )}
             <Badge variant="secondary" className="ml-1 text-[10px]">
@@ -643,18 +637,18 @@ function CreateComputerDialog({
               </SelectContent>
             </Select>
           </div>
-          {remoteNodes.length === 0 && createItems.some((i) => i.value === LOCAL_VALUE) ? (
+          {remoteNodes.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">
-              尚未注册远程 Runner。可先在本机创建，或前往{" "}
+              尚未注册电脑或服务器。请前往{" "}
               <Link href="/dashboard/runners" className="underline">
-                Runners
+                电脑与服务器
               </Link>{" "}
-              注册设备。
+              安装 zakura-agent。
             </p>
           ) : null}
           {!createItems.length ? (
             <p className="text-[11px] text-warning-foreground">
-              当前没有可用运行节点。请联系管理员授权本机 Runner，或等待共享 Runner 上线。
+              当前没有可用电脑或服务器。请先安装 zakura-agent。
             </p>
           ) : null}
         </div>
@@ -666,8 +660,8 @@ function CreateComputerDialog({
             disabled={
               creating ||
               !createItems.length ||
-              (createNodeId !== LOCAL_VALUE &&
-                remoteNodes.find((n) => n.id === createNodeId)?.status !== "online")
+              !createNodeId ||
+                remoteNodes.find((n) => n.id === createNodeId)?.status !== "online"
             }
             onClick={onConfirm}
           >

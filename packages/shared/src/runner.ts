@@ -2,7 +2,7 @@
 
 export const LOCAL_RUNTIME_NODE_ID = "local";
 
-export type RuntimeNodeKind = "local" | "runner";
+export type RuntimeNodeKind = "computer" | "server" | "local" | "runner";
 export type RuntimeNodeStatus = "online" | "offline" | "draining";
 
 export type WorkspaceStatus = "ready" | "locked" | "migrating";
@@ -70,6 +70,8 @@ export interface RuntimeNodeDto {
   access?: "owned" | "shared";
   createdAt: string;
   updatedAt: string;
+  /** 旧 TS Runner / local 节点，需重装 Go 代理 */
+  needsReinstall?: boolean;
 }
 
 export interface MigrationManifestFile {
@@ -186,21 +188,40 @@ function buildTsExtraArgs(opts: {
 }
 
 export type RunnerInstallPackage = {
-  /** docker-compose.yml contents (secrets embedded) */
+  /** docker-compose.yml contents (secrets embedded) — 旧 TS Runner，仅兼容 */
   compose: string;
-  /** Always `docker-compose.yml` */
   filename: string;
-  /**
-   * One-shot shell: detect/install Docker if missing, write compose under
-   * /var/zakura/{slug}/, then start.
-   */
   script: string;
-  /** Plain `docker run` (no compose file). Data bind-mounted under /var/zakura/{slug}/. */
   dockerRun: string;
   enableTailscale: boolean;
   tsHostname: string | null;
   slug: string;
+  /** Go 代理：curl | sh */
+  installCurl?: string;
+  installShUrl?: string;
+  installPs1Url?: string;
+  needsReinstall?: boolean;
 };
+
+/** 一键安装 Go 代理（三端）。 */
+export function buildGoAgentInstall(opts: {
+  publicBaseUrl: string;
+  nodeId: string;
+  token: string;
+  kind: "computer" | "server";
+}): { installCurl: string; installShUrl: string; installPs1Url: string; script: string } {
+  const base = opts.publicBaseUrl.replace(/\/$/, "");
+  const q = `token=${encodeURIComponent(opts.token)}&kind=${encodeURIComponent(opts.kind)}`;
+  const installShUrl = `${base}/api/runtime-nodes/${opts.nodeId}/install.sh?${q}`;
+  const installPs1Url = `${base}/api/runtime-nodes/${opts.nodeId}/install.ps1?${q}`;
+  const installCurl = `curl -fsSL ${JSON.stringify(installShUrl)} | sh`;
+  const script = `export ZAKURA_AGENT_SERVER=${JSON.stringify(base)}
+export ZAKURA_AGENT_TOKEN=${JSON.stringify(opts.token)}
+export ZAKURA_AGENT_KIND=${JSON.stringify(opts.kind)}
+curl -fsSL ${JSON.stringify(installShUrl)} | sh
+`;
+  return { installCurl, installShUrl, installPs1Url, script };
+}
 
 function sanitizeSlug(raw: string | undefined): string {
   const s = (raw ?? "runner")

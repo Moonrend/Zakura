@@ -580,8 +580,8 @@ export const runtimeNodes = pgTable(
       .references(() => tenants.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
-    /** local | runner */
-    kind: text("kind").notNull().default("runner"),
+    /** computer | server（旧值 local/runner 视为待重装） */
+    kind: text("kind").notNull().default("computer"),
     /** online | offline | draining */
     status: text("status").notNull().default("offline"),
     endpoint: text("endpoint"),
@@ -637,10 +637,12 @@ export const agents = pgTable(
       onDelete: "set null",
     }),
     workspaceImage: text("workspace_image"),
-    /** Bound Runner node; null = implicit local */
+    /** Bound runner；开电脑后必填 */
     runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
       onDelete: "set null",
     }),
+    /** host = 本机目录；container = Docker 电脑 */
+    workspaceKind: text("workspace_kind").notNull().default("container"),
     /** ready | locked | migrating */
     workspaceStatus: text("workspace_status").notNull().default("ready"),
     workspaceRevision: text("workspace_revision"),

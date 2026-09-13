@@ -95,8 +95,6 @@ export default function RunnerDetailPage() {
   });
   const [versionInfo, setVersionInfo] = useState<RunnerVersionInfo | null>(null);
   const [versionBusy, setVersionBusy] = useState(false);
-  const [runnerImageInput, setRunnerImageInput] = useState("");
-  const [workspaceImageInput, setWorkspaceImageInput] = useState("");
   const [imageUpdates, setImageUpdates] = useState<ImageUpdateEntry[] | null>(null);
   const [imageUpdatesBusy, setImageUpdatesBusy] = useState(false);
 
@@ -140,13 +138,12 @@ export default function RunnerDetailPage() {
     try {
       const info = await fetchRunnerVersion(id);
       setVersionInfo(info);
-      if (!runnerImageInput && info.image) setRunnerImageInput(info.image);
     } catch {
       /* offline / unavailable */
     } finally {
       setVersionBusy(false);
     }
-  }, [id, node, runnerImageInput]);
+  }, [id, node]);
 
   const loadImageUpdates = useCallback(async () => {
     if (!node || node.kind === "local" || node.access === "shared") return;
@@ -222,17 +219,14 @@ export default function RunnerDetailPage() {
 
   async function handleUpdateRunner() {
     if (!node) return;
-    const image = runnerImageInput.trim();
-    if (!image) {
-      toast.error("请输入目标 Runner 镜像");
-      return;
-    }
     setVersionBusy(true);
     try {
-      const result = await updateRunner(node.id, { image });
-      toast.success(`已调度更新到 ${result.image}，Runner 将短暂重连`);
-      // Runner will drop + reconnect; re-probe after a delay
-      setTimeout(() => void loadVersion(), 8_000);
+      await updateRunner(node.id);
+      toast.success("已调度代理更新，设备将短暂重连");
+      setTimeout(() => {
+        void loadVersion();
+        void loadImageUpdates();
+      }, 8_000);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -242,20 +236,16 @@ export default function RunnerDetailPage() {
 
   async function handleRefreshWorkspaceImage() {
     if (!node) return;
-    const image = workspaceImageInput.trim();
-    if (!image) {
-      toast.error("请输入要刷新的工作区镜像");
-      return;
-    }
     setVersionBusy(true);
     try {
       const result = await refreshWorkspaceImage(node.id, {
-        image,
         recreateRunning: true,
       });
       toast.success(
-        `镜像已刷新${result.recreated.length ? `，已重建 ${result.recreated.length} 个工作区` : ""}`,
+        `容器已刷新${result.recreated.length ? `，已重建 ${result.recreated.length} 个` : ""}`,
       );
+      void loadImageUpdates();
+      void loadContainers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -460,7 +450,7 @@ export default function RunnerDetailPage() {
                 ) : null}
               </div>
             </SettingsField>
-            <SettingsField label="Runner 镜像">
+            <SettingsField label="代理二进制">
               <code className="text-[11px] text-muted-foreground break-all">
                 {versionInfo?.image || "—"}
               </code>
@@ -477,10 +467,8 @@ export default function RunnerDetailPage() {
                 <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
                   <AlertCircle className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
                   <div className="text-xs text-warning-foreground">
-                    检测到镜像有新版本可用。建议在低峰期更新：
-                    <strong>更新 Runner</strong> 会重建 Runner 容器（连接短暂中断）；
-                    <strong>刷新工作区镜像</strong> 会重建运行中的工作区（进行中会话将重启）。
-                    若主机目录挂载异常导致工作区不可用，可能需要重启电脑环境以恢复 /workspace 挂载。
+                    检测到更新。一键更新代理会替换 zakura-agent 并短暂重连；
+                    刷新容器会拉取镜像并重建本机上带 zakura 标签的工作区 / MCP / ACP 容器。
                   </div>
                 </div>
               ) : (
@@ -522,46 +510,34 @@ export default function RunnerDetailPage() {
           ) : null}
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor="rn-runner-image">更新 Runner 到镜像</Label>
-              <Input
-                id="rn-runner-image"
-                value={runnerImageInput}
-                onChange={(e) => setRunnerImageInput(e.target.value)}
-                placeholder="sunwuyuan/zakura-runner-dev:latest"
-              />
+              <Label>更新代理</Label>
               <Button
                 size="sm"
                 className="w-full"
-                disabled={versionBusy || !runnerImageInput.trim()}
+                disabled={versionBusy}
                 onClick={() => void handleUpdateRunner()}
               >
                 {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                更新 Runner（拉取并重建）
+                一键更新 zakura-agent
               </Button>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="rn-ws-image">刷新工作区镜像</Label>
-              <Input
-                id="rn-ws-image"
-                value={workspaceImageInput}
-                onChange={(e) => setWorkspaceImageInput(e.target.value)}
-                placeholder="sunwuyuan/zakura-workspace-dev:debian"
-              />
+              <Label>刷新容器</Label>
               <Button
                 size="sm"
                 variant="outline"
                 className="w-full"
-                disabled={versionBusy || !workspaceImageInput.trim()}
+                disabled={versionBusy}
                 onClick={() => void handleRefreshWorkspaceImage()}
               >
                 {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                刷新并重建在跑工作区
+                一键拉取并重建容器
               </Button>
             </div>
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            更新 Runner 会拉取新镜像并重建当前容器，期间连接会短暂中断（数秒）。
-            刷新工作区镜像会重建所有使用该镜像的运行中工作区，进行中的会话将被重启。
+            更新代理从本控制面拉取对应系统的二进制并重启服务，约数秒。
+            刷新容器只重建带 zakura 标签的容器，不会动你自己的其它 Docker 应用。
           </p>
         </SettingsSection>
       ) : null}

@@ -69,7 +69,8 @@ export default function RunnersPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [accessMode, setAccessMode] = useState<AccessMode>(null);
+  const [createKind, setCreateKind] = useState<"computer" | "server">("computer");
+  const [accessMode, setAccessMode] = useState<AccessMode>("public");
   const [meshReady, setMeshReady] = useState(false);
   const [platformMode, setPlatformMode] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -140,7 +141,7 @@ export default function RunnersPage() {
   return (
     <div className="space-y-5">
       <SettingsHeader
-        title="Runners"
+        title="电脑与服务器"
         actions={
           <>
             <Button
@@ -154,13 +155,26 @@ export default function RunnersPage() {
             </Button>
             <Button
               size="sm"
+              variant="outline"
               onClick={() => {
                 resetDialog();
+                setCreateKind("computer");
                 setOpen(true);
               }}
             >
               <Plus />
-              注册 Runner
+              添加电脑
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                resetDialog();
+                setCreateKind("server");
+                setOpen(true);
+              }}
+            >
+              <Plus />
+              添加服务器
             </Button>
           </>
         }
@@ -178,9 +192,11 @@ export default function RunnersPage() {
           </div>
         </div>
         <div className="surface-interactive rounded-lg bg-card shadow-surface-2 p-4">
-          <div className="text-xs text-muted-foreground">远程 Runner</div>
+          <div className="text-xs text-muted-foreground">电脑 / 服务器</div>
           <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">
-            {rows.filter((r) => r.kind === "runner").length}
+            {rows.filter((r) => r.kind === "computer").length}
+            {" / "}
+            {rows.filter((r) => r.kind === "server").length}
           </div>
         </div>
       </div>
@@ -235,6 +251,11 @@ export default function RunnersPage() {
                     {r.access === "shared" || r.isShared ? (
                       <Badge variant="secondary" className="mt-1">
                         共享
+                      </Badge>
+                    ) : null}
+                    {r.needsReinstall ? (
+                      <Badge variant="destructive" className="mt-1">
+                        需重装
                       </Badge>
                     ) : null}
                   </TableCell>
@@ -304,7 +325,7 @@ export default function RunnersPage() {
                 <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
                   <div className="flex flex-col items-center gap-2">
                     <Cpu className="size-8 opacity-40" />
-                    <div>{rows.length ? `没有匹配「${q}」的 Runner` : "暂无 Runner"}</div>
+                    <div>{rows.length ? `没有匹配「${q}」的节点` : "暂无电脑或服务器"}</div>
                   </div>
                 </TableCell>
               </TableRow>
@@ -323,7 +344,13 @@ export default function RunnersPage() {
       >
         <DialogContent className="max-w-lg sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>{created ? "安装" : "注册 Runner"}</DialogTitle>
+            <DialogTitle>
+              {created
+                ? "安装 zakura-agent"
+                : createKind === "server"
+                  ? "添加 Docker 服务器"
+                  : "添加直连电脑"}
+            </DialogTitle>
           </DialogHeader>
 
           {created ? (
@@ -354,8 +381,7 @@ export default function RunnersPage() {
                   return;
                 }
                 if (!accessMode) {
-                  toast.error("请选择访问方式");
-                  return;
+                  setAccessMode("public");
                 }
                 if (accessMode === "tailscale" && !meshReady) {
                   toast.error("请先完成 Tailscale 连接");
@@ -369,6 +395,7 @@ export default function RunnersPage() {
                 try {
                   const res = await createRuntimeNode({
                     name: name.trim(),
+                    kind: createKind,
                     enableTailscale: accessMode === "tailscale",
                   });
                   setCreated(res);

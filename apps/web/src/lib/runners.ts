@@ -39,7 +39,7 @@ export type RuntimeNode = {
   tenantId: string;
   name: string;
   slug: string;
-  kind: "local" | "runner" | string;
+  kind: "computer" | "server" | "local" | "runner" | string;
   status: "online" | "offline" | "draining" | string;
   endpoint: string | null;
   capabilities: Record<string, unknown>;
@@ -53,14 +53,13 @@ export type RuntimeNode = {
   access?: "owned" | "shared";
   createdAt: string;
   updatedAt: string;
+  needsReinstall?: boolean;
 };
 
 export type RunnerInstallPackage = {
   compose: string;
   filename: string;
-  /** Detect/install Docker → /var/zakura → start */
   script: string;
-  /** Plain docker run (no compose) */
   dockerRun?: string;
   enableTailscale: boolean;
   tsHostname: string | null;
@@ -69,8 +68,10 @@ export type RunnerInstallPackage = {
   meshConnected?: boolean;
   tags?: string[];
   bootstrapUrl?: string;
-  /** curl | sudo bash */
   installCurl?: string;
+  installShUrl?: string;
+  installPs1Url?: string;
+  needsReinstall?: boolean;
 };
 
 export type RunnerInstallBundle = {
@@ -121,6 +122,7 @@ export async function fetchRunnerDetail(id: string): Promise<RunnerDetailPayload
 
 export async function createRuntimeNode(input: {
   name: string;
+  kind?: "computer" | "server";
   labels?: Record<string, unknown>;
   enableTailscale?: boolean;
 }): Promise<{
@@ -232,8 +234,14 @@ export async function fetchRunnerVersion(
 /** Trigger a remote Runner self-update to `image`. */
 export async function updateRunner(
   id: string,
-  body: { image: string; recreateDelayMs?: number },
-): Promise<{ image: string; scheduled: true }> {
+  body: {
+    image?: string;
+    url?: string;
+    sha256?: string;
+    version?: string;
+    recreateDelayMs?: number;
+  } = {},
+): Promise<{ image: string; scheduled: true; version?: string }> {
   return api(`/api/runtime-nodes/${id}/update-runner`, {
     method: "POST",
     json: body,
@@ -243,9 +251,10 @@ export async function updateRunner(
 /** Pull (refresh) a workspace image on the runner, optionally recreating runnings. */
 export async function refreshWorkspaceImage(
   id: string,
-  body: { image: string; recreateRunning?: boolean },
+  body: { image?: string; recreateRunning?: boolean } = {},
 ): Promise<{
   image: string;
+  images?: string[];
   status: string;
   recreated: Array<{ agentId: string; dockerId: string; name: string }>;
 }> {
@@ -315,13 +324,14 @@ export function resolveImageUpdateKind(entry: {
   kind?: ImageUpdateKind;
 }): ImageUpdateKind {
   if (entry.kind) return entry.kind;
+  if (entry.image.startsWith("zakura-agent:")) return "runner";
   const repo = (ref: string) => ref.split("@")[0]!.replace(/:[^/:]+$/, "");
   return repo(entry.image) === repo(DEFAULT_RUNNER_IMAGE) ? "runner" : "workspace";
 }
 
 /**
- * 统一升级入口：runner 镜像走 updateRunner（重建 Runner 容器），
- * 工作区镜像走 refreshWorkspaceImage（重建运行中工作区）。返回 kind 以便调用方给出针对性的 toast 文案。
+ * 统一升级入口：runner 走 Go 代理二进制 sys.update，
+ * 工作区镜像走 pull + 重建运行中的 zakura 容器。
  */
 export async function upgradeNodeImage(
   nodeId: string,
@@ -330,7 +340,7 @@ export async function upgradeNodeImage(
   const target = typeof entry === "string" ? { image: entry } : entry;
   const kind = resolveImageUpdateKind(target);
   if (kind === "runner") {
-    return { kind, result: await updateRunner(nodeId, { image: target.image }) };
+    return { kind, result: await updateRunner(nodeId) };
   }
   return {
     kind,
@@ -387,10 +397,14 @@ export function statusLabel(status: string): string {
 
 export function kindLabel(kind: string): string {
   switch (kind) {
+    case "computer":
+      return "电脑";
+    case "server":
+      return "服务器";
     case "local":
-      return "本机";
+      return "旧本机（需重装）";
     case "runner":
-      return "远程 Runner";
+      return "旧 Runner（需重装）";
     default:
       return kind;
   }

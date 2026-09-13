@@ -2,9 +2,8 @@
  * MCP/component 实例跨 Runner 迁移：stop → export 数据卷 → import → 更新 runtime_node_id → start
  */
 import { and, eq } from "drizzle-orm";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { exportWorkspace, importWorkspace } from "@zakura/core";
 import { LOCAL_RUNTIME_NODE_ID } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -30,10 +29,6 @@ export class InstanceMigrationService {
     return join(this.config.migrationDir, "instances");
   }
 
-  private localDataDir(instanceId: string, providerId: string): string {
-    return join(this.config.dataDir, providerId, instanceId);
-  }
-
   async migrate(
     tenantId: string,
     instanceId: string,
@@ -50,9 +45,14 @@ export class InstanceMigrationService {
       throw new Error("仅容器 MCP（stdio）支持 Runner 迁移");
     }
 
-    const local = await this.nodes.ensureLocalNode(tenantId);
-    const sourceId = instance.runtimeNodeId ?? local.id;
-    const targetId = targetNodeId === "local" ? local.id : targetNodeId;
+    if (!instance.runtimeNodeId) {
+      throw new Error("该实例未绑定运行节点，请先选择一台在线的 zakura-agent");
+    }
+    if (targetNodeId === "local" || !targetNodeId) {
+      throw new Error("目标必须是在线的电脑或服务器，不再支持隐式本机节点");
+    }
+    const sourceId = instance.runtimeNodeId;
+    const targetId = targetNodeId;
     if (sourceId === targetId) {
       return { ok: true, runtimeNodeId: instance.runtimeNodeId };
     }
@@ -71,40 +71,19 @@ export class InstanceMigrationService {
     const archivePath = join(this.stagingDir(), `${instanceId}-${Date.now()}.tar.gz`);
     mkdirSync(this.stagingDir(), { recursive: true });
 
-    // Export
-    if (isLocalNodeId(sourceId) || sourceId === local.id) {
-      const dataDir = this.localDataDir(instanceId, instance.providerId);
-      mkdirSync(dataDir, { recursive: true });
-      const { archive } = await exportWorkspace({
-        workspaceRoot: dataDir,
-        agentId: instanceId,
-        sourceNodeId: sourceId,
-      });
-      writeFileSync(archivePath, archive);
-    } else {
-      const { client } = await this.nodes.requireRunnerClient(tenantId, sourceId);
-      const { archive } = await client.exportInstanceMigration(instanceId, {
-        sourceNodeId: sourceId,
-      });
-      writeFileSync(archivePath, archive);
+    if (isLocalNodeId(sourceId) || target.kind === "local" || isLocalNodeId(targetId)) {
+      throw new Error("旧本机节点已停用。请在两端都安装 zakura-agent 后再迁移。");
     }
+    const { client: src } = await this.nodes.requireRunnerClient(tenantId, sourceId);
+    const { archive } = await src.exportInstanceMigration(instanceId, {
+      sourceNodeId: sourceId,
+    });
+    writeFileSync(archivePath, archive);
 
-    const archive = readFileSync(archivePath);
+    const { client: dst } = await this.nodes.requireRunnerClient(tenantId, targetId);
+    await dst.importInstanceMigration(instanceId, archive);
 
-    // Import
-    if (isLocalNodeId(targetId) || target.kind === "local") {
-      const dataDir = this.localDataDir(instanceId, instance.providerId);
-      mkdirSync(dataDir, { recursive: true });
-      await importWorkspace({
-        targetWorkspaceRoot: dataDir,
-        archive,
-      });
-    } else {
-      const { client } = await this.nodes.requireRunnerClient(tenantId, targetId);
-      await client.importInstanceMigration(instanceId, archive);
-    }
-
-    const nextNodeId = target.kind === "local" ? null : target.id;
+    const nextNodeId = target.id;
     await this.db
       .update(componentInstances)
       .set({ runtimeNodeId: nextNodeId, updatedAt: new Date() })

@@ -758,6 +758,9 @@ export function registerMcpRoutes(
           slug: plan.slug,
           config: plan.config,
         });
+        if (agentIds.length) {
+          await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
+        }
         let started = false;
         let startError: string | undefined;
         if (body.start !== false) {
@@ -767,9 +770,6 @@ export function registerMcpRoutes(
           } catch (err) {
             startError = err instanceof Error ? err.message : String(err);
           }
-        }
-        if (agentIds.length) {
-          await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
         }
         results.push({
           key: entry.key,
@@ -1031,15 +1031,23 @@ export function registerMcpRoutes(
       if (body.slug?.trim()) plan.slug = body.slug.trim();
       if (body.displayName?.trim()) plan.name = body.displayName.trim();
 
-      const needsRunner = plan.providerId === "stdio-mcp";
       const instance = await orchestrator.createInstance({
         tenantId: session.tenantId,
         providerId: plan.providerId,
         name: plan.name,
         slug: plan.slug,
         config: plan.config,
-        runtimeNodeId: needsRunner ? (body.runtimeNodeId ?? null) : null,
+        // stdio 执行节点跟 Agent 走，不在 instance 上选 runner
+        runtimeNodeId: null,
       });
+
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
+      if (agentIds.length) {
+        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
+      }
 
       let started = false;
       let startError: string | undefined;
@@ -1050,14 +1058,6 @@ export function registerMcpRoutes(
         } catch (err) {
           startError = err instanceof Error ? err.message : String(err);
         }
-      }
-
-      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
-        agentIds: body.agentIds,
-        all: body.all,
-      });
-      if (agentIds.length) {
-        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
       }
 
       const fresh = await loadInstanceWithContainers(db, session.tenantId, instance.id);
@@ -1145,8 +1145,16 @@ export function registerMcpRoutes(
           workingDir: body.workingDir ?? "/data",
           packageManager,
         },
-        runtimeNodeId: body.runtimeNodeId ?? null,
+        runtimeNodeId: null,
       });
+
+      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
+        agentIds: body.agentIds,
+        all: body.all,
+      });
+      if (agentIds.length) {
+        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
+      }
 
       let started = false;
       let startError: string | undefined;
@@ -1157,14 +1165,6 @@ export function registerMcpRoutes(
         } catch (err) {
           startError = err instanceof Error ? err.message : String(err);
         }
-      }
-
-      const agentIds = await agentService.resolveInstallAgentIds(session.tenantId, {
-        agentIds: body.agentIds,
-        all: body.all,
-      });
-      if (agentIds.length) {
-        await agentService.bindInstanceToAgents(session.tenantId, instance.id, agentIds);
       }
 
       return c.json(

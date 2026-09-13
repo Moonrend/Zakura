@@ -1,5 +1,5 @@
 /**
- * Server-side HTTP client for a remote Runner Agent.
+ * 通过 RunnerHub 调用 Go 代理原语。不再 HTTP 回调 :7443。
  */
 import type { ImageUpdateEntry, MigrationManifest, RunnerHostInfo } from "@zakura/shared";
 import type {
@@ -10,28 +10,45 @@ import type {
 } from "./workspace-fs.js";
 import type { ShellJobSnapshot } from "./shell-job.js";
 
+export type HubRpc = {
+  rpc<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T>;
+  onStream?: (id: string, fn: (chan: string, data: Buffer) => void) => () => void;
+  storageRoot?: string;
+};
+
 export type RunnerClientOptions = {
-  baseUrl: string;
-  token: string;
+  hub: HubRpc;
+  workspaceKind?: "host" | "container";
+  /** @deprecated HTTP 入站已移除 */
+  baseUrl?: string;
+  token?: string;
   fetchImpl?: typeof fetch;
 };
 
+type DockerInfo = {
+  dockerId: string;
+  name: string;
+  image: string;
+  status: string;
+  ports?: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
+  labels?: Record<string, string>;
+};
+
 export class RunnerClient {
-  readonly baseUrl: string;
-  private readonly token: string;
-  private readonly fetchImpl: typeof fetch;
+  readonly baseUrl = "";
+  private readonly hub: HubRpc;
+  readonly workspaceKind: "host" | "container";
 
   constructor(opts: RunnerClientOptions) {
-    this.baseUrl = opts.baseUrl.replace(/\/$/, "");
-    this.token = opts.token;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+    if (!opts.hub) {
+      throw new Error("RunnerClient 需要 Hub 会话；旧 HTTP Runner 已移除，请重装 zakura-agent");
+    }
+    this.hub = opts.hub;
+    this.workspaceKind = opts.workspaceKind === "host" ? "host" : "container";
   }
 
-  private headers(extra?: Record<string, string>): Record<string, string> {
-    return {
-      Authorization: `Bearer ${this.token}`,
-      ...extra,
-    };
+  private rpc<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+    return this.hub.rpc<T>(method, params, timeoutMs);
   }
 
   async ping(): Promise<{
@@ -40,61 +57,46 @@ export class RunnerClient {
     storageRoot?: string;
     hostInfo?: RunnerHostInfo;
     docker?: { ok: boolean; version?: string; error?: string };
+    sha256?: string;
+    goos?: string;
+    goarch?: string;
   }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/ping`, {
-      headers: this.headers(),
-    });
-    if (!res.ok) {
-      return { ok: false };
-    }
-    return (await res.json()) as {
-      ok: boolean;
+    const info = await this.rpc<{
       version?: string;
       storageRoot?: string;
       hostInfo?: RunnerHostInfo;
       docker?: { ok: boolean; version?: string; error?: string };
-    };
+      sha256?: string;
+      goos?: string;
+      goarch?: string;
+    }>("sys.info");
+    return { ok: true, ...info };
   }
 
-  async systemVersion(): Promise<{
-    version: string;
-    image: string;
-    containerId: string | null;
-  }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/version`, {
-      headers: this.headers(),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as {
-      version: string;
-      image: string;
-      containerId: string | null;
-    };
+  async systemVersion(): Promise<{ version: string; image: string; containerId: string | null }> {
+    const info = await this.rpc<{ version?: string; binPath?: string }>("sys.info");
+    return { version: info.version ?? "dev", image: info.binPath ?? "", containerId: null };
   }
 
-  /**
-   * Trigger a Runner self-update: pull `image`, then recreate the Runner
-   * container with it. Returns once the recreation is scheduled; the Runner
-   * will briefly disconnect while the container swaps.
-   */
   async updateRunner(body: {
     image: string;
+    url?: string;
+    sha256?: string;
+    version?: string;
     recreateDelayMs?: number;
-  }): Promise<{ image: string; scheduled: true }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/update`, {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
+  }): Promise<{
+    image: string;
+    scheduled: true;
+  }> {
+    await this.rpc("sys.update", {
+      url: body.url ?? body.image,
+      sha256: body.sha256,
+      version: body.version,
+      restart: true,
     });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { image: string; scheduled: true };
+    return { image: body.image, scheduled: true };
   }
 
-  /**
-   * Pull (refresh) a workspace image on the Runner, optionally recreating every
-   * currently-running workspace container that uses it so the new image takes
-   * effect immediately.
-   */
   async refreshWorkspaceImage(body: {
     image: string;
     recreateRunning?: boolean;
@@ -103,43 +105,60 @@ export class RunnerClient {
     status: string;
     recreated: Array<{ agentId: string; dockerId: string; name: string }>;
   }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/system/workspace-image/refresh`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as {
-      image: string;
-      status: string;
-      recreated: Array<{ agentId: string; dockerId: string; name: string }>;
-    };
+    await this.rpc("docker.pull", { image: body.image }, 10 * 60_000);
+    if (body.recreateRunning === false) {
+      return { image: body.image, status: "updated", recreated: [] };
+    }
+    const result = await this.rpc<{
+      recreated?: Array<{ dockerId?: string; name?: string; labels?: Record<string, string> }>;
+    }>("docker.recreate", { image: body.image }, 10 * 60_000);
+    const recreated = (result.recreated ?? []).map((c) => ({
+      agentId: c.labels?.["zakura.agent"] ?? "",
+      dockerId: c.dockerId ?? "",
+      name: c.name ?? "",
+    }));
+    return { image: body.image, status: "updated", recreated };
   }
 
-  /**
-   * Probe the Runner's local image digests against their remote registry
-   * digests (no pull). Returns one entry per image with `updateAvailable`
-   * when the remote digest differs from the local one. The Server uses
-   * this to show "镜像有更新" hints in the runner detail page.
-   */
   async checkImageUpdates(body: {
     images: string[];
-    /** Opt in to the daemon-pull digest fallback (mutates the Runner host). */
     allowPullFallback?: boolean;
   }): Promise<{ images: ImageUpdateEntry[] }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/system/image-updates`, {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-      // A probe that pulls can legitimately take minutes; a plain one must not
-      // hang forever on an unreachable Runner.
-      signal: AbortSignal.timeout(body.allowPullFallback ? 10 * 60_000 : 90_000),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { images: ImageUpdateEntry[] };
+    void body.allowPullFallback;
+    if (body.allowPullFallback) {
+      for (const image of body.images) {
+        try {
+          await this.rpc("docker.pull", { image }, 10 * 60_000);
+        } catch {
+          /* 探测失败记在 docker.images.error */
+        }
+      }
+    }
+    const rows = await this.rpc<
+      Array<{
+        image: string;
+        id?: string;
+        digest?: string;
+        runningStale?: boolean;
+        error?: string;
+      }>
+    >("docker.images", { images: body.images }, 60_000);
+    const images: ImageUpdateEntry[] = (rows ?? []).map((row) => ({
+      image: row.image,
+      localId: row.id ?? null,
+      localDigest: row.digest ?? row.id ?? null,
+      remoteDigest: row.digest ?? null,
+      updateAvailable: Boolean(row.runningStale),
+      runningStale: Boolean(row.runningStale),
+      error: row.error ?? null,
+    }));
+    return { images };
+  }
+
+  private wsName(tenantSlug: string | undefined, agentSlug: string): string {
+    const t = (tenantSlug || "default").toLowerCase().replace(/[^a-z0-9-_]/g, "-");
+    const a = agentSlug.toLowerCase().replace(/[^a-z0-9-_]/g, "-");
+    return `zakura-ws-${t}-${a}`.slice(0, 63);
   }
 
   async startWorkspace(body: {
@@ -150,6 +169,7 @@ export class RunnerClient {
     network?: string;
     env?: Record<string, string>;
     labels?: Record<string, string>;
+    workspaceKind?: "host" | "container";
   }): Promise<{
     agentId: string;
     dockerId: string;
@@ -166,29 +186,64 @@ export class RunnerClient {
       cdpUrl: string | null;
     };
   }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/workspaces`, {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as { workspace: {
-      agentId: string;
-      dockerId: string;
-      name: string;
-      image: string;
-      status: string;
-      ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
-      labels: Record<string, string>;
-      workspaceHostPath: string;
-      endpoints: {
-        novncPort: number | null;
-        cdpPort: number | null;
-        novncUrl: string | null;
-        cdpUrl: string | null;
+    const mk = await this.rpc<{ abs?: string }>("host.fs.mkdir", { agentId: body.agentId, path: "/" });
+    const kind = body.workspaceKind ?? this.workspaceKind;
+    if (kind === "host") {
+      const info = await this.ping();
+      const root = mk.abs || `${info.storageRoot ?? ""}/agents/${body.agentId}/workspace`;
+      return {
+        agentId: body.agentId,
+        dockerId: "",
+        name: `host-${body.agentSlug}`,
+        image: "host",
+        status: "running",
+        ports: [],
+        labels: body.labels ?? {},
+        workspaceHostPath: root,
+        endpoints: { novncPort: null, cdpPort: null, novncUrl: null, cdpUrl: null },
       };
-    } };
-    return data.workspace;
+    }
+    const docker = (await this.ping()).docker;
+    if (!docker?.ok) {
+      throw new Error(docker?.error || "本机没有 Docker，无法创建容器电脑。文件/终端可用，或改绑直连电脑。");
+    }
+    const image = body.image || "sunwuyuan/zakura-workspace-dev:latest";
+    await this.rpc("docker.pull", { image }, 10 * 60_000);
+    const name = this.wsName(body.tenantSlug, body.agentSlug);
+    const info = await this.ping();
+    const hostPath = mk.abs || `${info.storageRoot ?? ""}/agents/${body.agentId}/workspace`;
+    const running = await this.rpc<DockerInfo>("docker.run", {
+      name,
+      image,
+      network: body.network,
+      env: { ZAKURA_AGENT_ID: body.agentId, ...(body.env ?? {}) },
+      labels: { "zakura.agent": body.agentId, ...(body.labels ?? {}) },
+      volumes: [{ hostPath, containerPath: "/workspace" }],
+      ports: [
+        { containerPort: 6080, protocol: "tcp" },
+        { containerPort: 9222, protocol: "tcp" },
+      ],
+      workingDir: "/workspace",
+      restart: "unless-stopped",
+    });
+    const novnc = running.ports?.find((p) => p.containerPort === 6080);
+    const cdp = running.ports?.find((p) => p.containerPort === 9222);
+    return {
+      agentId: body.agentId,
+      dockerId: running.dockerId,
+      name: running.name,
+      image: running.image,
+      status: running.status,
+      ports: running.ports ?? [],
+      labels: running.labels ?? {},
+      workspaceHostPath: hostPath,
+      endpoints: {
+        novncPort: novnc?.hostPort ?? null,
+        cdpPort: cdp?.hostPort ?? null,
+        novncUrl: novnc?.hostPort ? `http://127.0.0.1:${novnc.hostPort}/vnc.html?autoconnect=true` : null,
+        cdpUrl: cdp?.hostPort ? `http://127.0.0.1:${cdp.hostPort}` : null,
+      },
+    };
   }
 
   async getWorkspace(agentId: string): Promise<{
@@ -201,34 +256,34 @@ export class RunnerClient {
       cdpUrl: string | null;
     };
   } | null> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}`,
-      { headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as { workspace: {
-      dockerId: string;
-      status: string;
-      endpoints: {
-        novncPort: number | null;
-        cdpPort: number | null;
-        novncUrl: string | null;
-        cdpUrl: string | null;
+    if (this.workspaceKind === "host") {
+      return {
+        dockerId: "",
+        status: "running",
+        endpoints: { novncPort: null, cdpPort: null, novncUrl: null, cdpUrl: null },
       };
-    } | null };
-    return data.workspace;
+    }
+    const list = await this.rpc<DockerInfo[]>("docker.list", { label: `zakura.agent=${agentId}` });
+    const c = list?.[0];
+    if (!c) return null;
+    const novnc = c.ports?.find((p) => p.containerPort === 6080);
+    const cdp = c.ports?.find((p) => p.containerPort === 9222);
+    return {
+      dockerId: c.dockerId,
+      status: c.status,
+      endpoints: {
+        novncPort: novnc?.hostPort ?? null,
+        cdpPort: cdp?.hostPort ?? null,
+        novncUrl: novnc?.hostPort ? `http://127.0.0.1:${novnc.hostPort}/vnc.html?autoconnect=true` : null,
+        cdpUrl: cdp?.hostPort ? `http://127.0.0.1:${cdp.hostPort}` : null,
+      },
+    };
   }
 
   async stopWorkspace(agentId: string, remove = true): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ remove }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
+    if (this.workspaceKind === "host") return;
+    const ws = await this.getWorkspace(agentId);
+    if (ws?.dockerId) await this.rpc("docker.stop", { id: ws.dockerId, remove });
   }
 
   async startInstance(body: {
@@ -239,18 +294,8 @@ export class RunnerClient {
     env?: Record<string, string>;
     command?: string[];
     args?: string[];
-    ports?: Array<{
-      containerPort: number;
-      hostPort?: number;
-      hostIp?: string;
-      protocol?: "tcp" | "udp";
-    }>;
-    volumes?: Array<{
-      hostPath?: string;
-      volumeName?: string;
-      containerPath: string;
-      readOnly?: boolean;
-    }>;
+    ports?: Array<{ containerPort: number; hostPort?: number; hostIp?: string; protocol?: "tcp" | "udp" }>;
+    volumes?: Array<{ hostPath?: string; volumeName?: string; containerPath: string; readOnly?: boolean }>;
     labels?: Record<string, string>;
     network?: string;
     workingDir?: string;
@@ -262,27 +307,28 @@ export class RunnerClient {
     ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
     dataHostPath: string;
   }> {
-    const { instanceId, ...spec } = body;
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/start`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(spec),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as {
-      instance: {
-        dockerId: string;
-        name: string;
-        image: string;
-        status: string;
-        ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
-        dataHostPath: string;
-      };
+    const docker = (await this.ping()).docker;
+    if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法启动 MCP 容器");
+    await this.rpc("docker.pull", { image: body.image }, 10 * 60_000);
+    const running = await this.rpc<DockerInfo>("docker.run", {
+      name: body.name,
+      image: body.image,
+      command: [...(body.command ?? []), ...(body.args ?? [])],
+      env: body.env,
+      labels: { "zakura.instance": body.instanceId, ...(body.labels ?? {}) },
+      ports: body.ports,
+      volumes: body.volumes,
+      network: body.network,
+      workingDir: body.workingDir,
+    });
+    return {
+      dockerId: running.dockerId,
+      name: running.name,
+      image: running.image,
+      status: running.status,
+      ports: running.ports ?? [],
+      dataHostPath: "",
     };
-    return data.instance;
   }
 
   async getInstance(instanceId: string): Promise<{
@@ -293,75 +339,22 @@ export class RunnerClient {
     ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
     dataHostPath: string;
   } | null> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}`,
-      { headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as {
-      instance: {
-        dockerId: string;
-        name: string;
-        image: string;
-        status: string;
-        ports: Array<{ containerPort: number; hostPort?: number; protocol?: string }>;
-        dataHostPath: string;
-      } | null;
-    };
-    return data.instance;
+    const list = await this.rpc<DockerInfo[]>("docker.list", { label: `zakura.instance=${instanceId}` });
+    const c = list?.[0];
+    if (!c) return null;
+    return { ...c, ports: c.ports ?? [], dataHostPath: "" };
   }
 
   async stopInstance(instanceId: string, remove = true): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/stop`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ remove }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
+    const inst = await this.getInstance(instanceId);
+    if (inst?.dockerId) await this.rpc("docker.stop", { id: inst.dockerId, remove });
   }
 
   async exportInstanceMigration(
     instanceId: string,
-    body: {
-      sourceNodeId: string;
-      excludePatterns?: string[];
-      includePatterns?: string[];
-    },
+    body: { sourceNodeId: string; excludePatterns?: string[]; includePatterns?: string[] },
   ): Promise<{ archive: Buffer; manifest: MigrationManifest; archiveSha256: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/migration/export`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const sha = res.headers.get("x-archive-sha256") ?? "";
-    const manifestHeader = res.headers.get("x-migration-manifest");
-    const archive = Buffer.from(await res.arrayBuffer());
-    let manifest: MigrationManifest;
-    if (manifestHeader) {
-      manifest = JSON.parse(
-        Buffer.from(manifestHeader, "base64url").toString("utf8"),
-      ) as MigrationManifest;
-    } else {
-      manifest = {
-        version: 1,
-        agentId: instanceId,
-        exportedAt: new Date().toISOString(),
-        sourceNodeId: body.sourceNodeId,
-        compression: "gzip",
-        excludePatterns: body.excludePatterns ?? [],
-        files: [],
-        totalBytes: archive.length,
-        fileCount: 0,
-      };
-    }
-    return { archive, manifest, archiveSha256: sha };
+    return this.exportMigration(instanceId, body);
   }
 
   async importInstanceMigration(
@@ -369,20 +362,7 @@ export class RunnerClient {
     archive: Buffer,
     opts?: { expectedSha256?: string; atomic?: boolean },
   ): Promise<{ ok: true; fileCount: number; workspaceRoot: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/instances/${encodeURIComponent(instanceId)}/migration/import`,
-      {
-        method: "POST",
-        headers: this.headers({
-          "Content-Type": "application/octet-stream",
-          ...(opts?.expectedSha256 ? { "X-Archive-Sha256": opts.expectedSha256 } : {}),
-          ...(opts?.atomic === false ? { "X-Atomic": "0" } : {}),
-        }),
-        body: archive,
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { ok: true; fileCount: number; workspaceRoot: string };
+    return this.importMigration(instanceId, archive, opts);
   }
 
   async execWorkspace(
@@ -390,21 +370,12 @@ export class RunnerClient {
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          command,
-          workingDir: opts?.workingDir,
-          env: opts?.env,
-          timeoutMs: opts?.timeoutMs,
-        }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { exitCode: number; stdout: string; stderr: string };
+    if (this.workspaceKind === "host") {
+      return this.rpc("host.exec", { agentId, command, ...opts });
+    }
+    const ws = await this.getWorkspace(agentId);
+    if (!ws?.dockerId) throw new Error("工作区容器未运行");
+    return this.rpc("docker.exec", { id: ws.dockerId, command, workingDir: opts?.workingDir, env: opts?.env });
   }
 
   async startExecJob(
@@ -412,260 +383,199 @@ export class RunnerClient {
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number; stdin?: string },
   ): Promise<ShellJobSnapshot> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          command,
-          workingDir: opts?.workingDir,
-          env: opts?.env,
-          timeoutMs: opts?.timeoutMs,
-          stdin: opts?.stdin,
-        }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ShellJobSnapshot;
+    const params: Record<string, unknown> = { command, ...opts };
+    if (this.workspaceKind === "host") {
+      params.agentId = agentId;
+    } else {
+      const ws = await this.getWorkspace(agentId);
+      if (!ws?.dockerId) throw new Error("工作区容器未运行");
+      // 后台 job 复用 host.exec 登记；真正进容器靠本机 docker CLI。
+      params.command = [
+        "docker",
+        "exec",
+        ...(opts?.workingDir ? ["-w", opts.workingDir] : []),
+        ws.dockerId,
+        ...command,
+      ];
+      delete params.workingDir;
+    }
+    const snap = await this.rpc<{
+      id: string;
+      stdout: string;
+      stderr: string;
+      exitCode: number | null;
+      running: boolean;
+    }>("host.exec.start", params);
+    return {
+      jobId: snap.id,
+      running: snap.running,
+      exitCode: snap.exitCode,
+      stdout: snap.stdout,
+      stderr: snap.stderr,
+      timedOut: false,
+      elapsedMs: 0,
+    };
   }
 
-  async getExecJob(agentId: string, jobId: string): Promise<ShellJobSnapshot> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}`,
-      { headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ShellJobSnapshot;
+  async getExecJob(_agentId: string, jobId: string): Promise<ShellJobSnapshot> {
+    const snap = await this.rpc<{
+      id: string;
+      stdout: string;
+      stderr: string;
+      exitCode: number | null;
+      running: boolean;
+    }>("host.exec.get", { id: jobId });
+    return {
+      jobId: snap.id,
+      running: snap.running,
+      exitCode: snap.exitCode,
+      stdout: snap.stdout,
+      stderr: snap.stderr,
+      timedOut: false,
+      elapsedMs: 0,
+    };
   }
 
   async waitExecJob(
     agentId: string,
     jobId: string,
     waitMs: number,
-    stdin?: string,
+    _stdin?: string,
   ): Promise<ShellJobSnapshot> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/wait`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ waitMs, stdin }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ShellJobSnapshot;
+    const deadline = Date.now() + waitMs;
+    let last = await this.getExecJob(agentId, jobId);
+    while (last.running && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 400));
+      last = await this.getExecJob(agentId, jobId);
+    }
+    return last;
   }
 
-  async killExecJob(agentId: string, jobId: string): Promise<ShellJobSnapshot> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/kill`,
-      { method: "POST", headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ShellJobSnapshot;
+  async killExecJob(_agentId: string, jobId: string): Promise<ShellJobSnapshot> {
+    const snap = await this.rpc<{
+      id: string;
+      stdout: string;
+      stderr: string;
+      exitCode: number | null;
+      running: boolean;
+    }>("host.exec.kill", { id: jobId });
+    return {
+      jobId: snap.id,
+      running: snap.running,
+      exitCode: snap.exitCode,
+      stdout: snap.stdout,
+      stderr: snap.stderr,
+      timedOut: false,
+      elapsedMs: 0,
+    };
   }
 
-  async resizeExecJob(agentId: string, jobId: string, cols: number, rows: number): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/jobs/${encodeURIComponent(jobId)}/resize`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ cols, rows }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
+  async resizeExecJob(_agentId: string, jobId: string, cols: number, rows: number): Promise<void> {
+    await this.rpc("host.pty.resize", { id: jobId, cols, rows }).catch(() => undefined);
   }
 
   async startStdio(
     agentId: string,
     command: string[],
-    opts?: { workingDir?: string; env?: Record<string, string> },
+    opts?: { workingDir?: string; env?: Record<string, string>; dockerId?: string; attach?: boolean },
   ): Promise<{
     writable: WritableStream<Uint8Array>;
     readable: ReadableStream<Uint8Array>;
     kill: () => Promise<void>;
-    /** 订阅子进程 stderr（runner SSE 的 `t:"err"` 帧）。 */
     onStderr: (fn: (chunk: string) => void) => () => void;
   }> {
-    const start = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          command,
-          workingDir: opts?.workingDir,
-          env: opts?.env,
-        }),
-      },
-    );
-    if (!start.ok) throw new Error(await start.text());
-    const { id } = (await start.json()) as { id: string };
-    const events = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}`,
-      { headers: this.headers({ Accept: "text/event-stream" }) },
-    );
-    if (!events.ok || !events.body) throw new Error(await events.text());
-
+    let dockerId = opts?.dockerId;
+    if (!dockerId && this.workspaceKind !== "host") {
+      dockerId = (await this.getWorkspace(agentId))?.dockerId;
+      if (!dockerId) throw new Error("工作区容器未运行");
+    }
+    const method = opts?.attach
+      ? "docker.attach"
+      : dockerId
+        ? "docker.exec.start"
+        : "host.pty.start";
+    const started = await this.rpc<{ id: string }>(method, {
+      id: dockerId,
+      agentId,
+      command,
+      workingDir: opts?.workingDir,
+      env: opts?.env,
+    });
+    const streamId = started.id;
     const stderrListeners = new Set<(chunk: string) => void>();
+    let closed = false;
     const readable = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const reader = events.body!.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buf += dec.decode(value, { stream: true });
-            for (;;) {
-              const idx = buf.indexOf("\n\n");
-              if (idx < 0) break;
-              const block = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-              const line = block
-                .split("\n")
-                .find((l) => l.startsWith("data: "));
-              if (!line) continue;
-              const msg = JSON.parse(line.slice(6)) as {
-                t?: string;
-                d?: string;
-                code?: number | null;
-              };
-              if (msg.t === "out" && msg.d) {
-                controller.enqueue(Uint8Array.from(Buffer.from(msg.d, "base64")));
-              } else if (msg.t === "err" && msg.d) {
-                for (const fn of stderrListeners) fn(msg.d);
-              }
-              if (msg.t === "exit") {
-                controller.close();
-                return;
-              }
+      start: (controller) => {
+        this.hub.onStream?.(streamId, (chan, data) => {
+          if (chan === "stdout" && data.length) controller.enqueue(new Uint8Array(data));
+          if (chan === "stderr" && data.length) {
+            const text = data.toString("utf8");
+            for (const fn of stderrListeners) fn(text);
+          }
+          if (chan === "exit" && !closed) {
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              /* ignore */
             }
           }
-        } finally {
-          try {
-            controller.close();
-          } catch {
-            /* already closed */
-          }
-        }
+        });
       },
     });
-
+    const writeMethod = dockerId ? "docker.exec.write" : "host.pty.write";
+    const closeMethod = dockerId ? "docker.exec.close" : "host.pty.close";
     const writable = new WritableStream<Uint8Array>({
       write: async (chunk) => {
-        const res = await this.fetchImpl(
-          `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}/stdin`,
-          {
-            method: "POST",
-            headers: this.headers({ "Content-Type": "application/octet-stream" }),
-            body: chunk,
-          },
-        );
-        if (!res.ok) throw new Error(await res.text());
+        await this.rpc(writeMethod, { id: streamId, base64: Buffer.from(chunk).toString("base64") });
       },
     });
-
     return {
       writable,
       readable,
       kill: async () => {
-        await this.fetchImpl(
-          `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/exec/stdio/${encodeURIComponent(id)}/kill`,
-          { method: "POST", headers: this.headers() },
-        ).catch(() => undefined);
+        await this.rpc(closeMethod, { id: streamId }).catch(() => undefined);
       },
       onStderr: (fn) => {
         stderrListeners.add(fn);
-        return () => {
-          stderrListeners.delete(fn);
-        };
+        return () => stderrListeners.delete(fn);
       },
     };
   }
 
   async listDetailed(agentId: string, path: string): Promise<ListDetailedResult> {
-    const url = new URL(`${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/list`);
-    url.searchParams.set("path", path || "/");
-    const res = await this.fetchImpl(url, { headers: this.headers() });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ListDetailedResult;
+    return this.rpc("host.fs.list", { agentId, path: path || "/" });
   }
 
   async readText(agentId: string, path: string): Promise<ReadTextResult> {
-    const url = new URL(`${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/read`);
-    url.searchParams.set("path", path);
-    const res = await this.fetchImpl(url, { headers: this.headers() });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ReadTextResult;
+    const r = await this.rpc<{ path: string; content: string }>("host.fs.read", { agentId, path });
+    return { path: r.path, content: r.content, revision: "" } as ReadTextResult;
   }
 
   async writeText(
     agentId: string,
     path: string,
     content: string,
-    expectedRevision?: string | null,
+    _expectedRevision?: string | null,
   ): Promise<{ path: string; ok: true; revision: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/write`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ path, content, expectedRevision }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { path: string; ok: true; revision: string };
+    return this.rpc("host.fs.write", { agentId, path, content });
   }
 
   async mkdir(agentId: string, path: string): Promise<{ path: string; ok: true }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/mkdir`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ path }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { path: string; ok: true };
+    return this.rpc("host.fs.mkdir", { agentId, path });
   }
 
-  async delete(
-    agentId: string,
-    path: string,
-    recursive?: boolean,
-  ): Promise<{ path: string; ok: true }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/delete`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ path, recursive }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { path: string; ok: true };
+  async delete(agentId: string, path: string, recursive?: boolean): Promise<{ path: string; ok: true }> {
+    return this.rpc("host.fs.remove", { agentId, path, recursive });
   }
 
   async downloadBytes(
     agentId: string,
     path: string,
   ): Promise<{ data: Buffer; size: number; name: string }> {
-    const url = new URL(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/download`,
-    );
-    url.searchParams.set("path", path);
-    const res = await this.fetchImpl(url, { headers: this.headers() });
-    if (!res.ok) throw new Error(await res.text());
-    const data = Buffer.from(await res.arrayBuffer());
-    const disposition = res.headers.get("content-disposition") ?? "";
-    const match = disposition.match(/filename="([^"]+)"/);
-    const name = match?.[1] ? decodeURIComponent(match[1]) : path.split("/").filter(Boolean).pop() || "download";
-    return { data, size: data.length, name };
+    const r = await this.rpc<{ base64: string; size: number }>("host.fs.read", { agentId, path, max: 32 << 20 });
+    const data = Buffer.from(r.base64, "base64");
+    return { data, size: data.length, name: path.split("/").filter(Boolean).pop() || "download" };
   }
 
   async uploadBytes(
@@ -673,39 +583,16 @@ export class RunnerClient {
     path: string,
     data: Buffer,
   ): Promise<{ path: string; size: number }> {
-    const form = new FormData();
-    form.append("path", path);
-    form.append("file", new Blob([data]), path.split("/").filter(Boolean).pop() || "upload");
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/upload`,
-      {
-        method: "POST",
-        headers: this.headers(),
-        body: form,
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { path: string; size: number };
+    await this.rpc("host.fs.write", { agentId, path, base64: data.toString("base64") });
+    return { path, size: data.length };
   }
 
   async archivePaths(
     agentId: string,
     paths: string[],
   ): Promise<{ filename: string; buffer: Buffer }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/archive`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ paths }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const disposition = res.headers.get("content-disposition") ?? "";
-    const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match?.[1] ? decodeURIComponent(match[1]) : "archive.tar.gz";
-    return { filename, buffer };
+    const tar = await this.execWorkspace(agentId, ["tar", "-czf", "-", ...paths]);
+    return { filename: "archive.tar.gz", buffer: Buffer.from(tar.stdout, "binary") };
   }
 
   async extractArchive(
@@ -713,97 +600,45 @@ export class RunnerClient {
     archivePath: string,
     destination?: string,
   ): Promise<{ destination: string; ok: true }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/extract`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ path: archivePath, destination }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { destination: string; ok: true };
+    const dest = destination || "/";
+    await this.execWorkspace(agentId, ["tar", "-xzf", archivePath, "-C", dest]);
+    return { destination: dest, ok: true };
   }
 
-  async rename(
-    agentId: string,
-    oldPath: string,
-    newPath: string,
-  ): Promise<{ ok: true; path: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs/rename`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ oldPath, newPath }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { ok: true; path: string };
+  async rename(agentId: string, oldPath: string, newPath: string): Promise<{ ok: true; path: string }> {
+    return this.rpc("host.fs.rename", { agentId, oldPath, newPath });
   }
 
   async exportMigration(
     agentId: string,
-    body: {
-      sourceNodeId: string;
-      excludePatterns?: string[];
-      includePatterns?: string[];
-    },
+    body: { sourceNodeId: string; excludePatterns?: string[]; includePatterns?: string[] },
   ): Promise<{ archive: Buffer; manifest: MigrationManifest; archiveSha256: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/migration/export`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const sha = res.headers.get("x-archive-sha256") ?? "";
-    const manifestHeader = res.headers.get("x-migration-manifest");
-    const archive = Buffer.from(await res.arrayBuffer());
-    let manifest: MigrationManifest;
-    if (manifestHeader) {
-      manifest = JSON.parse(Buffer.from(manifestHeader, "base64url").toString("utf8")) as MigrationManifest;
-    } else {
-      manifest = {
-        version: 1,
-        agentId,
-        exportedAt: new Date().toISOString(),
-        sourceNodeId: body.sourceNodeId,
-        compression: "gzip",
-        excludePatterns: body.excludePatterns ?? [],
-        files: [],
-        totalBytes: archive.length,
-        fileCount: 0,
-      };
-    }
-    return { archive, manifest, archiveSha256: sha };
+    const arch = await this.archivePaths(agentId, ["."]);
+    const manifest: MigrationManifest = {
+      version: 1,
+      agentId,
+      exportedAt: new Date().toISOString(),
+      sourceNodeId: body.sourceNodeId,
+      compression: "gzip",
+      excludePatterns: body.excludePatterns ?? [],
+      files: [],
+      totalBytes: arch.buffer.length,
+      fileCount: 0,
+    };
+    return { archive: arch.buffer, manifest, archiveSha256: "" };
   }
 
   async importMigration(
     agentId: string,
     archive: Buffer,
-    opts?: { expectedSha256?: string; atomic?: boolean },
+    _opts?: { expectedSha256?: string; atomic?: boolean },
   ): Promise<{ ok: true; fileCount: number; workspaceRoot: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/migration/import`,
-      {
-        method: "POST",
-        headers: this.headers({
-          "Content-Type": "application/octet-stream",
-          ...(opts?.expectedSha256 ? { "X-Archive-Sha256": opts.expectedSha256 } : {}),
-          ...(opts?.atomic === false ? { "X-Atomic": "0" } : {}),
-        }),
-        body: archive,
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { ok: true; fileCount: number; workspaceRoot: string };
+    await this.uploadBytes(agentId, "/.migrate.tar.gz", archive);
+    await this.extractArchive(agentId, "/.migrate.tar.gz", "/");
+    return { ok: true, fileCount: 0, workspaceRoot: "/" };
   }
 
-  /** 在远程 Runner 上启动 Cloudflare Quick Tunnel */
-  async startExposure(input: {
+  async startExposure(_input: {
     exposureId: string;
     agentId: string;
     port: number;
@@ -811,48 +646,20 @@ export class RunnerClient {
     protocol?: "http" | "https" | "tcp";
     ttlMinutes?: number;
   }): Promise<{ publicUrl: string; relayHost: string; relayPort: number }> {
-    const res = await this.fetchImpl(`${this.baseUrl}/v1/exposures`, {
-      method: "POST",
-      headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(input),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || `startExposure failed (${res.status})`);
-    }
-    return (await res.json()) as {
-      publicUrl: string;
-      relayHost: string;
-      relayPort: number;
-    };
+    throw new Error("端口暴露改由控制面隧道处理；Go 代理不再内嵌 Quick Tunnel");
   }
 
-  async stopExposure(exposureId: string): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/exposures/${encodeURIComponent(exposureId)}`,
-      { method: "DELETE", headers: this.headers() },
-    );
-    if (!res.ok && res.status !== 404) {
-      const text = await res.text();
-      throw new Error(text || `stopExposure failed (${res.status})`);
-    }
-  }
+  async stopExposure(_exposureId: string): Promise<void> {}
 
-  /** Build a WorkspaceFs that proxies all ops to this Runner for one agent. */
   workspaceFs(agentId: string): WorkspaceFs {
     const client = this;
     return {
       async stat(path: string) {
-        const s = await client.statDetailed(agentId, path);
-        return {
-          path: s.path,
-          type: s.isDir ? ("dir" as const) : ("file" as const),
-          size: s.size,
-          mtime: s.modTime,
-        };
+        const s = await client.rpc<WorkspaceFsEntry>("host.fs.stat", { agentId, path });
+        return { path: s.path, type: s.isDir ? ("dir" as const) : ("file" as const), size: s.size, mtime: s.modTime };
       },
       async statDetailed(path: string) {
-        return client.statDetailed(agentId, path);
+        return client.rpc("host.fs.stat", { agentId, path });
       },
       async list(path: string) {
         const d = await client.listDetailed(agentId, path);
@@ -872,33 +679,26 @@ export class RunnerClient {
       async read(path: string) {
         const t = await client.readText(agentId, path);
         const lines = t.content.split("\n");
-        return {
-          path: t.path,
-          content: t.content,
-          truncated: false,
-          totalLines: lines.length,
-        };
+        return { path: t.path, content: t.content, truncated: false, totalLines: lines.length, startLine: 1 };
       },
       async readText(path: string) {
         return client.readText(agentId, path);
       },
       async write(path: string, content: string) {
         const r = await client.writeText(agentId, path, content);
-        return { path: r.path, bytes: Buffer.byteLength(content, "utf8") };
+        return { path: r.path, bytes: content.length };
       },
       async writeText(path: string, content: string, expectedRevision?: string | null) {
         return client.writeText(agentId, path, content, expectedRevision);
       },
       async edit(path: string, oldText: string, newText: string) {
         const cur = await client.readText(agentId, path);
-        if (!cur.content.includes(oldText)) throw new Error("old_text not found in file");
-        const updated = cur.content.replace(oldText, newText);
-        await client.writeText(agentId, path, updated);
-        return { path: cur.path, ok: true as const };
+        if (!cur.content.includes(oldText)) throw new Error("oldText 未找到");
+        await client.writeText(agentId, path, cur.content.replace(oldText, newText));
+        return { path, ok: true as const };
       },
       async mkdir(path: string) {
-        const r = await client.mkdir(agentId, path);
-        return { path: r.path };
+        return client.mkdir(agentId, path);
       },
       async mkdirApi(path: string) {
         return client.mkdir(agentId, path);
@@ -918,15 +718,15 @@ export class RunnerClient {
       },
       async exists(path: string) {
         try {
-          await client.statDetailed(agentId, path);
+          await client.rpc("host.fs.stat", { agentId, path });
           return true;
         } catch {
           return false;
         }
       },
       async readBytes(path: string) {
-        const file = await client.downloadBytes(agentId, path);
-        return { path, ...file };
+        const r = await client.downloadBytes(agentId, path);
+        return { path, data: r.data, size: r.size, name: r.name };
       },
       async writeBytes(path: string, data: Buffer) {
         return client.uploadBytes(agentId, path, data);
@@ -940,42 +740,30 @@ export class RunnerClient {
     };
   }
 
-  private async statDetailed(agentId: string, path: string): Promise<WorkspaceFsEntry> {
-    const url = new URL(`${this.baseUrl}/v1/agents/${encodeURIComponent(agentId)}/fs`);
-    url.searchParams.set("path", path || "/");
-    const res = await this.fetchImpl(url, { headers: this.headers() });
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as WorkspaceFsEntry;
-  }
-
-  // ── ACP Sidecar ────────────────────────────────────────────────────────────
-
   async ensureAcpSidecar(body: {
     agentId: string;
     image?: string;
     network?: string;
   }): Promise<{ dockerId: string; image: string; status: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(body.agentId)}/sidecar`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ image: body.image, network: body.network }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    const data = (await res.json()) as {
-      sidecar: { dockerId: string; image: string; status: string };
-    };
-    return data.sidecar;
+    const image = body.image || "sunwuyuan/zakura-acp-sidecar:latest";
+    const docker = (await this.ping()).docker;
+    if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法启动 ACP sidecar");
+    const mk = await this.rpc<{ abs?: string }>("host.fs.mkdir", { agentId: body.agentId, path: "/" });
+    const hostPath = mk.abs || `${(await this.ping()).storageRoot ?? ""}/agents/${body.agentId}/workspace`;
+    const running = await this.rpc<DockerInfo>("docker.run", {
+      name: `zakura-acp-${body.agentId}`.slice(0, 63),
+      image,
+      network: body.network,
+      labels: { "zakura.agent": body.agentId, "zakura.purpose": "acp-sidecar" },
+      volumes: [{ hostPath, containerPath: "/workspace" }],
+      workingDir: "/workspace",
+      restart: "unless-stopped",
+    });
+    return { dockerId: running.dockerId, image: running.image, status: running.status };
   }
 
   async stopAcpSidecar(agentId: string): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar`,
-      { method: "DELETE", headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
+    await this.rpc("docker.stop", { id: `zakura-acp-${agentId}`.slice(0, 63), remove: true }).catch(() => undefined);
   }
 
   async execInSidecar(
@@ -983,42 +771,25 @@ export class RunnerClient {
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar/exec`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ command, ...opts }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { exitCode: number; stdout: string; stderr: string };
+    return this.rpc("docker.exec", {
+      id: `zakura-acp-${agentId}`.slice(0, 63),
+      command,
+      workingDir: opts?.workingDir,
+      env: opts?.env,
+    });
   }
 
   async startStdioInSidecar(
     agentId: string,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
-  ): Promise<{ stdioId: string; agentId: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/sidecar/stdio`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ command, ...opts }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { stdioId: string; agentId: string };
+  ) {
+    return this.startStdio(agentId, command, {
+      ...opts,
+      dockerId: `zakura-acp-${agentId}`.slice(0, 63),
+    });
   }
 
-  /**
-   * 确保 (agent × adapter × chat session) 的 adapter 容器在运行。
-   * adapter 二进制即容器 CMD（PID 1），凭据挂在专属 volume 上。
-   *
-   * sessionKey 是必填：Docker 会把 PID 1 的 stdout 广播给所有 attach 方，
-   * 并把它们的 stdin 合流，所以一个容器同时只能服务一个 JSON-RPC 对端。
-   */
   async ensureAcpAdapterContainer(
     agentId: string,
     adapterId: string,
@@ -1030,73 +801,83 @@ export class RunnerClient {
       specHash?: string;
     },
   ): Promise<{ dockerId: string; image: string; status: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/ensure`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
+    const docker = (await this.ping()).docker;
+    if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法启动 ACP adapter");
+    const mk = await this.rpc<{ abs?: string }>("host.fs.mkdir", { agentId, path: "/" });
+    const info = await this.ping();
+    const hostPath = mk.abs || `${info.storageRoot ?? ""}/agents/${agentId}/workspace`;
+    const name = `zakura-acpa-${agentId}-${adapterId}-${body.sessionKey}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
+    const running = await this.rpc<DockerInfo>("docker.run", {
+      name,
+      image: body.image,
+      network: body.network,
+      env: body.env,
+      labels: {
+        "zakura.agent": agentId,
+        "zakura.purpose": "acp-adapter",
+        "zakura.adapter": adapterId,
       },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { dockerId: string; image: string; status: string };
+      volumes: [{ hostPath, containerPath: "/workspace" }],
+      workingDir: "/workspace",
+      restart: "no",
+      stdinOpen: true,
+    });
+    return { dockerId: running.dockerId, image: running.image, status: running.status };
   }
 
-  /**
-   * Attach 到 adapter 容器 PID 1 的 stdio。
-   * 返回的 stdioId 与 startStdioInSidecar 同源，可复用现有
-   * stream / stdin / kill 端点。
-   */
+  async execDocker(
+    id: string,
+    command: string[],
+    opts?: { workingDir?: string; env?: Record<string, string> },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return this.rpc("docker.exec", { id, command, workingDir: opts?.workingDir, env: opts?.env });
+  }
+
+  async attachContainer(dockerId: string): Promise<{
+    writable: WritableStream<Uint8Array>;
+    readable: ReadableStream<Uint8Array>;
+    kill: () => Promise<void>;
+    onStderr: (fn: (chunk: string) => void) => () => void;
+  }> {
+    return this.startStdio("", [], { dockerId, attach: true });
+  }
+
   async attachStdioInAdapter(
     agentId: string,
     adapterId: string,
     sessionKey: string,
   ): Promise<{ stdioId: string; agentId: string; adapterId: string }> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/attach`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ sessionKey }),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as { stdioId: string; agentId: string; adapterId: string };
+    const name = `zakura-acpa-${agentId}-${adapterId}-${sessionKey}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
+    const r = await this.rpc<{ id: string }>("docker.attach", { id: name });
+    return { stdioId: r.id, agentId, adapterId };
   }
 
-  async removeAcpAdapterContainer(
-    agentId: string,
-    adapterId: string,
-    sessionKey: string,
-  ): Promise<void> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}?sessionKey=${encodeURIComponent(sessionKey)}`,
-      { method: "DELETE", headers: this.headers() },
-    );
-    if (!res.ok) throw new Error(await res.text());
+  async removeAcpAdapterContainer(agentId: string, adapterId: string, sessionKey: string): Promise<void> {
+    const name = `zakura-acpa-${agentId}-${adapterId}-${sessionKey}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
+    await this.rpc("docker.stop", { id: name, remove: true }).catch(() => undefined);
   }
 
-  /**
-   * Open an interactive PTY inside the adapter container so a human can run
-   * the agent's CLI login. Credentials land on the adapter's cred volume,
-   * which is why this must exec into that exact container rather than the
-   * agent workspace.
-   */
   async startAcpAdapterLoginShell(
     agentId: string,
     adapterId: string,
-    body: { sessionKey?: string; command?: string[]; cols?: number; rows?: number },
+    opts?: {
+      command?: string[];
+      env?: Record<string, string>;
+      sessionKey?: string;
+      cols?: number;
+      rows?: number;
+    },
   ): Promise<ShellJobSnapshot> {
-    const res = await this.fetchImpl(
-      `${this.baseUrl}/v1/workspaces/${encodeURIComponent(agentId)}/acp-adapters/${encodeURIComponent(adapterId)}/login-shell`,
-      {
-        method: "POST",
-        headers: this.headers({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return (await res.json()) as ShellJobSnapshot;
+    const name = `zakura-acpa-${agentId}-${adapterId}-${opts?.sessionKey ?? ""}`
+      .replace(/[^a-zA-Z0-9_.-]/g, "-")
+      .slice(0, 63);
+    const docker = (await this.ping()).docker;
+    if (!docker?.ok) throw new Error(docker?.error || "Docker 不可用，无法打开 ACP 登录壳");
+    void opts?.cols;
+    void opts?.rows;
+    const inner = opts?.command?.length ? opts.command : ["sh"];
+    return this.startExecJob(agentId, ["docker", "exec", "-i", name, ...inner], {
+      env: opts?.env,
+    });
   }
-
 }

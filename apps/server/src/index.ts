@@ -45,6 +45,7 @@ import {
 } from "./services/bootstrap.js";
 import { runMigrations } from "./db/migrate.js";
 import { RuntimeNodeService } from "./services/runtime-nodes.js";
+import { RunnerHub } from "./services/runner-hub.js";
 import { MigrationService } from "./services/migration-service.js";
 import { ServerWorkspaceFsProvider } from "./services/workspace-fs-provider.js";
 import { NetworkAuditService } from "./services/network-audit.js";
@@ -131,6 +132,8 @@ async function main() {
     });
   const gateway = new McpGateway(db, orchestrator, runtime);
   const runtimeNodes = new RuntimeNodeService(db, config);
+  const runnerHub = new RunnerHub(db);
+  runtimeNodes.bindHub(runnerHub);
   const agentService = new AgentService(db, runtime, config, runtimeNodes);
   const memoryStore = new MemoryStore(db);
   const memoryProviders = new MemoryProvidersService(db);
@@ -177,14 +180,8 @@ async function main() {
     networkAudit,
   );
   exposures.setRuntimeNodes(runtimeNodes);
-  // Seed implicit local runner when a tenant already exists
   const defaultTenant = await getDefaultTenant(db);
   if (defaultTenant) {
-    await runtimeNodes.ensureLocalNode(defaultTenant.id).catch((err) => {
-      telemetry.recordFault("runtime_nodes.seed_local", err, {
-        subsystem: "runtime_nodes",
-      });
-    });
     await networkSettings.ensureTenantDefaults(defaultTenant.id).catch((err) => {
       telemetry.recordFault("network.seed_defaults", err, { subsystem: "network" });
     });
@@ -465,6 +462,7 @@ async function main() {
     config,
     agentService,
   });
+  runnerHub.attach(server as import("node:http").Server);
 }
 
 main().catch((err) => {

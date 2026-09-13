@@ -30,7 +30,6 @@ services:
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     volumes:
       - zakura-dev-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     depends_on:
       redis-dev:

@@ -27,37 +27,6 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
-  apps/runner:
-    dependencies:
-      '@hono/node-server':
-        specifier: ^1.14.3
-        version: 1.19.14(hono@4.12.29)
-      '@zakura/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@zakura/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
-      dockerode:
-        specifier: ^4.0.6
-        version: 4.0.12
-      hono:
-        specifier: ^4.7.11
-        version: 4.12.29
-    devDependencies:
-      '@types/dockerode':
-        specifier: ^3.3.38
-        version: 3.3.47
-      '@types/node':
-        specifier: ^22.15.30
-        version: 22.20.1
-      tsx:
-        specifier: ^4.19.4
-        version: 4.23.0
-      typescript:
-        specifier: ^5.8.3
-        version: 5.9.3
-
   apps/server:
     dependencies:
       '@agentclientprotocol/sdk':

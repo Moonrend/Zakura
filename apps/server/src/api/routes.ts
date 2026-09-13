@@ -426,10 +426,13 @@ export async function createApiApp(deps: {
       await withLogContext(idsFromSession(c.get("session")), next);
       return;
     }
-    // Host-served bootstrap script (token in query; validated in route)
+    // 安装脚本（query 里的 rnr_ token 由路由校验）和公开二进制下载
     if (
       c.req.method === "GET" &&
-      /^\/api\/runtime-nodes\/[^/]+\/bootstrap\.sh$/.test(c.req.path)
+      (/^\/api\/runtime-nodes\/[^/]+\/(bootstrap\.sh|install\.sh|install\.ps1)$/.test(
+        c.req.path,
+      ) ||
+        /^\/api\/runtime-nodes\/agent-binaries\/[^/]+\/[^/]+$/.test(c.req.path))
     ) {
       await withLogContext(idsFromSession(c.get("session")), next);
       return;
@@ -1929,6 +1932,7 @@ export async function createApiApp(deps: {
       memoryProviderId?: string | null;
       workspaceImage?: string | null;
       runtimeNodeId?: string | null;
+      workspaceKind?: "host" | "container";
       config?: Record<string, unknown>;
       restart?: boolean;
     }>();
@@ -1962,7 +1966,15 @@ export async function createApiApp(deps: {
     try {
       const body = (await c.req.json().catch(() => ({}))) as {
         runtimeNodeId?: string | null;
+        workspaceKind?: "host" | "container";
       };
+      if (body.workspaceKind || body.runtimeNodeId !== undefined) {
+        await agentService.update(session.tenantId, c.req.param("id"), {
+          runtimeNodeId: body.runtimeNodeId,
+          workspaceKind: body.workspaceKind,
+          userId: session.userId,
+        });
+      }
       const agent = await agentService.startAsync(session.tenantId, c.req.param("id"), {
         ...(Object.prototype.hasOwnProperty.call(body, "runtimeNodeId")
           ? { runtimeNodeId: body.runtimeNodeId ?? null }
@@ -2693,7 +2705,6 @@ export async function createApiApp(deps: {
             detail: opts?.detail,
           }),
         onTenantCreated: async (tenantId: string) => {
-          await runtimeNodes?.ensureLocalNode(tenantId).catch(() => undefined);
           await networkSettings?.ensureTenantDefaults(tenantId).catch(() => undefined);
           const defaults = await getAgentWebDefaults(db);
           const services = platformServices

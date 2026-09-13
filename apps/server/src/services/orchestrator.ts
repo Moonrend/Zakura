@@ -1,4 +1,4 @@
-import { and, eq, ne, notInArray } from "drizzle-orm";
+import { and, eq, isNull, ne, notInArray, or } from "drizzle-orm";
 import {
   componentLogger,
   decryptJson,
@@ -12,11 +12,11 @@ import {
   type RunnerClient,
 } from "@zakura/core";
 import { LOCAL_RUNTIME_NODE_ID } from "@zakura/shared";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
+  agentBindings,
+  agents,
   componentInstances,
   managedContainers,
   newId,
@@ -78,40 +78,6 @@ export class InstanceNotFoundError extends Error {
     super(`Instance not found: ${instanceId}`);
     this.name = "InstanceNotFoundError";
   }
-}
-
-/**
- * Prepare a bind-mount host path.
- * - Existing file/dir: leave as-is (never mkdir over a file).
- * - Docker engine paths (socket): skip — resolved inside Docker Desktop / Linux VM.
- * - Missing path that looks like a file (or read-only mount): ensure parent dir, require file to exist.
- * - Otherwise create a directory (workspace data mounts).
- */
-function ensureVolumeHostPath(hostPath: string, readOnly?: boolean): void {
-  const normalized = hostPath.replace(/\\/g, "/");
-  // Docker socket / engine paths are not necessarily present on the Node host FS
-  // (e.g. Docker Desktop on Windows uses the Linux VM path).
-  if (
-    normalized === "/var/run/docker.sock" ||
-    normalized.endsWith("/docker.sock") ||
-    normalized.startsWith("//./pipe/") ||
-    /^\/(var\/)?run\//.test(normalized)
-  ) {
-    return;
-  }
-  if (existsSync(hostPath)) {
-    return;
-  }
-  const base = normalized.split("/").pop() ?? "";
-  const looksLikeFile = /\.[A-Za-z0-9]+$/.test(base);
-  if (looksLikeFile || readOnly) {
-    mkdirSync(dirname(hostPath), { recursive: true });
-    if (!existsSync(hostPath)) {
-      throw new Error(`Required volume host file missing: ${hostPath}`);
-    }
-    return;
-  }
-  mkdirSync(hostPath, { recursive: true });
 }
 
 function mergeMaskedConfig(
@@ -194,12 +160,26 @@ export class Orchestrator {
 
   constructor(
     private readonly db: Db,
-    private readonly runtime: DockerRuntime,
+    runtime: DockerRuntime,
     private readonly config: AppConfig,
-  ) {}
+  ) {
+    void runtime;
+  }
 
   setRuntimeNodes(nodes: RuntimeNodeService): void {
     this.nodes = nodes;
+  }
+
+  /** stdio MCP 跑在当前绑定 Agent 所选 runner 上，不读 instance.runtime_node_id。 */
+  async resolveStdioRuntimeNodeId(tenantId: string, instance: ComponentInstance): Promise<string> {
+    const bound = await this.db
+      .select({ runtimeNodeId: agents.runtimeNodeId, workspaceKind: agents.workspaceKind })
+      .from(agentBindings)
+      .innerJoin(agents, eq(agents.id, agentBindings.agentId))
+      .where(and(eq(agentBindings.instanceId, instance.id), eq(agentBindings.tenantId, tenantId)));
+    const fromAgent = bound.map((b) => b.runtimeNodeId).find((id) => id && !isLocalRuntimeNodeId(id));
+    if (fromAgent) return fromAgent;
+    throw new Error("请先把该 MCP 绑定到一台已选择电脑/服务器的 Agent");
   }
 
   /** 实例停止后清预缓存 */
@@ -428,91 +408,9 @@ export class Orchestrator {
     let recovered = 0;
     let failed = 0;
 
-    for (const row of rows) {
-      // 远端 runtime node 的容器不由本进程的 docker 客户端管理，跳过以免误判
-      if (!isLocalRuntimeNodeId(row.runtimeNodeId)) continue;
-
-      const containerRows = await this.db.query.managedContainers.findMany({
-        where: and(
-          eq(managedContainers.instanceId, row.id),
-          eq(managedContainers.tenantId, row.tenantId),
-        ),
-      });
-      // 无托管容器的实例（纯远端 HTTP MCP）不涉及容器存活问题
-      if (containerRows.length === 0) continue;
-
+    for (const _row of rows) {
+      // 容器生命周期在 zakura-agent 上；控制面不再对照本机 docker.sock。
       checked += 1;
-
-      let alive = true;
-      for (const c of containerRows) {
-        if (!c.dockerId) {
-          alive = false;
-          break;
-        }
-        try {
-          const info = await this.runtime.inspect(c.dockerId);
-          // inspect 对不存在的容器返回 null；exited/dead 也视为不可用
-          if (!info || info.status === "exited" || info.status === "dead") {
-            alive = false;
-            break;
-          }
-        } catch {
-          alive = false;
-          break;
-        }
-      }
-
-      if (alive) continue;
-
-      ghosts += 1;
-      componentLogger("orch").warn(
-        "ghost instance detected: marked running but container is gone; recovering",
-        { instanceId: row.id, slug: row.slug, providerId: row.providerId },
-      );
-
-      try {
-        await this.db
-          .update(componentInstances)
-          .set({
-            status: "stopped",
-            lastError: "container disappeared; auto-recovered by health check",
-            updatedAt: new Date(),
-          })
-          .where(
-            and(eq(componentInstances.id, row.id), eq(componentInstances.tenantId, row.tenantId)),
-          );
-
-        // 清掉指向已消失容器的陈旧记录。startInstance 只会删除 docker 中仍存在的
-        // 同名容器对应的行，幽灵行的 dockerId 已查不到，不清理就会永久残留，
-        // 导致后续自检每轮都判定该实例 not alive 而反复重建。
-        for (const c of containerRows) {
-          if (!c.dockerId) continue;
-          let stale = false;
-          try {
-            stale = (await this.runtime.inspect(c.dockerId)) === null;
-          } catch {
-            stale = true;
-          }
-          if (stale) {
-            await this.db.delete(managedContainers).where(eq(managedContainers.id, c.id));
-          }
-        }
-
-        await this.startInstance(row.tenantId, row.id);
-        recovered += 1;
-        componentLogger("orch").info("ghost instance recovered", {
-          instanceId: row.id,
-          slug: row.slug,
-        });
-      } catch (err) {
-        failed += 1;
-        getTelemetry().mcpErrors.inc({ kind: "orch_ghost_recover" });
-        componentLogger("orch").error("ghost instance recovery failed", {
-          instanceId: row.id,
-          slug: row.slug,
-          err: String(err),
-        });
-      }
     }
 
     const result = { checked, ghosts, recovered, failed };
@@ -592,17 +490,14 @@ export class Orchestrator {
       const plugin = globalRegistry.get(instance.providerId);
       const config = decryptJson<Record<string, unknown>>(this.config.secret, instance.configEnc);
 
-      const useRunner =
-        !isLocalRuntimeNodeId(instance.runtimeNodeId) && instance.providerId === "stdio-mcp";
+      const useRunner = instance.providerId === "stdio-mcp";
       let advertiseHost: string | null = null;
       let runnerClient: RunnerClient | null = null;
       let runnerNode: RuntimeNode | null = null;
       if (useRunner) {
         if (!this.nodes) throw new Error("RuntimeNodeService 未挂载，无法在 Runner 上启动");
-        const { client, node } = await this.nodes.requireRunnerClient(
-          tenantId,
-          instance.runtimeNodeId!,
-        );
+        const execNodeId = await this.resolveStdioRuntimeNodeId(tenantId, instance);
+        const { client, node } = await this.nodes.requireRunnerClient(tenantId, execNodeId);
         runnerClient = client;
         runnerNode = node;
         advertiseHost = advertiseHostFromNode(node);
@@ -646,13 +541,17 @@ export class Orchestrator {
       let endpointUrl = instance.endpointUrl ?? spec.endpointTemplate ?? null;
 
       if (runnerClient && runnerNode) {
-        // 远程 Runner：清空旧 managed_containers 记录后按 spec 启动
+        // 只清本执行节点上的旧容器，其它 runner 上的共享 MCP 容器留下
         await this.db
           .delete(managedContainers)
           .where(
             and(
               eq(managedContainers.instanceId, instanceId),
               eq(managedContainers.tenantId, tenantId),
+              or(
+                eq(managedContainers.runtimeNodeId, runnerNode.id),
+                isNull(managedContainers.runtimeNodeId),
+              ),
             ),
           );
 
@@ -726,86 +625,7 @@ export class Orchestrator {
           }
         }
       } else {
-        const ping = await this.runtime.ping();
-        if (!ping.ok) {
-          throw new Error(`Docker 不可用: ${ping.error}`);
-        }
-
-        await this.runtime.ensureNetwork(this.config.dockerNetwork);
-
-        for (const containerSpec of spec.containers) {
-          const dataSubdir = join(this.config.dataDir, instance.providerId, instance.id);
-          mkdirSync(dataSubdir, { recursive: true });
-
-          const volumes = (containerSpec.volumes ?? []).map((v) => {
-            if (v.hostPath) {
-              ensureVolumeHostPath(v.hostPath, v.readOnly);
-            }
-            return v;
-          });
-
-          const name = this.runtime.buildSpecName(tenant.slug, instance.slug, containerSpec.name);
-
-          const existing = await this.runtime.list({
-            tenantId: instance.tenantId,
-            instanceId: instance.id,
-          });
-          for (const ex of existing) {
-            if (ex.name === name) {
-              await this.runtime.remove(ex.id, true);
-              await this.db
-                .delete(managedContainers)
-                .where(eq(managedContainers.dockerId, ex.id));
-            }
-          }
-
-          this.emitProgress(
-            instance,
-            "pull_image",
-            `拉取镜像 ${containerSpec.image}（首次可能需要几分钟）`,
-          );
-          await this.runtime.ensureImage(containerSpec.image);
-          this.emitProgress(instance, "image_ready", `镜像就绪：${containerSpec.image}`, "ok");
-
-          const running = await this.runtime.createAndStart({
-            tenantId: instance.tenantId,
-            instanceId: instance.id,
-            purpose: containerSpec.purpose ?? "component",
-            spec: {
-              ...containerSpec,
-              name,
-              volumes,
-              network: containerSpec.network ?? this.config.dockerNetwork,
-            },
-          });
-
-          const now = new Date();
-          await this.db.insert(managedContainers).values({
-            id: newId(),
-            tenantId: instance.tenantId,
-            instanceId: instance.id,
-            dockerId: running.id,
-            name: running.name,
-            image: running.image,
-            purpose: containerSpec.purpose ?? "component",
-            status: running.status,
-            labelsJson: JSON.stringify(running.labels),
-            portsJson: JSON.stringify(running.ports),
-            envEnc: containerSpec.env
-              ? encryptJson(this.config.secret, containerSpec.env)
-              : null,
-            runtimeNodeId: null,
-            createdAt: now,
-            updatedAt: now,
-          });
-
-          if (containerSpec.name === spec.primaryContainer || spec.containers.length === 1) {
-            const published = running.ports.find((p) => p.hostPort);
-            if (published?.hostPort) {
-              endpointUrl = ctx.resolveEndpoint(published.hostPort);
-            }
-          }
-        }
+        throw new Error("有容器的组件必须在已绑定 Agent 的 zakura-agent 上启动，控制面不再使用本机 Docker");
       }
 
       await this.db
@@ -853,38 +673,30 @@ export class Orchestrator {
         and(eq(componentInstances.id, instanceId), eq(componentInstances.tenantId, tenantId)),
       );
 
-    const useRunner = !isLocalRuntimeNodeId(instance.runtimeNodeId);
-    if (useRunner && this.nodes) {
+    const execNodeIds = [
+      ...new Set(
+        containers
+          .map((c) => c.runtimeNodeId)
+          .concat(instance.runtimeNodeId)
+          .filter((id): id is string => Boolean(id) && !isLocalRuntimeNodeId(id)),
+      ),
+    ];
+    for (const execNodeId of execNodeIds) {
+      if (!this.nodes) break;
       try {
-        const { client } = await this.nodes.requireRunnerClient(
-          tenantId,
-          instance.runtimeNodeId!,
-          { allowOffline: true },
-        );
+        const { client } = await this.nodes.requireRunnerClient(tenantId, execNodeId, {
+          allowOffline: true,
+        });
         await client.stopInstance(instanceId, true);
       } catch (err) {
         recordPlatformFault("orch.runner_stop", err, { subsystem: "orch" });
       }
-      for (const c of containers) {
-        await this.db
-          .update(managedContainers)
-          .set({ status: "removed", dockerId: null, updatedAt: new Date() })
-          .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
-      }
-    } else {
-      for (const c of containers) {
-        if (!c.dockerId) continue;
-        try {
-          await this.runtime.stop(c.dockerId);
-          await this.runtime.remove(c.dockerId, true);
-        } catch (err) {
-          recordPlatformFault("orch.container_stop", err, { subsystem: "orch" });
-        }
-        await this.db
-          .update(managedContainers)
-          .set({ status: "removed", dockerId: null, updatedAt: new Date() })
-          .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
-      }
+    }
+    for (const c of containers) {
+      await this.db
+        .update(managedContainers)
+        .set({ status: "removed", dockerId: null, updatedAt: new Date() })
+        .where(and(eq(managedContainers.id, c.id), eq(managedContainers.tenantId, tenantId)));
     }
 
     await this.db
@@ -986,32 +798,22 @@ export class Orchestrator {
     ports?: Array<{ containerPort: number; hostPort?: number }>;
     runtimeNodeId?: string | null;
   }) {
-    const ping = await this.runtime.ping();
-    if (!ping.ok) {
-      throw new Error(`Docker 不可用: ${ping.error}`);
+    if (!input.runtimeNodeId || isLocalRuntimeNodeId(input.runtimeNodeId)) {
+      throw new Error("allocateContainer 必须指定在线的 zakura-agent 节点");
     }
-    await this.runtime.ensureNetwork(this.config.dockerNetwork);
+    if (!this.nodes) throw new Error("RuntimeNodeService 未挂载");
+    const { client } = await this.nodes.requireRunnerClient(input.tenantId, input.runtimeNodeId);
     const name =
       input.name ??
       `zakura-alloc-${input.tenantId.slice(0, 6)}-${Date.now().toString(36)}`.slice(0, 63);
-
-    await this.runtime.ensureImage(input.image);
-
-    const running = await this.runtime.createAndStart({
+    const running = await client.startInstance({
+      instanceId: name,
       tenantId: input.tenantId,
-      purpose: input.purpose ?? "ephemeral",
-      allocatedTo: input.allocatedTo,
-      spec: {
-        name,
-        image: input.image,
-        purpose: input.purpose ?? "ephemeral",
-        // Keep allocated containers alive unless caller provides a command
-        command: input.command?.length ? input.command : ["sleep", "infinity"],
-        env: input.env,
-        ports: input.ports,
-        network: this.config.dockerNetwork,
-        restartPolicy: "no",
-      },
+      name,
+      image: input.image,
+      env: input.env,
+      command: input.command?.length ? input.command : ["sleep", "infinity"],
+      ports: input.ports,
     });
 
     const now = new Date();
@@ -1020,12 +822,12 @@ export class Orchestrator {
       .values({
         id: newId(),
         tenantId: input.tenantId,
-        dockerId: running.id,
+        dockerId: running.dockerId,
         name: running.name,
         image: running.image,
         purpose: input.purpose ?? "ephemeral",
         status: running.status,
-        labelsJson: JSON.stringify(running.labels),
+        labelsJson: "{}",
         portsJson: JSON.stringify(running.ports),
         allocatedTo: input.allocatedTo,
         envEnc: input.env ? encryptJson(this.config.secret, input.env) : null,

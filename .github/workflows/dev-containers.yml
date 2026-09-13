@@ -20,7 +20,6 @@ on:
         options:
           - all
           - app
-          - runner
           - workspace
           - workspace-lite
 
@@ -89,15 +88,7 @@ jobs:
             context: .
             timeout: 60
             workspace_tags: "false"
-            build_args: ""
-            target: ""
-          - name: runner
-            image: zakura-runner-dev
-            dockerfile: docker/runner/Dockerfile
-            context: .
-            timeout: 60
-            workspace_tags: "false"
-            build_args: ""
+            build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
             target: ""
           - name: workspace
             image: zakura-workspace-dev

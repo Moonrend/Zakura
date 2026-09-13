@@ -1,5 +1,4 @@
 import {
-  LocalWorkspaceFs,
   type WorkspaceFs,
   type WorkspaceFsProvider,
 } from "@zakura/core";
@@ -49,7 +48,7 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
   async forAgentBinding(binding: AgentFsBinding): Promise<WorkspaceFs> {
     const nodeId = binding.runtimeNodeId;
     if (!nodeId || nodeId === LOCAL_RUNTIME_NODE_ID) {
-      return this.openLocal(binding.id);
+      throw new Error("该 Agent 未绑定运行节点，无法访问工作区文件");
     }
 
     const cacheKey = `${binding.id}:${nodeId}`;
@@ -66,7 +65,7 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
     );
     // local 节点不应走到 requireRunnerClient；双保险
     if (node.kind === "local") {
-      return this.openLocal(binding.id);
+      throw new Error("旧本机节点已停用，请重装 zakura-agent");
     }
     const clientFs = client.workspaceFs(binding.id);
     this.runnerFsCache.set(cacheKey, {
@@ -74,12 +73,6 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
       expiresAt: Date.now() + 30_000,
     });
     return clientFs;
-  }
-
-  /** 本机磁盘；LocalWorkspaceFs 构造时会 ensureWorkspaceDir */
-  private openLocal(agentId: string): WorkspaceFs {
-    const root = agentWorkspaceHostPath(this.config, agentId);
-    return new LocalWorkspaceFs(root);
   }
 
   /** Invalidate cached Runner FS (e.g. after migrate / rebind). */

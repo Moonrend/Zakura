@@ -2,23 +2,13 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { Check, Copy, Download } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import type { RunnerInstallPackage } from "@/lib/runners";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
-}
-
-function downloadText(filename: string, text: string) {
-  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function CopyBlock({
@@ -61,7 +51,7 @@ function CopyBlock({
   );
 }
 
-type TabId = "curl" | "compose" | "docker";
+type TabId = "unix" | "windows";
 
 export function RunnerInstallPanel({
   install,
@@ -70,63 +60,42 @@ export function RunnerInstallPanel({
   install: RunnerInstallPackage;
   compact?: boolean;
 }) {
-  const [tab, setTab] = useState<TabId>("curl");
+  const [tab, setTab] = useState<TabId>("unix");
   const installCurl =
     install.installCurl?.trim() ||
-    (install.bootstrapUrl
-      ? `curl -fsSL ${JSON.stringify(install.bootstrapUrl)} | sudo bash`
+    (install.installShUrl
+      ? `curl -fsSL ${JSON.stringify(install.installShUrl)} | sh`
       : "");
-  const dockerRun = install.dockerRun?.trim() || "";
-  const compose = install.compose?.trim() || "";
+  const ps1 = install.installPs1Url
+    ? `irm ${JSON.stringify(install.installPs1Url)} | iex`
+    : "";
 
   return (
     <div className="space-y-3">
-      {install.enableTailscale && install.tsHostname ? (
-        <p className="text-xs text-muted-foreground font-mono">{install.tsHostname}</p>
+      {install.needsReinstall ? (
+        <p className="text-xs text-destructive">旧协议节点，请按下方脚本重装 Go 代理。</p>
       ) : null}
 
       <Tabs
         value={tab}
         onValueChange={(v) => {
-          if (v === "curl" || v === "compose" || v === "docker") setTab(v);
+          if (v === "unix" || v === "windows") setTab(v);
         }}
       >
         <TabsList
           variant="line"
           className="scrollbar-subtle scrollbar-x-compact scrollbar-edge-pad -mx-1 w-[calc(100%+0.5rem)] justify-start overflow-x-auto px-1"
         >
-          <TabsTrigger value="curl">一键安装</TabsTrigger>
-          <TabsTrigger value="compose">Compose</TabsTrigger>
-          <TabsTrigger value="docker">Docker run</TabsTrigger>
+          <TabsTrigger value="unix">Linux / macOS</TabsTrigger>
+          <TabsTrigger value="windows">Windows</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="curl" className="mt-3 space-y-2">
+        <TabsContent value="unix" className="mt-3 space-y-2">
           <CopyBlock value={installCurl} compact={compact} label="复制" />
         </TabsContent>
 
-        <TabsContent value="compose" className="mt-3 space-y-2">
-          <div className="flex flex-wrap items-center gap-2">
-            {compose ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => downloadText("docker-compose.yml", compose)}
-              >
-                <Download className="size-3.5" />
-                下载
-              </Button>
-            ) : null}
-          </div>
-          <CopyBlock value={compose} compact={compact} label="复制" />
-          <CopyBlock
-            value={`mkdir -p /var/zakura/${install.slug} && cd /var/zakura/${install.slug} && docker compose up -d`}
-            compact
-            label="复制启动"
-          />
-        </TabsContent>
-
-        <TabsContent value="docker" className="mt-3 space-y-2">
-          <CopyBlock value={dockerRun} compact={compact} label="复制" />
+        <TabsContent value="windows" className="mt-3 space-y-2">
+          <CopyBlock value={ps1} compact={compact} label="复制" />
         </TabsContent>
       </Tabs>
     </div>

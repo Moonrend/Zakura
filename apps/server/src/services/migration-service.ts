@@ -90,8 +90,10 @@ export class MigrationService {
       throw new Error("Agent workspace is locked or already migrating");
     }
 
-    const local = await this.nodes.ensureLocalNode(tenantId);
-    const sourceNodeId = agent.runtimeNodeId ?? local.id;
+    if (!agent.runtimeNodeId) {
+      throw new Error("请先绑定一台电脑或服务器，再迁移工作区");
+    }
+    const sourceNodeId = agent.runtimeNodeId;
     const targetNodeId = input.targetNodeId;
 
     if (sourceNodeId === targetNodeId) {

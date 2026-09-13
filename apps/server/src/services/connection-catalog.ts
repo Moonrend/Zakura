@@ -652,15 +652,17 @@ export class ConnectionCatalogService {
         packageIndex:
           typeof req.config?.packageIndex === "number" ? req.config.packageIndex : undefined,
       });
-      const needsRunner = plan.providerId === "stdio-mcp";
       const instance = await this.orchestrator.createInstance({
         tenantId,
         providerId: plan.providerId,
         name: req.name?.trim() || plan.name,
         slug: plan.slug,
         config: plan.config,
-        runtimeNodeId: needsRunner ? (req.runtimeNodeId ?? null) : null,
+        runtimeNodeId: null,
       });
+      if (agentIds.length) {
+        await this.agents.bindInstanceToAgents(tenantId, instance.id, agentIds);
+      }
       let started = false;
       let authRequired = false;
       try {
@@ -672,9 +674,6 @@ export class ConnectionCatalogService {
         }
       } catch {
         /* leave */
-      }
-      if (agentIds.length) {
-        await this.agents.bindInstanceToAgents(tenantId, instance.id, agentIds);
       }
       if (server.skills?.length && agentIds.length) {
         for (const skill of server.skills) {
@@ -716,7 +715,7 @@ export class ConnectionCatalogService {
       }
       return {
         id: `instance:${instance.id}`,
-        kind: server.isPlugin ? "plugin" : needsRunner ? "mcp-stdio" : "mcp-http",
+        kind: server.isPlugin ? "plugin" : plan.providerId === "stdio-mcp" ? "mcp-stdio" : "mcp-http",
         name: instance.name,
         status: started ? "running" : "stopped",
         authRequired,

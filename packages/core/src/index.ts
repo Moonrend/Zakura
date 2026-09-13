@@ -59,7 +59,7 @@ export type {
 } from "./migration-archive.js";
 export { generateRunnerToken, hashRunnerToken, isRunnerToken } from "./runner-token.js";
 export { RunnerClient } from "./runner-client.js";
-export type { RunnerClientOptions } from "./runner-client.js";
+export type { RunnerClientOptions, HubRpc } from "./runner-client.js";
 export {
   toDockerHostPath,
   unwrapShellCommand,

@@ -18,7 +18,6 @@ on:
         options:
           - all
           - app
-          - runner
           - workspace
 
 permissions:
@@ -98,14 +97,7 @@ jobs:
             context: .
             timeout: 60
             workspace_tags: "false"
-            build_args: ""
-          - name: runner
-            image: zakura-runner
-            dockerfile: docker/runner/Dockerfile
-            context: .
-            timeout: 60
-            workspace_tags: "false"
-            build_args: ""
+            build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
           - name: workspace
             image: zakura-workspace
             dockerfile: docker/workspace/Dockerfile
@@ -245,7 +237,7 @@ jobs:
             echo "### Pull (Docker Hub)"
             echo
             echo '```bash'
-            for img in zakura zakura-runner zakura-workspace; do
+            for img in zakura zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 echo "docker pull ${DH_USER}/${img}:${VERSION}"
               fi
@@ -255,7 +247,7 @@ jobs:
             echo "### Pull (GHCR)"
             echo
             echo '```bash'
-            for img in zakura zakura-runner zakura-workspace; do
+            for img in zakura zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 echo "docker pull ${REGISTRY}/${OWNER}/${img}:${VERSION}"
               fi
@@ -264,7 +256,7 @@ jobs:
             echo
             echo "### Digests"
             echo
-            for img in zakura zakura-runner zakura-workspace; do
+            for img in zakura zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 digest="$(tr -d '[:space:]' < "digests/${img}.txt")"
                 echo "- \`${DH_USER}/${img}@${digest}\`"
@@ -278,9 +270,6 @@ jobs:
             echo "|-------|------|"
             if [[ -f digests/zakura.txt ]]; then
               echo "| \`${DH_USER}/zakura\` / \`${REGISTRY}/${OWNER}/zakura\` | \`${VERSION}\`, minor/major, \`latest\` |"
-            fi
-            if [[ -f digests/zakura-runner.txt ]]; then
-              echo "| \`${DH_USER}/zakura-runner\` / \`${REGISTRY}/${OWNER}/zakura-runner\` | \`${VERSION}\`, minor/major, \`latest\` |"
             fi
             if [[ -f digests/zakura-workspace.txt ]]; then
               echo "| \`${DH_USER}/zakura-workspace\` / \`${REGISTRY}/${OWNER}/zakura-workspace\` | \`${VERSION}\`, \`debian-${VERSION}\`, \`debian\`, \`latest\` |"

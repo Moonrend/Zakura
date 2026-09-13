@@ -7,16 +7,15 @@ import {
   RunnerClient,
 } from "@zakura/core";
 import { LOCAL_RUNTIME_NODE_ID, type RunnerHostInfo } from "@zakura/shared";
+import type { RunnerHub } from "./runner-hub.js";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
   agents,
-  newId,
   runtimeNodes,
   users,
   type RuntimeNode,
 } from "../db/schema.js";
-import { getDefaultTenant } from "./bootstrap.js";
 import {
   listSharedRunnerNodes,
   resolveAccessibleNode,
@@ -54,73 +53,28 @@ export function mapRuntimeNode(
     access,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    needsReinstall: row.kind === "local" || row.kind === "runner",
   };
 }
 
 export class RuntimeNodeService {
+  hub: RunnerHub | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly config: AppConfig,
   ) {}
 
-  /** Ensure implicit local node exists for the default tenant (and requested tenant). */
-  async ensureLocalNode(tenantId?: string): Promise<RuntimeNode> {
-    const tid =
-      tenantId ??
-      (await getDefaultTenant(this.db).then((t) => t?.id)) ??
-      null;
-    if (!tid) {
-      throw new Error("No tenant available to seed local runtime node");
-    }
+  bindHub(hub: RunnerHub) {
+    this.hub = hub;
+  }
 
-    const existing = await this.db.query.runtimeNodes.findFirst({
-      where: and(eq(runtimeNodes.tenantId, tid), eq(runtimeNodes.slug, "local")),
-    });
-    if (existing) {
-      if (existing.status !== "online") {
-        const now = new Date();
-        await this.db
-          .update(runtimeNodes)
-          .set({ status: "online", lastSeenAt: now, updatedAt: now })
-          .where(eq(runtimeNodes.id, existing.id));
-        return { ...existing, status: "online", lastSeenAt: now, updatedAt: now };
-      }
-      return existing;
-    }
-
-    const now = new Date();
-    // Prefer stable id "local" when free
-    const idTaken = await this.db.query.runtimeNodes.findFirst({
-      where: eq(runtimeNodes.id, LOCAL_RUNTIME_NODE_ID),
-    });
-    const id = idTaken ? newId() : LOCAL_RUNTIME_NODE_ID;
-
-    const [row] = await this.db
-      .insert(runtimeNodes)
-      .values({
-        id,
-        tenantId: tid,
-        name: "Local",
-        slug: "local",
-        kind: "local",
-        status: "online",
-        endpoint: null,
-        capabilitiesJson: JSON.stringify({ docker: true, local: true }),
-        hostInfoJson: "{}",
-        storageRoot: this.config.dataDir,
-        agentVersion: "embedded",
-        lastSeenAt: now,
-        tokenHash: null,
-        labelsJson: "{}",
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
-    return row!;
+  /** @deprecated 隐式 local 节点已删除，调用方应改为选择在线 Go 代理 */
+  async ensureLocalNode(_tenantId?: string): Promise<RuntimeNode> {
+    throw new Error("隐式本机节点已移除。请安装 zakura-agent 并绑定电脑或服务器。");
   }
 
   async list(tenantId: string): Promise<RuntimeNode[]> {
-    await this.ensureLocalNode(tenantId);
     return this.db.query.runtimeNodes.findMany({
       where: eq(runtimeNodes.tenantId, tenantId),
     });
@@ -157,6 +111,7 @@ export class RuntimeNodeService {
     tenantId: string,
     input: {
       name: string;
+      kind?: "computer" | "server";
       labels?: Record<string, unknown>;
       createdByUserId?: string | null;
     },
@@ -193,12 +148,12 @@ export class RuntimeNodeService {
         tenantId,
         name: input.name.trim(),
         slug,
-        kind: "runner",
+        kind: input.kind === "server" ? "server" : "computer",
         status: "offline",
         endpoint: null,
         capabilitiesJson: "{}",
         hostInfoJson: "{}",
-        storageRoot: "/var/lib/zakura",
+        storageRoot: "",
         tokenHash: hash,
         labelsJson: JSON.stringify(labels),
         isShared: false,
@@ -227,8 +182,8 @@ export class RuntimeNodeService {
       where: eq(runtimeNodes.id, nodeId),
     });
     if (!node) throw new Error("Runner 不存在");
-    if (node.kind === "local" || node.slug === "local") {
-      throw new Error("本机 Local Runner 不可设为共享");
+    if (node.slug === "local") {
+      throw new Error("旧本机节点不可设为共享");
     }
 
     if (isShared) {
@@ -263,7 +218,7 @@ export class RuntimeNodeService {
   /** 平台管理：列出全部远程 runner（含共享状态） */
   async listAllRemote(): Promise<RuntimeNode[]> {
     return this.db.query.runtimeNodes.findMany({
-      where: and(eq(runtimeNodes.kind, "runner"), ne(runtimeNodes.slug, "local")),
+      where: ne(runtimeNodes.slug, "local"),
     });
   }
 
@@ -368,12 +323,13 @@ export class RuntimeNodeService {
     return { ok: true };
   }
 
-  /** Build a RunnerClient for a remote node; local returns null. */
-  clientFor(node: RuntimeNode, rawToken?: string): RunnerClient | null {
-    if (node.kind === "local" || !node.endpoint) return null;
-    const token = rawToken ?? getCachedRunnerToken(node.id);
-    if (!token) return null;
-    return new RunnerClient({ baseUrl: node.endpoint, token });
+  clientFor(node: RuntimeNode): RunnerClient | null {
+    const session = this.hub?.get(node.id);
+    if (!session) return null;
+    return new RunnerClient({
+      hub: session,
+      workspaceKind: node.kind === "computer" ? "host" : "container",
+    });
   }
 
   /**
@@ -420,11 +376,14 @@ export class RuntimeNodeService {
       .where(eq(runtimeNodes.id, nodeId));
   }
 
-  /** Require a usable HTTP client for a remote runner node. */
   async requireRunnerClient(
     tenantId: string,
     nodeId: string,
-    opts?: { allowOffline?: boolean; skipHeartbeatRefresh?: boolean },
+    opts?: {
+      allowOffline?: boolean;
+      skipHeartbeatRefresh?: boolean;
+      workspaceKind?: "host" | "container";
+    },
   ): Promise<{ node: RuntimeNode; client: RunnerClient }> {
     if (!opts?.skipHeartbeatRefresh) {
       await this.refreshOfflineStatuses(this.config.runnerHeartbeatTimeoutSec);
@@ -434,37 +393,23 @@ export class RuntimeNodeService {
       throw new Error("所选运行节点不存在，请重新选择。");
     }
     if (node.kind === "local" || node.slug === "local") {
-      throw new Error("当前操作需要远程运行节点。");
+      throw new Error("旧本机节点已停用。请安装 zakura-agent 并重新绑定。");
     }
-    if (!opts?.allowOffline && (node.status === "offline" || node.status === "draining")) {
-      throw new Error(
-        node.status === "draining"
-          ? `「${node.name}」正在排空，暂不可用。请选择其他节点，或使用「迁移」。`
-          : `「${node.name}」当前离线。请等待节点上线，或迁移到其他可用节点。`,
-      );
+    const session = this.hub?.get(node.id);
+    if (!session) {
+      throw new Error(`「${node.name}」的 Go 代理未在线。请在该设备运行安装脚本。`);
     }
-    if (!node.endpoint?.trim()) {
-      throw new Error(
-        `「${node.name}」尚未完成注册。请在该设备启动 Runner 并完成注册。`,
-      );
-    }
-    const token = this.resolveToken(node);
-    if (!token) {
-      throw new Error(
-        `无法连接「${node.name}」：鉴权信息失效。请在该设备重新注册 Runner，或删除节点后重新创建。`,
-      );
-    }
-    cacheRunnerToken(node.id, token);
+    const workspaceKind =
+      opts?.workspaceKind ?? (node.kind === "computer" ? "host" : "container");
     return {
       node,
-      client: new RunnerClient({ baseUrl: node.endpoint.replace(/\/$/, ""), token }),
+      client: new RunnerClient({ hub: session, workspaceKind }),
     };
   }
 
-  /** Resolve node for an agent. null runtimeNodeId → local. */
   async resolveNodeForAgent(tenantId: string, agentRuntimeNodeId: string | null): Promise<RuntimeNode> {
     if (!agentRuntimeNodeId || agentRuntimeNodeId === LOCAL_RUNTIME_NODE_ID) {
-      return this.ensureLocalNode(tenantId);
+      throw new Error("请先绑定一台电脑或服务器");
     }
     const node = await this.getAccessible(tenantId, agentRuntimeNodeId);
     if (!node) {
@@ -477,7 +422,6 @@ export class RuntimeNodeService {
   async refreshOfflineStatuses(timeoutSec = 60, tenantId?: string): Promise<void> {
     const cutoff = new Date(Date.now() - timeoutSec * 1000);
     const conds = [
-      eq(runtimeNodes.kind, "runner"),
       eq(runtimeNodes.status, "online"),
     ];
     if (tenantId) conds.push(eq(runtimeNodes.tenantId, tenantId));
