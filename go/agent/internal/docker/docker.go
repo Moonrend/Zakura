@@ -112,15 +112,7 @@ func volumeMountFlag(v Volume) string {
 }
 
 func Pull(ctx context.Context, image string) error {
-	if err := Require(); err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, dockerBin(), "pull", image)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker pull: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
+	return PullWithProgress(ctx, image, nil)
 }
 
 func Run(ctx context.Context, spec RunSpec) (ContainerInfo, error) {

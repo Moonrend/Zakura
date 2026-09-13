@@ -17,23 +17,11 @@ import {
   type RunningContainer,
   recordPlatformFault,
 } from "@zakura/core";
-import type { ContainerSpec, ImageUpdateEntry } from "@zakura/shared";
+import type { ContainerSpec, DockerPullEvent, ImageUpdateEntry } from "@zakura/shared";
 
 export { toDockerHostPath };
 
-export interface DockerPullEvent {
-  id?: string;
-  status?: string;
-  progress?: string;
-  progressDetail?: { current?: number; total?: number };
-  error?: string;
-  errorDetail?: { message?: string };
-  zakura?: {
-    phase?: "queued" | "pulling" | "present";
-    image?: string;
-    deduplicated?: boolean;
-  };
-}
+export type { DockerPullEvent } from "@zakura/shared";
 
 function dockerErr(err: unknown): Error {
   if (!err || typeof err !== "object") return new Error(String(err));

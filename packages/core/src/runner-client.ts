@@ -1,7 +1,13 @@
 /**
  * 通过 RunnerHub 调用 Go 代理原语。不再 HTTP 回调 :7443。
  */
-import type { ImageUpdateEntry, MigrationManifest, RunnerHostInfo } from "@zakura/shared";
+import { randomUUID } from "node:crypto";
+import type {
+  DockerPullEvent,
+  ImageUpdateEntry,
+  MigrationManifest,
+  RunnerHostInfo,
+} from "@zakura/shared";
 import type {
   ListDetailedResult,
   ReadTextResult,
@@ -859,8 +865,38 @@ export class RunnerClient {
     await this.rpc("docker.stop", { id: name, remove: true }).catch(() => undefined);
   }
 
-  async pullImage(image: string): Promise<void> {
-    await this.rpc("docker.pull", { image }, 10 * 60_000);
+  async pullImage(
+    image: string,
+    onProgress?: (line: string, event?: DockerPullEvent) => void,
+  ): Promise<void> {
+    // Subscribe before requesting the pull: the first layers may arrive before
+    // the RPC response. Older agents can ignore progressStream and still pull.
+    const progressStream = onProgress && this.hub.onStream ? `pull-${randomUUID()}` : undefined;
+    const unsubscribe = progressStream
+      ? this.hub.onStream!(progressStream, (chan, data) => {
+          if (chan !== "progress") return;
+          try {
+            const event = JSON.parse(data.toString("utf8")) as DockerPullEvent;
+            if (!event || typeof event !== "object") return;
+            const line = event.error || [event.id, event.status, event.progress]
+              .filter((part) => typeof part === "string" && part.trim())
+              .map((part) => part!.trim())
+              .join(" ");
+            onProgress?.(line, { ...event, zakura: { ...event.zakura, image } });
+          } catch {
+            // Malformed events and progress observers must not fail the pull.
+          }
+        })
+      : undefined;
+    try {
+      await this.rpc(
+        "docker.pull",
+        { image, ...(progressStream ? { progressStream } : {}) },
+        10 * 60_000,
+      );
+    } finally {
+      unsubscribe?.();
+    }
   }
 
   async removeAcpAdapterContainers(agentId: string, adapterId: string): Promise<number> {
