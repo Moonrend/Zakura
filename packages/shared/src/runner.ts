@@ -199,6 +199,8 @@ export type RunnerInstallPackage = {
   /** Go 代理：curl | sh */
   installCurl?: string;
   installShUrl?: string;
+  /** Go 代理：iwr | iex（不要用 irm | iex，脚本带 prelude） */
+  installPs1?: string;
   installPs1Url?: string;
   needsReinstall?: boolean;
 };
@@ -209,18 +211,26 @@ export function buildGoAgentInstall(opts: {
   nodeId: string;
   token: string;
   kind: "computer" | "server";
-}): { installCurl: string; installShUrl: string; installPs1Url: string; script: string } {
+}): {
+  installCurl: string;
+  installShUrl: string;
+  installPs1: string;
+  installPs1Url: string;
+  script: string;
+} {
   const base = opts.publicBaseUrl.replace(/\/$/, "");
   const q = `token=${encodeURIComponent(opts.token)}&kind=${encodeURIComponent(opts.kind)}`;
   const installShUrl = `${base}/api/runtime-nodes/${opts.nodeId}/install.sh?${q}`;
   const installPs1Url = `${base}/api/runtime-nodes/${opts.nodeId}/install.ps1?${q}`;
   const installCurl = `curl -fsSL ${JSON.stringify(installShUrl)} | sh`;
+  // irm | iex 会把 text/plain 当 JSON/XML 解析，且管道脚本不能有 param()。
+  const installPs1 = `iex (iwr -UseBasicParsing ${JSON.stringify(installPs1Url)}).Content`;
   const script = `export ZAKURA_AGENT_SERVER=${JSON.stringify(base)}
 export ZAKURA_AGENT_TOKEN=${JSON.stringify(opts.token)}
 export ZAKURA_AGENT_KIND=${JSON.stringify(opts.kind)}
 curl -fsSL ${JSON.stringify(installShUrl)} | sh
 `;
-  return { installCurl, installShUrl, installPs1Url, script };
+  return { installCurl, installShUrl, installPs1, installPs1Url, script };
 }
 
 function sanitizeSlug(raw: string | undefined): string {

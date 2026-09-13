@@ -66,9 +66,11 @@ export function RunnerInstallPanel({
     (install.installShUrl
       ? `curl -fsSL ${JSON.stringify(install.installShUrl)} | sh`
       : "");
-  const ps1 = install.installPs1Url
-    ? `irm ${JSON.stringify(install.installPs1Url)} | iex`
-    : "";
+  const ps1 =
+    install.installPs1?.trim() ||
+    (install.installPs1Url
+      ? `iex (iwr -UseBasicParsing ${JSON.stringify(install.installPs1Url)}).Content`
+      : "");
 
   return (
     <div className="space-y-3">

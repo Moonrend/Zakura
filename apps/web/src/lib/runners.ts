@@ -70,6 +70,7 @@ export type RunnerInstallPackage = {
   bootstrapUrl?: string;
   installCurl?: string;
   installShUrl?: string;
+  installPs1?: string;
   installPs1Url?: string;
   needsReinstall?: boolean;
 };

@@ -289,6 +289,7 @@ export function registerRuntimeNodeRoutes(
       slug: node.slug,
       installCurl: go.installCurl,
       installShUrl: go.installShUrl,
+      installPs1: go.installPs1,
       installPs1Url: go.installPs1Url,
       needsReinstall: false,
     };
@@ -349,7 +350,10 @@ export ZAKURA_AGENT_KIND=${JSON.stringify(kind)}
 $env:ZAKURA_AGENT_TOKEN = ${JSON.stringify(token)}
 $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
 `;
-    return c.text(prelude + body, 200, { "content-type": "text/plain; charset=utf-8" });
+    return c.text(prelude + body, 200, {
+      "content-type": "text/plain; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    });
   });
 
   app.get("/api/runtime-nodes/agent-binaries/:os/:arch", async (c) => {
