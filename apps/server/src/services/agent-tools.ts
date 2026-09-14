@@ -22,9 +22,8 @@ import { Mem0Client } from "./mem0-client.js";
 import { withEmbedding } from "./memory-embed.js";
 import { embedText, parseEmbeddingConfig } from "./embedding-client.js";
 import { platformEvents } from "./platform-events.js";
-import { posix } from "node:path";
 import { captureDesktop, desktopAction, desktopGeometry } from "./agent-desktop.js";
-import { screenshotOutput, screenshotOutputSchema, screenshotResult } from "./agent-screenshot.js";
+import { screenshotOutput, screenshotOutputSchema, screenshotPath, screenshotResult } from "./agent-screenshot.js";
 
 export interface AgentNativeToolDef {
   qualifiedName: string;
@@ -550,12 +549,14 @@ export function listAgentNativeTools(
             script: { type: "string", description: "JS for evaluate" },
             full_page: { type: "boolean", default: false },
             output: screenshotOutputSchema,
+            path: { type: "string", description: "Workspace-relative PNG save path for screenshot or screenshot_annotate." },
+            timeout: { type: "integer", minimum: 1, maximum: 45000, description: "Wait for page load, milliseconds (default 8000)." },
           },
         },
       ),
       tool(
         "browser_action",
-        "Operate the workspace browser. Prefer refs from browser_observe snapshot over CSS selectors. After navigation, observe again when the next step depends on new UI.",
+        "Operate the persistent workspace browser tab. Prefer current snapshot refs. x/y use viewport CSS pixels, excluding browser chrome; convert screenshot pixels using screenshotScale and screenshotOrigin. Navigation waits for load and invalidates refs; observe again before using new UI. Actions return viewport state; screenshot=true also captures the result.",
         {
           type: "object",
           required: ["action"],
@@ -589,13 +590,17 @@ export function listAgentNativeTools(
             text: { type: "string" },
             key: { type: "string" },
             value: { type: "string" },
+            x: { type: "number", minimum: 0, description: "Viewport CSS x for click/hover/scroll when refs are unavailable (canvas)." },
+            y: { type: "number", minimum: 0, description: "Viewport CSS y; use x/y together." },
+            screenshot: { type: "boolean", default: false },
+            output: screenshotOutputSchema,
             direction: {
               type: "string",
               enum: ["up", "down", "left", "right"],
             },
             amount: { type: "integer", minimum: 1, maximum: 5000, default: 500 },
             tab_index: { type: "integer", minimum: 0 },
-            timeout: { type: "integer", minimum: 1, maximum: 45000, default: 1000 },
+            timeout: { type: "integer", minimum: 1, maximum: 45000, description: "Milliseconds; wait defaults to 1000, navigation to 8000. With selector/ref, wait until visible." },
           },
         },
       ),
@@ -1418,17 +1423,28 @@ export async function callAgentNativeTool(
       }
       case "browser_observe": {
         if (!browser) return textResult("Browser service not configured", true);
+        const output = screenshotOutput(args.output);
+        const path = screenshotPath(args.path);
+        if (path && args.observe !== "screenshot" && args.observe !== "screenshot_annotate") return textResult("path is only supported for screenshots", true);
+        await workspace.ensureStarted(agent, { require: "display" });
         const result = await browser.observe(agent.id, {
           observe: String(args.observe ?? "snapshot"),
           ref: typeof args.ref === "string" ? args.ref : undefined,
           selector: typeof args.selector === "string" ? args.selector : undefined,
           script: typeof args.script === "string" ? args.script : undefined,
           full_page: Boolean(args.full_page),
+          timeout: typeof args.timeout === "number" ? args.timeout : undefined,
         });
-        return screenshotResult(result, args.output);
+        if (path && typeof result.base64Full === "string") {
+          await (await getFs()).writeBytes(path, Buffer.from(result.base64Full, "base64"));
+          notifyFsChanged(path);
+        }
+        return screenshotResult({ ...result, ...(path ? { savedPath: path } : {}) }, output);
       }
       case "browser_action": {
         if (!browser) return textResult("Browser service not configured", true);
+        screenshotOutput(args.output);
+        await workspace.ensureStarted(agent, { require: "display" });
         const result = await browser.action(agent.id, {
           action: String(args.action ?? ""),
           url: typeof args.url === "string" ? args.url : undefined,
@@ -1441,8 +1457,11 @@ export async function callAgentNativeTool(
           amount: typeof args.amount === "number" ? args.amount : undefined,
           tab_index: typeof args.tab_index === "number" ? args.tab_index : undefined,
           timeout: typeof args.timeout === "number" ? args.timeout : undefined,
+          x: typeof args.x === "number" ? args.x : undefined,
+          y: typeof args.y === "number" ? args.y : undefined,
+          screenshot: args.screenshot === true,
         });
-        return okJson(result);
+        return screenshotResult(result, args.output);
       }
       case "search_memory": {
         if (kind === "mem0") {
@@ -1719,10 +1738,7 @@ export async function callAgentNativeTool(
       }
       case "computer_screenshot": {
         const output = screenshotOutput(args.output);
-        const path = args.path;
-        if (path !== undefined && (typeof path !== "string" || !path || path.includes("\0") || posix.isAbsolute(path) || path.replace(/\\/g, "/").split("/").includes(".."))) {
-          return textResult("path must be a workspace-relative file path without traversal", true);
-        }
+        const path = screenshotPath(args.path);
         const shot = await captureDesktop(workspace, agent);
         if (typeof path === "string") {
           await (await getFs()).writeBytes(path, Buffer.from(shot.base64Full, "base64"));

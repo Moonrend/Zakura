@@ -1,4 +1,13 @@
 import type { McpToolResult } from "@zakura/shared";
+import { posix } from "node:path";
+
+export function screenshotPath(path: unknown): string | undefined {
+  if (path === undefined) return undefined;
+  if (typeof path !== "string" || !path || path.includes("\0") || posix.isAbsolute(path) || path.replace(/\\/g, "/").split("/").includes("..")) {
+    throw new Error("path must be a workspace-relative file path without traversal");
+  }
+  return path;
+}
 
 /** Images travel as image content, never as a sliced base64 string. */
 export const MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
