@@ -106,7 +106,7 @@ describe("desktop native tools", () => {
   it("executes literal input and screenshot fallback, never reuses an old capture", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "zakura-desktop-test-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
-    for (const bin of ["mktemp", "rm", "base64"]) await symlink(`/usr/bin/${bin}`, join(dir, bin));
+    for (const bin of ["mktemp", "rm", "base64", "bash"]) await symlink(`/usr/bin/${bin}`, join(dir, bin));
     const log = join(dir, "input.json");
     const marker = join(dir, "expanded");
     const stub = async (name: string, script: string) => writeFile(join(dir, name), `#!${process.execPath}\n${script}`, { mode: 0o755 });
@@ -117,7 +117,7 @@ describe("desktop native tools", () => {
       ensureStarted: async () => agent,
       execInWorkspace: async (_agent: Agent, command: string[], opts: { env?: Record<string, string> }) => {
         try {
-          const result = await promisify(execFile)("/bin/bash", command.slice(1), { env: { ...process.env, ...opts.env, PATH: dir }, timeout: 5000 });
+          const result = await promisify(execFile)(`/usr/bin/${command[0]}`, command.slice(1), { env: { ...process.env, ...opts.env, PATH: dir }, timeout: 5000 });
           return { ...result, exitCode: 0 };
         } catch (err) {
           const result = err as Error & { stdout: string; stderr: string; code: number };

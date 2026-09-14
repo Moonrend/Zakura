@@ -1729,9 +1729,9 @@ export async function callAgentNativeTool(
       }
       case "desktop_info": {
         const info = await workspace.getDesktopInfo(agent);
-        if (info.containerStatus !== "running") return okJson({ ...info, ready: false, display: ":99" });
+        if (!info.supported || info.containerStatus !== "running") return okJson({ ...info, ready: false });
         try {
-          return okJson({ ...info, ...await desktopGeometry(workspace, agent), ready: true });
+          return okJson({ ...info, ...await desktopGeometry(workspace, agent), dimensionsSource: "display", ready: true });
         } catch (err) {
           return okJson({ ...info, ready: false, display: ":99", reason: err instanceof Error ? err.message : String(err) });
         }

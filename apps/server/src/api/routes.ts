@@ -1840,6 +1840,11 @@ export async function createApiApp(deps: {
         getTelemetry().platformFaults.inc({ kind: "api.desktop_info" });
         desktop = {
           enabled: false,
+          supported: false,
+          display: null,
+          coordinateSpace: "desktop pixels, origin top-left",
+          dimensionsSource: "configured",
+          reason: "桌面状态暂时不可用，请查看工作区日志。",
           computer: false,
           browser: false,
           containerStatus: container?.status ?? null,
@@ -1889,6 +1894,13 @@ export async function createApiApp(deps: {
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
     if (!agent.enableComputer) return c.json({ error: "Desktop is disabled" }, 409);
+    try {
+      // Issue the short-lived ticket only after startup. Otherwise it can expire
+      // while Xvfb / Chromium is still booting and noVNC reports a vague failure.
+      await agentService.workspace.ensureStarted(agent, { require: "display" });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "桌面尚未就绪，请查看工作区日志。" }, 503);
+    }
     const ticket = signWorkspaceConnectionTicket(
       config.secret,
       session.tenantId,

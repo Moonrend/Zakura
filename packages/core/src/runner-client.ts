@@ -255,10 +255,9 @@ export class RunnerClient {
       env: { ZAKURA_AGENT_ID: body.agentId, ...(body.env ?? {}) },
       labels: { "zakura.agent": body.agentId, ...(body.labels ?? {}) },
       volumes: [{ hostPath, containerPath: "/workspace" }],
-      ports: [
-        { containerPort: 6080, protocol: "tcp" },
-        { containerPort: 9222, protocol: "tcp" },
-      ],
+      // Desktop and CDP use authenticated stdio tunnels. Neither endpoint needs
+      // an unauthenticated published port (Chrome also binds container localhost).
+      ports: [],
       workingDir: "/workspace",
       restart: "unless-stopped",
     });

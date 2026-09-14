@@ -39,6 +39,7 @@ export function verifyWorkspaceConnectionTicket(
   secret: string,
   token: string,
 ): WorkspaceConnectionTicket | null {
+  if (token.length > 4096 || token.split(".").length !== 2) return null;
   const [body, signature] = token.split(".");
   if (!body || !signature) return null;
   const expected = createHmac("sha256", secret).update(`workspace:${body}`).digest("base64url");
@@ -50,7 +51,10 @@ export function verifyWorkspaceConnectionTicket(
       Buffer.from(body, "base64url").toString("utf8"),
     ) as WorkspaceConnectionTicket;
     if (ticket.kind !== "desktop" && ticket.kind !== "terminal") return null;
-    return ticket.exp >= Math.floor(Date.now() / 1000) ? ticket : null;
+    if (typeof ticket.tenantId !== "string" || !ticket.tenantId || typeof ticket.agentId !== "string" || !ticket.agentId) return null;
+    if (!Number.isSafeInteger(ticket.exp)) return null;
+    if (ticket.adapterId !== undefined && (ticket.kind !== "terminal" || typeof ticket.adapterId !== "string" || !ticket.adapterId)) return null;
+    return ticket.exp > Math.floor(Date.now() / 1000) ? ticket : null;
   } catch {
     return null;
   }

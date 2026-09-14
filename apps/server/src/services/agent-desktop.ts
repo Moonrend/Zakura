@@ -11,7 +11,7 @@ command -v xdotool >/dev/null 2>&1 || { echo 'Desktop input unavailable: missing
 exec xdotool "$@"`;
 
 async function execDesktop(workspace: Workspace, agent: Agent, command: string[]) {
-  const result = await workspace.execInWorkspace(agent, command, {
+  const result = await workspace.execInWorkspace(agent, ["timeout", "--signal=TERM", "--kill-after=2s", "25s", ...command], {
     env: { DISPLAY: DESKTOP_DISPLAY },
     timeoutMs: 30_000,
   });
@@ -35,8 +35,8 @@ export async function desktopGeometry(workspace: Workspace, agent: Agent) {
   return { width: Number(match[1]), height: Number(match[2]), display: DESKTOP_DISPLAY, coordinateSpace };
 }
 
-export async function captureDesktop(workspace: Workspace, agent: Agent) {
-  await workspace.ensureStarted(agent, { require: "display" });
+export async function captureDesktop(workspace: Workspace, agent: Agent, prepared = false) {
+  if (!prepared) await workspace.ensureStarted(agent, { require: "display" });
   const result = await execDesktop(workspace, agent, ["bash", "-c", `set -eu
 shot_dir=$(mktemp -d /tmp/zakura-shot.XXXXXX)
 trap 'rm -rf "$shot_dir"' EXIT
@@ -134,7 +134,7 @@ export async function desktopAction(workspace: Workspace, agent: Agent, name: st
   let observation;
   if (args.screenshot === true) {
     try {
-      observation = await captureDesktop(workspace, agent);
+      observation = await captureDesktop(workspace, agent, true);
     } catch (err) {
       throw new Error(`${name} completed, but its screenshot failed. Observe the desktop before repeating the action. ${err instanceof Error ? err.message : String(err)}`);
     }
