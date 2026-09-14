@@ -88,7 +88,7 @@ describe("desktop native tools", () => {
   });
 
   it("rejects screenshot path traversal without executing workspace commands", async () => {
-    for (const path of ["../escape.png", "/tmp/escape.png", "a/../../escape.png", "..\\escape.png", "a\0b"]) {
+    for (const path of ["../escape.png", "/workspace/../escape.png", "a/../../escape.png", "..\\escape.png", "a\0b"]) {
       const { service, commands } = workspace();
       const result = await callAgentNativeTool(agent, service, "computer_screenshot", { path });
       assert.equal(result.isError, true, path);

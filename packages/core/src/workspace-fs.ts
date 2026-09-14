@@ -78,6 +78,8 @@ export type ExtractResult = {
 };
 
 export interface WorkspaceFs {
+  /** Known local root, for path validation and scrubbing filesystem errors. */
+  getRoot?(): string;
   stat(path: string): Promise<{
     path: string;
     type: "file" | "dir" | "other";

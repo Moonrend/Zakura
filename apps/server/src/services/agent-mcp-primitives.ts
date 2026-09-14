@@ -13,6 +13,7 @@ import type {
   McpResourceDef,
   McpResourceTemplateDef,
 } from "@zakura/shared";
+import { scrubHostPathsInMessage } from "@zakura/core";
 import type { Agent } from "../db/schema.js";
 import { buildAgentMcpInstructions } from "../mcp/instructions.js";
 import {
@@ -297,7 +298,7 @@ export async function readWorkspaceFsResource(
       ],
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = scrubHostPathsInMessage(fs.getRoot?.(), err instanceof Error ? err.message : String(err));
     throw Object.assign(new Error(`Failed to read workspace resource ${uri}: ${message}`), {
       code: -32602,
       data: { uri },

@@ -622,8 +622,8 @@ export class RunnerClient {
     path: string,
     data: Buffer,
   ): Promise<{ path: string; size: number }> {
-    await this.rpc("host.fs.write", { agentId, path, base64: data.toString("base64") });
-    return { path, size: data.length };
+    const saved = await this.rpc<{ path: string }>("host.fs.write", { agentId, path, base64: data.toString("base64") });
+    return { path: saved.path, size: data.length };
   }
 
   async archivePaths(

@@ -185,7 +185,13 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		return
 	}
 	if err != nil {
-		send(Err(msg.ID, err.Error()))
+		message := err.Error()
+		if strings.HasPrefix(msg.Method, "host.fs.") {
+			var p agentPath
+			_ = json.Unmarshal(msg.Params, &p)
+			message = host.ScrubHostPathsInMessage(h.rootOf(p), message)
+		}
+		send(Err(msg.ID, message))
 		return
 	}
 	send(Ok(msg.ID, result))
@@ -210,6 +216,16 @@ func (h *Handler) rootOf(p agentPath) string {
 	return h.StorageRoot
 }
 
+// Called after the filesystem operation has validated the path with Jail.
+func (h *Handler) apiPath(p agentPath, path string) string {
+	root := h.rootOf(p)
+	abs, err := host.Jail(root, path)
+	if err != nil {
+		return path
+	}
+	return host.WorkspacePath(root, abs)
+}
+
 func (h *Handler) fsStat(raw json.RawMessage) (any, error) {
 	var p agentPath
 	_ = json.Unmarshal(raw, &p)
@@ -223,7 +239,7 @@ func (h *Handler) fsList(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": p.Path, "entries": ents}, nil
+	return map[string]any{"path": h.apiPath(p, p.Path), "entries": ents}, nil
 }
 
 func (h *Handler) fsRead(raw json.RawMessage) (any, error) {
@@ -240,7 +256,7 @@ func (h *Handler) fsRead(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return map[string]any{
-		"path":    p.Path,
+		"path":    h.apiPath(p.agentPath, p.Path),
 		"content": string(b),
 		"base64":  base64.StdEncoding.EncodeToString(b),
 		"size":    len(b),
@@ -266,7 +282,7 @@ func (h *Handler) fsWrite(raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": p.Path, "ok": true, "revision": rev}, nil
+	return map[string]any{"path": h.apiPath(p.agentPath, p.Path), "ok": true, "revision": rev}, nil
 }
 
 func (h *Handler) fsMkdir(raw json.RawMessage) (any, error) {
@@ -280,7 +296,7 @@ func (h *Handler) fsMkdir(raw json.RawMessage) (any, error) {
 	if err != nil {
 		abs = root
 	}
-	return map[string]any{"path": p.Path, "ok": true, "abs": abs}, nil
+	return map[string]any{"path": h.apiPath(p, p.Path), "ok": true, "abs": abs}, nil
 }
 
 func (h *Handler) fsRemove(raw json.RawMessage) (any, error) {
@@ -292,7 +308,7 @@ func (h *Handler) fsRemove(raw json.RawMessage) (any, error) {
 	if err := host.Remove(h.rootOf(p.agentPath), p.Path, p.Recursive); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": p.Path, "ok": true}, nil
+	return map[string]any{"path": h.apiPath(p.agentPath, p.Path), "ok": true}, nil
 }
 
 func (h *Handler) fsRename(raw json.RawMessage) (any, error) {
@@ -305,7 +321,7 @@ func (h *Handler) fsRename(raw json.RawMessage) (any, error) {
 	if err := host.Rename(h.rootOf(p.agentPath), p.OldPath, p.NewPath); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "path": p.NewPath}, nil
+	return map[string]any{"ok": true, "path": h.apiPath(p.agentPath, p.NewPath)}, nil
 }
 
 func (h *Handler) hostExec(raw json.RawMessage) (any, error) {
