@@ -63,6 +63,12 @@ describe("resolveInRoot path jail", () => {
     );
   });
 
+  it("does not strip a workspace subdirectory that resembles a host storage layout", () => {
+    const suffix = "/projects/agents/demo/workspace/a.txt";
+    assert.equal(scrubHostPathsInMessage(root, `open ${root}${suffix}`), `open /workspace${suffix}`);
+    assert.equal(scrubHostPathsInMessage(undefined, `open /workspace${suffix}`), `open /workspace${suffix}`);
+  });
+
   it("rejects .. escape", () => {
     for (const path of ["../outside", "foo/../../outside", "/../outside", "/workspace/../outside", `${root}/../outside`, "..\\outside"]) {
       assert.throws(() => resolveInRoot(root, path), (err: unknown) => {

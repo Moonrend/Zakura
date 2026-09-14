@@ -77,10 +77,11 @@ export function scrubHostPathsInMessage(root: string | undefined, message: strin
       const trimmed = prefix.replace(/[\\/]+$/, "");
       if (trimmed) scrubbed = scrubbed.split(trimmed).join(CONTAINER_WORKSPACE_ROOT);
     }
+    return scrubbed;
   }
   // Older remote Runners do not expose their root through WorkspaceFs.
   return scrubbed.replace(
     /(?:[A-Za-z]:)?(?:[\\/][^\\/\s'"]+)*[\\/]agents[\\/][A-Za-z0-9_-]+[\\/]workspace(?=[\\/\s'"]|$)/g,
-    CONTAINER_WORKSPACE_ROOT,
+    (prefix) => prefix.startsWith(`${CONTAINER_WORKSPACE_ROOT}/`) ? prefix : CONTAINER_WORKSPACE_ROOT,
   );
 }
