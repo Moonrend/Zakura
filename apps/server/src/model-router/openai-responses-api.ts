@@ -37,12 +37,25 @@ function timeout(route: ResolvedRoute): number {
 }
 
 /** Chat messages → Responses `input` + 可选 `instructions` */
-export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
+export function mapMessagesToResponsesInput(messages: ModelChatMessage[], packedTools: unknown[] = []): {
   instructions?: string;
   input: unknown[];
 } {
   const instructionsParts: string[] = [];
   const input: unknown[] = [];
+  // Old durable events have no namespace. Reconstruct it from the current pack,
+  // which may also have renamed a shard when fitting it into the tools budget.
+  const namespaces = new Map<string, string | undefined>();
+  for (const value of packedTools) {
+    if (!value || typeof value !== "object") continue;
+    const tool = value as { type?: string; name?: string; tools?: Array<{ name?: string }> };
+    if (tool.type === "function" && tool.name) namespaces.set(tool.name, undefined);
+    if (tool.type === "namespace" && tool.name && Array.isArray(tool.tools)) {
+      for (const fn of tool.tools) {
+        if (fn.name) namespaces.set(fn.name, tool.name);
+      }
+    }
+  }
 
   for (const m of messages) {
     if (m.role === "system") {
@@ -66,10 +79,14 @@ export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
     if (m.role === "assistant") {
       if (m.toolCalls?.length) {
         for (const tc of m.toolCalls) {
+          const namespace = namespaces.has(tc.function.name)
+            ? namespaces.get(tc.function.name)
+            : tc.namespace;
           input.push({
             type: "function_call",
             call_id: tc.id,
             name: tc.function.name,
+            ...(namespace ? { namespace } : {}),
             arguments: tc.function.arguments || "{}",
           });
         }
@@ -111,7 +128,7 @@ function mapToolChoice(toolChoice: ModelToolChoice | undefined): unknown {
   return undefined;
 }
 
-export function parseResponsesOutput(data: {
+type ResponsesData = {
   id?: string;
   created_at?: number;
   model?: string;
@@ -121,11 +138,23 @@ export function parseResponsesOutput(data: {
     output_tokens?: number;
     total_tokens?: number;
   };
-}): {
+  status?: string;
+  error?: { code?: string; message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+};
+
+function responsesFailure(data: ResponsesData, status = data.status ?? "error"): Error {
+  return new Error(`responses ${status}: ${data.error?.message ?? data.incomplete_details?.reason ?? "upstream response did not complete"}`);
+}
+
+export function parseResponsesOutput(data: ResponsesData): {
   content: string | null;
   toolCalls?: ModelToolCall[];
   finishReason: string;
 } {
+  if (data.error || (data.status && data.status !== "completed")) {
+    throw responsesFailure(data);
+  }
   const output = data.output ?? [];
   const textParts: string[] = [];
   const toolCalls: ModelToolCall[] = [];
@@ -163,6 +192,7 @@ export function parseResponsesOutput(data: {
       toolCalls.push({
         id: callId,
         type: "function",
+        ...(typeof item.namespace === "string" && item.namespace ? { namespace: item.namespace } : {}),
         function: { name, arguments: args },
       });
     }
@@ -186,7 +216,7 @@ export async function responsesChat(
     maxTokens?: number;
   },
 ): Promise<ModelChatResult> {
-  const mapped = mapMessagesToResponsesInput(messages);
+  const mapped = mapMessagesToResponsesInput(messages, packedTools);
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
@@ -202,18 +232,7 @@ export async function responsesChat(
   const tc = mapToolChoice(options?.toolChoice);
   if (tc !== undefined) body.tool_choice = tc;
 
-  const res = await httpJson<{
-    id?: string;
-    created_at?: number;
-    model?: string;
-    output?: Array<Record<string, unknown>>;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      total_tokens?: number;
-    };
-    error?: { message?: string };
-  }>(responsesUrl(route), {
+  const res = await httpJson<ResponsesData>(responsesUrl(route), {
     method: "POST",
     headers: buildHeaders(route.upstream.config, route.upstream.protocol),
     body: JSON.stringify(body),
@@ -240,14 +259,13 @@ export async function responsesChat(
   return toModelChatResult(openai, res.data);
 }
 
+type ResponsesToolCallState = { id: string; name: string; arguments: string; namespace?: string };
+
 type ResponsesStreamState = {
   content: string;
-  toolCalls: Map<
-    number,
-    { id: string; name: string; arguments: string }
-  >;
-  /** call_id → slot for argument deltas that key by item id */
-  byItemId: Map<string, { id: string; name: string; arguments: string }>;
+  toolCalls: Map<number, ResponsesToolCallState>;
+  /** item id → slot for argument deltas */
+  byItemId: Map<string, ResponsesToolCallState>;
   finishReason: string | null;
   model: string | null;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -267,7 +285,7 @@ export async function responsesChatStream(
   } | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
-  const mapped = mapMessagesToResponsesInput(messages);
+  const mapped = mapMessagesToResponsesInput(messages, packedTools);
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
@@ -319,8 +337,15 @@ export async function responsesChatStream(
         return;
       }
       absorbResponsesStreamEvent(state, chunk, callbacks);
+      if (state.finishReason !== null) {
+        stopped = true;
+        return false;
+      }
     },
   );
+  if (state.finishReason === null) {
+    throw new Error("responses stream ended before response.completed");
+  }
 
   const toolCalls = [...state.toolCalls.values(), ...state.byItemId.values()].filter(
     (t) => t.name.trim(),
@@ -337,6 +362,7 @@ export async function responsesChatStream(
     ? unique.map((t, i) => ({
         id: t.id || `call_${i}`,
         type: "function" as const,
+        ...(t.namespace ? { namespace: t.namespace } : {}),
         function: { name: t.name, arguments: t.arguments || "{}" },
       }))
     : undefined;
@@ -361,17 +387,20 @@ function absorbResponsesStreamEvent(
   const ev = chunk as Record<string, unknown>;
   const type = typeof ev.type === "string" ? ev.type : "";
 
+  if (type === "error" || type === "response.error") {
+    const error = ev.error as ResponsesData["error"];
+    throw responsesFailure({ error: { message: error?.message ?? (typeof ev.message === "string" ? ev.message : "upstream stream error") } });
+  }
+  if (type === "response.failed" || type === "response.incomplete" || type === "response.cancelled") {
+    throw responsesFailure((ev.response ?? {}) as ResponsesData, type.slice("response.".length));
+  }
+
   if (typeof ev.model === "string" && ev.model) state.model = ev.model;
 
-  // Chat Completions 风格误路由时也能吃
+  // A misrouted Chat stream cannot be decoded as Responses: doing so used to
+  // retain text while silently discarding every tool call.
   if (Array.isArray((ev as { choices?: unknown }).choices)) {
-    const choice = (ev as { choices: Array<{ delta?: { content?: string } }> }).choices[0];
-    const delta = choice?.delta?.content;
-    if (typeof delta === "string" && delta) {
-      state.content += delta;
-      callbacks.onDelta?.(delta);
-    }
-    return;
+    throw new Error("responses received Chat Completions events; use chat/completions");
   }
 
   if (type === "response.output_text.delta" || type === "response.text.delta") {
@@ -383,7 +412,7 @@ function absorbResponsesStreamEvent(
     return;
   }
 
-  if (type === "response.output_item.added") {
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
     const item = ev.item as Record<string, unknown> | undefined;
     if (!item || item.type !== "function_call") return;
     const name = typeof item.name === "string" ? item.name : "";
@@ -391,9 +420,15 @@ function absorbResponsesStreamEvent(
       (typeof item.call_id === "string" && item.call_id) ||
       (typeof item.id === "string" && item.id) ||
       `call_${createId()}`;
-    const slot = { id: callId, name, arguments: "" };
+    const idx = typeof ev.output_index === "number" ? ev.output_index : state.toolCalls.size;
+    const slot = (typeof item.id === "string" ? state.byItemId.get(item.id) : undefined)
+      ?? state.toolCalls.get(idx)
+      ?? { id: callId, name, arguments: "" };
+    slot.id = callId;
+    slot.name = name;
+    if (typeof item.arguments === "string") slot.arguments = item.arguments;
+    if (typeof item.namespace === "string") slot.namespace = item.namespace;
     if (typeof item.id === "string") state.byItemId.set(item.id, slot);
-    const idx = state.toolCalls.size;
     state.toolCalls.set(idx, slot);
     return;
   }
@@ -418,29 +453,20 @@ function absorbResponsesStreamEvent(
   if (type === "response.completed" || type === "response.done") {
     const resp = (ev.response as Record<string, unknown> | undefined) ?? ev;
     if (resp && typeof resp === "object") {
-      const parsed = parseResponsesOutput({
-        output: Array.isArray(resp.output)
-          ? (resp.output as Array<Record<string, unknown>>)
-          : undefined,
-        usage: resp.usage as
-          | {
-              input_tokens?: number;
-              output_tokens?: number;
-              total_tokens?: number;
-            }
-          | undefined,
-        model: typeof resp.model === "string" ? resp.model : undefined,
-      });
+      const parsed = parseResponsesOutput(resp as ResponsesData);
       if (parsed.content && !state.content) {
         state.content = parsed.content;
         callbacks.onDelta?.(parsed.content);
       }
-      if (parsed.toolCalls?.length && state.toolCalls.size === 0 && state.byItemId.size === 0) {
+      if (parsed.toolCalls?.length) {
+        state.toolCalls.clear();
+        state.byItemId.clear();
         parsed.toolCalls.forEach((tc, i) => {
           state.toolCalls.set(i, {
             id: tc.id,
             name: tc.function.name,
             arguments: tc.function.arguments,
+            ...(tc.namespace ? { namespace: tc.namespace } : {}),
           });
         });
       }

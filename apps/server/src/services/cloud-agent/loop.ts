@@ -678,6 +678,7 @@ export async function runAgentLoop(
           payload: {
             toolCallId: call.id,
             name: modelName,
+            ...(call.namespace ? { namespace: call.namespace } : {}),
             title: input.hooks?.toolTitle?.(modelName, qualified) ?? qualified,
           },
         });

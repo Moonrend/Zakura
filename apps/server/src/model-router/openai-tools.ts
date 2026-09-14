@@ -1,6 +1,7 @@
 /**
  * OpenAI 兼容上游的 tools 打包：
- * - gpt-5.4+ 且工具面较大时：非常驻走 namespace + defer_loading + tool_search
+ * - Responses + gpt-5.4+ 且工具面较大时：非常驻走 namespace + defer_loading + tool_search
+ * - Chat Completions 只发送标准 function；不支持 hosted tool_search
  * - 分片按语义（read/write/other），超限合并进 external_misc，并优先保留会话里用过的 namespace
  *
  * @see https://developers.openai.com/api/docs/guides/tools-tool-search
@@ -243,17 +244,21 @@ export function shardNamespaceGroups(
 }
 
 /** 从对话历史里已调用的 tool 名，推断应优先保留的 namespace */
-export function preferredNamespacesFromMessages(
-  messages: ModelChatMessage[] | undefined,
-  groups: NamespaceGroup[],
-): string[] {
-  if (!messages?.length || !groups.length) return [];
+function calledToolNames(messages: ModelChatMessage[] | undefined): Set<string> {
   const called = new Set<string>();
-  for (const m of messages) {
+  for (const m of messages ?? []) {
     for (const tc of m.toolCalls ?? []) {
       if (tc.function?.name) called.add(tc.function.name);
     }
   }
+  return called;
+}
+
+export function preferredNamespacesFromMessages(
+  messages: ModelChatMessage[] | undefined,
+  groups: NamespaceGroup[],
+): string[] {
+  const called = calledToolNames(messages);
   if (!called.size) return [];
   const preferred: string[] = [];
   for (const g of groups) {
@@ -342,12 +347,12 @@ export function fitNamespacesToRoom(
   return { kept, omitted, mergedIntoMisc: fittedMisc.length > 0 };
 }
 
-function toNamespaceTool(group: NamespaceGroup): Record<string, unknown> {
+function toNamespaceTool(group: NamespaceGroup, eagerTools: Set<string>): Record<string, unknown> {
   return {
     type: "namespace",
     name: group.name,
     description: group.description,
-    tools: group.tools.map((t) => toFlatFunctionTool(t, true)),
+    tools: group.tools.map((t) => toFlatFunctionTool(t, !eagerTools.has(t.function.name))),
   };
 }
 
@@ -375,20 +380,21 @@ export function packOpenAiChatTools(
 
   const { alwaysOn, deferred } = partitionTools(tools);
 
-  if (shouldUseToolSearchPack(model, alwaysOn.length, deferred.length)) {
+  if (
+    format === "responses" &&
+    alwaysOn.length < OPENAI_TOOLS_ARRAY_MAX - 1 &&
+    shouldUseToolSearchPack(model, alwaysOn.length, deferred.length)
+  ) {
     const rawGroups = shardNamespaceGroups(groupDeferredByNamespace(deferred));
     const preferred = preferredNamespacesFromMessages(opts?.messages, rawGroups);
     const ranked = rankNamespaces(rawGroups, preferred);
-
-    const maxAlways = Math.max(0, OPENAI_TOOLS_ARRAY_MAX - 1);
-    const keptAlways =
-      alwaysOn.length > maxAlways ? alwaysOn.slice(0, maxAlways) : alwaysOn;
-    if (keptAlways.length < alwaysOn.length) {
-      console.warn(
-        `[openai-tools] always-on tools ${alwaysOn.length} exceed room before tool_search; truncated to ${keptAlways.length}`,
-      );
-    }
-    const roomForNs = Math.max(0, OPENAI_TOOLS_ARRAY_MAX - keptAlways.length - 1);
+    // Requests are stateless: hosted tool_search_output items are not replayed.
+    // Reload used namespaces eagerly instead of making the model search again
+    // for tools it has already called. Unused namespaces remain searchable.
+    const eagerTools = new Set(rawGroups
+      .filter((group) => preferred.includes(group.name))
+      .flatMap((group) => group.tools.map((tool) => tool.function.name)));
+    const roomForNs = OPENAI_TOOLS_ARRAY_MAX - alwaysOn.length - 1;
     const { kept, omitted, mergedIntoMisc } = fitNamespacesToRoom(ranked, roomForNs);
     let warning: string | undefined;
     if (omitted.length) {
@@ -399,8 +405,8 @@ export function packOpenAiChatTools(
     }
     return {
       tools: [
-        ...keptAlways.map(mapAlways),
-        ...kept.map(toNamespaceTool),
+        ...alwaysOn.map(mapAlways),
+        ...kept.map((group) => toNamespaceTool(group, eagerTools)),
         { type: "tool_search" },
       ],
       usedToolSearch: true,
@@ -425,13 +431,17 @@ export function packOpenAiChatTools(
   }
   const room = OPENAI_TOOLS_ARRAY_MAX - alwaysOn.length;
   const dropped = deferred.length > room ? deferred.length - room : 0;
+  const called = calledToolNames(opts?.messages);
+  const rankedDeferred = dropped > 0
+    ? [...deferred].sort((a, b) => Number(called.has(b.function.name)) - Number(called.has(a.function.name)))
+    : deferred;
   const warning =
     dropped > 0
       ? `tools ${alwaysOn.length + deferred.length} > ${OPENAI_TOOLS_ARRAY_MAX}; keeping ${alwaysOn.length} always-on + ${room} deferred`
       : undefined;
   if (warning) console.warn(`[openai-tools] ${warning} (model=${model ?? "?"})`);
   return {
-    tools: [...alwaysOn, ...deferred.slice(0, room)].map(mapAlways),
+    tools: [...alwaysOn, ...rankedDeferred.slice(0, room)].map(mapAlways),
     usedToolSearch: false,
     omittedNamespaces: [],
     ...(warning ? { warning } : {}),
