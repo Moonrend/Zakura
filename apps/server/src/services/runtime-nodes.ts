@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or, ne } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, ne, notInArray } from "drizzle-orm";
 import {
   decryptJson,
   encryptJson,
@@ -12,14 +12,19 @@ import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
   agents,
+  componentInstances,
+  managedContainers,
+  portExposures,
   runtimeNodes,
   users,
+  workspaceMigrations,
   type RuntimeNode,
 } from "../db/schema.js";
 import {
   listSharedRunnerNodes,
   resolveAccessibleNode,
 } from "./runner-access.js";
+import { platformEvents } from "./platform-events.js";
 
 const TOKEN_ENC_LABEL = "_tokenEnc";
 
@@ -316,19 +321,66 @@ export class RuntimeNodeService {
   }
 
   async delete(tenantId: string, id: string): Promise<{ ok: true } | { error: string }> {
-    const node = await this.get(tenantId, id);
-    if (!node) return { error: "Not found" };
-    if (node.kind === "local" || node.slug === "local") {
-      return { error: "Cannot delete local runtime node" };
-    }
-    const bound = await this.db.query.agents.findFirst({
-      where: and(eq(agents.runtimeNodeId, id), eq(agents.tenantId, tenantId)),
-    });
-    if (bound) return { error: "Node still has bound agents" };
+    const result = await this.db.transaction(async (tx) => {
+      // Serialize deletion against new FK references, including shared consumers.
+      const [node] = await tx.select().from(runtimeNodes)
+        .where(and(eq(runtimeNodes.id, id), eq(runtimeNodes.tenantId, tenantId)))
+        .for("update");
+      if (!node) return { error: "Not found" };
+      if (node.kind === "local" || node.slug === "local") {
+        return { error: "Cannot delete local runtime node" };
+      }
+      const referencesNode = or(
+        eq(workspaceMigrations.sourceNodeId, id),
+        eq(workspaceMigrations.targetNodeId, id),
+      );
+      const active = await tx.select({ id: workspaceMigrations.id }).from(workspaceMigrations)
+        .where(and(referencesNode, notInArray(workspaceMigrations.status, ["completed", "failed", "cancelled"])))
+        .limit(1);
+      if (active.length) return { error: "节点仍有进行中的工作区迁移，请等待迁移结束后再删除。" };
 
-    await this.db
-      .delete(runtimeNodes)
-      .where(and(eq(runtimeNodes.id, id), eq(runtimeNodes.tenantId, tenantId)));
+      const now = new Date();
+      const lastError = `运行节点「${node.name}」已删除，请重新绑定电脑或服务器。`;
+      const history = await tx.delete(workspaceMigrations).where(referencesNode)
+        .returning();
+      if (history.length) {
+        await tx.update(agents).set({ lastMigrationId: null, updatedAt: now })
+          .where(inArray(agents.lastMigrationId, history.map((job) => job.id)));
+      }
+
+      // Do not scope dependencies to the owner tenant: shared nodes can have
+      // consumers in other tenants. Agent data/configuration stays intact.
+      const detached = await tx.update(agents)
+        .set({ runtimeNodeId: null, lastError, updatedAt: now })
+        .where(eq(agents.runtimeNodeId, id))
+        .returning();
+      await tx.update(componentInstances)
+        .set({ runtimeNodeId: null, status: "stopped", endpointUrl: null, healthStatus: "unknown", healthClaimUntil: null, lastError, updatedAt: now })
+        .where(or(
+          eq(componentInstances.runtimeNodeId, id),
+          inArray(componentInstances.id, tx.select({ id: managedContainers.instanceId })
+            .from(managedContainers).where(eq(managedContainers.runtimeNodeId, id))),
+        ));
+      await tx.update(portExposures)
+        .set({ runtimeNodeId: null, status: "stopped", publicUrl: null, relayHost: null, relayPort: null, stoppedAt: now, lastError, updatedAt: now })
+        .where(eq(portExposures.runtimeNodeId, id));
+      // SET NULL alone would make remote Docker IDs look like local containers.
+      // Remove bookkeeping only; deleting a node must not erase remote files.
+      await tx.delete(managedContainers).where(eq(managedContainers.runtimeNodeId, id));
+      await tx.delete(runtimeNodes)
+        .where(and(eq(runtimeNodes.id, id), eq(runtimeNodes.tenantId, tenantId)));
+      return { node, detached };
+    });
+    if ("error" in result) return { error: result.error! };
+
+    this.hub?.disconnect(id);
+    clearCachedRunnerToken(id);
+    for (const agent of result.detached) {
+      platformEvents.publish(agent.tenantId, { type: "agent_config_changed", agentId: agent.id });
+    }
+    const event = { type: "runner_node" as const, nodeId: id };
+    if (result.node.isShared) platformEvents.publishAll(event);
+    else platformEvents.publish(tenantId, event);
     return { ok: true };
   }
 

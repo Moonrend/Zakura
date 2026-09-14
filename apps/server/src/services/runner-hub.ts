@@ -175,6 +175,12 @@ export class RunnerHub {
     return s;
   }
 
+  disconnect(nodeId: string): void {
+    const session = this.sessions.get(nodeId);
+    this.sessions.delete(nodeId);
+    session?.close("运行节点已删除", true);
+  }
+
   private async accept(ws: WebSocket, req: IncomingMessage) {
     ws.on("error", () => ws.terminate());
     const token = bearer(req);
@@ -224,7 +230,7 @@ export class RunnerHub {
       session.version = info.version ?? "";
       session.kind = info.kind ?? node.kind;
       const now = new Date();
-      await this.db
+      const [updated] = await this.db
         .update(runtimeNodes)
         .set({
           status: sql`case when ${runtimeNodes.status} = 'draining' then 'draining' else 'online' end`,
@@ -240,7 +246,12 @@ export class RunnerHub {
           lastSeenAt: now,
           updatedAt: now,
         })
-        .where(eq(runtimeNodes.id, node.id));
+        .where(eq(runtimeNodes.id, node.id))
+        .returning();
+      if (!updated) {
+        session.close("运行节点已删除", true);
+        return;
+      }
       if (this.sessions.get(node.id) !== session || !session.connected) return;
       session.ready = true;
       const event = { type: "runner_node" as const, nodeId: node.id };
