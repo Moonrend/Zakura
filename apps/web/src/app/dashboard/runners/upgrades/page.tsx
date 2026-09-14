@@ -21,6 +21,7 @@ import {
   statusLabel,
   statusVariant,
   upgradeNodeImage,
+  runnerUpdateProgressText,
   type GlobalImageUpdateStatus,
   type ImageUpdateEntry,
   type ImageUpdateNode,
@@ -75,6 +76,7 @@ export default function UpgradesPage() {
   const [checkingNode, setCheckingNode] = useState<Record<string, boolean>>({});
   const [upgrading, setUpgrading] = useState<Record<EntryKey, boolean>>({});
   const [upgraded, setUpgraded] = useState<Record<EntryKey, boolean>>({});
+  const [updateProgress, setUpdateProgress] = useState<Record<EntryKey, string>>({});
   const [upgradingAll, setUpgradingAll] = useState(false);
 
   const loadNodes = useCallback(async () => {
@@ -136,10 +138,10 @@ export default function UpgradesPage() {
   }, []);
 
   const handleCheckNode = useCallback(
-    async (nodeId: string) => {
+    async (nodeId: string, allowPullFallback = true) => {
       setCheckingNode((prev) => ({ ...prev, [nodeId]: true }));
       try {
-        const result = await checkNodeImageUpdates(nodeId);
+        const result = await checkNodeImageUpdates(nodeId, { allowPullFallback });
         setStatus((prev) => {
           if (!prev) return prev;
           const next = prev.nodes.map((n) =>
@@ -166,9 +168,11 @@ export default function UpgradesPage() {
       const key = entryKey(node.id, entry.image);
       setUpgrading((prev) => ({ ...prev, [key]: true }));
       try {
-        const { kind, result } = await upgradeNodeImage(node.id, entry);
+        const { kind, result } = await upgradeNodeImage(node.id, entry, (update) => {
+          setUpdateProgress((prev) => ({ ...prev, [key]: runnerUpdateProgressText(update) }));
+        });
         if (kind === "runner") {
-          toast.success(`${node.name} 的代理已调度更新，设备将短暂重连`);
+          toast.success(`${node.name} 的代理更新完成，已重新上线`);
         } else {
           const r = result as { recreated: unknown[] };
           toast.success(
@@ -176,10 +180,10 @@ export default function UpgradesPage() {
           );
         }
         setUpgraded((prev) => ({ ...prev, [key]: true }));
-        // 升级后等待 Runner 完成重建再重新探测该节点
-        setTimeout(() => void handleCheckNode(node.id), 3000);
+        void handleCheckNode(node.id, false);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        setUpdateProgress((prev) => ({ ...prev, [key]: `升级失败：${msg}` }));
         toast.error(`${node.name} 升级失败：${msg}`);
       } finally {
         setUpgrading((prev) => ({ ...prev, [key]: false }));
@@ -194,11 +198,13 @@ export default function UpgradesPage() {
     img: statusByNodeId.get(n.id) ?? null,
   }));
 
-  // 全部更新：并发升级所有节点的待升级镜像条目，单条失败不阻断其余。
+  // Different nodes can update concurrently. Within a node, restart the agent
+  // last so it cannot disconnect an in-flight workspace pull/recreate RPC.
   const handleUpgradeAll = useCallback(async () => {
     const pending: Array<{ node: RuntimeNode; entry: ImageUpdateEntry; key: string }> = [];
     for (const { node, img } of merged) {
       if (!img) continue;
+      if (img.entries.some((entry) => upgrading[entryKey(node.id, entry.image)])) continue;
       for (const entry of img.entries) {
         if (!isActionable(entry)) continue;
         if (!canUpgradeImage(node, entry)) continue;
@@ -214,22 +220,30 @@ export default function UpgradesPage() {
     );
     let okCount = 0;
     let failCount = 0;
+    const byNode = new Map<string, typeof pending>();
+    for (const item of pending) {
+      const items = byNode.get(item.node.id) ?? [];
+      items.push(item);
+      byNode.set(item.node.id, items);
+    }
     await Promise.allSettled(
-      pending.map(async (p) => {
-        try {
-          const { kind } = await upgradeNodeImage(p.node.id, p.entry);
-          setUpgraded((prev) => ({ ...prev, [p.key]: true }));
-          okCount += 1;
-          setTimeout(() => void handleCheckNode(p.node.id), kind === "runner" ? 3000 : 1500);
-        } catch {
-          failCount += 1;
-        } finally {
-          setUpgrading((prev) => {
-            const n = { ...prev };
-            delete n[p.key];
-            return n;
-          });
+      [...byNode.values()].map(async (items) => {
+        items.sort((a, b) => Number(resolveImageUpdateKind(a.entry) === "runner") - Number(resolveImageUpdateKind(b.entry) === "runner"));
+        for (const p of items) {
+          try {
+            await upgradeNodeImage(p.node.id, p.entry, (update) => {
+              setUpdateProgress((prev) => ({ ...prev, [p.key]: runnerUpdateProgressText(update) }));
+            });
+            setUpgraded((prev) => ({ ...prev, [p.key]: true }));
+            okCount += 1;
+          } catch (error) {
+            failCount += 1;
+            setUpdateProgress((prev) => ({ ...prev, [p.key]: `升级失败：${error instanceof Error ? error.message : String(error)}` }));
+          } finally {
+            setUpgrading((prev) => ({ ...prev, [p.key]: false }));
+          }
         }
+        void handleCheckNode(items[0]!.node.id, false);
       }),
     );
     setUpgradingAll(false);
@@ -243,6 +257,7 @@ export default function UpgradesPage() {
   // 待升级条目数：驱动「全部更新」按钮的显隐与禁用。
   const pendingCount = merged.reduce((sum, { node, img }) => {
     if (!img) return sum;
+    if (img.entries.some((entry) => upgrading[entryKey(node.id, entry.image)])) return sum;
     return (
       sum +
       img.entries.filter((e) => {
@@ -314,6 +329,7 @@ export default function UpgradesPage() {
               checkingNode={Boolean(checkingNode[node.id])}
               upgrading={upgrading}
               upgraded={upgraded}
+              updateProgress={updateProgress}
               onCheckNode={() => void handleCheckNode(node.id)}
               onUpgrade={(entry) => void handleUpgrade(node, entry)}
             />
@@ -330,6 +346,7 @@ function NodeCard({
   checkingNode,
   upgrading,
   upgraded,
+  updateProgress,
   onCheckNode,
   onUpgrade,
 }: {
@@ -338,6 +355,7 @@ function NodeCard({
   checkingNode: boolean;
   upgrading: Record<EntryKey, boolean>;
   upgraded: Record<EntryKey, boolean>;
+  updateProgress: Record<EntryKey, string>;
   onCheckNode: () => void;
   onUpgrade: (entry: ImageUpdateEntry) => void;
 }) {
@@ -413,6 +431,8 @@ function NodeCard({
               node={node}
               upgrading={Boolean(upgrading[entryKey(node.id, entry.image)])}
               upgraded={Boolean(upgraded[entryKey(node.id, entry.image)])}
+              nodeBusy={img.entries.some((item) => upgrading[entryKey(node.id, item.image)])}
+              progress={updateProgress[entryKey(node.id, entry.image)]}
               onUpgrade={() => onUpgrade(entry)}
             />
           ))}
@@ -427,18 +447,22 @@ function EntryRow({
   node,
   upgrading,
   upgraded,
+  nodeBusy,
+  progress,
   onUpgrade,
 }: {
   entry: ImageUpdateEntry;
   node: RuntimeNode;
   upgrading: boolean;
   upgraded: boolean;
+  nodeBusy: boolean;
+  progress?: string;
   onUpgrade: () => void;
 }) {
   const runnerImage = resolveImageUpdateKind(entry) === "runner";
   const actionable = isActionable(entry);
   const upgradeable = canUpgradeImage(node, entry);
-  const disabled = !upgradeable || upgrading;
+  const disabled = !upgradeable || nodeBusy;
 
   let disabledReason: string | undefined;
   if (node.access === "shared") disabledReason = "共享节点，无管理权限";
@@ -491,6 +515,7 @@ function EntryRow({
             <CheckCircle2 className="size-3.5 text-emerald-500" />
           )}
         </div>
+        {progress ? <p role="status" className="mt-1 text-[11px] text-muted-foreground">{progress}</p> : null}
       </div>
       {actionable ? (
         upgraded ? (

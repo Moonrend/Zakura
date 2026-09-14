@@ -35,6 +35,8 @@ import {
   statusVariant,
   stopContainer,
   updateRunner,
+  runnerUpdateProgressText,
+  type RunnerUpdateStatus,
   type ManagedContainerRow,
   type RunnerHostInfo,
   type RunnerInstallBundle,
@@ -95,6 +97,8 @@ export default function RunnerDetailPage() {
   });
   const [versionInfo, setVersionInfo] = useState<RunnerVersionInfo | null>(null);
   const [versionBusy, setVersionBusy] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<RunnerUpdateStatus | null>(null);
   const [imageUpdates, setImageUpdates] = useState<ImageUpdateEntry[] | null>(null);
   const [imageUpdatesBusy, setImageUpdatesBusy] = useState(false);
 
@@ -132,8 +136,6 @@ export default function RunnerDetailPage() {
   }, [id]);
 
   const loadVersion = useCallback(async () => {
-    if (!node || node.kind === "local") return;
-    if (node.access === "shared") return;
     setVersionBusy(true);
     try {
       const info = await fetchRunnerVersion(id);
@@ -143,20 +145,19 @@ export default function RunnerDetailPage() {
     } finally {
       setVersionBusy(false);
     }
-  }, [id, node]);
+  }, [id]);
 
-  const loadImageUpdates = useCallback(async () => {
-    if (!node || node.kind === "local" || node.access === "shared") return;
+  const loadImageUpdates = useCallback(async (includeWorkspace = false) => {
     setImageUpdatesBusy(true);
     try {
-      const res = await fetchImageUpdates(id);
+      const res = await fetchImageUpdates(id, { runnerOnly: !includeWorkspace, allowPullFallback: includeWorkspace });
       setImageUpdates(res.images ?? []);
     } catch {
       setImageUpdates(null);
     } finally {
       setImageUpdatesBusy(false);
     }
-  }, [id, node]);
+  }, [id]);
 
   const load = useCallback(async () => {
     try {
@@ -172,14 +173,15 @@ export default function RunnerDetailPage() {
         Boolean(res.meshConnected || res.meshProvider === "headscale-platform"),
       );
       if (res.tailscaleError) setInstallError(res.tailscaleError);
-      // Install packages are heavy — load separately after detail paints
+      // Keep these callbacks independent of node state: setNode must not trigger
+      // another detail -> install -> image-check cycle.
       if (res.node.kind !== "local" && res.node.access !== "shared") {
         void loadInstall();
       } else {
         setInstallBundle(null);
       }
       // Probe live Runner version/image for the update panel (remote only)
-      if (res.node.kind !== "local") {
+      if (res.node.kind !== "local" && res.node.access !== "shared") {
         void loadVersion();
         void loadImageUpdates();
       }
@@ -219,18 +221,20 @@ export default function RunnerDetailPage() {
 
   async function handleUpdateRunner() {
     if (!node) return;
-    setVersionBusy(true);
+    setUpdateBusy(true);
+    setUpdateStatus(null);
     try {
-      await updateRunner(node.id);
-      toast.success("已调度代理更新，设备将短暂重连");
-      setTimeout(() => {
-        void loadVersion();
-        void loadImageUpdates();
-      }, 8_000);
+      const result = await updateRunner(node.id, {}, setUpdateStatus);
+      toast.success(result.update.note || "代理更新完成，已重新上线");
+      setNode((current) => current ? { ...current, agentVersion: result.version ?? current.agentVersion, status: "online" } : current);
+      void loadVersion();
+      void loadImageUpdates();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      const error = err instanceof Error ? err.message : String(err);
+      setUpdateStatus((current) => current ? { ...current, phase: "failed", error } : current);
+      toast.error(error);
     } finally {
-      setVersionBusy(false);
+      setUpdateBusy(false);
     }
   }
 
@@ -425,7 +429,7 @@ export default function RunnerDetailPage() {
               size="sm"
               variant="outline"
               disabled={imageUpdatesBusy}
-              onClick={() => void loadImageUpdates()}
+              onClick={() => void loadImageUpdates(true)}
             >
               {imageUpdatesBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
               检查镜像更新
@@ -471,11 +475,13 @@ export default function RunnerDetailPage() {
                     刷新容器会拉取镜像并重建本机上带 zakura 标签的工作区 / MCP / ACP 容器。
                   </div>
                 </div>
+              ) : imageUpdates.some((entry) => entry.error) ? (
+                <p className="text-xs text-muted-foreground">部分更新状态未知，请查看下方错误。</p>
               ) : (
                 <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/5 px-3 py-2">
                   <CheckCircle2 className="size-4 shrink-0 text-success" />
                   <span className="text-xs text-success">
-                    所有镜像均为最新版本
+                    已检查的项目均为最新版本
                   </span>
                 </div>
               )}
@@ -514,10 +520,10 @@ export default function RunnerDetailPage() {
               <Button
                 size="sm"
                 className="w-full"
-                disabled={versionBusy}
+                disabled={versionBusy || updateBusy}
                 onClick={() => void handleUpdateRunner()}
               >
-                {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                {updateBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                 一键更新 zakura-agent
               </Button>
             </div>
@@ -527,7 +533,7 @@ export default function RunnerDetailPage() {
                 size="sm"
                 variant="outline"
                 className="w-full"
-                disabled={versionBusy}
+                disabled={versionBusy || updateBusy}
                 onClick={() => void handleRefreshWorkspaceImage()}
               >
                 {versionBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -535,8 +541,13 @@ export default function RunnerDetailPage() {
               </Button>
             </div>
           </div>
+          {updateStatus ? (
+            <p role="status" aria-live="polite" className="mt-3 text-xs text-muted-foreground">
+              {runnerUpdateProgressText(updateStatus)}
+            </p>
+          ) : null}
           <p className="mt-3 text-[11px] text-muted-foreground">
-            更新代理从本控制面拉取对应系统的二进制并重启服务，约数秒。
+            更新代理会下载对应系统的二进制，校验后重启，并确认代理重新上线。
             刷新容器只重建带 zakura 标签的容器，不会动你自己的其它 Docker 应用。
           </p>
         </SettingsSection>

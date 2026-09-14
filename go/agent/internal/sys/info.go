@@ -40,6 +40,15 @@ type InfoResult struct {
 	SHA256       string         `json:"sha256,omitempty"`
 }
 
+// VersionInfo does not invoke Docker, scan disks or probe the network.
+func VersionInfo() map[string]any {
+	return map[string]any{
+		"version": Version, "binPath": currentBin(), "sha256": currentSHA256(),
+		"goos": runtime.GOOS, "goarch": runtime.GOARCH,
+		"updateError": selfUpdater.errorMessage(),
+	}
+}
+
 func Collect(kind, storageRoot string) InfoResult {
 	host, _ := os.Hostname()
 	d := docker.Probe()
@@ -72,7 +81,7 @@ func Collect(kind, storageRoot string) InfoResult {
 }
 
 func currentBin() string {
-	p, err := os.Executable()
+	p, err := executablePath()
 	if err != nil {
 		return DefaultBinPath()
 	}

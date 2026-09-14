@@ -19,7 +19,10 @@ import {
   resolveAgentUpdateTarget,
   normalizeAgentArch,
   normalizeAgentOs,
+  AgentBinaryChangedError,
+  type AgentUpdateTarget,
 } from "../services/agent-binaries.js";
+import { RunnerUpdates, RunnerUpdateConflictError } from "../services/runner-updates.js";
 import { Readable } from "node:stream";
 import { readFileSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -139,6 +142,10 @@ export function registerRuntimeNodeRoutes(
   },
 ) {
   const { nodes, db, config, network, orchestrator, runtime, imageUpdateChecker } = deps;
+  const runnerUpdates = new RunnerUpdates(async (tenantId, nodeId) => {
+    const { client } = await nodes.requireRunnerClient(tenantId, nodeId, { skipHeartbeatRefresh: true });
+    return client;
+  });
 
   // Every local node endpoint (including containers and image operations) has
   // the same grant requirement as listing/binding the node.
@@ -376,26 +383,40 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
   });
 
   app.get("/api/runtime-nodes/agent-binaries/:os/:arch", async (c) => {
-    const bin = findAgentBinary(c.req.param("os"), c.req.param("arch"));
-    if (!bin) {
-      return c.json(
-        {
-          error: "二进制尚未发布。请在仓库 go/agent 执行 goreleaser 或 go build，并设置 ZAKURA_AGENT_BINARIES_DIR。",
-        },
-        404,
-      );
+    try {
+      const bin = await findAgentBinary(c.req.param("os"), c.req.param("arch"));
+      if (!bin) {
+        return c.json(
+          {
+            error: "二进制尚未发布。请在仓库 go/agent 执行 goreleaser 或 go build，并设置 ZAKURA_AGENT_BINARIES_DIR。",
+          },
+          404,
+        );
+      }
+      const requestedSha = c.req.query("sha256");
+      if (requestedSha && requestedSha.toLowerCase() !== bin.sha256) {
+        return c.json({ error: "代理二进制已重新发布，请重新发起更新" }, 409);
+      }
+      const etag = `"${bin.sha256}"`;
+      const cacheControl = requestedSha ? "public, max-age=31536000, immutable" : "no-cache";
+      if (c.req.header("if-none-match") === etag) {
+        return c.body(null, 304, { etag, "cache-control": cacheControl });
+      }
+      const filename = bin.os === "windows" ? "zakura-agent.exe" : "zakura-agent";
+      const stream = await openAgentBinaryStream(bin);
+      return c.body(Readable.toWeb(stream) as unknown as ReadableStream, 200, {
+        "content-type": "application/octet-stream",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "content-length": String(bin.size),
+        etag,
+        "cache-control": cacheControl,
+        "x-zakura-agent-sha256": bin.sha256,
+        "x-zakura-agent-version": bin.version,
+      });
+    } catch (error) {
+      if (error instanceof AgentBinaryChangedError) return c.json({ error: error.message }, 409);
+      throw error;
     }
-    const etag = `"${bin.sha256}"`;
-    if (c.req.header("if-none-match") === etag) return c.body(null, 304);
-    const filename = bin.os === "windows" ? "zakura-agent.exe" : "zakura-agent";
-    return c.body(Readable.toWeb(openAgentBinaryStream(bin)) as unknown as ReadableStream, 200, {
-      "content-type": "application/octet-stream",
-      "content-disposition": `attachment; filename="${filename}"`,
-      etag,
-      "cache-control": "public, max-age=60",
-      "x-zakura-agent-sha256": bin.sha256,
-      "x-zakura-agent-version": bin.version,
-    });
   });
 
   /**
@@ -623,12 +644,10 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
         reportedVersion: node.agentVersion ?? null,
       });
     }
-    const { client } = await nodes.requireRunnerClient(
-      session.tenantId,
-      node.id,
-      { allowOffline: true },
-    );
     try {
+      const { client } = await nodes.requireRunnerClient(
+        session.tenantId, node.id, { allowOffline: true, skipHeartbeatRefresh: true },
+      );
       const live = await client.systemVersion();
       return c.json({
         version: live.version,
@@ -648,6 +667,21 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     }
   });
 
+  app.get("/api/runtime-nodes/:id/update-runner", async (c) => {
+    const session = c.get("session")!;
+    const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
+    if (!node) return c.json({ error: "Not found" }, 404);
+    try {
+      assertSharedRunnerOperationAllowed(node, session.tenantId, "manage");
+    } catch (err) {
+      if (err instanceof RunnerAccessError) return c.json({ error: err.message }, err.status);
+      throw err;
+    }
+    const update = runnerUpdates.get(node.id, c.req.query("id"));
+    if (!update) return c.json({ error: "更新任务不存在或已过期，请重新检查代理版本" }, 404);
+    return c.json({ update });
+  });
+
   app.post("/api/runtime-nodes/:id/update-runner", async (c) => {
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
@@ -663,33 +697,35 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
       }
       throw err;
     }
-    const body = await c.req
-      .json<{
-        image?: string;
-        url?: string;
-        sha256?: string;
-        version?: string;
-        recreateDelayMs?: number;
-      }>()
-      .catch(
-        () =>
-          ({}) as {
-            image?: string;
-            url?: string;
-            sha256?: string;
-            version?: string;
-            recreateDelayMs?: number;
-          },
-      );
-    const host = (JSON.parse(node.hostInfoJson || "{}") as {
-      platform?: string;
-      arch?: string;
-    }) ?? {};
-    const os = normalizeAgentOs(host.platform) ?? "linux";
-    const arch = normalizeAgentArch(host.arch) ?? "amd64";
-    let target: ReturnType<typeof resolveAgentUpdateTarget>;
+    let body: {
+      image?: string;
+      url?: string;
+      sha256?: string;
+      version?: string;
+      recreateDelayMs?: number;
+    };
     try {
-      target = resolveAgentUpdateTarget({
+      const raw = await c.req.text();
+      body = raw.trim() ? JSON.parse(raw) : {};
+    } catch {
+      return c.json({ error: "请求体必须是有效的 JSON 对象" }, 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "请求体必须是 JSON 对象" }, 400);
+    for (const key of ["url", "image", "sha256", "version"] as const) {
+      if (body[key] !== undefined && typeof body[key] !== "string") return c.json({ error: `${key} must be a string` }, 400);
+    }
+    let host: { platform?: unknown; arch?: unknown };
+    try {
+      host = JSON.parse(node.hostInfoJson || "{}") ?? {};
+    } catch {
+      host = {};
+    }
+    const os = normalizeAgentOs(typeof host.platform === "string" ? host.platform : undefined);
+    const arch = normalizeAgentArch(typeof host.arch === "string" ? host.arch : undefined);
+    if (!os || !arch) return c.json({ error: "节点尚未上报可识别的平台与架构，请等待代理连接后重试" }, 400);
+    let target: AgentUpdateTarget;
+    try {
+      target = await resolveAgentUpdateTarget({
         publicBaseUrl: config.publicBaseUrl,
         os,
         arch,
@@ -701,20 +737,13 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
-    const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
     try {
-      const result = await client.updateRunner({
-        image: target.url,
-        url: target.url,
-        sha256: target.sha256,
-        version: target.version,
-        recreateDelayMs: body.recreateDelayMs,
-      });
-      return c.json({ ...result, version: target.version, sha256: target.sha256 });
+      const update = runnerUpdates.start(session.tenantId, node.id, target);
+      return c.json({ image: target.url, scheduled: true, version: target.version, sha256: target.sha256, update }, 202);
     } catch (err) {
       return c.json(
         { error: err instanceof Error ? err.message : String(err) },
-        502,
+        err instanceof RunnerUpdateConflictError ? 409 : 502,
       );
     }
   });
@@ -775,7 +804,8 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
       // so the node page and the indicator could disagree about the same node, and
       // "check" here appeared to do nothing globally.
       const status = await imageUpdateChecker.checkNode(node.id, {
-        allowPullFallback: true,
+        allowPullFallback: c.req.query("pull") === "1",
+        runnerOnly: c.req.query("kind") === "runner",
       });
       if (status.error) return c.json({ error: status.error, images: [] }, 502);
       return c.json({ images: status.entries, checkedAt: status.checkedAt });

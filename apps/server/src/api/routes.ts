@@ -3080,7 +3080,7 @@ export async function createApiApp(deps: {
 
     app.post("/api/system/image-updates/check", async (c) => {
       const session = c.get("session")!;
-      const body = (await c.req.json().catch(() => ({}))) as { nodeId?: string };
+      const body = (await c.req.json().catch(() => ({}))) as { nodeId?: string; allowPullFallback?: boolean };
       if (!body.nodeId?.trim()) return c.json({ error: "nodeId is required" }, 400);
       const nodeId = body.nodeId.trim();
       const node = await runtimeNodes.getAccessible(session.tenantId, nodeId);
@@ -3091,7 +3091,7 @@ export async function createApiApp(deps: {
       try {
         // 用户点的「检查」允许最后退回 docker pull 取摘要（后台巡检永远不会）。
         const status = await imageUpdateChecker.checkNode(node.id, {
-          allowPullFallback: true,
+          allowPullFallback: body.allowPullFallback !== false,
         });
         return c.json(
           decorate(status, {

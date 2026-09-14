@@ -73,6 +73,7 @@ export class ImageUpdateChecker {
   /** Re-entrancy guard: a slow sweep must not overlap the next interval. */
   private ticking = false;
   private readonly cache = new Map<string, NodeImageUpdateStatus>();
+  private readonly inFlight = new Map<string, Promise<NodeImageUpdateStatus>>();
 
   constructor(
     private readonly db: Db,
@@ -114,10 +115,26 @@ export class ImageUpdateChecker {
    * Force a refresh for one node (user clicked "check"). This is the only path
    * allowed to fall back to `docker pull` for a digest, and only when asked.
    */
-  async checkNode(nodeId: string, opts?: { allowPullFallback?: boolean }): Promise<NodeImageUpdateStatus> {
-    const status = await this.probeNode(nodeId, opts);
-    this.cache.set(nodeId, status);
-    return status;
+  async checkNode(nodeId: string, opts?: { allowPullFallback?: boolean; runnerOnly?: boolean }): Promise<NodeImageUpdateStatus> {
+    const key = `${nodeId}:${Boolean(opts?.runnerOnly)}:${Boolean(opts?.allowPullFallback)}`;
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+    const check = this.probeNode(nodeId, opts).then((status) => {
+      const previous = this.cache.get(nodeId);
+      if (opts?.runnerOnly && previous && !status.error) {
+        const entries = [...status.entries, ...previous.entries.filter((entry) => entry.kind !== "runner")];
+        // A fast agent probe must neither erase workspace results nor make old
+        // workspace probes look freshly checked.
+        this.cache.set(nodeId, { ...status, checkedAt: previous.checkedAt, entries,
+          hasUpdates: entries.some((entry) => entry.updateAvailable),
+          hasRunningStale: entries.some((entry) => entry.runningStale) });
+      } else {
+        this.cache.set(nodeId, status);
+      }
+      return status;
+    }).finally(() => { this.inFlight.delete(key); });
+    this.inFlight.set(key, check);
+    return check;
   }
 
   private async tick(): Promise<void> {
@@ -159,7 +176,7 @@ export class ImageUpdateChecker {
 
   private async probeNode(
     nodeId: string,
-    opts?: { allowPullFallback?: boolean },
+    opts?: { allowPullFallback?: boolean; runnerOnly?: boolean },
   ): Promise<NodeImageUpdateStatus> {
     try {
       const node = await this.db.query.runtimeNodes.findFirst({
@@ -168,7 +185,7 @@ export class ImageUpdateChecker {
       if (!node) throw new Error(`runtime node ${nodeId} not found`);
 
       const isLocal = node.kind === "local";
-      const wanted = await collectNodeImages(this.db, nodeId, {
+      const wanted = opts?.runnerOnly ? [] : await collectNodeImages(this.db, nodeId, {
         isLocal,
         runnerImage: (node as { runnerImage?: string | null }).runnerImage ?? null,
       });
@@ -180,12 +197,12 @@ export class ImageUpdateChecker {
         allowOffline: true,
         skipHeartbeatRefresh: true,
       });
-      const info = await client.ping();
-      const host = info.hostInfo as { platform?: string; arch?: string } | undefined;
+      const info = opts?.runnerOnly ? await client.systemVersion() : await client.ping();
+      const host = ("hostInfo" in info ? info.hostInfo : undefined) as { platform?: string; arch?: string } | undefined;
       const extra = info as { sha256?: string; goos?: string; goarch?: string };
-      const os = extra.goos ?? host?.platform ?? "linux";
-      const arch = extra.goarch ?? host?.arch ?? "amd64";
-      const bin = findAgentBinary(os, arch);
+      const os = extra.goos ?? host?.platform ?? "";
+      const arch = extra.goarch ?? host?.arch ?? "";
+      const bin = await findAgentBinary(os, arch);
       if (bin && !isLocal) {
         const currentSha = extra.sha256;
         const currentVer = info.version ?? node.agentVersion ?? "";
@@ -204,10 +221,15 @@ export class ImageUpdateChecker {
         });
       }
 
-      const result = await client.checkImageUpdates({
-        images,
-        allowPullFallback: opts?.allowPullFallback === true,
-      });
+      // A computer without Docker still has a fully updatable host agent.
+      const result = opts?.runnerOnly || ("docker" in info && info.docker?.ok === false)
+        ? { images: [] }
+        : await client.checkImageUpdates({ images, allowPullFallback: opts?.allowPullFallback === true })
+          .catch((error: unknown) => ({ images: images.map((image) => ({
+            image, localId: null, localDigest: null, remoteDigest: null,
+            updateAvailable: false, runningStale: false,
+            error: error instanceof Error ? error.message : String(error),
+          })) }));
       entries = entries.concat(
         (result.images ?? []).map((e) => ({
           ...e,
