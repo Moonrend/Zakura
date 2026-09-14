@@ -298,7 +298,7 @@ export default function RunnersPage() {
                           variant="ghost"
                           title="删除"
                           onClick={async () => {
-                            if (!(await confirm({ title: `删除 Runner「${r.name}」？`, description: "需无 Agent 绑定。", confirmLabel: "删除" }))) {
+                            if (!(await confirm({ title: `删除 Runner「${r.name}」？`, description: "将解绑相关 Agent 并清理节点记录。远程文件和容器保留；进行中的迁移需先结束。", confirmLabel: "删除" }))) {
                               return;
                             }
                             try {

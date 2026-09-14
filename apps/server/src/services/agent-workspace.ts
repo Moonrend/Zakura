@@ -18,7 +18,6 @@ import {
   DEFAULT_ACP_SIDECAR_IMAGE,
   DEFAULT_WORKSPACE_IMAGE,
   DEFAULT_WORKSPACE_LITE_IMAGE,
-  LOCAL_RUNTIME_NODE_ID,
   WORKSPACE_IMAGE_LOCAL,
   type RunnerHostInfo,
 } from "@zakura/shared";
@@ -223,7 +222,7 @@ export class AgentWorkspaceService {
     private readonly config: AppConfig,
     private readonly nodes?: RuntimeNodeService,
   ) {
-    // 工作区 Docker 已改走 Hub；保留参数以免改调用方。
+    // RuntimeNodeService owns the local Docker and remote Hub clients.
     void _runtime;
   }
 
@@ -284,10 +283,9 @@ export class AgentWorkspaceService {
     return root;
   }
 
-  /** True when agent is bound to a remote runner (not local/null). */
-  isRemoteAgent(agent: Agent): boolean {
-    const id = agent.runtimeNodeId;
-    return Boolean(id && id !== LOCAL_RUNTIME_NODE_ID);
+  /** An explicit local or remote binding is required; null never falls back. */
+  private hasRuntimeNode(agent: Agent): boolean {
+    return Boolean(agent.runtimeNodeId);
   }
 
   isHostWorkspace(agent: Agent): boolean {
@@ -297,7 +295,7 @@ export class AgentWorkspaceService {
   private async requireRunnerClient(
     agent: Agent,
   ): Promise<{ client: RunnerClient; node: RuntimeNode }> {
-    if (!this.isRemoteAgent(agent)) {
+    if (!this.hasRuntimeNode(agent)) {
       throw new Error("请先绑定一台电脑或服务器");
     }
     if (!this.nodes) {
@@ -398,7 +396,7 @@ export class AgentWorkspaceService {
       const agentRow = await this.db.query.agents.findFirst({
         where: eq(agents.id, agentId),
       });
-      if (agentRow && this.isRemoteAgent(agentRow)) {
+      if (agentRow && this.hasRuntimeNode(agentRow)) {
         try {
           const { client, node } = await this.requireRunnerClient(agentRow);
           const ws = await client.getWorkspace(agentId).catch(() => null);
@@ -449,7 +447,7 @@ export class AgentWorkspaceService {
     const computerOn = Boolean(agent.enableComputer);
     const row = await this.getWorkspaceContainer(agent.id);
 
-    if (this.isRemoteAgent(agent)) {
+    if (this.hasRuntimeNode(agent)) {
       // Remote: never fall through to local Docker inspect
       try {
         const { client, node } = await this.requireRunnerClient(agent);
@@ -542,7 +540,7 @@ export class AgentWorkspaceService {
     beginAgentProgress(agent.id, "starting", agent.tenantId);
     log("init", "准备工作区环境", 2, "init");
 
-    if (!this.isRemoteAgent(agent)) {
+    if (!this.hasRuntimeNode(agent)) {
       throw new Error("请先绑定一台电脑或服务器，再启动工作区");
     }
 
@@ -582,7 +580,7 @@ export class AgentWorkspaceService {
       if (!ping.ok) throw new Error("运行节点不可达");
       const hostWs = this.isHostWorkspace(agent);
       if (!hostWs && ping.docker && ping.docker.ok === false) {
-        throw new Error(`远程 Docker 不可用: ${ping.docker.error || "unknown"}`);
+        throw new Error(`运行节点 Docker 不可用: ${ping.docker.error || "unknown"}`);
       }
       log("runner", `节点在线${ping.docker?.version ? ` · Docker ${ping.docker.version}` : ""}`, 20);
 
@@ -604,7 +602,7 @@ export class AgentWorkspaceService {
       // The lite image is built/pushed by CI, so remote runners can pull it the
       // same way they pull the full image.
       const image = resolveImageForMode(mode, agent.workspaceImage);
-      log("container", `在远程 Runner 启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
+      log("container", `在所选节点启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
 
       const ws = await client.startWorkspace({
         agentId: agent.id,
@@ -637,7 +635,7 @@ export class AgentWorkspaceService {
         updatedAt: now,
       });
 
-      log("container", `远程工作区已启动 ${ws.name.slice(0, 24)}…`, 70);
+      log("container", `工作区已启动 ${ws.name.slice(0, 24)}…`, 70);
       if (ws.endpoints?.novncUrl) {
         log("desktop", `noVNC: ${ws.endpoints.novncUrl}`, 90);
       }
@@ -648,14 +646,14 @@ export class AgentWorkspaceService {
         if (cur?.status === "running") break;
         await new Promise((r) => setTimeout(r, 2000));
       }
-      log("ready", "远程电脑环境就绪", 100, "ready");
+      log("ready", "工作区就绪", 100, "ready");
 
       const [updated] = await this.db
         .update(agents)
         .set({ lastError: null, updatedAt: new Date() })
         .where(eq(agents.id, agent.id))
         .returning();
-      finishAgentProgress(agent.id, { ok: true, message: "远程工作区运行中" });
+      finishAgentProgress(agent.id, { ok: true, message: "工作区运行中" });
       return updated ?? agent;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -676,7 +674,7 @@ export class AgentWorkspaceService {
     this.closeTunnelsForAgent(agent.id);
     await this.shellJobs.killAgent(agent.id);
 
-    if (this.isRemoteAgent(agent)) {
+    if (this.hasRuntimeNode(agent)) {
       // Remote-bound: only stop on Runner — never touch local Docker
       let remoteErr: unknown = null;
       try {
@@ -822,7 +820,7 @@ export class AgentWorkspaceService {
     waitMs: number,
     opts?: { stdin?: string; onOutput?: (snap: ShellJobSnapshot) => void },
   ): Promise<ShellJobSnapshot> {
-    if (this.isRemoteAgent(agent)) {
+    if (this.hasRuntimeNode(agent)) {
       const { client } = await this.requireRunnerClient(agent);
       if (opts?.onOutput) {
         void client
@@ -1002,7 +1000,7 @@ export class AgentWorkspaceService {
     const out = new Map<string, boolean | undefined>();
     const unique = [...new Set(images.filter(Boolean))];
     if (unique.length === 0) return out;
-    if (!this.isRemoteAgent(agent)) {
+    if (!this.hasRuntimeNode(agent)) {
       for (const image of unique) out.set(image, undefined);
       return out;
     }
@@ -1244,7 +1242,7 @@ export class AgentWorkspaceService {
 
   /** Remove ACP adapter containers on the agent's bound computer. */
   async removeAcpAdapterContainers(agent: Agent, adapterId: string): Promise<number> {
-    if (!this.isRemoteAgent(agent)) return 0;
+    if (!this.hasRuntimeNode(agent)) return 0;
     const { client } = await this.requireRunnerClient(agent);
     const n = await client.removeAcpAdapterContainers(agent.id, adapterId);
     const rows = await this.db

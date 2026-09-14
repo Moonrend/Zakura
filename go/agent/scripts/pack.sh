@@ -15,20 +15,24 @@ if echo "$ver" | grep -Eq '^[0-9a-f]{40}$'; then
   ver="$(echo "$ver" | cut -c1-7)"
 fi
 mkdir -p dist
+# Build away from the served paths, and publish only after every platform built.
+# Renaming on the same filesystem lets existing downloads finish on their inode.
+stage=$(mktemp -d dist/.pack-XXXXXX)
+trap 'rm -rf "$stage"' EXIT
 for os in linux darwin windows; do
   for arch in amd64 arm64; do
     ext=""
     [ "$os" = windows ] && ext=".exe"
-    out="dist/zakura-agent_${os}_${arch}${ext}"
+    out="$stage/zakura-agent_${os}_${arch}${ext}"
     echo "$os/$arch -> $out"
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
       -ldflags "-s -w -X zakura.dev/agent/internal/sys.Version=${ver}" \
       -o "$out" ./cmd/zakura-agent
   done
 done
-printf '%s\n' "$ver" > dist/VERSION
+printf '%s\n' "$ver" > "$stage/VERSION"
 (
-  cd dist
+  cd "$stage"
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum zakura-agent_* > checksums.txt
   else
@@ -42,5 +46,10 @@ pathlib.Path('checksums.txt').write_text('\n'.join(lines) + '\n')
 PY
   fi
 )
+for binary in "$stage"/zakura-agent_*; do
+  mv -f "$binary" "dist/$(basename "$binary")"
+done
+mv -f "$stage/VERSION" dist/VERSION
+mv -f "$stage/checksums.txt" dist/checksums.txt
 echo "packed version=$ver"
 ls -l dist

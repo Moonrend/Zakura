@@ -168,7 +168,7 @@ describe("Go runner availability and shared node selection", () => {
     const sharedComputer = await newNode("computer");
     const privateNode = await newNode("server", false);
     const retiredLocal = await newNode("runner");
-    await db.update(runtimeNodes).set({ slug: "local" }).where(eq(runtimeNodes.id, retiredLocal.node.id));
+    await db.update(runtimeNodes).set({ slug: "local", tokenHash: null }).where(eq(runtimeNodes.id, retiredLocal.node.id));
     await connect(sharedServer);
     const listed = await nodes.listAccessible("consumer");
     assert.equal(listed.find((node) => node.id === sharedServer.node.id)?.status, "online");
@@ -245,5 +245,21 @@ describe("Go runner availability and shared node selection", () => {
     await until(() => first.socket.readyState === WebSocket.CLOSED);
     assert.notEqual(hub.get(input.node.id), old);
     assert.equal((await nodes.getAccessible("consumer", input.node.id))?.status, "online");
+  });
+
+  it("deleting a node closes its live session and revokes its token", async () => {
+    const input = await newNode();
+    const { socket, frames } = await connect(input);
+    const session = hub.get(input.node.id)!;
+    const rejected = assert.rejects(session.rpc("docker.pull", { image: "test:1" }), /节点已删除/);
+    await until(() => frames.some((frame) => frame.method === "docker.pull"));
+    assert.deepEqual(await nodes.delete("owner", input.node.id), { ok: true });
+    await rejected;
+    assert.equal(hub.get(input.node.id), null);
+    await until(() => socket.readyState === WebSocket.CLOSED);
+    const reconnect = new WebSocket(url, { headers: { authorization: `Bearer ${input.token}` } });
+    sockets.add(reconnect);
+    const [code] = await once(reconnect, "close");
+    assert.equal(code, 4403);
   });
 });

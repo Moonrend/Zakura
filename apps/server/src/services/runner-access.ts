@@ -1,4 +1,4 @@
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { managedContainers, runtimeNodes, users } from "../db/schema.js";
@@ -56,6 +56,11 @@ export function assertCanUseLocalRunner(allowed: boolean): void {
   }
 }
 
+/** 0053 changed implicit local nodes to computer; token-bearing names are remote. */
+export function isLocalRuntimeNode(node: { kind: string; slug: string; tokenHash: string | null }): boolean {
+  return node.kind === "local" || (node.slug === "local" && node.tokenHash === null);
+}
+
 /** 节点是否对调用租户为「外来共享」访问（非本租户拥有） */
 export function isForeignSharedAccess(
   node: { tenantId: string; isShared: boolean },
@@ -80,7 +85,7 @@ export async function resolveAccessibleNode(
       eq(runtimeNodes.id, nodeId),
       eq(runtimeNodes.isShared, true),
       inArray(runtimeNodes.kind, ["runner", "computer", "server"]),
-      ne(runtimeNodes.slug, "local"),
+      or(ne(runtimeNodes.slug, "local"), isNotNull(runtimeNodes.tokenHash)),
     ),
   });
   return shared ?? null;
@@ -91,7 +96,7 @@ export async function listSharedRunnerNodes(db: Db, excludeTenantId?: string) {
     where: and(
       eq(runtimeNodes.isShared, true),
       inArray(runtimeNodes.kind, ["runner", "computer", "server"]),
-      ne(runtimeNodes.slug, "local"),
+      or(ne(runtimeNodes.slug, "local"), isNotNull(runtimeNodes.tokenHash)),
     ),
   });
   if (!excludeTenantId) return rows;
@@ -126,7 +131,7 @@ export async function assertNodeBindAllowed(
     throw new RunnerAccessError("Runner 节点不存在或不可访问", 404);
   }
 
-  if (node.kind === "local" || node.slug === "local") {
+  if (isLocalRuntimeNode(node)) {
     const ok = await userCanUseLocalRunner(db, config, userId);
     assertCanUseLocalRunner(ok);
     return;

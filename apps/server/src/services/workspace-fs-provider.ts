@@ -2,7 +2,6 @@ import {
   type WorkspaceFs,
   type WorkspaceFsProvider,
 } from "@zakura/core";
-import { LOCAL_RUNTIME_NODE_ID } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import { agents } from "../db/schema.js";
@@ -47,7 +46,7 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
 
   async forAgentBinding(binding: AgentFsBinding): Promise<WorkspaceFs> {
     const nodeId = binding.runtimeNodeId;
-    if (!nodeId || nodeId === LOCAL_RUNTIME_NODE_ID) {
+    if (!nodeId) {
       throw new Error("该 Agent 未绑定运行节点，无法访问工作区文件");
     }
 
@@ -57,16 +56,12 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
       return cached.clientFs;
     }
 
-    // 热路径跳过全表心跳刷新；直连 Runner HTTP FS（机器磁盘）
-    const { node, client } = await this.nodes.requireRunnerClient(
+    // Local clients use the server filesystem; remote clients require a live Hub.
+    const { client } = await this.nodes.requireRunnerClient(
       binding.tenantId,
       nodeId,
       { skipHeartbeatRefresh: true },
     );
-    // local 节点不应走到 requireRunnerClient；双保险
-    if (node.kind === "local") {
-      throw new Error("旧本机节点已停用，请重装 zakura-agent");
-    }
     const clientFs = client.workspaceFs(binding.id);
     this.runnerFsCache.set(cacheKey, {
       clientFs,

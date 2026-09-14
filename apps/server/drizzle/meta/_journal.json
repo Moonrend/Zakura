@@ -379,6 +379,13 @@
       "when": 1787100000000,
       "tag": "0053_go_agent_runtime",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1789401600000,
+      "tag": "0054_restore_local_runtime",
+      "breakpoints": true
     }
   ]
 }

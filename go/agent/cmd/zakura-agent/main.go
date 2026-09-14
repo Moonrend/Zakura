@@ -36,14 +36,22 @@ func main() {
 
 	log.Printf("zakura-agent %s 启动 kind=%s goos=%s/%s data=%s", sys.Version, *kind, runtime.GOOS, runtime.GOARCH, *data)
 	h := rpc.New(*kind, *data)
+	run := func(ctx context.Context) {
+		dial.Loop(ctx, dial.Config{
+			ServerURL: *server,
+			Token:     *token,
+			Kind:      *kind,
+			Handler:   h,
+		})
+	}
+	if managed, err := runService(run); err != nil {
+		log.Fatal(err)
+	} else if managed {
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	dial.Loop(ctx, dial.Config{
-		ServerURL: *server,
-		Token:     *token,
-		Kind:      *kind,
-		Handler:   h,
-	})
+	run(ctx)
 }
 
 func env(key, fallback string) string {

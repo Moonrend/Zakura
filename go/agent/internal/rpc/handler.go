@@ -40,11 +40,28 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	var result any
 	switch msg.Method {
 	case "sys.info":
-		result = sys.Collect(h.Kind, h.StorageRoot)
+		var p struct {
+			Light bool `json:"light"`
+		}
+		_ = json.Unmarshal(msg.Params, &p)
+		if p.Light {
+			result = sys.VersionInfo()
+		} else {
+			result = sys.Collect(h.Kind, h.StorageRoot)
+		}
 	case "sys.update":
 		var p sys.UpdateParams
-		_ = json.Unmarshal(msg.Params, &p)
-		result, err = sys.Apply(p)
+		if err = json.Unmarshal(msg.Params, &p); err != nil {
+			break
+		}
+		var progress func(sys.UpdateProgress)
+		if p.ProgressStream != "" {
+			progress = func(event sys.UpdateProgress) {
+				data, _ := json.Marshal(event)
+				send(Msg{Type: "stream", Stream: p.ProgressStream, Chan: "progress", Data: base64.StdEncoding.EncodeToString(data)})
+			}
+		}
+		result, err = sys.Apply(ctx, p, progress)
 	case "host.fs.stat":
 		result, err = h.fsStat(msg.Params)
 	case "host.fs.list":
@@ -172,6 +189,9 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		return
 	}
 	send(Ok(msg.ID, result))
+	if update, ok := result.(sys.UpdateResult); ok {
+		update.AfterReply()
+	}
 }
 
 type agentPath struct {

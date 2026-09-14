@@ -460,6 +460,8 @@ export type {
 } from "./runner.js";
 
 export { hasImageProbeErrors } from "./image-updates.js";
+export { isRunnerUpdateActive } from "./runner-update.js";
+export type { RunnerUpdatePhase, RunnerUpdateProgress, RunnerUpdateStatus } from "./runner-update.js";
 
 export {
   ACP_REGISTRY_URL,

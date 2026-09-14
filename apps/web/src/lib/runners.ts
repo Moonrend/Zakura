@@ -1,9 +1,10 @@
-import { api } from "@/lib/api";
-import { DEFAULT_RUNNER_IMAGE } from "@zakura/shared";
+import { api, ApiError } from "@/lib/api";
+import { DEFAULT_RUNNER_IMAGE, isRunnerUpdateActive } from "@zakura/shared";
 import type {
   ImageUpdateEntry,
   ImageUpdateKind,
   NodeImageUpdateStatus,
+  RunnerUpdateStatus,
 } from "@zakura/shared";
 
 export type RunnerNetworkInterface = {
@@ -229,10 +230,27 @@ export type RunnerVersionInfo = {
 export async function fetchRunnerVersion(
   id: string,
 ): Promise<RunnerVersionInfo> {
-  return api(`/api/runtime-nodes/${id}/version`);
+  return api(`/api/runtime-nodes/${id}/version`, { cacheTtlMs: false });
 }
 
-/** Trigger a remote Runner self-update to `image`. */
+export type { RunnerUpdateStatus } from "@zakura/shared";
+
+export function runnerUpdateProgressText(update: RunnerUpdateStatus): string {
+  const labels = {
+    queued: "等待代理响应", downloading: "正在下载代理", verifying: "正在校验下载文件",
+    installing: "正在替换代理", restarting: "正在重启，等待代理重新上线",
+    completed: update.note || "更新完成，代理已在线", failed: update.error || "代理更新失败",
+  };
+  let text = labels[update.phase];
+  if (update.phase === "downloading" && update.downloadedBytes > 0) {
+    text += ` ${formatBytes(update.downloadedBytes)}`;
+    if (update.totalBytes > 0) text += ` / ${formatBytes(update.totalBytes)}（${Math.min(100, Math.floor(update.downloadedBytes / update.totalBytes * 100))}%）`;
+  }
+  if (isRunnerUpdateActive(update)) text += ` · 已用时 ${Math.max(0, Math.floor((Date.now() - update.startedAt) / 1000))} 秒`;
+  return text;
+}
+
+/** Start a background update, then poll until the running target digest is verified. */
 export async function updateRunner(
   id: string,
   body: {
@@ -242,11 +260,34 @@ export async function updateRunner(
     version?: string;
     recreateDelayMs?: number;
   } = {},
-): Promise<{ image: string; scheduled: true; version?: string }> {
-  return api(`/api/runtime-nodes/${id}/update-runner`, {
+  onProgress?: (update: RunnerUpdateStatus) => void,
+): Promise<{ image: string; scheduled: boolean; version?: string; update: RunnerUpdateStatus }> {
+  const started = await api<{ image: string; scheduled: boolean; version?: string; update: RunnerUpdateStatus }>(`/api/runtime-nodes/${id}/update-runner`, {
     method: "POST",
     json: body,
+    signal: AbortSignal.timeout(30_000),
   });
+  if (!started.update?.id) throw new Error("未收到更新任务，请重新检查代理版本");
+  let update = started.update;
+  const deadline = Date.now() + 13 * 60_000;
+  onProgress?.(update);
+  while (isRunnerUpdateActive(update)) {
+    if (Date.now() >= deadline) throw new Error("等待更新结果超时，请重新检查代理版本");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const status = await api<{ update: RunnerUpdateStatus }>(`/api/runtime-nodes/${id}/update-runner?id=${encodeURIComponent(update.id)}`, {
+        cacheTtlMs: false, signal: AbortSignal.timeout(15_000),
+      });
+      update = status.update;
+    } catch (error) {
+      // The server job survives transient network/proxy failures. Keep observing
+      // it within the overall deadline instead of reporting an update failure.
+      if (error instanceof ApiError && error.status < 500 && error.status !== 408 && error.status !== 429) throw error;
+    }
+    onProgress?.(update);
+  }
+  if (update.phase === "failed") throw new Error(update.error || "代理更新失败");
+  return { ...started, scheduled: false, version: update.version, update };
 }
 
 /** Pull (refresh) a workspace image on the runner, optionally recreating runnings. */
@@ -270,8 +311,12 @@ export type { ImageUpdateEntry, ImageUpdateKind } from "@zakura/shared";
 
 export async function fetchImageUpdates(
   id: string,
+  opts: { runnerOnly?: boolean; allowPullFallback?: boolean } = {},
 ): Promise<{ images: ImageUpdateEntry[]; checkedAt?: number }> {
-  return api(`/api/runtime-nodes/${id}/image-updates`);
+  const query = new URLSearchParams();
+  if (opts.runnerOnly) query.set("kind", "runner");
+  if (opts.allowPullFallback) query.set("pull", "1");
+  return api(`/api/runtime-nodes/${id}/image-updates?${query}`, { cacheTtlMs: false });
 }
 
 /** 单节点状态 + 后端附加的节点元数据。 */
@@ -297,10 +342,11 @@ export async function fetchGlobalImageUpdates(): Promise<GlobalImageUpdateStatus
 
 export async function checkNodeImageUpdates(
   nodeId: string,
+  opts: { allowPullFallback?: boolean } = {},
 ): Promise<ImageUpdateNode> {
   return api("/api/system/image-updates/check", {
     method: "POST",
-    json: { nodeId },
+    json: { nodeId, ...opts },
   });
 }
 
@@ -337,11 +383,12 @@ export function resolveImageUpdateKind(entry: {
 export async function upgradeNodeImage(
   nodeId: string,
   entry: string | { image: string; kind?: ImageUpdateKind },
+  onProgress?: (update: RunnerUpdateStatus) => void,
 ): Promise<{ kind: ImageUpdateKind; result: unknown }> {
   const target = typeof entry === "string" ? { image: entry } : entry;
   const kind = resolveImageUpdateKind(target);
   if (kind === "runner") {
-    return { kind, result: await updateRunner(nodeId) };
+    return { kind, result: await updateRunner(nodeId, {}, onProgress) };
   }
   return {
     kind,
@@ -403,7 +450,7 @@ export function kindLabel(kind: string): string {
     case "server":
       return "服务器";
     case "local":
-      return "旧本机（需重装）";
+      return "本机 / Local Runner";
     case "runner":
       return "旧 Runner（需重装）";
     default:

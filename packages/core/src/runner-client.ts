@@ -7,6 +7,7 @@ import type {
   ImageUpdateEntry,
   MigrationManifest,
   RunnerHostInfo,
+  RunnerUpdateProgress,
 } from "@zakura/shared";
 import type {
   ListDetailedResult,
@@ -79,9 +80,15 @@ export class RunnerClient {
     return { ok: true, ...info };
   }
 
-  async systemVersion(): Promise<{ version: string; image: string; containerId: string | null }> {
-    const info = await this.rpc<{ version?: string; binPath?: string }>("sys.info");
-    return { version: info.version ?? "dev", image: info.binPath ?? "", containerId: null };
+  async systemVersion(): Promise<{
+    version: string; image: string; containerId: string | null;
+    sha256?: string; goos?: string; goarch?: string; updateError?: string;
+  }> {
+    const info = await this.rpc<{
+      version?: string; binPath?: string; sha256?: string;
+      goos?: string; goarch?: string; updateError?: string;
+    }>("sys.info", { light: true }, 10_000);
+    return { ...info, version: info.version ?? "dev", image: info.binPath ?? "", containerId: null };
   }
 
   async updateRunner(body: {
@@ -90,17 +97,40 @@ export class RunnerClient {
     sha256?: string;
     version?: string;
     recreateDelayMs?: number;
-  }): Promise<{
+  }, onProgress?: (progress: RunnerUpdateProgress) => void): Promise<{
     image: string;
-    scheduled: true;
+    scheduled: boolean;
+    alreadyCurrent?: boolean;
+    note?: string;
   }> {
-    await this.rpc("sys.update", {
-      url: body.url ?? body.image,
-      sha256: body.sha256,
-      version: body.version,
-      restart: true,
-    });
-    return { image: body.image, scheduled: true };
+    const progressStream = onProgress && this.hub.onStream ? `update-${randomUUID()}` : undefined;
+    const unsubscribe = progressStream
+      ? this.hub.onStream!(progressStream, (chan, data) => {
+          if (chan !== "progress") return;
+          try {
+            const event = JSON.parse(data.toString("utf8")) as RunnerUpdateProgress;
+            if (!["downloading", "verifying", "installing", "restarting"].includes(event.phase)) return;
+            onProgress?.({
+              phase: event.phase,
+              downloadedBytes: Number.isFinite(event.downloadedBytes) ? Math.max(0, event.downloadedBytes) : 0,
+              totalBytes: Number.isFinite(event.totalBytes) ? Math.max(0, event.totalBytes) : 0,
+            });
+          } catch { /* A malformed progress frame must not interrupt an update. */ }
+        })
+      : undefined;
+    try {
+      const result = await this.rpc<{ ok?: boolean; alreadyCurrent?: boolean; note?: string }>("sys.update", {
+        url: body.url ?? body.image,
+        sha256: body.sha256,
+        version: body.version,
+        restart: true,
+        ...(progressStream ? { progressStream } : {}),
+      }, 11 * 60_000); // The agent (including older releases) allows a ten-minute download.
+      if (result?.ok === false) throw new Error(result.note || "代理更新失败");
+      return { image: body.image, scheduled: !result?.alreadyCurrent, alreadyCurrent: result?.alreadyCurrent, note: result?.note };
+    } finally {
+      unsubscribe?.();
+    }
   }
 
   async refreshWorkspaceImage(body: {
