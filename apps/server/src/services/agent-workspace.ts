@@ -957,8 +957,8 @@ export class AgentWorkspaceService {
    * Pull the adapter image so a later launch cannot fail on a missing image.
    *
    * Returns true when the image was actually fetched, false when it was already
-   * present. Remote runners pull on create, so there we only verify the tag is
-   * resolvable rather than transferring bytes through the server.
+   * present. The bound runner pulls the image and streams Docker layer progress
+   * back through the Hub; image contents stay on the runner.
    */
   async ensureAcpAdapterImage(
     agent: Agent,
@@ -970,10 +970,19 @@ export class AgentWorkspaceService {
     if (!opts.forcePull) {
       const { images } = await client.checkImageUpdates({ images: [image] });
       const row = images[0];
-      if (row?.localId && !row.error) return false;
+      if (row?.localId && !row.error) {
+        onProgress?.(`镜像已在绑定设备上：${image}`, {
+          status: "镜像已在绑定设备上",
+          zakura: { phase: "present", image },
+        });
+        return false;
+      }
     }
-    onProgress?.(`正在绑定电脑拉取 ${image}`);
-    await client.pullImage(image);
+    onProgress?.(`正在绑定设备拉取 ${image}`, {
+      status: `正在绑定设备拉取 ${image}`,
+      zakura: { phase: "pulling", image },
+    });
+    await client.pullImage(image, onProgress);
     return true;
   }
 

@@ -132,7 +132,9 @@ async function main() {
     });
   const gateway = new McpGateway(db, orchestrator, runtime);
   const runtimeNodes = new RuntimeNodeService(db, config);
-  const runnerHub = new RunnerHub(db);
+  const runnerHub = new RunnerHub(db, {
+    heartbeatTimeoutMs: config.runnerHeartbeatTimeoutSec * 1000,
+  });
   runtimeNodes.bindHub(runnerHub);
   const agentService = new AgentService(db, runtime, config, runtimeNodes);
   const memoryStore = new MemoryStore(db);

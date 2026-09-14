@@ -58,7 +58,7 @@ export interface AcpIntegrationSpec {
   sessionModeId?: string;
   /** Agent only speaks HTTP MCP; never hand it a stdio gateway. */
   forceHttpMcp?: boolean;
-  /** Binary already lives in the image; skip any install step. */
+  /** @deprecated Legacy workspace binary hint; ignored when an adapter has an image. */
   preinstalled?: boolean;
   /** Human-facing hint shown when setup needs manual action. */
   installHint?: string;

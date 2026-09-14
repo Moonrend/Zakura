@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -56,14 +57,30 @@ func connectOnce(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer c.Close()
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopClose := context.AfterFunc(connCtx, func() { _ = c.Close() })
+	defer stopClose()
 
-	hello := rpc.Hello(cfg.Token, sys.Version, cfg.Kind)
-	if err := c.WriteJSON(hello); err != nil {
+	// RPC、流和心跳来自不同 goroutine；Gorilla 只允许一个并发 writer。
+	var writeMu sync.Mutex
+	write := func(m rpc.Msg) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return c.WriteJSON(m)
+	}
+	if err := write(rpc.Hello(cfg.Token, sys.Version, cfg.Kind)); err != nil {
 		return err
 	}
 
 	send := func(m rpc.Msg) {
-		_ = c.WriteJSON(m)
+		if connCtx.Err() != nil {
+			return
+		}
+		if err := write(m); err != nil {
+			cancel()
+		}
 	}
 
 	c.SetReadLimit(16 << 20)
@@ -85,7 +102,7 @@ func connectOnce(ctx context.Context, cfg Config) error {
 		if msg.Type != "req" {
 			continue
 		}
-		go cfg.Handler.Dispatch(ctx, msg, send)
+		go cfg.Handler.Dispatch(connCtx, msg, send)
 	}
 }
 

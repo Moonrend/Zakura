@@ -18,6 +18,18 @@ import {
   acpRuntimeLayout,
   acpSnapshotVersion,
 } from "../src/index.js";
+import { ACP_REGISTRY_SNAPSHOT } from "../src/acp-registry-snapshot.js";
+
+test("legacy preinstalled metadata cannot skip an adapter image install", (t) => {
+  t.after(() => resetAcpRegistry());
+  const index = structuredClone(ACP_REGISTRY_SNAPSHOT);
+  const fx = index.agents.find((agent) => agent.profileId === "fx")!;
+  fx.integration = { ...fx.integration, preinstalled: true };
+  assert.equal(applyAcpRegistryIndex(index).ok, true);
+
+  assert.equal(builtinAcpProfiles().find((profile) => profile.id === "fx")?.preinstalled, false);
+  assert.match(acpAgentByProfile("fx")!.image, /^ghcr\.io\/moonrend\/acp-registry\/fx-acp:/);
+});
 
 test("registry snapshot ships with the expected shape", () => {
   const agents = acpAgents();

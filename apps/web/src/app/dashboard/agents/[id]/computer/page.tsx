@@ -96,10 +96,25 @@ export default function AgentComputerPage() {
   }, [agent]);
 
   useEffect(() => {
-    void listRuntimeNodes()
-      .then(setNodes)
-      .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
-  }, [id]);
+    let alive = true;
+    const syncNodes = () => {
+      void listRuntimeNodes()
+        .then((rows) => {
+          if (alive) setNodes(rows);
+        })
+        .catch((err) => {
+          if (alive) toast.error(err instanceof Error ? err.message : String(err));
+        });
+    };
+    syncNodes();
+    const unsubscribe = subscribePlatformEvents((event) => {
+      if (event.type === "runner_node") syncNodes();
+    }, syncNodes);
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [id, createOpen, migrateOpen]);
 
   // 进度经平台事件推送（SSE），只在挂载/重连/收尾时拉快照对齐
   useEffect(() => {
@@ -154,15 +169,19 @@ export default function AgentComputerPage() {
   );
 
   useEffect(() => {
-    const first = nodes.find((n) => n.kind === "computer" || n.kind === "server");
-    if (first) setCreateNodeId(first.id);
-  }, [nodes]);
+    setCreateNodeId((current) =>
+      remoteNodes.some((node) => node.id === current)
+        ? current
+        : remoteNodes.find((node) => node.status === "online")?.id ?? "",
+    );
+  }, [remoteNodes]);
 
   const createItems = useMemo(
     () =>
       remoteNodes.map((n) => ({
         value: n.id,
         label: `${n.name} · ${kindLabel(n.kind)}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
+        disabled: n.status !== "online",
       })),
     [remoteNodes],
   );
@@ -170,6 +189,7 @@ export default function AgentComputerPage() {
   const migrateItems = useMemo(() => {
     const current = agent?.runtimeNodeId || "";
     return remoteNodes
+      .filter((n) => n.status === "online")
       .map((n) => ({
         value: n.id,
         label: `${n.name} · ${kindLabel(n.kind)} · ${statusLabel(n.status)}`,
@@ -573,7 +593,10 @@ export default function AgentComputerPage() {
             >
               取消
             </Button>
-            <Button disabled={migrateBusy} onClick={() => void runMigrate()}>
+            <Button
+              disabled={migrateBusy || !migrateItems.some((item) => item.value === migrateTarget)}
+              onClick={() => void runMigrate()}
+            >
               {migrateBusy ? <Loader2 className="animate-spin" /> : <ArrowRightLeft />}
               开始迁移
             </Button>
@@ -603,7 +626,7 @@ function CreateComputerDialog({
   onOpenChange: (v: boolean) => void;
   createNodeId: string;
   setCreateNodeId: (v: string) => void;
-  createItems: Array<{ value: string; label: string }>;
+  createItems: Array<{ value: string; label: string; disabled: boolean }>;
   remoteNodes: RuntimeNode[];
   creating: boolean;
   onConfirm: () => void;
@@ -630,7 +653,7 @@ function CreateComputerDialog({
               </SelectTrigger>
               <SelectContent>
                 {createItems.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
+                  <SelectItem key={item.value} value={item.value} disabled={item.disabled}>
                     {item.label}
                   </SelectItem>
                 ))}
@@ -646,9 +669,12 @@ function CreateComputerDialog({
               安装 zakura-agent。
             </p>
           ) : null}
-          {!createItems.length ? (
+          {remoteNodes.length > 0 && createItems.every((item) => item.disabled) ? (
             <p className="text-[11px] text-warning-foreground">
-              当前没有可用电脑或服务器。请先安装 zakura-agent。
+              当前没有在线的电脑或服务器。
+              {remoteNodes.some((node) => node.access === "shared")
+                ? "共享节点由平台管理员维护；也可接入自己的设备。"
+                : "请启动设备上的 zakura-agent 并检查网络连接。"}
             </p>
           ) : null}
         </div>
@@ -661,7 +687,7 @@ function CreateComputerDialog({
               creating ||
               !createItems.length ||
               !createNodeId ||
-                remoteNodes.find((n) => n.id === createNodeId)?.status !== "online"
+              remoteNodes.find((n) => n.id === createNodeId)?.status !== "online"
             }
             onClick={onConfirm}
           >

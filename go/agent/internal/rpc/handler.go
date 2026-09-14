@@ -82,10 +82,18 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		result = docker.Probe()
 	case "docker.pull":
 		var p struct {
-			Image string `json:"image"`
+			Image          string `json:"image"`
+			ProgressStream string `json:"progressStream"`
 		}
 		_ = json.Unmarshal(msg.Params, &p)
-		err = docker.Pull(ctx, p.Image)
+		var progress func(docker.PullEvent)
+		if p.ProgressStream != "" {
+			progress = func(event docker.PullEvent) {
+				data, _ := json.Marshal(event)
+				send(Msg{Type: "stream", Stream: p.ProgressStream, Chan: "progress", Data: base64.StdEncoding.EncodeToString(data)})
+			}
+		}
+		err = docker.PullWithProgress(ctx, p.Image, progress)
 		result = map[string]string{"image": p.Image}
 	case "docker.run":
 		var spec docker.RunSpec

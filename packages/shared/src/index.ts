@@ -1,3 +1,5 @@
+export type { DockerPullEvent } from "./docker-pull.js";
+
 /** JSON Schema-like config descriptor for provider forms */
 export type JsonSchemaType = "string" | "number" | "boolean" | "object" | "array";
 

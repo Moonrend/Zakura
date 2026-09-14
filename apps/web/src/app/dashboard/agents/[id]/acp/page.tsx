@@ -359,13 +359,9 @@ export default function AgentAcpPage() {
         </div>
         <SettingsSection title={selectedProfile.displayName}>
           <p className="px-1 text-xs text-muted-foreground">{selectedProfile.description}</p>
-          {selectedProfile.preinstalled ? (
-            <p className="px-1 text-xs text-muted-foreground">适配器随工作区镜像出厂，无需安装。</p>
-          ) : (
-            <p className="px-1 text-xs text-muted-foreground">
-              适配器按需安装到工作区（首次启动会自动装），可随时点「安装 / 更新」升到最新版本。
-            </p>
-          )}
+          <p className="px-1 text-xs text-muted-foreground">
+            适配器镜像按需拉取（首次启动会自动安装），可随时点「安装 / 更新」升到最新版本。
+          </p>
           <SettingsRow
             label="模型来源"
             description="Zakura 路由会覆盖 Agent 模型设置"

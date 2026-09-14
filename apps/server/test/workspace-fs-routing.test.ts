@@ -140,7 +140,7 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
     const localWouldBe = join(dataDir, "agents", agentId, "workspace", "routed.txt");
     await assert.rejects(
       () => provider.forAgent(agentId, tenantId),
-      /未在线|安装脚本|不存在/,
+      /Go 代理当前离线/,
     );
     assert.equal(existsSync(localWouldBe), false);
   });
