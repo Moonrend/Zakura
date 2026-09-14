@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNull, lt, or, ne, notInArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, or, ne, notInArray } from "drizzle-orm";
+import { arch, hostname, platform } from "node:os";
 import {
   decryptJson,
   encryptJson,
@@ -16,6 +17,7 @@ import {
   managedContainers,
   portExposures,
   runtimeNodes,
+  tenants,
   users,
   workspaceMigrations,
   type RuntimeNode,
@@ -23,8 +25,11 @@ import {
 import {
   listSharedRunnerNodes,
   resolveAccessibleNode,
+  isLocalRuntimeNode,
 } from "./runner-access.js";
 import { platformEvents } from "./platform-events.js";
+import { DockerRuntime } from "../runtime/docker.js";
+import { LocalRunnerClient } from "./local-runner.js";
 
 const TOKEN_ENC_LABEL = "_tokenEnc";
 
@@ -38,13 +43,14 @@ export function mapRuntimeNode(
   void _hidden;
   const access =
     opts?.access ?? "owned";
+  const local = isLocalRuntimeNode(row);
   return {
     id: row.id,
     tenantId: row.tenantId,
     name: row.name,
     slug: row.slug,
-    kind: row.kind,
-    status: row.status,
+    kind: local ? "local" : row.kind,
+    status: local && row.status !== "draining" ? "online" : row.status,
     endpoint: row.endpoint,
     capabilities: JSON.parse(row.capabilitiesJson || "{}") as Record<string, unknown>,
     hostInfo: JSON.parse(row.hostInfoJson || "{}") as RunnerHostInfo | Record<string, unknown>,
@@ -58,16 +64,18 @@ export function mapRuntimeNode(
     access,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    needsReinstall: row.kind === "local" || row.kind === "runner",
+    needsReinstall: !local && row.kind === "runner",
   };
 }
 
 export class RuntimeNodeService {
   hub: RunnerHub | null = null;
+  private readonly localClients = new Map<string, LocalRunnerClient>();
 
   constructor(
     private readonly db: Db,
     private readonly config: AppConfig,
+    private readonly runtime: DockerRuntime = new DockerRuntime(),
   ) {}
 
   bindHub(hub: RunnerHub) {
@@ -75,15 +83,52 @@ export class RuntimeNodeService {
   }
 
   private withLiveStatus<T extends RuntimeNode>(node: T): T {
+    if (isLocalRuntimeNode(node)) {
+      return { ...node, kind: "local", status: node.status === "draining" ? "draining" : "online" };
+    }
     // DB heartbeats can outlive a server restart or come from a legacy HTTP
     // runner. Only a ready Hub session can execute work on this control plane.
     if (node.status === "draining") return node;
     return { ...node, status: this.hub?.get(node.id) ? "online" : "offline" };
   }
 
-  /** @deprecated 隐式 local 节点已删除，调用方应改为选择在线 Go 代理 */
-  async ensureLocalNode(_tenantId?: string): Promise<RuntimeNode> {
-    throw new Error("隐式本机节点已移除。请安装 zakura-agent 并绑定电脑或服务器。");
+  /** Tenant-scoped local node; callers enforce userCanUseLocalRunner before use. */
+  async ensureLocalNode(tenantId?: string): Promise<RuntimeNode> {
+    if (!tenantId) {
+      tenantId = (await this.db.query.tenants.findFirst({ where: eq(tenants.isDefault, true) }))?.id;
+    }
+    if (!tenantId) throw new Error("Tenant not found");
+    const localWhere = and(eq(runtimeNodes.tenantId, tenantId), or(
+      eq(runtimeNodes.kind, "local"),
+      and(eq(runtimeNodes.slug, "local"), isNull(runtimeNodes.tokenHash)),
+    ));
+    const existing = await this.db.query.runtimeNodes.findFirst({ where: localWhere });
+    if (existing) {
+      if (existing.kind !== "local" || existing.isShared) {
+        const [repaired] = await this.db.update(runtimeNodes)
+          .set({ kind: "local", isShared: false, updatedAt: new Date() })
+          .where(eq(runtimeNodes.id, existing.id)).returning();
+        return this.withLiveStatus(repaired!);
+      }
+      return this.withLiveStatus(existing);
+    }
+    // Reserve "local" for new nodes, but tolerate old remote nodes with that name.
+    for (let suffix = 0; suffix < 20; suffix++) {
+      const [created] = await this.db.insert(runtimeNodes).values({
+        tenantId,
+        name: "本机 / Local Runner",
+        slug: suffix === 0 ? "local" : `local-${suffix + 1}`,
+        kind: "local",
+        status: "online",
+        storageRoot: this.config.dataDir,
+        capabilitiesJson: JSON.stringify({ fs: true, docker: true }),
+        hostInfoJson: JSON.stringify({ hostname: hostname(), platform: platform(), arch: arch(), interfaces: [], storageRoot: this.config.dataDir }),
+      }).onConflictDoNothing().returning();
+      if (created) return created;
+      const concurrent = await this.db.query.runtimeNodes.findFirst({ where: localWhere });
+      if (concurrent) return this.withLiveStatus(concurrent);
+    }
+    throw new Error("无法创建本机运行节点：节点名称冲突");
   }
 
   async list(tenantId: string): Promise<RuntimeNode[]> {
@@ -107,6 +152,7 @@ export class RuntimeNodeService {
   }
 
   async get(tenantId: string, id: string): Promise<RuntimeNode | null> {
+    if (id === LOCAL_RUNTIME_NODE_ID) return this.ensureLocalNode(tenantId);
     const node = await this.db.query.runtimeNodes.findFirst({
       where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.id, id)),
     });
@@ -115,6 +161,7 @@ export class RuntimeNodeService {
 
   /** 本租户或共享节点 */
   async getAccessible(tenantId: string, id: string): Promise<RuntimeNode | null> {
+    if (id === LOCAL_RUNTIME_NODE_ID) return this.ensureLocalNode(tenantId);
     const node = await resolveAccessibleNode(this.db, tenantId, id);
     return node ? this.withLiveStatus(node) : null;
   }
@@ -138,7 +185,7 @@ export class RuntimeNodeService {
       .slice(0, 48) || "runner";
     let slug = "";
     for (let suffix = 0; suffix < 20; suffix++) {
-      const candidate = suffix === 0 ? base : `${base}-${suffix + 1}`;
+      const candidate = suffix === 0 && base !== "local" ? base : `${base}-${suffix + 1}`;
       const existing = await this.db.query.runtimeNodes.findFirst({
         where: and(eq(runtimeNodes.tenantId, tenantId), eq(runtimeNodes.slug, candidate)),
       });
@@ -195,8 +242,8 @@ export class RuntimeNodeService {
       where: eq(runtimeNodes.id, nodeId),
     });
     if (!node) throw new Error("Runner 不存在");
-    if (node.slug === "local") {
-      throw new Error("旧本机节点不可设为共享");
+    if (isLocalRuntimeNode(node)) {
+      throw new Error("本机节点不可设为共享");
     }
 
     if (isShared) {
@@ -231,7 +278,7 @@ export class RuntimeNodeService {
   /** 平台管理：列出全部远程 runner（含共享状态） */
   async listAllRemote(): Promise<RuntimeNode[]> {
     const rows = await this.db.query.runtimeNodes.findMany({
-      where: ne(runtimeNodes.slug, "local"),
+      where: and(ne(runtimeNodes.kind, "local"), or(ne(runtimeNodes.slug, "local"), isNotNull(runtimeNodes.tokenHash))),
     });
     return rows.map((node) => this.withLiveStatus(node));
   }
@@ -315,7 +362,7 @@ export class RuntimeNodeService {
         labelsJson: input.labels ? JSON.stringify(input.labels) : node.labelsJson,
         updatedAt: now,
       })
-      .where(eq(runtimeNodes.id, id))
+      .where(eq(runtimeNodes.id, node.id))
       .returning();
     return updated ?? null;
   }
@@ -327,7 +374,7 @@ export class RuntimeNodeService {
         .where(and(eq(runtimeNodes.id, id), eq(runtimeNodes.tenantId, tenantId)))
         .for("update");
       if (!node) return { error: "Not found" };
-      if (node.kind === "local" || node.slug === "local") {
+      if (isLocalRuntimeNode(node)) {
         return { error: "Cannot delete local runtime node" };
       }
       const referencesNode = or(
@@ -385,12 +432,22 @@ export class RuntimeNodeService {
   }
 
   clientFor(node: RuntimeNode): RunnerClient | null {
+    if (isLocalRuntimeNode(node)) return this.localClientFor(node);
     const session = this.hub?.get(node.id);
     if (!session) return null;
     return new RunnerClient({
       hub: session,
       workspaceKind: node.kind === "computer" ? "host" : "container",
     });
+  }
+
+  private localClientFor(node: RuntimeNode): LocalRunnerClient {
+    let client = this.localClients.get(node.id);
+    if (!client) {
+      client = new LocalRunnerClient(this.runtime, this.config, node.tenantId);
+      this.localClients.set(node.id, client);
+    }
+    return client;
   }
 
   /**
@@ -453,8 +510,9 @@ export class RuntimeNodeService {
     if (!node) {
       throw new Error("所选运行节点不存在，请重新选择。");
     }
-    if (node.kind === "local" || node.slug === "local") {
-      throw new Error("旧本机节点已停用。请安装 zakura-agent 并重新绑定。");
+    if (isLocalRuntimeNode(node)) {
+      if (opts?.workspaceKind === "host") throw new Error("本机 Local Runner 使用容器工作区");
+      return { node, client: this.localClientFor(node) };
     }
     const session = this.hub?.get(node.id);
     if (!session) {
@@ -472,7 +530,7 @@ export class RuntimeNodeService {
   }
 
   async resolveNodeForAgent(tenantId: string, agentRuntimeNodeId: string | null): Promise<RuntimeNode> {
-    if (!agentRuntimeNodeId || agentRuntimeNodeId === LOCAL_RUNTIME_NODE_ID) {
+    if (!agentRuntimeNodeId) {
       throw new Error("请先绑定一台电脑或服务器");
     }
     const node = await this.getAccessible(tenantId, agentRuntimeNodeId);
@@ -487,6 +545,8 @@ export class RuntimeNodeService {
     const cutoff = new Date(Date.now() - timeoutSec * 1000);
     const conds = [
       eq(runtimeNodes.status, "online"),
+      ne(runtimeNodes.kind, "local"),
+      or(ne(runtimeNodes.slug, "local"), isNotNull(runtimeNodes.tokenHash))!,
     ];
     if (tenantId) conds.push(eq(runtimeNodes.tenantId, tenantId));
     await this.db

@@ -18,6 +18,7 @@ import {
 } from "../db/schema.js";
 import { agentWorkspaceHostPath } from "./agent-workspace.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
+import { assertNodeBindAllowed } from "./runner-access.js";
 
 export function mapMigration(row: WorkspaceMigration) {
   return {
@@ -80,7 +81,7 @@ export class MigrationService {
   async start(
     tenantId: string,
     agentId: string,
-    input: { targetNodeId: string; excludePatterns?: string[] },
+    input: { targetNodeId: string; excludePatterns?: string[]; userId?: string },
   ): Promise<WorkspaceMigration> {
     const agent = await this.db.query.agents.findFirst({
       where: and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)),
@@ -94,14 +95,18 @@ export class MigrationService {
       throw new Error("请先绑定一台电脑或服务器，再迁移工作区");
     }
     const sourceNodeId = agent.runtimeNodeId;
-    const targetNodeId = input.targetNodeId;
+    if (input.userId) {
+      for (const nodeId of [sourceNodeId, input.targetNodeId]) {
+        await assertNodeBindAllowed(this.db, this.config, { tenantId, userId: input.userId, nodeId, excludeAgentId: agent.id });
+      }
+    }
+    const target = await this.nodes.get(tenantId, input.targetNodeId);
+    if (!target) throw new Error("Target node not found");
+    const targetNodeId = target.id;
 
     if (sourceNodeId === targetNodeId) {
       throw new Error("Source and target runners are the same");
     }
-
-    const target = await this.nodes.get(tenantId, targetNodeId);
-    if (!target) throw new Error("Target node not found");
 
     const excludePatterns = mergeExcludePatterns(input.excludePatterns);
     const now = new Date();
@@ -284,7 +289,7 @@ export class MigrationService {
       await this.db
         .update(agents)
         .set({
-          runtimeNodeId: target.kind === "local" ? null : target.id,
+          runtimeNodeId: target.id,
           workspaceStatus: "ready",
           workspaceRevision: archiveSha256,
           lastMigrationId: job.id,

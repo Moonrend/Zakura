@@ -131,7 +131,7 @@ async function main() {
       });
     });
   const gateway = new McpGateway(db, orchestrator, runtime);
-  const runtimeNodes = new RuntimeNodeService(db, config);
+  const runtimeNodes = new RuntimeNodeService(db, config, runtime);
   const runnerHub = new RunnerHub(db, {
     heartbeatTimeoutMs: config.runnerHeartbeatTimeoutSec * 1000,
   });

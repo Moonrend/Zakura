@@ -163,39 +163,37 @@ export default function AgentComputerPage() {
     return nodes.find((n) => n.id === agent.runtimeNodeId) ?? null;
   }, [agent?.runtimeNodeId, nodes]);
 
-  const remoteNodes = useMemo(
-    () => nodes.filter((n) => n.kind !== "local"),
-    [nodes],
-  );
+  // The API includes Local only when the current user has permission to use it.
+  const availableNodes = nodes;
 
   useEffect(() => {
     setCreateNodeId((current) =>
-      remoteNodes.some((node) => node.id === current)
+      availableNodes.some((node) => node.id === current)
         ? current
-        : remoteNodes.find((node) => node.status === "online")?.id ?? "",
+        : availableNodes.find((node) => node.status === "online")?.id ?? "",
     );
-  }, [remoteNodes]);
+  }, [availableNodes]);
 
   const createItems = useMemo(
     () =>
-      remoteNodes.map((n) => ({
+      availableNodes.map((n) => ({
         value: n.id,
         label: `${n.name} · ${kindLabel(n.kind)}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
         disabled: n.status !== "online",
       })),
-    [remoteNodes],
+    [availableNodes],
   );
 
   const migrateItems = useMemo(() => {
     const current = agent?.runtimeNodeId || "";
-    return remoteNodes
+    return availableNodes
       .filter((n) => n.status === "online")
       .map((n) => ({
         value: n.id,
         label: `${n.name} · ${kindLabel(n.kind)} · ${statusLabel(n.status)}`,
       }))
       .filter((i) => i.value !== current);
-  }, [agent?.runtimeNodeId, remoteNodes]);
+  }, [agent?.runtimeNodeId, availableNodes]);
 
   async function createComputer() {
     setCreating(true);
@@ -371,7 +369,7 @@ export default function AgentComputerPage() {
           createNodeId={createNodeId}
           setCreateNodeId={setCreateNodeId}
           createItems={createItems}
-          remoteNodes={remoteNodes}
+          availableNodes={availableNodes}
           creating={creating}
           onConfirm={() => void createComputer()}
         />
@@ -618,7 +616,7 @@ function CreateComputerDialog({
   createNodeId,
   setCreateNodeId,
   createItems,
-  remoteNodes,
+  availableNodes,
   creating,
   onConfirm,
 }: {
@@ -627,7 +625,7 @@ function CreateComputerDialog({
   createNodeId: string;
   setCreateNodeId: (v: string) => void;
   createItems: Array<{ value: string; label: string; disabled: boolean }>;
-  remoteNodes: RuntimeNode[];
+  availableNodes: RuntimeNode[];
   creating: boolean;
   onConfirm: () => void;
 }) {
@@ -660,7 +658,7 @@ function CreateComputerDialog({
               </SelectContent>
             </Select>
           </div>
-          {remoteNodes.length === 0 ? (
+          {availableNodes.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">
               尚未注册电脑或服务器。请前往{" "}
               <Link href="/dashboard/runners" className="underline">
@@ -669,10 +667,10 @@ function CreateComputerDialog({
               安装 zakura-agent。
             </p>
           ) : null}
-          {remoteNodes.length > 0 && createItems.every((item) => item.disabled) ? (
+          {availableNodes.length > 0 && createItems.every((item) => item.disabled) ? (
             <p className="text-[11px] text-warning-foreground">
               当前没有在线的电脑或服务器。
-              {remoteNodes.some((node) => node.access === "shared")
+              {availableNodes.some((node) => node.access === "shared")
                 ? "共享节点由平台管理员维护；也可接入自己的设备。"
                 : "请启动设备上的 zakura-agent 并检查网络连接。"}
             </p>
@@ -687,7 +685,7 @@ function CreateComputerDialog({
               creating ||
               !createItems.length ||
               !createNodeId ||
-              remoteNodes.find((n) => n.id === createNodeId)?.status !== "online"
+              availableNodes.find((n) => n.id === createNodeId)?.status !== "online"
             }
             onClick={onConfirm}
           >

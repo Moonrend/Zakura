@@ -168,7 +168,7 @@ describe("Go runner availability and shared node selection", () => {
     const sharedComputer = await newNode("computer");
     const privateNode = await newNode("server", false);
     const retiredLocal = await newNode("runner");
-    await db.update(runtimeNodes).set({ slug: "local" }).where(eq(runtimeNodes.id, retiredLocal.node.id));
+    await db.update(runtimeNodes).set({ slug: "local", tokenHash: null }).where(eq(runtimeNodes.id, retiredLocal.node.id));
     await connect(sharedServer);
     const listed = await nodes.listAccessible("consumer");
     assert.equal(listed.find((node) => node.id === sharedServer.node.id)?.status, "online");

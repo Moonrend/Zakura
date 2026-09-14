@@ -10,6 +10,7 @@ import { runtimeNodes } from "../db/schema.js";
 import { log } from "@zakura/core";
 import { cacheRunnerToken } from "./runtime-nodes.js";
 import { platformEvents } from "./platform-events.js";
+import { isLocalRuntimeNode } from "./runner-access.js";
 
 type Frame = {
   type: string;
@@ -192,7 +193,7 @@ export class RunnerHub {
     const node = await this.db.query.runtimeNodes.findFirst({
       where: eq(runtimeNodes.tokenHash, hash),
     });
-    if (!node) {
+    if (!node || isLocalRuntimeNode(node)) {
       ws.close(4403, "unknown token");
       return;
     }

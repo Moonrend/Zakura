@@ -826,12 +826,12 @@ export class DockerRuntime implements ContainerRuntime {
    * mounts, labels, network), only the image ref stays as-is so a freshly
    * pulled image takes effect. Used by the local workspace-image refresh flow.
    */
-  async recreateWorkspaces(image?: string | null): Promise<
+  async recreateWorkspaces(image?: string | null, tenantId?: string): Promise<
     Array<{ agentId: string; dockerId: string; name: string }>
   > {
     const list = await this.docker.listContainers({
       all: false,
-      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true"] },
+      filters: { label: ["zakura.purpose=workspace", "zakura.managed=true", ...(tenantId ? [`zakura.tenant=${tenantId}`] : [])] },
     });
     // Resolve the target image's id (sha256:...) once so we can match running
     // containers by image id, not just by ref string. The update checker flags

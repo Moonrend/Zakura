@@ -580,7 +580,7 @@ export const runtimeNodes = pgTable(
       .references(() => tenants.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
-    /** computer | server（旧值 local/runner 视为待重装） */
+    /** local | computer | server（旧值 runner 需重装 Go 代理） */
     kind: text("kind").notNull().default("computer"),
     /** online | offline | draining */
     status: text("status").notNull().default("offline"),

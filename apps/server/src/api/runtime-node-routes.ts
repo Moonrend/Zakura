@@ -1,4 +1,4 @@
-import type { Hono } from "hono";
+import type { Hono, MiddlewareHandler } from "hono";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
 import {
   cacheRunnerToken,
@@ -32,6 +32,7 @@ import { agentWorkspaceHostPath } from "../services/agent-workspace.js";
 import {
   assertSharedRunnerOperationAllowed,
   isForeignSharedAccess,
+  isLocalRuntimeNode,
   userCanUseLocalRunner,
   RunnerAccessError,
 } from "../services/runner-access.js";
@@ -139,6 +140,23 @@ export function registerRuntimeNodeRoutes(
 ) {
   const { nodes, db, config, network, orchestrator, runtime, imageUpdateChecker } = deps;
 
+  // Every local node endpoint (including containers and image operations) has
+  // the same grant requirement as listing/binding the node.
+  const localAccess: MiddlewareHandler<{ Variables: SessionVars }> = async (c, next) => {
+    const session = c.get("session");
+    const id = c.req.param("id");
+    if (session && id) {
+      const node = id === "local" ? null : await nodes.getAccessible(session.tenantId, id);
+      if ((id === "local" || (node && isLocalRuntimeNode(node)))
+        && !await userCanUseLocalRunner(db, config, session.userId)) {
+        return c.json({ error: "未授权使用本机 Local Runner" }, 403);
+      }
+    }
+    await next();
+  };
+  app.use("/api/runtime-nodes/:id", localAccess);
+  app.use("/api/runtime-nodes/:id/*", localAccess);
+
   // Agent self-register — authenticated by rnr_ token, not session
   app.post("/api/runtime-nodes/register", async (c) => {
     type RegisterBody = {
@@ -199,9 +217,10 @@ export function registerRuntimeNodeRoutes(
     const session = c.get("session")!;
     await nodes.refreshOfflineStatuses(config.runnerHeartbeatTimeoutSec, session.tenantId);
     const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+    if (canLocal) await nodes.ensureLocalNode(session.tenantId);
     const list = await nodes.listAccessible(session.tenantId);
     const filtered = list.filter((n) => {
-      if (n.kind === "local" || n.slug === "local") return canLocal;
+      if (isLocalRuntimeNode(n)) return canLocal;
       return true;
     });
     return c.json({
@@ -433,7 +452,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
         tsHostname: null,
         slug: node.slug,
         ...go,
-        needsReinstall: node.kind === "local" || node.kind === "runner",
+        needsReinstall: node.kind === "runner",
       },
     });
   });
@@ -444,7 +463,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     const t0 = performance.now();
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
+    if (isLocalRuntimeNode(node)) {
       const canLocal = await userCanUseLocalRunner(db, config, session.userId);
       if (!canLocal) return c.json({ error: "未授权使用本机 Local Runner" }, 403);
     }
@@ -521,7 +540,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
+    if (isLocalRuntimeNode(node)) {
       const canLocal = await userCanUseLocalRunner(db, config, session.userId);
       if (!canLocal) return c.json({ error: "未授权使用本机 Local Runner" }, 403);
     }
@@ -595,7 +614,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
+    if (isLocalRuntimeNode(node)) {
       return c.json({
         version: node.agentVersion ?? "embedded",
         image: null,
@@ -633,7 +652,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     const session = c.get("session")!;
     const node = await nodes.getAccessible(session.tenantId, c.req.param("id"));
     if (!node) return c.json({ error: "Not found" }, 404);
-    if (node.kind === "local" || node.slug === "local") {
+    if (isLocalRuntimeNode(node)) {
       return c.json({ error: "本机 Runner 无需远程更新" }, 400);
     }
     try {
@@ -820,7 +839,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
     });
     if (!agent) return c.json({ error: "Agent not found" }, 404);
     // Only allow deleting residual when agent is no longer bound to this node
-    if (agent.runtimeNodeId === nodeId) {
+    if (agent.runtimeNodeId === node.id) {
       return c.json({ error: "Agent still bound to this node; unbind or migrate first" }, 400);
     }
     if (node.kind === "local") {

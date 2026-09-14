@@ -122,6 +122,7 @@ import { registerOpenAiGatewayRoutes } from "./openai-gateway-routes.js";
 import { signWorkspaceConnectionTicket } from "../services/desktop-ticket.js";
 import { loadSaasServer } from "../saas-loader.js";
 import type { RuntimeNodeService } from "../services/runtime-nodes.js";
+import { userCanUseLocalRunner } from "../services/runner-access.js";
 import type { MigrationService } from "../services/migration-service.js";
 import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provider.js";
 import type { NetworkSettingsService } from "../services/network-settings.js";
@@ -807,7 +808,6 @@ export async function createApiApp(deps: {
       where: eq(tenants.id, session.tenantId),
     });
     if (!tenant) throw new Error(`Tenant not found: ${session.tenantId}`);
-    const { userCanUseLocalRunner } = await import("../services/runner-access.js");
     const canUseLocalRunner = await userCanUseLocalRunner(db, config, session.userId);
     return c.json({
       user: user
@@ -3053,7 +3053,9 @@ export async function createApiApp(deps: {
 
     app.get("/api/system/image-updates", async (c) => {
       const session = c.get("session")!;
-      const accessible = await runtimeNodes.listAccessible(session.tenantId);
+      const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+      const accessible = (await runtimeNodes.listAccessible(session.tenantId))
+        .filter((node) => node.kind !== "local" || canLocal);
       const metaMap = new Map(
         accessible.map((n) => [
           n.id,
@@ -3083,9 +3085,12 @@ export async function createApiApp(deps: {
       const nodeId = body.nodeId.trim();
       const node = await runtimeNodes.getAccessible(session.tenantId, nodeId);
       if (!node) return c.json({ error: "Not found" }, 404);
+      if (node.kind === "local" && !await userCanUseLocalRunner(db, config, session.userId)) {
+        return c.json({ error: "未授权使用本机 Local Runner" }, 403);
+      }
       try {
         // 用户点的「检查」允许最后退回 docker pull 取摘要（后台巡检永远不会）。
-        const status = await imageUpdateChecker.checkNode(nodeId, {
+        const status = await imageUpdateChecker.checkNode(node.id, {
           allowPullFallback: true,
         });
         return c.json(
@@ -3109,7 +3114,9 @@ export async function createApiApp(deps: {
 
     app.post("/api/system/image-updates/check-all", async (c) => {
       const session = c.get("session")!;
-      const accessible = await runtimeNodes.listAccessible(session.tenantId);
+      const canLocal = await userCanUseLocalRunner(db, config, session.userId);
+      const accessible = (await runtimeNodes.listAccessible(session.tenantId))
+        .filter((node) => node.kind !== "local" || canLocal);
       // 检查所有在线节点（local + 远程 runner），串行避免突发负载。
       const toCheck = accessible.filter((n) => n.status === "online");
       const nodes = [];

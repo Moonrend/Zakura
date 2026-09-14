@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { generateApiKey, recordPlatformFault } from "@zakura/core";
+import { LOCAL_RUNTIME_NODE_ID } from "@zakura/shared";
 import { rmSync } from "node:fs";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -266,7 +267,7 @@ export class AgentService {
     if (!agent) throw new Error("Agent not found");
 
     if (opts && "runtimeNodeId" in opts) {
-      const nodeId = opts.runtimeNodeId;
+      let nodeId = opts.runtimeNodeId;
       if (opts.userId) {
         await assertNodeBindAllowed(this.db, this.config, {
           userId: opts.userId,
@@ -275,6 +276,7 @@ export class AgentService {
           excludeAgentId: agent.id,
         });
       }
+      nodeId = await this.normalizeRuntimeNodeId(tenantId, nodeId);
       if (nodeId) {
         await this.assertNodeAvailable(tenantId, nodeId);
       }
@@ -309,6 +311,12 @@ export class AgentService {
       recordPlatformFault("agent.workspace_start", err, { subsystem: "agent" });
     });
     return agent;
+  }
+
+  private async normalizeRuntimeNodeId(tenantId: string, nodeId: string | null | undefined) {
+    if (nodeId !== LOCAL_RUNTIME_NODE_ID) return nodeId;
+    if (!this.nodes) throw new Error("运行节点服务不可用");
+    return (await this.nodes.ensureLocalNode(tenantId)).id;
   }
 
   private async assertNodeAvailable(tenantId: string, nodeId: string): Promise<void> {
@@ -349,8 +357,9 @@ export class AgentService {
         excludeAgentId: agent.id,
       });
     }
-    if (input.runtimeNodeId && input.runtimeNodeId !== agent.runtimeNodeId) {
-      await this.assertNodeAvailable(tenantId, input.runtimeNodeId);
+    const runtimeNodeId = await this.normalizeRuntimeNodeId(tenantId, input.runtimeNodeId);
+    if (runtimeNodeId && runtimeNodeId !== agent.runtimeNodeId) {
+      await this.assertNodeAvailable(tenantId, runtimeNodeId);
     }
 
     if (input.memoryProviderId) {
@@ -396,8 +405,8 @@ export class AgentService {
         ...(input.workspaceImage !== undefined
           ? { workspaceImage: input.workspaceImage }
           : {}),
-        ...(input.runtimeNodeId !== undefined
-          ? { runtimeNodeId: input.runtimeNodeId }
+        ...(runtimeNodeId !== undefined
+          ? { runtimeNodeId }
           : {}),
         ...(input.workspaceKind !== undefined
           ? { workspaceKind: input.workspaceKind }

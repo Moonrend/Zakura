@@ -70,7 +70,7 @@ export interface RuntimeNodeDto {
   access?: "owned" | "shared";
   createdAt: string;
   updatedAt: string;
-  /** 旧 TS Runner / local 节点，需重装 Go 代理 */
+  /** 旧 TS Runner 需重装 Go 代理；本机 Local Runner 无需安装 */
   needsReinstall?: boolean;
 }
 

@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import type { MigrationService } from "../services/migration-service.js";
 import { mapMigration } from "../services/migration-service.js";
 import type { AgentService } from "../services/agents.js";
+import { RunnerAccessError } from "../services/runner-access.js";
 
 type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
@@ -29,9 +30,11 @@ export function registerMigrationRoutes(
       const job = await migrations.start(session.tenantId, agent.id, {
         targetNodeId: body.targetNodeId,
         excludePatterns: body.excludePatterns,
+        userId: session.userId,
       });
       return c.json({ migration: mapMigration(job) }, 201);
     } catch (err) {
+      if (err instanceof RunnerAccessError) return c.json({ error: err.message }, err.status);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }
   });

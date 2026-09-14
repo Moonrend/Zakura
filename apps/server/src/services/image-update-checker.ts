@@ -128,7 +128,7 @@ export class ImageUpdateChecker {
     this.ticking = true;
     try {
       const nodes = await this.db.query.runtimeNodes.findMany({
-        where: inArray(runtimeNodes.kind, ["computer", "server", "runner"]),
+        where: inArray(runtimeNodes.kind, ["local", "computer", "server", "runner"]),
       });
       for (const node of nodes) {
         if (node.status !== "online") continue;
@@ -186,7 +186,7 @@ export class ImageUpdateChecker {
       const os = extra.goos ?? host?.platform ?? "linux";
       const arch = extra.goarch ?? host?.arch ?? "amd64";
       const bin = findAgentBinary(os, arch);
-      if (bin) {
+      if (bin && !isLocal) {
         const currentSha = extra.sha256;
         const currentVer = info.version ?? node.agentVersion ?? "";
         const updateAvailable = currentSha

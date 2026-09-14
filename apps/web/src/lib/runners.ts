@@ -403,7 +403,7 @@ export function kindLabel(kind: string): string {
     case "server":
       return "服务器";
     case "local":
-      return "旧本机（需重装）";
+      return "本机 / Local Runner";
     case "runner":
       return "旧 Runner（需重装）";
     default:
