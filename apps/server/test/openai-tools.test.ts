@@ -26,7 +26,13 @@ import {
   namespaceSlugFromTool,
   nativeDeferredNamespace,
   toolsToDefinitions,
+  mcpResultToModelOutput,
+  mcpResultToText,
+  pruneToolImages,
 } from "../src/services/cloud-agent/tools.js";
+import { mapOpenAiCompatibleMessages } from "../src/model-router/adapters/openai-compatible.js";
+import type { ModelChatMessage } from "@zakura/shared";
+import { makePng } from "./helpers/png.js";
 import type { ResolvedTool } from "../src/services/mcp-gateway.js";
 
 function tool(
@@ -326,5 +332,67 @@ describe("responses mapping", () => {
     });
     assert.equal(parsed.toolCalls?.[0]?.function.name, "list_open_orders");
     assert.equal(parsed.finishReason, "tool_calls");
+  });
+});
+
+describe("computer image results", () => {
+  const png = makePng(300, 180);
+  const result = { content: [{ type: "text", text: '{"width":300,"height":180}' }, { type: "image", data: png, mimeType: "image/png" }] };
+
+  it("keeps complete image parts outside the 12000-character text limit", () => {
+    const output = mcpResultToModelOutput(result);
+    assert.ok(png.length > 120_000);
+    assert.equal(output.parts?.find((part) => part.type === "image_url")?.imageUrl.url, `data:image/png;base64,${png}`);
+    assert.equal(output.parts?.find((part) => part.type === "image_url")?.imageUrl.detail, "original");
+    assert.ok(output.text.length < 1000);
+    const imageOnly = mcpResultToText({ content: result.content.slice(1) });
+    assert.ok(imageOnly.text.length < 1000);
+    assert.ok(!imageOnly.text.includes(png.slice(0, 200)));
+  });
+
+  it("turns legacy/full base64 JSON into vision input without logging all image bytes", () => {
+    const output = mcpResultToModelOutput({ content: [{ type: "text", text: JSON.stringify({ format: "png", base64Full: png, width: 300, height: 180 }) }] });
+    assert.ok(output.parts?.some((part) => part.type === "image_url"));
+    assert.equal(JSON.parse(output.text).base64Full, undefined);
+    assert.equal(JSON.parse(output.text).width, 300);
+    assert.ok(output.text.length < 1000);
+  });
+
+  it("bounds images, rejects damaged PNGs and preserves tool errors", () => {
+    const output = mcpResultToModelOutput({ isError: true, content: [null, { type: "image", data: png.slice(0, -16), mimeType: "image/png" }] });
+    assert.equal(output.isError, true);
+    assert.equal(output.parts, undefined);
+    assert.match(output.text, /incomplete PNG/);
+    const bounded = mcpResultToModelOutput({ content: Array.from({ length: 4 }, () => result.content[1]) });
+    assert.equal(bounded.parts?.filter((part) => part.type === "image_url").length, 2);
+    assert.match(bounded.text, /limit/);
+  });
+
+  it("keeps only the two latest tool images without changing call ids or metadata", () => {
+    const messages: ModelChatMessage[] = [1, 2, 3].map((i) => ({ role: "tool", toolCallId: `c${i}`, content: `frame ${i}`, parts: mcpResultToModelOutput(result).parts }));
+    pruneToolImages(messages);
+    assert.equal(messages[0]!.parts, undefined);
+    assert.equal(messages[0]!.content, "frame 1");
+    assert.equal(messages.filter((message) => message.parts).length, 2);
+    assert.deepEqual(messages.map((message) => message.toolCallId), ["c1", "c2", "c3"]);
+  });
+
+  it("sends Responses images in the matching tool output and preserves complete tool batches in Chat fallback", () => {
+    const output = mcpResultToModelOutput(result);
+    const messages: ModelChatMessage[] = [
+      { role: "assistant", content: null, toolCalls: [1, 2].map((i) => ({ id: `c${i}`, type: "function", function: { name: "re_computer_screenshot", arguments: "{}" } })) },
+      { role: "tool", toolCallId: "c1", name: "re_computer_screenshot", content: output.text, parts: output.parts },
+      { role: "tool", toolCallId: "c2", name: "re_desktop_info", content: "ready" },
+    ];
+    const responses = mapMessagesToResponsesInput(messages).input as Array<Record<string, any>>;
+    const imageResult = responses.find((item) => item.type === "function_call_output" && item.call_id === "c1")!;
+    assert.deepEqual(imageResult.output.find((part: { type: string }) => part.type === "input_image"), { type: "input_image", image_url: `data:image/png;base64,${png}`, detail: "original" });
+    const chat = mapOpenAiCompatibleMessages({ meta: { modalities: { input: ["text", "image"] } } } as never, messages);
+    assert.deepEqual(chat.map((message) => message.role), ["assistant", "tool", "tool", "user"]);
+    const parts = chat.at(-1)!.content as Array<Record<string, any>>;
+    assert.equal(parts.find((part) => part.type === "image_url")?.image_url.url, `data:image/png;base64,${png}`);
+    assert.equal(parts.find((part) => part.type === "image_url")?.image_url.detail, "high");
+    assert.equal(chat[1]!.tool_call_id, "c1");
+    assert.equal(chat[2]!.tool_call_id, "c2");
   });
 });

@@ -32,7 +32,7 @@ import {
   isContextOverflowError,
   type CompactBudget,
 } from "./messages.js";
-import { mcpResultToText, parseToolArgs } from "./tools.js";
+import { mcpResultToModelOutput, parseToolArgs, pruneToolImages } from "./tools.js";
 
 /** 取消标记兜底轮询间隔：pub/sub 丢失时最长这么久也会掐断 */
 const CANCEL_POLL_MS = 500;
@@ -837,7 +837,7 @@ export async function runAgentLoop(
         } else {
           outcome = raced.outcome;
         }
-        const { text: resultText, isError } = mcpResultToText(outcome.result);
+        const { text: resultText, isError, parts } = mcpResultToModelOutput(outcome.result);
         const durationMs = Date.now() - started;
 
         await store.appendEvent({
@@ -868,9 +868,11 @@ export async function runAgentLoop(
         messages.push({
           role: "tool",
           content: resultText,
+          ...(parts ? { parts } : {}),
           toolCallId: call.id,
           name: modelName,
         });
+        pruneToolImages(messages);
         if (hookInject.trim()) {
           messages.push({
             role: "system",

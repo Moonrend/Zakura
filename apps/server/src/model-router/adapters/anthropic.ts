@@ -10,7 +10,7 @@ import {
   type ModelProtocolAdapter,
 } from "../adapter.js";
 import { apiError, httpJson, httpSse } from "../http.js";
-import { acceptsImageInput, imageOmittedText } from "../media.js";
+import { acceptsImageInput, expandToolImageMessages, imageOmittedText } from "../media.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
 import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
@@ -48,7 +48,7 @@ function toAnthropicMessages(route: ResolvedRoute, messages: ModelChatMessage[])
   const out: Array<{ role: string; content: string | AnthropicContentBlock[] }> = [];
   const supportsImage = acceptsImageInput(route);
 
-  for (const m of messages) {
+  for (const m of expandToolImageMessages(messages)) {
     if (m.role === "system") {
       if (m.content) systemParts.push(m.content);
       continue;

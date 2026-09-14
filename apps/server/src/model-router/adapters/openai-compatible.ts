@@ -21,7 +21,7 @@ import {
   createChatStreamState,
   toModelChatResult,
 } from "../openai-response.js";
-import { acceptsImageInput, imageOmittedText } from "../media.js";
+import { acceptsImageInput, expandToolImageMessages, imageOmittedText } from "../media.js";
 import { packOpenAiChatTools, shouldUseToolSearchPack } from "../openai-tools.js";
 import {
   responsesChat,
@@ -90,7 +90,7 @@ export function mapOpenAiCompatibleMessages(
   messages: ModelChatMessage[],
 ) {
   const supportsImage = acceptsImageInput(route);
-  return messages.map((m) => {
+  return expandToolImageMessages(messages).map((m) => {
     const base: Record<string, unknown> = {
       role: m.role,
       content: m.content,
@@ -102,7 +102,7 @@ export function mapOpenAiCompatibleMessages(
           if (supportsImage) {
             return {
               type: "image_url",
-              image_url: { url: p.imageUrl.url, detail: "auto" },
+              image_url: { url: p.imageUrl.url, detail: p.imageUrl.detail === "original" ? "high" : p.imageUrl.detail ?? "auto" },
             };
           }
           return { type: "text", text: imageOmittedText() };

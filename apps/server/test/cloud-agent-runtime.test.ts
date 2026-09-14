@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { makePng } from "./helpers/png.js";
 import { describe, it } from "node:test";
 import {
   buildChainMessages,
@@ -1073,6 +1074,7 @@ describe("runSubagent", () => {
   }
 
   function makeRuntime(handlers: {
+    toolResult?: unknown;
     chat: (messages: Array<{ role: string; content: string | null }>, options?: unknown) => {
       content: string | null;
       toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
@@ -1101,7 +1103,7 @@ describe("runSubagent", () => {
       ],
       callTool: async (_tenant: string, qualified: string) => {
         toolCalls.push(qualified);
-        return { content: [{ type: "text", text: `result-of-${qualified}` }] };
+        return handlers.toolResult ?? { content: [{ type: "text", text: `result-of-${qualified}` }] };
       },
     };
     const modelRouter = {
@@ -1129,6 +1131,26 @@ describe("runSubagent", () => {
     });
     return { runtime, chatInputs, toolCalls, events, sessions };
   }
+
+  it("feeds complete tool images into the next model round while persisting compact text", async () => {
+    const png = makePng(300, 180);
+    let round = 0;
+    const { runtime, events } = makeRuntime({
+      toolResult: { content: [{ type: "text", text: '{"width":300,"height":180}' }, { type: "image", data: png, mimeType: "image/png" }] },
+      chat: (messages) => {
+        round++;
+        if (round === 1) return { content: null, toolCalls: [{ id: "image-call", type: "function", function: { name: "re_fs_read", arguments: '{}' } }] };
+        const result = (messages as ModelChatMessage[]).find((message) => message.toolCallId === "image-call");
+        assert.equal(result?.parts?.find((part) => part.type === "image_url")?.imageUrl.url, `data:image/png;base64,${png}`);
+        return { content: "Observed the screenshot" };
+      },
+    });
+    const answer = await runtime.runSubagent("t1", fakeAgent, { task: "Inspect an image" }, {});
+    assert.equal(answer.text, "Observed the screenshot");
+    const stored = events.find((event) => event.type === "tool_call_result")!;
+    assert.ok(JSON.stringify(stored.payload).length < 1500);
+    assert.ok(!JSON.stringify(stored.payload).includes(png.slice(0, 200)));
+  });
 
   it("runs an isolated tool loop and returns the final answer", async () => {
     let round = 0;

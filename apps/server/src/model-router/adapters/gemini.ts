@@ -12,7 +12,7 @@ import {
   type ModelProtocolAdapter,
 } from "../adapter.js";
 import { apiError, httpJson, httpSse, mapConcurrent } from "../http.js";
-import { acceptsImageInput, imageOmittedText } from "../media.js";
+import { acceptsImageInput, expandToolImageMessages, imageOmittedText } from "../media.js";
 import { buildOpenAIChatCompletion, toModelChatResult } from "../openai-response.js";
 import { applyReasoningOptions } from "../reasoning.js";
 import type { ResolvedRoute } from "../types.js";
@@ -77,7 +77,7 @@ function toGeminiContents(route: ResolvedRoute, messages: ModelChatMessage[]) {
   const contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> = [];
   const supportsImage = acceptsImageInput(route);
 
-  for (const m of messages) {
+  for (const m of expandToolImageMessages(messages)) {
     if (m.role === "system") continue;
 
     if (m.role === "tool") {

@@ -53,7 +53,7 @@ export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
       if (m.parts?.length) {
         const content = m.parts.map((p) => {
           if (p.type === "image_url") {
-            return { type: "input_image", image_url: p.imageUrl.url };
+            return { type: "input_image", image_url: p.imageUrl.url, ...(p.imageUrl.detail ? { detail: p.imageUrl.detail } : {}) };
           }
           return { type: "input_text", text: p.text };
         });
@@ -87,7 +87,9 @@ export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
       input.push({
         type: "function_call_output",
         call_id: m.toolCallId ?? "",
-        output: m.content ?? "",
+        output: m.parts?.length ? m.parts.map((part) => part.type === "image_url"
+          ? { type: "input_image", image_url: part.imageUrl.url, ...(part.imageUrl.detail ? { detail: part.imageUrl.detail } : {}) }
+          : { type: "input_text", text: part.text }) : m.content ?? "",
       });
     }
   }
