@@ -22,6 +22,7 @@ fi
 
 mkdir -p /tmp/zakura-display /var/log/zakura /tmp/zakura-chrome /tmp/.X11-unix /var/lib/zakura-features
 chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+rm -f /var/lib/zakura-features/.shell-ready /var/lib/zakura-features/.display-ready /var/lib/zakura-features/.display-error /var/lib/zakura-features/.ready
 
 log() { echo "[$(date -Iseconds)] $*" >>/var/log/zakura/workspace.log; }
 
@@ -91,24 +92,50 @@ fi
 
 log "display mode browser=$BROWSER computer=$COMPUTER ${W}x${H}"
 
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
-Xvfb :99 -screen 0 "${W}x${H}x24" -ac -nolisten tcp >>/var/log/zakura/xvfb.log 2>&1 &
-for i in $(seq 1 80); do
-  [ -e /tmp/.X11-unix/X99 ] && break
-  sleep 0.1
-done
-if [ ! -e /tmp/.X11-unix/X99 ]; then
-  log "ERROR: Xvfb failed"
-fi
+start_display() {
+  rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+  Xvfb :99 -screen 0 "${W}x${H}x24" -ac -nolisten tcp >>/var/log/zakura/xvfb.log 2>&1 &
+  for i in $(seq 1 80); do
+    if DISPLAY=:99 xdotool getdisplaygeometry >/dev/null 2>&1; then return 0; fi
+    sleep 0.1
+  done
+  log "ERROR: Xvfb not ready on DISPLAY=:99"
+  return 1
+}
+
+start_vnc() {
+  x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -listen 127.0.0.1 -xkb \
+    >>/var/log/zakura/x11vnc.log 2>&1 &
+}
+
+update_display_readiness() {
+  local ready=1
+  DISPLAY=:99 xdotool getdisplaygeometry >/dev/null 2>&1 || ready=0
+  if [ "$COMPUTER" = "1" ] || [ "$COMPUTER" = "true" ]; then
+    timeout 1 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; IFS= read -r -n 12 banner <&3; [[ "$banner" == RFB* ]]' 2>/dev/null || ready=0
+  fi
+  if [ "$BROWSER" = "1" ] || [ "$BROWSER" = "true" ]; then
+    curl -sf -m 1 http://127.0.0.1:9222/json/version >/dev/null 2>&1 || ready=0
+  fi
+  if [ "$ready" = 1 ]; then
+    [ -f /var/lib/zakura-features/.display-ready ] || log "display-ready"
+    touch /var/lib/zakura-features/.display-ready /var/lib/zakura-features/.ready
+    rm -f /var/lib/zakura-features/.display-error
+  else
+    rm -f /var/lib/zakura-features/.display-ready /var/lib/zakura-features/.ready
+    echo 'Display not ready: check Xvfb :99, VNC :5900 and Chrome :9222 logs in /var/log/zakura.' >/var/lib/zakura-features/.display-error
+  fi
+}
+
+start_display || true
 
 openbox >>/var/log/zakura/openbox.log 2>&1 &
 sleep 0.5
 
 if [ "$COMPUTER" = "1" ] || [ "$COMPUTER" = "true" ]; then
-  x11vnc -display :99 -forever -shared -rfbport 5900 -nopw -listen 0.0.0.0 -xkb \
-    >>/var/log/zakura/x11vnc.log 2>&1 &
+  start_vnc
   if [ -d /usr/share/novnc ]; then
-    websockify --web /usr/share/novnc 6080 localhost:5900 >>/var/log/zakura/novnc.log 2>&1 &
+    websockify --web /usr/share/novnc 127.0.0.1:6080 localhost:5900 >>/var/log/zakura/novnc.log 2>&1 &
   fi
   log "noVNC on :6080"
 fi
@@ -117,22 +144,37 @@ if [ "$BROWSER" = "1" ] || [ "$BROWSER" = "true" ]; then
   start_chrome || true
 fi
 
-# Display readiness: the full browser/desktop stack is up (or best-effort).
-# Touched *after* the Chrome CDP loop so ACP computer-use paths can wait for it
-# without blocking pure coding agents on .shell-ready.
-touch /var/lib/zakura-features/.display-ready
-touch /var/lib/zakura-features/.ready
-log "ready"
+# Shell remains available for diagnosis if display startup failed. Do not claim
+# the computer is ready solely because PID1 or the X11 socket exists.
+update_display_readiness
 
 (
   while true; do
     sleep 5
+    if ! pgrep -x Xvfb >/dev/null; then
+      log "Xvfb down — restarting display"
+      start_display || true
+    fi
+    if ! DISPLAY=:99 xdotool getdisplaygeometry >/dev/null 2>&1; then
+      update_display_readiness
+      continue
+    fi
+    if ! pgrep -x openbox >/dev/null; then
+      openbox >>/var/log/zakura/openbox.log 2>&1 &
+    fi
+    if [ "$COMPUTER" = "1" ] || [ "$COMPUTER" = "true" ]; then
+      if ! pgrep -x x11vnc >/dev/null; then
+        log "VNC down — restarting x11vnc"
+        start_vnc
+      fi
+    fi
     if [ "$BROWSER" = "1" ] || [ "$BROWSER" = "true" ]; then
       if ! curl -sf -m 1 http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
         log "CDP down — restarting chrome"
         start_chrome || true
       fi
     fi
+    update_display_readiness
   done
 ) &
 

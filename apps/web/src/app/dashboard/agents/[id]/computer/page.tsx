@@ -74,6 +74,7 @@ export default function AgentComputerPage() {
   const [wsStatus, setWsStatus] = useState("idle");
   const [createOpen, setCreateOpen] = useState(false);
   const [createNodeId, setCreateNodeId] = useState("");
+  const [createWorkspaceKind, setCreateWorkspaceKind] = useState<"host" | "container">("container");
   const [migrateOpen, setMigrateOpen] = useState(false);
   const [migrateTarget, setMigrateTarget] = useState("");
   const [migrateBusy, setMigrateBusy] = useState(false);
@@ -163,6 +164,11 @@ export default function AgentComputerPage() {
     return nodes.find((n) => n.id === agent.runtimeNodeId) ?? null;
   }, [agent?.runtimeNodeId, nodes]);
 
+  const createNodeKind = nodes.find((node) => node.id === createNodeId)?.kind;
+  useEffect(() => {
+    setCreateWorkspaceKind(createNodeKind === "computer" ? "host" : "container");
+  }, [createNodeId, createNodeKind]);
+
   // The API includes Local only when the current user has permission to use it.
   const availableNodes = nodes;
 
@@ -203,8 +209,7 @@ export default function AgentComputerPage() {
         toast.error("请选择一台电脑或服务器");
         return;
       }
-      const node = nodes.find((n) => n.id === runtimeNodeId);
-      const workspaceKind = node?.kind === "computer" ? "host" : "container";
+      const workspaceKind = createWorkspaceKind;
       await api(`/api/agents/${id}`, {
         method: "PATCH",
         json: { enableComputer: true, restart: false, runtimeNodeId, workspaceKind },
@@ -253,6 +258,18 @@ export default function AgentComputerPage() {
         method: "POST",
         json: {},
       });
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEnvBusy(false);
+    }
+  }
+
+  async function enableGraphicalWorkspace() {
+    setEnvBusy(true);
+    try {
+      await api(`/api/agents/${id}`, { method: "PATCH", json: { workspaceKind: "container", restart: true } });
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -368,6 +385,8 @@ export default function AgentComputerPage() {
           onOpenChange={setCreateOpen}
           createNodeId={createNodeId}
           setCreateNodeId={setCreateNodeId}
+          workspaceKind={createWorkspaceKind}
+          setWorkspaceKind={setCreateWorkspaceKind}
           createItems={createItems}
           availableNodes={availableNodes}
           creating={creating}
@@ -526,11 +545,19 @@ export default function AgentComputerPage() {
           </div>
         }
       >
-        {workspaceRunning ? (
+        {agent.workspaceKind === "host" ? (
+          <div className="space-y-3 rounded-md border border-dashed p-5 text-sm">
+            <p className="text-muted-foreground">本机工作区支持文件和终端。图形桌面与浏览器需要该节点上的 Docker 容器。</p>
+            <Button size="sm" variant="outline" disabled={envBusy || currentNode?.status !== "online"} onClick={() => void enableGraphicalWorkspace()}>
+              {envBusy ? <Loader2 className="animate-spin" /> : <Monitor />}
+              启用图形桌面（Docker）
+            </Button>
+          </div>
+        ) : workspaceRunning ? (
           <WorkspaceDesktop agentId={id} active={workspaceRunning} />
         ) : (
           <div className="flex min-h-[200px] items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
-            {workspaceRunning ? "桌面准备中…" : "启动后可用"}
+            启动后可用
           </div>
         )}
       </SettingsSection>
@@ -615,6 +642,8 @@ function CreateComputerDialog({
   onOpenChange,
   createNodeId,
   setCreateNodeId,
+  workspaceKind,
+  setWorkspaceKind,
   createItems,
   availableNodes,
   creating,
@@ -624,6 +653,8 @@ function CreateComputerDialog({
   onOpenChange: (v: boolean) => void;
   createNodeId: string;
   setCreateNodeId: (v: string) => void;
+  workspaceKind: "host" | "container";
+  setWorkspaceKind: (v: "host" | "container") => void;
   createItems: Array<{ value: string; label: string; disabled: boolean }>;
   availableNodes: RuntimeNode[];
   creating: boolean;
@@ -657,6 +688,18 @@ function CreateComputerDialog({
                 ))}
               </SelectContent>
             </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>工作区类型</Label>
+            <Select value={workspaceKind} onValueChange={(value) => { if (value === "host" || value === "container") setWorkspaceKind(value); }}
+              items={[{ value: "container", label: "图形工作区（Docker）" }, { value: "host", label: "本机文件与终端" }]}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="container">图形工作区（Docker）</SelectItem>
+                <SelectItem value="host">本机文件与终端</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{workspaceKind === "container" ? "提供浏览器、图形桌面与截图；所选节点需要 Docker。" : "使用节点本机文件和终端，不提供虚拟图形桌面。"}</p>
           </div>
           {availableNodes.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">

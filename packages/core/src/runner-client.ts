@@ -253,12 +253,11 @@ export class RunnerClient {
       image,
       network: body.network,
       env: { ZAKURA_AGENT_ID: body.agentId, ...(body.env ?? {}) },
-      labels: { "zakura.agent": body.agentId, ...(body.labels ?? {}) },
+      labels: { ...(body.labels ?? {}), "zakura.agent": body.agentId, "zakura.purpose": "workspace" },
       volumes: [{ hostPath, containerPath: "/workspace" }],
-      ports: [
-        { containerPort: 6080, protocol: "tcp" },
-        { containerPort: 9222, protocol: "tcp" },
-      ],
+      // Desktop and CDP use authenticated stdio tunnels. Neither endpoint needs
+      // an unauthenticated published port (Chrome also binds container localhost).
+      ports: [],
       workingDir: "/workspace",
       restart: "unless-stopped",
     });
@@ -300,7 +299,11 @@ export class RunnerClient {
       };
     }
     const list = await this.rpc<DockerInfo[]>("docker.list", { label: `zakura.agent=${agentId}` });
-    const c = list?.[0];
+    // ACP sidecars/adapters carry the same agent label and are often listed
+    // first. Never run desktop commands in them or stop them as the workspace.
+    // Older workspace containers predate the purpose label.
+    const c = list?.find((container) => container.labels?.["zakura.purpose"] === "workspace")
+      ?? list?.find((container) => !container.labels?.["zakura.purpose"]);
     if (!c) return null;
     const novnc = c.ports?.find((p) => p.containerPort === 6080);
     const cdp = c.ports?.find((p) => p.containerPort === 9222);

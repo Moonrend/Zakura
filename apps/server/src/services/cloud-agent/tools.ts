@@ -2,8 +2,9 @@
  * 工具面辅助：MCP 工具 → 模型工具定义的映射、参数解析与结果转文本。
  * 主对话 / 子代理 / 跨 Agent 委派共用同一份实现。
  */
-import { isCreateTaskResult, type ModelToolDefinition } from "@zakura/shared";
+import { isCreateTaskResult, type ModelChatContentPart, type ModelChatMessage, type ModelToolDefinition } from "@zakura/shared";
 import type { ResolvedTool } from "../mcp-gateway.js";
+import { MAX_SCREENSHOT_BYTES, pngDimensions } from "../agent-screenshot.js";
 
 export const RESULT_TEXT_LIMIT = 12_000;
 /** 跨 Agent 委派工具名（agent loop 内置，非 MCP 工具） */
@@ -17,35 +18,81 @@ export function sanitizeToolName(name: string): string {
   return cleaned || "tool";
 }
 
-export function mcpResultToText(result: unknown): { text: string; isError: boolean } {
-  if (isCreateTaskResult(result)) {
-    return {
-      text: JSON.stringify({ task: result.task }, null, 2),
-      isError: false,
-    };
-  }
-  if (!result || typeof result !== "object") {
-    return { text: String(result ?? ""), isError: false };
-  }
-  const r = result as {
+export function mcpResultToModelOutput(result: unknown): { text: string; isError: boolean; parts?: ModelChatContentPart[] } {
+  if (isCreateTaskResult(result)) return { text: JSON.stringify({ task: result.task }, null, 2), isError: false };
+  if (!result || typeof result !== "object") return { text: String(result ?? ""), isError: false };
+  const value = result as {
     isError?: boolean;
-    content?: Array<{ type?: string; text?: string }>;
+    content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
     structuredContent?: unknown;
   };
-  const parts: string[] = [];
-  if (Array.isArray(r.content)) {
-    for (const c of r.content) {
-      if (c && typeof c.text === "string") parts.push(c.text);
+  const textParts: string[] = [];
+  const images: ModelChatContentPart[] = [];
+  let imageBytes = 0;
+  const addImage = (data: string, mimeType: string) => {
+    const bytes = Buffer.byteLength(data, "base64");
+    if (!/^image\/(png|jpeg|webp|gif)$/.test(mimeType) || images.length >= 2 || imageBytes + bytes > MAX_SCREENSHOT_BYTES || !data || !/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) {
+      textParts.push("[Image omitted: unsupported, invalid or exceeds the 8 MiB / 2 image tool limit]");
+      return;
+    }
+    if (mimeType === "image/png") {
+      try { pngDimensions(data); }
+      catch { textParts.push("[Image omitted: incomplete PNG; capture a new screenshot]"); return; }
+    }
+    imageBytes += bytes;
+    images.push({ type: "image_url", imageUrl: { url: `data:${mimeType};base64,${data}`, detail: "original" } });
+  };
+  const addText = (text: string) => {
+    // Older tools and explicit output=base64 can still return JSON image bytes.
+    // Convert those to vision input too; do not send a sliced image as prose.
+    try {
+      if (text.includes('"base64Full"') || text.includes('"screenshotBase64Full"')) {
+        const raw = JSON.parse(text) as Record<string, unknown>;
+        const image = raw.base64Full ?? raw.screenshotBase64Full;
+        if (typeof image === "string") {
+          const { base64Full: _base64, screenshotBase64Full: _screenshot, ...metadata } = raw;
+          addImage(image, "image/png");
+          textParts.push(JSON.stringify({ ...metadata, base64Length: image.length, base64Preview: `${image.slice(0, 120)}… (preview only)` }));
+          return;
+        }
+      }
+    } catch { /* Ordinary tool text is not necessarily JSON. */ }
+    textParts.push(text);
+  };
+  for (const part of Array.isArray(value.content) ? value.content : []) {
+    if (!part || typeof part !== "object") continue;
+    if (typeof part.text === "string") addText(part.text);
+    else if (part.type === "image" && typeof part.data === "string") addImage(part.data, part.mimeType ?? "image/png");
+  }
+  if (value.structuredContent !== undefined) addText(JSON.stringify(value.structuredContent, null, 2));
+  let text = textParts.join("\n").trim() || (Array.isArray(value.content) ? (images.length ? "Tool returned an image." : "Tool returned no text content.") : JSON.stringify(result));
+  if (text.length > RESULT_TEXT_LIMIT) text = `${text.slice(0, RESULT_TEXT_LIMIT)}\n…(truncated)`;
+  return { text, isError: value.isError === true, ...(images.length ? { parts: [{ type: "text" as const, text }, ...images] } : {}) };
+}
+
+export function mcpResultToText(result: unknown): { text: string; isError: boolean } {
+  const { text, isError } = mcpResultToModelOutput(result);
+  return { text, isError };
+}
+
+/** Keep recent visual state in memory without accumulating images every turn. */
+export function pruneToolImages(messages: ModelChatMessage[]): void {
+  let count = 0;
+  let bytes = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== "tool" || !message.parts) continue;
+    const images = message.parts.filter((part) => part.type === "image_url");
+    if (!images.length) continue;
+    const size = images.reduce((sum, part) => sum + (part.imageUrl.url.startsWith("data:")
+      ? Buffer.byteLength(part.imageUrl.url.slice(part.imageUrl.url.indexOf(",") + 1), "base64") : 0), 0);
+    if (count + images.length > 2 || bytes + size > MAX_SCREENSHOT_BYTES) {
+      delete message.parts;
+    } else {
+      count += images.length;
+      bytes += size;
     }
   }
-  if (r.structuredContent !== undefined) {
-    parts.push(JSON.stringify(r.structuredContent, null, 2));
-  }
-  let text = parts.join("\n").trim() || JSON.stringify(result);
-  if (text.length > RESULT_TEXT_LIMIT) {
-    text = `${text.slice(0, RESULT_TEXT_LIMIT)}\n…(truncated)`;
-  }
-  return { text, isError: r.isError === true };
 }
 
 /**
@@ -80,7 +127,7 @@ export function nativeDeferredNamespace(localName: string): NativeDeferNs | null
     return {
       name: "desktop",
       description:
-        "Virtual desktop GUI: screenshot, mouse and keyboard (xdotool). Use when operating the full desktop beyond Chromium browser_* tools.",
+        "Virtual desktop GUI: desktop_info readiness and dimensions, screenshots, click/type/key/scroll/move/drag/wait. Requires a container workspace. Use original desktop pixels; observe before acting and after short action groups. Screenshots default to image content with compact metadata.",
     };
   }
 

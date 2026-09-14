@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import { recordPlatformFault } from "@zakura/core";
 import { WebSocketServer, type WebSocket } from "ws";
 import { verifyWorkspaceConnectionTicket } from "./desktop-ticket.js";
 import type { AppConfig } from "../config.js";
@@ -28,7 +29,10 @@ export function createDesktopProxyGateway(
       }
       wss.handleUpgrade(req, socket, head, (ws) => {
         if (kind === "desktop") void bridgeDesktop(ws, agent);
-        else void bridgeTerminal(ws, agent, ticket.adapterId);
+        else {
+          ws.on("error", () => ws.close());
+          void bridgeTerminal(ws, agent, ticket.adapterId);
+        }
       });
     }).catch(() => socket.destroy());
   });
@@ -38,34 +42,81 @@ export function createDesktopProxyGateway(
     agent: NonNullable<Awaited<ReturnType<AgentService["get"]>>>,
   ) {
     let bridge: Awaited<ReturnType<AgentService["workspace"]["startStdio"]>> | undefined;
-    try {
-      bridge = await deps.agentService.workspace.startStdio(agent, ["socat", "-", "TCP:127.0.0.1:5900"], {
-        workingDir: "/",
-      });
-      const writer = bridge.writable.getWriter();
-      ws.on("message", (data) => {
-        const bytes = Array.isArray(data)
-          ? Buffer.concat(data)
-          : data instanceof ArrayBuffer
-            ? Buffer.from(new Uint8Array(data))
-            : Buffer.from(data);
-        void writer.write(bytes).catch(() => undefined);
-      });
-      ws.on("close", () => {
-        void writer.close().catch(() => undefined);
-        void bridge?.kill();
-      });
-      const reader = bridge.readable.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done || ws.readyState !== ws.OPEN) break;
-        if (value?.byteLength) ws.send(Buffer.from(value));
+    let writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let stderr = "";
+    let closed = false;
+    let flushing = false;
+    const pending: Buffer[] = [];
+    let pendingBytes = 0;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      ws.resume();
+      pending.length = 0;
+      unsubscribe?.();
+      void writer?.abort().catch(() => undefined);
+      void reader?.cancel().catch(() => undefined);
+      void bridge?.kill().catch(() => undefined);
+    };
+    const fail = (error: unknown) => {
+      if (closed) return;
+      recordPlatformFault("desktop.proxy", new Error(`${error instanceof Error ? error.message : String(error)}${stderr ? `: ${stderr}` : ""}`), { subsystem: "desktop" });
+      if (ws.readyState === ws.OPEN) ws.close(1011, "Desktop unavailable; check workspace display/VNC logs");
+      cleanup();
+    };
+    const flush = async () => {
+      if (flushing || !writer || closed) return;
+      flushing = true;
+      try {
+        while (pending.length && !closed) {
+          const bytes = pending.shift()!;
+          await writer.write(bytes);
+          pendingBytes -= bytes.length;
+        }
+        if (!closed) ws.resume();
+      } catch (error) { fail(error); }
+      finally { flushing = false; }
+    };
+    // Attach lifecycle and input handlers before awaiting Runner startup.
+    ws.on("close", cleanup);
+    ws.on("error", fail);
+    ws.on("message", (data) => {
+      if (closed) return;
+      const bytes = Array.isArray(data) ? Buffer.concat(data)
+        : data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data);
+      pendingBytes += bytes.length;
+      if (pendingBytes > 1024 * 1024) {
+        ws.close(1013, "Desktop input buffer full; reconnect");
+        cleanup();
+        return;
       }
-      if (ws.readyState === ws.OPEN) ws.close();
-    } catch {
-      if (ws.readyState === ws.OPEN) ws.close(1011, "desktop proxy unavailable");
-      await bridge?.kill().catch(() => undefined);
-    }
+      pending.push(bytes);
+      if (pendingBytes > 64 * 1024) ws.pause();
+      void flush();
+    });
+    try {
+      await deps.agentService.workspace.ensureStarted(agent, { require: "display" });
+      if (closed) return;
+      bridge = await deps.agentService.workspace.startStdio(agent, ["socat", "STDIO", "TCP:127.0.0.1:5900,connect-timeout=5"], {
+        workingDir: "/workspace",
+      });
+      if (closed) { await bridge.kill(); return; }
+      unsubscribe = bridge.onStderr((chunk) => { stderr = (stderr + chunk).slice(-2000); });
+      writer = bridge.writable.getWriter();
+      reader = bridge.readable.getReader();
+      void flush();
+      while (!closed) {
+        const { done, value } = await reader.read();
+        if (closed) break;
+        if (done) throw new Error("VNC stream ended unexpectedly");
+        if (value?.byteLength && ws.readyState === ws.OPEN) {
+          await new Promise<void>((resolve, reject) => ws.send(Buffer.from(value), (error) => error ? reject(error) : resolve()));
+        }
+      }
+    } catch (error) { fail(error); }
+    finally { cleanup(); }
   }
 
   async function bridgeTerminal(
@@ -137,6 +188,10 @@ export function createDesktopProxyGateway(
             { onOutput: pushSnapshot, interactive: true },
           );
       jobId = initial.jobId;
+      if (closed) {
+        await deps.agentService.workspace.killShellJob(agent, jobId).catch(() => undefined);
+        return;
+      }
       if (pendingSize) {
         await deps.agentService.workspace.resizeShellJob(agent, jobId, pendingSize.cols, pendingSize.rows);
       }

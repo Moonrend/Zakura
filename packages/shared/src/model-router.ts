@@ -742,14 +742,15 @@ export type ModelToolChoice =
 /** 多模态内容部件（图片以 data: URI 或 http(s) URL 传入） */
 export type ModelChatContentPart =
   | { type: "text"; text: string }
-  | { type: "image_url"; imageUrl: { url: string } };
+  | { type: "image_url"; imageUrl: { url: string; detail?: "auto" | "low" | "high" | "original" } };
 
 export interface ModelChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
   /**
    * 可选多模态部件；存在时适配器优先使用 parts（content 作为纯文本回退，
-   * 便于不支持多模态的路径与历史代码继续工作）。仅 user 消息支持。
+   * 便于不支持多模态的路径与历史代码继续工作）。user 和 tool 消息支持；
+   * tool 图片仅保留在当前执行的内存中，事件历史记录轻量文本。
    */
   parts?: ModelChatContentPart[];
   name?: string;

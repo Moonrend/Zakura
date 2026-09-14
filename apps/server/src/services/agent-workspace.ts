@@ -38,6 +38,8 @@ import {
   logAgentProgress,
 } from "./agent-progress.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
+import { workspaceReadyCommand } from "./workspace-readiness.js";
+import { openWorkspaceTcpTunnel } from "./workspace-tcp-tunnel.js";
 
 export const WORKSPACE_EXEC_PATH =
   "/opt/zakura/acp/bin:/usr/local/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -267,10 +269,29 @@ export class AgentWorkspaceService {
     opts?: { require?: "shell" | "display" },
   ): Promise<Agent> {
     const require = opts?.require ?? "shell";
+    if (require === "display" && this.isHostWorkspace(agent)) {
+      throw new Error("本机工作区提供文件和终端；虚拟桌面与浏览器需要容器工作区（Docker）。");
+    }
     return this.withStartLock(agent.id, async () => {
-      if (await this.isWorkspaceRunning(agent)) return agent;
+      if (await this.isWorkspaceRunning(agent)) {
+        if (require === "display") {
+          const { client } = await this.requireRunnerClient(agent);
+          await this.waitUntilReady(agent, client, require);
+        }
+        return agent;
+      }
       return this.startUnlocked(agent, { require });
     });
+  }
+
+  private async waitUntilReady(agent: Agent, client: RunnerClient, require: "shell" | "display") {
+    if (this.isHostWorkspace(agent)) return;
+    const result = await client.execWorkspace(agent.id, workspaceReadyCommand(require), {
+      env: { DISPLAY: ":99" }, timeoutMs: 40_000,
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(`Workspace ${require} readiness failed (exit ${result.exitCode}, DISPLAY=:99). Check workspace startup logs, Xvfb, x11vnc and Chromium; restart older containers to apply display flags.\n${result.stderr || result.stdout}`.slice(0, 3000));
+    }
   }
 
   hostRoot(agent: Agent): string {
@@ -390,52 +411,41 @@ export class AgentWorkspaceService {
     containerStatus: string | null;
     chromeInside: boolean;
   }> {
-    const row = await this.getWorkspaceContainer(agentId);
-    // Remote runner: only use Runner endpoints — never local docker sock
-    {
-      const agentRow = await this.db.query.agents.findFirst({
-        where: eq(agents.id, agentId),
-      });
-      if (agentRow && this.hasRuntimeNode(agentRow)) {
-        try {
-          const { client, node } = await this.requireRunnerClient(agentRow);
-          const ws = await client.getWorkspace(agentId).catch(() => null);
-          const advertise = advertiseHostFromNode(node);
-          const cdp = rewriteLoopbackUrl(ws?.endpoints?.cdpUrl ?? null, advertise);
-          if (cdp && (await this.probeHttp(`${cdp}/json/version`))) {
-            return {
-              url: cdp,
-              reason: "ok",
-              containerStatus: ws?.status ?? row?.status ?? null,
-              chromeInside: true,
-            };
-          }
-          return {
-            url: cdp,
-            reason: cdp
-              ? "远程 CDP 已发布但探测失败，请检查 Runner 的 ZAKURA_RUNNER_PUBLIC_HOST"
-              : "远程工作区未提供 CDP 端口",
-            containerStatus: ws?.status ?? row?.status ?? null,
-            chromeInside: Boolean(cdp),
-          };
-        } catch (err) {
-          return {
-            url: null,
-            reason: err instanceof Error ? err.message : "远程运行节点不可用",
-            containerStatus: row?.status ?? "offline",
-            chromeInside: false,
-          };
+    return this.withStartLock(agentId, async () => {
+      const row = await this.getWorkspaceContainer(agentId);
+      const unavailable = (reason: string, status: string | null = row?.status ?? null) => ({ url: null, reason, containerStatus: status, chromeInside: false });
+      const agent = await this.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+      if (!agent || !this.hasRuntimeNode(agent)) return unavailable("请先绑定一台在线的电脑或服务器");
+      if (this.isHostWorkspace(agent)) return unavailable("本机工作区提供文件和终端；虚拟浏览器需要容器工作区（Docker）。");
+      try {
+        const { client } = await this.requireRunnerClient(agent);
+        const ws = await client.getWorkspace(agentId);
+        if (!ws || ws.status !== "running") return unavailable("工作区未运行，请先启动电脑。", ws?.status ?? null);
+        const key = `${agentId}:${agent.runtimeNodeId}:${ws.dockerId}:${AGENT_PORT_CDP}`;
+        const cached = this.tunnels.get(key);
+        if (cached && await this.probeHttp(`${cached.url}/json/version`)) {
+          return { url: cached.url, reason: "ok", containerStatus: ws.status, chromeInside: true };
         }
+        this.closeTunnelsForAgent(agentId);
+        const inside = await client.execWorkspace(agentId, ["curl", "--fail", "--silent", "--max-time", "2", `http://127.0.0.1:${AGENT_PORT_CDP}/json/version`], { timeoutMs: 3000 });
+        if (inside.exitCode !== 0) return unavailable("Chromium CDP 尚未就绪。检查工作区启动日志和浏览器启用标志；旧容器需重新启动。", ws.status);
+        // Chrome binds container localhost. Published ports and PUBLIC_HOST cannot
+        // reach it reliably, especially behind NAT; carry HTTP + WS over Runner.
+        const tunnel = await openWorkspaceTcpTunnel(
+          () => client.startStdio(agentId, ["socat", "STDIO", `TCP:127.0.0.1:${AGENT_PORT_CDP},connect-timeout=5`], { workingDir: AGENT_WORKSPACE_ROOT }),
+          (error) => recordPlatformFault("agent_ws.cdp_tunnel", error, { subsystem: "agent_ws" }),
+        );
+        this.tunnels.set(key, tunnel);
+        if (!await this.probeHttp(`${tunnel.url}/json/version`, 8000)) {
+          this.closeTunnelsForAgent(agentId);
+          return unavailable("CDP 代理连接失败。检查 Runner 通道和工作区 socat/Chromium 日志。", ws.status);
+        }
+        return { url: tunnel.url, reason: "ok", containerStatus: ws.status, chromeInside: true };
+      } catch (error) {
+        this.closeTunnelsForAgent(agentId);
+        return unavailable(error instanceof Error ? error.message : "运行节点或 CDP 代理不可用");
       }
-    }
-
-    return {
-      url: null,
-      reason: "请先绑定一台在线的电脑或服务器",
-      containerStatus: row?.status ?? null,
-      chromeInside: false,
-    };
-
+    });
   }
 
   /**
@@ -445,6 +455,17 @@ export class AgentWorkspaceService {
    */
   async getDesktopInfo(agent: Agent) {
     const computerOn = Boolean(agent.enableComputer);
+    const supported = computerOn && !this.isHostWorkspace(agent);
+    const display = {
+      enabled: supported,
+      supported,
+      computer: supported,
+      browser: supported,
+      display: supported ? ":99" : null,
+      coordinateSpace: "desktop pixels, origin top-left",
+      dimensionsSource: "configured",
+      reason: !computerOn ? "电脑未启用" : this.isHostWorkspace(agent) ? "本机工作区提供文件和终端；虚拟桌面与浏览器需要容器工作区（Docker）。" : undefined,
+    };
     const row = await this.getWorkspaceContainer(agent.id);
 
     if (this.hasRuntimeNode(agent)) {
@@ -461,9 +482,7 @@ export class AgentWorkspaceService {
           }
           const advertise = advertiseHostFromNode(node);
           return {
-            enabled: computerOn,
-            computer: computerOn,
-            browser: computerOn,
+            ...display,
             containerStatus: ws.status ?? row?.status ?? null,
             dockerId: row?.dockerId ?? null,
             novncUrl: rewriteLoopbackUrl(ws.endpoints.novncUrl, advertise),
@@ -476,9 +495,7 @@ export class AgentWorkspaceService {
           };
         }
         return {
-          enabled: computerOn,
-          computer: computerOn,
-          browser: computerOn,
+          ...display,
           containerStatus: ws?.status ?? row?.status ?? "idle",
           dockerId: row?.dockerId ?? null,
           novncUrl: null,
@@ -489,11 +506,10 @@ export class AgentWorkspaceService {
           width: AGENT_DESKTOP_WIDTH,
           height: AGENT_DESKTOP_HEIGHT,
         };
-      } catch {
+      } catch (error) {
         return {
-          enabled: computerOn,
-          computer: computerOn,
-          browser: computerOn,
+          ...display,
+          reason: error instanceof Error ? error.message : "运行节点不可用",
           containerStatus: row?.status ?? "offline",
           dockerId: row?.dockerId ?? null,
           novncUrl: null,
@@ -508,9 +524,7 @@ export class AgentWorkspaceService {
     }
 
     return {
-      enabled: computerOn,
-      computer: computerOn,
-      browser: computerOn,
+      ...display,
       containerStatus: row?.status ?? "unbound",
       dockerId: row?.dockerId ?? null,
       novncUrl: null,
@@ -531,7 +545,6 @@ export class AgentWorkspaceService {
     agent: Agent,
     opts: { require: "shell" | "display" } = { require: "display" },
   ): Promise<Agent> {
-    void opts.require;
     const mode = resolveStackMode(agent);
     const log = (step: string, message: string, percent?: number, phase?: string) =>
       logAgentProgress(agent.id, step, message, { percent, phase });
@@ -565,7 +578,7 @@ export class AgentWorkspaceService {
 
     log("runner", "正在连接运行节点…", 6, "docker");
     const { client: remoteClient } = await this.requireRunnerClient(agent);
-    return this.startOnRunner(agent, remoteClient, log);
+    return this.startOnRunner(agent, remoteClient, log, opts.require);
   }
 
   /** Start workspace container on a remote Runner Agent. */
@@ -573,6 +586,7 @@ export class AgentWorkspaceService {
     agent: Agent,
     client: RunnerClient,
     log: (step: string, message: string, percent?: number, phase?: string) => void,
+    require: "shell" | "display",
   ): Promise<Agent> {
     try {
       log("runner", "连接远程 Runner…", 10, "docker");
@@ -611,6 +625,13 @@ export class AgentWorkspaceService {
         image,
         network: this.config.dockerNetwork,
         workspaceKind: hostWs ? "host" : "container",
+        env: {
+          DISPLAY: ":99",
+          ZAKURA_ENABLE_COMPUTER: mode === "display" ? "1" : "0",
+          ZAKURA_ENABLE_BROWSER: mode === "display" ? "1" : "0",
+          ZAKURA_DESKTOP_WIDTH: String(AGENT_DESKTOP_WIDTH),
+          ZAKURA_DESKTOP_HEIGHT: String(AGENT_DESKTOP_HEIGHT),
+        },
         labels: {
           "zakura.agent": agent.id,
           "zakura.agent_slug": agent.slug,
@@ -640,12 +661,16 @@ export class AgentWorkspaceService {
         log("desktop", `noVNC: ${ws.endpoints.novncUrl}`, 90);
       }
 
-      // Soft wait: poll remote for running status
+      let running = false;
       for (let i = 0; i < 15; i++) {
         const cur = await client.getWorkspace(agent.id);
-        if (cur?.status === "running") break;
+        if (cur?.status === "running") { running = true; break; }
         await new Promise((r) => setTimeout(r, 2000));
       }
+      if (!running) throw new Error("工作区启动超时：容器未进入 running 状态，请查看启动日志。");
+      const readiness = mode === "display" ? require : "shell";
+      log("readiness", readiness === "display" ? "等待桌面、VNC 和浏览器就绪…" : "等待 Shell 就绪…", 90);
+      await this.waitUntilReady(agent, client, readiness);
       log("ready", "工作区就绪", 100, "ready");
 
       const [updated] = await this.db

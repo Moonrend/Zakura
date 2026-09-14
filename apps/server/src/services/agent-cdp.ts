@@ -1,7 +1,9 @@
 /**
  * Lightweight Chrome DevTools Protocol client for agent Browser Use.
- * Connects to Chromium inside the workspace container via published host port.
+ * Connects to Chromium through a workspace endpoint/tunnel; keeps tab and ref state.
  */
+import WebSocket from "ws";
+import { pngDimensions } from "./agent-screenshot.js";
 
 export interface CdpTarget {
   id: string;
@@ -22,9 +24,13 @@ export interface BrowserSnapshotNode {
 }
 
 type Pending = {
+  method: string;
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 };
+
+class CdpConnectionError extends Error {}
 
 class CdpSession {
   private ws: WebSocket;
@@ -45,8 +51,9 @@ class CdpSession {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.error) {
-          p.reject(new Error(msg.error.message ?? "CDP error"));
+          p.reject(new Error(`CDP ${p.method}: ${msg.error.message ?? "unknown error"}`));
         } else {
           p.resolve(msg.result);
         }
@@ -54,34 +61,40 @@ class CdpSession {
         /* ignore */
       }
     });
-    this.ws.addEventListener("close", () => {
-      this.closed = true;
-      for (const [, p] of this.pending) {
-        p.reject(new Error("CDP connection closed"));
-      }
-      this.pending.clear();
-    });
+    this.ws.addEventListener("close", () => this.fail(new CdpConnectionError("CDP connection closed")));
+    this.ws.addEventListener("error", (event) => this.fail(new CdpConnectionError(`CDP connection failed: ${event.message}`)));
+  }
+
+  private fail(error: Error) {
+    this.closed = true;
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(error);
+    }
+    this.pending.clear();
   }
 
   async send<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> {
-    if (this.closed) throw new Error("CDP session closed");
+    if (this.closed || this.ws.readyState !== WebSocket.OPEN) throw new CdpConnectionError("CDP session closed");
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: (v) => resolve(v as T),
-        reject,
-      });
-      this.ws.send(JSON.stringify({ id, method, params: params ?? {} }));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
-          reject(new Error(`CDP timeout: ${method}`));
+          reject(new CdpConnectionError(`CDP timeout: ${method}`));
         }
       }, 45_000);
+      this.pending.set(id, { method, resolve: (v) => resolve(v as T), reject, timer });
+      try {
+        this.ws.send(JSON.stringify({ id, method, params: params ?? {} }));
+      } catch (err) {
+        this.fail(new CdpConnectionError(`CDP send failed: ${err instanceof Error ? err.message : String(err)}`));
+      }
     });
   }
 
   close(): void {
+    this.fail(new CdpConnectionError("CDP session closed"));
     try {
       this.ws.close();
     } catch {
@@ -93,15 +106,24 @@ class CdpSession {
 async function waitWsOpen(ws: WebSocket): Promise<void> {
   if (ws.readyState === WebSocket.OPEN) return;
   await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("WebSocket open timeout")), 10_000);
-    ws.addEventListener("open", () => {
-      clearTimeout(t);
-      resolve();
-    });
-    ws.addEventListener("error", () => {
-      clearTimeout(t);
-      reject(new Error("WebSocket connection failed"));
-    });
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.removeEventListener("open", opened);
+      ws.removeEventListener("error", failed);
+      ws.removeEventListener("close", failed);
+    };
+    const opened = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new CdpConnectionError("CDP WebSocket connection failed")); };
+    const timer = setTimeout(() => {
+      cleanup();
+      // Keep an error listener during terminate (ws may emit a handshake error).
+      ws.on("error", () => undefined);
+      ws.terminate();
+      reject(new CdpConnectionError("CDP WebSocket open timeout"));
+    }, 10_000);
+    ws.addEventListener("open", opened);
+    ws.addEventListener("error", failed);
+    ws.addEventListener("close", failed);
   });
 }
 
@@ -109,13 +131,15 @@ export async function listCdpTargets(cdpBaseUrl: string): Promise<CdpTarget[]> {
   const base = cdpBaseUrl.replace(/\/$/, "");
   const res = await fetch(`${base}/json/list`, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`CDP /json/list failed: ${res.status}`);
-  return (await res.json()) as CdpTarget[];
+  const targets = await res.json();
+  if (!Array.isArray(targets)) throw new Error("CDP /json/list returned an invalid target list");
+  return targets as CdpTarget[];
 }
 
 export async function cdpReady(cdpBaseUrl: string): Promise<boolean> {
   try {
-    const targets = await listCdpTargets(cdpBaseUrl);
-    return targets.length > 0;
+    await listCdpTargets(cdpBaseUrl);
+    return true; // An empty browser is ready; openSession can create a page.
   } catch {
     return false;
   }
@@ -126,10 +150,10 @@ async function openSession(cdpBaseUrl: string, targetId?: string): Promise<{
   target: CdpTarget;
 }> {
   const targets = await listCdpTargets(cdpBaseUrl);
-  let page =
-    (targetId ? targets.find((t) => t.id === targetId) : undefined) ??
-    targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl) ??
-    targets.find((t) => t.webSocketDebuggerUrl);
+  let page = targetId
+    ? targets.find((t) => t.id === targetId && t.type === "page")
+    : targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+  if (targetId && !page) throw new Error("Selected browser tab is no longer available. Use tab_list and tab_select, then observe a new snapshot.");
 
   if (!page?.webSocketDebuggerUrl) {
     // Create a new tab
@@ -155,6 +179,7 @@ async function openSession(cdpBaseUrl: string, targetId?: string): Promise<{
   try {
     const base = new URL(cdpBaseUrl);
     const u = new URL(wsUrl);
+    u.protocol = base.protocol === "https:" ? "wss:" : "ws:";
     u.hostname = base.hostname;
     u.port = base.port;
     wsUrl = u.toString();
@@ -162,14 +187,19 @@ async function openSession(cdpBaseUrl: string, targetId?: string): Promise<{
     /* keep */
   }
 
-  const ws = new WebSocket(wsUrl);
-  await waitWsOpen(ws);
+  const ws = new WebSocket(wsUrl, { maxPayload: 16 * 1024 * 1024 });
   const session = new CdpSession(ws);
-  await session.send("Page.enable");
-  await session.send("Runtime.enable");
-  await session.send("DOM.enable").catch(() => undefined);
-  await session.send("Accessibility.enable").catch(() => undefined);
-  return { session, target: page };
+  try {
+    await waitWsOpen(ws);
+    await session.send("Page.enable");
+    await session.send("Runtime.enable");
+    await session.send("DOM.enable");
+    await session.send("Accessibility.enable");
+    return { session, target: page };
+  } catch (err) {
+    session.close();
+    throw err;
+  }
 }
 
 function flattenAxTree(root: unknown): BrowserSnapshotNode[] {
@@ -177,6 +207,7 @@ function flattenAxTree(root: unknown): BrowserSnapshotNode[] {
   let counter = 0;
 
   const walk = (node: unknown, depth: number) => {
+    if (out.length >= 200) return;
     if (!node || typeof node !== "object") return;
     const n = node as {
       role?: { value?: string };
@@ -234,467 +265,467 @@ function flattenAxTree(root: unknown): BrowserSnapshotNode[] {
   return out.slice(0, 200);
 }
 
-async function resolveRefClickable(
-  session: CdpSession,
-  refMap: Map<string, BrowserSnapshotNode>,
-  ref: string,
-): Promise<{ x: number; y: number } | null> {
-  const node = refMap.get(ref);
-  if (!node?.backendDOMNodeId) return null;
-  try {
-    const box = await session.send<{
-      model?: { content?: number[] };
-    }>("DOM.getBoxModel", { backendNodeId: node.backendDOMNodeId });
-    const content = box.model?.content;
-    if (!content || content.length < 8) return null;
-    // content quad: x1,y1,x2,y2,x3,y3,x4,y4
-    const xs = [content[0], content[2], content[4], content[6]];
-    const ys = [content[1], content[3], content[5], content[7]];
-    const x = Math.round((Math.min(...xs) + Math.max(...xs)) / 2);
-    const y = Math.round((Math.min(...ys) + Math.max(...ys)) / 2);
-    return { x, y };
-  } catch {
-    return null;
+type Evaluation<T> = {
+  result?: { value?: T; objectId?: string };
+  exceptionDetails?: { text?: string; exception?: { description?: string } };
+};
+
+function evaluationValue<T>(result: Evaluation<T>): T {
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "Browser JavaScript failed");
   }
+  return result.result?.value as T;
+}
+
+async function evaluate<T>(session: CdpSession, expression: string): Promise<T> {
+  return evaluationValue(await session.send<Evaluation<T>>("Runtime.evaluate", {
+    expression, returnByValue: true, awaitPromise: true,
+  }));
+}
+
+async function onElement<T>(session: CdpSession, objectId: string, functionDeclaration: string, values: unknown[] = []): Promise<T> {
+  return evaluationValue(await session.send<Evaluation<T>>("Runtime.callFunctionOn", {
+    objectId, functionDeclaration, arguments: values.map((value) => ({ value })),
+    returnByValue: true, awaitPromise: true,
+  }));
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const coordinateSpace = "viewport CSS pixels, origin top-left of page content (excluding browser chrome)";
+
+type BrowserState = {
+  url: string;
+  title: string;
+  readyState: string;
+  viewport: { width: number; height: number; devicePixelRatio: number; scrollX: number; scrollY: number };
+};
+
+async function readState(session: CdpSession): Promise<BrowserState> {
+  return evaluate<BrowserState>(session, `({ url: location.href, title: document.title, readyState: document.readyState,
+    viewport: { width: innerWidth, height: innerHeight, devicePixelRatio, scrollX, scrollY } })`);
+}
+
+async function documentId(session: CdpSession): Promise<string> {
+  const tree = await session.send<{ frameTree: { frame: { loaderId: string } } }>("Page.getFrameTree");
+  return tree.frameTree.frame.loaderId;
+}
+
+function timeoutMs(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1 || value > 45_000) throw new Error("timeout must be an integer from 1 to 45000 milliseconds");
+  return value;
+}
+
+type DocumentWait = { expected?: string; previous?: string; historyEntry?: number; allowLoading?: boolean };
+
+async function waitForDocument(session: CdpSession, timeout: number, transition: DocumentWait = {}): Promise<BrowserState> {
+  const deadline = Date.now() + timeout;
+  do {
+    try {
+      const current = transition.expected || transition.previous ? await documentId(session) : undefined;
+      const history = transition.historyEntry === undefined ? undefined
+        : await session.send<{ currentIndex: number; entries: Array<{ id: number }> }>("Page.getNavigationHistory");
+      const atHistoryEntry = !history || history.entries[history.currentIndex]?.id === transition.historyEntry;
+      if ((!transition.expected || current === transition.expected) && (!transition.previous || current !== transition.previous) && atHistoryEntry) {
+        const state = await readState(session);
+        if (transition.allowLoading || state.readyState === "complete") return state;
+      }
+    } catch (err) {
+      // Navigation destroys contexts and BFCache restoration can briefly leave
+      // Page.getNavigationHistory on an inactive frame. Retry these reads only;
+      // method names such as "navigate" must not hide unrelated protocol errors.
+      if (err instanceof CdpConnectionError || !/context.*destroyed|Cannot find context|Inspected target navigated|(?:frame|page) is navigating|Not attached to (?:an active )?page/i.test(String(err))) throw err;
+    }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(100, deadline - Date.now()));
+  } while (Date.now() <= deadline);
+  throw new Error(`Browser document did not finish loading within ${timeout} ms. Use wait/observe before another action.`);
+}
+
+async function captureScreenshot(session: CdpSession, state: BrowserState, fullPage = false) {
+  let cssWidth = state.viewport.width;
+  let cssHeight = state.viewport.height;
+  let clip: Record<string, number> | undefined;
+  if (fullPage) {
+    const layout = await session.send<{ cssContentSize: { width: number; height: number } }>("Page.getLayoutMetrics");
+    cssWidth = layout.cssContentSize.width;
+    cssHeight = layout.cssContentSize.height;
+    clip = { x: 0, y: 0, width: cssWidth, height: cssHeight, scale: 1 };
+  }
+  let shot: { data: string };
+  let warning: string | undefined;
+  try {
+    shot = await session.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: fullPage, ...(clip ? { clip } : {}) });
+  } catch (err) {
+    if (err instanceof CdpConnectionError) throw err;
+    await session.send("Page.bringToFront");
+    shot = await session.send("Page.captureScreenshot", { format: "png", fromSurface: false, captureBeyondViewport: false });
+    warning = `Surface capture failed; returned a viewport screenshot. ${String(err).slice(0, 300)}`;
+    fullPage = false;
+    cssWidth = state.viewport.width;
+    cssHeight = state.viewport.height;
+  }
+  const size = pngDimensions(shot.data);
+  return {
+    ...state, ...size, coordinateSpace, format: "png", base64Full: shot.data,
+    fullPage, ...(warning ? { warning } : {}),
+    // To click a screenshot point: pixel / screenshotScale + screenshotOrigin - viewport scroll.
+    screenshotScale: { x: size.width / cssWidth, y: size.height / cssHeight },
+    screenshotOrigin: { x: fullPage ? 0 : state.viewport.scrollX, y: fullPage ? 0 : state.viewport.scrollY },
+  };
 }
 
 async function clickAt(session: CdpSession, x: number, y: number, double = false) {
-  await session.send("Input.dispatchMouseEvent", {
-    type: "mouseMoved",
-    x,
-    y,
-  });
-  const click = async () => {
-    await session.send("Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x,
-      y,
-      button: "left",
-      clickCount: double ? 2 : 1,
-    });
-    await session.send("Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x,
-      y,
-      button: "left",
-      clickCount: double ? 2 : 1,
-    });
-  };
-  await click();
-  if (double) await click();
-}
-
-async function typeText(session: CdpSession, text: string) {
-  for (const ch of text) {
-    await session.send("Input.dispatchKeyEvent", {
-      type: "keyDown",
-      text: ch,
-      unmodifiedText: ch,
-    });
-    await session.send("Input.dispatchKeyEvent", {
-      type: "keyUp",
-      text: ch,
-      unmodifiedText: ch,
-    });
+  await session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  for (let clickCount = 1; clickCount <= (double ? 2 : 1); clickCount++) {
+    await session.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount });
+    await session.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount });
   }
 }
 
-/** Per-agent last snapshot refs (in-process). */
-const agentRefMaps = new Map<string, Map<string, BrowserSnapshotNode>>();
+async function pressKey(session: CdpSession, combo: string) {
+  const keys: Record<string, [string, string, number]> = {
+    Enter: ["Enter", "Enter", 13], Return: ["Enter", "Enter", 13], Tab: ["Tab", "Tab", 9],
+    Escape: ["Escape", "Escape", 27], Esc: ["Escape", "Escape", 27], Backspace: ["Backspace", "Backspace", 8],
+    Delete: ["Delete", "Delete", 46], ArrowLeft: ["ArrowLeft", "ArrowLeft", 37], ArrowUp: ["ArrowUp", "ArrowUp", 38],
+    ArrowRight: ["ArrowRight", "ArrowRight", 39], ArrowDown: ["ArrowDown", "ArrowDown", 40],
+    Home: ["Home", "Home", 36], End: ["End", "End", 35], PageUp: ["PageUp", "PageUp", 33], PageDown: ["PageDown", "PageDown", 34],
+    Space: [" ", "Space", 32],
+  };
+  const parts = combo.split("+");
+  const last = parts.pop()!;
+  const modifiersByName: Record<string, number> = { alt: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, shift: 8 };
+  let modifiers = 0;
+  for (const part of parts) {
+    const bit = modifiersByName[part.toLowerCase()];
+    if (!bit) throw new Error(`Unknown key modifier: ${part}`);
+    modifiers |= bit;
+  }
+  const key = keys[last] ?? (last.length === 1
+    ? [last, /^[a-z]$/i.test(last) ? `Key${last.toUpperCase()}` : /^\d$/.test(last) ? `Digit${last}` : "", last.toUpperCase().charCodeAt(0)] as [string, string, number]
+    : /^F([1-9]|1\d|2[0-4])$/.test(last) ? [last, last, 111 + Number(last.slice(1))] as [string, string, number] : undefined);
+  if (!key) throw new Error(`Unsupported key: ${combo}. Use Enter, Tab, ArrowDown, Control+a, etc.`);
+  const params = { key: key[0], code: key[1], windowsVirtualKeyCode: key[2], modifiers };
+  const text = !(modifiers & 7) ? (key[0] === "Enter" ? "\r" : key[0].length === 1 ? key[0] : undefined) : undefined;
+  await session.send("Input.dispatchKeyEvent", { type: "keyDown", ...params, ...(text ? { text } : {}) });
+  await session.send("Input.dispatchKeyEvent", { type: "keyUp", ...params });
+}
 
-export type CdpResolveResult = {
-  url: string | null;
-  reason?: string;
-};
-
+export type CdpResolveResult = { url: string | null; reason?: string };
 export type CdpResolver = (agentId: string) => Promise<string | null | CdpResolveResult>;
 
+type ObserveArgs = { observe: string; ref?: string; selector?: string; script?: string; full_page?: boolean; timeout?: number };
+type ActionArgs = {
+  action: string; url?: string; ref?: string; selector?: string; text?: string; key?: string; value?: string;
+  direction?: string; amount?: number; tab_index?: number; timeout?: number; x?: number; y?: number; screenshot?: boolean;
+};
+
+type SnapshotRefs = { targetId: string; documentId: string; nodes: Map<string, BrowserSnapshotNode> };
+
 export class AgentBrowserService {
+  private selected = new Map<string, string>();
+  private bases = new Map<string, string>();
+  private refs = new Map<string, SnapshotRefs>();
+  private queues = new Map<string, Promise<unknown>>();
+
   constructor(private readonly getCdpBaseUrl: CdpResolver) {}
 
-  async observe(
-    agentId: string,
-    args: {
-      observe: string;
-      ref?: string;
-      selector?: string;
-      script?: string;
-      full_page?: boolean;
-    },
-  ) {
-    const base = await this.requireCdp(agentId);
-    const { session, target } = await openSession(base);
-    try {
-      switch (args.observe) {
-        case "get_url":
-          return { url: target.url, title: target.title };
-        case "get_title": {
-          const r = await session.send<{ result?: { value?: string } }>("Runtime.evaluate", {
-            expression: "document.title",
-            returnByValue: true,
-          });
-          return { title: r.result?.value ?? target.title, url: target.url };
-        }
-        case "tab_list": {
-          const tabs = await listCdpTargets(base);
-          return {
-            tabs: tabs
-              .filter((t) => t.type === "page")
-              .map((t, i) => ({ index: i, id: t.id, title: t.title, url: t.url })),
-          };
-        }
-        case "screenshot": {
-          const shot = await session.send<{ data: string }>("Page.captureScreenshot", {
-            format: "png",
-            fromSurface: true,
-            captureBeyondViewport: Boolean(args.full_page),
-          });
-          return {
-            format: "png",
-            base64Length: shot.data.length,
-            base64Full: shot.data,
-            url: target.url,
-          };
-        }
-        case "get_content": {
-          const expr = args.selector
-            ? `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); return el ? (el.innerText || el.textContent || '') : ''; })()`
-            : `document.body ? document.body.innerText : ''`;
-          const r = await session.send<{ result?: { value?: string } }>("Runtime.evaluate", {
-            expression: expr,
-            returnByValue: true,
-          });
-          const text = String(r.result?.value ?? "").slice(0, 50_000);
-          return { text, url: target.url, truncated: text.length >= 50_000 };
-        }
-        case "get_html": {
-          const expr = args.selector
-            ? `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); return el ? el.outerHTML : ''; })()`
-            : `document.documentElement ? document.documentElement.outerHTML : ''`;
-          const r = await session.send<{ result?: { value?: string } }>("Runtime.evaluate", {
-            expression: expr,
-            returnByValue: true,
-          });
-          const html = String(r.result?.value ?? "").slice(0, 80_000);
-          return { html, url: target.url, truncated: html.length >= 80_000 };
-        }
-        case "evaluate": {
-          if (!args.script) throw new Error("script required for evaluate");
-          const r = await session.send<{ result?: { value?: unknown }; exceptionDetails?: unknown }>(
-            "Runtime.evaluate",
-            {
-              expression: args.script,
-              returnByValue: true,
-              awaitPromise: true,
-            },
-          );
-          if (r.exceptionDetails) {
-            return { error: r.exceptionDetails, url: target.url };
-          }
-          return { result: r.result?.value, url: target.url };
-        }
-        case "snapshot":
-        case "screenshot_annotate":
-        default: {
-          const ax = await session.send<{ nodes?: unknown[] }>("Accessibility.getFullAXTree");
-          // CDP returns flat nodes with childIds; build tree roots
-          const nodes = ax.nodes ?? [];
-          const byId = new Map<string, Record<string, unknown>>();
-          for (const raw of nodes) {
-            const n = raw as { nodeId?: string; childIds?: string[] };
-            if (n.nodeId) byId.set(n.nodeId, { ...(raw as object), children: [] });
-          }
-          for (const raw of nodes) {
-            const n = raw as { nodeId?: string; childIds?: string[] };
-            if (!n.nodeId) continue;
-            const parent = byId.get(n.nodeId);
-            if (!parent) continue;
-            const kids: unknown[] = [];
-            for (const cid of n.childIds ?? []) {
-              const child = byId.get(cid);
-              if (child) kids.push(child);
-            }
-            parent.children = kids;
-          }
-          const root =
-            [...byId.values()].find((n) => (n.role as { value?: string })?.value === "RootWebArea") ??
-            [...byId.values()].find((n) => (n.role as { value?: string })?.value === "WebArea") ??
-            [...byId.values()][0];
+  private async serial<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    const pending = (this.queues.get(agentId) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    this.queues.set(agentId, pending);
+    try { return await pending; }
+    finally { if (this.queues.get(agentId) === pending) this.queues.delete(agentId); }
+  }
 
-          const flat = flattenAxTree(root);
-          const map = new Map(flat.map((f) => [f.ref, f]));
-          agentRefMaps.set(agentId, map);
-
-          const lines = flat.map(
-            (f) =>
-              `${"  ".repeat(Math.min(f.depth, 6))}${f.ref} [${f.role}] ${f.name}${f.value ? ` = ${f.value}` : ""}`,
-          );
-
-          let screenshot: string | undefined;
-          if (args.observe === "screenshot_annotate") {
-            const shot = await session.send<{ data: string }>("Page.captureScreenshot", {
-              format: "png",
-              fromSurface: true,
-            });
-            screenshot = shot.data;
-          }
-
-          return {
-            url: target.url,
-            title: target.title,
-            count: flat.length,
-            snapshot: lines.join("\n"),
-            items: flat.map(({ ref, role, name, value }) => ({ ref, role, name, value })),
-            ...(screenshot
-              ? { screenshotBase64Length: screenshot.length, screenshotBase64Full: screenshot }
-              : {}),
-          };
+  private async withSession<T>(agentId: string, readOnly: boolean, operation: (session: CdpSession, target: CdpTarget, base: string) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      let session: CdpSession | undefined;
+      try {
+        const base = await this.requireCdp(agentId);
+        const opened = await openSession(base, this.selected.get(agentId));
+        session = opened.session;
+        this.selected.set(agentId, opened.target.id);
+        return await operation(session, opened.target, base);
+      } catch (err) {
+        if (err instanceof CdpConnectionError) {
+          this.refs.delete(agentId);
+          if (attempt === 0 && (readOnly || !session)) continue;
+          if (!readOnly && session) throw new Error(`${err.message}. The browser action may have completed; reconnect with observe before repeating it.`);
         }
-      }
-    } finally {
-      session.close();
+        throw err;
+      } finally { session?.close(); }
     }
   }
 
-  async action(
-    agentId: string,
-    args: {
-      action: string;
-      url?: string;
-      ref?: string;
-      selector?: string;
-      text?: string;
-      key?: string;
-      value?: string;
-      direction?: string;
-      amount?: number;
-      tab_index?: number;
-      timeout?: number;
-    },
-  ) {
-    const base = await this.requireCdp(agentId);
-    const action = args.action;
-
-    if (action === "tab_new") {
-      const url = args.url || "about:blank";
-      const res = await fetch(`${base.replace(/\/$/, "")}/json/new?${encodeURIComponent(url)}`, {
-        method: "PUT",
-        signal: AbortSignal.timeout(10_000),
-      }).catch(async () =>
-        fetch(`${base.replace(/\/$/, "")}/json/new?${encodeURIComponent(url)}`, {
-          signal: AbortSignal.timeout(10_000),
-        }),
-      );
-      if (!res.ok) throw new Error(`tab_new failed: ${res.status}`);
-      const t = (await res.json()) as CdpTarget;
-      return { ok: true, tab: { id: t.id, url: t.url, title: t.title } };
-    }
-
-    if (action === "tab_select" || action === "tab_close") {
-      const tabs = (await listCdpTargets(base)).filter((t) => t.type === "page");
-      const idx = args.tab_index ?? 0;
-      const tab = tabs[idx];
-      if (!tab) throw new Error(`No tab at index ${idx}`);
-      if (action === "tab_close") {
-        await fetch(`${base.replace(/\/$/, "")}/json/close/${tab.id}`, {
-          signal: AbortSignal.timeout(5000),
-        });
-        return { ok: true, closed: tab.id };
+  private async element(session: CdpSession, agentId: string, target: CdpTarget, args: { ref?: string; selector?: string }): Promise<string> {
+    if (args.ref) {
+      const snapshot = this.refs.get(agentId);
+      if (!snapshot || snapshot.targetId !== target.id || snapshot.documentId !== await documentId(session)) {
+        this.refs.delete(agentId);
+        throw new Error("Snapshot refs are stale or belong to a different tab. Run browser_observe snapshot again.");
       }
-      // Activate: connect and bring to front
-      const { session } = await openSession(base, tab.id);
+      const node = snapshot.nodes.get(args.ref);
+      if (!node?.backendDOMNodeId) throw new Error(`Unknown ref ${args.ref}; run browser_observe snapshot again.`);
       try {
-        await session.send("Page.bringToFront").catch(() => undefined);
-        return { ok: true, selected: { id: tab.id, url: tab.url, title: tab.title } };
-      } finally {
-        session.close();
-      }
+        const result = await session.send<{ object: { objectId?: string } }>("DOM.resolveNode", { backendNodeId: node.backendDOMNodeId });
+        if (result.object.objectId) return result.object.objectId;
+      } catch (err) { if (err instanceof CdpConnectionError) throw err; }
+      throw new Error(`Element ref ${args.ref} is no longer available. Run browser_observe snapshot again.`);
     }
+    if (!args.selector) throw new Error("ref or selector required; run browser_observe snapshot first");
+    const result = await session.send<Evaluation<unknown>>("Runtime.evaluate", { expression: `document.querySelector(${JSON.stringify(args.selector)})` });
+    evaluationValue(result);
+    if (!result.result?.objectId) throw new Error(`Element not found for selector ${args.selector}`);
+    return result.result.objectId;
+  }
 
-    const { session, target } = await openSession(base);
-    try {
-      const refMap = agentRefMaps.get(agentId) ?? new Map();
+  private async point(session: CdpSession, agentId: string, target: CdpTarget, args: ActionArgs) {
+    if (args.ref || args.selector) {
+      const objectId = await this.element(session, agentId, target, args);
+      return onElement<{ x: number; y: number }>(session, objectId, `function() {
+        if (!this.isConnected) throw new Error('Element detached; observe a new snapshot');
+        this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const b = this.getBoundingClientRect();
+        const left = Math.max(0, b.left), right = Math.min(innerWidth, b.right);
+        const top = Math.max(0, b.top), bottom = Math.min(innerHeight, b.bottom);
+        if (right <= left || bottom <= top) throw new Error('Element is not visible; observe the page');
+        return { x: (left + right) / 2, y: (top + bottom) / 2 };
+      }`);
+    }
+    const { viewport } = await readState(session);
+    if (typeof args.x !== "number" || !Number.isFinite(args.x) || args.x < 0 || args.x >= viewport.width ||
+        typeof args.y !== "number" || !Number.isFinite(args.y) || args.y < 0 || args.y >= viewport.height) {
+      throw new Error("Provide a current ref/selector or x,y inside the viewport in CSS pixels.");
+    }
+    return { x: args.x, y: args.y };
+  }
 
-      switch (action) {
-        case "navigate": {
-          if (!args.url) throw new Error("url required for navigate");
-          await session.send("Page.navigate", { url: args.url });
-          await session.send("Runtime.evaluate", {
-            expression: `new Promise(r => { if (document.readyState === 'complete') r(true); else window.addEventListener('load', () => r(true)); setTimeout(() => r(false), ${args.timeout ?? 8000}); })`,
-            awaitPromise: true,
-            returnByValue: true,
-          });
-          const tabs = await listCdpTargets(base);
-          const cur = tabs.find((t) => t.id === target.id) ?? tabs.find((t) => t.type === "page");
-          return { ok: true, url: cur?.url ?? args.url, title: cur?.title };
+  private async snapshot(session: CdpSession, agentId: string, target: CdpTarget, state: BrowserState) {
+    const loader = await documentId(session);
+    const ax = await session.send<{ nodes?: Array<Record<string, any>> }>("Accessibility.getFullAXTree");
+    const byId = new Map<string, Record<string, any>>();
+    for (const node of ax.nodes ?? []) if (node.nodeId) byId.set(node.nodeId, { ...node, children: [] });
+    for (const node of byId.values()) node.children = (node.childIds ?? []).map((id: string) => byId.get(id)).filter(Boolean);
+    const root = [...byId.values()].find((node) => ["RootWebArea", "WebArea"].includes(node.role?.value)) ?? byId.values().next().value;
+    const flat = flattenAxTree(root);
+    this.refs.set(agentId, { targetId: target.id, documentId: loader, nodes: new Map(flat.map((node) => [node.ref, node])) });
+    return {
+      ...state, coordinateSpace, count: flat.length,
+      snapshot: flat.map((node) => `${"  ".repeat(Math.min(node.depth, 6))}${node.ref} [${node.role}] ${node.name}${node.value ? ` = ${node.value}` : ""}`).join("\n"),
+      items: flat.map(({ ref, role, name, value }) => ({ ref, role, name, value })),
+    };
+  }
+
+  async observe(agentId: string, args: ObserveArgs): Promise<Record<string, any>> {
+    return this.serial(agentId, async () => {
+      const timeout = timeoutMs(args.timeout, 8000);
+      if (args.observe === "tab_list") {
+        const tabs = await listCdpTargets(await this.requireCdp(agentId));
+        return { tabs: tabs.filter((tab) => tab.type === "page").map((tab, index) => ({ index, id: tab.id, title: tab.title, url: tab.url, selected: tab.id === this.selected.get(agentId) })) };
+      }
+      return this.withSession(agentId, args.observe !== "evaluate", async (session, target) => {
+        if (args.observe === "evaluate") {
+          if (!args.script) throw new Error("script required for evaluate");
+          return { result: await evaluate(session, args.script) };
         }
-        case "go_back":
-          await session.send("Runtime.evaluate", {
-            expression: "history.back()",
-            returnByValue: true,
-          });
-          return { ok: true };
-        case "go_forward":
-          await session.send("Runtime.evaluate", {
-            expression: "history.forward()",
-            returnByValue: true,
-          });
-          return { ok: true };
-        case "reload":
-          await session.send("Page.reload");
-          return { ok: true };
-        case "wait":
-          await new Promise((r) => setTimeout(r, Math.min(45_000, args.timeout ?? 1000)));
-          return { ok: true, waitedMs: args.timeout ?? 1000 };
-        case "click":
-        case "double_click":
-        case "focus":
-        case "hover": {
-          let point: { x: number; y: number } | null = null;
-          if (args.ref) point = await resolveRefClickable(session, refMap, args.ref);
-          if (!point && args.selector) {
-            const r = await session.send<{ result?: { value?: { x: number; y: number } | null } }>(
-              "Runtime.evaluate",
-              {
-                expression: `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); if (!el) return null; const b = el.getBoundingClientRect(); return { x: Math.round(b.x + b.width/2), y: Math.round(b.y + b.height/2) }; })()`,
-                returnByValue: true,
-              },
-            );
-            point = r.result?.value ?? null;
+        // Observation must remain possible after a navigation timeout, including
+        // pages with a stalled image/script. Return their current readyState.
+        const state = await waitForDocument(session, timeout, { allowLoading: true });
+        switch (args.observe) {
+          case "get_url": case "get_title": return { ...state, coordinateSpace };
+          case "screenshot": return captureScreenshot(session, state, args.full_page);
+          case "snapshot": return this.snapshot(session, agentId, target, state);
+          case "screenshot_annotate":
+            // Compatibility name: a snapshot plus an unmodified image, not drawn labels.
+            return { ...await this.snapshot(session, agentId, target, state), ...await captureScreenshot(session, state, args.full_page) };
+          case "get_content": case "get_html": {
+            const html = args.observe === "get_html";
+            const expression = html ? "this.outerHTML || ''" : "this.innerText || this.textContent || ''";
+            const raw = args.ref || args.selector
+              ? await onElement<string>(session, await this.element(session, agentId, target, args), `function() { return ${expression}; }`)
+              : await evaluate<string>(session, html ? "document.documentElement?.outerHTML || ''" : "document.body?.innerText || ''");
+            const limit = html ? 80_000 : 50_000;
+            return { ...state, [html ? "html" : "text"]: String(raw).slice(0, limit), truncated: String(raw).length > limit };
           }
-          if (!point) throw new Error("Could not resolve ref/selector to coordinates; run browser_observe snapshot first");
-          if (action === "hover" || action === "focus") {
-            await session.send("Input.dispatchMouseEvent", {
-              type: "mouseMoved",
-              x: point.x,
-              y: point.y,
-            });
-            if (action === "focus" && args.selector) {
-              await session.send("Runtime.evaluate", {
-                expression: `document.querySelector(${JSON.stringify(args.selector)})?.focus()`,
-              });
+          default: throw new Error(`Unknown browser observation: ${args.observe}`);
+        }
+      });
+    });
+  }
+
+  async action(agentId: string, args: ActionArgs): Promise<Record<string, any>> {
+    return this.serial(agentId, async () => {
+      const timeout = timeoutMs(args.timeout, args.action === "wait" ? 1000 : 8000);
+      if (["tab_new", "tab_select", "tab_close"].includes(args.action)) {
+        const base = await this.requireCdp(agentId);
+        if (args.action === "tab_new") {
+          const url = `${base.replace(/\/$/, "")}/json/new?${encodeURIComponent(args.url || "about:blank")}`;
+          let response = await fetch(url, { method: "PUT", signal: AbortSignal.timeout(10_000) });
+          if (response.status === 405) response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+          if (!response.ok) throw new Error(`tab_new failed: ${response.status}`);
+          this.selected.set(agentId, ((await response.json()) as CdpTarget).id);
+        } else {
+          const tabs = (await listCdpTargets(base)).filter((tab) => tab.type === "page");
+          const index = args.tab_index ?? 0;
+          if (!Number.isInteger(index) || index < 0 || !tabs[index]) throw new Error(`No tab at index ${index}`);
+          const tab = tabs[index]!;
+          if (args.action === "tab_close") {
+            const response = await fetch(`${base.replace(/\/$/, "")}/json/close/${encodeURIComponent(tab.id)}`, { signal: AbortSignal.timeout(5000) });
+            if (!response.ok) throw new Error(`tab_close failed: ${response.status}`);
+            if (this.selected.get(agentId) === tab.id) { this.selected.delete(agentId); this.refs.delete(agentId); }
+            return { ok: true, closed: tab.id };
+          }
+          this.selected.set(agentId, tab.id);
+        }
+        this.refs.delete(agentId);
+        return this.withSession(agentId, false, async (session, target) => {
+          await session.send("Page.bringToFront");
+          const state = await waitForDocument(session, timeout);
+          return { ok: true, selected: { id: target.id, url: state.url, title: state.title }, ...state, coordinateSpace,
+            ...(args.screenshot ? await captureScreenshot(session, state) : {}) };
+        });
+      }
+      return this.withSession(agentId, false, async (session, target) => {
+        let state: BrowserState | undefined;
+        const extra: Record<string, unknown> = {};
+        switch (args.action) {
+          case "navigate": {
+            if (!args.url) throw new Error("url required for navigate");
+            this.refs.delete(agentId);
+            const navigation = await session.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url: args.url });
+            if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`);
+            state = await waitForDocument(session, timeout, { expected: navigation.loaderId });
+            break;
+          }
+          case "reload": case "go_back": case "go_forward": {
+            this.refs.delete(agentId);
+            if (args.action === "reload") {
+              const previous = await documentId(session);
+              await session.send("Page.reload");
+              state = await waitForDocument(session, timeout, { previous });
+            } else {
+              const history = await session.send<{ currentIndex: number; entries: Array<{ id: number }> }>("Page.getNavigationHistory");
+              const entry = history.entries[history.currentIndex + (args.action === "go_back" ? -1 : 1)];
+              if (!entry) { extra.navigated = false; break; }
+              await session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+              // hash/pushState history changes keep the same loader. The active
+              // history entry confirms navigation even when its URL is unchanged.
+              state = await waitForDocument(session, timeout, { historyEntry: entry.id });
             }
-            return { ok: true, x: point.x, y: point.y };
+            break;
           }
-          await clickAt(session, point.x, point.y, action === "double_click");
-          return { ok: true, x: point.x, y: point.y };
-        }
-        case "type":
-        case "fill": {
-          if (args.ref || args.selector) {
-            // focus first
-            let point: { x: number; y: number } | null = null;
-            if (args.ref) point = await resolveRefClickable(session, refMap, args.ref);
-            if (!point && args.selector) {
-              const r = await session.send<{
-                result?: { value?: { x: number; y: number } | null };
-              }>("Runtime.evaluate", {
-                expression: `(() => { const el = document.querySelector(${JSON.stringify(args.selector)}); if (!el) return null; el.focus(); const b = el.getBoundingClientRect(); return { x: Math.round(b.x + b.width/2), y: Math.round(b.y + b.height/2) }; })()`,
-                returnByValue: true,
-              });
-              point = r.result?.value ?? null;
-            }
-            if (point) await clickAt(session, point.x, point.y);
-          }
-          if (action === "fill") {
-            // Select all + type
-            await session.send("Input.dispatchKeyEvent", {
-              type: "keyDown",
-              key: "a",
-              code: "KeyA",
-              modifiers: 2, // ctrl
-              windowsVirtualKeyCode: 65,
-            });
-            await session.send("Input.dispatchKeyEvent", {
-              type: "keyUp",
-              key: "a",
-              code: "KeyA",
-              modifiers: 2,
-              windowsVirtualKeyCode: 65,
-            });
-          }
-          await typeText(session, String(args.text ?? ""));
-          return { ok: true };
-        }
-        case "press": {
-          const key = String(args.key ?? "Enter");
-          // Simple key names
-          await session.send("Input.dispatchKeyEvent", {
-            type: "keyDown",
-            key,
-            text: key.length === 1 ? key : undefined,
-          });
-          await session.send("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key,
-          });
-          return { ok: true, key };
-        }
-        case "select": {
-          if (!args.selector && !args.ref) throw new Error("selector or ref required for select");
-          const sel = args.selector
-            ? `document.querySelector(${JSON.stringify(args.selector)})`
-            : null;
-          if (!sel) throw new Error("select currently requires selector");
-          await session.send("Runtime.evaluate", {
-            expression: `(() => { const el = ${sel}; if (!el) throw new Error('not found'); el.value = ${JSON.stringify(args.value ?? "")}; el.dispatchEvent(new Event('change', { bubbles: true })); return el.value; })()`,
-            returnByValue: true,
-          });
-          return { ok: true };
-        }
-        case "scroll":
-        case "scroll_into_view": {
-          if (args.ref || args.selector) {
-            if (args.selector) {
-              await session.send("Runtime.evaluate", {
-                expression: `document.querySelector(${JSON.stringify(args.selector)})?.scrollIntoView({ block: 'center' })`,
-              });
-            } else if (args.ref) {
-              const point = await resolveRefClickable(session, refMap, args.ref);
-              if (point) {
-                await session.send("Runtime.evaluate", {
-                  expression: `window.scrollBy(0, ${point.y - 200})`,
-                });
+          case "wait": {
+            const started = Date.now();
+            if (!args.ref && !args.selector) await delay(timeout);
+            else {
+              const deadline = Date.now() + timeout;
+              for (;;) {
+                try {
+                  const element = await this.element(session, agentId, target, args);
+                  const visible = await onElement<boolean>(session, element, "function() { return this.isConnected && this.getClientRects().length > 0; }");
+                  if (visible) break;
+                } catch (err) { if (err instanceof CdpConnectionError || args.ref) throw err; }
+                if (Date.now() >= deadline) throw new Error(`Element did not become visible within ${timeout} ms; observe the page.`);
+                await delay(Math.min(100, deadline - Date.now()));
               }
             }
-            return { ok: true };
+            extra.waitedMs = Date.now() - started;
+            state = await readState(session);
+            break;
           }
-          const dir = args.direction ?? "down";
-          const amount = args.amount ?? 500;
-          const dx = dir === "left" ? -amount : dir === "right" ? amount : 0;
-          const dy = dir === "up" ? -amount : dir === "down" ? amount : 0;
-          await session.send("Runtime.evaluate", {
-            expression: `window.scrollBy(${dx}, ${dy})`,
-          });
-          return { ok: true, dx, dy };
+          case "focus": {
+            const element = await this.element(session, agentId, target, args);
+            await onElement(session, element, "function() { this.focus(); if (this.ownerDocument.activeElement !== this && this.getRootNode().activeElement !== this) throw new Error('Element could not be focused'); }");
+            break;
+          }
+          case "click": case "double_click": case "hover": {
+            const point = await this.point(session, agentId, target, args);
+            if (args.action === "hover") await session.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+            else await clickAt(session, point.x, point.y, args.action === "double_click");
+            Object.assign(extra, point);
+            break;
+          }
+          case "type": case "fill": {
+            const text = args.text ?? args.value;
+            if (typeof text !== "string" || text.length > 20_000) throw new Error("text or value must be supplied, at most 20000 characters");
+            const element = args.ref || args.selector
+              ? await this.element(session, agentId, target, args)
+              : (await session.send<Evaluation<unknown>>("Runtime.evaluate", { expression: "(() => { let el = document.activeElement; while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement; return el; })()" })).result?.objectId;
+            if (!element) throw new Error("No focused editable element; observe and focus a textbox first.");
+            await onElement(session, element, `function() {
+              if (!this.isConnected || typeof this.focus !== 'function') throw new Error('Element is not focusable; observe a textbox ref');
+              if ((!this.matches('input, textarea') && !this.isContentEditable) || this.disabled || this.readOnly) throw new Error('Element is not editable');
+              if (this.tagName === 'INPUT' && !['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(this.type)) throw new Error('Input does not accept typed text');
+              this.focus();
+              if (this.ownerDocument.activeElement !== this && this.getRootNode().activeElement !== this) throw new Error('Element could not be focused');
+            }`);
+            if (args.action === "fill") {
+              await pressKey(session, "Control+a");
+              await pressKey(session, "Backspace");
+            }
+            if (text) await session.send("Input.insertText", { text });
+            break;
+          }
+          case "press": {
+            if (args.ref || args.selector) {
+              const element = await this.element(session, agentId, target, args);
+              await onElement(session, element, "function() { this.focus(); if (this.ownerDocument.activeElement !== this && this.getRootNode().activeElement !== this) throw new Error('Element could not be focused'); }");
+            }
+            await pressKey(session, args.key ?? "Enter");
+            break;
+          }
+          case "select": {
+            if (typeof args.value !== "string") throw new Error("value required for select");
+            const element = await this.element(session, agentId, target, args);
+            await onElement(session, element, `function(value) {
+              if (this.tagName !== 'SELECT') throw new Error('Element is not a select');
+              if (!Array.from(this.options).some(option => option.value === value)) throw new Error('Option not found');
+              this.value = value; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true }));
+            }`, [args.value]);
+            break;
+          }
+          case "scroll_into_view": {
+            const element = await this.element(session, agentId, target, args);
+            await onElement(session, element, "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }");
+            break;
+          }
+          case "scroll": {
+            const direction = args.direction ?? "down";
+            const amount = args.amount ?? 500;
+            if (!["up", "down", "left", "right"].includes(direction) || !Number.isInteger(amount) || amount < 1 || amount > 5000) throw new Error("scroll needs a valid direction and amount from 1 to 5000 CSS pixels");
+            const dx = direction === "left" ? -amount : direction === "right" ? amount : 0;
+            const dy = direction === "up" ? -amount : direction === "down" ? amount : 0;
+            const viewport = (await readState(session)).viewport;
+            const point = args.ref || args.selector || args.x !== undefined || args.y !== undefined
+              ? await this.point(session, agentId, target, args) : { x: viewport.width / 2, y: viewport.height / 2 };
+            await session.send("Input.dispatchMouseEvent", { type: "mouseWheel", ...point, deltaX: dx, deltaY: dy });
+            Object.assign(extra, { dx, dy });
+            break;
+          }
+          default: throw new Error(`Unknown browser action: ${args.action}`);
         }
-        default:
-          throw new Error(`Unknown browser action: ${action}`);
-      }
-    } finally {
-      session.close();
-    }
+        state ??= await waitForDocument(session, timeout);
+        let screenshot;
+        if (args.screenshot) {
+          try { screenshot = await captureScreenshot(session, state); }
+          catch (err) { throw new Error(`${args.action} completed, but its screenshot failed. Observe before repeating the action. ${String(err)}`); }
+        }
+        return { ok: true, ...extra, ...state, coordinateSpace, ...screenshot };
+      });
+    });
   }
 
   private async requireCdp(agentId: string): Promise<string> {
     const raw = await this.getCdpBaseUrl(agentId);
     const base = typeof raw === "string" || raw == null ? raw : raw.url;
-    const reason =
-      typeof raw === "object" && raw && "reason" in raw ? raw.reason : undefined;
-
-    if (!base) {
-      throw new Error(
-        reason && reason !== "ok"
-          ? reason
-          : "Browser CDP 不可用。请确认 Agent 已开启浏览器，并已启动工作区。",
-      );
+    if (!base) throw new Error(typeof raw === "object" && raw?.reason ? raw.reason : "Browser CDP unavailable. Enable the computer workspace and wait for Chromium to start.");
+    if (!await cdpReady(base)) throw new CdpConnectionError("Chromium CDP is not ready. Check workspace display/Chrome startup logs and retry observe.");
+    // Reset stale state before tab_new/tab_select sets a new selection.
+    if (this.bases.has(agentId) && this.bases.get(agentId) !== base) {
+      this.selected.delete(agentId);
+      this.refs.delete(agentId);
     }
-    const ready = await cdpReady(base);
-    if (!ready) {
-      throw new Error(
-        `Chromium CDP 尚未就绪（${base}）。请稍等几秒后重试，或到工作区页查看启动日志。`,
-      );
-    }
+    this.bases.set(agentId, base);
     return base;
   }
 }
