@@ -8,7 +8,7 @@ import { makePng } from "./helpers/png.js";
 async function fixture(t: TestContext) {
   const pages = ["a", "b"].map((id) => ({ id, type: "page", title: `Page ${id}`, url: `https://example.test/${id}`, webSocketDebuggerUrl: "" }));
   const commands: Array<{ tab: string; method: string; params: Record<string, any> }> = [];
-  const state = { surfaceFails: false, disconnect: "", evaluateError: false, loader: 1, empty: false };
+  const state = { surfaceFails: false, disconnect: "", evaluateError: false, loader: 1, empty: false, readyState: "complete", historyIndex: 1, inactiveHistoryReads: 0, historyError: "Not attached to an active page" };
   const png = makePng(80, 60);
   const server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
@@ -39,6 +39,17 @@ async function fixture(t: TestContext) {
         result = { data: png };
       } else if (method === "Page.getFrameTree") result = { frameTree: { frame: { id: tab, loaderId: `loader-${state.loader}` } } };
       else if (method === "Page.getLayoutMetrics") result = { cssContentSize: { width: 80, height: 600 }, cssVisualViewport: { clientWidth: 80, clientHeight: 60, pageX: 0, pageY: 0 } };
+      else if (method === "Page.getNavigationHistory") {
+        if (state.inactiveHistoryReads > 0) {
+          state.inactiveHistoryReads--;
+          ws.send(JSON.stringify({ id, error: { message: state.historyError } }));
+          return;
+        }
+        result = { currentIndex: state.historyIndex, entries: [{ id: 1 }, { id: 2 }] };
+      } else if (method === "Page.navigateToHistoryEntry") {
+        state.historyIndex = params.entryId - 1;
+        state.inactiveHistoryReads = 1;
+      }
       else if (method === "Page.navigate") {
         if (params.url === "bad:") result = { errorText: "net::ERR_NAME_NOT_RESOLVED" };
         else {
@@ -49,7 +60,7 @@ async function fixture(t: TestContext) {
       } else if (method === "Runtime.evaluate") {
         if (state.evaluateError) result = { exceptionDetails: { text: "Uncaught", exception: { description: "Error: broken script" } } };
         else if (params.expression === "document.title") result = { result: { value: `Page ${tab}` } };
-        else result = { result: { value: { url: pages.find((p) => p.id === tab)!.url, title: `Page ${tab}`, readyState: "complete", viewport: { width: 80, height: 60, devicePixelRatio: 1, scrollX: 0, scrollY: 0 } } } };
+        else result = { result: { value: { url: pages.find((p) => p.id === tab)!.url, title: `Page ${tab}`, readyState: state.readyState, viewport: { width: 80, height: 60, devicePixelRatio: 1, scrollX: 0, scrollY: 0 } } } };
       } else if (method === "Accessibility.getFullAXTree") result = { nodes: [
         { nodeId: "root", role: { value: "RootWebArea" }, name: { value: `Page ${tab}` }, childIds: ["input"] },
         { nodeId: "input", role: { value: "textbox" }, name: { value: "Name" }, backendDOMNodeId: 42 },
@@ -70,7 +81,7 @@ async function fixture(t: TestContext) {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  return { service: new AgentBrowserService(async () => base), commands, state, png };
+  return { service: new AgentBrowserService(async () => base), base, commands, state, png };
 }
 
 describe("browser CDP regression coverage", () => {
@@ -87,6 +98,39 @@ describe("browser CDP regression coverage", () => {
     await service.action("agent", { action: "tab_select", tab_index: 1 });
     const result = await service.observe("agent", { observe: "get_title" });
     assert.equal(result.title, "Page b");
+  });
+
+  it("honors explicit tab selection when the workspace CDP endpoint changes", async (t) => {
+    const first = await fixture(t);
+    const second = await fixture(t);
+    let endpoint = first.base;
+    const service = new AgentBrowserService(async () => endpoint);
+    await service.observe("agent", { observe: "get_title" });
+    endpoint = second.base;
+    await service.action("agent", { action: "tab_select", tab_index: 1 });
+    assert.equal((await service.observe("agent", { observe: "get_title" })).title, "Page b");
+  });
+
+  it("can inspect and screenshot a document whose resources are still loading", async (t) => {
+    const { service, state, png } = await fixture(t);
+    state.readyState = "loading";
+    const shot = await service.observe("agent", { observe: "screenshot", timeout: 100 });
+    assert.equal(shot.base64Full, png);
+    assert.equal(shot.readyState, "loading");
+    assert.ok((await service.observe("agent", { observe: "snapshot", timeout: 100 })).items.length);
+  });
+
+  it("waits for an active page during history restoration without replaying navigation", async (t) => {
+    const { service, commands } = await fixture(t);
+    assert.equal((await service.action("agent", { action: "go_back", timeout: 500 })).ok, true);
+    assert.equal(commands.filter((command) => command.method === "Page.navigateToHistoryEntry").length, 1);
+    assert.ok(commands.filter((command) => command.method === "Page.getNavigationHistory").length >= 3);
+  });
+
+  it("does not hide unrelated protocol errors behind navigation retries", async (t) => {
+    const { service, state } = await fixture(t);
+    state.historyError = "Permission denied";
+    await assert.rejects(service.action("agent", { action: "go_back", timeout: 500 }), /CDP Page.getNavigationHistory: Permission denied/);
   });
 
   it("fills the supplied value through a snapshot ref with Unicode intact", async (t) => {

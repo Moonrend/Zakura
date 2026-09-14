@@ -4,16 +4,19 @@ import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { it } from "node:test";
+import { it, type TestContext } from "node:test";
 import { AgentBrowserService } from "../src/services/agent-cdp.js";
 
-// Optional real-browser smoke test. No external website, credentials or Docker required.
-it("operates a real Chromium page across screenshots, refs, navigation and tabs", {
+// Optional real-browser checks. No external website, credentials or Docker required.
+const options = {
   skip: !process.env.ZAKURA_TEST_CHROMIUM,
   timeout: 30_000,
-}, async (t) => {
+};
+
+async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "zakura-chromium-test-"));
   const server = createServer((req, res) => {
+    if (req.url === "/never-finish.js") return;
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.end(`<!doctype html><title>${req.url}</title>
       <label>Name <input id="name" value="old"></label>
@@ -21,7 +24,7 @@ it("operates a real Chromium page across screenshots, refs, navigation and tabs"
       <label>Choice <select id="choice"><option value="a">Alpha</option><option value="b">Beta</option></select></label>
       <button id="counter" onclick="window.clicks.push(event.detail)">Count</button>
       <div style="height:1500px"></div><button id="below" onclick="window.belowClicked=true">Below fold</button>
-      <script>window.clicks=[]</script>`);
+      <script>window.clicks=[]</script>${req.url === "/loading" ? '<script src="/never-finish.js"></script>' : ''}`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -49,6 +52,11 @@ it("operates a real Chromium page across screenshots, refs, navigation and tabs"
   });
   const browser = new AgentBrowserService(async () => base);
   const read = async (script: string) => (await browser.observe("agent", { observe: "evaluate", script })).result;
+  return { browser, url, read };
+}
+
+it("operates a real Chromium page across screenshots, refs, navigation and tabs", options, async (t) => {
+  const { browser, url, read } = await fixture(t);
   await browser.action("agent", { action: "navigate", url: `${url}/one` });
   const snapshot = await browser.observe("agent", { observe: "snapshot" });
   const ref = (name: string) => snapshot.items.find((item: { name: string; role: string }) => item.name.trim() === name && ["textbox", "combobox", "button"].includes(item.role))?.ref;
@@ -84,4 +92,27 @@ it("operates a real Chromium page across screenshots, refs, navigation and tabs"
   const original = tabs.find((tab: { url: string }) => tab.url === `${url}/one`);
   await browser.action("agent", { action: "tab_select", tab_index: original.index });
   assert.equal((await browser.observe("agent", { observe: "get_url" })).url, `${url}/one`);
+});
+
+it("navigates same-document history entries without waiting for a new loader", options, async (t) => {
+  const { browser, url, read } = await fixture(t);
+  await browser.action("agent", { action: "navigate", url: `${url}/history` });
+  await read("history.pushState({step:1}, '', '#one'); history.pushState({step:2}, '', '#two')");
+  const back = await browser.action("agent", { action: "go_back", timeout: 500 });
+  assert.equal(back.url, `${url}/history#one`);
+  const forward = await browser.action("agent", { action: "go_forward", timeout: 500 });
+  assert.equal(forward.url, `${url}/history#two`);
+  await read("history.pushState({step:3}, '', location.href)");
+  await browser.action("agent", { action: "go_back", timeout: 500 });
+  assert.equal(await read("history.state.step"), 2);
+});
+
+it("captures the current screen after a navigation times out on a stalled resource", options, async (t) => {
+  const { browser, url } = await fixture(t);
+  await assert.rejects(browser.action("agent", { action: "navigate", url: `${url}/loading`, timeout: 500 }), /did not finish loading/);
+  const shot = await browser.observe("agent", { observe: "screenshot", timeout: 500 });
+  assert.equal(shot.readyState, "loading");
+  assert.ok(shot.base64Full.length > 100);
+  const snapshot = await browser.observe("agent", { observe: "snapshot", timeout: 500 });
+  assert.ok(snapshot.items.some((item: { name: string }) => item.name.trim() === "Name"));
 });

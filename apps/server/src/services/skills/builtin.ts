@@ -279,6 +279,8 @@ ${F}
 
 navigate / reload / go_back / go_forward 会等待文档加载并报告超时，之后必须重新获取 snapshot。fill 接受 text 或 value；select、focus 和 scroll_into_view 均支持当前 ref。click / double_click / hover 在无法使用 ref 时可指定视口 x/y。关键动作可加 screenshot=true 返回截图。
 
+导航超时后仍可 screenshot / snapshot 查看当前页面；它们返回 readyState，资源尚未加载完时也不会阻止观察。先检查画面与 readyState，再决定等待、继续操作或重试导航。
+
 页面没加载完就操作是第二常见的失败原因。\`re_browser_action\` 的 \`action=wait\` 配合 \`timeout\` 可以等；带 selector/ref 时会等待元素可见；仍应在 wait 之后 observe 一次，确认目标元素真的出现了再动手。CDP 断线会自动重试安全观察；写入动作不会自动重放，连接错误后先 observe 确认动作是否已经发生。
 
 连续两次操作失败时**停下来 screenshot**，看看页面到底是什么状态——多半是弹了验证码、Cookie 横幅、或者跳到了登录页。

@@ -24,6 +24,7 @@ export interface BrowserSnapshotNode {
 }
 
 type Pending = {
+  method: string;
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -52,7 +53,7 @@ class CdpSession {
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
         if (msg.error) {
-          p.reject(new Error(msg.error.message ?? "CDP error"));
+          p.reject(new Error(`CDP ${p.method}: ${msg.error.message ?? "unknown error"}`));
         } else {
           p.resolve(msg.result);
         }
@@ -61,7 +62,7 @@ class CdpSession {
       }
     });
     this.ws.addEventListener("close", () => this.fail(new CdpConnectionError("CDP connection closed")));
-    this.ws.addEventListener("error", () => this.fail(new CdpConnectionError("CDP connection failed")));
+    this.ws.addEventListener("error", (event) => this.fail(new CdpConnectionError(`CDP connection failed: ${event.message}`)));
   }
 
   private fail(error: Error) {
@@ -83,7 +84,7 @@ class CdpSession {
           reject(new CdpConnectionError(`CDP timeout: ${method}`));
         }
       }, 45_000);
-      this.pending.set(id, { resolve: (v) => resolve(v as T), reject, timer });
+      this.pending.set(id, { method, resolve: (v) => resolve(v as T), reject, timer });
       try {
         this.ws.send(JSON.stringify({ id, method, params: params ?? {} }));
       } catch (err) {
@@ -315,19 +316,25 @@ function timeoutMs(value: number | undefined, fallback: number): number {
   return value;
 }
 
-async function waitForDocument(session: CdpSession, timeout: number, loader?: { expected?: string; previous?: string }): Promise<BrowserState> {
+type DocumentWait = { expected?: string; previous?: string; historyEntry?: number; allowLoading?: boolean };
+
+async function waitForDocument(session: CdpSession, timeout: number, transition: DocumentWait = {}): Promise<BrowserState> {
   const deadline = Date.now() + timeout;
   do {
     try {
-      const current = loader ? await documentId(session) : undefined;
-      if ((!loader?.expected || current === loader.expected) && (!loader?.previous || current !== loader.previous)) {
+      const current = transition.expected || transition.previous ? await documentId(session) : undefined;
+      const history = transition.historyEntry === undefined ? undefined
+        : await session.send<{ currentIndex: number; entries: Array<{ id: number }> }>("Page.getNavigationHistory");
+      const atHistoryEntry = !history || history.entries[history.currentIndex]?.id === transition.historyEntry;
+      if ((!transition.expected || current === transition.expected) && (!transition.previous || current !== transition.previous) && atHistoryEntry) {
         const state = await readState(session);
-        if (state.readyState === "complete") return state;
+        if (transition.allowLoading || state.readyState === "complete") return state;
       }
     } catch (err) {
-      // Navigation destroys the old execution context. Poll the new document;
-      // never install a load listener in a context that is about to disappear.
-      if (err instanceof CdpConnectionError || !/context.*destroyed|Cannot find context|navigat/i.test(String(err))) throw err;
+      // Navigation destroys contexts and BFCache restoration can briefly leave
+      // Page.getNavigationHistory on an inactive frame. Retry these reads only;
+      // method names such as "navigate" must not hide unrelated protocol errors.
+      if (err instanceof CdpConnectionError || !/context.*destroyed|Cannot find context|Inspected target navigated|(?:frame|page) is navigating|Not attached to (?:an active )?page/i.test(String(err))) throw err;
     }
     if (Date.now() >= deadline) break;
     await delay(Math.min(100, deadline - Date.now()));
@@ -435,11 +442,6 @@ export class AgentBrowserService {
       let session: CdpSession | undefined;
       try {
         const base = await this.requireCdp(agentId);
-        if (this.bases.has(agentId) && this.bases.get(agentId) !== base) {
-          this.selected.delete(agentId);
-          this.refs.delete(agentId);
-        }
-        this.bases.set(agentId, base);
         const opened = await openSession(base, this.selected.get(agentId));
         session = opened.session;
         this.selected.set(agentId, opened.target.id);
@@ -526,7 +528,9 @@ export class AgentBrowserService {
           if (!args.script) throw new Error("script required for evaluate");
           return { result: await evaluate(session, args.script) };
         }
-        const state = await waitForDocument(session, timeout);
+        // Observation must remain possible after a navigation timeout, including
+        // pages with a stalled image/script. Return their current readyState.
+        const state = await waitForDocument(session, timeout, { allowLoading: true });
         switch (args.observe) {
           case "get_url": case "get_title": return { ...state, coordinateSpace };
           case "screenshot": return captureScreenshot(session, state, args.full_page);
@@ -595,15 +599,19 @@ export class AgentBrowserService {
           }
           case "reload": case "go_back": case "go_forward": {
             this.refs.delete(agentId);
-            const previous = await documentId(session);
-            if (args.action === "reload") await session.send("Page.reload");
-            else {
+            if (args.action === "reload") {
+              const previous = await documentId(session);
+              await session.send("Page.reload");
+              state = await waitForDocument(session, timeout, { previous });
+            } else {
               const history = await session.send<{ currentIndex: number; entries: Array<{ id: number }> }>("Page.getNavigationHistory");
               const entry = history.entries[history.currentIndex + (args.action === "go_back" ? -1 : 1)];
               if (!entry) { extra.navigated = false; break; }
               await session.send("Page.navigateToHistoryEntry", { entryId: entry.id });
+              // hash/pushState history changes keep the same loader. The active
+              // history entry confirms navigation even when its URL is unchanged.
+              state = await waitForDocument(session, timeout, { historyEntry: entry.id });
             }
-            state = await waitForDocument(session, timeout, { previous });
             break;
           }
           case "wait": {
@@ -712,6 +720,12 @@ export class AgentBrowserService {
     const base = typeof raw === "string" || raw == null ? raw : raw.url;
     if (!base) throw new Error(typeof raw === "object" && raw?.reason ? raw.reason : "Browser CDP unavailable. Enable the computer workspace and wait for Chromium to start.");
     if (!await cdpReady(base)) throw new CdpConnectionError("Chromium CDP is not ready. Check workspace display/Chrome startup logs and retry observe.");
+    // Reset stale state before tab_new/tab_select sets a new selection.
+    if (this.bases.has(agentId) && this.bases.get(agentId) !== base) {
+      this.selected.delete(agentId);
+      this.refs.delete(agentId);
+    }
+    this.bases.set(agentId, base);
     return base;
   }
 }
