@@ -1,6 +1,5 @@
 import {
   LocalWorkspaceFs,
-  PathJailError,
   scrubHostPathsInMessage,
   textResult,
   unwrapShellCommand,
@@ -78,6 +77,11 @@ const MEMORY_TOOL_NAMES = [
 const desktopObservationProperties = {
   screenshot: { type: "boolean", default: false, description: "Capture the desktop after the action to verify its result." },
   output: screenshotOutputSchema,
+};
+
+const workspacePathSchema = {
+  type: "string",
+  description: "Workspace-relative path, with or without a leading slash or /workspace prefix: foo, /foo and /workspace/foo refer to the same file. Parent segments must stay inside the workspace.",
 };
 
 /** Native tools Zakura implements for one agent (exposed via MCP). */
@@ -248,12 +252,12 @@ export function listAgentNativeTools(
     tools.push(
       tool(
         "fs_read",
-        "Read a text file from the agent workspace. Paths are relative to the workspace root.",
+        "Read a text file from the agent workspace. Accepts foo, /foo or /workspace/foo.",
         {
           type: "object",
           required: ["path"],
           properties: {
-            path: { type: "string" },
+            path: workspacePathSchema,
             line_offset: { type: "integer", minimum: 1, description: "1-indexed start line" },
             n_lines: { type: "integer", minimum: 1 },
           },
@@ -263,7 +267,7 @@ export function listAgentNativeTools(
         type: "object",
         required: ["path", "content"],
         properties: {
-          path: { type: "string" },
+          path: workspacePathSchema,
           content: { type: "string" },
         },
       }),
@@ -271,7 +275,7 @@ export function listAgentNativeTools(
         type: "object",
         required: ["path", "old_text", "new_text"],
         properties: {
-          path: { type: "string" },
+          path: workspacePathSchema,
           old_text: { type: "string" },
           new_text: { type: "string" },
         },
@@ -279,7 +283,7 @@ export function listAgentNativeTools(
       tool("fs_list", "List directory entries in the agent workspace.", {
         type: "object",
         properties: {
-          path: { type: "string", default: "." },
+          path: { ...workspacePathSchema, default: "." },
           recursive: { type: "boolean", default: false },
           offset: { type: "integer", minimum: 0, default: 0 },
           limit: { type: "integer", minimum: 1, maximum: 500, default: 200 },
@@ -288,27 +292,27 @@ export function listAgentNativeTools(
       tool("fs_mkdir", "Create a directory (recursive).", {
         type: "object",
         required: ["path"],
-        properties: { path: { type: "string" } },
+        properties: { path: workspacePathSchema },
       }),
       tool("fs_delete", "Delete a file or directory inside the workspace.", {
         type: "object",
         required: ["path"],
         properties: {
-          path: { type: "string" },
+          path: workspacePathSchema,
           recursive: { type: "boolean", default: false },
         },
       }),
       tool("fs_stat", "Stat a path in the agent workspace.", {
         type: "object",
         required: ["path"],
-        properties: { path: { type: "string" } },
+        properties: { path: workspacePathSchema },
       }),
       tool("fs_move", "Move/rename a path inside the workspace.", {
         type: "object",
         required: ["from", "to"],
         properties: {
-          from: { type: "string" },
-          to: { type: "string" },
+          from: workspacePathSchema,
+          to: workspacePathSchema,
         },
       }),
       tool(
@@ -324,8 +328,8 @@ export function listAgentNativeTools(
           properties: {
             pattern: { type: "string", description: "Regex or fixed string to search" },
             path: {
-              type: "string",
-              description: "Subdirectory or file relative to workspace root (default .)",
+              ...workspacePathSchema,
+              default: ".",
             },
             glob: {
               type: "string",
@@ -368,7 +372,7 @@ export function listAgentNativeTools(
                 type: "object",
                 required: ["path", "old_text", "new_text"],
                 properties: {
-                  path: { type: "string" },
+                  path: workspacePathSchema,
                   old_text: { type: "string" },
                   new_text: { type: "string" },
                 },
@@ -403,8 +407,7 @@ export function listAgentNativeTools(
           required: ["path"],
           properties: {
             path: {
-              type: "string",
-              description: "Workspace-relative file path, e.g. /uploads/report.pdf",
+              ...workspacePathSchema,
             },
             ttl_minutes: {
               type: "integer",
@@ -549,7 +552,7 @@ export function listAgentNativeTools(
             script: { type: "string", description: "JS for evaluate" },
             full_page: { type: "boolean", default: false },
             output: screenshotOutputSchema,
-            path: { type: "string", description: "Workspace-relative PNG save path for screenshot or screenshot_annotate." },
+            path: { ...workspacePathSchema, description: `Optional PNG save path for screenshot or screenshot_annotate. ${workspacePathSchema.description}` },
             timeout: { type: "integer", minimum: 1, maximum: 45000, description: "Wait for page load, milliseconds (default 8000)." },
           },
         },
@@ -817,8 +820,8 @@ export function listAgentNativeTools(
           type: "object",
           properties: {
             path: {
-              type: "string",
-              description: "Optional workspace-relative path to also save the PNG",
+              ...workspacePathSchema,
+              description: `Optional path to also save the PNG. ${workspacePathSchema.description}`,
             },
             output: screenshotOutputSchema,
           },
@@ -900,10 +903,7 @@ function okJson(data: unknown): McpToolResult {
 }
 
 function errText(err: unknown, workspaceRoot?: string): McpToolResult {
-  let msg = err instanceof Error ? err.message : String(err);
-  if (workspaceRoot) {
-    msg = scrubHostPathsInMessage(workspaceRoot, msg);
-  }
+  const msg = scrubHostPathsInMessage(workspaceRoot, err instanceof Error ? err.message : String(err));
   return textResult(msg, true);
 }
 
@@ -925,6 +925,7 @@ export async function callAgentNativeTool(
 ): Promise<McpToolResult> {
   // 提升到 try 外，catch 里才能 scrub 宿主路径
   let fsOnce: WorkspaceFs | null = null;
+  const workspaceRoot = () => fsOnce?.getRoot?.();
   try {
     // 仅 fs_* / get_file_url 时打开磁盘/Runner；避免 shell/browser 等工具每次都查节点、建 FS
     const getFs = async (): Promise<WorkspaceFs> => {
@@ -1158,7 +1159,7 @@ export async function callAgentNativeTool(
             note: "Anyone with this URL can download the file until it expires or is revoked. Send the url to the user.",
           });
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err), true);
+          return errText(err, workspaceRoot());
         }
       }
       case "revoke_file_url": {
@@ -1247,8 +1248,15 @@ export async function callAgentNativeTool(
           typeof args.max_matches === "number"
             ? Math.min(Math.max(Math.floor(args.max_matches), 1), 200)
             : 50;
-        const searchPath =
+        const requestedPath =
           typeof args.path === "string" && args.path.trim() ? args.path.trim() : ".";
+        // Resolve through the FS first: /foo is workspace-relative, and host
+        // roots are only known to the filesystem backing this agent.
+        const st = await (await getFs()).stat(requestedPath);
+        const relativePath = st.path.replace(/^\/+/, "");
+        const searchPath = relativePath && relativePath !== "."
+          ? `${AGENT_WORKSPACE_ROOT}/${relativePath}`
+          : AGENT_WORKSPACE_ROOT;
         const flags = [
           "rg",
           "--line-number",
@@ -1303,11 +1311,11 @@ export async function callAgentNativeTool(
             matches,
             note:
               matches.length === 0
-                ? "No matches (or path outside workspace / binary-only)."
+                ? "No matches (binary files are skipped)."
                 : undefined,
           });
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err), true);
+          return errText(err, workspaceRoot());
         }
       }
       case "apply_patch": {
@@ -1344,7 +1352,7 @@ export async function callAgentNativeTool(
             results.push({
               path,
               ok: false,
-              error: err instanceof Error ? err.message : String(err),
+              error: scrubHostPathsInMessage(workspaceRoot(), err instanceof Error ? err.message : String(err)),
             });
             if (!continueOnError) break;
           }
@@ -1426,6 +1434,8 @@ export async function callAgentNativeTool(
         const output = screenshotOutput(args.output);
         const path = screenshotPath(args.path);
         if (path && args.observe !== "screenshot" && args.observe !== "screenshot_annotate") return textResult("path is only supported for screenshots", true);
+        const fs = path ? await getFs() : undefined;
+        if (fs) screenshotPath(path, fs.getRoot?.());
         await workspace.ensureStarted(agent, { require: "display" });
         const result = await browser.observe(agent.id, {
           observe: String(args.observe ?? "snapshot"),
@@ -1435,11 +1445,12 @@ export async function callAgentNativeTool(
           full_page: Boolean(args.full_page),
           timeout: typeof args.timeout === "number" ? args.timeout : undefined,
         });
-        if (path && typeof result.base64Full === "string") {
-          await (await getFs()).writeBytes(path, Buffer.from(result.base64Full, "base64"));
-          notifyFsChanged(path);
+        let savedPath: string | undefined;
+        if (path && fs && typeof result.base64Full === "string") {
+          savedPath = (await fs.writeBytes(path, Buffer.from(result.base64Full, "base64"))).path;
+          notifyFsChanged(savedPath);
         }
-        return screenshotResult({ ...result, ...(path ? { savedPath: path } : {}) }, output);
+        return screenshotResult({ ...result, ...(savedPath ? { savedPath } : {}) }, output);
       }
       case "browser_action": {
         if (!browser) return textResult("Browser service not configured", true);
@@ -1739,12 +1750,15 @@ export async function callAgentNativeTool(
       case "computer_screenshot": {
         const output = screenshotOutput(args.output);
         const path = screenshotPath(args.path);
+        const fs = path ? await getFs() : undefined;
+        if (fs) screenshotPath(path, fs.getRoot?.());
         const shot = await captureDesktop(workspace, agent);
-        if (typeof path === "string") {
-          await (await getFs()).writeBytes(path, Buffer.from(shot.base64Full, "base64"));
-          notifyFsChanged(path);
+        let savedPath: string | null = null;
+        if (path && fs) {
+          savedPath = (await fs.writeBytes(path, Buffer.from(shot.base64Full, "base64"))).path;
+          notifyFsChanged(savedPath);
         }
-        return screenshotResult({ ...shot, savedPath: path ?? null }, output);
+        return screenshotResult({ ...shot, savedPath }, output);
       }
       case "computer_click":
       case "computer_type":
@@ -1760,11 +1774,6 @@ export async function callAgentNativeTool(
         return textResult(`Unknown agent tool: ${name}`, true);
     }
   } catch (err) {
-    if (err instanceof PathJailError) return textResult(err.message, true);
-    const root =
-      fsOnce && typeof (fsOnce as LocalWorkspaceFs).getRoot === "function"
-        ? (fsOnce as LocalWorkspaceFs).getRoot()
-        : undefined;
-    return errText(err, root);
+    return errText(err, workspaceRoot());
   }
 }

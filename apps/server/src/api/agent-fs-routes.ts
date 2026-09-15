@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
-import { PathJailError, type WorkspaceFs } from "@zakura/core";
+import { PathJailError, scrubHostPathsInMessage, type WorkspaceFs } from "@zakura/core";
 import {
   AGENT_PROJECTS_DIR,
   isSafeGitRemoteUrl,
@@ -42,27 +42,11 @@ type SessionVars = {
   session?: { userId: string; tenantId: string; email: string; role: string };
 };
 
-/**
- * Rewrite absolute storage paths that leak out of Node's fs errors into their
- * `/workspace/...` equivalent.
- *
- * `ENOENT: … stat '/var/lib/zakura/agents/<id>/workspace/projects/x'` tells the
- * user nothing they can act on, exposes the deployment's layout, and — when a
- * model reads it — invites a retry against a host path that doesn't exist in the
- * sandbox.
- */
-function scrubFsMessage(message: string): string {
-  return message.replace(
-    /(['"]?)((?:\/[^\s'"]*)?\/agents\/[A-Za-z0-9_-]+\/workspace)(\/[^\s'"]*)?\1?/g,
-    (_all, _q, _root, rest) => `'/workspace${rest ?? ""}'`,
-  );
-}
-
-function fsError(err: unknown): { status: 400 | 403 | 404 | 409 | 500 | 503; body: { error: string } } {
+function fsError(err: unknown, fs: WorkspaceFs): { status: 400 | 403 | 404 | 409 | 500 | 503; body: { error: string } } {
+  const message = scrubHostPathsInMessage(fs.getRoot?.(), err instanceof Error ? err.message : String(err));
   if (err instanceof PathJailError) {
-    return { status: 403, body: { error: scrubFsMessage(err.message) } };
+    return { status: 403, body: { error: message } };
   }
-  const message = scrubFsMessage(err instanceof Error ? err.message : String(err));
   const code =
     err && typeof err === "object" && "code" in err
       ? String((err as { code: unknown }).code)
@@ -138,7 +122,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.statDetailed(path));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -157,7 +141,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.listDetailed(path));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -177,7 +161,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.readText(path));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -204,7 +188,7 @@ export function registerAgentFsRoutes(
         },
       });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -230,7 +214,7 @@ export function registerAgentFsRoutes(
         },
       });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -256,7 +240,7 @@ export function registerAgentFsRoutes(
         await resolved.fs.writeText(body.path, body.content ?? "", body.expectedRevision),
       );
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -283,7 +267,7 @@ export function registerAgentFsRoutes(
       const data = Buffer.from(await file.arrayBuffer());
       return c.json(await resolved.fs.writeBytes(destPath, data));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -303,7 +287,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.mkdirApi(body.path));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -323,7 +307,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.deleteApi(body.path, Boolean(body.recursive)));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -345,7 +329,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.renameApi(body.oldPath, body.newPath));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -365,7 +349,7 @@ export function registerAgentFsRoutes(
     try {
       return c.json(await resolved.fs.extract(body.path, body.destination));
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -481,7 +465,7 @@ export function registerAgentFsRoutes(
           }
         }
       } catch (err) {
-        const e = fsError(err);
+        const e = fsError(err, resolved.fs);
         return c.json(e.body, e.status);
       }
     }
@@ -554,7 +538,7 @@ export function registerAgentFsRoutes(
         });
       } catch (err) {
         if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
-        const e = fsError(err);
+        const e = fsError(err, resolved.fs);
         return c.json(e.body, e.status);
       }
     }
@@ -583,7 +567,7 @@ export function registerAgentFsRoutes(
           });
         }
       } catch (err) {
-        const e = fsError(err);
+        const e = fsError(err, resolved.fs);
         return c.json(e.body, e.status);
       }
     }
@@ -635,7 +619,7 @@ export function registerAgentFsRoutes(
           }
         } catch (err) {
           if (err instanceof ProjectFsError) return c.json({ error: err.message }, err.status);
-          const e = fsError(err);
+          const e = fsError(err, resolved.fs);
           return c.json(e.body, e.status);
         }
       }
@@ -661,7 +645,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ config });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -699,7 +683,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ config, path: saved.path });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -733,7 +717,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ config, path: saved.path });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -770,7 +754,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ skill, config }, 201);
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -793,7 +777,7 @@ export function registerAgentFsRoutes(
       if (!file) return c.json({ error: "技能不存在" }, 404);
       return c.json(file);
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -823,7 +807,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ config, path: saved.path });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });
@@ -852,7 +836,7 @@ export function registerAgentFsRoutes(
       const config = await loadProjectConfig(resolved.fs, slug);
       return c.json({ config });
     } catch (err) {
-      const e = fsError(err);
+      const e = fsError(err, resolved.fs);
       return c.json(e.body, e.status);
     }
   });

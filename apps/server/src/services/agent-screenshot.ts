@@ -1,11 +1,15 @@
 import type { McpToolResult } from "@zakura/shared";
-import { posix } from "node:path";
+import { CONTAINER_WORKSPACE_ROOT, resolveInRoot, toWorkspacePath } from "@zakura/core";
 
-export function screenshotPath(path: unknown): string | undefined {
+export function screenshotPath(path: unknown, root = CONTAINER_WORKSPACE_ROOT): string | undefined {
   if (path === undefined) return undefined;
-  if (typeof path !== "string" || !path || path.includes("\0") || posix.isAbsolute(path) || path.replace(/\\/g, "/").split("/").includes("..")) {
-    throw new Error("path must be a workspace-relative file path without traversal");
+  if (typeof path !== "string" || !path || /[\\/]$/.test(path)) {
+    throw new Error("path must name a workspace file (foo, /foo or /workspace/foo)");
   }
+  if (toWorkspacePath(root, resolveInRoot(root, path)) === ".") {
+    throw new Error("path must name a file, not the workspace root");
+  }
+  // Preserve host absolute paths until the filesystem can resolve its own root.
   return path;
 }
 

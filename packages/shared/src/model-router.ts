@@ -726,6 +726,8 @@ export interface ModelToolDefinition {
 export interface ModelToolCall {
   id: string;
   type: "function";
+  /** Responses namespace, retained across turns and omitted from Chat payloads. */
+  namespace?: string;
   function: {
     name: string;
     /** JSON 字符串参数 */

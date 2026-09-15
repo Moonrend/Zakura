@@ -31,7 +31,7 @@ func Stat(root, rel string) (Entry, error) {
 	}
 	return Entry{
 		Name:    st.Name(),
-		Path:    relOrSlash(rel),
+		Path:    WorkspacePath(root, p),
 		IsDir:   st.IsDir(),
 		Size:    st.Size(),
 		ModTime: st.ModTime().UTC().Format(time.RFC3339),
@@ -56,7 +56,7 @@ func List(root, rel string) ([]Entry, error) {
 		name := e.Name()
 		out = append(out, Entry{
 			Name:    name,
-			Path:    joinRel(rel, name),
+			Path:    WorkspacePath(root, filepath.Join(p, name)),
 			IsDir:   e.IsDir(),
 			Size:    info.Size(),
 			ModTime: info.ModTime().UTC().Format(time.RFC3339),
@@ -157,21 +157,4 @@ func WalkJSON(root string) ([]byte, error) {
 		return nil
 	})
 	return json.Marshal(names)
-}
-
-func relOrSlash(rel string) string {
-	if rel == "" {
-		return "/"
-	}
-	return rel
-}
-
-func joinRel(dir, name string) string {
-	if dir == "" || dir == "/" {
-		return "/" + name
-	}
-	if dir[0] != '/' {
-		dir = "/" + dir
-	}
-	return dir + "/" + name
 }

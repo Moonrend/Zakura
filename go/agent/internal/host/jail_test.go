@@ -26,6 +26,39 @@ func TestJailRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestJailWorkspaceAliases(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"shots/a.png", "/shots/a.png", "/workspace/shots/a.png", filepath.Join(root, "shots", "a.png"), "shots/old/../a.png"} {
+		t.Run(rel, func(t *testing.T) {
+			got, err := Jail(root, rel)
+			want := filepath.Join(root, "shots", "a.png")
+			if err != nil || got != want {
+				t.Fatalf("Jail(%q) = %q, %v; want %q", rel, got, err, want)
+			}
+		})
+	}
+	for _, rel := range []string{"workspace/a.txt", "/workspace/workspace/a.txt", filepath.Join(root, "workspace", "a.txt")} {
+		got, err := Jail(root, rel)
+		if err != nil || got != filepath.Join(root, "workspace", "a.txt") {
+			t.Fatalf("must strip only one prefix: %q => %q, %v", rel, got, err)
+		}
+	}
+	for _, rel := range []string{"..notes/a.txt", "/workspace-other/a.txt"} {
+		if _, err := Jail(root, rel); err != nil {
+			t.Fatalf("valid workspace path %q rejected: %v", rel, err)
+		}
+	}
+}
+
+func TestJailRejectsEscapesAfterWorkspacePrefixes(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"../outside", "/../outside", "/workspace/../outside", root + "/../outside", `..\outside`, "a\x00b"} {
+		if _, err := Jail(root, rel); err == nil {
+			t.Errorf("must reject %q", rel)
+		}
+	}
+}
+
 func TestRoundtripWriteRead(t *testing.T) {
 	root := t.TempDir()
 	if _, err := WriteFile(root, "hello.txt", []byte("hi")); err != nil {

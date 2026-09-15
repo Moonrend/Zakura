@@ -1,6 +1,6 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 
 describe("resolveInRoot path jail", () => {
   const root = mkdtempSync(join(tmpdir(), "zakura-jail-"));
+  after(() => rmSync(root, { recursive: true, force: true }));
 
   it("resolves relative paths inside root", () => {
     const abs = resolveInRoot(root, "src/main.ts");
@@ -34,15 +35,49 @@ describe("resolveInRoot path jail", () => {
     assert.equal(toWorkspacePath(root, resolveInRoot(root, hostAbs)), "lib/i18n.ts");
   });
 
+  it("strips only one workspace prefix and respects path boundaries", () => {
+    for (const path of ["workspace/a.txt", "/workspace/workspace/a.txt", join(root, "workspace/a.txt")]) {
+      assert.equal(resolveInRoot(root, path), join(root, "workspace/a.txt"), path);
+    }
+    assert.equal(resolveInRoot(root, "/workspace-other/a.txt"), join(root, "workspace-other/a.txt"));
+    assert.equal(resolveInRoot(root, "..notes/a.txt"), join(root, "..notes/a.txt"));
+  });
+
+  it("accepts equivalent file paths and in-workspace parent segments", () => {
+    for (const path of ["shots/a.png", "/shots/a.png", "/workspace/shots/a.png", join(root, "shots/a.png"), "shots/old/../a.png"]) {
+      assert.equal(resolveInRoot(root, path), join(root, "shots/a.png"), path);
+    }
+  });
+
   it("scrubs host paths in error messages", () => {
     const msg = `ENOENT: no such file or directory, stat '${join(root, "lib", "a.ts")}'`;
     assert.match(scrubHostPathsInMessage(root, msg), /\/workspace/);
     assert.ok(!scrubHostPathsInMessage(root, msg).includes(root.replace(/\\/g, "/")));
+    assert.equal(
+      scrubHostPathsInMessage(undefined, "open /srv/zakura/agents/a1/workspace/data/a.txt: missing"),
+      "open /workspace/data/a.txt: missing",
+    );
+    assert.equal(
+      scrubHostPathsInMessage(undefined, String.raw`open C:\data\agents\a1\workspace\a.txt: missing`),
+      String.raw`open /workspace\a.txt: missing`,
+    );
+  });
+
+  it("does not strip a workspace subdirectory that resembles a host storage layout", () => {
+    const suffix = "/projects/agents/demo/workspace/a.txt";
+    assert.equal(scrubHostPathsInMessage(root, `open ${root}${suffix}`), `open /workspace${suffix}`);
+    assert.equal(scrubHostPathsInMessage(undefined, `open /workspace${suffix}`), `open /workspace${suffix}`);
   });
 
   it("rejects .. escape", () => {
-    assert.throws(() => resolveInRoot(root, "../outside"), PathJailError);
-    assert.throws(() => resolveInRoot(root, "foo/../../outside"), PathJailError);
+    for (const path of ["../outside", "foo/../../outside", "/../outside", "/workspace/../outside", `${root}/../outside`, "..\\outside"]) {
+      assert.throws(() => resolveInRoot(root, path), (err: unknown) => {
+        assert.ok(err instanceof PathJailError);
+        assert.ok(!err.message.includes(root), err.message);
+        return true;
+      }, path);
+    }
+    assert.throws(() => resolveInRoot(root, "a\0b"), PathJailError);
   });
 
   it("toApiPath uses leading slash", () => {
