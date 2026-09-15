@@ -331,6 +331,8 @@ describe("packOpenAiChatTools", () => {
 describe("native tiering smoke", () => {
   it("defers desktop tools", () => {
     assert.equal(nativeDeferredNamespace("computer_click")?.name, "desktop");
+    assert.equal(nativeDeferredNamespace("computer_observe")?.name, "desktop");
+    assert.match(nativeDeferredNamespace("computer_observe")!.description, /snapshot.*refs/);
     assert.equal(
       isAlwaysOnResolvedTool(
         resolved({

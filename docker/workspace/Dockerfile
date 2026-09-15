@@ -118,6 +118,7 @@ RUN set -eux; \
   apt-get install -y --no-install-recommends \
     build-essential pkg-config \
     xvfb openbox xdotool scrot imagemagick x11-apps \
+    dbus dbus-x11 at-spi2-core libatk-adaptor python3-dbus python3-gi gir1.2-atspi-2.0 \
     fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fontconfig \
     x11vnc novnc websockify \
     chromium; \
@@ -126,9 +127,14 @@ RUN set -eux; \
   mkdir -p /tmp/.X11-unix /tmp/zakura-chrome; \
   chmod 1777 /tmp/.X11-unix
 
-ENV DISPLAY=:99
+ENV DISPLAY=:99 \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/zakura-display/session-bus \
+    GTK_MODULES=atk-bridge \
+    NO_AT_BRIDGE=0 \
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
 
 COPY entrypoint.sh /usr/local/bin/zakura-workspace
-RUN chmod +x /usr/local/bin/zakura-workspace
+COPY desktop-a11y.py /usr/local/bin/zakura-desktop-a11y
+RUN chmod +x /usr/local/bin/zakura-workspace /usr/local/bin/zakura-desktop-a11y
 
 ENTRYPOINT ["/usr/local/bin/zakura-workspace"]

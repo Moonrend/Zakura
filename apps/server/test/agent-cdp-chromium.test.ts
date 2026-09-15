@@ -37,7 +37,8 @@ async function fixture(t: TestContext) {
     if (chrome.exitCode === null) await new Promise<void>((resolve) => chrome.once("exit", () => resolve()));
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(root, { recursive: true, force: true });
+    // Chromium children can finish profile writes just after the main PID exits.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const base = await new Promise<string>((resolve, reject) => {
     let log = "";

@@ -127,7 +127,7 @@ export function nativeDeferredNamespace(localName: string): NativeDeferNs | null
     return {
       name: "desktop",
       description:
-        "Virtual desktop GUI: desktop_info readiness and dimensions, screenshots, click/type/key/scroll/move/drag/wait. Requires a container workspace. Use original desktop pixels; observe before acting and after short action groups. Screenshots default to image content with compact metadata.",
+        "Virtual desktop GUI: desktop_info readiness; computer_observe snapshot for accessibility context, text and refs; observe=screenshot for images. Prefer current desktop refs for click/type/key/scroll/move/drag; stale refs require a new snapshot. Coordinate fallback uses original desktop pixels. Requires a full Linux container workspace with AT-SPI. Observe after short action groups; screenshot=true can attach an image.",
     };
   }
 
