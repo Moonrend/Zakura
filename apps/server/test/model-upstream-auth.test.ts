@@ -164,13 +164,14 @@ describe("Codex 设备码与 Responses", () => {
     let captured: { url?: string; body?: Record<string, unknown> } = {};
     const restore = stubFetch(async (url, init) => {
       captured = { url, body: JSON.parse(String(init?.body ?? "{}")) };
-      return new Response(JSON.stringify({ output: [] }), {
+      return new Response(JSON.stringify({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Hi" }] }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     });
     try {
-      await responsesChat(r, [{ role: "user", content: "hi" }], []);
+      const result = await responsesChat(r, [{ role: "user", content: "hi" }], []);
+      assert.equal(result.content, "Hi");
       assert.equal(captured.url, "https://chatgpt.com/backend-api/codex/responses");
       assert.equal(captured.body?.store, false);
       assert.equal(captured.body?.temperature, undefined);

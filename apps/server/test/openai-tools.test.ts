@@ -34,6 +34,9 @@ import { mapOpenAiCompatibleMessages } from "../src/model-router/adapters/openai
 import type { ModelChatMessage } from "@zakura/shared";
 import { makePng } from "./helpers/png.js";
 import type { ResolvedTool } from "../src/services/mcp-gateway.js";
+import { prepareHistoryForModel } from "../src/services/cloud-agent/messages.js";
+import { listAgentNativeTools } from "../src/services/agent-tools.js";
+import type { Agent } from "../src/db/schema.js";
 
 function tool(
   name: string,
@@ -195,11 +198,11 @@ describe("packOpenAiChatTools", () => {
     const deferred = Array.from({ length: TOOL_SEARCH_MIN_DEFERRED_TOOLS }, (_, i) =>
       tool(`list_${i}`, { defer: true, ns: "gmail" }),
     );
-    const packed = packOpenAiChatTools([tool("re_fs_read"), ...deferred], "gpt-5.6-luna");
+    const packed = packOpenAiChatTools([tool("re_fs_read"), ...deferred], "gpt-5.6-luna", { format: "responses" });
     assert.ok(packed);
     assert.equal(packed!.usedToolSearch, true);
     assert.deepEqual(packed!.tools.at(-1), { type: "tool_search" });
-    assert.ok("function" in (packed!.tools[0] as object));
+    assert.equal((packed!.tools[0] as { name: string }).name, "re_fs_read");
   });
 
   it("responses format uses flat always-on functions", () => {
@@ -221,6 +224,7 @@ describe("packOpenAiChatTools", () => {
     );
     // force many namespaces: each tool its own ns already
     const packed = packOpenAiChatTools([tool("re_fs_read"), ...many], "gpt-5.6-luna", {
+      format: "responses",
       messages: [
         {
           role: "assistant",
@@ -249,6 +253,78 @@ describe("packOpenAiChatTools", () => {
     );
     const packed = packOpenAiChatTools([...always, ...deferred], "gpt-4o");
     assert.equal(packed!.tools.length, OPENAI_TOOLS_ARRAY_MAX);
+  });
+
+  it("keeps Chat Completions tools flat even for models that support Responses tool search", () => {
+    const deferred = Array.from({ length: 20 }, (_, i) => tool(`ext_${i}`, { defer: true }));
+    const packed = packOpenAiChatTools([tool("re_fs_read"), ...deferred], "gpt-5.4", { format: "chat" })!;
+    assert.equal(packed.usedToolSearch, false);
+    assert.equal(packed.tools.length, 21);
+    assert.ok(packed.tools.every((t: any) => t.type === "function" && t.function?.name));
+  });
+
+  it("does not evict an always-on function to make room for tool_search", () => {
+    const always = Array.from({ length: OPENAI_TOOLS_ARRAY_MAX }, (_, i) => tool(`native_${i}`));
+    const packed = packOpenAiChatTools([...always, tool("extra", { defer: true })], "gpt-5.4", { format: "responses" })!;
+    assert.equal(packed.usedToolSearch, false);
+    assert.deepEqual(packed.tools.map((t: any) => t.name), always.map((t) => t.function.name));
+  });
+
+  it("keeps native tools eager on every turn and reloads previously called namespaces after compaction", () => {
+    const agent = { enableComputer: true, enableMemory: true } as Agent;
+    const { definitions } = toolsToDefinitions(listAgentNativeTools(agent));
+    const before = JSON.stringify(definitions);
+    const history: ModelChatMessage[] = [
+      { role: "user", content: "Inspect the files" },
+      { role: "assistant", content: null, toolCalls: [{ id: "stat", type: "function", function: { name: "re_fs_stat", arguments: '{"path":"/a.txt"}' } }] },
+      { role: "tool", name: "re_fs_stat", toolCallId: "stat", content: "x".repeat(20_000) },
+      { role: "assistant", content: "Found the file" },
+      { role: "user", content: "Now move it" },
+    ];
+    prepareHistoryForModel(history, { maxToolResultChars: 2_000 });
+    for (const messages of [[history[0]!], history, [{ role: "system" as const, content: "Compacted history" }, history.at(-1)!]]) {
+      const packed = packOpenAiChatTools(definitions, "gpt-5.4", { format: "responses", messages })!;
+      assert.equal(packed.usedToolSearch, true);
+      for (const name of ["re_fs_read", "re_fs_write", "re_shell_exec", "re_browser_observe", "re_browser_action", "re_memory_context", "re_search_memory", "re_add_memory"]) {
+        const found = packed.tools.find((t: any) => t.type === "function" && t.name === name) as any;
+        assert.ok(found, `missing always-on tool ${name}`);
+        assert.notEqual(found.defer_loading, true);
+      }
+      const files = packed.tools.find((t: any) => t.type === "namespace" && t.name === "workspace_files") as any;
+      assert.ok(files);
+      assert.ok(files.tools.every((t: any) => Boolean(t.defer_loading) === (messages !== history)));
+    }
+    assert.equal(JSON.stringify(definitions), before, "packing must not mutate cached definitions");
+  });
+
+  it("prioritizes previously called deferred tools in a capped Chat fallback", () => {
+    const deferred = Array.from({ length: 150 }, (_, i) => tool(`ext_${i}`, { defer: true }));
+    const packed = packOpenAiChatTools([tool("re_fs_read"), ...deferred], "gpt-5.4", {
+      format: "chat",
+      messages: [{ role: "assistant", content: null, toolCalls: [{ id: "last", type: "function", function: { name: "ext_149", arguments: "{}" } }] }],
+    })!;
+    assert.ok(packed.tools.some((t: any) => t.function?.name === "re_fs_read"));
+    assert.ok(packed.tools.some((t: any) => t.function?.name === "ext_149"));
+  });
+
+  it("keeps used tools eager and remaps their historical namespace after overflow merging", () => {
+    const always = Array.from({ length: OPENAI_TOOLS_ARRAY_MAX - 3 }, (_, i) => tool(`native_${i}`));
+    const deferred = Array.from({ length: 20 }, (_, i) => tool(`ext_${i}`, { defer: true, ns: `ns_${i}` }));
+    const messages: ModelChatMessage[] = [{ role: "assistant", content: null, toolCalls: [
+      { id: "last", type: "function", namespace: "ns_19", function: { name: "ext_19", arguments: "{}" } },
+    ] }];
+    const packed = packOpenAiChatTools([...always, ...deferred], "gpt-5.4", { format: "responses", messages })!;
+    assert.equal(packed.tools.length, OPENAI_TOOLS_ARRAY_MAX);
+    for (const original of always) {
+      assert.ok(packed.tools.some((t: any) => t.type === "function" && t.name === original.function.name && t.defer_loading !== true));
+    }
+    const group = packed.tools.find((t: any) => t.type === "namespace" && t.tools.some((fn: any) => fn.name === "ext_19")) as any;
+    assert.ok(group.name.startsWith(TOOL_SEARCH_OVERFLOW_NAMESPACE));
+    assert.notEqual(group.tools.find((fn: any) => fn.name === "ext_19").defer_loading, true);
+    assert.ok(group.tools.filter((fn: any) => fn.name !== "ext_19").every((fn: any) => fn.defer_loading === true));
+    const replay = mapMessagesToResponsesInput(messages, packed.tools).input[0] as any;
+    assert.equal(replay.namespace, group.name);
+    assert.equal(messages[0]!.toolCalls![0]!.namespace, "ns_19", "packing must not mutate history");
   });
 });
 
@@ -332,6 +408,17 @@ describe("responses mapping", () => {
     });
     assert.equal(parsed.toolCalls?.[0]?.function.name, "list_open_orders");
     assert.equal(parsed.finishReason, "tool_calls");
+  });
+
+  it("preserves function namespaces and restores legacy calls from the current tool pack", () => {
+    const parsed = parseResponsesOutput({ output: [{ type: "function_call", call_id: "c1", name: "re_fs_stat", namespace: "workspace_files", arguments: "{}" }] });
+    assert.equal(parsed.toolCalls?.[0]?.namespace, "workspace_files");
+    const mapped = mapMessagesToResponsesInput([{ role: "assistant", content: null, toolCalls: parsed.toolCalls }]);
+    assert.equal((mapped.input[0] as any).namespace, "workspace_files");
+    const legacy = mapMessagesToResponsesInput([
+      { role: "assistant", content: null, toolCalls: [{ id: "old", type: "function", function: { name: "re_fs_stat", arguments: "{}" } }] },
+    ], [{ type: "namespace", name: "workspace_files", tools: [{ type: "function", name: "re_fs_stat" }] }]);
+    assert.equal((legacy.input[0] as any).namespace, "workspace_files");
   });
 });
 

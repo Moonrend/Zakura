@@ -13,8 +13,11 @@ import type {
 } from "@zakura/shared";
 import { apiError, buildHeaders, httpJson, httpSse } from "./http.js";
 import {
+  absorbChatStreamChunk,
   buildOpenAIChatCompletion,
+  createChatStreamState,
   toModelChatResult,
+  type ChatStreamState,
 } from "./openai-response.js";
 import type { ChatStreamCallbacks } from "./adapter.js";
 import type { ResolvedRoute } from "./types.js";
@@ -37,12 +40,28 @@ function timeout(route: ResolvedRoute): number {
 }
 
 /** Chat messages → Responses `input` + 可选 `instructions` */
-export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
+export function mapMessagesToResponsesInput(
+  messages: ModelChatMessage[],
+  packedTools: unknown[] = [],
+): {
   instructions?: string;
   input: unknown[];
 } {
   const instructionsParts: string[] = [];
   const input: unknown[] = [];
+  // Restore legacy calls and use the current namespace after sharding/overflow
+  // packing. Flat functions must also clear any historical namespace.
+  const namespaces = new Map<string, string | undefined>();
+  for (const value of packedTools) {
+    if (!value || typeof value !== "object") continue;
+    const tool = value as { type?: string; name?: string; tools?: Array<{ name?: string }> };
+    if (tool.type === "function" && tool.name) namespaces.set(tool.name, undefined);
+    if (tool.type === "namespace" && tool.name && Array.isArray(tool.tools)) {
+      for (const fn of tool.tools) {
+        if (fn.name) namespaces.set(fn.name, tool.name);
+      }
+    }
+  }
 
   for (const m of messages) {
     if (m.role === "system") {
@@ -66,10 +85,14 @@ export function mapMessagesToResponsesInput(messages: ModelChatMessage[]): {
     if (m.role === "assistant") {
       if (m.toolCalls?.length) {
         for (const tc of m.toolCalls) {
+          const namespace = namespaces.has(tc.function.name)
+            ? namespaces.get(tc.function.name)
+            : tc.namespace;
           input.push({
             type: "function_call",
             call_id: tc.id,
             name: tc.function.name,
+            ...(namespace ? { namespace } : {}),
             arguments: tc.function.arguments || "{}",
           });
         }
@@ -111,7 +134,7 @@ function mapToolChoice(toolChoice: ModelToolChoice | undefined): unknown {
   return undefined;
 }
 
-export function parseResponsesOutput(data: {
+type ResponsesData = {
   id?: string;
   created_at?: number;
   model?: string;
@@ -121,16 +144,28 @@ export function parseResponsesOutput(data: {
     output_tokens?: number;
     total_tokens?: number;
   };
-}): {
+  status?: string;
+  error?: { code?: string; message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+};
+
+function responsesFailure(data: ResponsesData, status = data.status ?? "error"): Error {
+  return new Error(`responses ${status}: ${data.error?.message ?? data.incomplete_details?.reason ?? "upstream returned no text or function calls"}`);
+}
+
+// Extract usable output independently of status: compatible gateways may keep
+// an in_progress/incomplete status even inside a response.completed snapshot.
+export function parseResponsesOutput(data: ResponsesData): {
   content: string | null;
   toolCalls?: ModelToolCall[];
   finishReason: string;
 } {
-  const output = data.output ?? [];
+  const output = Array.isArray(data.output) ? data.output : [];
   const textParts: string[] = [];
   const toolCalls: ModelToolCall[] = [];
 
   for (const item of output) {
+    if (!item || typeof item !== "object") continue;
     const type = String(item.type ?? "");
     // hosted tool_search 中间态：忽略，等真正的 function_call
     if (type === "tool_search_call" || type === "tool_search_output") continue;
@@ -163,6 +198,7 @@ export function parseResponsesOutput(data: {
       toolCalls.push({
         id: callId,
         type: "function",
+        ...(typeof item.namespace === "string" && item.namespace ? { namespace: item.namespace } : {}),
         function: { name, arguments: args },
       });
     }
@@ -172,7 +208,9 @@ export function parseResponsesOutput(data: {
   return {
     content,
     ...(toolCalls.length ? { toolCalls } : {}),
-    finishReason: toolCalls.length ? "tool_calls" : "stop",
+    finishReason: toolCalls.length
+      ? "tool_calls"
+      : data.incomplete_details?.reason === "max_output_tokens" ? "length" : "stop",
   };
 }
 
@@ -186,7 +224,7 @@ export async function responsesChat(
     maxTokens?: number;
   },
 ): Promise<ModelChatResult> {
-  const mapped = mapMessagesToResponsesInput(messages);
+  const mapped = mapMessagesToResponsesInput(messages, packedTools);
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
@@ -202,26 +240,17 @@ export async function responsesChat(
   const tc = mapToolChoice(options?.toolChoice);
   if (tc !== undefined) body.tool_choice = tc;
 
-  const res = await httpJson<{
-    id?: string;
-    created_at?: number;
-    model?: string;
-    output?: Array<Record<string, unknown>>;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      total_tokens?: number;
-    };
-    error?: { message?: string };
-  }>(responsesUrl(route), {
+  const res = await httpJson<ResponsesData>(responsesUrl(route), {
     method: "POST",
     headers: buildHeaders(route.upstream.config, route.upstream.protocol),
     body: JSON.stringify(body),
     timeoutMs: timeout(route),
   });
   if (!res.ok) throw apiError("responses", res.status, res.data, res.text);
+  if (res.data?.error) throw responsesFailure(res.data);
 
   const parsed = parseResponsesOutput(res.data ?? {});
+  if (!parsed.content && !parsed.toolCalls?.length) throw responsesFailure(res.data ?? {});
   const openai = buildOpenAIChatCompletion({
     id: res.data?.id,
     created: res.data?.created_at,
@@ -240,14 +269,14 @@ export async function responsesChat(
   return toModelChatResult(openai, res.data);
 }
 
+type ResponsesToolCallState = { id: string; name: string; arguments: string; namespace?: string };
+
 type ResponsesStreamState = {
   content: string;
-  toolCalls: Map<
-    number,
-    { id: string; name: string; arguments: string }
-  >;
-  /** call_id → slot for argument deltas that key by item id */
-  byItemId: Map<string, { id: string; name: string; arguments: string }>;
+  toolCalls: Map<number, ResponsesToolCallState>;
+  /** item id → slot for argument deltas */
+  byItemId: Map<string, ResponsesToolCallState>;
+  chat: ChatStreamState;
   finishReason: string | null;
   model: string | null;
   usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -267,7 +296,7 @@ export async function responsesChatStream(
   } | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
-  const mapped = mapMessagesToResponsesInput(messages);
+  const mapped = mapMessagesToResponsesInput(messages, packedTools);
   const body: Record<string, unknown> = {
     model: route.model,
     ...mapped,
@@ -288,6 +317,7 @@ export async function responsesChatStream(
     content: "",
     toolCalls: new Map(),
     byItemId: new Map(),
+    chat: createChatStreamState(),
     finishReason: null,
     model: null,
   };
@@ -318,17 +348,23 @@ export async function responsesChatStream(
       } catch {
         return;
       }
-      absorbResponsesStreamEvent(state, chunk, callbacks);
+      if (absorbResponsesStreamEvent(state, chunk, callbacks)) {
+        stopped = true;
+        return false;
+      }
     },
   );
 
-  const toolCalls = [...state.toolCalls.values(), ...state.byItemId.values()].filter(
-    (t) => t.name.trim(),
-  );
-  // dedupe by id
-  const seen = new Set<string>();
+  const toolCalls: ResponsesToolCallState[] = [
+    ...state.toolCalls.values(),
+    ...state.byItemId.values(),
+    ...state.chat.toolCalls,
+  ].filter((t) => t.name.trim());
+  // Both Responses maps reference the same slots. Calls without IDs still
+  // represent distinct Chat indices, even when they call the same function.
+  const seen = new Set<string | ResponsesToolCallState>();
   const unique = toolCalls.filter((t) => {
-    const key = t.id || t.name;
+    const key = t.id || t;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -337,40 +373,87 @@ export async function responsesChatStream(
     ? unique.map((t, i) => ({
         id: t.id || `call_${i}`,
         type: "function" as const,
+        ...(t.namespace ? { namespace: t.namespace } : {}),
         function: { name: t.name, arguments: t.arguments || "{}" },
       }))
     : undefined;
 
+  // [DONE] and clean EOF are normal endings for compatible gateways. Never
+  // discard parsed calls/text just because response.completed was omitted.
+  if (!state.content && !mappedCalls?.length) {
+    throw new Error("responses stream ended without text or function calls");
+  }
   const openai = buildOpenAIChatCompletion({
     model: state.model ?? route.model,
     content: state.content || null,
     toolCalls: mappedCalls,
-    finishReason:
-      state.finishReason ?? (mappedCalls?.length ? "tool_calls" : "stop"),
+    finishReason: mappedCalls?.length ? "tool_calls" : state.finishReason ?? "stop",
     usage: state.usage,
   });
   return toModelChatResult(openai);
+}
+
+function absorbResponsesToolCall(
+  state: ResponsesStreamState,
+  item: Record<string, unknown>,
+  outputIndex?: number,
+): void {
+  if (item.type !== "function_call") return;
+  const itemId = typeof item.id === "string" ? item.id : "";
+  const callId = typeof item.call_id === "string" ? item.call_id : "";
+  const slot: ResponsesToolCallState = (itemId ? state.byItemId.get(itemId) : undefined)
+    ?? (callId ? [...state.toolCalls.values()].find((call) => call.id === callId) : undefined)
+    ?? (outputIndex != null ? state.toolCalls.get(outputIndex) : undefined)
+    ?? { id: "", name: "", arguments: "" };
+  slot.id = callId || slot.id || itemId || `call_${createId()}`;
+  if (typeof item.name === "string" && item.name) slot.name = item.name;
+  if (typeof item.arguments === "string") {
+    if (item.arguments || !slot.arguments) slot.arguments = item.arguments;
+  } else if (item.arguments != null) {
+    slot.arguments = JSON.stringify(item.arguments);
+  }
+  if (typeof item.namespace === "string" && item.namespace) slot.namespace = item.namespace;
+  if (itemId) state.byItemId.set(itemId, slot);
+  if (outputIndex != null) {
+    state.toolCalls.set(outputIndex, slot);
+  } else if (![...state.toolCalls.values()].includes(slot)) {
+    let index = state.toolCalls.size;
+    while (state.toolCalls.has(index)) index++;
+    state.toolCalls.set(index, slot);
+  }
 }
 
 function absorbResponsesStreamEvent(
   state: ResponsesStreamState,
   chunk: unknown,
   callbacks: ChatStreamCallbacks,
-): void {
+): boolean | void {
   if (!chunk || typeof chunk !== "object") return;
   const ev = chunk as Record<string, unknown>;
   const type = typeof ev.type === "string" ? ev.type : "";
 
+  if (ev.error || type === "error" || type === "response.error") {
+    const error = ev.error as ResponsesData["error"];
+    throw responsesFailure({ error: { message: error?.message ?? (typeof ev.message === "string" ? ev.message : "upstream stream error") } });
+  }
+  if (type === "response.failed" || type === "response.cancelled") {
+    throw responsesFailure((ev.response ?? {}) as ResponsesData, type.slice("response.".length));
+  }
+
   if (typeof ev.model === "string" && ev.model) state.model = ev.model;
 
-  // Chat Completions 风格误路由时也能吃
+  // Some gateways return Chat SSE from /responses. Reuse the Chat accumulator
+  // so fragmented/parallel tool calls, reasoning and usage survive as well.
   if (Array.isArray((ev as { choices?: unknown }).choices)) {
-    const choice = (ev as { choices: Array<{ delta?: { content?: string } }> }).choices[0];
-    const delta = choice?.delta?.content;
-    if (typeof delta === "string" && delta) {
-      state.content += delta;
-      callbacks.onDelta?.(delta);
+    const delta = absorbChatStreamChunk(state.chat, chunk);
+    state.model = state.chat.model ?? state.model;
+    state.usage = state.chat.usage ?? state.usage;
+    state.finishReason = state.chat.finishReason ?? state.finishReason;
+    if (delta.content) {
+      state.content += delta.content;
+      callbacks.onDelta?.(delta.content);
     }
+    if (delta.reasoning) callbacks.onReasoningDelta?.(delta.reasoning);
     return;
   }
 
@@ -383,24 +466,16 @@ function absorbResponsesStreamEvent(
     return;
   }
 
-  if (type === "response.output_item.added") {
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
     const item = ev.item as Record<string, unknown> | undefined;
-    if (!item || item.type !== "function_call") return;
-    const name = typeof item.name === "string" ? item.name : "";
-    const callId =
-      (typeof item.call_id === "string" && item.call_id) ||
-      (typeof item.id === "string" && item.id) ||
-      `call_${createId()}`;
-    const slot = { id: callId, name, arguments: "" };
-    if (typeof item.id === "string") state.byItemId.set(item.id, slot);
-    const idx = state.toolCalls.size;
-    state.toolCalls.set(idx, slot);
+    if (item) absorbResponsesToolCall(state, item, typeof ev.output_index === "number" ? ev.output_index : undefined);
     return;
   }
 
   if (
     type === "response.function_call_arguments.delta" ||
-    type === "response.output_item.function_call_arguments.delta"
+    type === "response.output_item.function_call_arguments.delta" ||
+    type === "response.function_call_arguments.done"
   ) {
     const delta = typeof ev.delta === "string" ? ev.delta : "";
     const itemId = typeof ev.item_id === "string" ? ev.item_id : "";
@@ -411,39 +486,33 @@ function absorbResponsesStreamEvent(
     if (!slot && state.toolCalls.size) {
       slot = [...state.toolCalls.values()].at(-1);
     }
-    if (slot && delta) slot.arguments += delta;
+    if (slot) {
+      if (type === "response.function_call_arguments.done" && typeof ev.arguments === "string") {
+        slot.arguments = ev.arguments;
+      } else if (delta) {
+        slot.arguments += delta;
+      }
+    }
     return;
   }
 
-  if (type === "response.completed" || type === "response.done") {
+  if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
     const resp = (ev.response as Record<string, unknown> | undefined) ?? ev;
     if (resp && typeof resp === "object") {
-      const parsed = parseResponsesOutput({
-        output: Array.isArray(resp.output)
-          ? (resp.output as Array<Record<string, unknown>>)
-          : undefined,
-        usage: resp.usage as
-          | {
-              input_tokens?: number;
-              output_tokens?: number;
-              total_tokens?: number;
-            }
-          | undefined,
-        model: typeof resp.model === "string" ? resp.model : undefined,
-      });
+      const parsed = parseResponsesOutput(resp as ResponsesData);
       if (parsed.content && !state.content) {
         state.content = parsed.content;
         callbacks.onDelta?.(parsed.content);
       }
-      if (parsed.toolCalls?.length && state.toolCalls.size === 0 && state.byItemId.size === 0) {
-        parsed.toolCalls.forEach((tc, i) => {
-          state.toolCalls.set(i, {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          });
-        });
+      // Terminal snapshots may omit calls, arguments or namespaces seen in
+      // deltas. Merge them without clearing already parsed tool calls.
+      if (Array.isArray(resp.output)) {
+        for (const item of resp.output) {
+          if (item && typeof item === "object") absorbResponsesToolCall(state, item);
+        }
       }
+      state.finishReason = parsed.finishReason;
+      if (typeof resp.model === "string" && resp.model) state.model = resp.model;
       if (resp.usage && typeof resp.usage === "object") {
         const u = resp.usage as {
           input_tokens?: number;
@@ -457,7 +526,6 @@ function absorbResponsesStreamEvent(
         };
       }
     }
-    state.finishReason =
-      state.toolCalls.size || state.byItemId.size ? "tool_calls" : "stop";
+    return true;
   }
 }
