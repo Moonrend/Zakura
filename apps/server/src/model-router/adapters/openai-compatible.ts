@@ -13,7 +13,7 @@ import {
   type ChatStreamCallbacks,
   type ModelProtocolAdapter,
 } from "../adapter.js";
-import { apiError, buildHeaders, httpJson, httpSse, isAbortError } from "../http.js";
+import { apiError, buildHeaders, httpJson, httpSse } from "../http.js";
 import {
   absorbChatStreamChunk,
   buildOpenAIChatCompletion,
@@ -112,9 +112,7 @@ export function mapOpenAiCompatibleMessages(
     }
     if (m.name) base.name = m.name;
     if (m.toolCallId) base.tool_call_id = m.toolCallId;
-    if (m.toolCalls?.length) {
-      base.tool_calls = m.toolCalls.map(({ id, type, function: fn }) => ({ id, type, function: fn }));
-    }
+    if (m.toolCalls?.length) base.tool_calls = m.toolCalls;
     return base;
   });
 }
@@ -219,7 +217,6 @@ async function chatStream(
   options: ModelChatInvokeOptions | undefined,
   callbacks: ChatStreamCallbacks,
 ): Promise<ModelChatResult> {
-  let responsesEmitted = false;
   const useResponses = wantsResponsesToolSearch(route.model, options?.tools);
   if (useResponses) {
     const packed = packOpenAiChatTools(options?.tools, route.model, {
@@ -237,22 +234,9 @@ async function chatStream(
             temperature: route.options.temperature,
             maxTokens: route.options.maxTokens,
           },
-          {
-            ...callbacks,
-            onDelta: (text) => {
-              if (text) responsesEmitted = true;
-              callbacks.onDelta?.(text);
-            },
-            onReasoningDelta: (text) => {
-              if (text) responsesEmitted = true;
-              callbacks.onReasoningDelta?.(text);
-            },
-          },
+          callbacks,
         );
       } catch (err) {
-        // Let the loop roll back visible partial output; cancellation must not
-        // start a fresh Chat request either.
-        if (responsesEmitted || isAbortError(err) || callbacks.signal?.aborted) throw err;
         console.warn(
           `[openai] responses stream failed, falling back to chat/completions:`,
           err instanceof Error ? err.message : err,
