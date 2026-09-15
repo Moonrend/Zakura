@@ -493,7 +493,6 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
   const messages: ModelChatMessage[] = [];
   /** toolCallId → name */
   const toolNames = new Map<string, string>();
-  const toolNamespaces = new Map<string, string>();
   let pendingAssistant: {
     content: string;
     toolCalls: ModelToolCall[];
@@ -540,7 +539,6 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
           if (!raw || typeof raw !== "object") continue;
           const tc = raw as {
             id?: unknown;
-            namespace?: unknown;
             function?: { name?: unknown; arguments?: unknown };
           };
           const id = typeof tc.id === "string" ? tc.id : "";
@@ -551,7 +549,6 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
           pendingAssistant.toolCalls.push({
             id,
             type: "function",
-            ...(typeof tc.namespace === "string" && tc.namespace ? { namespace: tc.namespace } : {}),
             function: { name, arguments: args },
           });
           toolNames.set(id, name);
@@ -565,7 +562,6 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
       const id = typeof p.toolCallId === "string" ? p.toolCallId : newId();
       const name = typeof p.name === "string" ? p.name : "tool";
       toolNames.set(id, name);
-      if (typeof p.namespace === "string" && p.namespace) toolNamespaces.set(id, p.namespace);
       continue;
     }
     if (ev.type === "tool_call_args") {
@@ -577,7 +573,6 @@ export function eventsToMessages(events: StoredEvent[]): ModelChatMessage[] {
         pendingAssistant.toolCalls.push({
           id,
           type: "function",
-          ...(toolNamespaces.has(id) ? { namespace: toolNamespaces.get(id) } : {}),
           function: { name, arguments: args },
         });
       }
