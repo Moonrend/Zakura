@@ -2078,7 +2078,7 @@ export class CloudAgentRuntime {
             };
           }
           if (isRemoteChannelToolName(call.function.name)) {
-            const handle = this.deps.remoteChannels?.get(sessionId);
+            const handle = remoteHandle ?? this.deps.remoteChannels?.get(sessionId);
             if (!handle) {
               return {
                 result: {

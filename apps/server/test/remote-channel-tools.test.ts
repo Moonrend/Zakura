@@ -418,6 +418,53 @@ assert.equal(posts[2]!.threadId, "slack:C1:999.000");
 }
 
 {
+  let failOnce = true;
+  const flakyPosts: unknown[] = [];
+  const flakyChat = {
+    thread(threadId: string) {
+      return {
+        id: threadId,
+        channelId: "slack:C1",
+        isDM: false,
+        async post(message: unknown) {
+          if (failOnce) {
+            failOnce = false;
+            throw new Error("temporary post failure");
+          }
+          flakyPosts.push(message);
+          return { id: `f-${flakyPosts.length}`, threadId };
+        },
+        async startTyping() {},
+        adapter: { async addReaction() {} },
+      };
+    },
+    channel() {
+      return { id: "c", async post() { return { id: "x", threadId: "c" }; } };
+    },
+    async openDM() {
+      return { id: "d", async post() { return { id: "x", threadId: "d" }; } };
+    },
+  };
+  const flakyHandle = {
+    chat: flakyChat,
+    threadId: "slack:C1:flaky",
+    channelId: "slack:C1",
+    platform: "slack",
+    bindingId: "b",
+    chatReplySuccessCount: 0,
+    autoFallbackPosted: false,
+  };
+  const firstTry = await maybeAutoChatReplyOnSilentRun(flakyHandle, "第一次会失败");
+  assert.equal(firstTry.posted, false);
+  assert.equal(firstTry.reason, "post_failed");
+  assert.equal(flakyHandle.autoFallbackPosted, false);
+  const secondTry = await maybeAutoChatReplyOnSilentRun(flakyHandle, "第二次成功");
+  assert.equal(secondTry.posted, true);
+  assert.equal(secondTry.reason, "auto_fallback");
+  assert.equal(flakyPosts.length, 1);
+}
+
+{
   const listeners = new Map<string, Set<(e: any) => void>>();
   const history: any[] = [];
   const store = {
@@ -572,6 +619,152 @@ assert.equal(posts[2]!.threadId, "slack:C1:999.000");
   });
   await done2;
   assert.equal(noPosts.length, 0);
+}
+
+{
+  const listeners = new Map<string, Set<(e: any) => void>>();
+  const history: any[] = [];
+  const store = {
+    subscribe(sessionId: string, listener: (e: any) => void) {
+      let set = listeners.get(sessionId);
+      if (!set) {
+        set = new Set();
+        listeners.set(sessionId, set);
+      }
+      set.add(listener);
+      return () => set!.delete(listener);
+    },
+    async listEvents(sessionId: string) {
+      return history.filter((e) => e.sessionId === sessionId);
+    },
+    emit(event: any) {
+      history.push(event);
+      for (const fn of listeners.get(event.sessionId) ?? []) fn(event);
+    },
+  };
+  const toolPosts: unknown[] = [];
+  const directPosts: unknown[] = [];
+  const remoteHandle = {
+    chat: {
+      thread(threadId: string) {
+        return {
+          id: threadId,
+          channelId: "c",
+          isDM: false,
+          async post(message: unknown) {
+            toolPosts.push(message);
+            return { id: `tool-${toolPosts.length}`, threadId };
+          },
+          async startTyping() {},
+          adapter: { async addReaction() {} },
+        };
+      },
+      channel() {
+        return { id: "c", async post() { return { id: "x", threadId: "c" }; } };
+      },
+      async openDM() {
+        return { id: "d", async post() { return { id: "x", threadId: "d" }; } };
+      },
+    },
+    threadId: "t1",
+    channelId: "c",
+    platform: "slack",
+    bindingId: "b",
+    chatReplySuccessCount: 0,
+    autoFallbackPosted: false,
+  };
+  const thread = {
+    id: "t1",
+    async post(message: unknown) {
+      directPosts.push(message);
+    },
+    async startTyping() {},
+  };
+  const done = waitForRemoteRun(thread as never, store as never, "sess-err", "run-err", {
+    remoteHandle,
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  store.emit({
+    sessionId: "sess-err",
+    type: "run_error",
+    runId: "run-err",
+    payload: { message: "boom" },
+  });
+  await done;
+  assert.equal(directPosts.length, 0);
+  assert.equal(toolPosts.length, 1);
+  assert.match(String((toolPosts[0] as { markdown?: string }).markdown), /boom/);
+}
+
+{
+  const listeners = new Map<string, Set<(e: any) => void>>();
+  const history: any[] = [];
+  const store = {
+    subscribe(sessionId: string, listener: (e: any) => void) {
+      let set = listeners.get(sessionId);
+      if (!set) {
+        set = new Set();
+        listeners.set(sessionId, set);
+      }
+      set.add(listener);
+      return () => set!.delete(listener);
+    },
+    async listEvents(sessionId: string) {
+      return history.filter((e) => e.sessionId === sessionId);
+    },
+    emit(event: any) {
+      history.push(event);
+      for (const fn of listeners.get(event.sessionId) ?? []) fn(event);
+    },
+  };
+  const cancelPosts: unknown[] = [];
+  const remoteHandle = {
+    chat: {
+      thread(threadId: string) {
+        return {
+          id: threadId,
+          channelId: "c",
+          isDM: false,
+          async post(message: unknown) {
+            cancelPosts.push(message);
+            return { id: `tool-${cancelPosts.length}`, threadId };
+          },
+          async startTyping() {},
+          adapter: { async addReaction() {} },
+        };
+      },
+      channel() {
+        return { id: "c", async post() { return { id: "x", threadId: "c" }; } };
+      },
+      async openDM() {
+        return { id: "d", async post() { return { id: "x", threadId: "d" }; } };
+      },
+    },
+    threadId: "t2",
+    channelId: "c",
+    platform: "slack",
+    bindingId: "b",
+    chatReplySuccessCount: 0,
+    autoFallbackPosted: false,
+  };
+  const thread = {
+    id: "t2",
+    async post() {},
+    async startTyping() {},
+  };
+  const done = waitForRemoteRun(thread as never, store as never, "sess-cancel", "run-cancel", {
+    remoteHandle,
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  store.emit({
+    sessionId: "sess-cancel",
+    type: "run_end",
+    runId: "run-cancel",
+    payload: { runId: "run-cancel", status: "cancelled" },
+  });
+  await done;
+  assert.equal(cancelPosts.length, 1);
+  assert.match(String((cancelPosts[0] as { markdown?: string }).markdown), /取消/);
 }
 
 console.log("remote-channel-tools self-check ok");
