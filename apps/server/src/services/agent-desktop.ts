@@ -120,8 +120,19 @@ function integer(value: unknown, name: string, min: number, max: number): number
 
 async function accessibility<T>(workspace: Workspace, agent: Agent, command: "snapshot" | "resolve", args: Record<string, unknown>): Promise<T> {
   const result = await execDesktop(workspace, agent, ["bash", "-c", `set -eu
-command -v zakura-desktop-a11y >/dev/null 2>&1 || { echo 'Desktop accessibility unavailable: missing zakura-desktop-a11y. Rebuild/recreate the full workspace image with AT-SPI dependencies; use computer_observe observe=screenshot for coordinates.' >&2; exit 127; }
-exec zakura-desktop-a11y "$@"`, "zakura-a11y", command, JSON.stringify(args)]);
+helper=""
+if command -v zakura-desktop-a11y >/dev/null 2>&1; then
+  helper=$(command -v zakura-desktop-a11y)
+elif [ -x /usr/local/bin/zakura-desktop-a11y ]; then
+  helper=/usr/local/bin/zakura-desktop-a11y
+elif [ -f /usr/local/bin/zakura-desktop-a11y ]; then
+  helper="python3 /usr/local/bin/zakura-desktop-a11y"
+fi
+if [ -z "$helper" ]; then
+  echo 'Desktop accessibility unavailable: missing zakura-desktop-a11y. Pull/recreate the full workspace image (sunwuyuan/zakura-workspace-dev:debian or ZAKURA_WORKSPACE_IMAGE), not the lite image; use computer_observe observe=screenshot for coordinates.' >&2
+  exit 127
+fi
+exec $helper "$@"`, "zakura-a11y", command, JSON.stringify(args)]);
   try { return JSON.parse(result.stdout) as T; }
   catch { throw new Error(`Invalid response from the desktop AT-SPI helper. ${refreshSnapshot}`); }
 }
