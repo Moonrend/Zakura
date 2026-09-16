@@ -121,6 +121,8 @@ start_accessibility() {
   # A fixed socket lets docker exec / shell-launched GUI apps join PID1's bus.
   # dbus-run-session around Chrome alone would create an isolated desktop tree.
   if ! session_bus_ready; then
+    mkdir -p /tmp/zakura-display
+    chmod 700 /tmp/zakura-display 2>/dev/null || true
     rm -f /tmp/zakura-display/session-bus
     dbus-daemon --session --nofork --nopidfile --address="$DBUS_SESSION_BUS_ADDRESS" \
       >>/var/log/zakura/a11y.log 2>&1 &

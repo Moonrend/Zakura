@@ -75,8 +75,13 @@ class Accessibility:
             number = int(getattr(self.states, state))
             return number // 32 < len(bits) and bool(int(bits[number // 32]) & (1 << (number % 32)))
 
+        parent = props.get("Parent", ())
+        if isinstance(parent, (list, tuple)):
+            parent_signature = [str(component) for component in parent]
+        else:
+            parent_signature = str(parent)
         signature = hashlib.sha256(json.dumps(
-            [role, name, list(props.get("Parent", ()))], ensure_ascii=True
+            [role, name, parent_signature], ensure_ascii=True
         ).encode()).hexdigest()
         return props, role, name, has, signature
 

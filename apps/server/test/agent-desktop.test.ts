@@ -211,6 +211,16 @@ describe("desktop accessibility snapshots and refs", () => {
     assert.notEqual((await callAgentNativeTool(agent, service, "computer_click", { x: 10, y: 10 })).isError, true);
   });
 
+  it("does not duplicate refresh guidance when ref resolution already includes it", async () => {
+    const { service, behavior, observe } = a11yWorkspace();
+    const { items } = await observe();
+    behavior.resolveError = "Desktop ref changed. Run computer_observe observe=snapshot again.";
+    const result = await callAgentNativeTool(agent, service, "computer_click", { ref: items[1].ref });
+    assert.equal(result.isError, true);
+    const text = JSON.stringify(result);
+    assert.equal((text.match(/Run computer_observe observe=snapshot again\./g) ?? []).length, 1);
+  });
+
   it("serializes a ref action and a competing new snapshot", async (t) => {
     const { service, requests, observe } = a11yWorkspace();
     const { items } = await observe();
@@ -280,6 +290,22 @@ describe("desktop accessibility snapshots and refs", () => {
 });
 
 describe("desktop native tools", () => {
+  it("returns clear errors when ref and coordinate targets are both missing", async () => {
+    for (const [name, args, pattern] of [
+      ["computer_click", {}, /Provide ref or x\/y\./],
+      ["computer_move", {}, /Provide ref or x\/y\./],
+      ["computer_scroll", { dy: 1 }, /Provide ref or x\/y\./],
+      ["computer_drag", { x: 1, y: 2 }, /Provide to_ref or to_x\/to_y\./],
+      ["computer_drag", { to_x: 3, to_y: 4 }, /Provide ref or x\/y\./],
+    ] as const) {
+      const { service, commands } = workspace();
+      const result = await callAgentNativeTool(agent, service, name, args);
+      assert.equal(result.isError, true, JSON.stringify({ name, args }));
+      assert.match(JSON.stringify(result), pattern);
+      assert.ok(!commands.some((command) => command.join(" ").includes("mousemove")));
+    }
+  });
+
   it("uses xdotool repeat clicks for double click and returns display coordinates", async () => {
     const { service, commands } = workspace();
     const result = await callAgentNativeTool(agent, service, "computer_click", { x: 12, y: 34, double: true });
