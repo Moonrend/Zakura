@@ -68,7 +68,8 @@ export const CHAT_SDK_PLATFORMS = [
   "weixin",
 ] as const;
 
-export const REMOTE_PLATFORMS = [...CHAT_SDK_PLATFORMS] as const;
+// Zakura Bot implements RemoteChatHandle directly and uses its authenticated WS gateway.
+export const REMOTE_PLATFORMS = [...CHAT_SDK_PLATFORMS, "zakurabot"] as const;
 
 export type ChatSdkPlatform = (typeof CHAT_SDK_PLATFORMS)[number];
 export type RemotePlatform = (typeof REMOTE_PLATFORMS)[number];
@@ -108,10 +109,6 @@ const adapterFactories: Record<ChatSdkPlatform, AdapterFactory> = {
   mattermost: (config) => createMattermostAdapter(config as never),
   weixin: (config) => createWeixinAdapter(config as never),
 };
-
-function isPlatform(value: string): value is RemotePlatform {
-  return (REMOTE_PLATFORMS as readonly string[]).includes(value);
-}
 
 function isChatSdkPlatform(value: string): value is ChatSdkPlatform {
   return (CHAT_SDK_PLATFORMS as readonly string[]).includes(value);
@@ -214,7 +211,7 @@ export class RemoteChannelRuntime {
 
   async handleWebhook(tenantId: string, bindingId: string, request: Request): Promise<Response> {
     const binding = await this.ingress.getBinding(tenantId, bindingId);
-    if (!binding || !isPlatform(binding.platform)) {
+    if (!binding || !isChatSdkPlatform(binding.platform)) {
       return Response.json({ error: "远程连接不存在或平台不支持" }, { status: 404 });
     }
     const bot = await this.getBot(tenantId, binding);

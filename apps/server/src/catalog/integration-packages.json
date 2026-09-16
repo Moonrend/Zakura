@@ -684,7 +684,7 @@
   {
     "slug": "agent-remote",
     "name": "远程 Agent",
-    "description": "Chat SDK 消息平台：Slack、Telegram、Discord、Resend Email 等。在 Agent「平台」页绑定，无需额外邮箱连接器。",
+    "description": "远程消息平台：Zakura Bot、Slack、Telegram、Discord、Resend Email 等。在 Agent「平台」页绑定。",
     "publisher": "reCloud",
     "category": "communication",
     "icon": "↔",
@@ -696,6 +696,22 @@
       "summary": "Chat SDK 入站：斜杠指令 + 用户验证；👀 确认。Agent 用 chat_reply（可多次）发 text/附件/按钮，不镜像 assistant 文本。"
     },
     "components": [
+      {
+        "kind": "connector",
+        "ref": "remote-zakurabot",
+        "name": "Zakura Bot",
+        "description": "通过设备 token 连接 Zakura Bot App，支持消息、附件、卡片和工具活动。",
+        "config": {
+          "providerId": "remote-agent",
+          "auth": {
+            "kind": "custom",
+            "profile": "remote-zakurabot",
+            "profileLabel": "Zakura Bot",
+            "docsUrl": "https://github.com/Moonrend/Zakura/blob/main/docs/zakurabot-channel.md",
+            "fields": []
+          }
+        }
+      },
       {
         "kind": "connector",
         "ref": "remote-slack",

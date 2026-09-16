@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/sheet";
 import type { ConnectorOauthField } from "@/components/connections/connector-oauth-form";
 import { BrandIcon } from "@/components/brand-icon";
+import { ZakurabotDevices } from "@/components/zakurabot-devices";
 import { api } from "@/lib/api";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
@@ -68,6 +69,7 @@ type Binding = {
 const FOLLOW_DEFAULT = "__follow_default__";
 
 const platformLabels: Record<string, string> = {
+  zakurabot: "Zakura Bot",
   resend: "Resend Email",
   webex: "Webex",
   mattermost: "Mattermost",
@@ -85,6 +87,7 @@ const platformLabels: Record<string, string> = {
 };
 
 const platformHomepages: Record<string, string> = {
+  zakurabot: "https://github.com/Moonrend/zakura-bot",
   slack: "https://slack.com",
   discord: "https://discord.com",
   telegram: "https://telegram.org",
@@ -325,7 +328,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
     }
   }
 
-  const webhookUrl = editingId && webhookBaseUrl ? `${webhookBaseUrl}/${editingId}/webhook` : "";
+  const webhookUrl = platform !== "zakurabot" && editingId && webhookBaseUrl ? `${webhookBaseUrl}/${editingId}/webhook` : "";
   const defaultModelLabel =
     agentDefaultModel ||
     chatModels.find((m) => m.isDefault)?.name ||
@@ -544,7 +547,12 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
                 </div>
 
                 {/* Access */}
-                <div className="space-y-3">
+                {platform === "zakurabot" ? (
+                  editingId ? <ZakurabotDevices bindingId={editingId} onChange={async () => {
+                    const remote = await api<{ bindings: Binding[] }>("/api/remote-channels");
+                    setAllBindings(remote.bindings);
+                  }} /> : <p className="text-xs text-muted-foreground">保存后可创建设备 Token，连接 Zakura Bot App。</p>
+                ) : <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm font-medium">开放访问</span>
                     <Switch checked={allowAll} onCheckedChange={setAllowAll} />
@@ -569,7 +577,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
                       onDeny={(k) => void denyPending(k)}
                     />
                   ) : null}
-                </div>
+                </div>}
 
                 {/* Webhook (read-only) */}
                 {webhookUrl ? (
@@ -582,7 +590,7 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
                       {webhookUrl}
                     </code>
                   </div>
-                ) : editingId ? (
+                ) : editingId && platform !== "zakurabot" ? (
                   <p className="text-xs text-muted-foreground">保存后生成 Webhook 地址。</p>
                 ) : null}
 

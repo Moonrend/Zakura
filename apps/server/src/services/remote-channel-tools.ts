@@ -51,6 +51,8 @@ export function isRemoteChannelToolName(name: string): name is RemoteChannelTool
 
 /** Chat SDK Chat 实例上我们实际用到的方法 */
 export type RemoteChatHandle = {
+  /** First-party transports can preserve their native wire payload instead of Chat SDK cards. */
+  encodePostable?(args: Record<string, unknown>, ctx?: EncodePostableContext): Promise<unknown>;
   thread(threadId: string): {
     id: string;
     channelId: string;
@@ -744,7 +746,7 @@ async function postThread(
   ctx: EncodePostableContext | undefined,
   quoteDefault: boolean,
 ): Promise<{ ok: true; messageId: string; message_id: string; threadId: string; delivered: string }> {
-  const body = await encodePostable(args, ctx);
+  const body = await encodeForChat(handle.chat, args, ctx);
   const thread = handle.chat.thread(threadId);
   const replyTo = str(args, "reply_to") ?? (quoteDefault ? handle.inboundMessageId : undefined);
   const sent =
@@ -777,6 +779,10 @@ export async function callRemoteChannelTool(
   }
 }
 
+function encodeForChat(chat: RemoteChatHandle, args: Record<string, unknown>, ctx?: EncodePostableContext) {
+  return chat.encodePostable ? chat.encodePostable(args, ctx) : encodePostable(args, ctx);
+}
+
 async function dispatch(
   handle: RemoteChannelSessionHandle,
   name: string,
@@ -793,7 +799,7 @@ async function dispatch(
     }
     case CHAT_POST_CHANNEL_MESSAGE: {
       const channelId = str(args, "channelId") ?? handle.channelId;
-      const sent = await chat.channel(channelId).post(await encodePostable(args, ctx));
+      const sent = await chat.channel(channelId).post(await encodeForChat(chat, args, ctx));
       return {
         ok: true,
         messageId: sent.id,
@@ -806,7 +812,7 @@ async function dispatch(
       const userId = str(args, "userId");
       if (!userId) throw new Error("userId is required");
       const dm = await chat.openDM(userId);
-      const sent = await dm.post(await encodePostable(args, ctx));
+      const sent = await dm.post(await encodeForChat(chat, args, ctx));
       return {
         ok: true,
         messageId: sent.id,

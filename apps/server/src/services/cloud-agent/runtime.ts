@@ -105,6 +105,7 @@ import {
   isRemoteChannelToolName,
   listRemoteChannelToolDefinitions,
   remoteChannelPromptBlock,
+  type RemoteChannelSessionHandle,
 } from "../remote-channel-tools.js";
 import {
   callSessionTool,
@@ -392,6 +393,9 @@ export class CloudAgentRuntime {
     userId?: string | null;
     userName?: string | null;
   }): Promise<{ runId: string }> {
+    // A slow preparation may outlive cancellation and a later inbound binding.
+    // Keep this turn's reply target, rather than looking up the next turn's handle.
+    const remoteHandle = this.deps.remoteChannels?.get(input.sessionId);
     const attachments = parseAttachments(input.attachments);
     const isContinue = Boolean(input.continue);
     const isRegenerate = Boolean(input.regenerateOfMessageId || input.retry);
@@ -515,6 +519,7 @@ export class CloudAgentRuntime {
         runId: run.id,
         targetMessageId,
         isFirstTurn,
+        remoteHandle,
         ...(input.options ? { options: input.options } : {}),
       }),
     ).catch(async (err) => {
@@ -1433,6 +1438,7 @@ export class CloudAgentRuntime {
     targetMessageId: string;
     isFirstTurn: boolean;
     options?: CloudAgentRunOptions;
+    remoteHandle?: RemoteChannelSessionHandle;
   }): Promise<void> {
     const { tenantId, agent, sessionId, runId } = input;
     await this.store.markRunStarted(runId);
@@ -1593,7 +1599,7 @@ export class CloudAgentRuntime {
       }
     }
 
-    const remoteHandle = this.deps.remoteChannels?.get(sessionId) ?? undefined;
+    const remoteHandle = input.remoteHandle;
     const sessionKind = sessionPreferences?.kind ?? "chat";
 
     // —— 记忆 / 工具 / 技能 / hooks ——
@@ -2078,7 +2084,7 @@ export class CloudAgentRuntime {
             };
           }
           if (isRemoteChannelToolName(call.function.name)) {
-            const handle = remoteHandle ?? this.deps.remoteChannels?.get(sessionId);
+            const handle = remoteHandle;
             if (!handle) {
               return {
                 result: {

@@ -360,41 +360,39 @@ async function main() {
   app.route("/", createOauthApp({ db, config, oauth }));
 
   log.info("boot.api_app");
-  app.route(
-    "/",
-    await createApiApp({
-      db,
-      config,
-      orchestrator,
-      gateway,
-      runtime,
-      agentService,
-      memoryStore,
-      memoryProviders,
-      modelRouter,
-      modelUpstreams,
-      modelRoutes,
-      modelCatalog,
-      upstreamModels: upstreamModelsSvc,
-      toolCallStore,
-      oauth,
-      runtimeNodes,
-      migrations,
-      workspaceFsProvider,
-      networkSettings,
-      securityPolicy,
-      exposures,
-      fileShares,
-      networkAudit,
-      platformServices,
-      platformServiceUsage,
-      skills: skillsService,
-      connections: connectionCatalog,
-      instanceMigrations,
-      cloudSessionStore,
-      imageUpdateChecker,
-    }),
-  );
+  const apiApp = await createApiApp({
+    db,
+    config,
+    orchestrator,
+    gateway,
+    runtime,
+    agentService,
+    memoryStore,
+    memoryProviders,
+    modelRouter,
+    modelUpstreams,
+    modelRoutes,
+    modelCatalog,
+    upstreamModels: upstreamModelsSvc,
+    toolCallStore,
+    oauth,
+    runtimeNodes,
+    migrations,
+    workspaceFsProvider,
+    networkSettings,
+    securityPolicy,
+    exposures,
+    fileShares,
+    networkAudit,
+    platformServices,
+    platformServiceUsage,
+    skills: skillsService,
+    connections: connectionCatalog,
+    instanceMigrations,
+    cloudSessionStore,
+    imageUpdateChecker,
+  });
+  app.route("/", apiApp);
   log.info("boot.api_app_ok");
 
   const mcpHandler = createMcpHandler({
@@ -465,6 +463,7 @@ async function main() {
     agentService,
   });
   runnerHub.attach(server as import("node:http").Server);
+  apiApp.zakurabotGateway?.attach(server as import("node:http").Server);
 }
 
 main().catch((err) => {

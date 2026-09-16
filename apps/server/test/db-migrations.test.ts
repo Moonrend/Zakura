@@ -133,6 +133,8 @@ describe("drizzle migrations", () => {
           "agent_channel_bindings",
           "agent_channel_threads",
           "agent_channel_events",
+          "zakurabot_devices",
+          "zakurabot_messages",
           "email_connector_instances",
           "agent_connector_installations",
           "user_usage_events",

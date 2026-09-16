@@ -75,7 +75,7 @@ for (const [product, expectedTool] of [
 
 console.log("email provider product self-check ok");
 
-assert.deepEqual([...REMOTE_PLATFORMS], [...CHAT_SDK_PLATFORMS]);
+assert.deepEqual([...REMOTE_PLATFORMS], [...CHAT_SDK_PLATFORMS, "zakurabot"]);
 for (const platform of ["resend", "webex", "mattermost", "weixin"] as const) {
   assert.ok(CHAT_SDK_PLATFORMS.includes(platform));
 }

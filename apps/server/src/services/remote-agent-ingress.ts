@@ -65,7 +65,7 @@ export type RemoteInboundMessage = {
   senderEmail?: string;
   text: string;
   title?: string;
-  onSessionReady?: (sessionId: string, threadKey: string) => void;
+  onSessionReady?: (sessionId: string, threadKey: string) => void | Promise<void>;
 };
 
 export type RemoteInboundResult =
@@ -754,13 +754,13 @@ export class RemoteAgentIngress {
       .returning();
     if (!event) return { accepted: true, duplicate: true, sessionId: thread.sessionId };
 
-    input.onSessionReady?.(thread.sessionId, input.externalThreadKey);
     try {
       const { runId } = await this.startTurnAllowInterrupt(
         input.tenantId,
         binding.agentId,
         thread.sessionId,
         input.text,
+        () => input.onSessionReady?.(thread.sessionId, input.externalThreadKey),
       );
       await this.db
         .update(agentChannelThreads)
@@ -841,8 +841,11 @@ export class RemoteAgentIngress {
     agentId: string,
     sessionId: string,
     content: string,
+    onSessionReady?: () => void | Promise<void>,
   ): Promise<{ runId: string }> {
     await this.interruptActiveRun(tenantId, agentId, sessionId);
+    // The old run must release its handle before a new turn replaces the session binding.
+    await onSessionReady?.();
     try {
       return await this.runtime.startTurn({ tenantId, agentId, sessionId, content });
     } catch (error) {
@@ -851,6 +854,7 @@ export class RemoteAgentIngress {
       }
       // 并发入站：再打断一次后重试
       await this.interruptActiveRun(tenantId, agentId, sessionId);
+      await onSessionReady?.();
       return this.runtime.startTurn({ tenantId, agentId, sessionId, content });
     }
   }
