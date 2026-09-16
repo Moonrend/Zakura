@@ -91,6 +91,14 @@ export type RemoteChatHandle = {
   } | null>;
 };
 
+export type RemoteChannelTrigger = "dm" | "mention" | "subscribed";
+
+export type RemoteChannelSender = {
+  userId?: string;
+  userName?: string;
+  fullName?: string;
+};
+
 export type RemoteChannelSessionHandle = {
   chat: RemoteChatHandle;
   /** 入站线程完整 id，例如 slack:C123:1234567890.123456 */
@@ -100,6 +108,25 @@ export type RemoteChannelSessionHandle = {
   bindingId: string;
   /** 触发本回合的用户消息 id，chat_reply 默认 quote */
   inboundMessageId?: string;
+  /** 是否私信 */
+  isDM?: boolean;
+  /** 频道显示名（非 DM 时） */
+  channelName?: string;
+  /** 是否线程内（相对频道顶层） */
+  isThread?: boolean;
+  /** 发言人 */
+  sender?: RemoteChannelSender;
+  /** 入站触发方式 */
+  trigger?: RemoteChannelTrigger;
+  /** 原消息链接（若平台提供） */
+  permalink?: string;
+  /**
+   * 本回合成功 chat_reply 次数。bind 时置 0；成功发出后 +1。
+   * 供静默回合自动补发判断，勿手动改。
+   */
+  chatReplySuccessCount?: number;
+  /** 已做过静默自动补发，防止重复刷屏 */
+  autoFallbackPosted?: boolean;
 };
 
 export type EncodePostableContext = {
@@ -251,10 +278,11 @@ export function listRemoteChannelToolDefinitions(
       function: {
         name: CHAT_REPLY,
         description: [
-          `Speak in the current ${handle.platform} conversation (thread ${handle.threadId}).`,
-          "If you do not call this, you stay silent — assistant text is NOT posted.",
-          "Call multiple times for multiple bubbles (ack, progress, files, final answer). Prefer several short messages over one huge one.",
-          "text is enough for ordinary Markdown. attachments: workspace path or URL. actions: URL buttons. card: title/fields/table. reply_to quotes a message (defaults to the inbound user message).",
+          `在当前 ${handle.platform} 会话发一条用户可见消息（唯一可靠出口）。`,
+          "不调用则外部用户看不到任何内容——assistant 文本不会出现在 Slack/Telegram 等平台。",
+          "可多次调用：短确认 → 进度 → 附件/结论。长任务禁止只跑工具不 chat_reply。",
+          "text=Markdown 正文；attachments=工作区路径或 URL；actions=链接按钮；card=结构化卡片；reply_to 默认引用入站消息。",
+          "不要对用户复述内部 id（threadId/channelId/bindingId）。",
         ].join(" "),
         parameters: {
           type: "object",
@@ -740,6 +768,9 @@ export async function callRemoteChannelTool(
 ): Promise<McpToolResult> {
   try {
     const result = await dispatch(handle, name, args, ctx);
+    if (name === CHAT_REPLY) {
+      handle.chatReplySuccessCount = (handle.chatReplySuccessCount ?? 0) + 1;
+    }
     return textResult(JSON.stringify(result), false);
   } catch (error) {
     return textResult(error instanceof Error ? error.message : String(error), true);
@@ -851,22 +882,118 @@ async function dispatch(
   }
 }
 
+function locationLines(handle: RemoteChannelSessionHandle): string[] {
+  const where = handle.isDM
+    ? "私信（DM）"
+    : handle.channelName
+      ? `频道 #${handle.channelName}`
+      : "频道（名称未知）";
+  const shape = handle.isDM ? "一对一对话" : handle.isThread ? "线程内回复" : "频道顶层";
+  const sender =
+    handle.sender?.fullName ||
+    handle.sender?.userName ||
+    handle.sender?.userId ||
+    "未知用户";
+  const at =
+    handle.sender?.userName && handle.sender.userName !== sender
+      ? `（@${handle.sender.userName}）`
+      : "";
+  const triggerLabel =
+    handle.trigger === "dm"
+      ? "私信"
+      : handle.trigger === "mention"
+        ? "@提及"
+        : handle.trigger === "subscribed"
+          ? "订阅频道消息"
+          : "未知";
+  const lines = [
+    `平台：${handle.platform}`,
+    `位置：${where} · ${shape}`,
+    `对方：${sender}${at}`,
+    `触发：${triggerLabel}`,
+  ];
+  if (handle.permalink) lines.push(`链接：${handle.permalink}`);
+  return lines;
+}
+
+/** 入站用户回合前的一行来源标签（勿淹没正文） */
+export function formatRemoteInboundPrefix(
+  handle: Pick<
+    RemoteChannelSessionHandle,
+    "platform" | "isDM" | "channelName" | "isThread" | "sender" | "trigger"
+  >,
+): string {
+  const place = handle.isDM
+    ? "DM"
+    : handle.channelName
+      ? `#${handle.channelName}`
+      : "频道";
+  const shape = handle.isDM ? "" : handle.isThread ? "·线程" : "·顶层";
+  const who =
+    handle.sender?.fullName ||
+    handle.sender?.userName ||
+    handle.sender?.userId ||
+    "未知";
+  const trigger =
+    handle.trigger === "dm"
+      ? "dm"
+      : handle.trigger === "mention"
+        ? "mention"
+        : handle.trigger === "subscribed"
+          ? "subscribed"
+          : "?";
+  return `[来源: ${handle.platform} · ${place}${shape} · ${who} · 触发:${trigger}]`;
+}
+
+/**
+ * 回合结束仍无成功 chat_reply 时，把最后一段 assistant 文本（或短兜底）经 chat_reply 补发一次。
+ * 可测、防重复：已有成功回复或已补发则跳过。
+ */
+export async function maybeAutoChatReplyOnSilentRun(
+  handle: RemoteChannelSessionHandle,
+  lastAssistantText: string | undefined | null,
+  ctx?: EncodePostableContext,
+): Promise<{ posted: boolean; reason: string }> {
+  if ((handle.chatReplySuccessCount ?? 0) > 0) {
+    return { posted: false, reason: "already_replied" };
+  }
+  if (handle.autoFallbackPosted) {
+    return { posted: false, reason: "already_fallback" };
+  }
+  handle.autoFallbackPosted = true;
+  const text =
+    (typeof lastAssistantText === "string" && lastAssistantText.trim()) ||
+    "（本回合已完成，但未发出可见回复。）";
+  const result = await callRemoteChannelTool(handle, CHAT_REPLY, { text }, ctx);
+  if (result.isError) {
+    return { posted: false, reason: "post_failed" };
+  }
+  return { posted: true, reason: "auto_fallback" };
+}
+
 export function remoteChannelPromptBlock(handle: RemoteChannelSessionHandle): string {
   return [
-    "# Remote messaging channel (required)",
-    `You are Zakura Agent chatting in a ${handle.platform} remote session (thread ${handle.threadId}, channel ${handle.channelId}).`,
+    "# 远程消息通道（必读）",
     "",
-    "## How to reply",
-    "- Use chat_reply to speak. If you do not call it, you stay silent — assistant text is NOT posted.",
-    "- Call chat_reply multiple times for multiple bubbles (ack, progress, files, final answer). Prefer several short messages over one huge one.",
-    "- text is enough for ordinary Markdown. attachments: workspace path or public URL. actions: URL buttons. card: title/fields/table.",
-    "- reply_to quotes a platform message; chat_reply defaults to the inbound user message.",
-    "- chat_post_message / chat_post_channel_message / chat_send_direct_message: other threads, channels, or DMs.",
-    "- chat_add_reaction / chat_start_typing: reactions and typing.",
+    "## 你现在在哪",
+    ...locationLines(handle).map((line) => `- ${line}`),
     "",
-    "## Prefer multiple updates",
-    "- Long tasks: brief chat_reply confirmation, then tools, then progress, then a final chat_reply.",
-    "- Short questions still need at least one chat_reply.",
-    "- Match the user's language; keep it concise.",
+    "## 如何回复用户（强制）",
+    "- **任何要对用户可见的文字，都必须调用 chat_reply**。只写 assistant 文本不会出现在外部聊天平台。",
+    "- 可多次 chat_reply：短确认 → 干活 → 进度 → 最终结论。长任务禁止只跑工具不发消息。",
+    "- 短问题也至少一次 chat_reply。匹配用户语言，简洁。",
+    "- text 写普通 Markdown；attachments 用工作区路径或公开 URL；actions 为链接按钮；card 为结构化卡片。",
+    "- chat_reply 默认引用入站消息；需要时可传 reply_to。",
+    "- chat_post_message / chat_post_channel_message / chat_send_direct_message：发到其他线程、频道或私信。",
+    "- chat_add_reaction / chat_start_typing：表情与输入状态。",
+    "",
+    "## 何时查阅上下文",
+    "- chat_fetch_messages / chat_fetch_thread：需要回顾近期对话或确认线程信息时。",
+    "- chat_get_channel_info：需要频道名、人数、可见性时。",
+    "- chat_get_user：需要对方资料时。",
+    "",
+    "## 注意",
+    "- 不要对用户复述内部 id（threadId、channelId、bindingId、sessionId）。",
+    "- 用户可见结论必须经 chat_reply，不要倾倒原始 JSON 或全部中间过程。",
   ].join("\n");
 }

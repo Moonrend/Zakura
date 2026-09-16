@@ -5,6 +5,10 @@
 import { recordPlatformFault } from "@zakura/core";
 import type { CloudAgentEvent } from "@zakura/shared";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
+import {
+  maybeAutoChatReplyOnSilentRun,
+  type RemoteChannelSessionHandle,
+} from "./remote-channel-tools.js";
 
 function eventRunId(event: {
   runId?: string | null;
@@ -24,12 +28,32 @@ type ThreadLike = {
   };
 };
 
+export async function lastAssistantTextForRun(
+  store: Pick<CloudAgentSessionStore, "listEvents">,
+  sessionId: string,
+  runId: string,
+): Promise<string | undefined> {
+  const events = await store.listEvents(sessionId, { limit: 2000 });
+  let last: string | undefined;
+  for (const event of events) {
+    if (eventRunId(event) !== runId) continue;
+    if (event.type !== "assistant_message") continue;
+    const content = (event.payload as { content?: unknown } | undefined)?.content;
+    if (typeof content === "string" && content.trim()) last = content.trim();
+  }
+  return last;
+}
+
 export async function waitForRemoteRun(
   thread: ThreadLike,
   store: CloudAgentSessionStore,
   sessionId: string,
   runId: string,
-  opts?: { typingPulseMs?: number },
+  opts?: {
+    typingPulseMs?: number;
+    /** 若提供：回合完成且从未成功 chat_reply 时自动补发一次 */
+    remoteHandle?: RemoteChannelSessionHandle;
+  },
 ): Promise<void> {
   const typingPulseMs = opts?.typingPulseMs ?? 4000;
   let typingTimer: ReturnType<typeof setInterval> | null = null;
@@ -58,6 +82,17 @@ export async function waitForRemoteRun(
           subsystem: "remote_agent",
         });
       });
+      return;
+    }
+    if (outcome.status === "completed" && opts?.remoteHandle) {
+      try {
+        const lastText = await lastAssistantTextForRun(store, sessionId, runId);
+        await maybeAutoChatReplyOnSilentRun(opts.remoteHandle, lastText);
+      } catch (error) {
+        recordPlatformFault("remote_agent.auto_chat_reply", error, {
+          subsystem: "remote_agent",
+        });
+      }
     }
   } finally {
     stopTypingPulse();

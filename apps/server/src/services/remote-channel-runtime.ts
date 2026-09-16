@@ -43,7 +43,10 @@ import {
 } from "./remote-channel-commands.js";
 import {
   RemoteChannelSessionRegistry,
+  formatRemoteInboundPrefix,
+  type RemoteChannelSessionHandle,
   type RemoteChannelToolPort,
+  type RemoteChannelTrigger,
   type RemoteChatHandle,
 } from "./remote-channel-tools.js";
 import type { RemoteChannelSettings } from "./remote-agent-ingress.js";
@@ -145,6 +148,56 @@ function prepareAdapterConfig(platform: RemotePlatform, values: Record<string, u
     config.mode = "webhook";
   }
   return config;
+}
+
+
+function senderFromMessage(message: any): RemoteChannelSessionHandle["sender"] {
+  const author = message?.author ?? {};
+  const userId = String(author.userId ?? author.id ?? "").trim() || undefined;
+  const userName = String(author.userName ?? "").trim() || undefined;
+  const fullName = String(author.fullName ?? "").trim() || undefined;
+  if (!userId && !userName && !fullName) return undefined;
+  return { userId, userName, fullName };
+}
+
+function isThreadContext(thread: any, message: any): boolean {
+  if (thread?.isDM) return false;
+  if (message?.isThreadReply || message?.isReply) return true;
+  if (message?.parentId || thread?.parentId) return true;
+  const msgThread = message?.threadId != null ? String(message.threadId) : "";
+  const msgId = message?.id != null ? String(message.id) : "";
+  if (msgThread && msgId && msgThread !== msgId) return true;
+  return false;
+}
+
+async function resolveChannelName(bot: Bot, thread: any): Promise<string | undefined> {
+  const direct =
+    (typeof thread?.channel?.name === "string" && thread.channel.name.trim()) ||
+    (typeof thread?.channelName === "string" && thread.channelName.trim()) ||
+    "";
+  if (direct) return direct;
+  if (thread?.isDM) return undefined;
+  const channelId = String(thread?.channelId ?? thread?.channel?.id ?? "").trim();
+  if (!channelId) return undefined;
+  try {
+    const channel = bot.channel(channelId);
+    if (typeof channel.name === "string" && channel.name.trim()) return channel.name.trim();
+    if (typeof channel.info === "function") {
+      const info = await channel.info();
+      if (typeof info?.name === "string" && info.name.trim()) return info.name.trim();
+    }
+  } catch {
+    /* 平台无 info 或权限不足 */
+  }
+  return undefined;
+}
+
+function permalinkOf(message: any): string | undefined {
+  for (const key of ["permalink", "url", "link"] as const) {
+    const v = message?.[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
 }
 
 export class RemoteChannelRuntime {
@@ -464,6 +517,8 @@ export class RemoteChannelRuntime {
             channelId: input.threadKey,
             platform: binding.platform,
             bindingId: binding.id,
+            chatReplySuccessCount: 0,
+            autoFallbackPosted: false,
           });
           await reply(input, `已开启新会话。\n会话 ID：\`${sessionId}\``);
           return;
@@ -485,7 +540,11 @@ export class RemoteChannelRuntime {
       }
     };
 
-    const handleMessage = async (thread: any, message: any) => {
+    const handleMessage = async (
+      thread: any,
+      message: any,
+      trigger: RemoteChannelTrigger,
+    ) => {
       const text = String(message?.text ?? "").trim();
       const userKey = authorKey(message);
       const email = senderEmail(message);
@@ -516,6 +575,27 @@ export class RemoteChannelRuntime {
       // Memoh 式入站确认：👀 + typing（平台不支持则静默跳过）
       await acknowledgeInboundMessage(thread, message);
 
+      const isDM = Boolean(thread?.isDM) || trigger === "dm";
+      const isThread = isThreadContext(thread, message);
+      const channelName = await resolveChannelName(bot, thread);
+      const sender = senderFromMessage(message);
+      const permalink = permalinkOf(message);
+      const channelId = String(thread.channelId ?? thread.channel?.id ?? thread.id);
+      const contextHandle: Pick<
+        RemoteChannelSessionHandle,
+        "platform" | "isDM" | "channelName" | "isThread" | "sender" | "trigger"
+      > = {
+        platform: binding.platform,
+        isDM,
+        channelName,
+        isThread,
+        sender,
+        trigger,
+      };
+      const prefix = formatRemoteInboundPrefix(contextHandle);
+      const textForAgent = text ? `${prefix}\n${text}` : text;
+
+      let boundHandle: RemoteChannelSessionHandle | undefined;
       const input: RemoteInboundMessage = {
         tenantId,
         bindingId: binding.id,
@@ -524,23 +604,36 @@ export class RemoteChannelRuntime {
         externalThreadKey: String(thread.id),
         externalUserKey: userKey,
         senderEmail: email,
-        text,
+        text: textForAgent,
         title: `${binding.platform} 远程会话`,
         onSessionReady: (sessionId) => {
-          this.sessions.bind(sessionId, {
+          boundHandle = {
             chat: bot,
             threadId: String(thread.id),
-            channelId: String(thread.channelId ?? thread.channel?.id ?? thread.id),
+            channelId,
             platform: binding.platform,
             bindingId: binding.id,
             inboundMessageId: String(message?.id ?? "").trim() || undefined,
-          });
+            isDM,
+            channelName,
+            isThread,
+            sender,
+            trigger,
+            permalink,
+            chatReplySuccessCount: 0,
+            autoFallbackPosted: false,
+          };
+          this.sessions.bind(sessionId, boundHandle);
         },
       };
       try {
         const result = await this.ingress.handleInbound(input);
         if (!result.accepted || result.duplicate || !("runId" in result)) return;
-        await waitForRemoteRun(thread, this.store, result.sessionId, result.runId);
+        const remoteHandle =
+          boundHandle ?? this.sessions.get(result.sessionId) ?? undefined;
+        await waitForRemoteRun(thread, this.store, result.sessionId, result.runId, {
+          remoteHandle,
+        });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         recordPlatformFault("remote_agent.inbound", error, { subsystem: "remote_agent" });
@@ -548,9 +641,11 @@ export class RemoteChannelRuntime {
       }
     };
 
-    bot.onDirectMessage(handleMessage);
-    bot.onNewMention(handleMessage);
-    bot.onSubscribedMessage(handleMessage);
+    bot.onDirectMessage((thread, message) => handleMessage(thread, message, "dm"));
+    bot.onNewMention((thread, message) => handleMessage(thread, message, "mention"));
+    bot.onSubscribedMessage((thread, message) =>
+      handleMessage(thread, message, "subscribed"),
+    );
     bot.onSlashCommand(async (event) => {
       const user = event?.user ?? {};
       const channel = event?.channel;
