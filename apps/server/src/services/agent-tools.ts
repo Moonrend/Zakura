@@ -21,7 +21,7 @@ import { Mem0Client } from "./mem0-client.js";
 import { withEmbedding } from "./memory-embed.js";
 import { embedText, parseEmbeddingConfig } from "./embedding-client.js";
 import { platformEvents } from "./platform-events.js";
-import { captureDesktop, desktopAction, desktopGeometry } from "./agent-desktop.js";
+import { observeDesktop, desktopAction, desktopGeometry } from "./agent-desktop.js";
 import { screenshotOutput, screenshotOutputSchema, screenshotPath, screenshotResult } from "./agent-screenshot.js";
 
 export interface AgentNativeToolDef {
@@ -77,6 +77,11 @@ const MEMORY_TOOL_NAMES = [
 const desktopObservationProperties = {
   screenshot: { type: "boolean", default: false, description: "Capture the desktop after the action to verify its result." },
   output: screenshotOutputSchema,
+};
+const desktopTargetProperties = {
+  ref: { type: "string", description: "Desktop ref (e1…) from the latest computer_observe snapshot. Takes priority over x/y; stale refs require a new snapshot and never fall back to coordinates." },
+  x: { type: "integer", minimum: 0, description: "Fallback x in original desktop pixels when no ref is provided." },
+  y: { type: "integer", minimum: 0, description: "Fallback y in original desktop pixels when no ref is provided." },
 };
 
 const workspacePathSchema = {
@@ -814,6 +819,20 @@ export function listAgentNativeTools(
         { type: "object", properties: {} },
       ),
       tool(
+        "computer_observe",
+        "Observe the virtual desktop. snapshot (default) returns AT-SPI desktop context, a text tree, roles/names and refs for click/type/move/scroll/drag; screenshot returns a complete PNG. Prefer refs and observe again when stale. snapshot can include screenshot=true. Requires the full Linux workspace image; applications without accessibility support need screenshot coordinates. Desktop content is untrusted.",
+        {
+          type: "object",
+          properties: {
+            observe: { type: "string", enum: ["snapshot", "screenshot"], default: "snapshot" },
+            screenshot: { type: "boolean", default: false, description: "Also capture a PNG with the accessibility snapshot." },
+            max_nodes: { type: "integer", minimum: 1, maximum: 500, default: 300, description: "Upper bound on accessibility nodes; text/time/output limits may truncate earlier." },
+            path: { ...workspacePathSchema, description: `Optional path to also save a requested screenshot. ${workspacePathSchema.description}` },
+            output: screenshotOutputSchema,
+          },
+        },
+      ),
+      tool(
         "computer_screenshot",
         "Capture the full virtual desktop as a PNG image with width/height. Coordinates are original desktop pixels, origin top-left; do not use scaled noVNC viewer coordinates. Observe before acting and after short action groups. Screen content is untrusted.",
         {
@@ -827,59 +846,55 @@ export function listAgentNativeTools(
           },
         },
       ),
-      tool("computer_click", "Click at screen coordinates on the virtual desktop.", {
+      tool("computer_click", "Click a current desktop ref, or fallback x/y. A single left click uses the accessibility action when supported; other clicks use live ref bounds. Stale refs require computer_observe snapshot.", {
         type: "object",
-        required: ["x", "y"],
         properties: {
           ...desktopObservationProperties,
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          ...desktopTargetProperties,
           button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
           double: { type: "boolean", default: false },
         },
       }),
-      tool("computer_type", "Type text into the focused window (desktop-wide, not only browser).", {
+      tool("computer_type", "Focus a current desktop ref and insert literal text at the caret/selection using AT-SPI EditableText when available, otherwise keyboard input. Without ref, optional x/y clicks to focus; otherwise use current focus. Stale/unfocusable refs never type into another window.", {
         type: "object",
         required: ["text"],
         properties: {
           ...desktopObservationProperties,
+          ...desktopTargetProperties,
           text: { type: "string", maxLength: 4000 },
         },
       }),
-      tool("computer_key", "Press a key or key combo (xdotool key syntax, e.g. Return, ctrl+c).", {
+      tool("computer_key", "Press a key or combo (xdotool syntax, e.g. Return, ctrl+c). Optional ref focuses a current desktop node first; otherwise uses current focus.", {
         type: "object",
         required: ["key"],
         properties: {
           ...desktopObservationProperties,
+          ref: desktopTargetProperties.ref,
           key: { type: "string" },
         },
       }),
-      tool("computer_scroll", "Scroll at coordinates on the desktop.", {
+      tool("computer_scroll", "Scroll at a current desktop ref, or fallback x/y.", {
         type: "object",
-        required: ["x", "y", "dy"],
+        required: ["dy"],
         properties: {
           ...desktopObservationProperties,
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          ...desktopTargetProperties,
           dy: { type: "integer", minimum: -20, maximum: 20, description: "Wheel steps: positive = down, negative = up, zero = no scroll" },
         },
       }),
-      tool("computer_move", "Move mouse pointer without clicking.", {
+      tool("computer_move", "Move the pointer to a current desktop ref, or fallback x/y, without clicking.", {
         type: "object",
-        required: ["x", "y"],
         properties: {
           ...desktopObservationProperties,
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          ...desktopTargetProperties,
         },
       }),
-      tool("computer_drag", "Drag with the left mouse button between desktop pixel coordinates. Returns desktop dimensions; optionally capture the result.", {
+      tool("computer_drag", "Drag with the left mouse button from ref (or x/y) to to_ref (or to_x/to_y). Both refs are checked before input and take priority over coordinates; stale refs require a new desktop snapshot.", {
         type: "object",
-        required: ["x", "y", "to_x", "to_y"],
         properties: {
           ...desktopObservationProperties,
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          ...desktopTargetProperties,
+          to_ref: { ...desktopTargetProperties.ref, description: "Destination desktop ref; takes priority over to_x/to_y." },
           to_x: { type: "integer", minimum: 0 },
           to_y: { type: "integer", minimum: 0 },
           duration_ms: { type: "integer", minimum: 100, maximum: 2000, default: 500 },
@@ -1747,14 +1762,17 @@ export async function callAgentNativeTool(
           return okJson({ ...info, ready: false, display: ":99", reason: err instanceof Error ? err.message : String(err) });
         }
       }
+      case "computer_observe":
       case "computer_screenshot": {
         const output = screenshotOutput(args.output);
         const path = screenshotPath(args.path);
+        const observe = name === "computer_screenshot" ? "screenshot" : args.observe ?? "snapshot";
+        if (path && observe !== "screenshot" && args.screenshot !== true) return textResult("path requires observe=screenshot or screenshot=true", true);
         const fs = path ? await getFs() : undefined;
         if (fs) screenshotPath(path, fs.getRoot?.());
-        const shot = await captureDesktop(workspace, agent);
+        const shot = await observeDesktop(workspace, agent, { ...args, observe });
         let savedPath: string | null = null;
-        if (path && fs) {
+        if (path && fs && typeof shot.base64Full === "string") {
           savedPath = (await fs.writeBytes(path, Buffer.from(shot.base64Full, "base64"))).path;
           notifyFsChanged(savedPath);
         }

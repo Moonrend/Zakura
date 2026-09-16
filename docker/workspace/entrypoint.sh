@@ -5,6 +5,10 @@ set -u
 
 export DEBIAN_FRONTEND=noninteractive
 export DISPLAY="${DISPLAY:-:99}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/zakura-display/session-bus"
+export GTK_MODULES="${GTK_MODULES:-atk-bridge}"
+export NO_AT_BRIDGE=0
+export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
 export PATH="/usr/local/node/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 
 cd /workspace 2>/dev/null || { mkdir -p /workspace; cd /workspace; }
@@ -108,6 +112,42 @@ start_vnc() {
     >>/var/log/zakura/x11vnc.log 2>&1 &
 }
 
+session_bus_ready() {
+  dbus-send --session --dest=org.freedesktop.DBus --print-reply --reply-timeout=1000 \
+    /org/freedesktop/DBus org.freedesktop.DBus.GetId >/dev/null 2>&1
+}
+
+start_accessibility() {
+  # A fixed socket lets docker exec / shell-launched GUI apps join PID1's bus.
+  # dbus-run-session around Chrome alone would create an isolated desktop tree.
+  if ! session_bus_ready; then
+    rm -f /tmp/zakura-display/session-bus
+    dbus-daemon --session --nofork --nopidfile --address="$DBUS_SESSION_BUS_ADDRESS" \
+      >>/var/log/zakura/a11y.log 2>&1 &
+    local i
+    for i in $(seq 1 30); do
+      session_bus_ready && break
+      sleep 0.1
+    done
+  fi
+  if ! session_bus_ready; then
+    log "WARN: desktop D-Bus session unavailable; accessibility snapshots will fail (screenshots still supported)"
+    return 1
+  fi
+  # Activate the AT-SPI bus and tell GTK/Qt that assistive technology is present.
+  local property
+  for property in IsEnabled ScreenReaderEnabled; do
+    dbus-send --session --dest=org.a11y.Bus --print-reply --reply-timeout=2000 \
+      /org/a11y/bus org.freedesktop.DBus.Properties.Set \
+      string:org.a11y.Status "string:$property" variant:boolean:true >>/var/log/zakura/a11y.log 2>&1 || true
+  done
+  if ! zakura-desktop-a11y probe >>/var/log/zakura/a11y.log 2>&1; then
+    log "WARN: AT-SPI unavailable; check a11y.log and workspace image dependencies"
+    return 1
+  fi
+  log "desktop accessibility bus ready"
+}
+
 update_display_readiness() {
   local ready=1
   DISPLAY=:99 xdotool getdisplaygeometry >/dev/null 2>&1 || ready=0
@@ -128,6 +168,7 @@ update_display_readiness() {
 }
 
 start_display || true
+start_accessibility || true
 
 openbox >>/var/log/zakura/openbox.log 2>&1 &
 sleep 0.5
@@ -158,6 +199,10 @@ update_display_readiness
     if ! DISPLAY=:99 xdotool getdisplaygeometry >/dev/null 2>&1; then
       update_display_readiness
       continue
+    fi
+    if ! session_bus_ready; then
+      log "desktop D-Bus session down — restarting; GUI apps may need restarting to register again"
+      start_accessibility || true
     fi
     if ! pgrep -x openbox >/dev/null; then
       openbox >>/var/log/zakura/openbox.log 2>&1 &

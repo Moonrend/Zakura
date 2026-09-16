@@ -62,7 +62,7 @@ describe("workspace paths across native tools and APIs", () => {
     assert.equal(await readFile(join(root, "data/b.txt"), "utf8"), "world");
   });
 
-  for (const name of ["computer_screenshot", "browser_observe"]) {
+  for (const name of ["computer_screenshot", "computer_observe", "browser_observe"]) {
     it(`${name} saves all aliases to the workspace and returns a reusable path`, async (t) => {
       const { root, workspace, browser, png, aliases } = await fixture(t);
       for (const path of aliases("shots/a.png")) {
