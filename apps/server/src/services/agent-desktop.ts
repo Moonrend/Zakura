@@ -24,6 +24,7 @@ type DesktopState = { snapshot?: SnapshotRefs; pending?: Promise<unknown>; lastU
 const desktopStates = new WeakMap<Workspace, { agents: Map<string, DesktopState>; nextRef: number }>();
 const REF_TTL_MS = 5 * 60_000;
 const refreshSnapshot = "Run computer_observe observe=snapshot again.";
+const SNAPSHOT_OUTPUT_LIMIT = 10_000;
 
 /** Keep observations and input ordered, including parallel calls in a tool batch. */
 async function serialDesktop<T>(workspace: Workspace, agent: Agent, operation: (state: DesktopState, nextRef: () => string) => Promise<T>): Promise<T> {
@@ -118,6 +119,13 @@ function integer(value: unknown, name: string, min: number, max: number): number
   return value;
 }
 
+function ensureRefOrCoordinates(args: Record<string, unknown>, refKey = "ref", xKey = "x", yKey = "y", message = "Provide ref or x/y."): void {
+  if (args[refKey] !== undefined) return;
+  const hasX = args[xKey] !== undefined;
+  const hasY = args[yKey] !== undefined;
+  if (hasX !== hasY || !hasX) throw new Error(message);
+}
+
 async function accessibility<T>(workspace: Workspace, agent: Agent, command: "snapshot" | "resolve", args: Record<string, unknown>): Promise<T> {
   const result = await execDesktop(workspace, agent, ["bash", "-c", `set -eu
 helper=""
@@ -170,6 +178,10 @@ export async function observeDesktop(workspace: Workspace, agent: Agent, args: R
       refsExpireInMs: REF_TTL_MS,
       snapshot: "", items,
     };
+    const overflowWarning = "Snapshot output limit reached; omitted nodes have no refs. Use a screenshot for omitted controls.";
+    const baseLength = JSON.stringify({ ...result, truncated: true, count: maxNodes, warnings: [...result.warnings, overflowWarning] }, null, 2).length;
+    let snapshotLength = 0;
+    let itemsLength = 0;
     // Leave room below cloud-agent's 12k text limit for image metadata. Truncate
     // whole nodes, not JSON or ref lines, so every returned ref remains usable.
     for (const node of raw.items.slice(0, maxNodes)) {
@@ -178,15 +190,18 @@ export async function observeDesktop(workspace: Workspace, agent: Agent, args: R
         .filter(Boolean).join(", ");
       const line = `${"  ".repeat(Math.min(node.depth, 12))}${ref} [${node.role}] ${JSON.stringify(node.name)}${flags ? ` (${flags})` : ""}${node.actions.length ? ` actions=${node.actions.map((action) => JSON.stringify(action)).join(",")}` : ""}${node.text ? ` text=${JSON.stringify(node.text)}` : ""}`;
       const item = { ref, role: node.role, name: node.name, focusable: node.focusable, actions: node.actions };
-      items.push(item);
-      const snapshot = [...lines, line].join("\n");
-      if (JSON.stringify({ ...result, snapshot }, null, 2).length > 10_000) {
-        items.pop();
+      const nextSnapshotLength = snapshotLength + (lines.length ? 2 : 0) + (JSON.stringify(line).length - 2);
+      const itemLength = JSON.stringify(item).length;
+      const nextItemsLength = itemsLength + (items.length ? 1 : 0) + itemLength;
+      if (baseLength + nextSnapshotLength + nextItemsLength > SNAPSHOT_OUTPUT_LIMIT) {
         result.truncated = true;
-        result.warnings.push("Snapshot output limit reached; omitted nodes have no refs. Use a screenshot for omitted controls.");
+        result.warnings.push(overflowWarning);
         break;
       }
+      items.push(item);
       lines.push(line);
+      snapshotLength = nextSnapshotLength;
+      itemsLength = nextItemsLength;
       nodes.set(ref, node.handle);
     }
     result.snapshot = lines.join("\n");
@@ -215,6 +230,11 @@ export async function desktopAction(workspace: Workspace, agent: Agent, name: st
 
 async function performDesktopAction(workspace: Workspace, agent: Agent, name: string, args: Record<string, unknown>, state: DesktopState) {
   await workspace.ensureStarted(agent, { require: "display" });
+  if (name === "computer_click" || name === "computer_scroll" || name === "computer_move") ensureRefOrCoordinates(args);
+  if (name === "computer_drag") {
+    ensureRefOrCoordinates(args);
+    ensureRefOrCoordinates(args, "to_ref", "to_x", "to_y", "Provide to_ref or to_x/to_y.");
+  }
   const geometry = await desktopGeometry(workspace, agent);
   const point = (x: unknown, y: unknown) => [
     String(integer(x, "x", 0, geometry.width - 1)),
@@ -234,7 +254,8 @@ async function performDesktopAction(workspace: Workspace, agent: Agent, name: st
     try {
       result = await accessibility(workspace, agent, "resolve", { session: snapshot.session, targets, mode, width: geometry.width, height: geometry.height, ...(mode === "type" ? { text: args.text } : {}) });
     } catch (err) {
-      throw new Error(`${err instanceof Error ? err.message : String(err)} ${refreshSnapshot} The action may have partially completed; observe before repeating it.`);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`${message.includes(refreshSnapshot) ? message : `${message} ${refreshSnapshot}`} The action may have partially completed; observe before repeating it.`);
     }
     if (!result || (result.handled !== true && (!Array.isArray(result.points) || result.points.length !== refs.length)) || (mode === "point" && result.handled)) {
       throw new Error(`Invalid desktop ref resolution. ${refreshSnapshot}`);
