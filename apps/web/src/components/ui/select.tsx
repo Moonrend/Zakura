@@ -74,14 +74,18 @@ function SelectContent({
   sideOffset = 4,
   align = "center",
   alignOffset = 0,
-  alignItemWithTrigger = true,
+  // Match Fluid Functionalism Select (registry): alignItemWithTrigger=false.
+  // true repositions the list to the trigger height and breaks touch hit-testing
+  // (often only the last option is selectable on mobile).
+  alignItemWithTrigger = false,
   ...props
 }: SelectPrimitive.Popup.Props &
   Pick<
     SelectPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset" | "alignItemWithTrigger"
   >) {
-  const { ref, hover } = useFluidHoverScope()
+  // gapClick off: on touch, a stale/wrong activeIndex must not steal the tap.
+  const { ref, hover } = useFluidHoverScope({ gapClick: false })
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Positioner
