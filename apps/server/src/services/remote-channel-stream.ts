@@ -76,23 +76,36 @@ export async function waitForRemoteRun(
   startTypingPulse();
   try {
     const outcome = await waitForRunEnd(store, sessionId, runId);
-    if (outcome.status === "error" && outcome.message) {
-      await thread.post({ markdown: `Agent 暂时无法处理消息：${outcome.message}` }).catch((error) => {
-        recordPlatformFault("remote_agent.run_error_post", error, {
-          subsystem: "remote_agent",
-        });
-      });
-      return;
-    }
-    if (outcome.status === "completed" && opts?.remoteHandle) {
+    if (opts?.remoteHandle) {
+      const statusFallbackText =
+        outcome.status === "error"
+          ? `Agent 暂时无法处理消息：${outcome.message?.trim() || "未知错误"}`
+          : outcome.status === "cancelled"
+            ? "（本次请求已取消，未产出可见回复。）"
+            : undefined;
       try {
         const lastText = await lastAssistantTextForRun(store, sessionId, runId);
-        await maybeAutoChatReplyOnSilentRun(opts.remoteHandle, lastText);
+        await maybeAutoChatReplyOnSilentRun(
+          opts.remoteHandle,
+          lastText,
+          { fallbackText: statusFallbackText },
+        );
       } catch (error) {
         recordPlatformFault("remote_agent.auto_chat_reply", error, {
           subsystem: "remote_agent",
         });
       }
+      return;
+    }
+    if (outcome.status === "error" && outcome.message) {
+      await thread
+        .post({ markdown: `Agent 暂时无法处理消息：${outcome.message}` })
+        .catch((error) => {
+          recordPlatformFault("remote_agent.run_error_post", error, {
+            subsystem: "remote_agent",
+          });
+        });
+      return;
     }
   } finally {
     stopTypingPulse();

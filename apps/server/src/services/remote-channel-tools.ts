@@ -952,6 +952,7 @@ export function formatRemoteInboundPrefix(
 export async function maybeAutoChatReplyOnSilentRun(
   handle: RemoteChannelSessionHandle,
   lastAssistantText: string | undefined | null,
+  opts?: { fallbackText?: string },
   ctx?: EncodePostableContext,
 ): Promise<{ posted: boolean; reason: string }> {
   if ((handle.chatReplySuccessCount ?? 0) > 0) {
@@ -961,11 +962,17 @@ export async function maybeAutoChatReplyOnSilentRun(
     return { posted: false, reason: "already_fallback" };
   }
   handle.autoFallbackPosted = true;
+  const fallbackText =
+    typeof opts?.fallbackText === "string" && opts.fallbackText.trim()
+      ? opts.fallbackText.trim()
+      : undefined;
   const text =
     (typeof lastAssistantText === "string" && lastAssistantText.trim()) ||
+    fallbackText ||
     "（本回合已完成，但未发出可见回复。）";
   const result = await callRemoteChannelTool(handle, CHAT_REPLY, { text }, ctx);
   if (result.isError) {
+    handle.autoFallbackPosted = false;
     return { posted: false, reason: "post_failed" };
   }
   return { posted: true, reason: "auto_fallback" };
