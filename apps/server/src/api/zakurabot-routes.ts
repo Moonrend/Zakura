@@ -6,6 +6,7 @@ import type { ZakurabotGateway } from "../services/zakurabot-gateway.js";
 import { channelIdSchema } from "../services/zakurabot-protocol.js";
 import { zakurabotDeviceView } from "../services/zakurabot-store.js";
 import { registerZakurabotAuthRoutes } from "./zakurabot-auth-routes.js";
+import { registerZakurabotSessionRoutes } from "./zakurabot-session-routes.js";
 
 const issueSchema = z.object({
   name: z.string().trim().min(1).max(128),
@@ -19,6 +20,7 @@ export function registerZakurabotRoutes(
   publicBaseUrl: string,
 ) {
   registerZakurabotAuthRoutes(app, gateway, publicBaseUrl);
+  registerZakurabotSessionRoutes(app, gateway);
   const store = gateway.channel.deps.store;
   app.use("/api/zakurabot/devices", async (c, next) => {
     const session = c.get("session");

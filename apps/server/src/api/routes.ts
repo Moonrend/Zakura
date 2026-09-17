@@ -400,6 +400,7 @@ export async function createApiApp(deps: {
     // probe/import require auth — intentional
     if (
       publicPaths.has(path) ||
+      /^\/api\/zakurabot\/sessions\/[^/]+$/.test(path) ||
       isOauthLoginPublic ||
       isInvitePublic ||
       isFileSharePublic ||

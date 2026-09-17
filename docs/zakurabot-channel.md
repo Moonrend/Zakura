@@ -56,6 +56,8 @@ Content-Type: application/json
 
 ## WS v1
 
+App 会话管理使用设备 Bearer Token：`GET /api/zakurabot/sessions/:agentId` 返回 `bindingId/agentId/sessionId/status/title`；`POST` 同一路径携带 `{action:"start"|"stop"|"new"}`。start 在没有会话时创建；stop 等待当前运行取消；new 打断旧运行后建立新上下文。操作与 send 共用队列，并重新校验设备及绑定权限。历史消息继续保留在设备会话的 transcript 中。
+
 连接 `{baseUrl}/api/zakurabot/ws`（HTTP→WS，HTTPS→WSS，保留部署路径前缀）。Token 只放在首个 `hello` JSON 文本帧中；不使用 URL、cookie 或客户端自报的租户/设备 ID。
 
 ```json

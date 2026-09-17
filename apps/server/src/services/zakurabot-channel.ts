@@ -100,7 +100,7 @@ export class ZakurabotChannel {
       if (!agent) continue;
       const c = this.conversation(device, binding);
       const status = await this.deps.ingress.getThreadStatus(device.tenantId, binding.id, zakurabotThreadId(c));
-      agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label,
+      agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description, bindingId: binding.id,
         status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false });
       conversations.push(c);
     }
@@ -214,6 +214,30 @@ export class ZakurabotChannel {
     await this.serial(threadId, async () => {
       await this.authorize(c);
       await this.deps.ingress.stopThreadRun(c.tenantId, c.bindingId, threadId);
+    });
+  }
+
+  /** Session operations share the same queue as sends, so a reset cannot race a new turn. */
+  async manageSession(identity: ZakurabotIdentity, agentId: string, action: "status" | "start" | "stop" | "new") {
+    const { device, conversation: c } = await this.resolveConversation(identity, agentId);
+    const threadId = zakurabotThreadId(c);
+    return this.serial(threadId, async () => {
+      await this.authorize(c);
+      const current = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, threadId);
+      if (action === "stop") await this.deps.ingress.stopThreadRun(c.tenantId, c.bindingId, threadId);
+      if (action === "new" || (action === "start" && !current)) {
+        await this.deps.ingress.resetThreadSession(c.tenantId, c.bindingId, threadId, device.id, `Zakura Bot · ${device.name}`);
+        const previous = this.runs.get(threadId);
+        previous?.abort.abort();
+        await previous?.done;
+        if (current && this.deps.sessions.get(current.sessionId) === this.handles.get(current.sessionId)) {
+          this.deps.sessions.unbind(current.sessionId);
+          this.handles.delete(current.sessionId);
+        }
+      }
+      const status = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, threadId);
+      return { bindingId: c.bindingId, agentId: c.agentId, sessionId: status?.sessionId ?? null,
+        status: status?.activeRunId ? "busy" : status ? "ready" : "not_started", title: status?.title ?? null };
     });
   }
 

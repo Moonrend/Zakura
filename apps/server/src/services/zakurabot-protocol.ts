@@ -71,7 +71,7 @@ export const zakurabotClientFrameSchema = z.discriminatedUnion("type", [
 export type ZakurabotClientFrame = z.infer<typeof zakurabotClientFrameSchema>;
 export type ZakurabotReply = z.infer<typeof zakurabotReplySchema>;
 export type ZakurabotAgent = { id: string; name: string; status: "idle" | "busy" | "offline";
-  color: string; unread: boolean; title?: string };
+  color: string; unread: boolean; title?: string; bindingId?: string; description?: string };
 export type ZakurabotUserFrame = { type: "message"; message: {
   id: string; agentId: string; role: "user"; kind: "text"; text: string;
   clientMessageId: string; createdAt: number;
