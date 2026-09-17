@@ -4,7 +4,7 @@
 
 ## 连接 App
 
-1. 升级服务端并应用迁移（正常启动会自动迁移，当前需要到 `0057_zakurabot_app`）。为 Agent 配置可用的 chat 模型；收发工作区文件还需要启用文件系统并绑定运行节点。
+1. 升级服务端并应用迁移（正常启动会自动迁移，当前需要到 `0058_zakurabot_interactions`）。为 Agent 配置可用的 chat 模型；收发工作区文件还需要启用文件系统并绑定运行节点。
 2. 在 Agent 的「平台」页添加 **Zakura Bot**，选择模型或跟随默认，保存。
 3. App 首次启动输入实例 URL，点击 **Sign in with Zakura**，浏览器打开设备授权页。
 4. 使用现有租户成员登录（支持 MFA/SSO），核对设备授权码，选择 1–16 个有权访问的绑定并批准。返回 App 后自动完成登录。
@@ -81,6 +81,49 @@ Content-Type: application/json
 
 `file.url` **每次下载都需要设备 Bearer Token**；Web 客户端可用带 Authorization 的 fetch 取得 Blob 再展示，不能把 Token 放入查询参数。URL 在权限和工作区文件有效期间可用。分组由客户端按实例本地保存，当前没有服务端分组同步 API。
 
+## 交互消息：问题、授权与表单
+
+启用后，实例 capabilities 包含 `interactions`，Bot 的 `capabilities.interactions` 为 `true`。`ask_user_request`、ACP `permission_request` 和 `elicitation_request` 经同一 `chat_reply` 工具转换为卡片；主会话及其同 Agent 的 ACP 派生会话都按原设备、绑定和会话授权。普通模型工具不能自行构造 interaction ID，询问用户应调用 `ask_user`。
+
+协议仍为 v1，增加可选的 `payload.interaction`，同时保留 `kind:"card"` 和普通 `card`：
+
+```json
+{
+  "type": "chat_reply", "agentId": "<agent-id>", "messageId": "zbi_…", "createdAt": 1789689600000,
+  "payload": {
+    "kind": "card", "text": "允许执行此操作？", "reply_to": "user-1",
+    "card": {"title": "允许执行此操作？", "subtitle": "等待回答"},
+    "interaction": {
+      "type": "approval", "requestId": "request-1", "status": "pending", "title": "允许执行此操作？",
+      "options": [{"id": "allow", "label": "允许一次", "kind": "allow_once"}, {"id": "deny", "label": "拒绝", "kind": "reject_once"}]
+    }
+  }
+}
+```
+
+`interaction.type` 为 `approval | question | form`；`status` 为 `pending | answered | cancelled | skipped | timeout | resolved`。问题还可带 `allowMultiple/secret/mode:"sync"|"async"/expiresAt/placeholder`；表单带 `mode:"form"|"url"/url/fields`，字段包含 `id/type/title?/required?/options?`。状态变更使用原 `messageId` 和 `createdAt` 再发 `chat_reply`，客户端应原位 upsert，只有 `pending` 可回答。
+
+接口均使用设备 Bearer Token、`Cache-Control: no-store`，保留实例 URL 前缀：
+
+| 方法与路径 | 请求 / 返回 |
+| --- | --- |
+| `GET /api/zakurabot/agents/:agentId/interactions` | 当前会话未完成的交互，最多 100 条：`{interactions:[{messageId,createdAt,interaction}]}` |
+| `GET /api/zakurabot/agents/:agentId/interactions/:messageId` | 单条状态快照：`{messageId,createdAt,interaction,replyTo?}`；也可查询旧会话的已结束卡片 |
+| `POST /api/zakurabot/agents/:agentId/interactions/:messageId` | 提交答案；成功返回 `{ok:true,messageId,createdAt,interaction,replyTo?}` |
+
+回答使用卡片外层的 `messageId` 定位，客户端不能传 tenant/device/session/run ID。JSON 请求体按类型填写：
+
+- approval：`{"optionId":"allow"}`，只能选择服务端提供的选项。
+- question：`{"selected":["option-1"],"text":"补充说明"}`，选项与文本至少一项非空；多选必须有 `allowMultiple:true`。
+- form：`{"content":{"methodId":"browser","count":1}}`，只接受已声明的字段，校验必填项、类型及选项。URL 模式可在外部授权结束后提交 `{}` 确认，或由 ACP 的完成事件自动更新。
+- 任意类型取消：`{"cancelled":true}`。
+
+请求体限 64 KiB、文本限 8000 字符、选项最多 32 项。缺少或无效设备凭据返回 401，无 Bot 权限返回 403，交互不属于当前设备/会话返回 404，过期、重复回答或原运行已结束返回 409，非法答案返回 400，超限返回 413，服务不可用返回 503。并发回答只有一个请求能认领交互；HTTP 成功响应和单条快照可用于 WS 断线时确认最终状态。
+
+回答正文、密钥和原始工具参数/结果不写入渠道 transcript、交互元数据或 WS。`secret:true` 使用密码输入，提交后清空；原始答案仅交给已有的 ask_user/ACP 处理服务。同步问题在运行结束后失效；异步问题在原回合完成后仍可回答，并通过原远程会话发起后续回合。新建会话会取消旧问题，重连/重启会重放状态并补齐遗漏的卡片。
+
+`zakura-bot@f895388` 可显示普通 fallback 卡片；可回答 UI 需读取新增的 `interaction` 字段、调用上述接口，并按 `messageId` 更新状态。实例 capability 表示服务端支持，不代表旧版客户端已经具有回答控件。
+
 ## WS v1
 
 App 会话管理使用设备 Bearer Token：`GET /api/zakurabot/sessions/:agentId` 返回 `bindingId/agentId/sessionId/status/title`；`POST` 同一路径携带 `{action:"start"|"stop"|"new"}`。start 在没有会话时创建；stop 等待当前运行取消；new 打断旧运行后建立新上下文。操作与 send 共用队列，并重新校验设备及绑定权限。历史消息继续保留在设备会话的 transcript 中。
@@ -94,13 +137,13 @@ App 会话管理使用设备 Bearer Token：`GET /api/zakurabot/sessions/:agentI
 {"type":"ping"}
 ```
 
-服务端先返回 `ready {protocol:1, agents[], capabilities:["agents","history","files"]}`（具体能力取决于服务配置），之后发送：
+服务端先返回 `ready {protocol:1, agents[], capabilities:["agents","history","files","interactions"]}`（具体能力取决于服务配置），之后发送：
 
 | 帧 | 用途 |
 | --- | --- |
 | `agents` | 权限或状态变化后的 Agent 列表 |
 | `message {message}` | 用户回执；保留 `clientMessageId`，确认已存储的入站消息 |
-| `chat_reply {agentId,messageId,createdAt,payload}` | 助手可见回复；支持 `text/kind/format/reply_to/attachments/actions/card` |
+| `chat_reply {agentId,messageId,createdAt,payload}` | 助手可见回复；支持 `text/kind/format/reply_to/attachments/actions/card/interaction` |
 | `typing {agentId,active}` | 运行中及完成/取消后的输入状态 |
 | `tool_activity {agentId,message}` | 工具名称、开始/结束/取消状态；不转发原始参数、结果或推理内容 |
 | `error {message,agentId?,clientMessageId?,fatal?}` | 可关联到失败发送的错误 |
@@ -112,7 +155,7 @@ App 会话管理使用设备 Bearer Token：`GET /api/zakurabot/sessions/:agentI
 
 线程由服务端按 **tenant/device/binding/agent** 确定，设备不能指定别人的会话。相同 `clientMessageId` 的重试只补用户回执，不再次启动回合；重复 ID 携带不同正文或文件 ID 列表会被拒绝。新消息和 `interrupt` 使用现有远程入口的取消机制。
 
-Agent 必须通过 `chat_reply` 发出可见文字，默认引用入站消息 ID。post/channel/DM 变体也编码为 `chat_reply`，目标限定在当前设备会话。普通 assistant delta 和 reasoning 不进入 WS；静默回合沿用现有 runtime 的一次 `chat_reply` 兜底。当前服务端每次工具调用发送完整回复，未使用可选的 `message_delta/message_done`。
+Agent 必须通过 `chat_reply` 发出可见文字，默认引用入站消息 ID。post/channel/DM 变体也编码为 `chat_reply`，目标限定在当前设备会话。普通 assistant delta 和 reasoning 不进入 WS；静默回合沿用现有 runtime 的一次 `chat_reply` 兜底，已送达的交互卡片也计为可见回复。异步答案触发的后续回合恢复远程工具并重新计算兜底状态。当前服务端每次工具调用发送完整回复，未使用可选的 `message_delta/message_done`。
 
 用户回执和 `chat_reply` 持久化后才计为送达；断线不取消已启动回合。重连或服务重启后会补发每个授权会话最近 100 条消息，ID 保持稳定，客户端可直接 upsert。typing/tool 活动只实时发送。
 
@@ -125,8 +168,8 @@ Agent 必须通过 `chat_reply` 发出可见文字，默认引用入站消息 ID
 v1 的 socket 投递和会话工具句柄驻留在当前服务进程。使用单个 API/runtime 实例，或保证同一设备始终路由到同一实例；当前没有跨进程 socket 广播。
 
 ```sh
-REDIS_URL=off pnpm --filter @zakura/server exec tsx --test --test-force-exit 'test/zakurabot-*.test.ts' test/remote-channel-tools.test.ts test/remote-channel-commands.test.ts test/remote-agent-ingress.test.ts test/db-migrations.test.ts
+REDIS_URL=off pnpm --filter @zakura/server exec tsx --test --test-force-exit --test-concurrency=2 'test/zakurabot-*.test.ts' test/remote-channel-tools.test.ts test/remote-channel-commands.test.ts test/remote-agent-ingress.test.ts test/acp-elicitation.test.ts test/db-migrations.test.ts
 pnpm typecheck
 ```
 
-集成测试使用真实 WS、PGlite、RemoteAgentIngress 和会话存储，以受控 runtime 验证鉴权、隔离、幂等、打断、附件下载、重连补发及 Socket.IO 共存，无需外部模型或聊天平台凭据。
+集成测试使用真实 WS、PGlite、RemoteAgentIngress 和会话存储，以受控 runtime 验证鉴权、隔离、幂等、打断、附件下载、交互回答/超时/恢复、ACP 派生会话归属及 Socket.IO 共存。ACP URL 完成关联另用真实 SDK 消息流验证，无需外部模型或聊天平台凭据。

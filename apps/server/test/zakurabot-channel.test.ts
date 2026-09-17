@@ -14,6 +14,7 @@ import type { ZakurabotServerFrame } from "../src/services/zakurabot-protocol.js
 import { ZakurabotChannel } from "../src/services/zakurabot-channel.js";
 import { ZakurabotGateway } from "../src/services/zakurabot-gateway.js";
 import { ZakurabotStore } from "../src/services/zakurabot-store.js";
+import { ZakurabotInteractionService } from "../src/services/zakurabot-interactions.js";
 import { within, zakurabotHarness } from "./helpers/zakurabot.js";
 
 describe("zakurabot HTTP/WS channel with real persistent remote sessions", () => {
@@ -389,7 +390,8 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     assert.equal((await run.tool("chat_reply", { text: "Delivered while offline" })).isError, false);
     await run.finish();
     await h.gateway.close();
-    const channel = new ZakurabotChannel({ ...h.channel.deps, store: new ZakurabotStore(h.db) });
+    const channel = new ZakurabotChannel({ ...h.channel.deps, store: new ZakurabotStore(h.db),
+      interactions: new ZakurabotInteractionService(h.db, { sessions: h.sessions, askUser: h.askUser }) });
     const gateway = new ZakurabotGateway(channel, { publicBaseUrl: h.url });
     gateway.attach(h.server);
     try {

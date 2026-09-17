@@ -55,6 +55,8 @@ export async function waitForRemoteRun(
     remoteHandle?: RemoteChannelSessionHandle;
     /** Release subscriptions on transport shutdown without posting a synthetic reply. */
     signal?: AbortSignal;
+    /** A native channel can finish projecting interactive replies before the silent-run check. */
+    beforeFallback?: () => Promise<void>;
   },
 ): Promise<void> {
   const typingPulseMs = opts?.typingPulseMs ?? 4000;
@@ -87,6 +89,8 @@ export async function waitForRemoteRun(
             ? "（本次请求已取消，未产出可见回复。）"
             : undefined;
       try {
+        await opts.beforeFallback?.();
+        if (opts.signal?.aborted) return;
         const lastText = await lastAssistantTextForRun(store, sessionId, runId);
         await maybeAutoChatReplyOnSilentRun(
           opts.remoteHandle,

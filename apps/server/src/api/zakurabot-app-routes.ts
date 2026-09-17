@@ -10,10 +10,12 @@ import { ZakurabotFileError } from "../services/zakurabot-files.js";
 import { zakurabotDeviceView } from "../services/zakurabot-store.js";
 import { ZAKURABOT_MAX_FILE_BYTES } from "../services/zakurabot-protocol.js";
 
+import { ZakurabotInteractionError, zakurabotAnswerSchema } from "../services/zakurabot-interactions.js";
+
 /** These endpoints authenticate their own device bearer. Never promote it to a tenant session. */
 export function isZakurabotAppPath(path: string): boolean {
   return /^\/api\/zakurabot\/(me|bots|agents)$/.test(path) ||
-    /^\/api\/zakurabot\/agents\/[^/]+(?:\/(?:history|files(?:\/[^/]+)?))?$/.test(path);
+    /^\/api\/zakurabot\/agents\/[^/]+(?:\/(?:history|files(?:\/[^/]+)?|interactions(?:\/[^/]+)?))?$/.test(path);
 }
 
 export function registerZakurabotAppRoutes(
@@ -34,6 +36,7 @@ export function registerZakurabotAppRoutes(
     if (error instanceof ZakurabotAccessError) return c.json({ error: error.message }, error.closeCode === 4401 ? 401 : 403);
     if (error instanceof ZakurabotInputError) return c.json({ error: error.message }, 400);
     if (error instanceof ZakurabotFileError) return c.json({ error: error.message }, error.status);
+    if (error instanceof ZakurabotInteractionError) return c.json({ error: error.message }, error.status);
     if (error instanceof PathJailError) return c.json({ error: "Forbidden workspace path" }, 403);
     if ("code" in error && error.code === "ENOENT") return c.json({ error: "File not found" }, 404);
     // Workspace/runner errors can include local paths or credentials.
@@ -87,6 +90,32 @@ export function registerZakurabotAppRoutes(
         (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
       "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox",
     } });
+  });
+  api.get("/agents/:id/interactions", async (c) => {
+    if (!channel.deps.interactions) return c.json({ error: "Interactions are unavailable" }, 503);
+    const { conversation, sessionId } = await channel.interactionSession(c.get("device"), c.req.param("id"));
+    if (!sessionId) return c.json({ interactions: [] });
+    await channel.deps.interactions.sync(sessionId);
+    const pending = await channel.deps.interactions.pending(conversation, sessionId);
+    await channel.resolveConversation(c.get("device"), c.req.param("id"));
+    return c.json({ interactions: pending.map((row) => ({ messageId: row.id, createdAt: row.createdAt.getTime(),
+      interaction: channel.deps.interactions!.payload(row) })) });
+  });
+  api.get("/agents/:id/interactions/:messageId", async (c) => {
+    if (!channel.deps.interactions) return c.json({ error: "Interactions are unavailable" }, 503);
+    const { conversation } = await channel.interactionSession(c.get("device"), c.req.param("id"));
+    const snapshot = await channel.deps.interactions.snapshot(conversation, c.req.param("messageId"));
+    await channel.resolveConversation(c.get("device"), c.req.param("id"));
+    return c.json(snapshot);
+  });
+  api.post("/agents/:id/interactions/:messageId", bodyLimit({ maxSize: 64 * 1024,
+    onError: (c) => c.json({ error: "Interaction response is too large" }, 413) }), async (c) => {
+    if (!channel.deps.interactions) return c.json({ error: "Interactions are unavailable" }, 503);
+    const input = zakurabotAnswerSchema.safeParse(await c.req.json().catch(() => null));
+    if (!input.success) return c.json({ error: "Invalid interaction response" }, 400);
+    const snapshot = await channel.respondInteraction(c.get("device"), c.req.param("id"), c.req.param("messageId"), input.data);
+    await channel.resolveConversation(c.get("device"), c.req.param("id"));
+    return c.json({ ok: true, ...snapshot });
   });
   app.route("/api/zakurabot", api);
 }

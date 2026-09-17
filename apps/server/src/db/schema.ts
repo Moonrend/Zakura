@@ -1075,6 +1075,27 @@ export const zakurabotFiles = pgTable("zakurabot_files", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("zakurabot_files_conversation").on(t.deviceId, t.bindingId, t.agentId)]);
 
+/** Validated interaction metadata only; user answers and raw tools never enter this table. */
+export const zakurabotInteractions = pgTable("zakurabot_interactions", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  deviceId: text("device_id").notNull().references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+  bindingId: text("binding_id").notNull().references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+  agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").notNull().references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+  runId: text("run_id"),
+  sourceSessionId: text("source_session_id").notNull().references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+  sourceRunId: text("source_run_id"),
+  requestId: text("request_id").notNull(),
+  type: text("type").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  replyTo: text("reply_to"),
+  status: text("status").notNull().default("pending"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  eventSeq: integer("event_seq").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("zakurabot_interactions_session").on(t.sessionId, t.requestId)]);
+
 /** Only delivered channel messages, never assistant/reasoning token streams. */
 export const zakurabotMessages = pgTable(
   "zakurabot_messages",
@@ -1979,6 +2000,7 @@ export const schema = {
   zakurabotDevices,
   zakurabotAuthorizations,
   zakurabotFiles,
+  zakurabotInteractions,
   zakurabotMessages,
   settings,
   platformServices,
@@ -2037,6 +2059,7 @@ export type AgentChannelThread = typeof agentChannelThreads.$inferSelect;
 export type AgentChannelEvent = typeof agentChannelEvents.$inferSelect;
 export type ZakurabotDevice = typeof zakurabotDevices.$inferSelect;
 export type ZakurabotFile = typeof zakurabotFiles.$inferSelect;
+export type ZakurabotInteraction = typeof zakurabotInteractions.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type ProviderCatalog = typeof providerCatalog.$inferSelect;
 export type EmailConnectorInstance = typeof emailConnectorInstances.$inferSelect;

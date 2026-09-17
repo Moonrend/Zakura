@@ -199,6 +199,14 @@ export class ZakurabotStore {
     const frameJson = JSON.stringify(frame);
     if (Buffer.byteLength(frameJson) > ZAKURABOT_MAX_FRAME_BYTES) throw new Error("Channel reply is too large");
     const clientMessageId = frame.type === "message" ? frame.message.clientMessageId : null;
+    if (frame.type === "chat_reply" && frame.payload.interaction) {
+      // Interaction resolutions replace their original card, preserving transcript order and ID.
+      await this.db.insert(zakurabotMessages).values({
+        id: frame.messageId, ...c, frameJson, createdAt: new Date(frame.createdAt),
+      }).onConflictDoUpdate({ target: zakurabotMessages.id, set: { frameJson },
+        setWhere: this.conversationWhere(c) });
+      return frame;
+    }
     const rows = await this.db.insert(zakurabotMessages).values({
       id: newId(), ...c, clientMessageId, frameJson,
       createdAt: new Date(frame.type === "message" ? frame.message.createdAt : frame.createdAt),

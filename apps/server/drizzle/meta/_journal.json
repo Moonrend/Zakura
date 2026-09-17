@@ -407,6 +407,13 @@
       "when": 1789689600000,
       "tag": "0057_zakurabot_app",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1789689600001,
+      "tag": "0058_zakurabot_interactions",
+      "breakpoints": true
     }
   ]
 }

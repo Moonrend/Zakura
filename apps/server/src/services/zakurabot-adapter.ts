@@ -4,7 +4,7 @@ import type { FileShareService } from "./file-shares.js";
 import type { ServerWorkspaceFsProvider } from "./workspace-fs-provider.js";
 import type { ZakurabotConversation } from "./zakurabot-store.js";
 import type { RemoteChatHandle } from "./remote-channel-tools.js";
-import { encodeZakurabotReply, zakurabotReplySchema, type ZakurabotServerFrame, type ZakurabotStoredFrame } from "./zakurabot-protocol.js";
+import { encodeZakurabotReply, zakurabotReplySchema, type ZakurabotInteractionPayload, type ZakurabotServerFrame, type ZakurabotStoredFrame } from "./zakurabot-protocol.js";
 
 export function createZakurabotFilePublisher(deps: {
   agents: Pick<AgentService, "get">;
@@ -35,6 +35,8 @@ export function createZakurabotChat(input: {
   post: (frame: ZakurabotServerFrame) => Promise<void>;
   history: (limit?: number) => Promise<ZakurabotStoredFrame[]>;
   publishFile: (path: string) => Promise<{ url: string; name: string }>;
+  /** Only the event projector can attach an actionable interaction to a reply. */
+  interaction?: ZakurabotInteractionPayload;
 }): RemoteChatHandle {
   const requireThread = (id: string) => {
     if (id !== input.threadId) throw new Error("Zakura Bot can only access the current conversation");
@@ -74,7 +76,10 @@ export function createZakurabotChat(input: {
     async getParticipants() { return [user]; },
   };
   return {
-    encodePostable: (args) => encodeZakurabotReply(args, input.publishFile),
+    encodePostable: (args) => {
+      if (args.interaction !== undefined) throw new Error("Use ask_user to request an answer; interaction IDs are server-managed");
+      return encodeZakurabotReply({ ...args, interaction: input.interaction }, input.publishFile);
+    },
     thread(id) { requireThread(id); return thread; },
     channel(id) {
       requireThread(id);

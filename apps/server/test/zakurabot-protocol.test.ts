@@ -76,6 +76,7 @@ describe("zakurabot v1 contract", () => {
     ] as const) assert.equal((await callRemoteChannelTool(handle, tool, args)).isError, false);
     assert.equal(frames.filter((f) => f.type === "chat_reply").length, 4);
     for (const [tool, args] of [
+      ["chat_reply", { text: "Invented", interaction: { type: "approval", requestId: "fake", title: "Fake", status: "pending" } }],
       ["chat_post_message", { text: "x", threadId: "another-device" }],
       ["chat_post_channel_message", { text: "x", channelId: "another-tenant" }],
       ["chat_send_direct_message", { text: "x", userId: "another-device" }],

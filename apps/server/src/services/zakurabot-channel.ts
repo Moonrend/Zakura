@@ -5,12 +5,13 @@ import type { AgentChannelBinding, ZakurabotDevice } from "../db/schema.js";
 import type { AgentService } from "./agents.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
 import { isRemoteSenderAllowed, type RemoteAgentIngress } from "./remote-agent-ingress.js";
-import { formatRemoteInboundPrefix, type RemoteChannelSessionHandle, type RemoteChannelToolPort } from "./remote-channel-tools.js";
+import { callRemoteChannelTool, formatRemoteInboundPrefix, type RemoteChannelSessionHandle, type RemoteChannelToolPort } from "./remote-channel-tools.js";
 import { waitForRemoteRun } from "./remote-channel-stream.js";
 import { createZakurabotChat } from "./zakurabot-adapter.js";
 import type { ZakurabotAgent, ZakurabotClientFrame, ZakurabotServerFrame, ZakurabotToolFrame, ZakurabotUserFrame } from "./zakurabot-protocol.js";
 import { deviceBindingIds, type ZakurabotConversation, type ZakurabotStore } from "./zakurabot-store.js";
 import { ZakurabotFileError, type ZakurabotFileService } from "./zakurabot-files.js";
+import { ZakurabotInteractionError, type ZakurabotInteractionService } from "./zakurabot-interactions.js";
 import { isSessionAdmin } from "./auth.js";
 
 export class ZakurabotAccessError extends Error {
@@ -34,6 +35,8 @@ export class ZakurabotChannel {
   private readonly chains = new Map<string, Promise<unknown>>();
   private readonly runs = new Map<string, ActiveRun>();
   private readonly handles = new Map<string, RemoteChannelSessionHandle>();
+  private readonly runSubscriptions = new Map<string, () => void>();
+  private readonly trackedRunIds = new Map<string, string>();
   private stopped = false;
 
   constructor(readonly deps: {
@@ -43,11 +46,13 @@ export class ZakurabotChannel {
     sessionStore: CloudAgentSessionStore;
     agents: Pick<AgentService, "get">;
     files?: ZakurabotFileService;
+    interactions?: ZakurabotInteractionService;
     publishFile: (conversation: ZakurabotConversation, path: string) => Promise<{ url: string; name: string }>;
   }) {}
 
   capabilities(): string[] {
-    return ["agents", "history", ...(this.deps.files ? ["files"] : [])];
+    return ["agents", "history", ...(this.deps.files ? ["files"] : []),
+      ...(this.deps.interactions ? ["interactions"] : [])];
   }
 
   async authorizableBindings(tenantId: string, userId: string) {
@@ -134,7 +139,8 @@ export class ZakurabotChannel {
       const status = await this.deps.ingress.getThreadStatus(device.tenantId, binding.id, zakurabotThreadId(c));
       agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description,
         status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false, bindingId: binding.id,
-        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: false, interactions: false } });
+        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: false,
+          interactions: Boolean(this.deps.interactions) } });
       conversations.push(c);
     }
     if (!agents.length) throw new ZakurabotAccessError("No enabled Zakura Bot bindings are authorized for this device", 4403);
@@ -151,7 +157,123 @@ export class ZakurabotChannel {
 
   async history(c: ZakurabotConversation, limit?: number) {
     await this.authorize(c);
+    const status = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, zakurabotThreadId(c));
+    if (status) await this.watchInteractions(c, status.sessionId);
     return this.deps.store.history(c, limit);
+  }
+
+  private async watchInteractions(c: ZakurabotConversation, sessionId: string) {
+    if (this.deps.interactions && !this.runSubscriptions.has(sessionId)) {
+      this.runSubscriptions.set(sessionId, this.deps.sessionStore.subscribe(sessionId, (event) => {
+        if (event.type !== "run_start" || !event.runId) return;
+        const handle = this.deps.sessions.get(sessionId);
+        if (!handle || handle !== this.handles.get(sessionId)) return;
+        this.trackRun(c, sessionId, event.runId, handle, true);
+      }));
+    }
+    await this.deps.interactions?.watch(c, sessionId, async (row, interaction) => {
+      await this.authorize(c);
+      const current = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, zakurabotThreadId(c));
+      if (current?.sessionId !== sessionId) return;
+      const threadId = zakurabotThreadId(c);
+      const chat = createZakurabotChat({ agentId: c.agentId, deviceId: c.deviceId, deviceName: "Zakura Bot", threadId,
+        interaction,
+        history: (limit) => this.history(c, limit), publishFile: (path) => this.deps.publishFile(c, path),
+        post: async (frame) => {
+          if (frame.type === "chat_reply") {
+            await this.publish(c, { ...frame, messageId: row.id, createdAt: row.createdAt.getTime() });
+          }
+        },
+      });
+      const handle: RemoteChannelSessionHandle = { chat, platform: "zakurabot", bindingId: c.bindingId,
+        threadId, channelId: threadId, inboundMessageId: row.replyTo ?? undefined };
+      const state = interaction.status === "pending" ? "等待回答" : interaction.status === "answered" ? "已回答" :
+        interaction.status === "cancelled" ? "已取消" : interaction.status === "timeout" ? "已超时" : "已结束";
+      const result = await callRemoteChannelTool(handle, "chat_reply", {
+        text: interaction.title, kind: "card",
+        card: { title: interaction.title, subtitle: state,
+          fields: interaction.options?.map((option) => ({ label: option.label, value: option.description ?? "" })),
+          links: interaction.url ? [{ label: "打开", url: interaction.url }] : undefined },
+      });
+      if (result.isError) throw new Error("Could not deliver interaction through chat_reply");
+      const run = this.runs.get(threadId);
+      const bound = this.deps.sessions.get(sessionId);
+      const handleForRun = run?.runId === row.runId ? run.handle : bound && bound === this.handles.get(sessionId) &&
+        (await this.deps.sessionStore.getSession(c.tenantId, c.agentId, sessionId))?.activeRunId === row.runId ? bound : undefined;
+      if (handleForRun) handleForRun.chatReplySuccessCount = (handleForRun.chatReplySuccessCount ?? 0) + 1;
+    });
+  }
+
+  async interactionSession(identity: ZakurabotIdentity, agentId: string) {
+    const { conversation } = await this.resolveConversation(identity, agentId);
+    const status = await this.deps.ingress.getThreadStatus(conversation.tenantId, conversation.bindingId, zakurabotThreadId(conversation));
+    if (!status) return { conversation, sessionId: null };
+    await this.watchInteractions(conversation, status.sessionId);
+    return { conversation, sessionId: status.sessionId };
+  }
+
+  async respondInteraction(identity: ZakurabotIdentity, agentId: string, messageId: string,
+    input: Parameters<ZakurabotInteractionService["respond"]>[3]) {
+    if (!this.deps.interactions) throw new ZakurabotInteractionError("Interactions are unavailable", 503);
+    const { conversation: c, sessionId } = await this.interactionSession(identity, agentId);
+    if (!sessionId) throw new ZakurabotInteractionError("Interaction not found in this conversation", 404);
+    const snapshot = await this.deps.interactions.snapshot(c, messageId, sessionId);
+    // An async answer may start a follow-up after a server restart, with no inbound send to bind its tools.
+    if (snapshot.interaction.type === "question" && snapshot.interaction.mode === "async" &&
+      snapshot.interaction.status === "pending" && !this.deps.sessions.get(sessionId)) {
+      await this.restoreHandle(c, sessionId, snapshot.replyTo);
+    }
+    // Startup can itself await an answer. The database claim serializes answers without blocking on send.
+    return this.deps.interactions.respond(c, sessionId, messageId, input, async () => {
+      await this.authorize(c);
+      const current = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, zakurabotThreadId(c));
+      if (current?.sessionId !== sessionId) throw new ZakurabotInteractionError("Interaction session has changed", 409);
+    });
+  }
+
+  private async syncRunInteractions(run: ActiveRun) {
+    await this.deps.interactions?.sync(run.sessionId);
+    // A fast startup may have delivered its card before startTurn returned the run ID.
+    if (!run.abort.signal.aborted && !(run.handle.chatReplySuccessCount ?? 0) &&
+      await this.deps.interactions?.hasDeliveredReply(run.conversation, run.sessionId, run.runId)) {
+      if (!run.abort.signal.aborted) run.handle.chatReplySuccessCount = Math.max(1, run.handle.chatReplySuccessCount ?? 0);
+    }
+  }
+
+  private async restoreHandle(c: ZakurabotConversation, sessionId: string, replyTo?: string) {
+    const { device } = await this.authorize(c);
+    if (this.deps.sessions.get(sessionId)) return;
+    const threadId = zakurabotThreadId(c);
+    const requireCurrent = () => {
+      if (this.deps.sessions.get(sessionId) !== handle) throw new Error("This remote turn has been superseded");
+    };
+    const chat = createZakurabotChat({ agentId: c.agentId, deviceId: device.id, deviceName: device.name, threadId,
+      post: (frame) => this.publish(c, frame, () => { requireCurrent(); return true; }),
+      history: (limit) => { requireCurrent(); return this.history(c, limit); },
+      publishFile: async (path) => { requireCurrent(); await this.authorize(c); return this.deps.publishFile(c, path); },
+    });
+    const handle: RemoteChannelSessionHandle = { chat, threadId, channelId: threadId, platform: "zakurabot", bindingId: c.bindingId,
+      inboundMessageId: replyTo, isDM: true, isThread: false, trigger: "dm",
+      sender: { userId: device.id, userName: device.name, fullName: device.name }, chatReplySuccessCount: 0, autoFallbackPosted: false };
+    this.deps.sessions.bind(sessionId, handle);
+    this.handles.set(sessionId, handle);
+  }
+
+  private trackRun(c: ZakurabotConversation, sessionId: string, runId: string, handle: RemoteChannelSessionHandle, resetCounters = false) {
+    const threadId = zakurabotThreadId(c);
+    const previous = this.runs.get(threadId);
+    if (this.trackedRunIds.get(sessionId) === runId) return;
+    this.trackedRunIds.set(sessionId, runId);
+    previous?.abort.abort();
+    if (resetCounters) {
+      handle.chatReplySuccessCount = 0;
+      handle.autoFallbackPosted = false;
+    }
+    const run: ActiveRun = { sessionId, runId, handle, conversation: c, abort: new AbortController(), done: Promise.resolve() };
+    this.runs.set(threadId, run);
+    run.done = this.observeRun(run).catch((error) => {
+      recordPlatformFault("zakurabot.run", error, { subsystem: "remote_agent" });
+    });
   }
 
   private async publish(c: ZakurabotConversation, frame: ZakurabotServerFrame, shouldPublish?: () => boolean): Promise<void> {
@@ -244,16 +366,12 @@ export class ZakurabotChannel {
           this.deps.sessions.bind(sessionId, handle);
           boundSessionId = sessionId;
           this.handles.set(sessionId, handle);
+          await this.watchInteractions(c, sessionId);
         },
       });
       if (!result.accepted) throw new ZakurabotAccessError("Message rejected by the remote channel binding", 4403);
       if (result.duplicate) { await this.publish(c, echo); return; }
-      const run: ActiveRun = { sessionId: result.sessionId, runId: result.runId, handle, conversation: c,
-        abort: new AbortController(), done: Promise.resolve() };
-      this.runs.set(threadId, run);
-      run.done = this.observeRun(run).catch((error) => {
-        recordPlatformFault("zakurabot.run", error, { subsystem: "remote_agent" });
-      });
+      this.trackRun(c, result.sessionId, result.runId, handle);
     });
   }
 
@@ -275,6 +393,7 @@ export class ZakurabotChannel {
       const current = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, threadId);
       if (action === "stop") await this.deps.ingress.stopThreadRun(c.tenantId, c.bindingId, threadId);
       if (action === "new" || (action === "start" && !current)) {
+        if (current) await this.deps.interactions?.cancelSession(c, current.sessionId);
         await this.deps.ingress.resetThreadSession(c.tenantId, c.bindingId, threadId, device.id, `Zakura Bot · ${device.name}`);
         const previous = this.runs.get(threadId);
         previous?.abort.abort();
@@ -282,6 +401,12 @@ export class ZakurabotChannel {
         if (current && this.deps.sessions.get(current.sessionId) === this.handles.get(current.sessionId)) {
           this.deps.sessions.unbind(current.sessionId);
           this.handles.delete(current.sessionId);
+        }
+        if (current) await this.deps.interactions?.unwatch(current.sessionId);
+        if (current) {
+          this.runSubscriptions.get(current.sessionId)?.();
+          this.runSubscriptions.delete(current.sessionId);
+          this.trackedRunIds.delete(current.sessionId);
         }
       }
       const status = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, threadId);
@@ -315,8 +440,10 @@ export class ZakurabotChannel {
     try {
       const events = await this.deps.sessionStore.listEvents(run.sessionId, { limit: 2000 });
       events.forEach(onEvent);
+      await this.syncRunInteractions(run);
       await waitForRemoteRun(run.handle.chat.thread(threadId), this.deps.sessionStore, run.sessionId, run.runId,
-        { remoteHandle: run.handle, signal: run.abort.signal });
+        { remoteHandle: run.handle, signal: run.abort.signal,
+          beforeFallback: () => this.syncRunInteractions(run) });
     } finally {
       unsubscribe();
       await activity;
@@ -336,6 +463,10 @@ export class ZakurabotChannel {
 
   async stop() {
     this.stopped = true;
+    for (const unsubscribe of this.runSubscriptions.values()) unsubscribe();
+    this.runSubscriptions.clear();
+    this.trackedRunIds.clear();
+    await this.deps.interactions?.close();
     await Promise.allSettled(this.chains.values());
     for (const run of this.runs.values()) run.abort.abort();
     await Promise.all(Array.from(this.runs.values(), (run) => run.done));

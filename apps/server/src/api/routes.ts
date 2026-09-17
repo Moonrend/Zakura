@@ -115,6 +115,7 @@ import { ZakurabotStore } from "../services/zakurabot-store.js";
 import { registerZakurabotRoutes } from "./zakurabot-routes.js";
 import { isZakurabotAppPath, registerZakurabotAppRoutes } from "./zakurabot-app-routes.js";
 import { ZakurabotFileService } from "../services/zakurabot-files.js";
+import { ZakurabotInteractionService } from "../services/zakurabot-interactions.js";
 import { OpenAiGatewayService } from "../services/openai-gateway.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -2330,6 +2331,7 @@ export async function createApiApp(deps: {
         files: workspaceFsProvider ? new ZakurabotFileService(db, {
           agents: agentService, workspaceFs: workspaceFsProvider, publicBaseUrl: config.publicBaseUrl,
         }) : undefined,
+        interactions: new ZakurabotInteractionService(db, { sessions: cloudStore, askUser, acp: acpSessions }),
         publishFile: createZakurabotFilePublisher({ agents: agentService, fileShares, workspaceFs: workspaceFsProvider }),
       }), { publicBaseUrl: config.publicBaseUrl });
       registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl, config.webPublicUrl);

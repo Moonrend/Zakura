@@ -997,6 +997,9 @@ export function remoteChannelPromptBlock(handle: RemoteChannelSessionHandle): st
     "- 短问题也至少一次 chat_reply。匹配用户语言，简洁。",
     "- text 写普通 Markdown；attachments 用工作区路径或公开 URL；actions 为链接按钮；card 为结构化卡片。",
     "- chat_reply 默认引用入站消息；需要时可传 reply_to。",
+    ...(handle.platform === "zakurabot" ? [
+      "- 需要用户选择、确认或提供秘密时使用 ask_user；Zakura Bot 会自动把问题经 chat_reply 发送为可回答的卡片。不要自己编造交互 requestId，不要回显秘密答案。",
+    ] : []),
     "- chat_post_message / chat_post_channel_message / chat_send_direct_message：发到其他线程、频道或私信。",
     "- chat_add_reaction / chat_start_typing：表情与输入状态。",
     "",

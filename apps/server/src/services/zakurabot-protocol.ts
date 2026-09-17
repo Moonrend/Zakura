@@ -19,6 +19,29 @@ export const zakurabotHttpUrlSchema = z.string().refine((value) => {
 }, "Expected an HTTP(S) URL without credentials");
 const httpUrl = zakurabotHttpUrlSchema;
 
+/** Additive v1 extension: kind stays card so older clients can render the fallback. */
+export const zakurabotInteractionSchema = z.object({
+  type: z.enum(["approval", "question", "form"]),
+  requestId: channelIdSchema,
+  status: z.enum(["pending", "answered", "cancelled", "skipped", "timeout", "resolved"]),
+  title: z.string().max(8000),
+  options: z.array(z.object({
+    id: channelIdSchema, label: z.string().min(1).max(2000),
+    description: z.string().max(4000).optional(), kind: z.string().max(128).optional(),
+  })).max(32).optional(),
+  allowMultiple: z.boolean().optional(),
+  secret: z.boolean().optional(),
+  mode: z.enum(["sync", "async", "form", "url"]).optional(),
+  expiresAt: z.string().datetime().nullable().optional(),
+  placeholder: z.string().max(2000).optional(),
+  url: httpUrl.optional(),
+  fields: z.array(z.object({
+    id: channelIdSchema, type: z.string().max(128), title: z.string().max(2000).optional(), required: z.boolean().optional(),
+    options: z.array(z.string().min(1).max(2000)).max(32).optional(),
+  })).max(32).optional(),
+});
+export type ZakurabotInteractionPayload = z.infer<typeof zakurabotInteractionSchema>;
+
 export type ZakurabotFileView = {
   id: string; name: string; mime: string; size: number;
   type: "image" | "file" | "audio" | "video"; url: string;
@@ -58,6 +81,7 @@ const replyFieldsSchema = z.object({
   attachments: z.array(attachmentSchema).max(8).optional(),
   actions: z.array(linkSchema).optional(),
   card: cardSchema.optional(),
+  interaction: zakurabotInteractionSchema.optional(),
 }).refine((p) => p.kind !== "card" || Boolean(p.card), "kind=card requires a card");
 export const zakurabotReplySchema = replyFieldsSchema.refine(
   (p) => Boolean(p.text?.trim() || p.attachments?.length || p.actions?.length || p.card), "Empty reply",
@@ -133,7 +157,7 @@ export async function encodeZakurabotReply(
     links: record(args.card).links ?? record(args.card).actions,
   };
   const base = replyFieldsSchema.parse({
-    text, kind: kind === "plain" ? "raw" : kind, card,
+    text, kind: kind === "plain" ? "raw" : kind, card, interaction: args.interaction,
     actions: args.actions ?? nested.actions,
   });
   const attachments: z.infer<typeof attachmentSchema>[] = [];

@@ -20,6 +20,9 @@ import { registerFileShareRoutes } from "../../src/api/file-share-routes.js";
 import { registerZakurabotRoutes } from "../../src/api/zakurabot-routes.js";
 import { registerZakurabotAppRoutes } from "../../src/api/zakurabot-app-routes.js";
 import { ZakurabotFileService } from "../../src/services/zakurabot-files.js";
+import { ZakurabotInteractionService } from "../../src/services/zakurabot-interactions.js";
+import { AskUserService } from "../../src/services/ask-user.js";
+import type { AcpSessionService } from "../../src/services/acp/session.js";
 import { createSocketGateway } from "../../src/realtime/socket-gateway.js";
 import { signSession, verifySession } from "../../src/services/auth.js";
 import { CloudAgentSessionStore } from "../../src/services/cloud-agent-session.js";
@@ -78,7 +81,10 @@ export class SocketProbe {
   }
 }
 
-export async function zakurabotHarness() {
+export async function zakurabotHarness(options: {
+  acp?: Pick<AcpSessionService, "resolvePermission" | "resolveElicitation">;
+  onStart?: (run: { sessionId: string; runId: string }) => Promise<void>;
+} = {}) {
   process.env.REDIS_URL = "off";
   const dataDir = mkdtempSync(join(tmpdir(), "zakurabot-test-"));
   const databaseUrl = `pglite:${join(dataDir, "db")}`;
@@ -108,6 +114,8 @@ export async function zakurabotHarness() {
   };
   const fileShares = new FileShareService(db, config);
   const sessions = new CloudAgentSessionStore(db);
+  const askUser = new AskUserService(db, sessions);
+  const interactions = new ZakurabotInteractionService(db, { sessions, askUser, acp: options.acp });
   const registry = new RemoteChannelSessionRegistry();
   const runEvents = new EventEmitter();
   const runs: Array<{
@@ -136,12 +144,13 @@ export async function zakurabotHarness() {
       sessions.onRunCancel(run.id, () => { void controlled.finish("cancelled"); });
       runs.push(controlled);
       runEvents.emit("run", controlled);
+      await options.onStart?.(controlled);
       return { runId: run.id };
     },
   }, config);
   const store = new ZakurabotStore(db);
   const channel = new ZakurabotChannel({ store, ingress, sessions: registry, sessionStore: sessions,
-    agents: agentService, files: new ZakurabotFileService(db, { agents: agentService, workspaceFs, publicBaseUrl: url }),
+    agents: agentService, files: new ZakurabotFileService(db, { agents: agentService, workspaceFs, publicBaseUrl: url }), interactions,
     publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }) });
   const gateway = new ZakurabotGateway(channel, { publicBaseUrl: `${url}/prefix` });
   registerZakurabotRoutes(app, gateway, url);
@@ -177,7 +186,7 @@ export async function zakurabotHarness() {
     { userId: tenantId, tenantId, email: `${tenantId}@example.test`, role });
   return {
     url, app, db, config, server, ingress, registry, sessions, store, channel, gateway, runs, access, adminToken, fileShares,
-    workspaceFs,
+    askUser, interactions, workspaceFs,
     async connect(token?: string, path = "/api/zakurabot/ws") {
       const probe = new SocketProbe(`${url.replace("http:", "ws:")}${path}`);
       probes.push(probe);
@@ -201,7 +210,8 @@ export async function zakurabotHarness() {
     async close() {
       for (const probe of probes) probe.ws.terminate();
       await gateway.close();
-      for (const run of runs) await run.finish("cancelled");
+      for (const run of runs) { await askUser.cancelRun(run.runId); await run.finish("cancelled"); }
+      askUser.stop();
       await new Promise<void>((resolve) => socketIo.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await database.close();
