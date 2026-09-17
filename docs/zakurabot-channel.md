@@ -6,8 +6,23 @@
 
 1. 升级服务端并应用迁移（正常启动会自动迁移，新增 `0055_zakurabot_channel`）。为 Agent 配置可用的 chat 模型。
 2. 在 Agent 的「平台」页添加 **Zakura Bot**，选择模型或跟随默认，保存。
-3. 在该绑定的「Zakura Bot 设备」中填写设备名称，点击「创建设备」。复制只显示一次的 Token。
-4. 在 App 设置中填写返回的 **Base URL** 和 **Auth Token**，关闭 Mock Channel。连接成功后显示已授权的 Agent。
+3. App 首次启动输入实例 URL，点击 **Sign in with Zakura**，浏览器打开设备授权页。
+4. 使用现有租户登录（支持 MFA/SSO），核对设备授权码，选择 1–16 个绑定并批准。返回 App 后自动完成登录。
+
+手动 fallback：在该绑定的「Zakura Bot 设备」中创建设备，将 Token 和 Base URL 填入 App 的 Advanced connection，关闭 Mock Channel。
+
+浏览器授权需要新增迁移 `0056_zakurabot_authorization`。访问凭证有效 30 分钟，刷新凭证有效 90 天且每次使用后轮换；刷新保持同一个设备 ID 和会话历史。原生 App 使用 SecureStore，Web 使用当前标签页 sessionStorage；App 可保存多个实例并切换。登出撤销当前设备。
+
+设备授权接口（JSON 请求体，公开接口不接受租户管理凭证来提升权限）：
+
+- `POST /api/zakurabot/oauth/device-code {name}` → `device_code/user_code/verification_uri/verification_uri_complete/expires_in/interval`，10 分钟内有效。
+- `GET /api/zakurabot/authorization?user_code=…` → 设备名称和当前租户可授权绑定；要求有效租户管理员会话。
+- `POST /api/zakurabot/authorization {user_code,approve,bindingIds}` → 批准或拒绝；要求租户管理员，绑定必须属于当前租户。
+- `POST /api/zakurabot/oauth/token {grant_type:"urn:ietf:params:oauth:grant-type:device_code",device_code}` → 单次领取 `access_token/refresh_token/expires_in/refresh_expires_at/device/tenant`；等待时返回 `authorization_pending`。
+- `POST /api/zakurabot/oauth/token {grant_type:"refresh_token",refresh_token}` → 轮换凭证。旧 refresh token 失效，已撤销或封禁的设备不能刷新。
+- `POST /api/zakurabot/oauth/revoke {token}` → 撤销 access 或 refresh token 所属设备并关闭其 WS。
+
+授权码、设备码和 refresh token 均只存哈希；凭证接口禁止缓存。设备码不进入浏览器 URL；授权码本身不能领取凭证。相同设备码只能消费一次，并发 refresh 只有一次成功。
 
 设备 Token 默认有效 90 天，仅保存 SHA-256 哈希。签发设备会将设备 ID 加入所选绑定的白名单；设备还必须拥有该绑定的显式授权。绑定禁用、白名单移除、设备撤销/过期或租户封禁都会阻止访问。控制台可以撤销设备，已连接的 socket 会关闭。
 

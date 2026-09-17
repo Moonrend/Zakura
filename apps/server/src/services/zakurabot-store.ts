@@ -1,10 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gt, isNull, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { newId, tenants, zakurabotDevices, zakurabotMessages, type ZakurabotDevice } from "../db/schema.js";
+import { newId, tenants, zakurabotAuthorizations, zakurabotDevices, zakurabotMessages, type ZakurabotDevice } from "../db/schema.js";
 import { ZAKURABOT_MAX_FRAME_BYTES, type ZakurabotStoredFrame, type ZakurabotUserFrame } from "./zakurabot-protocol.js";
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
+const userCodeHash = (code: string) => hash(code.toUpperCase().replace(/[-\s]/g, ""));
+const ACCESS_SECONDS = 1800;
 
 export type ZakurabotConversation = {
   tenantId: string;
@@ -26,6 +28,89 @@ export function zakurabotDeviceView(device: ZakurabotDevice) {
 
 export class ZakurabotStore {
   constructor(private readonly db: Db) {}
+
+  async beginAuthorization(name: string) {
+    await this.db.delete(zakurabotAuthorizations).where(lt(zakurabotAuthorizations.expiresAt, new Date()));
+    const deviceCode = randomBytes(32).toString("base64url");
+    const code = randomBytes(5).toString("hex").toUpperCase();
+    const userCode = `${code.slice(0, 5)}-${code.slice(5)}`;
+    await this.db.insert(zakurabotAuthorizations).values({ codeHash: hash(deviceCode),
+      userCodeHash: userCodeHash(userCode), name, expiresAt: new Date(Date.now() + 600_000) });
+    return { device_code: deviceCode, user_code: userCode, expires_in: 600, interval: 5 };
+  }
+
+  async authorizationInfo(code: string) {
+    const [row] = await this.db.select().from(zakurabotAuthorizations).where(and(
+      eq(zakurabotAuthorizations.userCodeHash, userCodeHash(code)),
+      eq(zakurabotAuthorizations.status, "pending"), gt(zakurabotAuthorizations.expiresAt, new Date()),
+    )).limit(1);
+    return row ? { name: row.name, expiresAt: row.expiresAt.toISOString() } : null;
+  }
+
+  async decideAuthorization(code: string, deviceId: string | null) {
+    const rows = await this.db.update(zakurabotAuthorizations).set({
+      status: deviceId ? "approved" : "denied", deviceId,
+    }).where(and(eq(zakurabotAuthorizations.userCodeHash, userCodeHash(code)),
+      eq(zakurabotAuthorizations.status, "pending"), gt(zakurabotAuthorizations.expiresAt, new Date()))).returning();
+    return rows.length > 0;
+  }
+
+  private async credentials(device: ZakurabotDevice, accessToken: string, refreshToken: string) {
+    const [tenant] = await this.db.select({ id: tenants.id, name: tenants.name }).from(tenants)
+      .where(eq(tenants.id, device.tenantId)).limit(1);
+    return { token_type: "Bearer", access_token: accessToken, refresh_token: refreshToken,
+      expires_in: ACCESS_SECONDS, refresh_expires_at: device.refreshExpiresAt!.toISOString(),
+      device: zakurabotDeviceView(device), tenant };
+  }
+
+  async redeemAuthorization(deviceCode: string) {
+    const token = `zbot_${randomBytes(32).toString("base64url")}`;
+    const refresh = `zbrt_${randomBytes(32).toString("base64url")}`;
+    const result = await this.db.transaction(async (tx) => {
+      // Conditional UPDATE claims a grant exactly once, including across API processes.
+      const [grant] = await tx.update(zakurabotAuthorizations).set({ status: "consumed" })
+        .where(and(eq(zakurabotAuthorizations.codeHash, hash(deviceCode)),
+          eq(zakurabotAuthorizations.status, "approved"), gt(zakurabotAuthorizations.expiresAt, new Date()))).returning();
+      if (!grant?.deviceId) return null;
+      const [active] = await tx.select({ id: zakurabotDevices.id }).from(zakurabotDevices)
+        .innerJoin(tenants, eq(tenants.id, zakurabotDevices.tenantId))
+        .where(and(eq(zakurabotDevices.id, grant.deviceId), isNull(zakurabotDevices.revokedAt),
+          gt(zakurabotDevices.expiresAt, new Date()), isNull(tenants.suspendedAt))).limit(1);
+      if (!active) return null;
+      const [device] = await tx.update(zakurabotDevices).set({ tokenHash: hash(token), refreshTokenHash: hash(refresh),
+        expiresAt: new Date(Date.now() + ACCESS_SECONDS * 1000), refreshExpiresAt: new Date(Date.now() + 90 * 86_400_000),
+      }).where(and(eq(zakurabotDevices.id, grant.deviceId), isNull(zakurabotDevices.revokedAt))).returning();
+      return device ?? null;
+    });
+    if (result) return { credentials: await this.credentials(result, token, refresh) };
+    const [grant] = await this.db.select().from(zakurabotAuthorizations)
+      .where(eq(zakurabotAuthorizations.codeHash, hash(deviceCode))).limit(1);
+    return { error: !grant || grant.expiresAt <= new Date() ? "expired_token" :
+      grant.status === "pending" ? "authorization_pending" : grant.status === "denied" ? "access_denied" : "invalid_grant" };
+  }
+
+  async refreshCredentials(refreshToken: string) {
+    if (!/^zbrt_[A-Za-z0-9_-]{43}$/.test(refreshToken)) return null;
+    const [current] = await this.db.select({ device: zakurabotDevices }).from(zakurabotDevices)
+      .innerJoin(tenants, eq(tenants.id, zakurabotDevices.tenantId))
+      .where(and(eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)), isNull(zakurabotDevices.revokedAt),
+        gt(zakurabotDevices.refreshExpiresAt, new Date()), isNull(tenants.suspendedAt))).limit(1);
+    if (!current) return null;
+    const token = `zbot_${randomBytes(32).toString("base64url")}`;
+    const refresh = `zbrt_${randomBytes(32).toString("base64url")}`;
+    const [device] = await this.db.update(zakurabotDevices).set({ tokenHash: hash(token),
+      refreshTokenHash: hash(refresh), expiresAt: new Date(Date.now() + ACCESS_SECONDS * 1000) })
+      .where(and(eq(zakurabotDevices.id, current.device.id), eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)),
+        isNull(zakurabotDevices.revokedAt), gt(zakurabotDevices.refreshExpiresAt, new Date()))).returning();
+    return device ? this.credentials(device, token, refresh) : null;
+  }
+
+  async revokeCredential(token: string) {
+    if (!/^(zbot_|zbrt_)[A-Za-z0-9_-]{43}$/.test(token)) return null;
+    const [device] = await this.db.update(zakurabotDevices).set({ revokedAt: new Date(), refreshTokenHash: null })
+      .where(or(eq(zakurabotDevices.tokenHash, hash(token)), eq(zakurabotDevices.refreshTokenHash, hash(token)))).returning();
+    return device ?? null;
+  }
 
   async createDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number }) {
     const token = `zbot_${randomBytes(32).toString("base64url")}`;

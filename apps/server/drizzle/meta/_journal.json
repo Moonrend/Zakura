@@ -393,6 +393,13 @@
       "when": 1789516800000,
       "tag": "0055_zakurabot_channel",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789603200000,
+      "tag": "0056_zakurabot_authorization",
+      "breakpoints": true
     }
   ]
 }

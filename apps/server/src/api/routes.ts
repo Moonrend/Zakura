@@ -373,6 +373,9 @@ export async function createApiApp(deps: {
       "/api/otel/config",
       "/api/otel/v1/logs",
       "/api/zakurabot/ws",
+      "/api/zakurabot/oauth/device-code",
+      "/api/zakurabot/oauth/token",
+      "/api/zakurabot/oauth/revoke",
     ]);
     const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);

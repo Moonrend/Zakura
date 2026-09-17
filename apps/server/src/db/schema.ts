@@ -1033,6 +1033,8 @@ export const zakurabotDevices = pgTable(
     tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     tokenHash: text("token_hash").notNull(),
+    refreshTokenHash: text("refresh_token_hash"),
+    refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
     bindingIdsJson: text("binding_ids_json").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -1044,6 +1046,16 @@ export const zakurabotDevices = pgTable(
     index("zakurabot_devices_tenant").on(t.tenantId),
   ],
 );
+
+/** Short-lived, one-time device authorization grants; secrets are hashed. */
+export const zakurabotAuthorizations = pgTable("zakurabot_authorizations", {
+  codeHash: text("code_hash").primaryKey(),
+  userCodeHash: text("user_code_hash").notNull().unique(),
+  name: text("name").notNull(),
+  status: text("status").notNull().default("pending"),
+  deviceId: text("device_id").references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
 
 /** Only delivered channel messages, never assistant/reasoning token streams. */
 export const zakurabotMessages = pgTable(
@@ -1947,6 +1959,7 @@ export const schema = {
   agentChannelThreads,
   agentChannelEvents,
   zakurabotDevices,
+  zakurabotAuthorizations,
   zakurabotMessages,
   settings,
   platformServices,
