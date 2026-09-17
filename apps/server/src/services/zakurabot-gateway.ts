@@ -159,7 +159,8 @@ export class ZakurabotGateway {
       connection.identity = { id: device.id, tenantId: device.tenantId };
       connection.allowed = new Set(roster.conversations.map(zakurabotThreadId));
       connection.rosterJson = JSON.stringify(roster.agents);
-      await this.write(connection, { type: "ready", protocol: ZAKURABOT_PROTOCOL, agents: roster.agents });
+      await this.write(connection, { type: "ready", protocol: ZAKURABOT_PROTOCOL, agents: roster.agents,
+        capabilities: this.channel.capabilities() });
       if (connection.phase !== "authenticating" || connection.ws.readyState !== WebSocket.OPEN) return;
       connection.phase = "ready";
       clearTimeout(connection.helloTimer);
@@ -228,9 +229,9 @@ export class ZakurabotGateway {
     await this.channel.revalidateRuns();
   }
 
-  async disconnectDevice(tenantId: string, deviceId: string) {
+  async disconnectDevice(tenantId: string, deviceId: string, message = "Device token has been revoked") {
     await Promise.all(Array.from(this.connections).filter((c) => c.identity?.tenantId === tenantId && c.identity.id === deviceId)
-      .map((c) => this.fail(c, "Device token has been revoked", 4401)));
+      .map((c) => this.fail(c, message, 4401)));
     await this.channel.revalidateRuns();
   }
 

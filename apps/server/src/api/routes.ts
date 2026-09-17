@@ -113,6 +113,8 @@ import { createZakurabotFilePublisher } from "../services/zakurabot-adapter.js";
 import { ZakurabotGateway } from "../services/zakurabot-gateway.js";
 import { ZakurabotStore } from "../services/zakurabot-store.js";
 import { registerZakurabotRoutes } from "./zakurabot-routes.js";
+import { isZakurabotAppPath, registerZakurabotAppRoutes } from "./zakurabot-app-routes.js";
+import { ZakurabotFileService } from "../services/zakurabot-files.js";
 import { OpenAiGatewayService } from "../services/openai-gateway.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -408,7 +410,8 @@ export async function createApiApp(deps: {
       isScim ||
       isEmailInbound ||
       isRemoteWebhook ||
-      isRoutineWebhook
+      isRoutineWebhook ||
+      isZakurabotAppPath(path)
     ) {
       // Optional session for invite accept
       if (isInvitePublic) {
@@ -2324,9 +2327,13 @@ export async function createApiApp(deps: {
         sessions: remoteRuntime.sessions,
         sessionStore: cloudStore,
         agents: agentService,
+        files: workspaceFsProvider ? new ZakurabotFileService(db, {
+          agents: agentService, workspaceFs: workspaceFsProvider, publicBaseUrl: config.publicBaseUrl,
+        }) : undefined,
         publishFile: createZakurabotFilePublisher({ agents: agentService, fileShares, workspaceFs: workspaceFsProvider }),
       }), { publicBaseUrl: config.publicBaseUrl });
-      registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl);
+      registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl, config.webPublicUrl);
+      registerZakurabotAppRoutes(app, zakurabotGateway, config.publicBaseUrl);
       automation.setRunner({
         startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
       });

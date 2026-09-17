@@ -9,6 +9,7 @@ describe("zakurabot v1 contract", () => {
     for (const frame of [
       { type: "hello", protocol: 1, token: "zbot_test", client: { name: "zakura-bot", version: "1.0" } },
       { type: "send", agentId: "a", clientMessageId: "u-1", text: " hello " },
+      { type: "send", agentId: "a", clientMessageId: "u-file", attachments: [{ fileId: "file-1" }] },
       { type: "interrupt", agentId: "a" }, { type: "ping" },
     ]) assert.ok(zakurabotClientFrameSchema.safeParse(frame).success);
     for (const frame of [
@@ -18,6 +19,9 @@ describe("zakurabot v1 contract", () => {
       { type: "send", agentId: "a", clientMessageId: "u", text: " " },
       { type: "send", agentId: "a", clientMessageId: "u", text: "x".repeat(4001) },
       { type: "send", agentId: "a", text: "missing id" }, null, [],
+      { type: "send", agentId: "a", clientMessageId: "u", attachments: [{ fileId: "file-1", path: "/etc/passwd" }] },
+      { type: "send", agentId: "a", clientMessageId: "u", attachments: [{ fileId: "file-1" }, { fileId: "file-1" }] },
+      { type: "send", agentId: "a", clientMessageId: "u", attachments: Array(9).fill({ fileId: "file-1" }) },
     ]) assert.equal(zakurabotClientFrameSchema.safeParse(frame).success, false);
   });
 

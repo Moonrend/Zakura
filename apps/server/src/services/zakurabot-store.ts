@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, gt, isNull, lt, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { newId, tenants, zakurabotAuthorizations, zakurabotDevices, zakurabotMessages, type ZakurabotDevice } from "../db/schema.js";
+import { newId, tenantMemberships, tenants, users, zakurabotAuthorizations, zakurabotDevices, zakurabotMessages, type ZakurabotDevice } from "../db/schema.js";
 import { ZAKURABOT_MAX_FRAME_BYTES, type ZakurabotStoredFrame, type ZakurabotUserFrame } from "./zakurabot-protocol.js";
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
 const userCodeHash = (code: string) => hash(code.toUpperCase().replace(/[-\s]/g, ""));
 const ACCESS_SECONDS = 1800;
+const activeOwner = () => or(isNull(zakurabotDevices.userId), and(isNotNull(users.id), isNull(users.suspendedAt),
+  eq(tenantMemberships.status, "active")));
 
 export type ZakurabotConversation = {
   tenantId: string;
@@ -21,7 +23,7 @@ export function deviceBindingIds(device: ZakurabotDevice): string[] {
 }
 
 export function zakurabotDeviceView(device: ZakurabotDevice) {
-  return { id: device.id, name: device.name, bindingIds: deviceBindingIds(device),
+  return { id: device.id, name: device.name, userId: device.userId, bindingIds: deviceBindingIds(device),
     expiresAt: device.expiresAt.toISOString(), revokedAt: device.revokedAt?.toISOString() ?? null,
     lastSeenAt: device.lastSeenAt?.toISOString() ?? null, createdAt: device.createdAt.toISOString() };
 }
@@ -29,13 +31,13 @@ export function zakurabotDeviceView(device: ZakurabotDevice) {
 export class ZakurabotStore {
   constructor(private readonly db: Db) {}
 
-  async beginAuthorization(name: string) {
+  async beginAuthorization(name: string, codeChallenge?: string) {
     await this.db.delete(zakurabotAuthorizations).where(lt(zakurabotAuthorizations.expiresAt, new Date()));
     const deviceCode = randomBytes(32).toString("base64url");
     const code = randomBytes(5).toString("hex").toUpperCase();
     const userCode = `${code.slice(0, 5)}-${code.slice(5)}`;
     await this.db.insert(zakurabotAuthorizations).values({ codeHash: hash(deviceCode),
-      userCodeHash: userCodeHash(userCode), name, expiresAt: new Date(Date.now() + 600_000) });
+      userCodeHash: userCodeHash(userCode), name, codeChallenge, expiresAt: new Date(Date.now() + 600_000) });
     return { device_code: deviceCode, user_code: userCode, expires_in: 600, interval: 5 };
   }
 
@@ -52,55 +54,73 @@ export class ZakurabotStore {
       status: deviceId ? "approved" : "denied", deviceId,
     }).where(and(eq(zakurabotAuthorizations.userCodeHash, userCodeHash(code)),
       eq(zakurabotAuthorizations.status, "pending"), gt(zakurabotAuthorizations.expiresAt, new Date()))).returning();
+    if (deviceId && rows[0]) await this.db.update(zakurabotDevices).set({ expiresAt: rows[0].expiresAt })
+      .where(and(eq(zakurabotDevices.id, deviceId), isNull(zakurabotDevices.refreshTokenHash)));
     return rows.length > 0;
   }
 
   private async credentials(device: ZakurabotDevice, accessToken: string, refreshToken: string) {
     const [tenant] = await this.db.select({ id: tenants.id, name: tenants.name }).from(tenants)
       .where(eq(tenants.id, device.tenantId)).limit(1);
-    return { token_type: "Bearer", access_token: accessToken, refresh_token: refreshToken,
+    const user = device.userId ? await this.getActiveUser(device.tenantId, device.userId) : null;
+    return { token_type: "Bearer", scope: "zakurabot", access_token: accessToken, refresh_token: refreshToken,
       expires_in: ACCESS_SECONDS, refresh_expires_at: device.refreshExpiresAt!.toISOString(),
-      device: zakurabotDeviceView(device), tenant };
+      device: zakurabotDeviceView(device), tenant, user: user ? { id: user.userId, email: user.email } : null };
   }
 
-  async redeemAuthorization(deviceCode: string) {
+  async redeemAuthorization(deviceCode: string, codeVerifier?: string) {
     const token = `zbot_${randomBytes(32).toString("base64url")}`;
     const refresh = `zbrt_${randomBytes(32).toString("base64url")}`;
-    const result = await this.db.transaction(async (tx) => {
-      // Conditional UPDATE claims a grant exactly once, including across API processes.
-      const [grant] = await tx.update(zakurabotAuthorizations).set({ status: "consumed" })
-        .where(and(eq(zakurabotAuthorizations.codeHash, hash(deviceCode)),
-          eq(zakurabotAuthorizations.status, "approved"), gt(zakurabotAuthorizations.expiresAt, new Date()))).returning();
-      if (!grant?.deviceId) return null;
+    const result = await this.db.transaction(async (tx): Promise<{ device?: ZakurabotDevice; error?: string; interval?: number }> => {
+      const [grant] = await tx.select().from(zakurabotAuthorizations)
+        .where(eq(zakurabotAuthorizations.codeHash, hash(deviceCode))).limit(1).for("update");
+      const now = new Date();
+      if (!grant || grant.expiresAt <= now) return { error: "expired_token" };
+      // Existing v1 clients use the device-code grant without PKCE. A grant that
+      // opted into S256 must always prove possession, including after a restart.
+      if (grant.codeChallenge && (!codeVerifier || createHash("sha256").update(codeVerifier).digest("base64url") !== grant.codeChallenge)) {
+        return { error: "invalid_grant" };
+      }
+      if (grant.status === "denied") return { error: "access_denied" };
+      if (grant.status === "consumed") return { error: "invalid_grant" };
+      if (grant.lastPolledAt && now.getTime() < grant.lastPolledAt.getTime() + grant.intervalSeconds * 1000) {
+        const interval = Math.min(60, grant.intervalSeconds + 5);
+        await tx.update(zakurabotAuthorizations).set({ lastPolledAt: now, intervalSeconds: interval })
+          .where(eq(zakurabotAuthorizations.codeHash, grant.codeHash));
+        return { error: "slow_down", interval };
+      }
+      await tx.update(zakurabotAuthorizations).set({ lastPolledAt: now })
+        .where(eq(zakurabotAuthorizations.codeHash, grant.codeHash));
+      if (grant.status === "pending") return { error: "authorization_pending", interval: grant.intervalSeconds };
+      if (!grant.deviceId) return { error: "invalid_grant" };
+      await tx.update(zakurabotAuthorizations).set({ status: "consumed" })
+        .where(eq(zakurabotAuthorizations.codeHash, grant.codeHash));
       const [active] = await tx.select({ id: zakurabotDevices.id }).from(zakurabotDevices)
         .innerJoin(tenants, eq(tenants.id, zakurabotDevices.tenantId))
+        .leftJoin(users, eq(users.id, zakurabotDevices.userId))
+        .leftJoin(tenantMemberships, and(eq(tenantMemberships.userId, zakurabotDevices.userId), eq(tenantMemberships.tenantId, zakurabotDevices.tenantId)))
         .where(and(eq(zakurabotDevices.id, grant.deviceId), isNull(zakurabotDevices.revokedAt),
-          gt(zakurabotDevices.expiresAt, new Date()), isNull(tenants.suspendedAt))).limit(1);
-      if (!active) return null;
+          gt(zakurabotDevices.expiresAt, now), isNull(tenants.suspendedAt), activeOwner())).limit(1);
+      if (!active) return { error: "invalid_grant" };
       const [device] = await tx.update(zakurabotDevices).set({ tokenHash: hash(token), refreshTokenHash: hash(refresh),
         expiresAt: new Date(Date.now() + ACCESS_SECONDS * 1000), refreshExpiresAt: new Date(Date.now() + 90 * 86_400_000),
       }).where(and(eq(zakurabotDevices.id, grant.deviceId), isNull(zakurabotDevices.revokedAt))).returning();
-      return device ?? null;
+      return device ? { device } : { error: "invalid_grant" };
     });
-    if (result) return { credentials: await this.credentials(result, token, refresh) };
-    const [grant] = await this.db.select().from(zakurabotAuthorizations)
-      .where(eq(zakurabotAuthorizations.codeHash, hash(deviceCode))).limit(1);
-    return { error: !grant || grant.expiresAt <= new Date() ? "expired_token" :
-      grant.status === "pending" ? "authorization_pending" : grant.status === "denied" ? "access_denied" : "invalid_grant" };
+    if (result.device) return { credentials: await this.credentials(result.device, token, refresh) };
+    return { error: result.error ?? "invalid_grant", interval: result.interval };
   }
 
   async refreshCredentials(refreshToken: string) {
     if (!/^zbrt_[A-Za-z0-9_-]{43}$/.test(refreshToken)) return null;
-    const [current] = await this.db.select({ device: zakurabotDevices }).from(zakurabotDevices)
-      .innerJoin(tenants, eq(tenants.id, zakurabotDevices.tenantId))
-      .where(and(eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)), isNull(zakurabotDevices.revokedAt),
-        gt(zakurabotDevices.refreshExpiresAt, new Date()), isNull(tenants.suspendedAt))).limit(1);
+    const current = await this.activeDevice(and(eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)),
+      gt(zakurabotDevices.refreshExpiresAt, new Date()))!, false);
     if (!current) return null;
     const token = `zbot_${randomBytes(32).toString("base64url")}`;
     const refresh = `zbrt_${randomBytes(32).toString("base64url")}`;
     const [device] = await this.db.update(zakurabotDevices).set({ tokenHash: hash(token),
       refreshTokenHash: hash(refresh), expiresAt: new Date(Date.now() + ACCESS_SECONDS * 1000) })
-      .where(and(eq(zakurabotDevices.id, current.device.id), eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)),
+      .where(and(eq(zakurabotDevices.id, current.id), eq(zakurabotDevices.refreshTokenHash, hash(refreshToken)),
         isNull(zakurabotDevices.revokedAt), gt(zakurabotDevices.refreshExpiresAt, new Date()))).returning();
     return device ? this.credentials(device, token, refresh) : null;
   }
@@ -112,20 +132,31 @@ export class ZakurabotStore {
     return device ?? null;
   }
 
-  async createDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number }) {
+  async createDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number; userId?: string }) {
     const token = `zbot_${randomBytes(32).toString("base64url")}`;
     const [device] = await this.db.insert(zakurabotDevices).values({
-      tenantId, name: input.name, tokenHash: hash(token), bindingIdsJson: JSON.stringify(input.bindingIds),
+      tenantId, userId: input.userId, name: input.name, tokenHash: hash(token), bindingIdsJson: JSON.stringify(input.bindingIds),
       expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000),
     }).returning();
     return { device: device!, token };
   }
 
-  private async activeDevice(condition: SQL): Promise<ZakurabotDevice | null> {
+  async getActiveUser(tenantId: string, userId: string) {
+    const [row] = await this.db.select({ userId: users.id, email: users.email, role: tenantMemberships.role }).from(tenantMemberships)
+      .innerJoin(users, eq(users.id, tenantMemberships.userId)).innerJoin(tenants, eq(tenants.id, tenantMemberships.tenantId))
+      .where(and(eq(tenantMemberships.tenantId, tenantId), eq(tenantMemberships.userId, userId),
+        eq(tenantMemberships.status, "active"), isNull(users.suspendedAt), isNull(tenants.suspendedAt))).limit(1);
+    return row ?? null;
+  }
+
+  private async activeDevice(condition: SQL, requireAccessExpiry = true): Promise<ZakurabotDevice | null> {
     const [row] = await this.db.select({ device: zakurabotDevices }).from(zakurabotDevices)
       .innerJoin(tenants, eq(tenants.id, zakurabotDevices.tenantId))
+      .leftJoin(users, eq(users.id, zakurabotDevices.userId))
+      .leftJoin(tenantMemberships, and(eq(tenantMemberships.userId, zakurabotDevices.userId), eq(tenantMemberships.tenantId, zakurabotDevices.tenantId)))
       .where(and(condition, isNull(zakurabotDevices.revokedAt),
-        gt(zakurabotDevices.expiresAt, new Date()), isNull(tenants.suspendedAt))).limit(1);
+        requireAccessExpiry ? gt(zakurabotDevices.expiresAt, new Date()) : undefined,
+        isNull(tenants.suspendedAt), activeOwner())).limit(1);
     return row?.device ?? null;
   }
 

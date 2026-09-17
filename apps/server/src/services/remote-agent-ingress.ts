@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { decryptJson, encryptJson } from "@zakura/core";
-import type { CloudAgentSessionOrigin } from "@zakura/shared";
+import type { CloudAgentAttachment, CloudAgentSessionOrigin } from "@zakura/shared";
 import { inboundFromSlack, inboundFromTeams, parseCloudAgentConfig } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
@@ -64,6 +64,7 @@ export type RemoteInboundMessage = {
   externalUserKey: string;
   senderEmail?: string;
   text: string;
+  attachments?: CloudAgentAttachment[];
   title?: string;
   onSessionReady?: (sessionId: string, threadKey: string) => void | Promise<void>;
 };
@@ -761,6 +762,7 @@ export class RemoteAgentIngress {
         thread.sessionId,
         input.text,
         () => input.onSessionReady?.(thread.sessionId, input.externalThreadKey),
+        input.attachments,
       );
       await this.db
         .update(agentChannelThreads)
@@ -842,12 +844,13 @@ export class RemoteAgentIngress {
     sessionId: string,
     content: string,
     onSessionReady?: () => void | Promise<void>,
+    attachments?: CloudAgentAttachment[],
   ): Promise<{ runId: string }> {
     await this.interruptActiveRun(tenantId, agentId, sessionId);
     // The old run must release its handle before a new turn replaces the session binding.
     await onSessionReady?.();
     try {
-      return await this.runtime.startTurn({ tenantId, agentId, sessionId, content });
+      return await this.runtime.startTurn({ tenantId, agentId, sessionId, content, ...(attachments?.length ? { attachments } : {}) });
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes("已有进行中的 Run")) {
         throw error;
@@ -855,7 +858,7 @@ export class RemoteAgentIngress {
       // 并发入站：再打断一次后重试
       await this.interruptActiveRun(tenantId, agentId, sessionId);
       await onSessionReady?.();
-      return this.runtime.startTurn({ tenantId, agentId, sessionId, content });
+      return this.runtime.startTurn({ tenantId, agentId, sessionId, content, ...(attachments?.length ? { attachments } : {}) });
     }
   }
 }

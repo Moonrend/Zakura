@@ -135,6 +135,8 @@ describe("drizzle migrations", () => {
           "agent_channel_events",
           "zakurabot_devices",
           "zakurabot_messages",
+          "zakurabot_authorizations",
+          "zakurabot_files",
           "email_connector_instances",
           "agent_connector_installations",
           "user_usage_events",

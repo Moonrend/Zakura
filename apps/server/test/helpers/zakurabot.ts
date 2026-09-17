@@ -7,16 +7,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { LocalWorkspaceFs } from "@zakura/core";
+import type { CloudAgentAttachment } from "@zakura/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { WebSocket } from "ws";
 import type { AppConfig } from "../../src/config.js";
 import { createDb } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { agents, newId, tenants, users } from "../../src/db/schema.js";
+import { agents, newId, tenantMemberships, tenants, users } from "../../src/db/schema.js";
 import type { AppVariables } from "../../src/api/routes.js";
 import { registerFileShareRoutes } from "../../src/api/file-share-routes.js";
 import { registerZakurabotRoutes } from "../../src/api/zakurabot-routes.js";
+import { registerZakurabotAppRoutes } from "../../src/api/zakurabot-app-routes.js";
+import { ZakurabotFileService } from "../../src/services/zakurabot-files.js";
 import { createSocketGateway } from "../../src/realtime/socket-gateway.js";
 import { signSession, verifySession } from "../../src/services/auth.js";
 import { CloudAgentSessionStore } from "../../src/services/cloud-agent-session.js";
@@ -108,7 +111,7 @@ export async function zakurabotHarness() {
   const registry = new RemoteChannelSessionRegistry();
   const runEvents = new EventEmitter();
   const runs: Array<{
-    sessionId: string; runId: string; content: string; handle: RemoteChannelSessionHandle;
+    sessionId: string; runId: string; content: string; attachments: CloudAgentAttachment[]; handle: RemoteChannelSessionHandle;
     finish: (status?: "completed" | "cancelled" | "failed") => Promise<void>;
     tool: (name: string, args: Record<string, unknown>) => ReturnType<typeof callRemoteChannelTool>;
   }> = [];
@@ -120,7 +123,7 @@ export async function zakurabotHarness() {
       await sessions.markRunStarted(run.id);
       let ending: Promise<void> | undefined;
       const controlled = {
-        sessionId: input.sessionId, runId: run.id, content: input.content, handle,
+        sessionId: input.sessionId, runId: run.id, content: input.content, attachments: input.attachments ?? [], handle,
         finish(status: "completed" | "cancelled" | "failed" = "completed") {
           ending ??= (async () => {
             await sessions.appendEvent({ sessionId: input.sessionId, runId: run.id, type: "run_end", payload: { runId: run.id, status } });
@@ -138,9 +141,11 @@ export async function zakurabotHarness() {
   }, config);
   const store = new ZakurabotStore(db);
   const channel = new ZakurabotChannel({ store, ingress, sessions: registry, sessionStore: sessions,
-    agents: agentService, publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }) });
+    agents: agentService, files: new ZakurabotFileService(db, { agents: agentService, workspaceFs, publicBaseUrl: url }),
+    publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }) });
   const gateway = new ZakurabotGateway(channel, { publicBaseUrl: `${url}/prefix` });
   registerZakurabotRoutes(app, gateway, url);
+  registerZakurabotAppRoutes(app, gateway, url);
   registerFileShareRoutes(app, fileShares, agentService as never, workspaceFs as never);
   const socketIo = createSocketGateway(server, { db, config, store: sessions });
   gateway.attach(server);
@@ -151,6 +156,7 @@ export async function zakurabotHarness() {
     if (!exists) {
       await db.insert(tenants).values({ id: tenantId, name: "Test tenant", slug: tenantId });
       await db.insert(users).values({ id: tenantId, email: `${tenantId}@example.test` });
+      await db.insert(tenantMemberships).values({ tenantId, userId: tenantId, role: "owner", status: "active" });
     }
     const bindings = [];
     for (let i = 0; i < count; i++) {
@@ -171,6 +177,7 @@ export async function zakurabotHarness() {
     { userId: tenantId, tenantId, email: `${tenantId}@example.test`, role });
   return {
     url, app, db, config, server, ingress, registry, sessions, store, channel, gateway, runs, access, adminToken, fileShares,
+    workspaceFs,
     async connect(token?: string, path = "/api/zakurabot/ws") {
       const probe = new SocketProbe(`${url.replace("http:", "ws:")}${path}`);
       probes.push(probe);

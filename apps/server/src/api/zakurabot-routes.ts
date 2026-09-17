@@ -18,8 +18,9 @@ export function registerZakurabotRoutes(
   app: Hono<{ Variables: AppVariables }>,
   gateway: ZakurabotGateway,
   publicBaseUrl: string,
+  webBaseUrl = publicBaseUrl,
 ) {
-  registerZakurabotAuthRoutes(app, gateway, publicBaseUrl);
+  registerZakurabotAuthRoutes(app, gateway, publicBaseUrl, webBaseUrl);
   registerZakurabotSessionRoutes(app, gateway);
   const store = gateway.channel.deps.store;
   app.use("/api/zakurabot/devices", async (c, next) => {

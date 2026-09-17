@@ -353,6 +353,8 @@ async function main() {
         "MCP-Protocol-Version",
         "Mcp-Session-Id",
         "X-Zakura-Session-Id",
+        "Retry-After",
+        "Content-Disposition",
       ],
     }),
   );

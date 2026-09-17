@@ -5,16 +5,24 @@ import { z } from "zod";
 export const ZAKURABOT_PROTOCOL = 1;
 export const ZAKURABOT_MAX_FRAME_BYTES = 1_000_000;
 export const ZAKURABOT_MAX_TEXT = 4000;
+export const ZAKURABOT_MAX_FILE_BYTES = 16 * 1024 * 1024;
 
 export const channelIdSchema = z.string().min(1).max(256).refine(
-  (id) => Boolean(id.trim()) && !["__proto__", "prototype", "constructor"].includes(id),
+  (id) => Boolean(id.trim()) && !/[\u0000-\u001f\u007f]/.test(id) &&
+    id !== "prototype" && !Object.hasOwn(Object.prototype, id),
 );
-const httpUrl = z.string().refine((value) => {
+export const zakurabotHttpUrlSchema = z.string().refine((value) => {
   try {
     const url = new URL(value);
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password;
   } catch { return false; }
 }, "Expected an HTTP(S) URL without credentials");
+const httpUrl = zakurabotHttpUrlSchema;
+
+export type ZakurabotFileView = {
+  id: string; name: string; mime: string; size: number;
+  type: "image" | "file" | "audio" | "video"; url: string;
+};
 const linkSchema = z.object({
   label: z.string().trim().min(1),
   url: httpUrl,
@@ -63,18 +71,22 @@ export const zakurabotClientFrameSchema = z.discriminatedUnion("type", [
     client: z.object({ name: z.string().min(1).max(128), version: z.string().min(1).max(128) }),
   }),
   z.object({ type: z.literal("send"), agentId: channelIdSchema, clientMessageId: channelIdSchema,
-    text: z.string().trim().min(1).max(ZAKURABOT_MAX_TEXT) }),
+    text: z.string().trim().max(ZAKURABOT_MAX_TEXT).default(""),
+    attachments: z.array(z.object({ fileId: channelIdSchema }).strict()).min(1).max(8)
+      .refine((files) => new Set(files.map((f) => f.fileId)).size === files.length).optional() }),
   z.object({ type: z.literal("interrupt"), agentId: channelIdSchema }),
   z.object({ type: z.literal("ping") }),
-]);
+]).refine((frame) => frame.type !== "send" || Boolean(frame.text || frame.attachments?.length), "Empty message");
 
 export type ZakurabotClientFrame = z.infer<typeof zakurabotClientFrameSchema>;
 export type ZakurabotReply = z.infer<typeof zakurabotReplySchema>;
 export type ZakurabotAgent = { id: string; name: string; status: "idle" | "busy" | "offline";
-  color: string; unread: boolean; title?: string; bindingId?: string; description?: string };
+  color: string; unread: boolean; title?: string; bindingId?: string; description?: string;
+  capabilities?: { files: boolean; desktop: boolean; interactions: boolean } };
 export type ZakurabotUserFrame = { type: "message"; message: {
   id: string; agentId: string; role: "user"; kind: "text"; text: string;
   clientMessageId: string; createdAt: number;
+  attachments?: ZakurabotFileView[];
 } };
 export type ZakurabotReplyFrame = { type: "chat_reply"; agentId: string; messageId: string;
   createdAt: number; payload: ZakurabotReply };
@@ -84,7 +96,7 @@ export type ZakurabotToolFrame = { type: "tool_activity"; agentId: string; messa
   tool: { name: string; ok?: boolean; detail?: string; interrupted?: boolean };
 } };
 export type ZakurabotServerFrame = ZakurabotStoredFrame | ZakurabotToolFrame |
-  { type: "ready"; protocol: number; agents: ZakurabotAgent[] } |
+  { type: "ready"; protocol: number; agents: ZakurabotAgent[]; capabilities?: string[] } |
   { type: "agents"; agents: ZakurabotAgent[] } |
   { type: "typing"; agentId: string; active: boolean } |
   { type: "error"; message: string; agentId?: string; clientMessageId?: string; fatal?: boolean } |

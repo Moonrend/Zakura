@@ -10,6 +10,8 @@ import { waitForRemoteRun } from "./remote-channel-stream.js";
 import { createZakurabotChat } from "./zakurabot-adapter.js";
 import type { ZakurabotAgent, ZakurabotClientFrame, ZakurabotServerFrame, ZakurabotToolFrame, ZakurabotUserFrame } from "./zakurabot-protocol.js";
 import { deviceBindingIds, type ZakurabotConversation, type ZakurabotStore } from "./zakurabot-store.js";
+import { ZakurabotFileError, type ZakurabotFileService } from "./zakurabot-files.js";
+import { isSessionAdmin } from "./auth.js";
 
 export class ZakurabotAccessError extends Error {
   constructor(message: string, readonly closeCode: 4401 | 4403) { super(message); }
@@ -40,10 +42,30 @@ export class ZakurabotChannel {
     sessions: RemoteChannelToolPort;
     sessionStore: CloudAgentSessionStore;
     agents: Pick<AgentService, "get">;
+    files?: ZakurabotFileService;
     publishFile: (conversation: ZakurabotConversation, path: string) => Promise<{ url: string; name: string }>;
   }) {}
 
-  async issueDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number }) {
+  capabilities(): string[] {
+    return ["agents", "history", ...(this.deps.files ? ["files"] : [])];
+  }
+
+  async authorizableBindings(tenantId: string, userId: string) {
+    const user = await this.deps.store.getActiveUser(tenantId, userId);
+    if (!user) throw new ZakurabotAccessError("An active tenant membership is required", 4403);
+    const bindings = (await this.deps.ingress.listBindings(tenantId, "zakurabot")).filter((binding) => {
+      const settings = this.deps.ingress.toBindingView(binding)!.settings;
+      return binding.enabled && settings.allowDMs !== false &&
+        (isSessionAdmin(user) || isRemoteSenderAllowed(settings, user.userId, user.email));
+    });
+    return { user, bindings };
+  }
+
+  async issueDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number; userId?: string }) {
+    if (input.userId) {
+      const allowed = new Set((await this.authorizableBindings(tenantId, input.userId)).bindings.map((binding) => binding.id));
+      if (input.bindingIds.some((id) => !allowed.has(id))) throw new ZakurabotAccessError("You cannot authorize these bindings", 4403);
+    }
     const agents = new Set<string>();
     for (const id of input.bindingIds) {
       const binding = await this.deps.ingress.getBinding(tenantId, id);
@@ -55,8 +77,15 @@ export class ZakurabotChannel {
     }
     const issued = await this.deps.store.createDevice(tenantId, input);
     try {
-      // Device issuance is an explicit admin grant; keep the existing ingress ACL authoritative.
-      for (const id of input.bindingIds) await this.deps.ingress.approveUser(tenantId, id, issued.device.id);
+      // Browser consent delegates the user's allowed bindings. An open ACL must remain open:
+      // adding its first allowedUsers entry would turn it into a restrictive allowlist.
+      for (const id of input.bindingIds) {
+        const binding = await this.deps.ingress.getBinding(tenantId, id);
+        const settings = this.deps.ingress.toBindingView(binding)!.settings;
+        if (!isRemoteSenderAllowed(settings, issued.device.id)) {
+          await this.deps.ingress.approveUser(tenantId, id, issued.device.id);
+        }
+      }
       return issued;
     } catch (error) {
       await this.deps.store.revokeDevice(tenantId, issued.device.id);
@@ -68,12 +97,15 @@ export class ZakurabotChannel {
     if (this.stopped) throw new Error("Zakura Bot is stopping");
     const device = await this.deps.store.getActiveDevice(identity.tenantId, identity.id);
     if (!device) throw new ZakurabotAccessError("Device token is invalid, expired, or revoked", 4401);
+    const owner = device.userId ? await this.deps.store.getActiveUser(device.tenantId, device.userId) : null;
+    if (device.userId && !owner) throw new ZakurabotAccessError("The device owner is no longer an active member", 4401);
     const grants = new Set(deviceBindingIds(device));
     const bindings = (await this.deps.ingress.listBindings(device.tenantId, "zakurabot"))
       .filter((binding) => {
         if (!grants.has(binding.id) || !binding.enabled) return false;
         const settings = this.deps.ingress.toBindingView(binding)!.settings;
-        return settings.allowDMs !== false && isRemoteSenderAllowed(settings, device.id);
+        return settings.allowDMs !== false && isRemoteSenderAllowed(settings, device.id) &&
+          (!owner || isSessionAdmin(owner) || isRemoteSenderAllowed(settings, owner.userId, owner.email));
       });
     return { device, bindings };
   }
@@ -100,8 +132,9 @@ export class ZakurabotChannel {
       if (!agent) continue;
       const c = this.conversation(device, binding);
       const status = await this.deps.ingress.getThreadStatus(device.tenantId, binding.id, zakurabotThreadId(c));
-      agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description, bindingId: binding.id,
-        status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false });
+      agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description,
+        status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false, bindingId: binding.id,
+        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: false, interactions: false } });
       conversations.push(c);
     }
     if (!agents.length) throw new ZakurabotAccessError("No enabled Zakura Bot bindings are authorized for this device", 4403);
@@ -133,7 +166,7 @@ export class ZakurabotChannel {
     void Promise.allSettled(Array.from(listeners, (listener) => Promise.resolve().then(() => listener(c, frame))));
   }
 
-  private async resolveConversation(identity: ZakurabotIdentity, agentId: string) {
+  async resolveConversation(identity: ZakurabotIdentity, agentId: string) {
     const { device, bindings } = await this.authorizedBindings(identity);
     const matches = bindings.filter((b) => b.agentId === agentId);
     if (matches.length !== 1) throw new ZakurabotAccessError("This device cannot access the requested agent", 4403);
@@ -153,12 +186,27 @@ export class ZakurabotChannel {
     await this.serial(threadId, async () => {
       await this.authorize(c);
       const existing = await this.deps.store.userMessage(c, frame.clientMessageId);
-      if (existing && existing.message.text !== frame.text) {
-        throw new ZakurabotInputError("This message was already sent with different text; send it as a new message");
+      const fileIds = frame.attachments?.map((file) => file.fileId) ?? [];
+      if (fileIds.length && !this.deps.files) throw new ZakurabotInputError("File uploads are unavailable");
+      let files: Awaited<ReturnType<ZakurabotFileService["resolveAttachments"]>> | undefined;
+      // A retry must still succeed if an accepted upload was subsequently moved or removed by the agent.
+      if (!existing && fileIds.length) {
+        try { files = await this.deps.files!.resolveAttachments(c, fileIds); }
+        catch (error) {
+          if (error instanceof ZakurabotFileError) throw new ZakurabotInputError(error.message);
+          throw error;
+        }
+      }
+      const attachmentViews = existing?.message.attachments ?? files?.views;
+      const text = frame.text || `📎 ${attachmentViews?.map((file) => file.name).join(", ") ?? "Files"}`;
+      if (existing && (existing.message.text !== text ||
+        JSON.stringify(existing.message.attachments?.map((file) => file.id) ?? []) !== JSON.stringify(fileIds))) {
+        throw new ZakurabotInputError("This message was already sent with different text or files; send it as a new message");
       }
       const echo: ZakurabotUserFrame = existing ?? { type: "message", message: {
-        id: frame.clientMessageId, agentId: c.agentId, role: "user", kind: "text", text: frame.text,
+        id: frame.clientMessageId, agentId: c.agentId, role: "user", kind: "text", text,
         clientMessageId: frame.clientMessageId, createdAt: Date.now(),
+        ...(files?.views.length ? { attachments: files.views } : {}),
       } };
       let boundSessionId: string | undefined;
       const requireCurrentTurn = () => {
@@ -184,7 +232,8 @@ export class ZakurabotChannel {
       const result = await this.deps.ingress.handleInbound({
         tenantId: c.tenantId, bindingId: c.bindingId, platform: "zakurabot",
         externalEventId: `${threadId}:${frame.clientMessageId}`, externalThreadKey: threadId,
-        externalUserKey: device.id, text: `${formatRemoteInboundPrefix(handle)}\n${frame.text}`,
+        externalUserKey: device.id, text: `${formatRemoteInboundPrefix(handle)}\n${text}`,
+        attachments: files?.attachments,
         title: `Zakura Bot · ${device.name}`,
         onSessionReady: async (sessionId) => {
           const previous = this.runs.get(threadId);
