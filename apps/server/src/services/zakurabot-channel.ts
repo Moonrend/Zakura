@@ -47,12 +47,13 @@ export class ZakurabotChannel {
     agents: Pick<AgentService, "get">;
     files?: ZakurabotFileService;
     interactions?: ZakurabotInteractionService;
+    desktopAvailable?: boolean;
     publishFile: (conversation: ZakurabotConversation, path: string) => Promise<{ url: string; name: string }>;
   }) {}
 
   capabilities(): string[] {
     return ["agents", "history", ...(this.deps.files ? ["files"] : []),
-      ...(this.deps.interactions ? ["interactions"] : [])];
+      ...(this.deps.desktopAvailable ? ["desktop_frames"] : []), ...(this.deps.interactions ? ["interactions"] : [])];
   }
 
   async authorizableBindings(tenantId: string, userId: string) {
@@ -139,7 +140,7 @@ export class ZakurabotChannel {
       const status = await this.deps.ingress.getThreadStatus(device.tenantId, binding.id, zakurabotThreadId(c));
       agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description,
         status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false, bindingId: binding.id,
-        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: false,
+        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: Boolean(agent.enableComputer && this.deps.desktopAvailable),
           interactions: Boolean(this.deps.interactions) } });
       conversations.push(c);
     }

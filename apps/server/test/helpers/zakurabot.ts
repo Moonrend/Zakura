@@ -23,6 +23,7 @@ import { ZakurabotFileService } from "../../src/services/zakurabot-files.js";
 import { ZakurabotInteractionService } from "../../src/services/zakurabot-interactions.js";
 import { AskUserService } from "../../src/services/ask-user.js";
 import type { AcpSessionService } from "../../src/services/acp/session.js";
+import type { AgentWorkspaceService } from "../../src/services/agent-workspace.js";
 import { createSocketGateway } from "../../src/realtime/socket-gateway.js";
 import { signSession, verifySession } from "../../src/services/auth.js";
 import { CloudAgentSessionStore } from "../../src/services/cloud-agent-session.js";
@@ -82,6 +83,7 @@ export class SocketProbe {
 }
 
 export async function zakurabotHarness(options: {
+  workspace?: Pick<AgentWorkspaceService, "getDesktopInfo" | "execInWorkspace" | "ensureStarted">;
   acp?: Pick<AcpSessionService, "resolvePermission" | "resolveElicitation">;
   onStart?: (run: { sessionId: string; runId: string }) => Promise<void>;
 } = {}) {
@@ -151,10 +153,11 @@ export async function zakurabotHarness(options: {
   const store = new ZakurabotStore(db);
   const channel = new ZakurabotChannel({ store, ingress, sessions: registry, sessionStore: sessions,
     agents: agentService, files: new ZakurabotFileService(db, { agents: agentService, workspaceFs, publicBaseUrl: url }), interactions,
+    desktopAvailable: Boolean(options.workspace),
     publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }) });
   const gateway = new ZakurabotGateway(channel, { publicBaseUrl: `${url}/prefix` });
   registerZakurabotRoutes(app, gateway, url);
-  registerZakurabotAppRoutes(app, gateway, url);
+  registerZakurabotAppRoutes(app, gateway, url, options.workspace);
   registerFileShareRoutes(app, fileShares, agentService as never, workspaceFs as never);
   const socketIo = createSocketGateway(server, { db, config, store: sessions });
   gateway.attach(server);

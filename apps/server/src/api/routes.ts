@@ -2332,10 +2332,11 @@ export async function createApiApp(deps: {
           agents: agentService, workspaceFs: workspaceFsProvider, publicBaseUrl: config.publicBaseUrl,
         }) : undefined,
         interactions: new ZakurabotInteractionService(db, { sessions: cloudStore, askUser, acp: acpSessions }),
+        desktopAvailable: true,
         publishFile: createZakurabotFilePublisher({ agents: agentService, fileShares, workspaceFs: workspaceFsProvider }),
       }), { publicBaseUrl: config.publicBaseUrl });
       registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl, config.webPublicUrl);
-      registerZakurabotAppRoutes(app, zakurabotGateway, config.publicBaseUrl);
+      registerZakurabotAppRoutes(app, zakurabotGateway, config.publicBaseUrl, agentService.workspace);
       automation.setRunner({
         startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
       });
