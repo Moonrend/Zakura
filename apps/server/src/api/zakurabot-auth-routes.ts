@@ -66,7 +66,8 @@ export function registerZakurabotAuthRoutes(app: Hono<{ Variables: AppVariables 
     if (!input.success) return c.json({ error: "invalid_request" }, 400);
     if (input.data.grant_type === "refresh_token") {
       const credentials = await validateCredentials(await store.refreshCredentials(input.data.refresh_token));
-      if (credentials) await gateway.disconnectDevice(credentials.tenant!.id, credentials.device.id, "Device credentials rotated; reconnect with the new token");
+      // Rotation is not an authentication failure: close with a retryable code so the App reconnects with the new token.
+      if (credentials) await gateway.disconnectDevice(credentials.tenant!.id, credentials.device.id, "Device credentials rotated; reconnect with the new token", 1012);
       return credentials ? c.json(credentials) : c.json({ error: "invalid_grant" }, 400);
     }
     const result = await store.redeemAuthorization(input.data.device_code, input.data.code_verifier);

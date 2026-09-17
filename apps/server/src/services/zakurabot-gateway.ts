@@ -75,6 +75,10 @@ export class ZakurabotGateway {
     return new Promise((resolve, reject) => connection.ws.send(data, (error) => error ? reject(error) : resolve()));
   }
 
+  /**
+   * Close codes the v1 client treats as terminal: 1008, 4401 and 4403. Everything else
+   * (including 1012 for credential rotation and 4408 for a slow hello) lets it reconnect.
+   */
   private async fail(connection: Connection, message: string, code: number,
     correlation?: { agentId: string; clientMessageId?: string }) {
     connection.phase = "closed";
@@ -88,7 +92,8 @@ export class ZakurabotGateway {
   private accept(ws: WebSocket, hasQuery: boolean) {
     const connection: Connection = {
       ws, phase: "hello", allowed: new Set(), rosterJson: "", alive: true, queued: 0, queue: Promise.resolve(),
-      helloTimer: setTimeout(() => { void this.fail(connection, "Timed out waiting for hello", 4401); },
+      // A client may still be refreshing its access token; let it retry rather than reporting bad credentials.
+      helloTimer: setTimeout(() => { void this.fail(connection, "Timed out waiting for hello; reconnect and authenticate", 4408); },
         this.options.helloTimeoutMs ?? 5000),
     };
     connection.helloTimer.unref();
@@ -229,9 +234,9 @@ export class ZakurabotGateway {
     await this.channel.revalidateRuns();
   }
 
-  async disconnectDevice(tenantId: string, deviceId: string, message = "Device token has been revoked") {
+  async disconnectDevice(tenantId: string, deviceId: string, message = "Device token has been revoked", code: 4401 | 1012 = 4401) {
     await Promise.all(Array.from(this.connections).filter((c) => c.identity?.tenantId === tenantId && c.identity.id === deviceId)
-      .map((c) => this.fail(c, message, 4401)));
+      .map((c) => this.fail(c, message, code)));
     await this.channel.revalidateRuns();
   }
 

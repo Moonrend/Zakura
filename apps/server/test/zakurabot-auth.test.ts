@@ -63,6 +63,10 @@ describe("Zakura Bot device authorization", () => {
     assert.equal(rotated.device.id, tokens.device.id);
     assert.notEqual(rotated.access_token, tokens.access_token);
     assert.equal(await h.store.authenticate(tokens.access_token), null);
+    // The old socket must not report an authentication failure: the App reconnects with the rotated token.
+    assert.equal(await socket.closed, 1012);
+    const rotationError = socket.frames.findLast((frame) => frame.type === "error");
+    assert.equal(rotationError?.type === "error" && rotationError.fatal, false);
     assert.equal((await refresh()).status, 400);
     const nextSocket = await h.connect(rotated.access_token);
     await nextSocket.wait("ready");

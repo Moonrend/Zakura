@@ -42,7 +42,9 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     const query = await h.connect(undefined, "/api/zakurabot/ws?token=never-accepted");
     assert.equal(await within(query.closed), 1008);
     const idle = await h.connect();
-    assert.equal(await within(idle.closed, "Hello timeout not enforced", 7000), 4401);
+    assert.equal(await within(idle.closed, "Hello timeout not enforced", 7000), 4408);
+    const timeout = idle.frames.findLast((frame) => frame.type === "error");
+    assert.equal(timeout?.type === "error" && timeout.fatal, false, "a slow hello is retryable, not an auth failure");
   });
 
   it("rejects malformed upgrade paths without crashing the HTTP server", async () => {
