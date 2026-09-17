@@ -10,6 +10,7 @@ import { AuthField, AuthFooter, AuthScreen } from "@/components/auth-screen";
 import { OauthProviderIcon } from "@/components/oauth-provider-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { consumeBotLoginReturn, rememberBotLoginReturn } from "@/lib/login-return";
 
 type OauthProvider = { id: string; name: string; enabled: boolean };
 type Mode = "signin" | "register";
@@ -50,6 +51,7 @@ export default function LoginPage() {
   const passkeyTried = useRef(false);
 
   useEffect(() => {
+    rememberBotLoginReturn();
     const params = new URLSearchParams(window.location.search);
     if (params.get("suspended") === "1") {
       setSuspendNotice(params.get("reason")?.trim() || "账号已被封禁");
@@ -103,7 +105,7 @@ export default function LoginPage() {
   async function finishLogin(session: string) {
     setSession(session);
     const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
-    router.push(current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");
+    router.push(consumeBotLoginReturn() ?? (current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents"));
   }
 
   async function startSso(hint: SsoHint) {

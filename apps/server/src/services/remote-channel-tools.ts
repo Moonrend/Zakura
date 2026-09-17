@@ -51,6 +51,8 @@ export function isRemoteChannelToolName(name: string): name is RemoteChannelTool
 
 /** Chat SDK Chat 实例上我们实际用到的方法 */
 export type RemoteChatHandle = {
+  /** First-party transports can preserve their native wire payload instead of Chat SDK cards. */
+  encodePostable?(args: Record<string, unknown>, ctx?: EncodePostableContext): Promise<unknown>;
   thread(threadId: string): {
     id: string;
     channelId: string;
@@ -744,7 +746,7 @@ async function postThread(
   ctx: EncodePostableContext | undefined,
   quoteDefault: boolean,
 ): Promise<{ ok: true; messageId: string; message_id: string; threadId: string; delivered: string }> {
-  const body = await encodePostable(args, ctx);
+  const body = await encodeForChat(handle.chat, args, ctx);
   const thread = handle.chat.thread(threadId);
   const replyTo = str(args, "reply_to") ?? (quoteDefault ? handle.inboundMessageId : undefined);
   const sent =
@@ -777,6 +779,10 @@ export async function callRemoteChannelTool(
   }
 }
 
+function encodeForChat(chat: RemoteChatHandle, args: Record<string, unknown>, ctx?: EncodePostableContext) {
+  return chat.encodePostable ? chat.encodePostable(args, ctx) : encodePostable(args, ctx);
+}
+
 async function dispatch(
   handle: RemoteChannelSessionHandle,
   name: string,
@@ -793,7 +799,7 @@ async function dispatch(
     }
     case CHAT_POST_CHANNEL_MESSAGE: {
       const channelId = str(args, "channelId") ?? handle.channelId;
-      const sent = await chat.channel(channelId).post(await encodePostable(args, ctx));
+      const sent = await chat.channel(channelId).post(await encodeForChat(chat, args, ctx));
       return {
         ok: true,
         messageId: sent.id,
@@ -806,7 +812,7 @@ async function dispatch(
       const userId = str(args, "userId");
       if (!userId) throw new Error("userId is required");
       const dm = await chat.openDM(userId);
-      const sent = await dm.post(await encodePostable(args, ctx));
+      const sent = await dm.post(await encodeForChat(chat, args, ctx));
       return {
         ok: true,
         messageId: sent.id,
@@ -991,6 +997,9 @@ export function remoteChannelPromptBlock(handle: RemoteChannelSessionHandle): st
     "- 短问题也至少一次 chat_reply。匹配用户语言，简洁。",
     "- text 写普通 Markdown；attachments 用工作区路径或公开 URL；actions 为链接按钮；card 为结构化卡片。",
     "- chat_reply 默认引用入站消息；需要时可传 reply_to。",
+    ...(handle.platform === "zakurabot" ? [
+      "- 需要用户选择、确认或提供秘密时使用 ask_user；Zakura Bot 会自动把问题经 chat_reply 发送为可回答的卡片。不要自己编造交互 requestId，不要回显秘密答案。",
+    ] : []),
     "- chat_post_message / chat_post_channel_message / chat_send_direct_message：发到其他线程、频道或私信。",
     "- chat_add_reaction / chat_start_typing：表情与输入状态。",
     "",

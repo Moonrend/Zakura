@@ -4,6 +4,7 @@ import {
   index,
   integer,
   pgTable,
+  serial,
   text,
   timestamp,
   uniqueIndex,
@@ -1024,6 +1025,97 @@ export const agentChannelEvents = pgTable(
   ],
 );
 
+/** First-party channel credentials. The raw device token is returned only at issuance. */
+export const zakurabotDevices = pgTable(
+  "zakurabot_devices",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    refreshTokenHash: text("refresh_token_hash"),
+    refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    bindingIdsJson: text("binding_ids_json").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("zakurabot_devices_token").on(t.tokenHash),
+    index("zakurabot_devices_tenant").on(t.tenantId),
+  ],
+);
+
+/** Short-lived browser consent requests; codes and credentials are never stored in plaintext. */
+export const zakurabotAuthorizations = pgTable("zakurabot_authorizations", {
+  codeHash: text("code_hash").primaryKey(),
+  userCodeHash: text("user_code_hash").notNull().unique(),
+  name: text("name").notNull(),
+  codeChallenge: text("code_challenge"),
+  lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+  intervalSeconds: integer("interval_seconds").notNull().default(5),
+  status: text("status").notNull().default("pending"),
+  deviceId: text("device_id").references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+/** Inbound files use opaque IDs scoped to a device conversation. */
+export const zakurabotFiles = pgTable("zakurabot_files", {
+  id: text("id").primaryKey().$defaultFn(newId),
+  tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  deviceId: text("device_id").notNull().references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+  bindingId: text("binding_id").notNull().references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+  agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  path: text("path").notNull(),
+  name: text("name").notNull(),
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("zakurabot_files_conversation").on(t.deviceId, t.bindingId, t.agentId)]);
+
+/** Validated interaction metadata only; user answers and raw tools never enter this table. */
+export const zakurabotInteractions = pgTable("zakurabot_interactions", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  deviceId: text("device_id").notNull().references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+  bindingId: text("binding_id").notNull().references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+  agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").notNull().references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+  runId: text("run_id"),
+  sourceSessionId: text("source_session_id").notNull().references(() => cloudAgentSessions.id, { onDelete: "cascade" }),
+  sourceRunId: text("source_run_id"),
+  requestId: text("request_id").notNull(),
+  type: text("type").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  replyTo: text("reply_to"),
+  status: text("status").notNull().default("pending"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  eventSeq: integer("event_seq").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("zakurabot_interactions_session").on(t.sessionId, t.requestId)]);
+
+/** Only delivered channel messages, never assistant/reasoning token streams. */
+export const zakurabotMessages = pgTable(
+  "zakurabot_messages",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    seq: serial("seq").notNull(),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+    deviceId: text("device_id").notNull().references(() => zakurabotDevices.id, { onDelete: "cascade" }),
+    bindingId: text("binding_id").notNull().references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+    agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    clientMessageId: text("client_message_id"),
+    frameJson: text("frame_json").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("zakurabot_messages_client").on(t.deviceId, t.bindingId, t.agentId, t.clientMessageId),
+    index("zakurabot_messages_history").on(t.deviceId, t.bindingId, t.agentId, t.seq),
+  ],
+);
+
 export const settings = pgTable(
   "settings",
   {
@@ -1905,6 +1997,11 @@ export const schema = {
   agentChannelBindings,
   agentChannelThreads,
   agentChannelEvents,
+  zakurabotDevices,
+  zakurabotAuthorizations,
+  zakurabotFiles,
+  zakurabotInteractions,
+  zakurabotMessages,
   settings,
   platformServices,
   platformServiceQuotas,
@@ -1960,6 +2057,9 @@ export type AgentBinding = typeof agentBindings.$inferSelect;
 export type AgentChannelBinding = typeof agentChannelBindings.$inferSelect;
 export type AgentChannelThread = typeof agentChannelThreads.$inferSelect;
 export type AgentChannelEvent = typeof agentChannelEvents.$inferSelect;
+export type ZakurabotDevice = typeof zakurabotDevices.$inferSelect;
+export type ZakurabotFile = typeof zakurabotFiles.$inferSelect;
+export type ZakurabotInteraction = typeof zakurabotInteractions.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type ProviderCatalog = typeof providerCatalog.$inferSelect;
 export type EmailConnectorInstance = typeof emailConnectorInstances.$inferSelect;
@@ -2208,4 +2308,3 @@ export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
 export type AgentUserQuestion = typeof agentUserQuestions.$inferSelect;
 export type AgentProjectRow = typeof agentProjects.$inferSelect;
-

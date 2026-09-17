@@ -108,6 +108,14 @@ import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
 import { RemoteChannelRuntime, REMOTE_PLATFORMS } from "../services/remote-channel-runtime.js";
+import { ZakurabotChannel } from "../services/zakurabot-channel.js";
+import { createZakurabotFilePublisher } from "../services/zakurabot-adapter.js";
+import { ZakurabotGateway } from "../services/zakurabot-gateway.js";
+import { ZakurabotStore } from "../services/zakurabot-store.js";
+import { registerZakurabotRoutes } from "./zakurabot-routes.js";
+import { isZakurabotAppPath, registerZakurabotAppRoutes } from "./zakurabot-app-routes.js";
+import { ZakurabotFileService } from "../services/zakurabot-files.js";
+import { ZakurabotInteractionService } from "../services/zakurabot-interactions.js";
 import { OpenAiGatewayService } from "../services/openai-gateway.js";
 import { registerTenantRoutes } from "./tenant-routes.js";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -335,6 +343,7 @@ export async function createApiApp(deps: {
   let emailInbound: EmailInboundService | null = null;
   let remoteIngress: RemoteAgentIngress | null = null;
   let remoteRuntime: RemoteChannelRuntime | null = null;
+  let zakurabotGateway: ZakurabotGateway | null = null;
   let cloudAgentRuntime: CloudAgentRuntime | null = null;
   const automation = new AgentAutomationService(db, {
     publicBaseUrl: config.publicBaseUrl,
@@ -366,6 +375,10 @@ export async function createApiApp(deps: {
       "/api/runtime-nodes/register",
       "/api/otel/config",
       "/api/otel/v1/logs",
+      "/api/zakurabot/ws",
+      "/api/zakurabot/oauth/device-code",
+      "/api/zakurabot/oauth/token",
+      "/api/zakurabot/oauth/revoke",
     ]);
     const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
@@ -390,6 +403,7 @@ export async function createApiApp(deps: {
     // probe/import require auth — intentional
     if (
       publicPaths.has(path) ||
+      /^\/api\/zakurabot\/sessions\/[^/]+$/.test(path) ||
       isOauthLoginPublic ||
       isInvitePublic ||
       isFileSharePublic ||
@@ -397,7 +411,8 @@ export async function createApiApp(deps: {
       isScim ||
       isEmailInbound ||
       isRemoteWebhook ||
-      isRoutineWebhook
+      isRoutineWebhook ||
+      isZakurabotAppPath(path)
     ) {
       // Optional session for invite accept
       if (isInvitePublic) {
@@ -2307,6 +2322,20 @@ export async function createApiApp(deps: {
         db,
       });
       cloudAgentRuntime = cloudRuntime;
+      zakurabotGateway = new ZakurabotGateway(new ZakurabotChannel({
+        store: new ZakurabotStore(db),
+        ingress: remoteIngress,
+        sessions: remoteRuntime.sessions,
+        sessionStore: cloudStore,
+        agents: agentService,
+        files: workspaceFsProvider ? new ZakurabotFileService(db, {
+          agents: agentService, workspaceFs: workspaceFsProvider, publicBaseUrl: config.publicBaseUrl,
+        }) : undefined,
+        interactions: new ZakurabotInteractionService(db, { sessions: cloudStore, askUser, acp: acpSessions }),
+        publishFile: createZakurabotFilePublisher({ agents: agentService, fileShares, workspaceFs: workspaceFsProvider }),
+      }), { publicBaseUrl: config.publicBaseUrl });
+      registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl, config.webPublicUrl);
+      registerZakurabotAppRoutes(app, zakurabotGateway, config.publicBaseUrl);
       automation.setRunner({
         startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
       });
@@ -2390,6 +2419,8 @@ export async function createApiApp(deps: {
   function remoteBindingView(binding: Awaited<ReturnType<RemoteAgentIngress["getBinding"]>>) {
     return remoteIngress ? remoteIngress.toBindingView(binding) : null;
   }
+
+  app.get("/api/zakurabot/ws", (c) => c.json({ error: "WebSocket upgrade required; authenticate with a hello frame" }, 426));
 
   app.get("/api/email-connectors", async (c) => {
     const session = c.get("session")!;
@@ -2552,6 +2583,7 @@ export async function createApiApp(deps: {
       });
       await remoteRuntime?.invalidate(current.id);
       if (binding.enabled) await remoteRuntime?.startBinding(session.tenantId, binding.id);
+      if (current.platform === "zakurabot" || binding.platform === "zakurabot") await zakurabotGateway?.refresh();
       return c.json({ binding: remoteBindingView(binding) });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -2565,8 +2597,12 @@ export async function createApiApp(deps: {
     }
     if (!remoteIngress) return c.json({ error: "远程 Agent 通路未初始化" }, 503);
     const id = c.req.param("id");
+    const binding = await remoteIngress.getBinding(session.tenantId, id);
+    if (!binding) return c.json({ ok: false });
     await remoteRuntime?.invalidate(id);
-    return c.json({ ok: await remoteIngress.deleteBinding(session.tenantId, id) });
+    const removed = await remoteIngress.deleteBinding(session.tenantId, id);
+    if (removed && binding.platform === "zakurabot") await zakurabotGateway?.refresh();
+    return c.json({ ok: removed });
   });
 
   app.post("/api/remote-channels/:id/access/approve", async (c) => {
@@ -2584,6 +2620,7 @@ export async function createApiApp(deps: {
         body.userKey,
       );
       const binding = await remoteIngress.getBinding(session.tenantId, c.req.param("id"));
+      if (binding?.platform === "zakurabot") await zakurabotGateway?.refresh();
       return c.json({ ok: result.ok, binding: remoteBindingView(binding), settings: result.settings });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -2605,6 +2642,7 @@ export async function createApiApp(deps: {
         body.userKey,
       );
       const binding = await remoteIngress.getBinding(session.tenantId, c.req.param("id"));
+      if (binding?.platform === "zakurabot") await zakurabotGateway?.refresh();
       return c.json({ ok: result.ok, binding: remoteBindingView(binding), settings: result.settings });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -3165,5 +3203,5 @@ export async function createApiApp(deps: {
     });
   }
 
-  return app;
+  return Object.assign(app, { zakurabotGateway });
 }

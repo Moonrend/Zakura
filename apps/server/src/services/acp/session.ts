@@ -209,7 +209,7 @@ export type LiveRuntime = {
   terminals: Map<string, { outputByteLimit?: number }>;
   permissionGrants: AcpPermissionGrant[];
   permissions: Map<string, PendingPermission>;
-  elicitations: Map<string, PendingDecision<acp.CreateElicitationResponse>>;
+  elicitations: Map<string, PendingDecision<acp.CreateElicitationResponse> & { requestId?: string }>;
   layout: AcpRuntimeLayout;
   agent: Agent;
   /** Registry adapter + version this process is executing from, when managed. */

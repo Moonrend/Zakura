@@ -386,6 +386,34 @@
       "when": 1789401600000,
       "tag": "0054_restore_local_runtime",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1789516800000,
+      "tag": "0055_zakurabot_channel",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789603200000,
+      "tag": "0056_zakurabot_authorization",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1789689600000,
+      "tag": "0057_zakurabot_app",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1789689600001,
+      "tag": "0058_zakurabot_interactions",
+      "breakpoints": true
     }
   ]
 }

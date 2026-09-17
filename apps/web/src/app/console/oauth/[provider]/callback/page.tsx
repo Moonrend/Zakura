@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { X } from "lucide-react";
 import { api, setSession } from "@/lib/api";
+import { consumeBotLoginReturn } from "@/lib/login-return";
 import { Button } from "@/components/ui/button";
 import { PageLoading } from "@/components/ui/progress-linear";
 
@@ -39,7 +40,7 @@ function CallbackInner() {
         const next =
           res.next ??
           (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");
-        router.replace(next);
+        router.replace(consumeBotLoginReturn() ?? next);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }

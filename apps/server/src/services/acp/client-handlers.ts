@@ -278,12 +278,13 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         },
       });
       return new Promise((resolve, reject) => {
-        target.elicitations.set(requestId, { resolve, reject });
+        const pending = { resolve, reject, requestId };
+        target.elicitations.set(requestId, pending);
         // url 模式下 agent 通过 elicitation/complete 通知收尾，而该通知只带
         // elicitationId（与 JSON-RPC requestId 不同）。这里额外登记一条别名，
         // 否则 URL 型 elicitation 永远等不到 resolve，整轮 prompt 会一直挂起。
         if (elicitationId && elicitationId !== requestId) {
-          target.elicitations.set(elicitationId, { resolve, reject });
+          target.elicitations.set(elicitationId, pending);
         }
       });
     })
@@ -310,7 +311,7 @@ export function buildAcpClient(ctx: AcpClientHandlerContext) {
         sessionId: target.chatSessionId,
         type: "elicitation_resolved",
         ...(target.runId ? { runId: target.runId } : {}),
-        payload: { requestId: elicitationId, cancelled: false },
+        payload: { requestId: pending.requestId ?? elicitationId, cancelled: false },
       });
       pending.resolve({ action: "accept" });
     });

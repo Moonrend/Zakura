@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, setSession } from "@/lib/api";
+import { consumeBotLoginReturn } from "@/lib/login-return";
 import { AuthScreen } from "@/components/auth-screen";
 import { Button } from "@/components/ui/button";
 import { PageLoading } from "@/components/ui/progress-linear";
@@ -26,7 +27,7 @@ function Inner() {
           json: { ticket },
         });
         setSession(res.session);
-        router.replace(res.next || "/dashboard/agents");
+        router.replace(consumeBotLoginReturn() ?? (res.next || "/dashboard/agents"));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }

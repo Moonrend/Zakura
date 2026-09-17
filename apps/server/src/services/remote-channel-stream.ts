@@ -53,6 +53,10 @@ export async function waitForRemoteRun(
     typingPulseMs?: number;
     /** 若提供：回合完成且从未成功 chat_reply 时自动补发一次 */
     remoteHandle?: RemoteChannelSessionHandle;
+    /** Release subscriptions on transport shutdown without posting a synthetic reply. */
+    signal?: AbortSignal;
+    /** A native channel can finish projecting interactive replies before the silent-run check. */
+    beforeFallback?: () => Promise<void>;
   },
 ): Promise<void> {
   const typingPulseMs = opts?.typingPulseMs ?? 4000;
@@ -75,7 +79,8 @@ export async function waitForRemoteRun(
 
   startTypingPulse();
   try {
-    const outcome = await waitForRunEnd(store, sessionId, runId);
+    const outcome = await waitForRunEnd(store, sessionId, runId, opts?.signal);
+    if (opts?.signal?.aborted) return;
     if (opts?.remoteHandle) {
       const statusFallbackText =
         outcome.status === "error"
@@ -84,6 +89,8 @@ export async function waitForRemoteRun(
             ? "（本次请求已取消，未产出可见回复。）"
             : undefined;
       try {
+        await opts.beforeFallback?.();
+        if (opts.signal?.aborted) return;
         const lastText = await lastAssistantTextForRun(store, sessionId, runId);
         await maybeAutoChatReplyOnSilentRun(
           opts.remoteHandle,
@@ -116,6 +123,7 @@ function waitForRunEnd(
   store: CloudAgentSessionStore,
   sessionId: string,
   runId: string,
+  signal?: AbortSignal,
 ): Promise<{ status: "completed" | "error" | "cancelled"; message?: string }> {
   return new Promise((resolve) => {
     let finished = false;
@@ -123,6 +131,7 @@ function waitForRunEnd(
       if (finished) return;
       finished = true;
       unsub();
+      signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
 
@@ -156,6 +165,9 @@ function waitForRunEnd(
     const unsub = store.subscribe(sessionId, (event: CloudAgentEvent) => {
       ingest(event);
     });
+    const onAbort = () => finish({ status: "cancelled" });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
 
     void store
       .listEvents(sessionId, { limit: 2000 })
