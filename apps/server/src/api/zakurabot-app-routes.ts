@@ -10,16 +10,20 @@ import { ZakurabotFileError } from "../services/zakurabot-files.js";
 import { zakurabotDeviceView } from "../services/zakurabot-store.js";
 import { ZAKURABOT_MAX_FILE_BYTES } from "../services/zakurabot-protocol.js";
 
+import { captureDesktop } from "../services/agent-desktop.js";
+import { MAX_SCREENSHOT_BYTES } from "../services/agent-screenshot.js";
+import type { AgentWorkspaceService } from "../services/agent-workspace.js";
 import { ZakurabotInteractionError, zakurabotAnswerSchema } from "../services/zakurabot-interactions.js";
 
 /** These endpoints authenticate their own device bearer. Never promote it to a tenant session. */
 export function isZakurabotAppPath(path: string): boolean {
   return /^\/api\/zakurabot\/(me|bots|agents)$/.test(path) ||
-    /^\/api\/zakurabot\/agents\/[^/]+(?:\/(?:history|files(?:\/[^/]+)?|interactions(?:\/[^/]+)?))?$/.test(path);
+    /^\/api\/zakurabot\/agents\/[^/]+(?:\/(?:history|files(?:\/[^/]+)?|desktop(?:\/frame)?|interactions(?:\/[^/]+)?))?$/.test(path);
 }
 
 export function registerZakurabotAppRoutes(
   app: Hono<{ Variables: AppVariables }>, gateway: ZakurabotGateway, baseUrl: string,
+  workspace?: Pick<AgentWorkspaceService, "getDesktopInfo" | "execInWorkspace" | "ensureStarted">,
 ) {
   const channel = gateway.channel;
   const api = new Hono<{ Variables: { device: ZakurabotDevice } }>();
@@ -89,6 +93,38 @@ export function registerZakurabotAppRoutes(
       "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(file.name).replace(/['()*]/g,
         (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
       "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox",
+    } });
+  });
+  api.get("/agents/:id/desktop", async (c) => {
+    const { conversation } = await channel.resolveConversation(c.get("device"), c.req.param("id"));
+    const agent = await channel.deps.agents.get(conversation.tenantId, conversation.agentId);
+    if (!agent?.enableComputer) return c.json({ error: "Desktop is disabled" }, 409);
+    if (!workspace) return c.json({ error: "Desktop is unavailable" }, 503);
+    const info = await workspace.getDesktopInfo(agent);
+    await channel.resolveConversation(c.get("device"), agent.id);
+    return c.json({ enabled: info.enabled, supported: info.supported, status: info.containerStatus,
+      width: info.width, height: info.height, coordinateSpace: info.coordinateSpace,
+      frameUrl: info.enabled && info.supported
+        ? `${baseUrl.replace(/\/+$/, "")}/api/zakurabot/agents/${encodeURIComponent(agent.id)}/desktop/frame` : null,
+      frameAuthorization: "Bearer", maxFrameBytes: MAX_SCREENSHOT_BYTES, suggestedIntervalMs: 2000 });
+  });
+  api.get("/agents/:id/desktop/frame", async (c) => {
+    const { conversation } = await channel.resolveConversation(c.get("device"), c.req.param("id"));
+    const agent = await channel.deps.agents.get(conversation.tenantId, conversation.agentId);
+    if (!agent?.enableComputer) return c.json({ error: "Desktop is disabled" }, 409);
+    if (!workspace) return c.json({ error: "Desktop is unavailable" }, 503);
+    const info = await workspace.getDesktopInfo(agent);
+    if (!info.enabled || !info.supported) return c.json({ error: "This workspace does not support a desktop" }, 409);
+    const frame = await captureDesktop(workspace, agent);
+    const bytes = Buffer.from(frame.base64Full, "base64");
+    await channel.resolveConversation(c.get("device"), agent.id);
+    if (!(await channel.deps.agents.get(conversation.tenantId, agent.id))?.enableComputer) {
+      return c.json({ error: "Desktop is disabled" }, 409);
+    }
+    return new Response(bytes, { headers: {
+      "Content-Type": "image/png", "Content-Length": String(bytes.length), "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff", "X-Frame-Width": String(frame.width), "X-Frame-Height": String(frame.height),
+      "X-Frame-Captured-At": new Date().toISOString(),
     } });
   });
   api.get("/agents/:id/interactions", async (c) => {

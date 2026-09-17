@@ -355,6 +355,9 @@ async function main() {
         "X-Zakura-Session-Id",
         "Retry-After",
         "Content-Disposition",
+        "X-Frame-Width",
+        "X-Frame-Height",
+        "X-Frame-Captured-At",
       ],
     }),
   );

@@ -1,10 +1,10 @@
 # Zakura Bot 远程渠道
 
-`zakurabot` 是 first-party 私聊渠道，兼容 `Moonrend/zakura-bot@94fde6a` 的登录、bot/会话管理与 v1 消息协议。文件能力通过可选字段扩展 v1，客户端可按 capabilities 启用。它复用 `RemoteAgentIngress`、远程会话注册表和 `chat_*` 工具；Slack、Telegram 等继续使用原来的 Chat SDK 适配器。
+`zakurabot` 是 first-party 私聊渠道，兼容 `Moonrend/zakura-bot@f895388` 的登录、bot/会话管理、文件、桌面查看与 v1 消息协议。interactions 通过可选字段扩展 v1，客户端可按 capabilities 启用。它复用 `RemoteAgentIngress`、远程会话注册表和 `chat_*` 工具；Slack、Telegram 等继续使用原来的 Chat SDK 适配器。
 
 ## 连接 App
 
-1. 升级服务端并应用迁移（正常启动会自动迁移，当前需要到 `0058_zakurabot_interactions`）。为 Agent 配置可用的 chat 模型；收发工作区文件还需要启用文件系统并绑定运行节点。
+1. 升级服务端并应用迁移（正常启动会自动迁移，当前需要到 `0058_zakurabot_interactions`）。为 Agent 配置可用的 chat 模型；收发工作区文件还需要启用文件系统并绑定运行节点。查看桌面需要启用 Computer，并使用支持桌面的容器工作区。
 2. 在 Agent 的「平台」页添加 **Zakura Bot**，选择模型或跟随默认，保存。
 3. App 首次启动输入实例 URL，点击 **Sign in with Zakura**，浏览器打开设备授权页。
 4. 使用现有租户成员登录（支持 MFA/SSO），核对设备授权码，选择 1–16 个有权访问的绑定并批准。返回 App 后自动完成登录。
@@ -81,6 +81,32 @@ Content-Type: application/json
 
 `file.url` **每次下载都需要设备 Bearer Token**；Web 客户端可用带 Authorization 的 fetch 取得 Blob 再展示，不能把 Token 放入查询参数。URL 在权限和工作区文件有效期间可用。分组由客户端按实例本地保存，当前没有服务端分组同步 API。
 
+## 桌面查看
+
+实例 capabilities 包含 `desktop_frames` 时，服务端提供截图 API；已启用 Computer 的 Bot 同时返回 `capabilities.desktop:true`。客户端 `f895388` 使用以下两个设备 Bearer 接口：
+
+| 方法与路径 | 返回 / 用途 |
+| --- | --- |
+| `GET /api/zakurabot/agents/:agentId/desktop` | 桌面能力和配置尺寸，以及截图路径、鉴权方式和建议刷新间隔 |
+| `GET /api/zakurabot/agents/:agentId/desktop/frame` | 完整 `image/png` 字节，最大 8 MiB |
+
+桌面信息示例：
+
+```json
+{
+  "enabled": true, "supported": true, "status": "running", "width": 1280, "height": 720,
+  "coordinateSpace": "desktop pixels, origin top-left",
+  "frameUrl": "https://zakura.example/prefix/api/zakurabot/agents/agent-1/desktop/frame",
+  "frameAuthorization": "Bearer", "maxFrameBytes": 8388608, "suggestedIntervalMs": 2000
+}
+```
+
+不支持桌面的工作区返回 `supported:false` 和 `frameUrl:null`。信息只包含上述公开字段，不返回 Runner 地址、CDP/noVNC 端口或容器 ID。`frameUrl` 保留部署前缀，下载时仍需设备凭据；客户端也可从当前实例 URL 和 Agent ID 构造相同路径。
+
+帧响应带 `Content-Length`、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`X-Frame-Width`、`X-Frame-Height` 和 ISO 时间戳 `X-Frame-Captured-At`。帧头记录实际截图尺寸，metadata 的尺寸来自工作区配置；三个 `X-Frame-*` 头已通过 CORS 暴露。Web 用带 Authorization 的 fetch 取得 Blob；原生端可转换为 data URL 显示。自动刷新建议间隔至少 2 秒，页面不可见或进入后台时暂停。
+
+每次捕获都重新校验设备、绑定和 Computer 权限，慢截图完成后再次校验；撤销或禁用后不会返回已捕获的图像。凭据失效返回 401，无 Bot 权限返回 403，Computer 未启用或工作区不支持返回 409，工作区不可用、截图失败、超限或 PNG 不完整返回 503。端点复用 `captureDesktop` 和原有工作区启动逻辑，只提供查看；电脑操作继续交给 Agent 的 `computer_*` 工具。
+
 ## 交互消息：问题、授权与表单
 
 启用后，实例 capabilities 包含 `interactions`，Bot 的 `capabilities.interactions` 为 `true`。`ask_user_request`、ACP `permission_request` 和 `elicitation_request` 经同一 `chat_reply` 工具转换为卡片；主会话及其同 Agent 的 ACP 派生会话都按原设备、绑定和会话授权。普通模型工具不能自行构造 interaction ID，询问用户应调用 `ask_user`。
@@ -137,7 +163,7 @@ App 会话管理使用设备 Bearer Token：`GET /api/zakurabot/sessions/:agentI
 {"type":"ping"}
 ```
 
-服务端先返回 `ready {protocol:1, agents[], capabilities:["agents","history","files","interactions"]}`（具体能力取决于服务配置），之后发送：
+服务端先返回 `ready {protocol:1, agents[], capabilities:["agents","history","files","interactions","desktop_frames"]}`（具体能力取决于服务配置），之后发送：
 
 | 帧 | 用途 |
 | --- | --- |
@@ -168,8 +194,8 @@ Agent 必须通过 `chat_reply` 发出可见文字，默认引用入站消息 ID
 v1 的 socket 投递和会话工具句柄驻留在当前服务进程。使用单个 API/runtime 实例，或保证同一设备始终路由到同一实例；当前没有跨进程 socket 广播。
 
 ```sh
-REDIS_URL=off pnpm --filter @zakura/server exec tsx --test --test-force-exit --test-concurrency=2 'test/zakurabot-*.test.ts' test/remote-channel-tools.test.ts test/remote-channel-commands.test.ts test/remote-agent-ingress.test.ts test/acp-elicitation.test.ts test/db-migrations.test.ts
+REDIS_URL=off pnpm --filter @zakura/server exec tsx --test --test-force-exit --test-concurrency=2 'test/zakurabot-*.test.ts' test/remote-channel-tools.test.ts test/remote-channel-commands.test.ts test/remote-agent-ingress.test.ts test/acp-elicitation.test.ts test/agent-desktop.test.ts test/db-migrations.test.ts
 pnpm typecheck
 ```
 
-集成测试使用真实 WS、PGlite、RemoteAgentIngress 和会话存储，以受控 runtime 验证鉴权、隔离、幂等、打断、附件下载、交互回答/超时/恢复、ACP 派生会话归属及 Socket.IO 共存。ACP URL 完成关联另用真实 SDK 消息流验证，无需外部模型或聊天平台凭据。
+集成测试使用真实 WS、PGlite、RemoteAgentIngress 和会话存储，以受控 runtime 验证鉴权、隔离、幂等、打断、附件下载、交互回答/超时/恢复、ACP 派生会话归属及 Socket.IO 共存。桌面测试通过真实 HTTP 验证受控截图后端的完整 PNG、响应头、撤销与错误处理；ACP URL 完成关联另用真实 SDK 消息流验证，无需外部模型或聊天平台凭据。
