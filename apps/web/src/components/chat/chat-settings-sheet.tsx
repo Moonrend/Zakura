@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ExternalLink } from "lucide-react";
-import type { CloudAgentFollowUpMode } from "@zakura/shared";
+import type { CloudAgentFollowUpMode, ToolApprovalPolicy } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -42,11 +42,23 @@ export interface ChatSettingsSheetProps {
   onAutoTitleChange: (value: boolean) => void;
   followUpMode: CloudAgentFollowUpMode;
   onFollowUpModeChange: (value: CloudAgentFollowUpMode) => void;
+  approvalPolicy: ToolApprovalPolicy;
+  onApprovalPolicyChange: (value: ToolApprovalPolicy) => void;
   maxSubagentDepth: string;
   onMaxSubagentDepthChange: (value: string) => void;
 }
 
 const SUBAGENT_DEPTHS = ["1", "2", "3", "4", "5"] as const;
+
+const APPROVAL_POLICIES: Array<{ value: ToolApprovalPolicy; label: string; hint: string }> = [
+  { value: "allow_all", label: "自动允许", hint: "所有工具调用直接执行" },
+  { value: "ask", label: "每次询问", hint: "只读放行，其余等你确认" },
+  { value: "ai", label: "AI 审批", hint: "AI 门控决定，低置信度转人工" },
+];
+
+function approvalPolicyHint(policy: ToolApprovalPolicy): string {
+  return APPROVAL_POLICIES.find((p) => p.value === policy)?.hint ?? "";
+}
 
 export function ChatSettingsSheet({
   open,
@@ -65,6 +77,8 @@ export function ChatSettingsSheet({
   onAutoTitleChange,
   followUpMode,
   onFollowUpModeChange,
+  approvalPolicy,
+  onApprovalPolicyChange,
   maxSubagentDepth,
   onMaxSubagentDepthChange,
 }: ChatSettingsSheetProps) {
@@ -98,6 +112,33 @@ export function ChatSettingsSheet({
             <SettingsRow label="自动标题">
               <Switch checked={autoTitle} onCheckedChange={onAutoTitleChange} />
             </SettingsRow>
+            <div className="flex items-center justify-between gap-4 py-3">
+              <div className="min-w-0 space-y-0.5">
+                <Label>工具审批</Label>
+                <p className="text-xs text-muted-foreground">
+                  {approvalPolicyHint(approvalPolicy)}
+                </p>
+              </div>
+              <Select
+                value={approvalPolicy}
+                onValueChange={(v) => {
+                  if (v !== "allow_all" && v !== "ask" && v !== "ai") return;
+                  onApprovalPolicyChange(v);
+                }}
+                items={APPROVAL_POLICIES.map((p) => ({ value: p.value, label: p.label }))}
+              >
+                <SelectTrigger className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {APPROVAL_POLICIES.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="flex items-center justify-between gap-4 py-3">
               <div className="min-w-0 space-y-0.5">
                 <Label>执行中发消息</Label>

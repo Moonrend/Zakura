@@ -104,6 +104,7 @@ import { CloudAgentSessionStore } from "../services/cloud-agent-session.js";
 import { CloudAgentRuntime } from "../services/cloud-agent-runtime.js";
 import { AgentAutomationService } from "../services/agent-automation.js";
 import { AskUserService } from "../services/ask-user.js";
+import { ToolApprovalService } from "../services/tool-approval.js";
 import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
@@ -2299,6 +2300,12 @@ export async function createApiApp(deps: {
     if (modelRouter) {
       const { AgentHooksService } = await import("../services/agent-hooks.js");
       const agentHooks = new AgentHooksService(agentService.workspace);
+      // 工具调用审批：策略引擎 + JEV/LLM AI 门控 + 人工审批卡
+      const toolApproval = new ToolApprovalService(db, cloudStore, modelRouter);
+      toolApproval.annotationsResolver = async (agent, qualifiedName) => {
+        const tools = await gateway.listToolsForAgent(agent);
+        return tools.find((t) => t.qualifiedName === qualifiedName)?.annotations;
+      };
       remoteRuntime = new RemoteChannelRuntime(
         config,
         connectorAuth,
@@ -2318,6 +2325,7 @@ export async function createApiApp(deps: {
         remoteChannels: remoteRuntime.sessions,
         automation,
         askUser,
+        toolApproval,
         acp: acpSessions,
         db,
       });
@@ -2343,6 +2351,7 @@ export async function createApiApp(deps: {
       automation.start();
       askUser.setFollowUp((input) => cloudRuntime.enqueueFollowUp(input));
       askUser.start();
+      toolApproval.start();
       remoteIngress?.setAutomation(automation);
       void db
         .select({ id: tenants.id })
@@ -2367,6 +2376,7 @@ export async function createApiApp(deps: {
         skills,
         acp: acpSessions,
         askUser,
+        toolApproval,
       });
       registerAutomationRoutes(app, { agentService, automation });
       emailInbound = new EmailInboundService(

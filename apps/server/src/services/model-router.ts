@@ -4,6 +4,8 @@ import type {
   ModelChatMessage,
   ModelChatResult,
   ModelEmbeddingResult,
+  ModelEvaluationInput,
+  ModelEvaluationResult,
   ModelImageResult,
   ModelRerankResult,
 } from "@zakura/shared";
@@ -12,6 +14,7 @@ import {
   executeChat,
   executeChatStream,
   executeEmbed,
+  executeEvaluation,
   executeImage,
   executeRerank,
   executeWithFallback,
@@ -94,6 +97,23 @@ export class ModelRouterService {
   ): Promise<RoutedResult<ModelChatResult>> {
     return this.invoke(tenantId, "chat", input, (route) =>
       executeChat(route, messages, options),
+    );
+  }
+
+  /**
+   * System One 结构化评估（TypeSafe JEV 等 evaluation 路由）。
+   * input.questions 的键即答案键；路由按 evaluation 能力解析。
+   */
+  evaluate(
+    tenantId: string,
+    input: ModelEvaluationInput,
+    routeQuery?: { alias?: string; routeId?: string },
+  ): Promise<RoutedResult<ModelEvaluationResult>> {
+    return this.invoke(
+      tenantId,
+      "evaluation",
+      { capability: "evaluation", ...routeQuery },
+      (route) => executeEvaluation(route, input),
     );
   }
 

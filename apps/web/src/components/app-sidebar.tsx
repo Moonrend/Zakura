@@ -101,6 +101,7 @@ type NavEntry = {
 const AGENT_ICONS: Record<string, IconComp> = {
   overview: LayoutDashboard,
   settings: Settings2,
+  approvals: ShieldCheck,
   computer: Monitor,
   projects: FolderKanban,
   web: Globe,

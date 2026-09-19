@@ -1,6 +1,5 @@
 {
   "version": "7",
-  "dialect": "postgresql",
   "entries": [
     {
       "idx": 0,
@@ -413,6 +412,13 @@
       "version": "7",
       "when": 1789689600001,
       "tag": "0058_zakurabot_interactions",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1789689600002,
+      "tag": "0060_tool_approvals",
       "breakpoints": true
     }
   ]

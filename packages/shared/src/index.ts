@@ -220,6 +220,10 @@ export {
   type ModelRerankResult,
   type ModelRerankDocument,
   type ModelImageResult,
+  type ModelEvaluationQuestion,
+  type ModelEvaluationInput,
+  type ModelEvaluationAnswer,
+  type ModelEvaluationResult,
   type ModelCatalogEntry,
   type UpstreamModelRecord,
   type LogicalModelGroup,
@@ -631,6 +635,34 @@ export type {
   AgentHooksByEvent,
   AgentHookPackage,
 } from "./agent-hooks.js";
+
+export {
+  TOOL_APPROVAL_POLICIES,
+  TOOL_APPROVAL_RULE_ACTIONS,
+  DEFAULT_TOOL_APPROVAL,
+  DEFAULT_AI_CONFIDENCE_THRESHOLD,
+  DEFAULT_ASK_TIMEOUT_SECONDS,
+  TOOL_APPROVAL_REASON_LABEL,
+  parseToolApprovalPolicy,
+  parseToolApprovalConfig,
+  resolveApprovalPolicy,
+  resolveConfidenceThreshold,
+  resolveAskTimeoutSeconds,
+  approvalRuleHits,
+} from "./tool-approval.js";
+export type {
+  ToolApprovalPolicy,
+  ToolApprovalRuleAction,
+  ToolApprovalRule,
+  ToolApprovalAiProvider,
+  ToolApprovalAiGateConfig,
+  ToolApprovalConfig,
+  ToolApprovalReason,
+  ToolApprovalAiDecision,
+  CloudAgentToolApprovalOption,
+  CloudAgentToolApprovalRequestPayload,
+  CloudAgentToolApprovalResolvedPayload,
+} from "./tool-approval.js";
 
 export type {
   StoreComponentKind,

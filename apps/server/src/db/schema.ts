@@ -2204,6 +2204,46 @@ export const agentUserQuestions = pgTable(
   ],
 );
 
+/** 工具调用审批记录：策略/规则/AI 门控触发，人工或 AI 决定，可审计 */
+export const agentToolApprovals = pgTable(
+  "agent_tool_approvals",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull(),
+    runId: text("run_id"),
+    toolCallId: text("tool_call_id"),
+    /** 模型可见的工具名 */
+    toolName: text("tool_name").notNull(),
+    /** 限定名（provider:tool） */
+    qualifiedName: text("qualified_name"),
+    argsJson: text("args_json").notNull().default("{}"),
+    /** rule_ask | policy_ask | ai_low_confidence | ai_deny_escalate */
+    reason: text("reason").notNull().default("policy_ask"),
+    /** AI 门控决策（ToolApprovalAiDecision） */
+    aiJson: text("ai_json").notNull().default("{}"),
+    /** pending | approved | denied | timeout | cancelled */
+    status: text("status").notNull().default("pending"),
+    /** user | ai | timeout | cancel */
+    decidedBy: text("decided_by"),
+    alwaysAllow: boolean("always_allow").notNull().default(false),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_tool_approvals_session").on(t.sessionId, t.status),
+    index("agent_tool_approvals_due").on(t.status, t.expiresAt),
+    index("agent_tool_approvals_tenant").on(t.tenantId),
+    index("agent_tool_approvals_agent").on(t.agentId, t.createdAt),
+  ],
+);
+
 /** 每 Agent 一条心跳配置：周期自唤醒 */
 export const agentHeartbeats = pgTable(
   "agent_heartbeats",
@@ -2307,4 +2347,5 @@ export type AgentSchedule = typeof agentSchedules.$inferSelect;
 export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
 export type AgentUserQuestion = typeof agentUserQuestions.$inferSelect;
+export type AgentToolApproval = typeof agentToolApprovals.$inferSelect;
 export type AgentProjectRow = typeof agentProjects.$inferSelect;

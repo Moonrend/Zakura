@@ -14,6 +14,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { AskUserCard } from "@/components/chat/ask-user-card";
+import { ToolApprovalCard } from "@/components/chat/tool-approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -523,6 +524,11 @@ function renderRunItems(
       selected?: string[];
       text?: string;
     }) => void;
+    onToolApproval?: (input: {
+      requestId: string;
+      decision: "approved" | "denied";
+      alwaysAllow?: boolean;
+    }) => void;
     uiKey?: string;
     ui?: Record<string, boolean>;
     setUiFlag?: (key: string, value: boolean) => void;
@@ -722,6 +728,14 @@ function renderRunItems(
           onResolve={opts.onAskUser}
         />,
       );
+    } else if (it.kind === "tool_approval") {
+      blocks.push(
+        <ToolApprovalCard
+          key={`approval-${it.id}`}
+          item={it}
+          onResolve={opts.onToolApproval}
+        />,
+      );
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -840,6 +854,7 @@ export function ChatMessages({
   onPermission,
   onElicitation,
   onAskUser,
+  onToolApproval,
   ui,
   setUiFlag,
   remotes = [],
@@ -872,6 +887,11 @@ export function ChatMessages({
     cancelled?: boolean;
     selected?: string[];
     text?: string;
+  }) => void;
+  onToolApproval?: (input: {
+    requestId: string;
+    decision: "approved" | "denied";
+    alwaysAllow?: boolean;
   }) => void;
   ui?: Record<string, boolean>;
   setUiFlag?: (key: string, value: boolean) => void;
@@ -1060,6 +1080,7 @@ export function ChatMessages({
                 onPermission,
                 onElicitation,
                 onAskUser,
+                onToolApproval,
                 uiKey: turn.message.id,
                 ui,
                 setUiFlag,

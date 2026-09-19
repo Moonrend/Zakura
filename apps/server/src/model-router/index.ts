@@ -11,6 +11,7 @@ export {
   executeChat,
   executeChatStream,
   executeEmbed,
+  executeEvaluation,
   executeRerank,
   executeImage,
   executeWithFallback,

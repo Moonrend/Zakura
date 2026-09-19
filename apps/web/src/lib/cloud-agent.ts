@@ -204,6 +204,34 @@ export type TimelineItem =
       seq: number;
     }
   | {
+      kind: "tool_approval";
+      id: string;
+      requestId: string;
+      toolCallId?: string;
+      toolName: string;
+      qualifiedName?: string;
+      title?: string;
+      argumentsJson?: string;
+      reason?: string;
+      ai?: {
+        provider: string;
+        model: string;
+        decision: string;
+        confidence: number;
+        probabilities?: Record<string, number>;
+        rationale?: string;
+        latencyMs?: number;
+        degraded?: boolean;
+      };
+      expiresAt?: string | null;
+      resolved?: {
+        decision: "approved" | "denied" | "timeout" | "cancelled";
+        decidedBy?: string;
+        alwaysAllow?: boolean;
+      };
+      seq: number;
+    }
+  | {
       kind: "plan";
       id: string;
       entries: Array<{ content: string; status?: string; priority?: string }>;
@@ -951,6 +979,73 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       }
       continue;
     }
+    if (ev.type === "tool_approval_request") {
+      flushReasoning();
+      flushAssistant();
+      const ai = p.ai as
+        | {
+            provider?: string;
+            model?: string;
+            decision?: string;
+            confidence?: number;
+            probabilities?: Record<string, number>;
+            rationale?: string;
+            latencyMs?: number;
+            degraded?: boolean;
+          }
+        | undefined;
+      items.push({
+        kind: "tool_approval",
+        id: ev.id,
+        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        toolCallId: typeof p.toolCallId === "string" ? p.toolCallId : undefined,
+        toolName: typeof p.toolName === "string" ? p.toolName : "",
+        qualifiedName: typeof p.qualifiedName === "string" ? p.qualifiedName : undefined,
+        title: typeof p.title === "string" ? p.title : undefined,
+        argumentsJson: typeof p.argumentsJson === "string" ? p.argumentsJson : undefined,
+        reason: typeof p.reason === "string" ? p.reason : undefined,
+        ...(ai && typeof ai.decision === "string"
+          ? {
+              ai: {
+                provider: String(ai.provider ?? "jev"),
+                model: String(ai.model ?? ""),
+                decision: String(ai.decision),
+                confidence: typeof ai.confidence === "number" ? ai.confidence : 0,
+                probabilities:
+                  ai.probabilities && typeof ai.probabilities === "object"
+                    ? ai.probabilities
+                    : undefined,
+                rationale: typeof ai.rationale === "string" ? ai.rationale : undefined,
+                latencyMs: typeof ai.latencyMs === "number" ? ai.latencyMs : undefined,
+                degraded: ai.degraded === true,
+              },
+            }
+          : {}),
+        expiresAt: typeof p.expiresAt === "string" ? p.expiresAt : null,
+        seq: ev.seq,
+      });
+      continue;
+    }
+    if (ev.type === "tool_approval_resolved") {
+      const rid = typeof p.requestId === "string" ? p.requestId : "";
+      const card = items.find(
+        (it) => it.kind === "tool_approval" && it.requestId === rid,
+      ) as Extract<TimelineItem, { kind: "tool_approval" }> | undefined;
+      if (card) {
+        card.resolved = {
+          decision:
+            p.decision === "approved" ||
+            p.decision === "denied" ||
+            p.decision === "timeout" ||
+            p.decision === "cancelled"
+              ? p.decision
+              : "denied",
+          decidedBy: typeof p.decidedBy === "string" ? p.decidedBy : undefined,
+          alwaysAllow: p.alwaysAllow === true,
+        };
+      }
+      continue;
+    }
     if (ev.type === "acp_plan") {
       flushReasoning();
       flushAssistant();
@@ -1138,7 +1233,17 @@ export function buildConversationTurns(
         ev.type === "memory_updated" ||
         ev.type === "context_sources" ||
         ev.type === "context_compacting" ||
-        ev.type === "context_compacted")
+        ev.type === "context_compacted" ||
+        // 交互卡：挂在所属 Run 的时间线上（询问 / 授权 / 审批 / 计划）
+        ev.type === "permission_request" ||
+        ev.type === "permission_resolved" ||
+        ev.type === "elicitation_request" ||
+        ev.type === "elicitation_resolved" ||
+        ev.type === "ask_user_request" ||
+        ev.type === "ask_user_resolved" ||
+        ev.type === "tool_approval_request" ||
+        ev.type === "tool_approval_resolved" ||
+        ev.type === "acp_plan")
     ) {
       const list = eventsByRun.get(ev.runId) ?? [];
       list.push(ev);
@@ -1429,6 +1534,18 @@ export async function resolveAskUser(
   });
 }
 
+/** 工具调用审批：允许 / 拒绝（可记住「总是允许」） */
+export async function resolveToolApproval(
+  agentId: string,
+  sessionId: string,
+  body: { requestId: string; decision: "approved" | "denied"; alwaysAllow?: boolean; cancelled?: boolean },
+) {
+  return api<{ ok: boolean }>(`/api/agents/${agentId}/sessions/${sessionId}/approvals`, {
+    method: "POST",
+    json: body,
+  });
+}
+
 /** 编辑服务端排队中的消息 */
 export async function updateQueuedMessage(
   agentId: string,
@@ -1547,7 +1664,7 @@ export async function searchCloudSessions(q: string, agentId?: string, limit = 5
   });
 }
 
-export type ModelCapabilityFilter = "chat" | "embedding" | "rerank" | "image";
+export type ModelCapabilityFilter = "chat" | "embedding" | "rerank" | "image" | "evaluation";
 
 export type ChatModelOption = {
   alias: string;

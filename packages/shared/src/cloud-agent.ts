@@ -5,6 +5,7 @@
  * - Run 可取消，工具调用作为一等事件展示
  */
 import type { ModelToolCall } from "./model-router.js";
+import { parseToolApprovalConfig } from "./tool-approval.js";
 
 /**
  * Agent 可调用、但不在任何用户界面展示的内部工具。
@@ -77,6 +78,9 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   /** 一等公民：询问用户（选项卡 / 密钥 / 同步或异步） */
   "ask_user_request",
   "ask_user_resolved",
+  /** 工具调用审批：策略 / 规则 / AI 门控触发，等待用户或 AI 决定 */
+  "tool_approval_request",
+  "tool_approval_resolved",
   /** ACP：执行计划 */
   "acp_plan",
 ] as const;
@@ -534,6 +538,10 @@ export type CloudAgentAskUserResolvedPayload = {
   hasText?: boolean;
 };
 
+export type CloudAgentToolApprovalRequestPayload = import("./tool-approval.js").CloudAgentToolApprovalRequestPayload;
+
+export type CloudAgentToolApprovalResolvedPayload = import("./tool-approval.js").CloudAgentToolApprovalResolvedPayload;
+
 export type CloudAgentAcpPlanEntry = {
   content: string;
   status?: string;
@@ -571,6 +579,8 @@ export type CloudAgentEventPayload =
   | CloudAgentElicitationResolvedPayload
   | CloudAgentAskUserRequestPayload
   | CloudAgentAskUserResolvedPayload
+  | CloudAgentToolApprovalRequestPayload
+  | CloudAgentToolApprovalResolvedPayload
   | CloudAgentAcpPlanPayload;
 
 export type CloudAgentEvent = {
@@ -646,6 +656,11 @@ export type CloudAgentConfig = {
    * - queue：等当前 Run 整轮结束后再开新回合
    */
   followUpMode?: CloudAgentFollowUpMode;
+  /**
+   * 工具调用审批（Codex / Claude Code 式）。
+   * 默认 allow_all：全部放行；可切换 ask（询问用户）或 ai（AI 审批门控）。
+   */
+  approvals?: import("./tool-approval.js").ToolApprovalConfig;
 };
 
 export type CloudAgentRunOptions = {
@@ -750,6 +765,10 @@ export function parseCloudAgentConfig(raw: unknown): CloudAgentConfig {
   }
   if (cloud.followUpMode === "steer" || cloud.followUpMode === "queue") {
     out.followUpMode = cloud.followUpMode;
+  }
+  if (cloud.approvals && typeof cloud.approvals === "object" && !Array.isArray(cloud.approvals)) {
+    const approvals = parseToolApprovalConfig(cloud.approvals);
+    if (Object.keys(approvals).length) out.approvals = approvals;
   }
   return out;
 }

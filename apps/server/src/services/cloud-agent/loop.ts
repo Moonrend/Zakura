@@ -122,6 +122,14 @@ export type AgentLoopHooks = {
     call: ModelToolCall,
     args: Record<string, unknown>,
   ) => Promise<LoopToolOutcome | undefined>;
+  /**
+   * 工具审批门：interceptCall 未拦截（即将要走 MCP gateway）时调用。
+   * 返回 LoopToolOutcome 表示拒绝/失败（不执行工具）；undefined = 已批准放行。
+   */
+  requestApproval?: (
+    call: ModelToolCall,
+    args: Record<string, unknown>,
+  ) => Promise<LoopToolOutcome | undefined>;
   /** 工具成功/失败后回调（插件 PostToolUse / PostToolUseFailure）；返回文本则注入下一轮上下文 */
   afterToolCall?: (
     call: ModelToolCall,
@@ -756,7 +764,10 @@ export async function runAgentLoop(
                 const resolved =
                   preResolved.get(call.id) ??
                   (await input.hooks?.interceptCall?.(call, args));
-                const outcome = resolved ?? {
+                const gated =
+                  resolved ??
+                  (await input.hooks?.requestApproval?.(call, args));
+                const outcome = gated ?? {
                   result: await deps.gateway.callTool(tenantId, qualified, args, {
                     agentId: agent.id,
                     ...(input.defaultWorkingDir

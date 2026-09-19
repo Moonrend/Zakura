@@ -204,6 +204,7 @@ export async function fetchAgentProgress(id: string) {
 export const AGENT_SUBNAV = [
   { href: "overview", label: "概况" },
   { href: "settings", label: "设置" },
+  { href: "approvals", label: "工具审批" },
   { href: "computer", label: "电脑" },
   { href: "projects", label: "项目" },
   { href: "web", label: "网页" },

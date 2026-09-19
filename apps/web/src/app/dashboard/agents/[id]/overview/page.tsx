@@ -11,6 +11,7 @@ import {
   MessageSquare,
   Plug,
   Settings2,
+  ShieldCheck,
   Blocks,
   Wrench,
   ArrowUpRight,
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils";
 
 const QUICK_LINKS = [
   { href: "settings", label: "设置", icon: Settings2, hint: "模型、指令与 Agent 行为" },
+  { href: "approvals", label: "工具审批", icon: ShieldCheck, hint: "审批策略、AI 门控与规则" },
   { href: "computer", label: "电脑", icon: HardDrive, hint: "容器与开发环境" },
   { href: "projects", label: "项目", icon: FolderKanban, hint: "系统指令与知识库" },
   { href: "skills", label: "技能", icon: Blocks, hint: "预装能力扩展" },

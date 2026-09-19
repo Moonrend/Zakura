@@ -29,6 +29,8 @@ import type {
   CloudAgentFollowUpMode,
   CloudAgentRunOptions,
   ComposerCapabilities,
+  ToolApprovalConfig,
+  ToolApprovalPolicy,
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
@@ -91,6 +93,7 @@ import {
   regenerateCloudRun,
   removeQueuedMessage,
   resolveAskUser,
+  resolveToolApproval,
   saveCloudConfig,
   sendCloudMessage,
   subscribeCloudEvents,
@@ -265,6 +268,9 @@ export function ChatApp() {
   /** 运行中再发：steer=下一工具后注入（默认）；queue=整轮结束后再发 */
   const [followUpMode, setFollowUpMode] = useState<CloudAgentFollowUpMode>("steer");
   const [maxSubagentDepth, setMaxSubagentDepth] = useState("2");
+  /** 工具审批策略（快捷项）；完整配置在 Agent 设置页编辑 */
+  const [approvalPolicy, setApprovalPolicy] = useState<ToolApprovalPolicy>("allow_all");
+  const approvalsRef = useRef<ToolApprovalConfig>({});
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [hasChatRoute, setHasChatRoute] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -1341,6 +1347,8 @@ export function ChatApp() {
         setAutoTitle(cfg.cloud.autoTitle !== false);
         setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
         setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
+        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
+        approvalsRef.current = cfg.cloud.approvals ?? {};
         setModels(chatModels);
         const pending = pendingSessionRef.current;
         pendingSessionRef.current = null;
@@ -1530,6 +1538,8 @@ export function ChatApp() {
               setAutoTitle(cfg.cloud.autoTitle !== false);
               setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
               setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
+        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
+        approvalsRef.current = cfg.cloud.approvals ?? {};
             })
             .catch(() => {});
         }
@@ -1554,6 +1564,8 @@ export function ChatApp() {
             setAutoTitle(cfg.cloud.autoTitle !== false);
             setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
             setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
+        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
+        approvalsRef.current = cfg.cloud.approvals ?? {};
           })
           .catch(() => {});
       },
@@ -2507,6 +2519,7 @@ export function ChatApp() {
     autoTitle?: boolean;
     followUpMode?: CloudAgentFollowUpMode;
     maxSubagentDepth?: string;
+    approvalsPolicy?: ToolApprovalPolicy;
   };
 
   const persistChatSettings = useCallback(
@@ -2522,6 +2535,10 @@ export function ChatApp() {
         const n = Number(patch.maxSubagentDepth);
         body.maxSubagentDepth =
           Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 5) : null;
+      }
+      if (patch.approvalsPolicy !== undefined) {
+        // 只带 policy：服务端按 key 合并，不覆盖规则 / AI 门控
+        body.approvals = { policy: patch.approvalsPolicy };
       }
       await saveCloudConfig(agentId, body);
     },
@@ -3056,6 +3073,12 @@ export function ChatApp() {
                   toast.error(err instanceof Error ? err.message : String(err)),
                 );
               }}
+              onToolApproval={(input) => {
+                if (!agentId || !sessionId) return;
+                void resolveToolApproval(agentId, sessionId, input).catch((err) =>
+                  toast.error(err instanceof Error ? err.message : String(err)),
+                );
+              }}
             />
               </>
             )}
@@ -3466,6 +3489,11 @@ export function ChatApp() {
         onFollowUpModeChange={(v) => {
           setFollowUpMode(v);
           saveSettingsNow({ followUpMode: v });
+        }}
+        approvalPolicy={approvalPolicy}
+        onApprovalPolicyChange={(v) => {
+          setApprovalPolicy(v);
+          saveSettingsNow({ approvalsPolicy: v });
         }}
         maxSubagentDepth={maxSubagentDepth}
         onMaxSubagentDepthChange={(v) => {

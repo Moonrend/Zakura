@@ -20,6 +20,7 @@ import {
   parseCloudAgentConfig,
   projectDefaultWorkingDir,
   isGitCommitCommand,
+  resolveApprovalPolicy,
   type CloudAgentAttachment,
   type CloudAgentConfig,
   type CloudAgentContextSourceItem,
@@ -207,6 +208,8 @@ export type CloudAgentRuntimeDeps = {
   automation?: AgentAutomationService | null;
   /** 询问用户（可选；chat + system 注入 ask_user） */
   askUser?: AskUserService | null;
+  /** 工具调用审批（可选；缺省时不做审批门控） */
+  toolApproval?: import("../tool-approval.js").ToolApprovalService | null;
   /** 第三方 ACP Agent（可选；主 chat 注入 list/spawn_acp_agent） */
   acp?: AcpSessionService | null;
   /** 项目记录（可选；缺省时只读目录里的 AGENTS.md） */
@@ -1878,7 +1881,14 @@ export class CloudAgentRuntime {
         ? { workingDir: projectDefaultWorkingDir(sessionPreferences.project) }
         : {}),
     };
-    const hookFns = this.makeHookLoopFns(agent, projectHookRunOpts);
+    const hookFns = this.makeHookLoopFns(agent, {
+      ...projectHookRunOpts,
+      runId,
+      cloud,
+      sessionKind,
+      lastUserContent: lastUserContent || undefined,
+      nameMap,
+    });
     const hasSubagent = definitions.some(
       (d) => d.function.name === SUBAGENT_TOOL_QUALIFIED,
     );
@@ -2160,23 +2170,65 @@ export class CloudAgentRuntime {
       extraPackages?: LoadedProjectContext["hookPackages"];
       workingDir?: string;
       sessionId?: string;
+      /** 审批门所需上下文（缺省 = 该会话不做审批门控） */
+      runId?: string;
+      cloud?: CloudAgentConfig;
+      sessionKind?: string;
+      lastUserContent?: string;
+      nameMap?: Map<string, string>;
     },
-  ): Pick<AgentLoopHooks, "interceptCall" | "afterToolCall" | "beforeStop"> {
+  ): Pick<AgentLoopHooks, "interceptCall" | "afterToolCall" | "beforeStop" | "requestApproval"> {
     const hooksSvc = this.deps.agentHooks;
-    if (!hooksSvc) return {};
+    const approvalSvc = this.deps.toolApproval;
+    if (!hooksSvc && !approvalSvc) return {};
     const preInject = new Map<string, string>();
+    // hook stdin 暴露真实审批策略（旧行为 bypassPermissions 语义 = allow_all）
+    const permissionMode = hookOpts.cloud
+      ? resolveApprovalPolicy(hookOpts.cloud.approvals)
+      : undefined;
+    const hookOptsWithMode = permissionMode
+      ? { ...hookOpts, permissionMode }
+      : hookOpts;
     return {
+      requestApproval: approvalSvc
+        ? async (call, args) => {
+            const modelName = call.function.name;
+            const qualified = hookOpts.nameMap?.get(modelName) ?? modelName;
+            const out = await approvalSvc.gate({
+              tenantId: agent.tenantId,
+              agent,
+              sessionId: hookOpts.sessionId ?? "",
+              runId: hookOpts.runId ?? "",
+              sessionKind: hookOpts.sessionKind,
+              toolCallId: call.id,
+              toolName: modelName,
+              qualifiedName: qualified,
+              args,
+              argsJson: call.function.arguments,
+              config: hookOpts.cloud?.approvals,
+              lastUserContent: hookOpts.lastUserContent,
+            });
+            if (out.action === "allow") return undefined;
+            return {
+              result: {
+                content: [{ type: "text", text: out.message }],
+                isError: true,
+              },
+            };
+          }
+        : undefined,
       interceptCall: async (call, args) => {
+        if (!hooksSvc) return undefined;
         const pre = await hooksSvc.runEvent(agent, "PreToolUse", {
           toolName: call.function.name,
           toolArgs: args,
-          ...hookOpts,
+          ...hookOptsWithMode,
         });
         const commit = isGitCommitCommand(call.function.name, args)
           ? await hooksSvc.runEvent(agent, "PreCommit", {
               toolName: call.function.name,
               toolArgs: args,
-              ...hookOpts,
+              ...hookOptsWithMode,
             })
           : [];
         const combined = [...pre, ...commit];
@@ -2197,6 +2249,7 @@ export class CloudAgentRuntime {
         };
       },
       afterToolCall: async (call, args, outcome) => {
+        if (!hooksSvc) return undefined;
         const post = await hooksSvc.runEvent(
           agent,
           outcome.isError ? "PostToolUseFailure" : "PostToolUse",
@@ -2205,7 +2258,7 @@ export class CloudAgentRuntime {
             toolArgs: args,
             toolResultText: outcome.resultText,
             isError: outcome.isError,
-            ...hookOpts,
+            ...hookOptsWithMode,
           },
         );
         const parts = [preInject.get(call.id), collectInjectText(post)].filter(
@@ -2215,9 +2268,10 @@ export class CloudAgentRuntime {
         return parts.join("\n\n") || undefined;
       },
       beforeStop: async (lastText) => {
+        if (!hooksSvc) return undefined;
         const results = await hooksSvc.runEvent(agent, "Stop", {
           lastAssistantMessage: lastText,
-          ...hookOpts,
+          ...hookOptsWithMode,
         });
         const inject = collectInjectText(results);
         const denied = firstDeny(results);
@@ -2541,7 +2595,13 @@ export class CloudAgentRuntime {
           ? { workingDir: projectDefaultWorkingDir(opts.project) }
           : {}),
       };
-      const hookFns = this.makeHookLoopFns(agent, projectHookRunOpts);
+      const hookFns = this.makeHookLoopFns(agent, {
+        ...projectHookRunOpts,
+        runId: run.id,
+        cloud,
+        sessionKind: "subagent",
+        nameMap,
+      });
       const result = await runAgentLoop(this.loopDeps, {
         tenantId,
         agent,
@@ -2696,7 +2756,13 @@ export class CloudAgentRuntime {
             parentTitle: session.title,
           })
         : undefined;
-      const hookFns = this.makeHookLoopFns(target, { sessionId: session.id });
+      const hookFns = this.makeHookLoopFns(target, {
+        sessionId: session.id,
+        runId: run.id,
+        cloud: targetCloud,
+        sessionKind: "delegate",
+        nameMap,
+      });
       const result = await runAgentLoop(this.loopDeps, {
         tenantId,
         agent: target,

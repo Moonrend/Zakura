@@ -39,6 +39,7 @@ export const MODEL_UPSTREAM_PROTOCOLS = [
   "cursor",
   "gemini-cli",
   "grok-build",
+  "typesafe",
   "custom",
 ] as const;
 export type ModelUpstreamProtocol = (typeof MODEL_UPSTREAM_PROTOCOLS)[number];
@@ -101,8 +102,48 @@ export const MODEL_CAPABILITIES = [
   "embedding",
   "rerank",
   "image",
+  "evaluation",
 ] as const;
 export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+
+/** System One 结构化评估问题（TypeSafe JEV 等） */
+export type ModelEvaluationQuestion =
+  | {
+      type: "noul";
+      instructions: string;
+      criteria?: { true?: string; false?: string };
+    }
+  | { type: "choice"; instructions: string; criteria: Record<string, unknown> }
+  | { type: "score"; instructions: string; criteria: string[] };
+
+export type ModelEvaluationInput = {
+  /** 待评估内容：文本 / 结构化对象 / 数组 */
+  state: unknown;
+  /** 键为问题 id，答案按同键返回 */
+  questions: Record<string, ModelEvaluationQuestion>;
+};
+
+export type ModelEvaluationAnswer =
+  | { type: "noul"; noul: number }
+  | {
+      type: "choice";
+      choice: string;
+      probabilities?: Record<string, number>;
+      confidence?: number;
+    }
+  | {
+      type: "score";
+      score: number;
+      legend?: Record<string, string>;
+      probabilities?: Record<string, number>;
+      confidence?: number;
+    };
+
+export type ModelEvaluationResult = {
+  model: string;
+  answers: Record<string, ModelEvaluationAnswer>;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+};
 
 /** 路由选择策略 */
 export const MODEL_ROUTE_STRATEGIES = ["priority", "weighted"] as const;
@@ -415,6 +456,12 @@ export const MODEL_UPSTREAM_PROTOCOL_META: Record<
     group: "agent",
     authKind: "device",
   },
+  typesafe: {
+    name: "TypeSafe System One",
+    description: "System One 结构化决策模型（JEV），用于评估类调用（工具审批等）",
+    fields: ["baseUrl", "apiKey"],
+    keywords: ["typesafe", "jev", "system one", "systemone", "决策", "评估"],
+  },
   custom: {
     name: "自定义",
     description: "自定义",
@@ -466,6 +513,7 @@ export const MODEL_UPSTREAM_DEFAULT_BASE_URLS: Partial<
   cursor: "https://cursor.com",
   "gemini-cli": "https://cloudcode-pa.googleapis.com",
   "grok-build": "https://cli-chat-proxy.grok.com/v1",
+  typesafe: "https://api.typesafe.ai",
 };
 
 /** 百炼 DashScope 区域端点 */
@@ -482,6 +530,10 @@ export const MODEL_CAPABILITY_META: Record<
   embedding: { name: "向量化", description: "文本 Embedding，供记忆检索等" },
   rerank: { name: "重排序", description: "Rerank / Ranker，供检索精排" },
   image: { name: "生图", description: "文生图 / 图像生成" },
+  evaluation: {
+    name: "评估",
+    description: "System One 结构化评估（choice / noul / score），供工具审批等",
+  },
 };
 
 /** 上游连接配置（存于 model_upstreams.config_json） */
@@ -658,6 +710,11 @@ export function applyUpstreamProtocolDefaults(
       return {
         ...base,
         baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS["grok-build"] || "",
+      };
+    case "typesafe":
+      return {
+        ...base,
+        baseUrl: base.baseUrl || MODEL_UPSTREAM_DEFAULT_BASE_URLS.typesafe || "",
       };
     case "custom":
     default:

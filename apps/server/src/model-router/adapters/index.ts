@@ -10,6 +10,7 @@ import {
 import { geminiAdapter, geminiCliAdapter } from "./gemini.js";
 import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
+import { typesafeAdapter } from "./typesafe.js";
 
 let registered = false;
 
@@ -26,6 +27,7 @@ export function registerBuiltinModelAdapters(): void {
   registerModelAdapter(geminiCliAdapter);
   registerModelAdapter(codexAdapter);
   registerModelAdapter(cursorAdapter);
+  registerModelAdapter(typesafeAdapter);
   registered = true;
 }
 
@@ -40,4 +42,5 @@ export {
   geminiCliAdapter,
   codexAdapter,
   cursorAdapter,
+  typesafeAdapter,
 };

@@ -4,6 +4,8 @@ import type {
   ModelChatMessage,
   ModelChatResult,
   ModelEmbeddingResult,
+  ModelEvaluationInput,
+  ModelEvaluationResult,
   ModelImageResult,
   ModelRerankResult,
   ModelToolCall,
@@ -39,6 +41,11 @@ export type ModelInvokeHandlers = {
     documents: string[],
   ): Promise<ModelRerankResult>;
   generateImage?(route: ResolvedRoute, prompt: string): Promise<ModelImageResult>;
+  /** System One 结构化评估（TypeSafe JEV 等） */
+  evaluate?(
+    route: ResolvedRoute,
+    input: ModelEvaluationInput,
+  ): Promise<ModelEvaluationResult>;
 };
 
 /** 协议适配器：按能力声明支持范围，便于注册表校验与扩展 */

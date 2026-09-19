@@ -98,12 +98,14 @@ const CAPABILITY_LABEL: Record<string, string> = {
   embedding: "向量化",
   rerank: "重排序",
   image: "生图",
+  evaluation: "评估",
 };
 
 const DEFAULT_CAPABILITIES: ModelCapabilityFilter[] = [
   "chat",
   "embedding",
   "rerank",
+  "evaluation",
   "image",
 ];
 

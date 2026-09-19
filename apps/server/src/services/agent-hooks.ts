@@ -28,6 +28,8 @@ export type HookRunOpts = {
   lastAssistantMessage?: string;
   /** Stop/PreCompact 等：matcher 比的不是工具名 */
   matcherValue?: string;
+  /** 工具审批策略：allow_all（默认全放行）/ ask / ai；缺省保持旧行为 */
+  permissionMode?: string;
 };
 
 export type HookRunResult = {
@@ -73,7 +75,7 @@ export function hookStdinPayload(event: AgentHookEvent, opts?: HookRunOpts): str
   const body: Record<string, unknown> = {
     hook_event_name: event,
     cwd,
-    permission_mode: "bypassPermissions",
+    permission_mode: opts?.permissionMode ?? "bypassPermissions",
   };
   if (opts?.sessionId) body.session_id = opts.sessionId;
   if (opts?.toolName) {

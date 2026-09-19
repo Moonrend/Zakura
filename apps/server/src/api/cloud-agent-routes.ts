@@ -8,6 +8,7 @@ import {
   parseCloudAgentSessionKind,
   parseCloudAgentSessionOrigin,
   parseProjectField,
+  parseToolApprovalConfig,
   resolveFollowUpMode,
   type CloudAgentAttachment,
   type CloudAgentFollowUpMode,
@@ -133,9 +134,10 @@ export function registerCloudAgentRoutes(
     skills?: SkillsService;
     acp?: import("../services/acp/session.js").AcpSessionService | null;
     askUser?: import("../services/ask-user.js").AskUserService | null;
+    toolApproval?: import("../services/tool-approval.js").ToolApprovalService | null;
   },
 ) {
-  const { agentService, store, runtime, modelRouter, gateway, skills, acp, askUser } = deps;
+  const { agentService, store, runtime, modelRouter, gateway, skills, acp, askUser, toolApproval } = deps;
 
   async function startNextQueued(input: {
     tenantId: string;
@@ -261,6 +263,8 @@ export function registerCloudAgentRoutes(
       gatewayModelMap?: Record<string, string> | null;
       /** 运行中再发消息：steer | queue；null 恢复默认 steer */
       followUpMode?: CloudAgentFollowUpMode | null;
+      /** 工具调用审批配置；null 清除 */
+      approvals?: import("@zakura/shared").ToolApprovalConfig | null;
     }>();
 
     let configJson: Record<string, unknown> = {};
@@ -354,6 +358,25 @@ export function registerCloudAgentRoutes(
       if (body.followUpMode === null) delete next.followUpMode;
       else if (body.followUpMode === "steer" || body.followUpMode === "queue") {
         next.followUpMode = body.followUpMode;
+      }
+    }
+    if (body.approvals !== undefined) {
+      if (body.approvals == null) {
+        delete next.approvals;
+      } else {
+        // 浅合并：快捷设置只带 policy 时不覆盖规则 / AI 门控；null = 删除该键
+        const prevApprovals =
+          next.approvals && typeof next.approvals === "object" && !Array.isArray(next.approvals)
+            ? (next.approvals as Record<string, unknown>)
+            : {};
+        const merged: Record<string, unknown> = { ...prevApprovals };
+        for (const [k, v] of Object.entries(body.approvals as Record<string, unknown>)) {
+          if (v === null) delete merged[k];
+          else merged[k] = v;
+        }
+        const approvals = parseToolApprovalConfig(merged);
+        if (Object.keys(approvals).length) next.approvals = approvals;
+        else delete next.approvals;
       }
     }
     if (body.gatewayModelMap !== undefined) {
@@ -911,6 +934,47 @@ export function registerCloudAgentRoutes(
         cancelled: body.cancelled === true,
         selected: body.selected,
         text: typeof body.text === "string" ? body.text : undefined,
+      });
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  /** 工具调用审批：用户在审批卡上点允许 / 拒绝 */
+  app.post("/api/agents/:id/sessions/:sid/approvals", async (c) => {
+    if (!toolApproval) return c.json({ error: "工具审批未启用" }, 400);
+    const session = c.get("session")!;
+    const agent = await requireAgent(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const body = await c.req
+      .json<{
+        requestId?: string;
+        decision?: string;
+        alwaysAllow?: boolean;
+        cancelled?: boolean;
+      }>()
+      .catch(
+        () =>
+          ({}) as {
+            requestId?: string;
+            decision?: string;
+            alwaysAllow?: boolean;
+            cancelled?: boolean;
+          },
+      );
+    const requestId = String(body.requestId ?? "").trim();
+    if (!requestId) return c.json({ error: "requestId required" }, 400);
+    const decision = body.cancelled === true ? "denied" : body.decision;
+    if (decision !== "approved" && decision !== "denied") {
+      return c.json({ error: "decision must be approved or denied" }, 400);
+    }
+    try {
+      await toolApproval.resolve(session.tenantId, agent.id, c.req.param("sid"), {
+        requestId,
+        decision,
+        alwaysAllow: body.alwaysAllow === true,
+        cancelled: body.cancelled === true,
       });
       return c.json({ ok: true });
     } catch (err) {

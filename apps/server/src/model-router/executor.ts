@@ -4,6 +4,8 @@ import type {
   ModelChatMessage,
   ModelChatResult,
   ModelEmbeddingResult,
+  ModelEvaluationInput,
+  ModelEvaluationResult,
   ModelImageResult,
   ModelReasoningOptions,
   ModelRerankResult,
@@ -184,4 +186,16 @@ export async function executeWithFallback<T>(
   const aggregate = new Error(`所有 ${capability} 路由均失败:\n${errors.join("\n")}`);
   (aggregate as { retryable?: boolean }).retryable = anyRetryable;
   throw aggregate;
+}
+
+/** System One 结构化评估：按 evaluation 能力解析适配器并调用 */
+export async function executeEvaluation(
+  route: ResolvedRoute,
+  input: ModelEvaluationInput,
+): Promise<ModelEvaluationResult> {
+  const adapter = resolveAdapterForCapability(route.upstream.protocol, "evaluation");
+  if (!adapter.evaluate) {
+    throw new Error(`协议 ${route.upstream.protocol} 不支持评估能力`);
+  }
+  return adapter.evaluate(route, input);
 }
