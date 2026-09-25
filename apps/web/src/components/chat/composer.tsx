@@ -49,8 +49,6 @@ import {
 } from "./composer-plus-menu";
 import { SessionContextBar } from "./session-context-bar";
 import { SlashCommandPicker } from "./slash-command-picker";
-import { ComposerCarets } from "./presence-cursors";
-import type { RemoteAwareness } from "@/lib/sync/session-doc";
 import {
   applyComposerSlash,
   filterComposerSlashItems,
@@ -329,9 +327,7 @@ export function Composer({
   showContinue,
   onContinue,
   className,
-  remotes = [],
   remoteFlash,
-  caretChannel,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -401,10 +397,7 @@ export function Composer({
   showContinue?: boolean;
   onContinue?: () => void;
   className?: string;
-  remotes?: RemoteAwareness[];
   remoteFlash?: ComposerRemoteFlash;
-  /** 与 awareness caret.channel 对齐；编辑已发送消息时为 `edit:${id}` */
-  caretChannel?: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 输入法组字期间的回车属于「选词」，不能当发送 */
@@ -742,12 +735,6 @@ export function Composer({
         </div>
 
         <div className="relative">
-        <ComposerCarets
-          remotes={remotes}
-          value={value}
-          textareaRef={textareaRef}
-          channel={caretChannel}
-        />
         <textarea
           ref={textareaRef}
           value={value}

@@ -11,6 +11,21 @@ import {
 } from "@zakura/shared";
 import { acquireSocket } from "@/lib/socket";
 
+/** 位置是否实质相同（忽略 ts）：相同就不触发重渲染。 */
+function sameLocation(a: PresenceLocation, b: PresenceLocation): boolean {
+  return (
+    a.agentId === b.agentId &&
+    a.project === b.project &&
+    a.sessionId === b.sessionId &&
+    a.pane === b.pane &&
+    a.idle === b.idle &&
+    a.filePath === b.filePath &&
+    a.fileDir === b.fileDir &&
+    a.avatarRev === b.avatarRev &&
+    a.name === b.name
+  );
+}
+
 export function useTenantPresence(opts: {
   userId: string | null;
   agentId: string | null;
@@ -35,7 +50,11 @@ export function useTenantPresence(opts: {
     const onUpdate = (raw: unknown) => {
       const loc = raw as PresenceLocation;
       if (!loc?.userId) return;
-      setPeers((prev) => mergePresenceByUser([...prev.filter((p) => p.userId !== loc.userId), loc]));
+      setPeers((prev) => {
+        const existing = prev.find((p) => p.userId === loc.userId);
+        if (existing && sameLocation(existing, loc)) return prev;
+        return mergePresenceByUser([...prev.filter((p) => p.userId !== loc.userId), loc]);
+      });
     };
     const onLeave = (raw: unknown) => {
       const userId = (raw as { userId?: string } | null)?.userId;

@@ -157,11 +157,12 @@ export class ZakurabotGateway {
 
   private async authenticate(connection: Connection, token: string) {
     try {
-      const device = await this.channel.deps.store.authenticate(token);
-      if (!device) throw new ZakurabotAccessError("Device token is invalid, expired, or revoked", 4401);
-      const roster = await this.channel.roster(device);
+      // Zakura Bot 使用标准 OAuth access token（api scope）登录，权限即用户本身。
+      const principal = await this.channel.resolvePrincipal(token);
+      if (!principal) throw new ZakurabotAccessError("Sign in with Zakura to use the channel", 4401);
+      const roster = await this.channel.roster(principal);
       if (connection.phase !== "authenticating" || connection.ws.readyState !== WebSocket.OPEN) return;
-      connection.identity = { id: device.id, tenantId: device.tenantId };
+      connection.identity = { tenantId: principal.tenantId, userId: principal.userId };
       connection.allowed = new Set(roster.conversations.map(zakurabotThreadId));
       connection.rosterJson = JSON.stringify(roster.agents);
       await this.write(connection, { type: "ready", protocol: ZAKURABOT_PROTOCOL, agents: roster.agents,
@@ -169,7 +170,7 @@ export class ZakurabotGateway {
       if (connection.phase !== "authenticating" || connection.ws.readyState !== WebSocket.OPEN) return;
       connection.phase = "ready";
       clearTimeout(connection.helloTimer);
-      connection.unsubscribe = this.channel.subscribe(device, async (c, frame) => {
+      connection.unsubscribe = this.channel.subscribe(connection.identity!, async (c, frame) => {
         if (connection.phase === "ready" && connection.allowed.has(zakurabotThreadId(c))) {
           await this.write(connection, frame);
         }
@@ -230,12 +231,14 @@ export class ZakurabotGateway {
 
   /** Called after binding/ACL edits; outbound authorization also reads current DB state. */
   async refresh() {
+    await this.channel.refresh();
     await Promise.all(Array.from(this.connections, (connection) => this.refreshConnection(connection)));
-    await this.channel.revalidateRuns();
   }
 
-  async disconnectDevice(tenantId: string, deviceId: string, message = "Device token has been revoked", code: 4401 | 1012 = 4401) {
-    await Promise.all(Array.from(this.connections).filter((c) => c.identity?.tenantId === tenantId && c.identity.id === deviceId)
+  /** 断开某用户在该租户下的所有连接（撤销登录、封禁等场景）。 */
+  async disconnectUser(tenantId: string, userId: string, message = "Your Zakura Bot access has ended", code: 4401 | 1012 = 4401) {
+    this.channel.forgetAccess(tenantId, userId);
+    await Promise.all(Array.from(this.connections).filter((c) => c.identity?.tenantId === tenantId && c.identity.userId === userId)
       .map((c) => this.fail(c, message, code)));
     await this.channel.revalidateRuns();
   }

@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { eq } from "drizzle-orm";
-import { agents, zakurabotFiles } from "../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { agents, tenantMemberships, zakurabotFiles } from "../src/db/schema.js";
 import { ZAKURABOT_MAX_FILE_BYTES, type ZakurabotFileView } from "../src/services/zakurabot-protocol.js";
-import { isZakurabotAppPath } from "../src/api/zakurabot-app-routes.js";
 import { zakurabotHarness } from "./helpers/zakurabot.js";
 
 describe("Zakura Bot scoped App API", () => {
@@ -17,8 +16,10 @@ describe("Zakura Bot scoped App API", () => {
     form.set("file", new Blob([content], { type: "text/plain" }), name);
     return fetch(`${h.url}/api/zakurabot/agents/${agentId}/files`, { method: "POST", headers: headers(token), body: form });
   };
+  const suspend = (ctx: { tenantId: string; userId: string }) => h.db.update(tenantMemberships)
+    .set({ status: "suspended" }).where(and(eq(tenantMemberships.tenantId, ctx.tenantId), eq(tenantMemberships.userId, ctx.userId)));
 
-  it("lists only granted bots with capabilities and rejects sessions on device endpoints", async () => {
+  it("lists every tenant agent with capabilities and unifies console sessions with OAuth tokens", async () => {
     const ctx = await h.access(2), other = await h.access();
     const response = await get("agents", ctx.token);
     assert.equal(response.status, 200);
@@ -27,19 +28,16 @@ describe("Zakura Bot scoped App API", () => {
     assert.deepEqual(list.agents.map((agent) => agent.id).sort(), ctx.bindings.map((binding) => binding.agentId).sort());
     assert.ok(list.agents.every((agent) => agent.bindingId && agent.capabilities.files));
     assert.equal((await (await get("bots", ctx.token)).json()).bots.length, 2);
-    assert.equal((await get(`agents/${other.bindings[0]!.agentId}`, ctx.token)).status, 403);
-    assert.equal((await get("agents", h.adminToken(ctx.tenantId))).status, 401);
-    assert.equal((await get("devices", ctx.token)).status, 401);
-    assert.equal(isZakurabotAppPath("/api/agents"), false);
-    assert.equal(isZakurabotAppPath("/api/zakurabot/devices"), false);
-    assert.equal(isZakurabotAppPath("/api/zakurabot/authorization"), false);
-    assert.equal(isZakurabotAppPath("/api/zakurabot/agents/a/fs/download"), false);
+    assert.equal((await get(`agents/${other.bindings[0]!.agentId}`, ctx.token)).status, 404);
+    // 控制台会话 token 与 OAuth token 走同一套权限，皆可用。
+    assert.equal((await get("agents", h.adminToken(ctx.tenantId))).status, 200);
+    assert.equal((await get("devices", ctx.token)).status, 404);
   });
 
-  it("uploads privately, forwards file metadata to the runtime, deduplicates sends, and enforces device/agent/tenant boundaries", async () => {
+  it("uploads privately, forwards file metadata to the runtime, deduplicates sends, and enforces user/agent/tenant boundaries", async () => {
     const ctx = await h.access(2), other = await h.access();
     const agentId = ctx.bindings[0]!.agentId;
-    const peer = await h.channel.issueDevice(ctx.tenantId, { name: "Peer", bindingIds: [ctx.bindings[0]!.id], expiresInDays: 1 });
+    const peer = await h.addUser(ctx.tenantId);
     const response = await upload(agentId, ctx.token, "Read this report", "../report.txt");
     assert.equal(response.status, 201);
     const { file } = await response.json() as { file: ZakurabotFileView };
@@ -129,7 +127,7 @@ describe("Zakura Bot scoped App API", () => {
     assert.equal(h.runs.some((run) => run.handle.inboundMessageId === "missing-upload"), false);
   });
 
-  it("rechecks device access when a workspace upload or download finishes", async () => {
+  it("rechecks member access when a workspace upload or download finishes", async () => {
     const original = h.workspaceFs.forAgentBinding;
     const uploadOwner = await h.access();
     h.workspaceFs.forAgentBinding = async (binding) => {
@@ -137,7 +135,8 @@ describe("Zakura Bot scoped App API", () => {
       const write = fs.writeBytes.bind(fs);
       fs.writeBytes = async (...args) => {
         const result = await write(...args);
-        await h.store.revokeDevice(uploadOwner.tenantId, uploadOwner.device.id);
+        await suspend(uploadOwner);
+        h.gateway.disconnectUser(uploadOwner.tenantId, uploadOwner.userId);
         return result;
       };
       return fs;
@@ -152,7 +151,8 @@ describe("Zakura Bot scoped App API", () => {
       const read = fs.readBytes.bind(fs);
       fs.readBytes = async (...args) => {
         const result = await read(...args);
-        await h.store.revokeDevice(downloadOwner.tenantId, downloadOwner.device.id);
+        await suspend(downloadOwner);
+        h.gateway.disconnectUser(downloadOwner.tenantId, downloadOwner.userId);
         return result;
       };
       return fs;

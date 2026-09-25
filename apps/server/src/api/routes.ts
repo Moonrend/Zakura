@@ -109,12 +109,12 @@ import { EmailInboundService } from "../services/email-inbound.js";
 import { ConnectorAuthService } from "../services/connector-auth.js";
 import { RemoteAgentIngress } from "../services/remote-agent-ingress.js";
 import { RemoteChannelRuntime, REMOTE_PLATFORMS } from "../services/remote-channel-runtime.js";
-import { ZakurabotChannel } from "../services/zakurabot-channel.js";
+import { ZakurabotChannel, ZakurabotPrincipalResolver } from "../services/zakurabot-channel.js";
 import { createZakurabotFilePublisher } from "../services/zakurabot-adapter.js";
 import { ZakurabotGateway } from "../services/zakurabot-gateway.js";
 import { ZakurabotStore } from "../services/zakurabot-store.js";
-import { registerZakurabotRoutes } from "./zakurabot-routes.js";
-import { isZakurabotAppPath, registerZakurabotAppRoutes } from "./zakurabot-app-routes.js";
+import { registerZakurabotAppRoutes } from "./zakurabot-app-routes.js";
+import { registerZakurabotSessionRoutes } from "./zakurabot-session-routes.js";
 import { ZakurabotFileService } from "../services/zakurabot-files.js";
 import { ZakurabotInteractionService } from "../services/zakurabot-interactions.js";
 import { OpenAiGatewayService } from "../services/openai-gateway.js";
@@ -377,9 +377,6 @@ export async function createApiApp(deps: {
       "/api/otel/config",
       "/api/otel/v1/logs",
       "/api/zakurabot/ws",
-      "/api/zakurabot/oauth/device-code",
-      "/api/zakurabot/oauth/token",
-      "/api/zakurabot/oauth/revoke",
     ]);
     const isEmailInbound = /^\/api\/email\/inbound\/[^/]+$/.test(c.req.path);
     const isRemoteWebhook = /^\/api\/remote-channels\/[^/]+\/[^/]+\/webhook$/.test(c.req.path);
@@ -404,7 +401,6 @@ export async function createApiApp(deps: {
     // probe/import require auth — intentional
     if (
       publicPaths.has(path) ||
-      /^\/api\/zakurabot\/sessions\/[^/]+$/.test(path) ||
       isOauthLoginPublic ||
       isInvitePublic ||
       isFileSharePublic ||
@@ -412,8 +408,7 @@ export async function createApiApp(deps: {
       isScim ||
       isEmailInbound ||
       isRemoteWebhook ||
-      isRoutineWebhook ||
-      isZakurabotAppPath(path)
+      isRoutineWebhook
     ) {
       // Optional session for invite accept
       if (isInvitePublic) {
@@ -478,6 +473,50 @@ export async function createApiApp(deps: {
       }
       c.set("session", alive);
       await withLogContext(idsFromSession(session), next);
+      return;
+    }
+
+    // OAuth 2.1 access tokens carrying the `api` scope act as the signing user,
+    // with the account's own tenant permissions (Zakura Bot and similar clients).
+    const oauthAccess = await oauth
+      .authenticateBearer(token)
+      .catch(() => null);
+    if (oauthAccess?.userId && oauthAccess.scope?.split(/[\s+]+/).includes("api")) {
+      const [principal] = await db
+        .select({
+          userId: users.id,
+          email: users.email,
+          role: tenantMemberships.role,
+          membershipStatus: tenantMemberships.status,
+        })
+        .from(users)
+        .innerJoin(
+          tenantMemberships,
+          and(
+            eq(tenantMemberships.userId, users.id),
+            eq(tenantMemberships.tenantId, oauthAccess.tenant.id),
+          ),
+        )
+        .where(eq(users.id, oauthAccess.userId))
+        .limit(1);
+      if (!principal || principal.membershipStatus !== "active") {
+        return c.json({ error: "Unauthorized" }, 401);
+      }
+      const oauthSession = {
+        userId: principal.userId,
+        tenantId: oauthAccess.tenant.id,
+        email: principal.email,
+        role: principal.role,
+      };
+      const suspended = await checkSessionSuspended(db, oauthSession);
+      if (suspended) {
+        return c.json(
+          { error: suspensionMessage(suspended), code: "account_suspended" },
+          403,
+        );
+      }
+      c.set("session", oauthSession);
+      await withLogContext(idsFromSession(oauthSession), next);
       return;
     }
 
@@ -2330,6 +2369,22 @@ export async function createApiApp(deps: {
         db,
       });
       cloudAgentRuntime = cloudRuntime;
+      // Zakura Bot 使用标准 OAuth（api scope）登录，权限即登录用户本身。
+      const zakurabotPrincipal: ZakurabotPrincipalResolver = async (token) => {
+        const access = await oauth.authenticateBearer(token).catch(() => null);
+        if (!access?.userId || !access.scope?.split(/[\s+]+/).includes("api")) return null;
+        const [row] = await db
+          .select({ email: users.email, name: users.name, role: tenantMemberships.role, status: tenantMemberships.status })
+          .from(users)
+          .innerJoin(
+            tenantMemberships,
+            and(eq(tenantMemberships.userId, users.id), eq(tenantMemberships.tenantId, access.tenant.id)),
+          )
+          .where(eq(users.id, access.userId))
+          .limit(1);
+        if (!row || row.status !== "active") return null;
+        return { tenantId: access.tenant.id, userId: access.userId, displayName: row.name || row.email };
+      };
       zakurabotGateway = new ZakurabotGateway(new ZakurabotChannel({
         store: new ZakurabotStore(db),
         ingress: remoteIngress,
@@ -2342,9 +2397,10 @@ export async function createApiApp(deps: {
         interactions: new ZakurabotInteractionService(db, { sessions: cloudStore, askUser, acp: acpSessions }),
         desktopAvailable: true,
         publishFile: createZakurabotFilePublisher({ agents: agentService, fileShares, workspaceFs: workspaceFsProvider }),
+        principal: zakurabotPrincipal,
       }), { publicBaseUrl: config.publicBaseUrl });
-      registerZakurabotRoutes(app, zakurabotGateway, config.publicBaseUrl, config.webPublicUrl);
       registerZakurabotAppRoutes(app, zakurabotGateway, config.publicBaseUrl, agentService.workspace);
+      registerZakurabotSessionRoutes(app, zakurabotGateway);
       automation.setRunner({
         startAutomationTurn: (input) => cloudRuntime.startAutomationTurn(input),
       });

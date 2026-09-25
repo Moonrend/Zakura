@@ -42,10 +42,8 @@ type DocEntry = {
 const docs = new Map<string, DocEntry>();
 
 type UpdateHandler = (sessionId: string, update: Uint8Array, fromSocketId: string) => void;
-type AwarenessHandler = (sessionId: string, update: Uint8Array, fromSocketId: string) => void;
 
 const updateListeners = new Set<UpdateHandler>();
-const awarenessListeners = new Set<AwarenessHandler>();
 
 let subClient: ZakuraRedis | null = null;
 let subReady: Promise<void> | null = null;
@@ -54,11 +52,6 @@ export function onYjsUpdate(handler: UpdateHandler): () => void {
   updateListeners.add(handler);
   void ensureSubscriber();
   return () => updateListeners.delete(handler);
-}
-
-export function onYjsAwareness(handler: AwarenessHandler): () => void {
-  awarenessListeners.add(handler);
-  return () => awarenessListeners.delete(handler);
 }
 
 function b64ToU8(s: string): Uint8Array {
@@ -82,16 +75,12 @@ async function ensureSubscriber(): Promise<void> {
           const parsed = JSON.parse(message) as {
             from?: string;
             sessionId: string;
-            kind: "update" | "awareness";
+            kind: "update";
             update: string;
             socketId: string;
           };
           if (parsed.from === instanceId) return;
           const bytes = b64ToU8(parsed.update);
-          if (parsed.kind === "awareness") {
-            for (const fn of awarenessListeners) fn(parsed.sessionId, bytes, parsed.socketId);
-            return;
-          }
           const entry = docs.get(parsed.sessionId);
           if (entry) Y.applyUpdate(entry.doc, bytes, "remote");
           for (const fn of updateListeners) fn(parsed.sessionId, bytes, parsed.socketId);
@@ -108,7 +97,7 @@ async function ensureSubscriber(): Promise<void> {
 
 async function publish(
   sessionId: string,
-  kind: "update" | "awareness",
+  kind: "update",
   update: Uint8Array,
   socketId: string,
 ): Promise<void> {
@@ -279,16 +268,6 @@ export function applyYjsUpdate(
   for (const fn of updateListeners) fn(sessionId, update, fromSocketId);
   void publish(sessionId, "update", update, fromSocketId);
   return true;
-}
-
-export function relayYjsAwareness(
-  sessionId: string,
-  update: Uint8Array,
-  fromSocketId: string,
-): void {
-  if (!docs.has(sessionId)) return;
-  for (const fn of awarenessListeners) fn(sessionId, update, fromSocketId);
-  void publish(sessionId, "awareness", update, fromSocketId);
 }
 
 export function encodeYjsUpdate(bytes: Uint8Array): string {

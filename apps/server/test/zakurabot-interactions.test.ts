@@ -26,10 +26,10 @@ describe("Zakura Bot interactions", () => {
   const post = (path: string, body: unknown, token: string) => fetch(`${h.url}/api/zakurabot/${path}`, {
     method: "POST", headers: { ...headers(token), "content-type": "application/json" }, body: JSON.stringify(body),
   });
-  it("delivers and resolves secret questions only through chat_reply, persists state, and rejects other devices", async () => {
+  it("delivers and resolves secret questions only through chat_reply, persists state, and rejects other users", async () => {
     const ctx = await h.access();
     const agentId = ctx.bindings[0]!.agentId;
-    const peer = await h.channel.issueDevice(ctx.tenantId, { name: "Peer", bindingIds: [ctx.bindings[0]!.id], expiresInDays: 1 });
+    const peer = await h.addUser(ctx.tenantId);
     const socket = await h.connect(ctx.token);
     await socket.wait("ready");
     socket.send({ type: "send", agentId, clientMessageId: "secret-question", text: "Ask me" });
@@ -43,7 +43,10 @@ describe("Zakura Bot interactions", () => {
     const endpoint = `agents/${agentId}/interactions/${question.messageId}`;
     assert.notEqual((await post(endpoint, { text: "steal" }, peer.token)).status, 200);
     assert.equal((await fetch(`${h.url}/api/zakurabot/${endpoint}`)).status, 401);
-    assert.equal((await get(endpoint, h.adminToken(ctx.tenantId))).status, 401);
+    // 控制台会话与 OAuth token 同权；同租户其他成员只能看到 pending 快照。
+    const consoleView = await get(endpoint, h.adminToken(ctx.tenantId));
+    assert.equal(consoleView.status, 200);
+    assert.equal(((await consoleView.json()) as { interaction: { status: string } }).interaction.status, "pending");
     const answer = await post(endpoint, { text: "super-secret-answer" }, ctx.token);
     assert.equal(answer.status, 200);
     const snapshot = await answer.json();
@@ -94,10 +97,10 @@ describe("Zakura Bot interactions", () => {
     await run.finish();
   });
 
-  it("projects ACP child permissions to their owning device and resolves the source session", async () => {
+  it("projects ACP child permissions to their owning user and resolves the source session", async () => {
     const ctx = await h.access(2);
     const agentId = ctx.bindings[0]!.agentId;
-    const peer = await h.channel.issueDevice(ctx.tenantId, { name: "Peer", bindingIds: [ctx.bindings[0]!.id], expiresInDays: 1 });
+    const peer = await h.addUser(ctx.tenantId);
     const socket = await h.connect(ctx.token), peerSocket = await h.connect(peer.token);
     await socket.wait("ready");
     await peerSocket.wait("ready");
@@ -251,7 +254,7 @@ describe("Zakura Bot interactions", () => {
         interactions: new ZakurabotInteractionService(local.db, { sessions: local.sessions, askUser }) });
       let delivered!: (frame: ZakurabotReplyFrame) => void;
       const reply = new Promise<ZakurabotReplyFrame>((resolve) => { delivered = resolve; });
-      restarted.subscribe(ctx.device, async (_conversation, frame) => {
+      restarted.subscribe({ tenantId: ctx.tenantId, userId: ctx.userId }, async (_conversation, frame) => {
         if (frame.type === "chat_reply" && frame.payload.text === "Follow-up after restart") delivered(frame);
       });
       askUser.setFollowUp(async (input) => {
@@ -265,7 +268,7 @@ describe("Zakura Bot interactions", () => {
           payload: { runId: next.id, status: "completed" } });
         await local.sessions.finishRun(input.sessionId, next.id, "completed");
       });
-      const snapshot = await restarted.respondInteraction(ctx.device, agentId, question.messageId, { cancelled: false, text: "Europe" });
+      const snapshot = await restarted.respondInteraction({ tenantId: ctx.tenantId, userId: ctx.userId }, agentId, question.messageId, { cancelled: false, text: "Europe" });
       assert.equal(snapshot.interaction.status, "answered");
       assert.equal((await within(reply, "Follow-up lost its remote reply")).payload.reply_to, "before-restart");
     } finally { await restarted?.stop(); await local.close(); }

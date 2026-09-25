@@ -34,7 +34,6 @@ import type {
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
-  DRAFT_CARET_CHANNEL,
   estimateEventPayloadTokens,
   estimateTextTokens,
   estimateTokensFromChars,
@@ -129,7 +128,6 @@ import { ProjectListPane, ProjectSettingsPane, NewProjectFields } from "./projec
 import { SessionSearchDialog } from "./session-search-dialog";
 import { PresenceAvatars } from "./presence-avatars";
 import { ChatProjectRow } from "./chat-project-row";
-import { FollowChip, PresencePointers } from "./presence-cursors";
 import { UserAvatar } from "@/components/user-avatar";
 import { useTenantPresence } from "@/lib/sync/presence";
 import { useSessionDoc } from "@/lib/sync/session-doc";
@@ -137,7 +135,6 @@ import {
   activeSessionIds,
   othersOnProject,
   othersOnSession,
-  normalizePresencePane,
   type PresenceLocation,
   type PresencePane,
 } from "@zakura/shared";
@@ -156,23 +153,6 @@ import {
   buildContextWindowInfo,
 } from "./chat-helpers";
 
-function sameArr(a: readonly string[], b: readonly string[]) {
-  if (a.length !== b.length) return false;
-  const left = new Set(a);
-  return b.every((x) => left.has(x));
-}
-
-function parsePrefList(raw: string | undefined): string[] | undefined {
-  if (raw == null) return undefined;
-  try {
-    const v = JSON.parse(raw) as unknown;
-    if (!Array.isArray(v)) return undefined;
-    return v.filter((x): x is string => typeof x === "string");
-  } catch {
-    return undefined;
-  }
-}
-
 export function ChatApp() {
   const { confirm } = useConfirmDialog();
   const router = useRouter();
@@ -183,10 +163,7 @@ export function ChatApp() {
     email: string;
     avatarRev?: number;
   } | null>(null);
-  const [pointerHost, setPointerHost] = useState<HTMLDivElement | null>(null);
-  const [followUserId, setFollowUserId] = useState<string | null>(null);
-  const [remoteFlash, setRemoteFlash] = useState<ComposerRemoteFlash>({});
-  const bumpFlash = useCallback((keys: Array<keyof ComposerRemoteFlash>) => {
+  const [remoteFlash, setRemoteFlash] = useState<ComposerRemoteFlash>({});  const bumpFlash = useCallback((keys: Array<keyof ComposerRemoteFlash>) => {
     if (keys.length === 0) return;
     setRemoteFlash((prev) => {
       const next = { ...prev };
@@ -206,9 +183,6 @@ export function ChatApp() {
     acpModel: undefined as string | undefined,
     acpReasoning: undefined as string | undefined,
   });
-  const prefsSeededKeyRef = useRef("");
-  const lastFollowKeyRef = useRef("");
-  const applyRemotePrefsRef = useRef<(prefs: Record<string, string>) => void>(() => {});
   const [agents, setAgents] = useState<AgentListItem[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CloudSession[]>([]);
@@ -387,100 +361,17 @@ export function ChatApp() {
   });
   const {
     bindValueChange,
-    remotes,
-    setPointer,
-    setView,
     setPaused,
-    setCaretChannel,
     ready: yjsReady,
-    ui,
-    setUiFlag,
-    setPref,
-    setPrefs,
-    setPrefIfAbsent,
   } = useSessionDoc({
     agentId,
     sessionId,
-    userId: meUser?.id ?? null,
-    name: meUser?.name ?? "",
     textareaRef: composerRef,
     onValueChange: setInput,
-    onPrefsChange: (prefs) => applyRemotePrefsRef.current(prefs),
   });
-  applyRemotePrefsRef.current = (prefs) => {
-    const live = liveRef.current;
-    const seedKey = `${agentId ?? ""}:${sessionId ?? ""}`;
-    const seeding = prefsSeededKeyRef.current !== seedKey;
-    if (seeding) prefsSeededKeyRef.current = seedKey;
-    const flashes: Array<keyof ComposerRemoteFlash> = [];
-    if (typeof prefs.model === "string") {
-      const nextRoute = prefs.modelRouteId || null;
-      if (prefs.model !== live.model || nextRoute !== live.modelRouteId) {
-        flashes.push("model");
-        live.model = prefs.model;
-        live.modelRouteId = nextRoute;
-      }
-      setModel(prefs.model);
-      setModelRouteId(nextRoute);
-    }
-    if (typeof prefs.reasoning === "string" && prefs.reasoning) {
-      if (prefs.reasoning !== live.reasoning) {
-        flashes.push("reasoning");
-        live.reasoning = prefs.reasoning as ComposerReasoningValue;
-      }
-      setReasoning(prefs.reasoning as ComposerReasoningValue);
-    }
-    const skills = parsePrefList(prefs.skills);
-    if (skills) {
-      if (!sameArr(skills, live.skills)) {
-        flashes.push("extras");
-        live.skills = skills;
-      }
-      setSelectedSkills(skills);
-    }
-    const groups = parsePrefList(prefs.disabledGroups);
-    if (groups) {
-      if (!sameArr(groups, live.groups)) {
-        if (!flashes.includes("extras")) flashes.push("extras");
-        live.groups = groups;
-      }
-      setDisabledGroupIds(groups);
-    }
-    if (prefs.pane) setMainPane(normalizePresencePane(prefs.pane));
-    if (typeof prefs.filePath === "string" && prefs.filePath) {
-      const dir = prefs.fileDir === "1";
-      setCollabFile({ path: prefs.filePath, dir });
-      setFileRequest((prev) => {
-        if (prev?.path === prefs.filePath && Boolean(prev?.dir) === dir) return prev;
-        fileNonceRef.current += 1;
-        return { path: prefs.filePath, nonce: fileNonceRef.current, dir };
-      });
-    }
-    if ("project" in prefs) {
-      const p = prefs.project || null;
-      if (p !== live.project) {
-        flashes.push("project");
-        live.project = p;
-      }
-      setDraftProject(p);
-    }
-    if (typeof prefs.runtimeId === "string" && prefs.runtimeId) {
-      if (prefs.runtimeId !== live.runtimeId) {
-        flashes.push("runtime");
-        live.runtimeId = prefs.runtimeId;
-      }
-      setDraftRuntimeId(prefs.runtimeId);
-    }
-    if (!seeding) bumpFlash(flashes);
-  };
-  const goPane = useCallback(
-    (next: PresencePane) => {
-      setFollowUserId(null);
-      setMainPane(next);
-      setPref("pane", next);
-    },
-    [setPref],
-  );
+  const goPane = useCallback((next: PresencePane) => {
+    setMainPane(next);
+  }, []);
   const workingIds = useMemo(
     () => activeSessionIds(peers, meUser?.id ?? ""),
     [peers, meUser?.id],
@@ -525,27 +416,6 @@ export function ChatApp() {
     () => buildConversationTurns(events, { variantByMessage, branchByParent }),
     [events, variantByMessage, branchByParent],
   );
-  const presenceTurns = useMemo(
-    () =>
-      turns.map((t) => ({
-        seq: t.message.seq,
-        messageId: t.message.id,
-        parentKey: t.message.parentKey,
-        runId: t.activeRunId,
-        siblings: t.siblings,
-        variants: t.variants,
-      })),
-    [turns],
-  );
-  useEffect(() => {
-    setView(
-      turns.map((t) => ({
-        messageId: t.message.id,
-        parentKey: t.message.parentKey,
-        runId: t.activeRunId,
-      })),
-    );
-  }, [setView, turns]);
   const currentModelItem = useMemo(() => {
     if (!models.length) return undefined;
     if (!model) return models.find((m) => m.isDefault) ?? models[0];
@@ -651,28 +521,7 @@ export function ChatApp() {
   };
   useEffect(() => {
     setRemoteFlash({});
-    prefsSeededKeyRef.current = "";
   }, [agentId, sessionId]);
-  useEffect(() => {
-    if (!yjsReady) return;
-    const patch: Record<string, string> = {
-      reasoning,
-      runtimeId: draftRuntimeId,
-      skills: JSON.stringify(selectedSkills),
-      disabledGroups: JSON.stringify(disabledGroupIds),
-      pane: mainPane,
-    };
-    if (model) patch.model = model;
-    if (modelRouteId) patch.modelRouteId = modelRouteId;
-    if (collabFile?.path) {
-      patch.filePath = collabFile.path;
-      if (collabFile.dir) patch.fileDir = "1";
-    }
-    if (sessionProject) patch.project = sessionProject;
-    setPrefIfAbsent(patch);
-    // 只在接入文档时填空，避免把本地默认值盖到对端已写入的键上
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [yjsReady, sessionId]);
   const {
     scrollRef,
     contentRef,
@@ -680,7 +529,7 @@ export function ChatApp() {
     atBottom,
     scrollToBottom,
     sync: syncScroll,
-  } = useStickToBottom<HTMLDivElement, HTMLDivElement>(140, Boolean(followUserId));
+  } = useStickToBottom<HTMLDivElement, HTMLDivElement>(140);
 
   // 初始按视口决定：桌面展开，移动端收起（覆盖式抽屉，避免首帧闪现）
   useEffect(() => {
@@ -1027,7 +876,6 @@ export function ChatApp() {
         const stash = editStashRef.current;
         editStashRef.current = null;
         setPaused(false);
-        setCaretChannel(DRAFT_CARET_CHANNEL);
         if (stash) {
           setAttachments(stash.attachments);
           previewsRef.current = stash.previews;
@@ -1046,9 +894,9 @@ export function ChatApp() {
         return [res.session, ...others].sort(
           (a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt),
         );
-      });
+        });
     },
-    [setPaused, setCaretChannel],
+    [setPaused],
   );
 
   /**
@@ -1121,45 +969,9 @@ export function ChatApp() {
     }
   }, [agentId, scrollEl]);
 
-  const ensureSeqLoaded = useCallback(async (seq: number) => {
-    if (eventsRef.current.some((e) => e.seq === seq)) return true;
-    const aid = agentId;
-    const sid = sessionIdRef.current;
-    if (!aid || !sid || seq < 1) return false;
-    try {
-      const res = await getCloudSession(aid, sid, { aroundSeq: seq });
-      if (res.events.length === 0) return false;
-      setEvents((prev) => {
-        const seen = new Set(prev.map((e) => e.seq));
-        const extra = res.events.filter((e) => !seen.has(e.seq));
-        if (extra.length === 0) return prev;
-        const merged = [...prev, ...extra].sort((a, b) => a.seq - b.seq);
-        oldestSeqRef.current = merged[0]?.seq ?? oldestSeqRef.current;
-        return merged;
-      });
-      if (res.hasMore) {
-        hasMoreHistoryRef.current = true;
-        setHasMoreHistory(true);
-      }
-      return true;
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "无法定位协同位置");
-      return false;
-    }
-  }, [agentId]);
-
+  /** 点侧栏/顶栏头像：跳到对方正在看的位置（只跳一次，不持续跟随） */
   const applyPeerLocation = useCallback(
-    (peer: PresenceLocation, force = false) => {
-      const key = [
-        peer.agentId ?? "",
-        peer.sessionId ?? "",
-        peer.project ?? "",
-        peer.pane,
-        peer.filePath ?? "",
-        peer.fileDir ? "1" : "0",
-      ].join("|");
-      if (!force && key === lastFollowKeyRef.current) return;
-      lastFollowKeyRef.current = key;
+    (peer: PresenceLocation) => {
       setMainPane(peer.pane);
       setActiveProject(peer.project);
       if (peer.pane === "files" && peer.filePath) {
@@ -1187,22 +999,10 @@ export function ChatApp() {
       const peer = peers.find((p) => p.userId === userId);
       if (!peer) return;
       closeNavOnMobile();
-      setFollowUserId(userId);
-      lastFollowKeyRef.current = "";
-      applyPeerLocation(peer, true);
+      applyPeerLocation(peer);
     },
     [applyPeerLocation, closeNavOnMobile, peers],
   );
-
-  useEffect(() => {
-    if (!followUserId) {
-      lastFollowKeyRef.current = "";
-      return;
-    }
-    const peer = peers.find((p) => p.userId === followUserId);
-    if (!peer || peer.idle) return;
-    applyPeerLocation(peer);
-  }, [applyPeerLocation, followUserId, peers]);
 
   const resetConversationEvents = useCallback(() => {
     setEvents([]);
@@ -1216,47 +1016,9 @@ export function ChatApp() {
     const onScroll = () => {
       if (scrollEl.scrollTop < 120) void loadOlderMessages();
     };
-    const unfollowIfUser = () => {
-      if (followUserId) setFollowUserId(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (!followUserId) return;
-      if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "PageUp" || e.key === "PageDown" || e.key === "Home" || e.key === "End") {
-        unfollowIfUser();
-      }
-    };
     scrollEl.addEventListener("scroll", onScroll, { passive: true });
-    scrollEl.addEventListener("wheel", unfollowIfUser, { passive: true });
-    scrollEl.addEventListener("touchmove", unfollowIfUser, { passive: true });
-    scrollEl.addEventListener("keydown", onKey);
-    return () => {
-      scrollEl.removeEventListener("scroll", onScroll);
-      scrollEl.removeEventListener("wheel", unfollowIfUser);
-      scrollEl.removeEventListener("touchmove", unfollowIfUser);
-      scrollEl.removeEventListener("keydown", onKey);
-    };
-  }, [scrollEl, loadOlderMessages, followUserId]);
-
-  useEffect(() => {
-    if (!followUserId) return;
-    const r = remotes.find((x) => x.user.id === followUserId);
-    const ptr = r?.pointer;
-    if (!ptr || !scrollEl) return;
-    if (ptr.seq < 1) return;
-    let cancelled = false;
-    void (async () => {
-      const ok = await ensureSeqLoaded(ptr.seq);
-      if (!ok || cancelled) return;
-      const el = scrollEl.querySelector(`[data-turn-seq="${ptr.seq}"]`);
-      if (!(el instanceof HTMLElement)) return;
-      const box = el.getBoundingClientRect();
-      const host = scrollEl.getBoundingClientRect();
-      scrollEl.scrollTop += box.top - host.top + ptr.y * box.height - host.height * 0.35;
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [ensureSeqLoaded, followUserId, remotes, scrollEl]);
+    return () => scrollEl.removeEventListener("scroll", onScroll);
+  }, [scrollEl, loadOlderMessages]);
 
   // 首屏未撑满视口时继续回拉，避免「还有历史但滚不到顶」
   useEffect(() => {
@@ -1638,7 +1400,6 @@ export function ChatApp() {
     if (stash) {
       editStashRef.current = null;
       setPaused(false);
-      setCaretChannel(DRAFT_CARET_CHANNEL);
       setEditingTarget(null);
     }
     draftKeyRef.current = nextKey;
@@ -1652,7 +1413,7 @@ export function ChatApp() {
     }
     latestInputRef.current = restored;
     setInput(restored);
-  }, [agentId, sessionId, setPaused, setCaretChannel]);
+  }, [agentId, sessionId, setPaused]);
 
   // 卸载时释放尚未发送的图片预览地址
   useEffect(() => {
@@ -1878,7 +1639,6 @@ export function ChatApp() {
     setDraftProject(next);
     setActiveProject(next);
     liveRef.current.project = next;
-    setPref("project", next ?? "");
     const sid = sessionIdRef.current;
     if (!agentId || !sid) return;
     const current = sessions.find((s) => s.id === sid);
@@ -1975,8 +1735,6 @@ export function ChatApp() {
     const path = `/projects/${slug}`;
     setFileRequest({ path, nonce: fileNonceRef.current, dir: true });
     setCollabFile({ path, dir: true });
-    setPref("filePath", path);
-    setPref("fileDir", "1");
   }
 
   function parentForSend(): string | null | undefined {
@@ -1991,9 +1749,7 @@ export function ChatApp() {
     fileNonceRef.current += 1;
     setFileRequest({ path, nonce: fileNonceRef.current });
     setCollabFile({ path, dir: false });
-    setPref("filePath", path);
-    setPref("fileDir", "");
-  }, [goPane, setPref]);
+  }, [goPane]);
 
   /** 图片附件的本地预览：object URL 由 previewsRef 统一持有并释放 */
   function dropPreview(path: string) {
@@ -2073,7 +1829,6 @@ export function ChatApp() {
   function leaveEditMode(restore: boolean) {
     const stash = editStashRef.current;
     editStashRef.current = null;
-    setCaretChannel(DRAFT_CARET_CHANNEL);
     setPaused(false);
     setEditingTarget(null);
     if (!restore || !stash) return;
@@ -2104,7 +1859,6 @@ export function ChatApp() {
       };
     }
     setPaused(true);
-    setCaretChannel(`edit:${messageId}`);
     setEditingTarget({ messageId, parentKey });
     setInput(content);
     latestInputRef.current = content;
@@ -2477,10 +2231,6 @@ export function ChatApp() {
     setModelRouteId(routeId);
     liveRef.current.model = value;
     liveRef.current.modelRouteId = routeId;
-    setPrefs({
-      model: value,
-      modelRouteId: routeId || "",
-    });
     try {
       if (sessionId) {
         await updateCloudSession(agentId, sessionId, {
@@ -2502,7 +2252,6 @@ export function ChatApp() {
   function handleReasoningChange(value: ComposerReasoningValue) {
     setReasoning(value);
     liveRef.current.reasoning = value;
-    setPref("reasoning", value);
     if (sessionId && agentId) {
       void updateCloudSession(agentId, sessionId, { reasoning: value }).catch((err) => {
         toast.error(err instanceof Error ? err.message : String(err));
@@ -2670,7 +2419,6 @@ export function ChatApp() {
                 <DropdownMenuItem
                   key={a.id}
                   onClick={() => {
-                    setFollowUserId(null);
                     setAgentId(a.id);
                     closeNavOnMobile();
                   }}
@@ -2886,19 +2634,9 @@ export function ChatApp() {
                       ? `${agent?.name ?? ""} · ${activeProjectRow.name}`
                       : agent?.name}
           </span>
-          {followUserId ? (
-            <FollowChip
-              userId={followUserId}
-              name={peers.find((p) => p.userId === followUserId)?.name ?? remotes.find((r) => r.user.id === followUserId)?.user.name ?? "成员"}
-              onStop={() => setFollowUserId(null)}
-            />
-          ) : null}
           <PresenceAvatars
             peers={othersOnSession(peers, sessionId, meUser?.id ?? "")}
-            onPick={(id) => {
-              if (followUserId === id) setFollowUserId(null);
-              else goToPeer(id);
-            }}
+            onPick={goToPeer}
           />
           {realtimeOffline ? (
             <span
@@ -2969,41 +2707,8 @@ export function ChatApp() {
         </header>
 
         <div
-          ref={setPointerHost}
           className={cn("relative flex min-h-0 flex-1 flex-col", mainPane !== "chat" && "hidden")}
-          onPointerMove={(e) => {
-            if (document.visibilityState !== "visible") {
-              setPointer(null);
-              return;
-            }
-            const host = e.currentTarget;
-            const turn = (e.target as HTMLElement | null)?.closest?.("[data-turn-seq]");
-            if (turn instanceof HTMLElement && host.contains(turn)) {
-              const seq = Number(turn.getAttribute("data-turn-seq"));
-              if (!Number.isFinite(seq)) return;
-              const box = turn.getBoundingClientRect();
-              const x = box.width <= 0 ? 0 : (e.clientX - box.left) / box.width;
-              const y = box.height <= 0 ? 0 : (e.clientY - box.top) / box.height;
-              setPointer({
-                seq,
-                x: Math.min(1, Math.max(0, x)),
-                y: Math.min(1, Math.max(0, y)),
-              });
-              return;
-            }
-            const box = host.getBoundingClientRect();
-            const x = box.width <= 0 ? 0 : (e.clientX - box.left) / box.width;
-            const y = box.height <= 0 ? 0 : (e.clientY - box.top) / box.height;
-            setPointer({
-              seq: 0,
-              x: Math.min(1, Math.max(0, x)),
-              y: Math.min(1, Math.max(0, y)),
-            });
-          }}
-          onPointerLeave={() => setPointer(null)}
         >
-          <PresencePointers remotes={remotes} followUserId={followUserId} container={pointerHost} turns={presenceTurns} />
-
         <div
           ref={scrollRef}
           className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
@@ -3043,10 +2748,6 @@ export function ChatApp() {
                 setBranchByParent((prev) => ({ ...prev, [parentKey]: mid }))
               }
               onOpenFile={openFileInPanel}
-              ui={ui}
-              setUiFlag={setUiFlag}
-              remotes={remotes}
-              peers={peers}
               onPermission={(requestId, optionId, cancelled) => {
                 if (!agentId || !sessionId) return;
                 void resolveAcpPermission(agentId, sessionId, {
@@ -3102,11 +2803,7 @@ export function ChatApp() {
           <Composer
             value={input}
             onValueChange={bindValueChange}
-            remotes={remotes}
             remoteFlash={remoteFlash}
-            caretChannel={
-              editingTarget ? `edit:${editingTarget.messageId}` : DRAFT_CARET_CHANNEL
-            }
             onSend={() => void handleSend()}
             onStop={() => void handleCancel()}
             showContinue={canContinue}
@@ -3145,7 +2842,6 @@ export function ChatApp() {
                   !events.some((e) => e.type === "user_message");
                 setDraftRuntimeId(id);
                 liveRef.current.runtimeId = id;
-                setPref("runtimeId", id);
                 if (id === ZAKURA_RUNTIME_ID) {
                   setAcpRuntime(null);
                   if (agentId && previousSessionId && previousUnused) {
@@ -3182,7 +2878,6 @@ export function ChatApp() {
                     if (prepared.runtime.state !== "starting") {
                       setAcpPreparingProfileId(null);
                     }
-                    setPref("runtimeId", id);
                   } catch (err) {
                     setDraftRuntimeId(ZAKURA_RUNTIME_ID);
                     liveRef.current.runtimeId = ZAKURA_RUNTIME_ID;
@@ -3296,7 +2991,6 @@ export function ChatApp() {
               setSelectedSkills((prev) => {
                 const next = prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name];
                 liveRef.current.skills = next;
-                setPref("skills", JSON.stringify(next));
                 return next;
               })
             }
@@ -3306,7 +3000,6 @@ export function ChatApp() {
               setDisabledGroupIds((prev) => {
                 const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
                 liveRef.current.groups = next;
-                setPref("disabledGroups", JSON.stringify(next));
                 return next;
               })
             }
@@ -3346,9 +3039,6 @@ export function ChatApp() {
             onClose={() => goPane("chat")}
             onOpenPath={(path, dir) => {
               setCollabFile(path ? { path, dir } : null);
-              setPref("filePath", path);
-              setPref("fileDir", dir ? "1" : "");
-              setPref("pane", "files");
             }}
           />
         </div>

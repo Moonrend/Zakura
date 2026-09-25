@@ -126,6 +126,22 @@ async function publish(payload: Fanout): Promise<void> {
   }
 }
 
+function samePresence(a: PresenceLocation | undefined, b: PresenceLocation): boolean {
+  if (!a) return false;
+  return (
+    a.name === b.name &&
+    a.email === b.email &&
+    a.agentId === b.agentId &&
+    a.project === b.project &&
+    a.sessionId === b.sessionId &&
+    a.pane === b.pane &&
+    a.idle === b.idle &&
+    a.avatarRev === b.avatarRev &&
+    a.filePath === b.filePath &&
+    a.fileDir === b.fileDir
+  );
+}
+
 export async function upsertPresence(
   tenantId: string,
   socketId: string,
@@ -163,7 +179,11 @@ export async function upsertPresence(
     }
   }
 
-  await publish({ kind: "update", tenantId, loc });
+  // 心跳内容没变化就不广播：否则每个客户端每 20s 触发一次全租户扇出，
+  // 前端跟着整体重渲染。TTL 靠上面的 hSet 刷新，不依赖广播。
+  if (!samePresence(prev, loc)) {
+    await publish({ kind: "update", tenantId, loc });
+  }
   return loc;
 }
 

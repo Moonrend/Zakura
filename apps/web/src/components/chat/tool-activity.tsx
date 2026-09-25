@@ -1128,9 +1128,6 @@ export function ToolActivity({
   autoCollapse = false,
   agentId,
   sessionId,
-  uiKey,
-  ui,
-  setUiFlag,
 }: {
   steps: ActivityStep[];
   onOpenFile?: (path: string) => void;
@@ -1138,9 +1135,6 @@ export function ToolActivity({
   autoCollapse?: boolean;
   agentId?: string | null;
   sessionId?: string | null;
-  uiKey?: string;
-  ui?: Record<string, boolean>;
-  setUiFlag?: (key: string, value: boolean) => void;
 }) {
   const visibleSteps = useMemo(() => {
     const out: ActivityStep[] = [];
@@ -1159,13 +1153,11 @@ export function ToolActivity({
   }, [steps]);
 
   const [showAll, setShowAll] = useState(false);
-  const groupKey = uiKey ? `t:${uiKey}` : null;
-  const [expandedLocal, setExpandedLocal] = useState(!autoCollapse);
-  const expanded = groupKey && ui && groupKey in ui ? ui[groupKey]! : expandedLocal;
-  const setExpanded = (next: boolean | ((prev: boolean) => boolean)) => {
-    const value = typeof next === "function" ? next(expanded) : next;
-    setExpandedLocal(value);
-    if (groupKey) setUiFlag?.(groupKey, value);
+  const [expanded, setExpanded] = useState(!autoCollapse);
+  /** 思考/工具单行的展开状态：仅本地，不再跨端同步 */
+  const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
+  const setRowOpen = (key: string, value: boolean) => {
+    setOpenRows((prev) => (prev[key] === value ? prev : { ...prev, [key]: value }));
   };
   const [detailMap, setDetailMap] = useState<
     Record<string, { arguments?: string; resultText?: string }>
@@ -1243,7 +1235,7 @@ export function ToolActivity({
     hydratedSteps.length > 1 &&
     !hydratedSteps
       .slice(1)
-      .some((s) => s.kind === "tool" && ui?.[`c:${s.call.toolCallId}`]);
+      .some((s) => s.kind === "tool" && openRows[`c:${s.call.toolCallId}`]);
 
   const collapsible =
     !compact &&
@@ -1268,8 +1260,8 @@ export function ToolActivity({
           id={s.id}
           content={s.content}
           active={s.active}
-          open={ui?.[`r:${s.id}`]}
-          onOpenChange={(next) => setUiFlag?.(`r:${s.id}`, next)}
+          open={openRows[`r:${s.id}`]}
+          onOpenChange={(next) => setRowOpen(`r:${s.id}`, next)}
         />
       );
     }
@@ -1283,9 +1275,9 @@ export function ToolActivity({
         onOpenFile={onOpenFile}
         agentId={agentId}
         sessionId={sessionId}
-        open={ui?.[`c:${s.call.toolCallId}`]}
+        open={openRows[`c:${s.call.toolCallId}`]}
         onOpenChange={(next) => {
-          setUiFlag?.(`c:${s.call.toolCallId}`, next);
+          setRowOpen(`c:${s.call.toolCallId}`, next);
           if (next) setExpanded(true);
         }}
       />
@@ -1325,7 +1317,7 @@ export function ToolActivity({
     : [];
   const middleOpen =
     showAll ||
-    middle.some((s) => s.kind === "tool" && ui?.[`c:${s.call.toolCallId}`]);
+    middle.some((s) => s.kind === "tool" && openRows[`c:${s.call.toolCallId}`]);
 
   return (
     <div className="relative flex w-full min-w-0 flex-col items-start">
@@ -1343,7 +1335,7 @@ export function ToolActivity({
               if (middleOpen) {
                 setShowAll(false);
                 for (const s of middle) {
-                  if (s.kind === "tool") setUiFlag?.(`c:${s.call.toolCallId}`, false);
+                  if (s.kind === "tool") setRowOpen(`c:${s.call.toolCallId}`, false);
                 }
               } else {
                 setShowAll(true);
@@ -1365,7 +1357,7 @@ export function ToolActivity({
           onClick={() => {
             setExpanded(false);
             for (const s of hydratedSteps.slice(1)) {
-              if (s.kind === "tool") setUiFlag?.(`c:${s.call.toolCallId}`, false);
+              if (s.kind === "tool") setRowOpen(`c:${s.call.toolCallId}`, false);
             }
           }}
           className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"

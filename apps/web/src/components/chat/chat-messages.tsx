@@ -42,17 +42,10 @@ import type {
   TimelineMemoryItem,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
-import {
-  remoteOnOtherSibling,
-  remoteOnOtherVariant,
-  type PresenceLocation,
-} from "@zakura/shared";
 import { ChatMarkdown } from "@/components/markdown/chat-markdown";
 import { ToolActivity, type ActivityStep } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 import { UserAvatar } from "@/components/user-avatar";
-import { peopleFromRemotes, PresencePeekAvatars } from "./presence-avatars";
-import type { RemoteAwareness } from "@/lib/sync/session-doc";
 
 function isImageMime(mime: string, fileName: string): boolean {
   if (mime.startsWith("image/")) return true;
@@ -233,15 +226,13 @@ function Pager({
   total,
   onSelect,
   disabled,
-  aside,
 }: {
   index: number;
   total: number;
   onSelect: (nextIndex: number) => void;
   disabled?: boolean;
-  aside?: ReactNode;
 }) {
-  if (total <= 1 && !aside) return null;
+  if (total <= 1) return null;
   return (
     <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
       {total > 1 ? (
@@ -271,7 +262,6 @@ function Pager({
           </Button>
         </>
       ) : null}
-      {aside}
     </span>
   );
 }
@@ -317,7 +307,6 @@ function AnswerToolbar({
   onRegenerate,
   onSelectVariant,
   onOpenSources,
-  pagerAside,
 }: {
   copyText: string;
   sources: CloudAgentContextSourceItem[];
@@ -330,14 +319,13 @@ function AnswerToolbar({
   onRegenerate: () => void;
   onSelectVariant: (runId: string) => void;
   onOpenSources: () => void;
-  pagerAside?: ReactNode;
 }) {
   const hasLeft =
     Boolean(copyText) ||
     showRegenerate ||
     sources.length > 0 ||
     memoryItems.length > 0;
-  const hasRight = variants.length > 1 || Boolean(pagerAside);
+  const hasRight = variants.length > 1;
   if (!hasLeft && !hasRight) return null;
 
   return (
@@ -373,7 +361,6 @@ function AnswerToolbar({
         index={variantIndex}
         total={variants.length}
         disabled={runActive}
-        aside={pagerAside}
         onSelect={(i) => {
           const target = variants[i];
           if (target) onSelectVariant(target);
@@ -529,9 +516,6 @@ function renderRunItems(
       decision: "approved" | "denied";
       alwaysAllow?: boolean;
     }) => void;
-    uiKey?: string;
-    ui?: Record<string, boolean>;
-    setUiFlag?: (key: string, value: boolean) => void;
   },
 ) {
   const blocks: ReactNode[] = [];
@@ -546,9 +530,6 @@ function renderRunItems(
         onOpenFile={opts.onOpenFile}
         agentId={opts.agentId}
         sessionId={opts.sessionId}
-        uiKey={opts.uiKey}
-        ui={opts.ui}
-        setUiFlag={opts.setUiFlag}
       />,
     );
     stepBuf = [];
@@ -855,10 +836,6 @@ export function ChatMessages({
   onElicitation,
   onAskUser,
   onToolApproval,
-  ui,
-  setUiFlag,
-  remotes = [],
-  peers = [],
 }: {
   turns: ConversationTurn[];
   runActive: boolean;
@@ -893,10 +870,6 @@ export function ChatMessages({
     decision: "approved" | "denied";
     alwaysAllow?: boolean;
   }) => void;
-  ui?: Record<string, boolean>;
-  setUiFlag?: (key: string, value: boolean) => void;
-  remotes?: RemoteAwareness[];
-  peers?: PresenceLocation[];
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
@@ -941,21 +914,13 @@ export function ChatMessages({
           const sharedFiles = collectTurnSharedFiles(runItems);
           const copyText = turnAssistantText(runItems);
           const memoryItems = turnMemoryItems(runItems);
-          const otherVariantPeople = peopleFromRemotes(remotes, peers, (r) =>
-            remoteOnOtherVariant(r.view, {
-              messageId: turn.message.id,
-              runId: turn.activeRunId,
-              variants: turn.variants,
-            }),
-          );
           const showActions =
-            otherVariantPeople.length > 0 ||
-            (!turnRunning &&
-              (Boolean(copyText) ||
-                sources.length > 0 ||
-                memoryItems.length > 0 ||
-                turn.variants.length > 1 ||
-                (isLast && canAct)));
+            !turnRunning &&
+            (Boolean(copyText) ||
+              sources.length > 0 ||
+              memoryItems.length > 0 ||
+              turn.variants.length > 1 ||
+              (isLast && canAct));
 
           return (
             <div
@@ -1043,24 +1008,6 @@ export function ChatMessages({
                       index={turn.siblingIndex}
                       total={turn.siblings.length}
                       disabled={runActive}
-                      aside={
-                        <PresencePeekAvatars
-                          people={peopleFromRemotes(remotes, peers, (r) =>
-                            remoteOnOtherSibling(r.view, {
-                              messageId: turn.message.id,
-                              parentKey: turn.message.parentKey,
-                              siblings: turn.siblings,
-                            }),
-                          )}
-                          hint="在看另一页"
-                          onPick={(userId) => {
-                            const hit = remotes
-                              .find((r) => r.user.id === userId)
-                              ?.view?.find((v) => v.parentKey === turn.message.parentKey);
-                            if (hit) onSelectBranch(turn.message.parentKey, hit.messageId);
-                          }}
-                        />
-                      }
                       onSelect={(i) => {
                         const target = turn.siblings[i];
                         if (target) onSelectBranch(turn.message.parentKey, target);
@@ -1081,9 +1028,6 @@ export function ChatMessages({
                 onElicitation,
                 onAskUser,
                 onToolApproval,
-                uiKey: turn.message.id,
-                ui,
-                setUiFlag,
               })}
 
               {sharedFiles.length > 0 && (
@@ -1103,18 +1047,6 @@ export function ChatMessages({
                   onRegenerate={() => onRegenerate(turn.message.id)}
                   onSelectVariant={(runId) => onSelectVariant(turn.message.id, runId)}
                   onOpenSources={() => setSourcesFor({ messageId: turn.message.id, items: sources })}
-                  pagerAside={
-                    <PresencePeekAvatars
-                      people={otherVariantPeople}
-                      hint="在看另一页"
-                      onPick={(userId) => {
-                        const hit = remotes
-                          .find((r) => r.user.id === userId)
-                          ?.view?.find((v) => v.messageId === turn.message.id);
-                        if (hit?.runId) onSelectVariant(turn.message.id, hit.runId);
-                      }}
-                    />
-                  }
                 />
               )}
             </div>

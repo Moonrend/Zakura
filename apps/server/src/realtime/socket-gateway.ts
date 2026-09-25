@@ -31,9 +31,7 @@ import {
   applyYjsUpdate,
   decodeYjsUpdate,
   encodeYjsUpdate,
-  onYjsAwareness,
   onYjsUpdate,
-  relayYjsAwareness,
   subscribeYjs,
   unsubscribeYjs,
   yjsDiffAgainst,
@@ -177,18 +175,10 @@ export function createSocketGateway(
       from: fromSocketId,
     });
   });
-  const stopAwareness = onYjsAwareness((sessionId, update, fromSocketId) => {
-    io.to(syncRoom(sessionId)).emit("sync:awareness", {
-      sessionId,
-      update: encodeYjsUpdate(update),
-      from: fromSocketId,
-    });
-  });
 
   io.engine.on("close", () => {
     stopPresence();
     stopYjs();
-    stopAwareness();
   });
 
   io.on("connection", (socket: Socket) => {
@@ -362,18 +352,11 @@ export function createSocketGateway(
     });
 
     socket.on("sync:update", (payload: { sessionId?: unknown; update?: unknown }) => {
-      // 差量不能丢：连续 setPref / 快速输入若被节流，对端会永远缺那一帧。
+      // 差量不能丢：连续快速输入若被节流，对端会永远缺那一帧。
       const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
       const update = decodeYjsUpdate(payload?.update);
       if (!sessionId || !update || !yjsSubs.has(sessionId)) return;
       applyYjsUpdate(sessionId, update, socket.id, store);
-    });
-
-    socket.on("sync:awareness", (payload: { sessionId?: unknown; update?: unknown }) => {
-      const sessionId = typeof payload?.sessionId === "string" ? payload.sessionId : "";
-      const update = decodeYjsUpdate(payload?.update);
-      if (!sessionId || !update || !yjsSubs.has(sessionId)) return;
-      relayYjsAwareness(sessionId, update, socket.id);
     });
 
     socket.on("disconnect", () => {

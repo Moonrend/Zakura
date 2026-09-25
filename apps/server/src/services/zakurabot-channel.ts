@@ -1,18 +1,16 @@
 import { createHash } from "node:crypto";
 import { recordPlatformFault } from "@zakura/core";
 import type { CloudAgentEvent } from "@zakura/shared";
-import type { AgentChannelBinding, ZakurabotDevice } from "../db/schema.js";
+import type { AgentChannelBinding } from "../db/schema.js";
 import type { AgentService } from "./agents.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
-import { isRemoteSenderAllowed, type RemoteAgentIngress } from "./remote-agent-ingress.js";
 import { callRemoteChannelTool, formatRemoteInboundPrefix, type RemoteChannelSessionHandle, type RemoteChannelToolPort } from "./remote-channel-tools.js";
 import { waitForRemoteRun } from "./remote-channel-stream.js";
 import { createZakurabotChat } from "./zakurabot-adapter.js";
 import type { ZakurabotAgent, ZakurabotClientFrame, ZakurabotServerFrame, ZakurabotToolFrame, ZakurabotUserFrame } from "./zakurabot-protocol.js";
-import { deviceBindingIds, type ZakurabotConversation, type ZakurabotStore } from "./zakurabot-store.js";
+import type { ZakurabotConversation, ZakurabotStore } from "./zakurabot-store.js";
 import { ZakurabotFileError, type ZakurabotFileService } from "./zakurabot-files.js";
 import { ZakurabotInteractionError, type ZakurabotInteractionService } from "./zakurabot-interactions.js";
-import { isSessionAdmin } from "./auth.js";
 
 export class ZakurabotAccessError extends Error {
   constructor(message: string, readonly closeCode: 4401 | 4403) { super(message); }
@@ -20,16 +18,24 @@ export class ZakurabotAccessError extends Error {
 
 export class ZakurabotInputError extends Error {}
 
-export type ZakurabotIdentity = Pick<ZakurabotDevice, "id" | "tenantId">;
+/** OAuth 登录后的租户成员；displayName 用于渠道内的发送者署名。 */
+export type ZakurabotIdentity = { tenantId: string; userId: string; displayName?: string };
+/** 从 OAuth access token 解析出活跃租户成员；无效/过期/非 api scope 返回 null。 */
+export type ZakurabotPrincipalResolver = (token: string) => Promise<ZakurabotIdentity | null>;
+
 type Subscriber = (conversation: ZakurabotConversation, frame: ZakurabotServerFrame) => Promise<void>;
 type ActiveRun = { sessionId: string; runId: string; handle: RemoteChannelSessionHandle;
   conversation: ZakurabotConversation; abort: AbortController; done: Promise<void> };
 
 export function zakurabotThreadId(c: ZakurabotConversation): string {
-  return `zakurabot:${c.deviceId}:${c.bindingId}:${c.agentId}`;
+  return `zakurabot:${c.tenantId}:${c.deviceId}:${c.bindingId}:${c.agentId}`;
 }
 
-/** Reuses the remote ingress, session registry, tools, and silent-run fallback. */
+/**
+ * Zakura Bot 是 Zakura 的一等功能：OAuth 登录后以用户自身权限访问租户全部 Agent。
+ * 每个 Agent 首次被访问时自动获得一条启用的 zakurabot 绑定（内部路由实现细节），
+ * 无需管理员预配，也不存在设备记录或独立的令牌体系。
+ */
 export class ZakurabotChannel {
   private readonly subscribers = new Map<string, Set<Subscriber>>();
   private readonly chains = new Map<string, Promise<unknown>>();
@@ -37,18 +43,22 @@ export class ZakurabotChannel {
   private readonly handles = new Map<string, RemoteChannelSessionHandle>();
   private readonly runSubscriptions = new Map<string, () => void>();
   private readonly trackedRunIds = new Map<string, string>();
+  /** 热路径缓存：roster/agent 绑定（省去逐消息的列表查询）。成员有效性每次回查，保证封禁即时生效。 */
+  private readonly rosterBindings = new Map<string, { at: number; bindings: AgentChannelBinding[] }>();
+  private readonly agentBindings = new Map<string, { at: number; binding: AgentChannelBinding }>();
   private stopped = false;
 
   constructor(readonly deps: {
     store: ZakurabotStore;
-    ingress: RemoteAgentIngress;
+    ingress: import("./remote-agent-ingress.js").RemoteAgentIngress;
     sessions: RemoteChannelToolPort;
     sessionStore: CloudAgentSessionStore;
-    agents: Pick<AgentService, "get">;
+    agents: Pick<AgentService, "get" | "list">;
     files?: ZakurabotFileService;
     interactions?: ZakurabotInteractionService;
     desktopAvailable?: boolean;
     publishFile: (conversation: ZakurabotConversation, path: string) => Promise<{ url: string; name: string }>;
+    principal: ZakurabotPrincipalResolver;
   }) {}
 
   capabilities(): string[] {
@@ -56,100 +66,138 @@ export class ZakurabotChannel {
       ...(this.deps.desktopAvailable ? ["desktop_frames"] : []), ...(this.deps.interactions ? ["interactions"] : [])];
   }
 
-  async authorizableBindings(tenantId: string, userId: string) {
+  resolvePrincipal(token: string) {
+    return this.deps.principal(token);
+  }
+
+  /** 成员身份变化（封禁/移除）时立即生效；绑定缓存随之失效以便重新评估。 */
+  forgetAccess(tenantId: string, userId: string) {
+    void userId;
+    this.rosterBindings.delete(tenantId);
+    this.agentBindings.clear();
+  }
+
+  private senderName(identity: ZakurabotIdentity): string {
+    return identity.displayName?.trim() || "Zakura Bot";
+  }
+
+  private async requireActiveUser(tenantId: string, userId: string) {
     const user = await this.deps.store.getActiveUser(tenantId, userId);
-    if (!user) throw new ZakurabotAccessError("An active tenant membership is required", 4403);
-    const bindings = (await this.deps.ingress.listBindings(tenantId, "zakurabot")).filter((binding) => {
-      const settings = this.deps.ingress.toBindingView(binding)!.settings;
-      return binding.enabled && settings.allowDMs !== false &&
-        (isSessionAdmin(user) || isRemoteSenderAllowed(settings, user.userId, user.email));
-    });
-    return { user, bindings };
+    if (!user) throw new ZakurabotAccessError("Sign in with an active Zakura account", 4401);
+    return user;
   }
 
-  async issueDevice(tenantId: string, input: { name: string; bindingIds: string[]; expiresInDays: number; userId?: string }) {
-    if (input.userId) {
-      const allowed = new Set((await this.authorizableBindings(tenantId, input.userId)).bindings.map((binding) => binding.id));
-      if (input.bindingIds.some((id) => !allowed.has(id))) throw new ZakurabotAccessError("You cannot authorize these bindings", 4403);
+  /** 找到或开通某 Agent 的 zakurabot 绑定；已禁用的绑定保持禁用（管理员可切断访问）。 */
+  private async ensureAgentBinding(tenantId: string, agentId: string): Promise<AgentChannelBinding | null> {
+    const key = `${tenantId}:${agentId}`;
+    const cached = this.agentBindings.get(key);
+    if (cached && Date.now() - cached.at < 10_000) return cached.binding;
+    const existing = (await this.deps.ingress.listBindings(tenantId, "zakurabot"))
+      .find((binding) => binding.agentId === agentId);
+    if (existing) {
+      // 设备时代的绑定默认是空白名单=拒绝；用户模型下升级为开放，访问控制由会话本身承担。
+      const settings = this.deps.ingress.toBindingView(existing)!.settings;
+      const restrictive = settings.allowAll !== true && !(settings.allowedUsers?.length || settings.allowedEmails?.length);
+      const binding = !restrictive ? existing : await this.serial(`provision:${tenantId}`, () =>
+        this.deps.ingress.saveBinding(tenantId, { id: existing.id, agentId, platform: "zakurabot",
+          profileKey: "remote-zakurabot", enabled: true, settings: { allowAll: true } }));
+      this.agentBindings.set(key, { at: Date.now(), binding: binding ?? existing });
+      return binding ?? existing;
     }
-    const agents = new Set<string>();
-    for (const id of input.bindingIds) {
-      const binding = await this.deps.ingress.getBinding(tenantId, id);
-      if (!binding || binding.platform !== "zakurabot" || !binding.enabled) {
-        throw new Error("设备只能授权本租户已启用的 Zakura Bot 绑定");
-      }
-      if (agents.has(binding.agentId)) throw new Error("同一设备每个 Agent 只能选择一个绑定");
-      agents.add(binding.agentId);
-    }
-    const issued = await this.deps.store.createDevice(tenantId, input);
-    try {
-      // Browser consent delegates the user's allowed bindings. An open ACL must remain open:
-      // adding its first allowedUsers entry would turn it into a restrictive allowlist.
-      for (const id of input.bindingIds) {
-        const binding = await this.deps.ingress.getBinding(tenantId, id);
-        const settings = this.deps.ingress.toBindingView(binding)!.settings;
-        if (!isRemoteSenderAllowed(settings, issued.device.id)) {
-          await this.deps.ingress.approveUser(tenantId, id, issued.device.id);
-        }
-      }
-      return issued;
-    } catch (error) {
-      await this.deps.store.revokeDevice(tenantId, issued.device.id);
-      throw error;
-    }
-  }
-
-  async authorizedBindings(identity: ZakurabotIdentity) {
-    if (this.stopped) throw new Error("Zakura Bot is stopping");
-    const device = await this.deps.store.getActiveDevice(identity.tenantId, identity.id);
-    if (!device) throw new ZakurabotAccessError("Device token is invalid, expired, or revoked", 4401);
-    const owner = device.userId ? await this.deps.store.getActiveUser(device.tenantId, device.userId) : null;
-    if (device.userId && !owner) throw new ZakurabotAccessError("The device owner is no longer an active member", 4401);
-    const grants = new Set(deviceBindingIds(device));
-    const bindings = (await this.deps.ingress.listBindings(device.tenantId, "zakurabot"))
-      .filter((binding) => {
-        if (!grants.has(binding.id) || !binding.enabled) return false;
-        const settings = this.deps.ingress.toBindingView(binding)!.settings;
-        return settings.allowDMs !== false && isRemoteSenderAllowed(settings, device.id) &&
-          (!owner || isSessionAdmin(owner) || isRemoteSenderAllowed(settings, owner.userId, owner.email));
+    if (!await this.deps.agents.get(tenantId, agentId)) return null;
+    const binding = await this.serial(`provision:${tenantId}`, async () => {
+      const current = (await this.deps.ingress.listBindings(tenantId, "zakurabot"))
+        .find((row) => row.agentId === agentId);
+      if (current) return current;
+      // allowAll 保持入站 ACL 开放；访问控制由用户会话本身承担。
+      return this.deps.ingress.saveBinding(tenantId, {
+        agentId, platform: "zakurabot", profileKey: "remote-zakurabot",
+        enabled: true, label: "Zakura Bot", settings: { allowAll: true },
       });
-    return { device, bindings };
+    });
+    if (!binding) return null;
+    this.agentBindings.set(key, { at: Date.now(), binding });
+    return binding;
   }
 
+  private async ensureRosterBindings(tenantId: string, agents: { id: string }[]): Promise<AgentChannelBinding[]> {
+    const cached = this.rosterBindings.get(tenantId);
+    if (cached && Date.now() - cached.at < 5_000) return cached.bindings;
+    const known = new Set(agents.map((agent) => agent.id));
+    const all = (await this.deps.ingress.listBindings(tenantId, "zakurabot"))
+      .filter((binding) => known.has(binding.agentId));
+    // 只有从未开通过的 Agent 才补建；禁用的绑定保持禁用（管理员可切断访问）。
+    const bindings = all.filter((binding) => binding.enabled);
+    const bound = new Set(all.map((binding) => binding.agentId));
+    const missing = agents.filter((agent) => !bound.has(agent.id));
+    const legacy = bindings.filter((binding) => {
+      const settings = this.deps.ingress.toBindingView(binding)!.settings;
+      return settings.allowAll !== true && !(settings.allowedUsers?.length || settings.allowedEmails?.length);
+    });
+    if (missing.length || legacy.length) {
+      await this.serial(`provision:${tenantId}`, async () => {
+        for (const agent of missing) {
+          try {
+            bindings.push(await this.deps.ingress.saveBinding(tenantId, {
+              agentId: agent.id, platform: "zakurabot", profileKey: "remote-zakurabot",
+              enabled: true, label: "Zakura Bot", settings: { allowAll: true },
+            }));
+          } catch { /* 已由并发路径开通时忽略 */ }
+        }
+        for (const binding of legacy) {
+          try {
+            const upgraded = await this.deps.ingress.saveBinding(tenantId, { id: binding.id,
+              agentId: binding.agentId, platform: "zakurabot", profileKey: "remote-zakurabot",
+              enabled: true, settings: { allowAll: true } });
+            const index = bindings.findIndex((row) => row.id === binding.id);
+            if (index >= 0 && upgraded) bindings[index] = upgraded;
+          } catch { /* 保留原 ACL */ }
+        }
+      });
+    }
+    this.rosterBindings.set(tenantId, { at: Date.now(), bindings });
+    return bindings;
+  }
+
+  private conversation(identity: ZakurabotIdentity, binding: AgentChannelBinding): ZakurabotConversation {
+    return { tenantId: identity.tenantId, deviceId: identity.userId, bindingId: binding.id, agentId: binding.agentId };
+  }
+
+  /** 授权校验：绑定仍存在、仍启用且指向同一 Agent。 */
   private async authorize(c: ZakurabotConversation) {
-    const { device, bindings } = await this.authorizedBindings({ id: c.deviceId, tenantId: c.tenantId });
-    const binding = bindings.find((b) => b.id === c.bindingId && b.agentId === c.agentId);
-    if (!binding) throw new ZakurabotAccessError("This device cannot access the requested agent", 4403);
-    return { device, binding };
-  }
-
-  private conversation(device: ZakurabotIdentity, binding: AgentChannelBinding): ZakurabotConversation {
-    return { tenantId: device.tenantId, deviceId: device.id, bindingId: binding.id, agentId: binding.agentId };
+    await this.requireActiveUser(c.tenantId, c.deviceId);
+    const binding = await this.deps.ingress.getBinding(c.tenantId, c.bindingId);
+    if (!binding || binding.platform !== "zakurabot" || binding.agentId !== c.agentId || !binding.enabled) {
+      throw new ZakurabotAccessError("This conversation is no longer available", 4403);
+    }
+    return binding;
   }
 
   async roster(identity: ZakurabotIdentity) {
-    const { device, bindings } = await this.authorizedBindings(identity);
+    if (this.stopped) throw new Error("Zakura Bot is stopping");
+    await this.requireActiveUser(identity.tenantId, identity.userId);
+    const tenantAgents = await this.deps.agents.list(identity.tenantId);
+    const bindings = await this.ensureRosterBindings(identity.tenantId, tenantAgents);
     const agents: ZakurabotAgent[] = [];
     const conversations: ZakurabotConversation[] = [];
     for (const binding of bindings) {
-      // A binding may have been reassigned since issuance. Fail closed on ambiguous routing.
+      // 重复绑定按歧义处理，失败关闭。
       if (bindings.filter((b) => b.agentId === binding.agentId).length !== 1) continue;
-      const agent = await this.deps.agents.get(device.tenantId, binding.agentId);
+      const agent = tenantAgents.find((row) => row.id === binding.agentId);
       if (!agent) continue;
-      const c = this.conversation(device, binding);
-      const status = await this.deps.ingress.getThreadStatus(device.tenantId, binding.id, zakurabotThreadId(c));
-      agents.push({ id: agent.id, name: agent.name || binding.label || "Agent", title: binding.label, description: agent.description,
+      const c = this.conversation(identity, binding);
+      const status = await this.deps.ingress.getThreadStatus(identity.tenantId, binding.id, zakurabotThreadId(c));
+      agents.push({ id: agent.id, name: agent.name || "Agent", title: binding.label, description: agent.description,
         status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false, bindingId: binding.id,
         capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: Boolean(agent.enableComputer && this.deps.desktopAvailable),
           interactions: Boolean(this.deps.interactions) } });
       conversations.push(c);
     }
-    if (!agents.length) throw new ZakurabotAccessError("No enabled Zakura Bot bindings are authorized for this device", 4403);
     return { agents, conversations };
   }
 
   subscribe(identity: ZakurabotIdentity, subscriber: Subscriber): () => void {
-    const key = `${identity.tenantId}:${identity.id}`;
+    const key = `${identity.tenantId}:${identity.userId}`;
     const listeners = this.subscribers.get(key) ?? new Set<Subscriber>();
     listeners.add(subscriber);
     this.subscribers.set(key, listeners);
@@ -241,21 +289,22 @@ export class ZakurabotChannel {
     }
   }
 
-  private async restoreHandle(c: ZakurabotConversation, sessionId: string, replyTo?: string) {
-    const { device } = await this.authorize(c);
+  private async restoreHandle(c: ZakurabotConversation, sessionId: string, replyTo?: string, identity?: ZakurabotIdentity) {
+    await this.authorize(c);
     if (this.deps.sessions.get(sessionId)) return;
     const threadId = zakurabotThreadId(c);
+    const sender = this.senderName(identity ?? { tenantId: c.tenantId, userId: c.deviceId });
     const requireCurrent = () => {
       if (this.deps.sessions.get(sessionId) !== handle) throw new Error("This remote turn has been superseded");
     };
-    const chat = createZakurabotChat({ agentId: c.agentId, deviceId: device.id, deviceName: device.name, threadId,
+    const chat = createZakurabotChat({ agentId: c.agentId, deviceId: c.deviceId, deviceName: sender, threadId,
       post: (frame) => this.publish(c, frame, () => { requireCurrent(); return true; }),
       history: (limit) => { requireCurrent(); return this.history(c, limit); },
       publishFile: async (path) => { requireCurrent(); await this.authorize(c); return this.deps.publishFile(c, path); },
     });
     const handle: RemoteChannelSessionHandle = { chat, threadId, channelId: threadId, platform: "zakurabot", bindingId: c.bindingId,
       inboundMessageId: replyTo, isDM: true, isThread: false, trigger: "dm",
-      sender: { userId: device.id, userName: device.name, fullName: device.name }, chatReplySuccessCount: 0, autoFallbackPosted: false };
+      sender: { userId: c.deviceId, userName: sender, fullName: sender }, chatReplySuccessCount: 0, autoFallbackPosted: false };
     this.deps.sessions.bind(sessionId, handle);
     this.handles.set(sessionId, handle);
   }
@@ -290,10 +339,11 @@ export class ZakurabotChannel {
   }
 
   async resolveConversation(identity: ZakurabotIdentity, agentId: string) {
-    const { device, bindings } = await this.authorizedBindings(identity);
-    const matches = bindings.filter((b) => b.agentId === agentId);
-    if (matches.length !== 1) throw new ZakurabotAccessError("This device cannot access the requested agent", 4403);
-    return { device, conversation: this.conversation(device, matches[0]!) };
+    if (this.stopped) throw new Error("Zakura Bot is stopping");
+    await this.requireActiveUser(identity.tenantId, identity.userId);
+    const binding = await this.ensureAgentBinding(identity.tenantId, agentId);
+    if (!binding || !binding.enabled) throw new ZakurabotAccessError("This device cannot access the requested agent", 4403);
+    return { device: identity, conversation: this.conversation(identity, binding) };
   }
 
   private serial<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -304,8 +354,9 @@ export class ZakurabotChannel {
   }
 
   async send(identity: ZakurabotIdentity, frame: Extract<ZakurabotClientFrame, { type: "send" }>) {
-    const { device, conversation: c } = await this.resolveConversation(identity, frame.agentId);
+    const { conversation: c } = await this.resolveConversation(identity, frame.agentId);
     const threadId = zakurabotThreadId(c);
+    const sender = this.senderName(identity);
     await this.serial(threadId, async () => {
       await this.authorize(c);
       const existing = await this.deps.store.userMessage(c, frame.clientMessageId);
@@ -338,7 +389,7 @@ export class ZakurabotChannel {
         }
       };
       const chat = createZakurabotChat({
-        agentId: c.agentId, deviceId: device.id, deviceName: device.name, threadId,
+        agentId: c.agentId, deviceId: c.deviceId, deviceName: sender, threadId,
         post: (message) => this.publish(c, message, () => {
           requireCurrentTurn();
           return message.type !== "typing" || !message.active || this.runs.get(threadId)?.handle === handle;
@@ -349,15 +400,15 @@ export class ZakurabotChannel {
       const handle: RemoteChannelSessionHandle = {
         chat, threadId, channelId: threadId, platform: "zakurabot", bindingId: c.bindingId,
         inboundMessageId: frame.clientMessageId, isDM: true, isThread: false, trigger: "dm",
-        sender: { userId: device.id, userName: device.name, fullName: device.name },
+        sender: { userId: c.deviceId, userName: sender, fullName: sender },
         chatReplySuccessCount: 0, autoFallbackPosted: false,
       };
       const result = await this.deps.ingress.handleInbound({
         tenantId: c.tenantId, bindingId: c.bindingId, platform: "zakurabot",
         externalEventId: `${threadId}:${frame.clientMessageId}`, externalThreadKey: threadId,
-        externalUserKey: device.id, text: `${formatRemoteInboundPrefix(handle)}\n${text}`,
+        externalUserKey: c.deviceId, text: `${formatRemoteInboundPrefix(handle)}\n${text}`,
         attachments: files?.attachments,
-        title: `Zakura Bot · ${device.name}`,
+        title: `Zakura Bot · ${sender}`,
         onSessionReady: async (sessionId) => {
           const previous = this.runs.get(threadId);
           previous?.abort.abort();
@@ -387,15 +438,16 @@ export class ZakurabotChannel {
 
   /** Session operations share the same queue as sends, so a reset cannot race a new turn. */
   async manageSession(identity: ZakurabotIdentity, agentId: string, action: "status" | "start" | "stop" | "new") {
-    const { device, conversation: c } = await this.resolveConversation(identity, agentId);
+    const { conversation: c } = await this.resolveConversation(identity, agentId);
     const threadId = zakurabotThreadId(c);
+    const sender = this.senderName(identity);
     return this.serial(threadId, async () => {
       await this.authorize(c);
       const current = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, threadId);
       if (action === "stop") await this.deps.ingress.stopThreadRun(c.tenantId, c.bindingId, threadId);
       if (action === "new" || (action === "start" && !current)) {
         if (current) await this.deps.interactions?.cancelSession(c, current.sessionId);
-        await this.deps.ingress.resetThreadSession(c.tenantId, c.bindingId, threadId, device.id, `Zakura Bot · ${device.name}`);
+        await this.deps.ingress.resetThreadSession(c.tenantId, c.bindingId, threadId, c.deviceId, `Zakura Bot · ${sender}`);
         const previous = this.runs.get(threadId);
         previous?.abort.abort();
         await previous?.done;
@@ -487,5 +539,12 @@ export class ZakurabotChannel {
         await this.deps.sessionStore.requestCancel(run.sessionId, run.runId);
       }
     }
+  }
+
+  /** 管理操作后的强制刷新：绕过 roster 缓存，让新 Agent 立刻可见。 */
+  async refresh() {
+    this.rosterBindings.clear();
+    this.agentBindings.clear();
+    await this.revalidateRuns();
   }
 }

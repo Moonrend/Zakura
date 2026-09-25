@@ -24,7 +24,6 @@ import {
 } from "@/components/ui/sheet";
 import type { ConnectorOauthField } from "@/components/connections/connector-oauth-form";
 import { BrandIcon } from "@/components/brand-icon";
-import { ZakurabotDevices } from "@/components/zakurabot-devices";
 import { api } from "@/lib/api";
 import { subscribePlatformEvents } from "@/lib/platform-events";
 import {
@@ -548,10 +547,9 @@ export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
 
                 {/* Access */}
                 {platform === "zakurabot" ? (
-                  editingId ? <ZakurabotDevices bindingId={editingId} onChange={async () => {
-                    const remote = await api<{ bindings: Binding[] }>("/api/remote-channels");
-                    setAllBindings(remote.bindings);
-                  }} /> : <p className="text-xs text-muted-foreground">保存后可创建设备 Token，连接 Zakura Bot App。</p>
+                  <p className="text-xs text-muted-foreground">
+                    Zakura Bot 通过 OAuth 登录即可访问授权用户的全部 Agent，无需在此配置设备或白名单。
+                  </p>
                 ) : <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm font-medium">开放访问</span>

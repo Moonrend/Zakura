@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { eq } from "drizzle-orm";
-import { agents } from "../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
+import { agents, tenantMemberships } from "../src/db/schema.js";
 import { MAX_SCREENSHOT_BYTES } from "../src/services/agent-screenshot.js";
 import { zakurabotHarness } from "./helpers/zakurabot.js";
 
@@ -29,7 +29,6 @@ describe("Zakura Bot desktop frames", () => {
     assert.equal((await get(path, ctx.token)).status, 409);
     assert.equal((await get(`${path}/frame`, ctx.token)).status, 409);
     await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
-    assert.equal((await (await get("me", ctx.token)).json()).capabilities.includes("desktop_frames"), true);
     assert.equal((await (await get(`agents/${agentId}`, ctx.token)).json()).agent.capabilities.desktop, true);
     const response = await get(path, ctx.token);
     assert.equal(response.status, 200);
@@ -45,7 +44,8 @@ describe("Zakura Bot desktop frames", () => {
     assert.equal(JSON.stringify(info).includes("private-runner"), false);
     assert.equal(JSON.stringify(info).includes("PRIVATE_CONTAINER"), false);
     assert.equal((await fetch(info.frameUrl)).status, 401);
-    assert.equal((await fetch(info.frameUrl, { headers: headers(h.adminToken(ctx.tenantId)) })).status, 401);
+    // 控制台会话与 OAuth token 同权：同一租户成员可直接取帧。
+    assert.equal((await fetch(info.frameUrl, { headers: headers(h.adminToken(ctx.tenantId)) })).status, 200);
     assert.equal((await fetch(info.frameUrl, { headers: headers(other.token) })).status, 403);
     const frame = await fetch(info.frameUrl, { headers: headers(ctx.token) });
     assert.equal(frame.status, 200);
@@ -69,7 +69,11 @@ describe("Zakura Bot desktop frames", () => {
       assert.equal(disabled.status, 409);
       assert.match(disabled.headers.get("content-type")!, /application\/json/);
       await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
-      afterCapture = async () => { await h.store.revokeDevice(ctx.tenantId, ctx.device.id); };
+      afterCapture = async () => {
+        await h.db.update(tenantMemberships).set({ status: "suspended" })
+          .where(and(eq(tenantMemberships.tenantId, ctx.tenantId), eq(tenantMemberships.userId, ctx.userId)));
+        h.gateway.disconnectUser(ctx.tenantId, ctx.userId);
+      };
       const revoked = await get(`agents/${agentId}/desktop/frame`, ctx.token);
       assert.equal(revoked.status, 401);
       assert.match(revoked.headers.get("content-type")!, /application\/json/);

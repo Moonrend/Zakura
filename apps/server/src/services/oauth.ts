@@ -45,9 +45,10 @@ const REFRESH_TTL_SEC = 60 * 60 * 24 * 30; // 30d
 const CODE_TTL_SEC = 60 * 10; // 10m
 const ID_TOKEN_TTL_SEC = 60 * 60; // 1h
 
-/** OIDC + MCP 对外声明的 scope */
+/** OIDC + MCP 对外声明的 scope；`api` 允许以用户身份调用租户 REST API（Zakura Bot 等原生客户端） */
 export const OAUTH_SCOPES_SUPPORTED = [
   "mcp",
+  "api",
   "openid",
   "email",
   "profile",
@@ -281,6 +282,8 @@ export function isAllowedRedirectUri(uri: string): boolean {
         u.hostname === "[::1]"
       );
     }
+    // Zakura Bot 原生 App（Expo openAuthSessionAsync）回跳 scheme
+    if (u.protocol === "zakurabot:") return true;
     // VS Code / Cursor custom schemes occasionally used
     if (u.protocol === "vscode:" || u.protocol === "cursor:" || u.protocol === "vscode-insiders:") {
       return true;

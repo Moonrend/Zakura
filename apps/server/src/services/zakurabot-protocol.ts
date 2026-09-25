@@ -91,7 +91,8 @@ export const zakurabotClientFrameSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
     protocol: z.literal(ZAKURABOT_PROTOCOL),
-    token: z.string().min(1).max(256),
+    /** OAuth access token（RS256 JWT），远长于旧设备 token。 */
+    token: z.string().min(1).max(4096),
     client: z.object({ name: z.string().min(1).max(128), version: z.string().min(1).max(128) }),
   }),
   z.object({ type: z.literal("send"), agentId: channelIdSchema, clientMessageId: channelIdSchema,

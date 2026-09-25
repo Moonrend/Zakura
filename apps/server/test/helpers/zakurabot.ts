@@ -17,8 +17,8 @@ import { runMigrations } from "../../src/db/migrate.js";
 import { agents, newId, tenantMemberships, tenants, users } from "../../src/db/schema.js";
 import type { AppVariables } from "../../src/api/routes.js";
 import { registerFileShareRoutes } from "../../src/api/file-share-routes.js";
-import { registerZakurabotRoutes } from "../../src/api/zakurabot-routes.js";
 import { registerZakurabotAppRoutes } from "../../src/api/zakurabot-app-routes.js";
+import { registerZakurabotSessionRoutes } from "../../src/api/zakurabot-session-routes.js";
 import { ZakurabotFileService } from "../../src/services/zakurabot-files.js";
 import { ZakurabotInteractionService } from "../../src/services/zakurabot-interactions.js";
 import { AskUserService } from "../../src/services/ask-user.js";
@@ -31,8 +31,10 @@ import { FileShareService } from "../../src/services/file-shares.js";
 import { RemoteAgentIngress } from "../../src/services/remote-agent-ingress.js";
 import { callRemoteChannelTool, RemoteChannelSessionRegistry, type RemoteChannelSessionHandle } from "../../src/services/remote-channel-tools.js";
 import { createZakurabotFilePublisher } from "../../src/services/zakurabot-adapter.js";
-import { ZakurabotChannel } from "../../src/services/zakurabot-channel.js";
+import { ZakurabotChannel, type ZakurabotPrincipalResolver } from "../../src/services/zakurabot-channel.js";
 import { ZakurabotGateway } from "../../src/services/zakurabot-gateway.js";
+import { loadOrCreateOauthSigningKey, signJwtRs256 } from "../../src/services/oauth-signing.js";
+import { OauthService } from "../../src/services/oauth.js";
 import type { ZakurabotServerFrame } from "../../src/services/zakurabot-protocol.js";
 import { ZakurabotStore } from "../../src/services/zakurabot-store.js";
 
@@ -94,13 +96,31 @@ export async function zakurabotHarness(options: {
   const database = await createDb({ databaseUrl, dataDir });
   const db = database.db;
   const config = { dataDir, databaseUrl, secret: "zakurabot-test-secret", publicBaseUrl: "http://localhost" } as AppConfig;
+  const oauthService = new OauthService(db, config);
   const app = new Hono<{ Variables: AppVariables }>();
   app.get("/api/health", (c) => c.json({ ok: true }));
   app.use("/api/*", async (c, next) => {
+    // 公开的 file share 路径与生产语义一致。
+    if (/^\/api\/files\/shared\/[^/]+$/.test(c.req.path)) return next();
     const token = c.req.header("authorization")?.replace(/^Bearer /, "");
     const session = token ? verifySession(config.secret, token) : null;
-    if (session) c.set("session", session);
-    await next();
+    if (session) { c.set("session", session); await next(); return; }
+    // 与生产中间件一致：api scope 的 OAuth token 以用户身份访问。
+    if (token) {
+      const access = await oauthService.authenticateBearer(token).catch(() => null);
+      if (access?.userId && access.scope?.split(/[\s+]+/).includes("api")) {
+        const [row] = await db.select({ email: users.email, role: tenantMemberships.role, status: tenantMemberships.status })
+          .from(users)
+          .innerJoin(tenantMemberships, and(eq(tenantMemberships.userId, users.id), eq(tenantMemberships.tenantId, access.tenant.id)))
+          .where(eq(users.id, access.userId)).limit(1);
+        if (row && row.status === "active") {
+          c.set("session", { userId: access.userId, tenantId: access.tenant.id, email: row.email, role: row.role });
+          await next();
+          return;
+        }
+      }
+    }
+    return c.json({ error: "Unauthorized" }, 401);
   });
   const server = await new Promise<Server>((resolve) => {
     const running = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, () => resolve(running as Server));
@@ -110,6 +130,7 @@ export async function zakurabotHarness(options: {
   const agentService = {
     get: async (tenantId: string, agentId: string) => (await db.select().from(agents)
       .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId))).limit(1))[0] ?? null,
+    list: async (tenantId: string) => db.select().from(agents).where(eq(agents.tenantId, tenantId)),
   };
   const workspaceFs = {
     forAgentBinding: async (binding: { id: string }) => new LocalWorkspaceFs(join(dataDir, "workspaces", binding.id)),
@@ -151,13 +172,31 @@ export async function zakurabotHarness(options: {
     },
   }, config);
   const store = new ZakurabotStore(db);
+  const signingKey = loadOrCreateOauthSigningKey(config.dataDir);
+  const signAccess = (userId: string, tenantId: string, scope = "api") => {
+    const now = Math.floor(Date.now() / 1000);
+    return signJwtRs256(signingKey, {
+      iss: config.publicBaseUrl, sub: userId, aud: config.publicBaseUrl, client_id: "test-client",
+      tid: tenantId, scope, iat: now, exp: now + 3600, jti: newId(),
+    }, { typ: "at+jwt" });
+  };
+  const principal: ZakurabotPrincipalResolver = async (token) => {
+    const access = await oauthService.authenticateBearer(token).catch(() => null);
+    if (!access?.userId || !access.scope?.split(/[\s+]+/).includes("api")) return null;
+    const [row] = await db.select({ email: users.email, status: tenantMemberships.status })
+      .from(users)
+      .innerJoin(tenantMemberships, and(eq(tenantMemberships.userId, users.id), eq(tenantMemberships.tenantId, access.tenant.id)))
+      .where(eq(users.id, access.userId)).limit(1);
+    if (!row || row.status !== "active") return null;
+    return { tenantId: access.tenant.id, userId: access.userId, displayName: row.email };
+  };
   const channel = new ZakurabotChannel({ store, ingress, sessions: registry, sessionStore: sessions,
     agents: agentService, files: new ZakurabotFileService(db, { agents: agentService, workspaceFs, publicBaseUrl: url }), interactions,
     desktopAvailable: Boolean(options.workspace),
-    publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }) });
+    publishFile: createZakurabotFilePublisher({ agents: agentService, workspaceFs, fileShares }), principal });
   const gateway = new ZakurabotGateway(channel, { publicBaseUrl: `${url}/prefix` });
-  registerZakurabotRoutes(app, gateway, url);
   registerZakurabotAppRoutes(app, gateway, url, options.workspace);
+  registerZakurabotSessionRoutes(app, gateway);
   registerFileShareRoutes(app, fileShares, agentService as never, workspaceFs as never);
   const socketIo = createSocketGateway(server, { db, config, store: sessions });
   gateway.attach(server);
@@ -181,14 +220,22 @@ export async function zakurabotHarness(options: {
       bindings.push((await ingress.saveBinding(tenantId, { agentId: id, platform: "zakurabot", profileKey: "remote-zakurabot",
         enabled: true, label: `Bot ${i + 1}` }))!);
     }
-    const issued = await channel.issueDevice(tenantId, { name: "Phone", bindingIds: bindings.map((b) => b.id), expiresInDays: 90 });
-    return { tenantId, bindings, ...issued };
+    return { tenantId, userId: tenantId, email: `${tenantId}@example.test`, bindings,
+      token: signAccess(tenantId, tenantId) };
+  }
+
+  /** 同租户的第二个成员：用于验证用户之间的会话隔离。 */
+  async function addUser(tenantId: string, role = "member") {
+    const userId = newId();
+    await db.insert(users).values({ id: userId, email: `${userId}@example.test` });
+    await db.insert(tenantMemberships).values({ tenantId, userId, role, status: "active" });
+    return { userId, token: signAccess(userId, tenantId) };
   }
 
   const adminToken = (tenantId: string, role = "owner") => signSession(config.secret,
     { userId: tenantId, tenantId, email: `${tenantId}@example.test`, role });
   return {
-    url, app, db, config, server, ingress, registry, sessions, store, channel, gateway, runs, access, adminToken, fileShares,
+    url, app, db, config, server, ingress, registry, sessions, store, channel, gateway, runs, access, addUser, signAccess, adminToken, fileShares,
     askUser, interactions, workspaceFs,
     async connect(token?: string, path = "/api/zakurabot/ws") {
       const probe = new SocketProbe(`${url.replace("http:", "ws:")}${path}`);

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { request } from "node:http";
 import { after, before, describe, it } from "node:test";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { io } from "socket.io-client";
-import { agentChannelBindings, agents, tenants, zakurabotDevices } from "../src/db/schema.js";
+import { agentChannelBindings, agents, tenantMemberships, tenants } from "../src/db/schema.js";
 import { CloudAgentRuntime } from "../src/services/cloud-agent/runtime.js";
 import { createZakurabotChat } from "../src/services/zakurabot-adapter.js";
 import { CHAT_SDK_PLATFORMS, REMOTE_PLATFORMS } from "../src/services/remote-channel-runtime.js";
@@ -62,41 +62,25 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     assert.equal((await fetch(`${h.url}/api/health`)).status, 200);
   });
 
-  it("issues only tenant-admin scoped device tokens, stores hashes, and supports tenant-safe revocation", async () => {
+  it("authenticates OAuth api-scope tokens and rejects tokens without the scope", async () => {
     const ctx = await h.access();
     const other = await h.access();
-    const endpoint = `${h.url}/api/zakurabot/devices`;
-    const body = { name: "Tablet", bindingIds: [ctx.bindings[0]!.id], expiresInDays: 30 };
-    const post = (token: string, value = body) => fetch(endpoint, { method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(value) });
-    assert.equal((await fetch(endpoint)).status, 401);
-    assert.equal((await post(h.adminToken(ctx.tenantId, "member"))).status, 403);
-    assert.equal((await post(h.adminToken(ctx.tenantId), { ...body, bindingIds: [other.bindings[0]!.id] })).status, 400);
-    assert.equal((await post(h.adminToken(ctx.tenantId), { ...body, expiresInDays: 0 })).status, 400);
-    const response = await post(h.adminToken(ctx.tenantId));
-    assert.equal(response.status, 201);
-    assert.equal(response.headers.get("cache-control"), "no-store");
-    const issued = await response.json() as { device: { id: string }; token: string };
-    assert.match(issued.token, /^zbot_/);
-    assert.equal((await h.store.authenticate(issued.token))?.id, issued.device.id);
-    const row = await h.db.query.zakurabotDevices.findFirst({ where: eq(zakurabotDevices.id, issued.device.id) });
-    assert.notEqual(row?.tokenHash, issued.token);
-    assert.match(row!.tokenHash, /^[a-f0-9]{64}$/);
-    const list = await fetch(endpoint, { headers: { authorization: `Bearer ${h.adminToken(ctx.tenantId)}` } });
-    const text = await list.text();
-    assert.equal(text.includes(issued.token), false);
-    assert.equal(text.includes("tokenHash"), false);
-    assert.equal(text.includes(other.device.id), false);
-    const socket = await h.connect(issued.token);
-    await socket.wait("ready");
-    const revoke = (tenantId: string) => fetch(`${endpoint}/${issued.device.id}`, {
-      method: "DELETE", headers: { authorization: `Bearer ${h.adminToken(tenantId)}` },
-    });
-    assert.equal((await revoke(other.tenantId)).status, 404);
-    assert.ok(await h.store.authenticate(issued.token));
-    assert.equal((await revoke(ctx.tenantId)).status, 200);
+    const endpoint = `${h.url}/api/zakurabot/agents`;
+    const list = async (token?: string) => fetch(endpoint, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    assert.equal((await list()).status, 401);
+    assert.equal((await list("not-a-jwt")).status, 401);
+    const roster = await list(ctx.token);
+    assert.equal(roster.status, 200);
+    assert.deepEqual(new Set(((await roster.json()) as { agents: { id: string }[] }).agents.map((a) => a.id)),
+      new Set(ctx.bindings.map((b) => b.agentId)));
+    // MCP-scope tokens do not unlock the Zakura Bot surface.
+    const mcpOnly = await h.signAccess(other.userId, other.tenantId, "mcp");
+    assert.equal((await list(mcpOnly)).status, 401);
+    const socket = await h.connect(mcpOnly);
     assert.equal(await within(socket.closed), 4401);
-    assert.equal(await h.store.authenticate(issued.token), null);
+    const good = await h.connect(ctx.token);
+    await good.wait("ready");
+    await good.close();
   });
 
   it("shares the server with HTTP and Socket.IO, supports prefixes, and returns a scoped roster", async () => {
@@ -135,7 +119,7 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     assert.equal(h.runs.filter((r) => r.handle.inboundMessageId === "retry-1").length, 1);
     assert.equal(run.handle.platform, "zakurabot");
     assert.equal(run.handle.bindingId, ctx.bindings[0]!.id);
-    assert.equal(run.handle.sender?.userId, ctx.device.id);
+    assert.equal(run.handle.sender?.userId, ctx.userId);
     assert.match(run.content, /来源: zakurabot/);
     assert.match(remoteChannelPromptBlock(run.handle), /必须调用 chat_reply/);
     const session = await h.sessions.getSession(ctx.tenantId, agentId, run.sessionId);
@@ -149,25 +133,28 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     await socket.close();
   });
 
-  it("isolates agents, tenants and devices even when client message ids match", async () => {
+  it("isolates tenants and users even when client message ids match, and reaches every tenant agent", async () => {
     const ctx = await h.access();
     const foreign = await h.access();
     const sameTenant = await h.access(1, ctx.tenantId);
-    const tablet = await h.channel.issueDevice(ctx.tenantId,
-      { name: "Tablet", bindingIds: [ctx.bindings[0]!.id], expiresInDays: 90 });
+    const tablet = await h.addUser(ctx.tenantId);
     const phoneSocket = await h.connect(ctx.token);
     const tabletSocket = await h.connect(tablet.token);
     await phoneSocket.wait("ready");
     await tabletSocket.wait("ready");
-    for (const binding of [foreign.bindings[0]!, sameTenant.bindings[0]!]) {
-      phoneSocket.send({ type: "send", agentId: binding.agentId, clientMessageId: `forbidden-${binding.id}`, text: "No" });
-      await phoneSocket.wait("error", (f) => f.clientMessageId === `forbidden-${binding.id}`);
-    }
+    // 外租户的 Agent 不可见也不可达。
+    phoneSocket.send({ type: "send", agentId: foreign.bindings[0]!.agentId, clientMessageId: `forbidden-${foreign.bindings[0]!.id}`, text: "No" });
+    await phoneSocket.wait("error", (f) => f.clientMessageId === `forbidden-${foreign.bindings[0]!.id}`);
+    // 同租户的全部 Agent 对每个成员自动可用（包括没有预配绑定的）。
+    const crossFrame = { type: "send", agentId: sameTenant.bindings[0]!.agentId, clientMessageId: "cross-agent", text: "Hi" };
+    phoneSocket.send(crossFrame);
+    await h.waitForRun("cross-agent", ctx.userId);
+    // 同一 Agent 上两个用户的会话互不相通。
     const frame = { type: "send", agentId: ctx.bindings[0]!.agentId, clientMessageId: "same-id", text: "Hi" };
     phoneSocket.send(frame);
     tabletSocket.send(frame);
-    const phoneRun = await h.waitForRun("same-id", ctx.device.id);
-    const tabletRun = await h.waitForRun("same-id", tablet.device.id);
+    const phoneRun = await h.waitForRun("same-id", ctx.userId);
+    const tabletRun = await h.waitForRun("same-id", tablet.userId);
     assert.notEqual(phoneRun.sessionId, tabletRun.sessionId);
     assert.notEqual(phoneRun.handle.threadId, tabletRun.handle.threadId);
     await phoneRun.tool("chat_reply", { text: "Phone only" });
@@ -212,7 +199,7 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     const session = await h.sessions.createSession({ tenantId: ctx.tenantId, agentId, title: "Runtime test", kind: "system" });
     const frames: ZakurabotServerFrame[] = [];
     const makeHandle = (inboundMessageId: string) => ({
-      chat: createZakurabotChat({ agentId, deviceId: ctx.device.id, deviceName: "Phone", threadId: "thread",
+      chat: createZakurabotChat({ agentId, deviceId: ctx.userId, deviceName: "Phone", threadId: "thread",
         post: async (f) => { frames.push(f); }, history: async () => [],
         publishFile: async () => { throw new Error("No files in this test"); } }),
       platform: "zakurabot", bindingId: ctx.bindings[0]!.id, threadId: "thread", channelId: "thread", inboundMessageId,
@@ -326,28 +313,25 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     await socket.wait("ready");
     socket.send({ type: "send", agentId: ctx.bindings[0]!.agentId, clientMessageId: "slow-subscriber", text: "Hi" });
     const run = await h.waitForRun("slow-subscriber");
-    const unsubscribe = h.channel.subscribe(ctx.device, () => new Promise(() => {}));
+    const unsubscribe = h.channel.subscribe({ tenantId: ctx.tenantId, userId: ctx.userId }, () => new Promise(() => {}));
     try {
       assert.equal((await within(run.tool("chat_reply", { text: "Stored reply" }), "Slow subscriber blocked a reply", 1000)).isError, false);
       await socket.wait("chat_reply", (f) => f.payload.text === "Stored reply");
     } finally { unsubscribe(); await run.finish(); await socket.close(); }
   });
 
-  it("rejects expired tokens and suspended tenants, and immediately applies binding/ACL changes", async () => {
+  it("reflects binding and membership changes; suspended members cannot authenticate", async () => {
     const ctx = await h.access();
     const socket = await h.connect(ctx.token);
     await socket.wait("ready");
-    await h.ingress.denyUser(ctx.tenantId, ctx.bindings[0]!.id, ctx.device.id);
-    await h.gateway.refresh();
-    assert.equal(await within(socket.closed), 4403);
-    await h.ingress.approveUser(ctx.tenantId, ctx.bindings[0]!.id, ctx.device.id);
     await h.db.update(agentChannelBindings).set({ enabled: false }).where(eq(agentChannelBindings.id, ctx.bindings[0]!.id));
-    const disabled = await h.connect(ctx.token);
-    assert.equal(await within(disabled.closed), 4403);
+    await h.gateway.refresh();
+    assert.equal(await socket.wait("agents", (f) => f.agents.length === 0).then(() => true), true,
+      "a disabled binding simply empties the roster");
     await h.db.update(agentChannelBindings).set({ enabled: true }).where(eq(agentChannelBindings.id, ctx.bindings[0]!.id));
-    await h.db.update(zakurabotDevices).set({ expiresAt: new Date(0) }).where(eq(zakurabotDevices.id, ctx.device.id));
-    const expired = await h.connect(ctx.token);
-    assert.equal(await within(expired.closed), 4401);
+    await h.gateway.refresh();
+    await socket.wait("agents", (f) => f.agents.length === 1);
+    await socket.close();
     const other = await h.access();
     const suspended = await h.connect(other.token);
     await suspended.wait("ready");
@@ -356,11 +340,12 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     assert.equal(await within(suspended.closed), 4401);
   });
 
-  it("correlates an expired token error with the failed send and cancels a revoked device's active run", async () => {
+  it("correlates a suspended member error with the failed send and cancels their active run", async () => {
     const ctx = await h.access();
     const socket = await h.connect(ctx.token);
     await socket.wait("ready");
-    await h.db.update(zakurabotDevices).set({ expiresAt: new Date(0) }).where(eq(zakurabotDevices.id, ctx.device.id));
+    await h.db.update(tenantMemberships).set({ status: "suspended" })
+      .where(and(eq(tenantMemberships.tenantId, ctx.tenantId), eq(tenantMemberships.userId, ctx.userId)));
     socket.send({ type: "send", agentId: ctx.bindings[0]!.agentId, clientMessageId: "expired-send", text: "Hi" });
     const error = await socket.wait("error", (f) => f.clientMessageId === "expired-send");
     assert.equal(error.fatal, true);
@@ -372,9 +357,11 @@ describe("zakurabot HTTP/WS channel with real persistent remote sessions", () =>
     connected.send({ type: "send", agentId: running.bindings[0]!.agentId, clientMessageId: "revoke-active", text: "Work" });
     const run = await h.waitForRun("revoke-active");
     await connected.wait("typing", (f) => f.active);
-    await h.store.revokeDevice(running.tenantId, running.device.id);
-    await h.gateway.disconnectDevice(running.tenantId, running.device.id);
+    await h.db.update(tenantMemberships).set({ status: "suspended" })
+      .where(and(eq(tenantMemberships.tenantId, running.tenantId), eq(tenantMemberships.userId, running.userId)));
+    await h.gateway.disconnectUser(running.tenantId, running.userId);
     assert.equal(await within(connected.closed), 4401);
+    await h.gateway.refresh();
     await run.finish("cancelled");
     assert.equal((await h.sessions.getRun(run.runId))?.status, "cancelled");
     assert.equal((await run.tool("chat_reply", { text: "Not delivered" })).isError, true);

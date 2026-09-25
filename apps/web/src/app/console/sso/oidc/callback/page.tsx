@@ -4,7 +4,6 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, setSession } from "@/lib/api";
-import { consumeBotLoginReturn } from "@/lib/login-return";
 import { AuthScreen } from "@/components/auth-screen";
 import { Button } from "@/components/ui/button";
 import { PageLoading } from "@/components/ui/progress-linear";
@@ -28,7 +27,7 @@ function Inner() {
           { method: "POST", json: { code, state } },
         );
         setSession(res.session);
-        router.replace(consumeBotLoginReturn() ?? (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents"));
+        router.replace(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
