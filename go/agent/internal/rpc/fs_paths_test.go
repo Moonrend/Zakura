@@ -14,10 +14,10 @@ import (
 func TestWorkspaceFsPathAliases(t *testing.T) {
 	storage := t.TempDir()
 	h := New("computer", storage)
-	root := host.AgentWorkspace(storage, "a1")
+	root := host.SpaceWorkspace(storage, "a1")
 	call := func(method, path string) Msg {
 		t.Helper()
-		params, _ := json.Marshal(map[string]string{"agentId": "a1", "path": path, "content": "hello"})
+		params, _ := json.Marshal(map[string]string{"spaceId": "a1", "path": path, "content": "hello"})
 		var response Msg
 		h.Dispatch(context.Background(), Msg{ID: "fs", Method: method, Params: params}, func(msg Msg) { response = msg })
 		return response

@@ -67,8 +67,8 @@ func ScrubHostPathsInMessage(root, message string) string {
 	return message
 }
 
-func AgentWorkspace(storageRoot, agentID string) string {
-	return filepath.Join(storageRoot, "agents", agentID, "workspace")
+func SpaceWorkspace(storageRoot, spaceID string) string {
+	return filepath.Join(storageRoot, "spaces", spaceID, "workspace")
 }
 
 func EnsureDir(path string) error {

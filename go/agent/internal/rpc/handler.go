@@ -31,8 +31,8 @@ func New(kind, storageRoot string) *Handler {
 	}
 }
 
-func (h *Handler) workspace(agentID string) string {
-	return host.AgentWorkspace(h.StorageRoot, agentID)
+func (h *Handler) workspace(spaceID string) string {
+	return host.SpaceWorkspace(h.StorageRoot, spaceID)
 }
 
 func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
@@ -187,7 +187,7 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	if err != nil {
 		message := err.Error()
 		if strings.HasPrefix(msg.Method, "host.fs.") {
-			var p agentPath
+			var p spacePath
 			_ = json.Unmarshal(msg.Params, &p)
 			message = host.ScrubHostPathsInMessage(h.rootOf(p), message)
 		}
@@ -200,24 +200,24 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	}
 }
 
-type agentPath struct {
-	AgentID string `json:"agentId"`
+type spacePath struct {
+	SpaceID string `json:"spaceId"`
 	Path    string `json:"path"`
 	Root    string `json:"root,omitempty"`
 }
 
-func (h *Handler) rootOf(p agentPath) string {
+func (h *Handler) rootOf(p spacePath) string {
 	if p.Root != "" {
 		return p.Root
 	}
-	if p.AgentID != "" {
-		return h.workspace(p.AgentID)
+	if p.SpaceID != "" {
+		return h.workspace(p.SpaceID)
 	}
 	return h.StorageRoot
 }
 
 // Called after the filesystem operation has validated the path with Jail.
-func (h *Handler) apiPath(p agentPath, path string) string {
+func (h *Handler) apiPath(p spacePath, path string) string {
 	root := h.rootOf(p)
 	abs, err := host.Jail(root, path)
 	if err != nil {
@@ -227,13 +227,13 @@ func (h *Handler) apiPath(p agentPath, path string) string {
 }
 
 func (h *Handler) fsStat(raw json.RawMessage) (any, error) {
-	var p agentPath
+	var p spacePath
 	_ = json.Unmarshal(raw, &p)
 	return host.Stat(h.rootOf(p), p.Path)
 }
 
 func (h *Handler) fsList(raw json.RawMessage) (any, error) {
-	var p agentPath
+	var p spacePath
 	_ = json.Unmarshal(raw, &p)
 	ents, err := host.List(h.rootOf(p), p.Path)
 	if err != nil {
@@ -244,19 +244,19 @@ func (h *Handler) fsList(raw json.RawMessage) (any, error) {
 
 func (h *Handler) fsRead(raw json.RawMessage) (any, error) {
 	var p struct {
-		agentPath
+		spacePath
 		Max int64 `json:"max"`
 	}
 	_ = json.Unmarshal(raw, &p)
 	if p.Max == 0 {
 		p.Max = 8 << 20
 	}
-	b, err := host.ReadFile(h.rootOf(p.agentPath), p.Path, p.Max)
+	b, err := host.ReadFile(h.rootOf(p.spacePath), p.Path, p.Max)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"path":    h.apiPath(p.agentPath, p.Path),
+		"path":    h.apiPath(p.spacePath, p.Path),
 		"content": string(b),
 		"base64":  base64.StdEncoding.EncodeToString(b),
 		"size":    len(b),
@@ -265,7 +265,7 @@ func (h *Handler) fsRead(raw json.RawMessage) (any, error) {
 
 func (h *Handler) fsWrite(raw json.RawMessage) (any, error) {
 	var p struct {
-		agentPath
+		spacePath
 		Content string `json:"content"`
 		Base64  string `json:"base64"`
 	}
@@ -278,15 +278,15 @@ func (h *Handler) fsWrite(raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 	}
-	rev, err := host.WriteFile(h.rootOf(p.agentPath), p.Path, data)
+	rev, err := host.WriteFile(h.rootOf(p.spacePath), p.Path, data)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": h.apiPath(p.agentPath, p.Path), "ok": true, "revision": rev}, nil
+	return map[string]any{"path": h.apiPath(p.spacePath, p.Path), "ok": true, "revision": rev}, nil
 }
 
 func (h *Handler) fsMkdir(raw json.RawMessage) (any, error) {
-	var p agentPath
+	var p spacePath
 	_ = json.Unmarshal(raw, &p)
 	root := h.rootOf(p)
 	if err := host.Mkdir(root, p.Path); err != nil {
@@ -301,38 +301,38 @@ func (h *Handler) fsMkdir(raw json.RawMessage) (any, error) {
 
 func (h *Handler) fsRemove(raw json.RawMessage) (any, error) {
 	var p struct {
-		agentPath
+		spacePath
 		Recursive bool `json:"recursive"`
 	}
 	_ = json.Unmarshal(raw, &p)
-	if err := host.Remove(h.rootOf(p.agentPath), p.Path, p.Recursive); err != nil {
+	if err := host.Remove(h.rootOf(p.spacePath), p.Path, p.Recursive); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": h.apiPath(p.agentPath, p.Path), "ok": true}, nil
+	return map[string]any{"path": h.apiPath(p.spacePath, p.Path), "ok": true}, nil
 }
 
 func (h *Handler) fsRename(raw json.RawMessage) (any, error) {
 	var p struct {
-		agentPath
+		spacePath
 		OldPath string `json:"oldPath"`
 		NewPath string `json:"newPath"`
 	}
 	_ = json.Unmarshal(raw, &p)
-	if err := host.Rename(h.rootOf(p.agentPath), p.OldPath, p.NewPath); err != nil {
+	if err := host.Rename(h.rootOf(p.spacePath), p.OldPath, p.NewPath); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "path": h.apiPath(p.agentPath, p.NewPath)}, nil
+	return map[string]any{"ok": true, "path": h.apiPath(p.spacePath, p.NewPath)}, nil
 }
 
 func (h *Handler) hostExec(raw json.RawMessage) (any, error) {
 	var p struct {
 		host.ExecParams
-		AgentID string `json:"agentId"`
+		SpaceID string `json:"spaceId"`
 	}
 	_ = json.Unmarshal(raw, &p)
 	root := h.StorageRoot
-	if p.AgentID != "" {
-		root = h.workspace(p.AgentID)
+	if p.SpaceID != "" {
+		root = h.workspace(p.SpaceID)
 		_ = host.EnsureDir(root)
 	}
 	return host.Run(root, p.ExecParams)
@@ -341,12 +341,12 @@ func (h *Handler) hostExec(raw json.RawMessage) (any, error) {
 func (h *Handler) hostExecStart(raw json.RawMessage) (any, error) {
 	var p struct {
 		host.ExecParams
-		AgentID string `json:"agentId"`
+		SpaceID string `json:"spaceId"`
 	}
 	_ = json.Unmarshal(raw, &p)
 	root := h.StorageRoot
-	if p.AgentID != "" {
-		root = h.workspace(p.AgentID)
+	if p.SpaceID != "" {
+		root = h.workspace(p.SpaceID)
 		_ = host.EnsureDir(root)
 	}
 	return h.jobs.Start(root, p.ExecParams)
@@ -379,14 +379,14 @@ func (h *Handler) hostExecKill(raw json.RawMessage) (any, error) {
 func (h *Handler) ptyStart(raw json.RawMessage, send func(Msg)) (any, error) {
 	var p struct {
 		host.ExecParams
-		AgentID string `json:"agentId"`
+		SpaceID string `json:"spaceId"`
 		Cols    int    `json:"cols"`
 		Rows    int    `json:"rows"`
 	}
 	_ = json.Unmarshal(raw, &p)
 	root := h.StorageRoot
-	if p.AgentID != "" {
-		root = h.workspace(p.AgentID)
+	if p.SpaceID != "" {
+		root = h.workspace(p.SpaceID)
 		_ = host.EnsureDir(root)
 	}
 	sess, err := host.StartPty(root, p.ExecParams, p.Cols, p.Rows)
