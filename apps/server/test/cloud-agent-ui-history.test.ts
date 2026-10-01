@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   reattachOrphanUserRoots,
   sliceEventsPreferringUserMessage,
+  slimToolArgsForUi,
   slimToolEventsForUi,
 } from "../src/services/cloud-agent/ui-history.js";
 
@@ -50,7 +51,7 @@ describe("ui-history window", () => {
     assert.ok(page.some((e) => e.type === "user_message"));
   });
 
-  it("slimToolEventsForUi keeps first tool full and marks later tools detailPending", () => {
+  it("slimToolEventsForUi keeps first tool full, later tools keep slimmed args + detailPending result", () => {
     const base = {
       id: "e",
       sessionId: "s",
@@ -91,14 +92,54 @@ describe("ui-history window", () => {
       },
     ];
     const slim = slimToolEventsForUi(events as never);
-    assert.ok(slim.some((e) => e.type === "tool_call_args" && (e.payload as { toolCallId: string }).toolCallId === "t1"));
-    assert.equal(
-      slim.some((e) => e.type === "tool_call_args" && (e.payload as { toolCallId: string }).toolCallId === "t2"),
-      false,
+    // 首个工具保留完整 args
+    const t1Args = slim.find(
+      (e) => e.type === "tool_call_args" && (e.payload as { toolCallId: string }).toolCallId === "t1",
     );
+    assert.equal((t1Args?.payload as { arguments: string }).arguments, '{"path":"a"}');
+    // 后续工具保留合法 JSON 的参数摘要：折叠行标签（命令/路径/查询词）可直接渲染
+    const t2Args = slim.find(
+      (e) => e.type === "tool_call_args" && (e.payload as { toolCallId: string }).toolCallId === "t2",
+    );
+    assert.ok(t2Args);
+    assert.deepEqual(JSON.parse((t2Args.payload as { arguments: string }).arguments), {
+      path: "b",
+    });
+    // 完整 result 仍按 detailPending 懒加载
     const t2 = slim.find(
       (e) => e.type === "tool_call_result" && (e.payload as { toolCallId: string }).toolCallId === "t2",
     );
     assert.equal((t2?.payload as { detailPending?: boolean }).detailPending, true);
+  });
+
+  it("slimToolArgsForUi keeps JSON valid while truncating huge values", () => {
+    // 超长字符串截断，但保持可解析
+    const long = "x".repeat(5_000);
+    const slimmed = slimToolArgsForUi(
+      JSON.stringify({ command: `npm run build ${long}`, path: "a/b.ts", content: long }),
+    );
+    const parsed = JSON.parse(slimmed) as Record<string, unknown>;
+    assert.equal(typeof parsed.command, "string");
+    assert.equal((parsed.command as string).length < 200, true);
+    assert.equal(parsed.path, "a/b.ts");
+    assert.equal(slimmed.length < 900, true);
+  });
+
+  it("slimToolArgsForUi drops largest fields first when over budget", () => {
+    const fields: Record<string, string> = { path: "src/x.ts" };
+    for (let i = 0; i < 10; i += 1) fields[`f${i}`] = "y".repeat(400);
+    const slimmed = slimToolArgsForUi(JSON.stringify(fields));
+    const parsed = JSON.parse(slimmed) as Record<string, unknown>;
+    assert.equal(parsed.path, "src/x.ts");
+    assert.equal(Object.keys(parsed).length < 11, true);
+    assert.equal(slimmed.length < 900, true);
+  });
+
+  it("slimToolArgsForUi caps large arrays and passes small args through verbatim", () => {
+    const small = JSON.stringify({ q: "hello", n: 3 });
+    assert.equal(slimToolArgsForUi(small), small);
+    const arr = JSON.stringify({ items: Array.from({ length: 50 }, (_, i) => i) });
+    const parsed = JSON.parse(slimToolArgsForUi(arr)) as { items: unknown[] };
+    assert.equal(parsed.items.length, 17); // 16 + 截断标记
   });
 });

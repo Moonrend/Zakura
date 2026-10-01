@@ -1,8 +1,29 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull } from "drizzle-orm";
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
-import { newId, spaces, type Space } from "../db/schema.js";
+import { agents, cloudAgentSessions, newId, spaces, type Space } from "../db/schema.js";
+
+const GRAPH_MESSAGE_WINDOW_DAYS = 30;
+
+export type SpaceGraphNode = {
+  id: string;
+  name: string;
+  description: string;
+  spaceId: string;
+  status: "running" | "stopped";
+};
+
+export type SpaceGraphEdge = {
+  type: "group" | "message";
+  a: string;
+  b: string;
+};
+
+export type SpaceGraph = {
+  nodes: SpaceGraphNode[];
+  edges: SpaceGraphEdge[];
+};
 
 /** 回填默认空间时使用的确定性 id 前缀（与 0062 迁移一致） */
 export const DEFAULT_SPACE_SLUG = "default";
@@ -108,7 +129,19 @@ export class SpaceService {
   async update(
     tenantId: string,
     id: string,
-    patch: { name?: string; description?: string; workspaceImage?: string | null },
+    patch: {
+      name?: string;
+      description?: string;
+      enableComputer?: boolean;
+      workspaceImage?: string | null;
+      runtimeNodeId?: string | null;
+      workspaceKind?: "host" | "container";
+      workspaceStatus?: string;
+      workspaceRevision?: string | null;
+      lastMigrationId?: string | null;
+      lastError?: string | null;
+      configJson?: string;
+    },
   ): Promise<Space | null> {
     const space = await this.get(tenantId, id);
     if (!space) return null;
@@ -117,7 +150,15 @@ export class SpaceService {
       .set({
         ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
         ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
+        ...(patch.enableComputer !== undefined ? { enableComputer: patch.enableComputer } : {}),
         ...(patch.workspaceImage !== undefined ? { workspaceImage: patch.workspaceImage } : {}),
+        ...(patch.runtimeNodeId !== undefined ? { runtimeNodeId: patch.runtimeNodeId } : {}),
+        ...(patch.workspaceKind !== undefined ? { workspaceKind: patch.workspaceKind } : {}),
+        ...(patch.workspaceStatus !== undefined ? { workspaceStatus: patch.workspaceStatus } : {}),
+        ...(patch.workspaceRevision !== undefined ? { workspaceRevision: patch.workspaceRevision } : {}),
+        ...(patch.lastMigrationId !== undefined ? { lastMigrationId: patch.lastMigrationId } : {}),
+        ...(patch.lastError !== undefined ? { lastError: patch.lastError } : {}),
+        ...(patch.configJson !== undefined ? { configJson: patch.configJson } : {}),
         updatedAt: new Date(),
       })
       .where(and(eq(spaces.tenantId, tenantId), eq(spaces.id, space.id)))
@@ -136,6 +177,112 @@ export class SpaceService {
       .delete(spaces)
       .where(and(eq(spaces.tenantId, tenantId), eq(spaces.id, space.id)));
     return true;
+  }
+
+  async graph(tenantId: string, idOrSlug: string): Promise<SpaceGraph | null> {
+    const space = await this.get(tenantId, idOrSlug);
+    if (!space) return null;
+
+    const rows = await this.db
+      .select({
+        id: agents.id,
+        name: agents.name,
+        description: agents.description,
+      })
+      .from(agents)
+      .where(and(eq(agents.tenantId, tenantId), eq(agents.spaceId, space.id)))
+      .orderBy(asc(agents.createdAt));
+
+    const agentIds = rows.map((row) => row.id);
+    if (agentIds.length === 0) return { nodes: [], edges: [] };
+
+    const runningRows = await this.db
+      .select({ agentId: cloudAgentSessions.agentId })
+      .from(cloudAgentSessions)
+      .where(
+        and(
+          eq(cloudAgentSessions.tenantId, tenantId),
+          isNotNull(cloudAgentSessions.activeRunId),
+          inArray(cloudAgentSessions.agentId, agentIds),
+        ),
+      );
+    const running = new Set(runningRows.map((row) => row.agentId));
+    const nodes: SpaceGraphNode[] = rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      spaceId: space.id,
+      status: running.has(row.id) ? "running" : "stopped",
+    }));
+
+    const edges: SpaceGraphEdge[] = [];
+    const seen = new Set<string>();
+    const addEdge = (type: SpaceGraphEdge["type"], a: string, b: string) => {
+      if (a === b) return;
+      const [x, y] = a < b ? [a, b] : [b, a];
+      const key = `${type}:${x}:${y}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      edges.push({ type, a: x, b: y });
+    };
+
+    const since = new Date(Date.now() - GRAPH_MESSAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const sessions = await this.db
+      .select({
+        agentId: cloudAgentSessions.agentId,
+        originJson: cloudAgentSessions.originJson,
+      })
+      .from(cloudAgentSessions)
+      .where(
+        and(
+          eq(cloudAgentSessions.tenantId, tenantId),
+          inArray(cloudAgentSessions.agentId, agentIds),
+          gte(cloudAgentSessions.createdAt, since),
+        ),
+      );
+    const inSpace = new Set(agentIds);
+    for (const row of sessions) {
+      let caller: string | undefined;
+      try {
+        const origin = JSON.parse(row.originJson || "{}") as { callerAgentId?: unknown };
+        caller = typeof origin.callerAgentId === "string" ? origin.callerAgentId : undefined;
+      } catch {
+        caller = undefined;
+      }
+      if (!caller || caller === row.agentId || !inSpace.has(caller)) continue;
+      addEdge("message", caller, row.agentId);
+    }
+
+    const projectRows = await this.db
+      .selectDistinct({
+        agentId: cloudAgentSessions.agentId,
+        project: cloudAgentSessions.project,
+      })
+      .from(cloudAgentSessions)
+      .where(
+        and(
+          eq(cloudAgentSessions.tenantId, tenantId),
+          inArray(cloudAgentSessions.agentId, agentIds),
+          isNotNull(cloudAgentSessions.project),
+        ),
+      );
+    const byProject = new Map<string, string[]>();
+    for (const row of projectRows) {
+      if (!row.project) continue;
+      const members = byProject.get(row.project) ?? [];
+      members.push(row.agentId);
+      byProject.set(row.project, members);
+    }
+    for (const members of byProject.values()) {
+      const unique = [...new Set(members)];
+      for (let i = 0; i < unique.length; i++) {
+        for (let j = i + 1; j < unique.length; j++) {
+          addEdge("group", unique[i]!, unique[j]!);
+        }
+      }
+    }
+
+    return { nodes, edges };
   }
 
   serialize(space: Space, extra?: { agentCount?: number }) {

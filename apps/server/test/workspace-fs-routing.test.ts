@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { generateRunnerToken, hashRunnerToken } from "@zakura/core";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
   let dataDir: string;
@@ -81,7 +82,13 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
     });
 
     agentId = newId();
+    const spaceId = await ensureTestSpace(db, tenantId, {
+      slug: "remote",
+      enableComputer: true,
+      runtimeNodeId: nodeId,
+    });
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "Remote Agent",
@@ -100,7 +107,9 @@ describe("ServerWorkspaceFsProvider routing by runtime_node_id", () => {
     });
 
     localAgentId = newId();
+    const spaceId2 = await ensureTestSpace(db, tenantId, { slug: "local", enableComputer: false });
     await db.insert(agents).values({
+      spaceId: spaceId2,
       id: localAgentId,
       tenantId,
       name: "Unbound Agent",

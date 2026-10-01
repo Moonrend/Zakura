@@ -83,7 +83,7 @@ export interface MigrationManifestFile {
 
 export interface MigrationManifest {
   version: 1;
-  agentId: string;
+  spaceId: string;
   exportedAt: string;
   sourceNodeId: string;
   compression: "zstd" | "gzip" | "none";
@@ -96,7 +96,7 @@ export interface MigrationManifest {
 export interface WorkspaceMigrationDto {
   id: string;
   tenantId: string;
-  agentId: string;
+  spaceId: string;
   sourceNodeId: string;
   targetNodeId: string;
   status: MigrationJobStatus;

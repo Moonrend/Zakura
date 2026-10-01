@@ -1,4 +1,4 @@
-import type { Agent } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import type { AgentWorkspaceService } from "./agent-workspace.js";
 import { pngDimensions } from "./agent-screenshot.js";
 
@@ -27,7 +27,7 @@ const refreshSnapshot = "Run computer_observe observe=snapshot again.";
 const SNAPSHOT_OUTPUT_LIMIT = 10_000;
 
 /** Keep observations and input ordered, including parallel calls in a tool batch. */
-async function serialDesktop<T>(workspace: Workspace, agent: Agent, operation: (state: DesktopState, nextRef: () => string) => Promise<T>): Promise<T> {
+async function serialDesktop<T>(workspace: Workspace, agent: AgentWithSpace, operation: (state: DesktopState, nextRef: () => string) => Promise<T>): Promise<T> {
   let owner = desktopStates.get(workspace);
   if (!owner) desktopStates.set(workspace, owner = { agents: new Map(), nextRef: 0 });
   for (const [key, state] of owner.agents) {
@@ -52,7 +52,7 @@ const xdotoolScript = `set -eu
 command -v xdotool >/dev/null 2>&1 || { echo 'Desktop input unavailable: missing xdotool' >&2; exit 127; }
 exec xdotool "$@"`;
 
-async function execDesktop(workspace: Workspace, agent: Agent, command: string[]) {
+async function execDesktop(workspace: Workspace, agent: AgentWithSpace, command: string[]) {
   const result = await workspace.execInWorkspace(agent, ["timeout", "--signal=TERM", "--kill-after=2s", "25s", ...command], {
     env: { DISPLAY: DESKTOP_DISPLAY },
     timeoutMs: 30_000,
@@ -68,7 +68,7 @@ function xdotool(args: string[]): string[] {
   return ["bash", "-c", xdotoolScript, "zakura-desktop", ...args];
 }
 
-export async function desktopGeometry(workspace: Workspace, agent: Agent) {
+export async function desktopGeometry(workspace: Workspace, agent: AgentWithSpace) {
   const result = await execDesktop(workspace, agent, xdotool(["getdisplaygeometry"]));
   const match = result.stdout.trim().match(/^(\d+)\s+(\d+)$/);
   if (!match || Number(match[1]) < 1 || Number(match[2]) < 1) {
@@ -77,7 +77,7 @@ export async function desktopGeometry(workspace: Workspace, agent: Agent) {
   return { width: Number(match[1]), height: Number(match[2]), display: DESKTOP_DISPLAY, coordinateSpace };
 }
 
-export async function captureDesktop(workspace: Workspace, agent: Agent, prepared = false) {
+export async function captureDesktop(workspace: Workspace, agent: AgentWithSpace, prepared = false) {
   if (!prepared) await workspace.ensureStarted(agent, { require: "display" });
   const result = await execDesktop(workspace, agent, ["bash", "-c", `set -eu
 shot_dir=$(mktemp -d /tmp/zakura-shot.XXXXXX)
@@ -126,7 +126,7 @@ function ensureRefOrCoordinates(args: Record<string, unknown>, refKey = "ref", x
   if (hasX !== hasY || !hasX) throw new Error(message);
 }
 
-async function accessibility<T>(workspace: Workspace, agent: Agent, command: "snapshot" | "resolve", args: Record<string, unknown>): Promise<T> {
+async function accessibility<T>(workspace: Workspace, agent: AgentWithSpace, command: "snapshot" | "resolve", args: Record<string, unknown>): Promise<T> {
   const result = await execDesktop(workspace, agent, ["bash", "-c", `set -eu
 helper=""
 if command -v zakura-desktop-a11y >/dev/null 2>&1; then
@@ -145,7 +145,7 @@ exec $helper "$@"`, "zakura-a11y", command, JSON.stringify(args)]);
   catch { throw new Error(`Invalid response from the desktop AT-SPI helper. ${refreshSnapshot}`); }
 }
 
-export async function observeDesktop(workspace: Workspace, agent: Agent, args: Record<string, unknown>) {
+export async function observeDesktop(workspace: Workspace, agent: AgentWithSpace, args: Record<string, unknown>) {
   const observe = args.observe ?? "snapshot";
   if (observe !== "snapshot" && observe !== "screenshot") throw new Error("observe must be snapshot or screenshot");
   const maxNodes = integer(args.max_nodes ?? 300, "max_nodes", 1, 500);
@@ -217,7 +217,7 @@ export async function observeDesktop(workspace: Workspace, agent: Agent, args: R
   });
 }
 
-export async function desktopAction(workspace: Workspace, agent: Agent, name: string, args: Record<string, unknown>) {
+export async function desktopAction(workspace: Workspace, agent: AgentWithSpace, name: string, args: Record<string, unknown>) {
   return serialDesktop(workspace, agent, async (state) => {
     try { return await performDesktopAction(workspace, agent, name, args, state); }
     catch (err) {
@@ -228,7 +228,7 @@ export async function desktopAction(workspace: Workspace, agent: Agent, name: st
   });
 }
 
-async function performDesktopAction(workspace: Workspace, agent: Agent, name: string, args: Record<string, unknown>, state: DesktopState) {
+async function performDesktopAction(workspace: Workspace, agent: AgentWithSpace, name: string, args: Record<string, unknown>, state: DesktopState) {
   await workspace.ensureStarted(agent, { require: "display" });
   if (name === "computer_click" || name === "computer_scroll" || name === "computer_move") ensureRefOrCoordinates(args);
   if (name === "computer_drag") {

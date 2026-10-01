@@ -1,6 +1,6 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { newId, tenantMemberships, tenants, users, zakurabotMessages } from "../db/schema.js";
+import { messageReactions, newId, tenantMemberships, tenants, users, zakurabotMessages } from "../db/schema.js";
 import { ZAKURABOT_MAX_FRAME_BYTES, type ZakurabotStoredFrame, type ZakurabotUserFrame } from "./zakurabot-protocol.js";
 
 export type ZakurabotConversation = {
@@ -10,6 +10,11 @@ export type ZakurabotConversation = {
   bindingId: string;
   agentId: string;
 };
+
+/** 一条已落库的会话消息及其全局递增序号；seq 同时作为向上翻页的游标。 */
+export type ZakurabotHistoryItem = { seq: number; frame: ZakurabotStoredFrame };
+/** 会话历史的一页：items 按 seq 升序排列；nextBefore 用于取更早的一页，null 表示已到开头。 */
+export type ZakurabotHistoryPage = { items: ZakurabotHistoryItem[]; nextBefore: number | null };
 
 export class ZakurabotStore {
   constructor(private readonly db: Db) {}
@@ -55,10 +60,43 @@ export class ZakurabotStore {
     return existing;
   }
 
-  async history(c: ZakurabotConversation, limit = 100): Promise<ZakurabotStoredFrame[]> {
-    const rows = await this.db.select({ frameJson: zakurabotMessages.frameJson }).from(zakurabotMessages)
-      .where(this.conversationWhere(c)).orderBy(desc(zakurabotMessages.seq))
-      .limit(Math.max(1, Math.min(100, limit)));
-    return rows.reverse().map((r) => JSON.parse(r.frameJson) as ZakurabotStoredFrame);
+  async history(c: ZakurabotConversation, limit = 100, beforeSeq?: number): Promise<ZakurabotHistoryPage> {
+    const capped = Math.max(1, Math.min(100, limit));
+    const where = beforeSeq === undefined ? this.conversationWhere(c)
+      : and(this.conversationWhere(c), lt(zakurabotMessages.seq, beforeSeq));
+    // 多取一条仅用于判断是否还有更早的消息，返回时丢弃。
+    const rows = await this.db.select({ seq: zakurabotMessages.seq, frameJson: zakurabotMessages.frameJson }).from(zakurabotMessages)
+      .where(where).orderBy(desc(zakurabotMessages.seq)).limit(capped + 1);
+    const items = rows.slice(0, capped).reverse()
+      .map((r) => ({ seq: r.seq, frame: JSON.parse(r.frameJson) as ZakurabotStoredFrame }));
+    return { items, nextBefore: rows.length > capped ? items[0]!.seq : null };
+  }
+
+  private reactionWhere(c: ZakurabotConversation, messageId: string, userId: string) {
+    return and(eq(messageReactions.tenantId, c.tenantId), eq(messageReactions.deviceId, c.deviceId),
+      eq(messageReactions.bindingId, c.bindingId), eq(messageReactions.agentId, c.agentId),
+      eq(messageReactions.messageId, messageId), eq(messageReactions.userId, userId));
+  }
+
+  async addReaction(c: ZakurabotConversation, messageId: string, userId: string, emoji: string) {
+    const [row] = await this.db.insert(messageReactions).values({ tenantId: c.tenantId, deviceId: c.deviceId,
+      bindingId: c.bindingId, agentId: c.agentId, messageId, userId, emoji })
+      .onConflictDoUpdate({ target: [messageReactions.tenantId, messageReactions.deviceId, messageReactions.bindingId,
+        messageReactions.agentId, messageReactions.messageId, messageReactions.userId], set: { emoji } }).returning();
+    return row!;
+  }
+
+  async removeReaction(c: ZakurabotConversation, messageId: string, userId: string, emoji: string) {
+    const [row] = await this.db.delete(messageReactions)
+      .where(and(this.reactionWhere(c, messageId, userId), eq(messageReactions.emoji, emoji))).returning();
+    return row ?? null;
+  }
+
+  async reactions(c: ZakurabotConversation, messageId: string) {
+    return this.db.select({ messageId: messageReactions.messageId, emoji: messageReactions.emoji,
+      userId: messageReactions.userId, createdAt: messageReactions.createdAt }).from(messageReactions)
+      .where(and(eq(messageReactions.tenantId, c.tenantId), eq(messageReactions.deviceId, c.deviceId),
+        eq(messageReactions.bindingId, c.bindingId), eq(messageReactions.agentId, c.agentId),
+        eq(messageReactions.messageId, messageId)));
   }
 }

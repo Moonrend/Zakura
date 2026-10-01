@@ -827,7 +827,7 @@ export class DockerRuntime implements ContainerRuntime {
    * pulled image takes effect. Used by the local workspace-image refresh flow.
    */
   async recreateWorkspaces(image?: string | null, tenantId?: string): Promise<
-    Array<{ agentId: string; dockerId: string; name: string }>
+    Array<{ spaceId: string; dockerId: string; name: string }>
   > {
     const list = await this.docker.listContainers({
       all: false,
@@ -846,7 +846,7 @@ export class DockerRuntime implements ContainerRuntime {
         targetImageId = null;
       }
     }
-    const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+    const recreated: Array<{ spaceId: string; dockerId: string; name: string }> = [];
     for (const c of list) {
       // Match by normalized ref (handles docker.io / registry-1.docker.io /
       // bare prefixes) and fall back to image id. The image-id guard alone
@@ -857,8 +857,8 @@ export class DockerRuntime implements ContainerRuntime {
         normalizeImageRef(c.Image) === normalizeImageRef(image) ||
         (targetImageId !== null && c.ImageID === targetImageId);
       if (!matchesImage) continue;
-      const agentId = (c.Labels ?? {})["zakura.agent"];
-      if (!agentId) continue;
+      const spaceId = (c.Labels ?? {})["zakura.space"];
+      if (!spaceId) continue;
       try {
         const info = await this.docker.getContainer(c.Id).inspect();
         // Reuse the full create config so env/mounts/labels/network are preserved.
@@ -875,10 +875,10 @@ export class DockerRuntime implements ContainerRuntime {
         await this.docker.getContainer(c.Id).remove({ force: true });
         const newContainer = await this.docker.createContainer({ ...createOpts, name });
         await newContainer.start();
-        recreated.push({ agentId, dockerId: newContainer.id, name });
+        recreated.push({ spaceId, dockerId: newContainer.id, name });
       } catch (err) {
         log.warn("image_update.local_recreate_failed", {
-          agentId,
+          spaceId,
           error: err instanceof Error ? err.message : String(err),
         });
       }

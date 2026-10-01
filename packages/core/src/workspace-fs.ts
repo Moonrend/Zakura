@@ -116,11 +116,12 @@ export interface WorkspaceFsProvider {
   /** Resolve FS for an agent; tenantId enforces multi-tenant isolation. */
   forAgent(agentId: string, tenantId: string): Promise<WorkspaceFs>;
   /**
-   * Prefer when the agent row is already loaded — skips agents 表查询，
+   * Prefer when the space row is already loaded — skips spaces 表查询，
    * 直接按 runtimeNodeId 打开本机目录或 Runner 上的文件。
    */
   forAgentBinding(binding: {
-    id: string;
+    /** 工作区归 Space；这里传 spaceId，不是 agentId */
+    spaceId: string;
     tenantId: string;
     runtimeNodeId?: string | null;
   }): Promise<WorkspaceFs>;

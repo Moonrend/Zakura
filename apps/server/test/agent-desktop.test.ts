@@ -377,7 +377,7 @@ describe("desktop native tools", () => {
     assert.ok(!commands.some((c) => c.includes("click")));
   });
 
-  it("executes literal input and screenshot fallback, never reuses an old capture", async (t) => {
+  (process.platform === "win32" ? it.skip : it)("executes literal input and screenshot fallback, never reuses an old capture", async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "zakura-desktop-test-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     for (const bin of ["mktemp", "rm", "base64", "bash"]) await symlink(`/usr/bin/${bin}`, join(dir, bin));

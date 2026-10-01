@@ -30,8 +30,9 @@ import {
   componentInstances,
   managedContainers,
   mcpPolicies,
-  type Agent,
+  spaces,
 } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
 import { REDIS_KEYS } from "./redis.js";
@@ -62,6 +63,7 @@ import { effectiveAgentWebDefaults, getAgentWebDefaults } from "./agent-defaults
 import { ensureCapabilityInstance } from "./capabilities.js";
 import type { MemoryStore } from "./memory-store.js";
 import type { MemoryProvidersService } from "./memory-providers.js";
+import { filterEnabledTools } from "./instance-tool-permissions.js";
 import type { Orchestrator } from "./orchestrator.js";
 import { callPlatformAssistantTool, isPlatformAssistantToolName, listPlatformAssistantTools } from "./platform-assistant-tools.js";
 import type { ToolCallStore } from "./tool-call-store.js";
@@ -308,7 +310,7 @@ export const SUBAGENT_TOOL_QUALIFIED = `re_${SUBAGENT_TOOL_NAME}`;
 export interface CloudSubagentRunner {
   run(
     tenantId: string,
-    agent: Agent,
+    agent: AgentWithSpace,
     args: Record<string, unknown>,
     opts: {
       /** 父任务取消检查（MCP 外部调用可缺省） */
@@ -334,7 +336,7 @@ function subagentToolDef(agentId: string): ResolvedTool {
     title: "Cloud subagent",
     description: [
       "[Callable now] Spawn a cloud subagent for an independent subtask; the final result is returned by this tool.",
-      "The subagent shares this Agent's workspace and full tool surface, but has an isolated context (no current chat/memory).",
+      "The subagent shares this AgentWithSpace's workspace and full tool surface, but has an isolated context (no current chat/memory).",
       "Use for: parallel subtasks (multiple re_spawn_subagent in one turn run in parallel), research that only needs a conclusion, work whose intermediate steps would fill the main context.",
       "task must be self-contained; put necessary background in context; put desired format in expected_output.",
       "After completion, integrate the returned conclusion into your reply to the user. Subagents may nest within the depth limit; do not nest for simple tasks.",
@@ -410,7 +412,7 @@ export class McpGateway {
   private runtimeNodes: import("./runtime-nodes.js").RuntimeNodeService | null = null;
   private instanceMigrations: import("./platform-assistant-tools.js").InstanceMigrationPort | null =
     null;
-  /** Agent 聚合工具列表进程内短缓存 */
+  /** AgentWithSpace 聚合工具列表进程内短缓存 */
   private readonly toolsMemCache = new TtlCache<ResolvedTool[]>(30_000);
   /** 单实例 MCP tools/list 预缓存（热路径只读，不现场拉取） */
   private readonly instanceToolsMemCache = new TtlCache<CachedInstanceTools>(60_000);
@@ -518,7 +520,7 @@ export class McpGateway {
 
   /**
    * 从上游拉取 tools/list 并写入实例预缓存。
-   * 启动就绪 / 缓存未命中时后台调用；Agent 热路径不走这里。
+   * 启动就绪 / 缓存未命中时后台调用；AgentWithSpace 热路径不走这里。
    */
   async refreshInstanceTools(
     tenantId: string,
@@ -579,9 +581,9 @@ export class McpGateway {
         );
       }
 
-      const listed = await withTimeout(
-        plugin.listTools(handle),
-        INSTANCE_LIST_TOOLS_TIMEOUT_MS,
+      const listed = filterEnabledTools(
+        handle.config,
+        await withTimeout(plugin.listTools(handle), INSTANCE_LIST_TOOLS_TIMEOUT_MS),
       );
       const entry: CachedInstanceTools = {
         tools: listed,
@@ -689,12 +691,12 @@ export class McpGateway {
   }
 
   /**
-   * 解析 Agent 应暴露的 MCP 实例。
+   * 解析 AgentWithSpace 应暴露的 MCP 实例。
    * 热路径只返回已 running 的实例；stopped 的后台拉起，绝不阻塞首字。
    * @returns warming=true 时调用方勿缓存工具列表（stdio 等冷启动尚未完成）
    */
   private async resolveAgentMcpInstances(
-    agent: Agent,
+    agent: AgentWithSpace,
   ): Promise<{ instances: InstanceRow[]; warming: boolean }> {
     if (!this.agentService) return { instances: [], warming: false };
     const mcpMode = getAgentMcpMode(agent);
@@ -866,7 +868,7 @@ export class McpGateway {
             image: { type: "string", description: "Docker image" },
             name: { type: "string" },
             purpose: { type: "string", enum: ["workspace", "ephemeral"], default: "ephemeral" },
-            allocated_to: { type: "string", description: "Agent / session id" },
+            allocated_to: { type: "string", description: "AgentWithSpace / session id" },
             command: { type: "array", items: { type: "string" } },
             env: { type: "object", additionalProperties: { type: "string" } },
           },
@@ -944,12 +946,12 @@ export class McpGateway {
   }
 
   /**
-   * Agent tool universe:
+   * AgentWithSpace tool universe:
    * 1) native tools gated by enableComputer / enableMemory
    * 2) web-search / web-fetch when agent providers.*.enabled === true
    * 3) other component instances: all running (mcp.mode=all) or agent_bindings (selected)
    */
-  async listToolsForAgent(agent: Agent): Promise<ResolvedTool[]> {
+  async listToolsForAgent(agent: AgentWithSpace): Promise<ResolvedTool[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
 
     const memHit = this.toolsMemCache.get(agent.id);
@@ -972,7 +974,7 @@ export class McpGateway {
   }
 
   private async listToolsForAgentUncached(
-    agent: Agent,
+    agent: AgentWithSpace,
   ): Promise<{ tools: ResolvedTool[]; cacheable: boolean }> {
     const platformDefaults = await getAgentWebDefaults(this.db);
     const effective = effectiveAgentWebDefaults(getAgentProviders(agent), platformDefaults);
@@ -1033,7 +1035,7 @@ export class McpGateway {
     }
     const usedNames = new Set(tools.map((t) => t.qualifiedName));
 
-    // 平台连接器直接注入 Agent 工具：不创建实例、不读取 MCP 绑定、不走 MCP 生命周期。
+    // 平台连接器直接注入 AgentWithSpace 工具：不创建实例、不读取 MCP 绑定、不走 MCP 生命周期。
     if (this.integrationCatalog) {
       let directTargets: DirectConnectorTarget[] = [];
       try {
@@ -1093,7 +1095,7 @@ export class McpGateway {
       }
     }
 
-    // 能力实例（搜索/抓取）仅在 Agent 显式开启且 running 时注入
+    // 能力实例（搜索/抓取）仅在 AgentWithSpace 显式开启且 running 时注入
     const capabilityInstances = await this.db
       .select()
       .from(componentInstances)
@@ -1187,11 +1189,11 @@ export class McpGateway {
     tenantId: string,
     opts?: { apiKeyId?: string; includeBuiltin?: boolean; agentId?: string | null },
   ): Promise<ResolvedTool[]> {
-    // Agent-scoped key or explicit agent → only that agent's world
+    // AgentWithSpace-scoped key or explicit agent → only that agent's world
     if (opts?.agentId && this.agentService) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (!agent) return [];
       return this.listToolsForAgent(agent);
     }
@@ -1373,10 +1375,10 @@ export class McpGateway {
     // 云端子代理：以隔离上下文 mini-loop 执行子任务（MCP 客户端可直接调用）
     if (tool.providerId === SUBAGENT_PROVIDER_ID && tool.agentId) {
       if (!this.subagentRunner) return textResult("子代理执行器未启用", true);
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
-      });
-      if (!agent) return textResult("Agent not found", true);
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, tool.agentId)
+        : null;
+      if (!agent) return textResult("AgentWithSpace not found", true);
       const answer = await this.subagentRunner.run(tenantId, agent, args, {
         origin: { source: "mcp" },
         ...(opts?.projectSlug ? { project: opts.projectSlug } : {}),
@@ -1400,7 +1402,7 @@ export class McpGateway {
             ? opts.agentId
             : tool.agentId ?? undefined;
       if (!agentId) {
-        return textResult("连接器工具缺少 Agent 上下文", true);
+        return textResult("连接器工具缺少 AgentWithSpace 上下文", true);
       }
       const target = (
         await this.integrationCatalog.listDirectConnectorTargets(tenantId, agentId)
@@ -1408,7 +1410,7 @@ export class McpGateway {
         (item) => item.connectorRef === connectorRef && item.capabilityRef === capabilityRef,
       );
       if (!target || !globalRegistry.has(target.providerId)) {
-        return textResult("连接器未授权给该 Agent 或授权已失效", true);
+        return textResult("连接器未授权给该 AgentWithSpace 或授权已失效", true);
       }
       const handle = directConnectorHandle(tenantId, target);
       const plugin = globalRegistry.get(target.providerId);
@@ -1437,10 +1439,10 @@ export class McpGateway {
       }
     }
     if (tool.agentScoped && tool.agentId && this.agentService) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
-      });
-      if (!agent) return textResult("Agent not found", true);
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, tool.agentId)
+        : null;
+      if (!agent) return textResult("AgentWithSpace not found", true);
       if (isPlatformAssistantToolName(tool.localName)) {
         if (!isPlatformAssistant(agent)) {
           return textResult("Platform assistant tools are not enabled for this agent", true);
@@ -1490,9 +1492,9 @@ export class McpGateway {
     // Inject per-agent default engine/backend when the model omitted them
     let callArgs = args;
     if (tool.agentId) {
-      const agentRow = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, tool.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agentRow = this.agentService
+        ? await this.agentService.get(tenantId, tool.agentId)
+        : null;
       if (agentRow) {
         const prefs = effectiveAgentWebDefaults(getAgentProviders(agentRow), await getAgentWebDefaults(this.db));
         if (tool.providerId === "web-search" && typeof args.engine !== "string" && prefs.searchEngine) {
@@ -1601,11 +1603,13 @@ export class McpGateway {
             id: agents.id,
             name: agents.name,
             slug: agents.slug,
-            workspaceStatus: agents.workspaceStatus,
-            enableComputer: agents.enableComputer,
+            spaceId: agents.spaceId,
+            workspaceStatus: spaces.workspaceStatus,
+            enableComputer: spaces.enableComputer,
             enableMemory: agents.enableMemory,
           })
           .from(agents)
+          .innerJoin(spaces, eq(spaces.id, agents.spaceId))
           .where(eq(agents.tenantId, tenantId));
         return textResult(JSON.stringify(rows, null, 2));
       }
@@ -1641,7 +1645,7 @@ export class McpGateway {
     return row.dockerId;
   }
 
-  private async listActiveAgentSkills(agent: Agent) {
+  private async listActiveAgentSkills(agent: AgentWithSpace) {
     if (!this.skillsService) return [];
     try {
       const list = await this.skillsService.listForAgent(agent.tenantId, agent.id);
@@ -1653,7 +1657,7 @@ export class McpGateway {
   }
 
   private async readAgentSkillResource(
-    agent: Agent,
+    agent: AgentWithSpace,
     uri: string,
   ): Promise<McpReadResourceResult | null> {
     if (!this.skillsService) return null;
@@ -1713,7 +1717,7 @@ export class McpGateway {
 
   // ─── Resources ───────────────────────────────────────────────
 
-  async listResourcesForAgent(agent: Agent): Promise<ResolvedResource[]> {
+  async listResourcesForAgent(agent: AgentWithSpace): Promise<ResolvedResource[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
     const resources: ResolvedResource[] = [];
     const usedUris = new Set<string>();
@@ -1742,7 +1746,7 @@ export class McpGateway {
         providerId: AGENT_NATIVE_PROVIDER_ID,
         localUri: SKILL_INDEX_RESOURCE_URI,
         name: "agent-skills-index",
-        title: "Agent skills index",
+        title: "AgentWithSpace skills index",
         description: "SEP-2640 skill discovery index for enabled installed skills",
         mimeType: "application/json",
         agentId: agent.id,
@@ -1752,7 +1756,7 @@ export class McpGateway {
     if (isWorkspaceFsExposedViaMcp(agent) && this.workspaceFsProvider) {
       try {
         const fs = await this.workspaceFsProvider.forAgentBinding({
-          id: agent.id,
+          spaceId: agent.spaceId,
           tenantId: agent.tenantId,
           runtimeNodeId: agent.runtimeNodeId,
         });
@@ -1833,9 +1837,9 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<ResolvedResource[]> {
     if (opts?.agentId && this.agentService) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (!agent) return [];
       return this.listResourcesForAgent(agent);
     }
@@ -1899,12 +1903,12 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<McpReadResourceResult> {
     if (opts?.agentId && isWorkspaceFsResourceUri(uri) && this.workspaceFsProvider) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (agent && isWorkspaceFsExposedViaMcp(agent)) {
         const fs = await this.workspaceFsProvider.forAgentBinding({
-          id: agent.id,
+          spaceId: agent.spaceId,
           tenantId: agent.tenantId,
           runtimeNodeId: agent.runtimeNodeId,
         });
@@ -1914,9 +1918,9 @@ export class McpGateway {
     }
 
     if (opts?.agentId && parseSkillResourceUri(uri)) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (agent) {
         const skill = await this.readAgentSkillResource(agent, uri);
         if (skill) return skill;
@@ -1924,9 +1928,9 @@ export class McpGateway {
     }
 
     if (opts?.agentId && isAgentNativeResourceUri(uri) && !isWorkspaceFsResourceUri(uri)) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (agent) {
         const native = readAgentNativeResource(agent, uri);
         if (native) return native;
@@ -1946,10 +1950,8 @@ export class McpGateway {
     }
 
     if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
-      const agent = match.agentId
-        ? await this.db.query.agents.findFirst({
-            where: and(eq(agents.id, match.agentId), eq(agents.tenantId, tenantId)),
-          })
+      const agent = match.agentId && this.agentService
+        ? await this.agentService.get(tenantId, match.agentId)
         : null;
       if (!agent) {
         throw Object.assign(new Error(`Resource not found: ${uri}`), {
@@ -1965,7 +1967,7 @@ export class McpGateway {
           });
         }
         const fs = await this.workspaceFsProvider.forAgentBinding({
-          id: agent.id,
+          spaceId: agent.spaceId,
           tenantId: agent.tenantId,
           runtimeNodeId: agent.runtimeNodeId,
         });
@@ -2009,7 +2011,7 @@ export class McpGateway {
 
   // ─── Prompts ─────────────────────────────────────────────────
 
-  async listPromptsForAgent(agent: Agent): Promise<ResolvedPrompt[]> {
+  async listPromptsForAgent(agent: AgentWithSpace): Promise<ResolvedPrompt[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
     const prompts: ResolvedPrompt[] = [];
     const usedNames = new Set<string>();
@@ -2087,9 +2089,9 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<ResolvedPrompt[]> {
     if (opts?.agentId && this.agentService) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (!agent) return [];
       return this.listPromptsForAgent(agent);
     }
@@ -2153,9 +2155,9 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<McpGetPromptResult> {
     if (opts?.agentId && isAgentNativePromptName(name)) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (agent) {
         const native = getAgentNativePrompt(agent, name, args);
         if (native) return native;
@@ -2176,10 +2178,8 @@ export class McpGateway {
     }
 
     if (match.providerId === AGENT_NATIVE_PROVIDER_ID || !match.instanceId) {
-      const agent = match.agentId
-        ? await this.db.query.agents.findFirst({
-            where: and(eq(agents.id, match.agentId), eq(agents.tenantId, tenantId)),
-          })
+      const agent = match.agentId && this.agentService
+        ? await this.agentService.get(tenantId, match.agentId)
         : null;
       if (!agent) {
         throw Object.assign(new Error(`Unknown prompt: ${name}`), {
@@ -2208,7 +2208,7 @@ export class McpGateway {
 
   // ─── Resource templates ──────────────────────────────────────
 
-  async listResourceTemplatesForAgent(agent: Agent): Promise<ResolvedResourceTemplate[]> {
+  async listResourceTemplatesForAgent(agent: AgentWithSpace): Promise<ResolvedResourceTemplate[]> {
     if (!this.agentService) throw new Error("AgentService not bound");
     const templates: ResolvedResourceTemplate[] = [];
     const used = new Set<string>();
@@ -2237,7 +2237,7 @@ export class McpGateway {
         providerId: AGENT_NATIVE_PROVIDER_ID,
         localUriTemplate: SKILL_RESOURCE_TEMPLATE,
         name: "agent-skill-file",
-        title: "Agent skill files",
+        title: "AgentWithSpace skill files",
         description:
           `Read a file from an enabled installed skill. Use path=${SKILL_MANIFEST_FILE} for the manifest.`,
         mimeType: "text/plain",
@@ -2301,9 +2301,9 @@ export class McpGateway {
     opts?: { apiKeyId?: string; agentId?: string | null },
   ): Promise<ResolvedResourceTemplate[]> {
     if (opts?.agentId && this.agentService) {
-      const agent = await this.db.query.agents.findFirst({
-        where: and(eq(agents.id, opts.agentId), eq(agents.tenantId, tenantId)),
-      });
+      const agent = this.agentService
+        ? await this.agentService.get(tenantId, opts.agentId)
+        : null;
       if (!agent) return [];
       return this.listResourceTemplatesForAgent(agent);
     }

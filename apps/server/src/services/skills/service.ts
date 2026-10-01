@@ -1,9 +1,9 @@
 /**
- * 技能服务：解析 → 注册表 → 写入 Agent 工作区，三段式。
+ * 技能服务：解析 → 注册表 → 写入 AgentWithSpace 工作区，三段式。
  *
- * 注册表（skills 表）保存技能内容，安装（agent_skills 表）把文件落到具体 Agent 的
- * 工作区 `/skills/<name>/`。这样同一技能装到多个 Agent 只需下载一次，
- * 离线也能复制到新 Agent。
+ * 注册表（skills 表）保存技能内容，安装（agent_skills 表）把文件落到具体 AgentWithSpace 的
+ * 工作区 `/skills/<name>/`。这样同一技能装到多个 AgentWithSpace 只需下载一次，
+ * 离线也能复制到新 AgentWithSpace。
  */
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { WorkspaceFs } from "@zakura/core";
@@ -39,10 +39,10 @@ import {
   platformSkillRepos,
   settings,
   skills,
-  type Agent,
   type AgentSkillRow,
   type SkillRow,
 } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import type { AgentService } from "../agents.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
 import { platformEvents } from "../platform-events.js";
@@ -83,7 +83,7 @@ export function skillWorkspacePath(name: string): string {
   return `${SKILLS_ROOT}/${name}`;
 }
 
-/** 同一租户多久才重新扫一遍"哪些 Agent 少装了内置技能" */
+/** 同一租户多久才重新扫一遍"哪些 AgentWithSpace 少装了内置技能" */
 const BUILTIN_BACKFILL_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
@@ -208,7 +208,7 @@ export class SkillsService {
   private readonly builtinSynced = new Set<string>();
   /** 同一租户并发 syncBuiltins 合并为一次 */
   private readonly builtinSyncInflight = new Map<string, Promise<void>>();
-  /** 上次给全部 Agent 补装内置技能的时间 */
+  /** 上次给全部 AgentWithSpace 补装内置技能的时间 */
   private readonly builtinBackfilled = new Map<string, number>();
   /** 正在抓取的仓库，防止同一仓库被并发重复拉 */
   private readonly inflight = new Map<string, Promise<CachedRepo | null>>();
@@ -745,7 +745,7 @@ export class SkillsService {
     }
   }
 
-  /** 有 Agent 或有技能的租户才值得维护 */
+  /** 有 AgentWithSpace 或有技能的租户才值得维护 */
   private async activeTenantIds(limit: number): Promise<string[]> {
     const [withAgents, withSkills] = await Promise.all([
       this.db.selectDistinct({ tenantId: agentsTable.tenantId }).from(agentsTable),
@@ -1029,7 +1029,7 @@ export class SkillsService {
   }
 
   /**
-   * 跨商店检索（Agent 的 search_skills 工具用）。
+   * 跨商店检索（AgentWithSpace 的 search_skills 工具用）。
    *
    * UI 一次只看一个商店，模型却是"帮我找个能做 X 的技能"——它需要一次问遍所有商店。
    * 这里复用单商店检索并合并结果，商店本身的实现不必为两种调用方各写一遍。
@@ -1091,7 +1091,7 @@ export class SkillsService {
   // —— 安装 ——
 
   /**
-   * 安装技能到指定 Agent。
+   * 安装技能到指定 AgentWithSpace。
    * source 与 skillId 二选一：source 会先抓取并注册，skillId 直接复用注册表内容。
    */
   async install(
@@ -1166,20 +1166,20 @@ export class SkillsService {
     tenantId: string,
     agentIds?: string[],
     all?: boolean,
-  ): Promise<Agent[]> {
+  ): Promise<AgentWithSpace[]> {
     if (all) return this.agentService.list(tenantId);
     if (!agentIds?.length) return [];
-    const found: Agent[] = [];
+    const found: AgentWithSpace[] = [];
     for (const id of agentIds) {
       const agent = await this.agentService.get(tenantId, id);
       if (agent) found.push(agent);
     }
-    if (!found.length) throw new SkillSourceError("未找到目标 Agent");
+    if (!found.length) throw new SkillSourceError("未找到目标 AgentWithSpace");
     return found;
   }
 
   /** 写入工作区并登记安装记录 */
-  private async installToAgent(agent: Agent, row: SkillRow): Promise<AgentSkillRecord> {
+  private async installToAgent(agent: AgentWithSpace, row: SkillRow): Promise<AgentSkillRecord> {
     const files = parseFiles(row.filesJson);
     if (!files.length) throw new Error("技能内容为空");
     const fs = await this.fsForAgent(agent);
@@ -1189,9 +1189,9 @@ export class SkillsService {
     return this.recordInstall(agent, row, "installed", null);
   }
 
-  private async fsForAgent(agent: Agent): Promise<WorkspaceFs> {
+  private async fsForAgent(agent: AgentWithSpace): Promise<WorkspaceFs> {
     return this.fsProvider.forAgentBinding({
-      id: agent.id,
+      spaceId: agent.spaceId,
       tenantId: agent.tenantId,
       runtimeNodeId: agent.runtimeNodeId,
     });
@@ -1199,7 +1199,7 @@ export class SkillsService {
 
   private async writeSkillFiles(
     fs: WorkspaceFs,
-    agent: Agent,
+    agent: AgentWithSpace,
     root: string,
     files: SkillFile[],
   ): Promise<void> {
@@ -1238,7 +1238,7 @@ export class SkillsService {
    * 只对绑定该项目的会话可见。
    */
   async installToProject(
-    agent: Agent,
+    agent: AgentWithSpace,
     slug: string,
     opts: { source?: string; names?: string[]; path?: string },
   ): Promise<{
@@ -1302,7 +1302,7 @@ export class SkillsService {
   }
 
   private async recordInstall(
-    agent: Agent,
+    agent: AgentWithSpace,
     row: SkillRow,
     status: "installed" | "error",
     error: string | null,
@@ -1331,7 +1331,7 @@ export class SkillsService {
     return toAgentRecord(inserted as AgentSkillRow, row);
   }
 
-  /** 新建 Agent 时装上推荐的内置技能（失败不抛，不阻断建 Agent 流程） */
+  /** 新建 AgentWithSpace 时装上推荐的内置技能（失败不抛，不阻断建 AgentWithSpace 流程） */
   async installRecommended(tenantId: string, agentId: string): Promise<void> {
     try {
       await this.syncBuiltins(tenantId);
@@ -1359,13 +1359,13 @@ export class SkillsService {
   }
 
   /**
-   * 让该租户所有 Agent 的内置技能与注册表保持一致。
+   * 让该租户所有 AgentWithSpace 的内置技能与注册表保持一致。
    *
    * 两件事：漏装的推荐内置技能补上；已装但版本落后的重写工作区。
    * 后者是内置技能能随平台升级自动生效的关键——内置技能的版本是内容哈希，
-   * 改了正文就有新版本，比对安装记录的版本即可知道哪些 Agent 还留着旧文本。
+   * 改了正文就有新版本，比对安装记录的版本即可知道哪些 AgentWithSpace 还留着旧文本。
    *
-   * 新建 Agent 走 installRecommended；这里覆盖"存量 Agent"、"新增内置技能"、
+   * 新建 AgentWithSpace 走 installRecommended；这里覆盖"存量 AgentWithSpace"、"新增内置技能"、
    * "内置技能内容更新"三种场景。写工作区可能较慢，调用方按需后台触发即可。
    */
   async backfillBuiltins(tenantId: string, opts: { force?: boolean } = {}): Promise<number> {
@@ -1433,7 +1433,7 @@ export class SkillsService {
     return synced;
   }
 
-  // —— Agent 视角 ——
+  // —— AgentWithSpace 视角 ——
 
   async listForAgent(tenantId: string, agentId: string): Promise<AgentSkillRecord[]> {
     const rows = await this.db
@@ -1498,7 +1498,7 @@ export class SkillsService {
     return toAgentRecord({ ...row, enabled }, skill);
   }
 
-  /** 从某个 Agent 卸载：删工作区文件 + 删记录 */
+  /** 从某个 AgentWithSpace 卸载：删工作区文件 + 删记录 */
   async uninstall(tenantId: string, agentId: string, name: string): Promise<boolean> {
     const normalized = normalizeSkillName(name);
     const row = await this.db.query.agentSkills.findFirst({
@@ -1514,7 +1514,7 @@ export class SkillsService {
     if (agent) {
       try {
         const fs = await this.fsProvider.forAgentBinding({
-          id: agent.id,
+          spaceId: agent.spaceId,
           tenantId: agent.tenantId,
           runtimeNodeId: agent.runtimeNodeId,
         });
@@ -1536,7 +1536,7 @@ export class SkillsService {
     return true;
   }
 
-  /** 从注册表删除技能，并从所有 Agent 卸载 */
+  /** 从注册表删除技能，并从所有 AgentWithSpace 卸载 */
   async remove(tenantId: string, idOrName: string): Promise<boolean> {
     const row = await this.findRow(tenantId, idOrName);
     if (!row) return false;
@@ -1552,7 +1552,7 @@ export class SkillsService {
     return true;
   }
 
-  /** 从来源重新抓取并覆盖安装到已装该技能的所有 Agent */
+  /** 从来源重新抓取并覆盖安装到已装该技能的所有 AgentWithSpace */
   async update(tenantId: string, idOrName: string): Promise<SkillRecord> {
     const row = await this.findRow(tenantId, idOrName);
     if (!row) throw new SkillSourceError("技能不存在");
@@ -1591,15 +1591,15 @@ export class SkillsService {
     return toRecord(row, installs.map((i) => i.agentId));
   }
 
-  // —— 工作区读写（供 Agent 工具使用）——
+  // —— 工作区读写（供 AgentWithSpace 工具使用）——
 
   /**
-   * 读技能文件。优先读工作区（Agent 可能就地改过），
+   * 读技能文件。优先读工作区（AgentWithSpace 可能就地改过），
    * 读不到再回落注册表内容。
    */
   async readSkillFile(
     tenantId: string,
-    agent: Agent,
+    agent: AgentWithSpace,
     name: string,
     relPath?: string,
   ): Promise<{ path: string; content: string } | null> {
@@ -1613,7 +1613,7 @@ export class SkillsService {
 
     try {
       const fs = await this.fsProvider.forAgentBinding({
-        id: agent.id,
+        spaceId: agent.spaceId,
         tenantId: agent.tenantId,
         runtimeNodeId: agent.runtimeNodeId,
       });
@@ -1633,16 +1633,16 @@ export class SkillsService {
   }
 
   /**
-   * 把 Agent 在工作区里写好的技能目录登记进注册表（skill-creator 流程）。
+   * 把 AgentWithSpace 在工作区里写好的技能目录登记进注册表（skill-creator 流程）。
    * 目录必须含 SKILL.md。
    */
   async registerFromWorkspace(
     tenantId: string,
-    agent: Agent,
+    agent: AgentWithSpace,
     dirPath: string,
   ): Promise<SkillRecord> {
     const fs = await this.fsProvider.forAgentBinding({
-      id: agent.id,
+      spaceId: agent.spaceId,
       tenantId: agent.tenantId,
       runtimeNodeId: agent.runtimeNodeId,
     });
@@ -1725,10 +1725,10 @@ export class SkillsService {
   }
 
   /** 工作区里存在但未登记的技能目录（供 UI 提示"发现未注册技能"） */
-  async discoverUnregistered(tenantId: string, agent: Agent): Promise<string[]> {
+  async discoverUnregistered(tenantId: string, agent: AgentWithSpace): Promise<string[]> {
     try {
       const fs: WorkspaceFs = await this.fsProvider.forAgentBinding({
-        id: agent.id,
+        spaceId: agent.spaceId,
         tenantId: agent.tenantId,
         runtimeNodeId: agent.runtimeNodeId,
       });

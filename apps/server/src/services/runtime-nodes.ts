@@ -12,11 +12,11 @@ import type { RunnerHub } from "./runner-hub.js";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
-  agents,
   componentInstances,
   managedContainers,
   portExposures,
   runtimeNodes,
+  spaces,
   tenants,
   users,
   workspaceMigrations,
@@ -391,15 +391,15 @@ export class RuntimeNodeService {
       const history = await tx.delete(workspaceMigrations).where(referencesNode)
         .returning();
       if (history.length) {
-        await tx.update(agents).set({ lastMigrationId: null, updatedAt: now })
-          .where(inArray(agents.lastMigrationId, history.map((job) => job.id)));
+        await tx.update(spaces).set({ lastMigrationId: null, updatedAt: now })
+          .where(inArray(spaces.lastMigrationId, history.map((job) => job.id)));
       }
 
       // Do not scope dependencies to the owner tenant: shared nodes can have
-      // consumers in other tenants. Agent data/configuration stays intact.
-      const detached = await tx.update(agents)
+      // consumers in other tenants. Space data/configuration stays intact.
+      const detached = await tx.update(spaces)
         .set({ runtimeNodeId: null, lastError, updatedAt: now })
-        .where(eq(agents.runtimeNodeId, id))
+        .where(eq(spaces.runtimeNodeId, id))
         .returning();
       await tx.update(componentInstances)
         .set({ runtimeNodeId: null, status: "stopped", endpointUrl: null, healthStatus: "unknown", healthClaimUntil: null, lastError, updatedAt: now })

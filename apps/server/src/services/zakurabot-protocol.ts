@@ -107,6 +107,8 @@ export type ZakurabotClientFrame = z.infer<typeof zakurabotClientFrameSchema>;
 export type ZakurabotReply = z.infer<typeof zakurabotReplySchema>;
 export type ZakurabotAgent = { id: string; name: string; status: "idle" | "busy" | "offline";
   color: string; unread: boolean; title?: string; bindingId?: string; description?: string;
+  spaceId?: string; spaceName?: string;
+  avatarColor?: string | null; avatarShape?: string | null; avatarUrl?: string | null;
   capabilities?: { files: boolean; desktop: boolean; interactions: boolean } };
 export type ZakurabotUserFrame = { type: "message"; message: {
   id: string; agentId: string; role: "user"; kind: "text"; text: string;
@@ -120,7 +122,9 @@ export type ZakurabotToolFrame = { type: "tool_activity"; agentId: string; messa
   id: string; agentId: string; role: "assistant"; kind: "activity"; createdAt: number;
   tool: { name: string; ok?: boolean; detail?: string; interrupted?: boolean };
 } };
-export type ZakurabotServerFrame = ZakurabotStoredFrame | ZakurabotToolFrame |
+export type ZakurabotReactionFrame = { type: "reaction"; messageId: string; emoji: string; userId: string;
+  op: "add" | "remove"; at: number };
+export type ZakurabotServerFrame = ZakurabotStoredFrame | ZakurabotToolFrame | ZakurabotReactionFrame |
   { type: "ready"; protocol: number; agents: ZakurabotAgent[]; capabilities?: string[] } |
   { type: "agents"; agents: ZakurabotAgent[] } |
   { type: "typing"; agentId: string; active: boolean } |

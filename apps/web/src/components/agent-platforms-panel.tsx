@@ -115,7 +115,18 @@ function isChatSdkConnector(c: ConnectorView): boolean {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function AgentPlatformsPanel({ agentId }: { agentId: string }) {
+export function AgentPlatformsPanel({
+  agentId,
+  spaceId: _spaceId,
+  memberAgents: _memberAgents,
+}: {
+  agentId: string;
+  /** 渠道绑定归 Space；控制台传入以便后续按空间展示。 */
+  spaceId?: string;
+  memberAgents?: Array<{ id: string; name: string }>;
+}) {
+  void _spaceId;
+  void _memberAgents;
   const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [allBindings, setAllBindings] = useState<Binding[]>([]);
   const [webhookBaseUrl, setWebhookBaseUrl] = useState("");

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "zakura-bot": {
+      "path": "../zakura-bot",
+      "description": "zakura-bot Expo/React Native client repo. Use for ALL client-app tasks: screens in app/, components in components/, logic in lib/."
+    }
+  },
+  "permission": {
+    "external_directory": {
+      "*": "ask",
+      "D:/github/zakura-bot/**": "allow",
+      "D:\\github\\zakura-bot\\**": "allow"
+    }
+  }
+}

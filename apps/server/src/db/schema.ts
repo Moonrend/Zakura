@@ -612,8 +612,12 @@ export const runtimeNodes = pgTable(
   ],
 );
 
-export const agents = pgTable(
-  "agents",
+/**
+ * Space = 一台共享电脑（工作区/运行时/电脑配置都在这一层）。
+ * Agent 行只保留身份（提示词 / 记忆 / 会话）。
+ */
+export const spaces = pgTable(
+  "spaces",
   {
     id: text("id").primaryKey().$defaultFn(newId),
     tenantId: text("tenant_id")
@@ -622,21 +626,8 @@ export const agents = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull(),
     description: text("description").notNull().default(""),
-    /** unused column; prefer workspaceStatus */
-    status: text("status").notNull().default("ready"),
-    /** files | computer — mirrored from enableComputer */
-    workspaceProfile: text("workspace_profile").notNull().default("files"),
-    /** 与 enableComputer 同步；内部闸门用 */
-    enableFs: boolean("enable_fs").notNull().default(false),
-    enableShell: boolean("enable_shell").notNull().default(false),
+    /** 电脑开关；文件按工作区可用性授予 */
     enableComputer: boolean("enable_computer").notNull().default(false),
-    enableBrowser: boolean("enable_browser").notNull().default(false),
-    /** Per-agent long-term memory (data scoped to this agent); opt-in */
-    enableMemory: boolean("enable_memory").notNull().default(false),
-    /** Which memory provider this agent uses (null = tenant default) */
-    memoryProviderId: text("memory_provider_id").references(() => memoryProviders.id, {
-      onDelete: "set null",
-    }),
     workspaceImage: text("workspace_image"),
     /** Bound runner；开电脑后必填 */
     runtimeNodeId: text("runtime_node_id").references(() => runtimeNodes.id, {
@@ -648,14 +639,49 @@ export const agents = pgTable(
     workspaceStatus: text("workspace_status").notNull().default("ready"),
     workspaceRevision: text("workspace_revision"),
     lastMigrationId: text("last_migration_id"),
-    /** JSON bag for future agent extensions (skills, model prefs, etc.) */
+    /** Space 级配置（ACP / MCP 等只存一份） */
     configJson: text("config_json").notNull().default("{}"),
     lastError: text("last_error"),
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("agents_tenant_slug").on(t.tenantId, t.slug),
+    uniqueIndex("spaces_tenant_slug").on(t.tenantId, t.slug),
+    index("spaces_tenant").on(t.tenantId),
+  ],
+);
+
+export const agents = pgTable(
+  "agents",
+  {
+    id: text("id").primaryKey().$defaultFn(newId),
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** 归属空间；空间共享电脑与运行时 */
+    spaceId: text("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description").notNull().default(""),
+    /** Per-agent long-term memory (data scoped to this agent)；默认开启 */
+    enableMemory: boolean("enable_memory").notNull().default(true),
+    /** Which memory provider this agent uses (null = tenant default) */
+    memoryProviderId: text("memory_provider_id").references(() => memoryProviders.id, {
+      onDelete: "set null",
+    }),
+    /** JSON bag for future agent extensions (skills, model prefs, etc.) */
+    configJson: text("config_json").notNull().default("{}"),
+    lastError: text("last_error"),
+    avatarColor: text("avatar_color"),
+    avatarShape: text("avatar_shape"),
+    avatarUrl: text("avatar_url"),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("agents_tenant_space_slug").on(t.tenantId, t.spaceId, t.slug),
     index("agents_tenant").on(t.tenantId),
+    index("agents_space").on(t.spaceId),
   ],
 );
 
@@ -666,9 +692,9 @@ export const workspaceMigrations = pgTable(
     tenantId: text("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    agentId: text("agent_id")
+    spaceId: text("space_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
+      .references(() => spaces.id, { onDelete: "cascade" }),
     sourceNodeId: text("source_node_id")
       .notNull()
       .references(() => runtimeNodes.id),
@@ -692,7 +718,7 @@ export const workspaceMigrations = pgTable(
     ...timestamps,
   },
   (t) => [
-    index("workspace_migrations_agent").on(t.agentId),
+    index("workspace_migrations_space").on(t.spaceId),
     index("workspace_migrations_status").on(t.status),
   ],
 );
@@ -704,6 +730,8 @@ export const apiKeys = pgTable("api_keys", {
     .references(() => tenants.id, { onDelete: "cascade" }),
   /** When set, MCP is scoped to this agent's tools + bindings */
   agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+  /** Gateway keys 归属空间 */
+  spaceId: text("space_id").references(() => spaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   keyHash: text("key_hash").notNull().unique(),
   keyPrefix: text("key_prefix").notNull(),
@@ -903,7 +931,9 @@ export const managedContainers = pgTable(
     instanceId: text("instance_id").references(() => componentInstances.id, {
       onDelete: "set null",
     }),
-    /** Agent workspace containers (purpose=workspace) */
+    /** Space workspace containers (purpose=workspace) */
+    spaceId: text("space_id").references(() => spaces.id, { onDelete: "cascade" }),
+    /** @deprecated 容器归空间；保留列兼容旧数据 */
     agentId: text("agent_id").references(() => agents.id, { onDelete: "set null" }),
     dockerId: text("docker_id"),
     name: text("name").notNull(),
@@ -923,10 +953,11 @@ export const managedContainers = pgTable(
     index("containers_tenant_purpose").on(t.tenantId, t.purpose),
     index("containers_docker_id").on(t.dockerId),
     index("containers_agent").on(t.agentId),
+    index("containers_space").on(t.spaceId),
   ],
 );
 
-/** Bind shared component instances (search/memory/MCP) into an agent tool space */
+/** Bind shared component instances (search/memory/MCP) into a space tool set */
 export const agentBindings = pgTable(
   "agent_bindings",
   {
@@ -934,17 +965,20 @@ export const agentBindings = pgTable(
     tenantId: text("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    agentId: text("agent_id")
+    spaceId: text("space_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
+      .references(() => spaces.id, { onDelete: "cascade" }),
+    /** 兼容旧数据；绑定归空间后可为空 */
+    agentId: text("agent_id").references(() => agents.id, { onDelete: "set null" }),
     instanceId: text("instance_id")
       .notNull()
       .references(() => componentInstances.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("agent_bindings_unique").on(t.agentId, t.instanceId),
+    uniqueIndex("agent_bindings_space_instance").on(t.spaceId, t.instanceId),
     index("agent_bindings_agent").on(t.agentId),
+    index("agent_bindings_space").on(t.spaceId),
     index("agent_bindings_tenant").on(t.tenantId),
   ],
 );
@@ -957,6 +991,9 @@ export const agentChannelBindings = pgTable(
     tenantId: text("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
+    spaceId: text("space_id")
+      .notNull()
+      .references(() => spaces.id, { onDelete: "cascade" }),
     agentId: text("agent_id")
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
@@ -973,6 +1010,7 @@ export const agentChannelBindings = pgTable(
   (t) => [
     index("agent_channel_bindings_tenant").on(t.tenantId),
     index("agent_channel_bindings_agent").on(t.agentId),
+    index("agent_channel_bindings_space").on(t.spaceId),
     index("agent_channel_bindings_platform").on(t.platform),
     index("agent_channel_bindings_tenant_platform").on(t.tenantId, t.platform),
   ],
@@ -1082,6 +1120,21 @@ export const zakurabotMessages = pgTable(
     index("zakurabot_messages_history").on(t.deviceId, t.bindingId, t.agentId, t.seq),
   ],
 );
+
+export const messageReactions = pgTable("message_reactions", {
+  id: text("id").primaryKey().$defaultFn(newId),
+  tenantId: text("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  deviceId: text("device_id").notNull(),
+  bindingId: text("binding_id").notNull().references(() => agentChannelBindings.id, { onDelete: "cascade" }),
+  agentId: text("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  messageId: text("message_id").notNull(),
+  userId: text("user_id").notNull(),
+  emoji: text("emoji").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("message_reactions_user").on(t.tenantId, t.deviceId, t.bindingId, t.agentId, t.messageId, t.userId),
+  index("message_reactions_message").on(t.deviceId, t.bindingId, t.agentId, t.messageId),
+]);
 
 export const settings = pgTable(
   "settings",
@@ -1967,6 +2020,7 @@ export const schema = {
   zakurabotFiles,
   zakurabotInteractions,
   zakurabotMessages,
+  messageReactions,
   settings,
   platformServices,
   platformServiceQuotas,
@@ -2017,6 +2071,7 @@ export type UpstreamModel = typeof upstreamModels.$inferSelect;
 export type ModelCatalogEntryRow = typeof modelCatalogEntries.$inferSelect;
 export type RuntimeNode = typeof runtimeNodes.$inferSelect;
 export type Agent = typeof agents.$inferSelect;
+export type Space = typeof spaces.$inferSelect;
 export type WorkspaceMigration = typeof workspaceMigrations.$inferSelect;
 export type AgentBinding = typeof agentBindings.$inferSelect;
 export type AgentChannelBinding = typeof agentChannelBindings.$inferSelect;
@@ -2269,19 +2324,19 @@ export const agentAutomationRuns = pgTable(
 );
 
 /**
- * Agent 项目：对话分组 + 说明，不必先有工作区目录。
+ * Space 项目：对话分组 + 说明，不必先有工作区目录。
  * slug 与会话/定时任务的 project 字段对齐；hasWorkspace 才对应 /workspace/projects/<slug>。
  */
-export const agentProjects = pgTable(
-  "agent_projects",
+export const spaceProjects = pgTable(
+  "space_projects",
   {
     id: text("id").primaryKey().$defaultFn(newId),
     tenantId: text("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    agentId: text("agent_id")
+    spaceId: text("space_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
+      .references(() => spaces.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
     description: text("description").notNull().default(""),
@@ -2291,9 +2346,9 @@ export const agentProjects = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("agent_projects_agent_slug").on(t.agentId, t.slug),
-    index("agent_projects_agent").on(t.agentId),
-    index("agent_projects_tenant").on(t.tenantId),
+    uniqueIndex("space_projects_space_slug").on(t.spaceId, t.slug),
+    index("space_projects_space").on(t.spaceId),
+    index("space_projects_tenant").on(t.tenantId),
   ],
 );
 
@@ -2312,4 +2367,5 @@ export type AgentHeartbeat = typeof agentHeartbeats.$inferSelect;
 export type AgentAutomationRun = typeof agentAutomationRuns.$inferSelect;
 export type AgentUserQuestion = typeof agentUserQuestions.$inferSelect;
 export type AgentToolApproval = typeof agentToolApprovals.$inferSelect;
-export type AgentProjectRow = typeof agentProjects.$inferSelect;
+export type SpaceProjectRow = typeof spaceProjects.$inferSelect;
+export type AgentProjectRow = SpaceProjectRow;

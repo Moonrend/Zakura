@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
 type AuthorizeInfo = {
+  issuer: string;
   client: {
     clientId: string;
     clientName: string;
@@ -117,9 +118,9 @@ export default function OauthAuthorizePage() {
       const url = new URL(query.redirect_uri);
       url.searchParams.set("error", "access_denied");
       if (query.state) url.searchParams.set("state", query.state);
-      // RFC 9207：错误响应也应带 iss
-      if (typeof window !== "undefined") {
-        url.searchParams.set("iss", window.location.origin);
+      // RFC 9207：http(s) 错误响应带 AS issuer；自定义 scheme 回跳不带（其 origin 为 null）
+      if ((url.protocol === "http:" || url.protocol === "https:") && info?.issuer) {
+        url.searchParams.set("iss", info.issuer);
       }
       window.location.href = url.toString();
     } catch {

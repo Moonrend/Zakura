@@ -399,7 +399,7 @@ export class AgentAutomationService {
   async listRuns(
     tenantId: string,
     agentId: string,
-    opts?: { limit?: number; kind?: "schedule" | "heartbeat" },
+    opts?: { limit?: number; kind?: "schedule" | "heartbeat"; scheduleId?: string },
   ) {
     const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 100);
     const rows = await this.db
@@ -410,6 +410,7 @@ export class AgentAutomationService {
           eq(agentAutomationRuns.tenantId, tenantId),
           eq(agentAutomationRuns.agentId, agentId),
           ...(opts?.kind ? [eq(agentAutomationRuns.kind, opts.kind)] : []),
+          ...(opts?.scheduleId ? [eq(agentAutomationRuns.scheduleId, opts.scheduleId)] : []),
         ),
       )
       .orderBy(desc(agentAutomationRuns.createdAt))

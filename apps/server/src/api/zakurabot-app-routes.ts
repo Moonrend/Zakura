@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { PathJailError } from "@zakura/core";
+import { PathJailError, log } from "@zakura/core";
 import type { AppVariables } from "./routes.js";
 import type { ZakurabotGateway } from "../services/zakurabot-gateway.js";
 import { ZakurabotAccessError, ZakurabotInputError, type ZakurabotIdentity } from "../services/zakurabot-channel.js";
@@ -12,6 +12,20 @@ import { captureDesktop } from "../services/agent-desktop.js";
 import { MAX_SCREENSHOT_BYTES } from "../services/agent-screenshot.js";
 import type { AgentWorkspaceService } from "../services/agent-workspace.js";
 import { ZakurabotInteractionError, zakurabotAnswerSchema } from "../services/zakurabot-interactions.js";
+
+const zakurabotExecBody = z.object({ command: z.string().min(1).max(2000) });
+const ZAKURABOT_EXEC_TIMEOUT_MS = 60_000;
+const ZAKURABOT_MAX_EXEC_OUTPUT_BYTES = 256 * 1024;
+
+const zakurabotReactionBody = z.object({ emoji: z.string().trim().min(1)
+  .refine((value) => [...value].length <= 16, "emoji must be at most 16 characters") });
+
+function clipExecOutput(stdout: string, stderr: string) {
+  const text = `${stdout}${stderr}`;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= ZAKURABOT_MAX_EXEC_OUTPUT_BYTES) return { output: text, truncated: false };
+  return { output: bytes.subarray(0, ZAKURABOT_MAX_EXEC_OUTPUT_BYTES).toString("utf8"), truncated: true };
+}
 
 /**
  * Zakura Bot App API：与控制台共用同一套会话鉴权（OAuth access token 或控制台会话），
@@ -39,11 +53,36 @@ export function registerZakurabotAppRoutes(
     if (error instanceof PathJailError) return c.json({ error: "Forbidden workspace path" }, 403);
     if ("code" in error && error.code === "ENOENT") return c.json({ error: "File not found" }, 404);
     // Workspace/runner errors can include local paths or credentials.
+    log.error("zakurabot.app_unhandled", {
+      path: c.req.path,
+      err_message: error instanceof Error ? error.message : String(error),
+      cause: error instanceof Error && error.cause ? String(error.cause) : undefined,
+      stack: error instanceof Error ? error.stack?.split("\n").slice(0, 6).join(" | ") : undefined,
+    });
     return c.json({ error: "Zakura Bot operation is temporarily unavailable" }, 503);
   });
 
   api.get("/agents", async (c) => c.json({ agents: (await channel.roster(identity(c))).agents }));
   api.get("/bots", async (c) => c.json({ bots: (await channel.roster(identity(c))).agents }));
+  api.get("/spaces", async (c) => {
+    const actor = identity(c);
+    const [spaces, agentRows] = await Promise.all([
+      channel.deps.agents.spaces.list(actor.tenantId),
+      channel.deps.agents.list(actor.tenantId),
+    ]);
+    const counts = new Map<string, number>();
+    for (const agent of agentRows) {
+      counts.set(agent.spaceId, (counts.get(agent.spaceId) ?? 0) + 1);
+    }
+    return c.json({
+      spaces: spaces.map((space) => ({
+        id: space.id,
+        name: space.name,
+        slug: space.slug,
+        agentCount: counts.get(space.id) ?? 0,
+      })),
+    });
+  });
   api.get("/agents/:id", async (c) => {
     const { agents } = await channel.roster(identity(c));
     const agent = agents.find((item) => item.id === c.req.param("id"));
@@ -52,8 +91,11 @@ export function registerZakurabotAppRoutes(
   api.get("/agents/:id/history", async (c) => {
     const parsed = z.coerce.number().int().min(1).max(100).safeParse(c.req.query("limit") ?? 100);
     if (!parsed.success) return c.json({ error: "limit must be between 1 and 100" }, 400);
+    const before = c.req.query("before") === undefined ? undefined
+      : z.coerce.number().int().min(1).safeParse(c.req.query("before"));
+    if (before && !before.success) return c.json({ error: "before must be a positive integer" }, 400);
     const { conversation } = await channel.resolveConversation(identity(c), c.req.param("id"));
-    return c.json({ messages: await channel.history(conversation, parsed.data) });
+    return c.json(await channel.history(conversation, parsed.data, before?.data));
   });
   api.post("/agents/:id/files", bodyLimit({ maxSize: ZAKURABOT_MAX_FILE_BYTES + 64 * 1024,
     onError: (c) => c.json({ error: "File upload is too large" }, 413) }), async (c) => {
@@ -116,6 +158,26 @@ export function registerZakurabotAppRoutes(
       "X-Frame-Captured-At": new Date().toISOString(),
     } });
   });
+  api.post("/agents/:id/exec", bodyLimit({ maxSize: 64 * 1024,
+    onError: (c) => c.json({ error: "Command is too large" }, 413) }), async (c) => {
+    const input = zakurabotExecBody.safeParse(await c.req.json().catch(() => null));
+    if (!input.success) return c.json({ error: "command must be 1-2000 characters" }, 400);
+    const actor = identity(c);
+    const { conversation } = await channel.resolveConversation(actor, c.req.param("id"));
+    const agent = await channel.deps.agents.get(conversation.tenantId, conversation.agentId);
+    if (!agent) return c.json({ error: "Agent not available" }, 404);
+    if (!workspace) return c.json({ error: "Terminal is unavailable" }, 503);
+    const info = await workspace.getDesktopInfo(agent);
+    if (info.containerStatus !== "running") {
+      return c.json({ error: "Workspace is not running. Start the agent first." }, 409);
+    }
+    const result = await workspace.execInWorkspace(agent, ["bash", "-lc", input.data.command], {
+      timeoutMs: ZAKURABOT_EXEC_TIMEOUT_MS,
+    });
+    const { output, truncated } = clipExecOutput(result.stdout, result.stderr);
+    await channel.resolveConversation(actor, agent.id);
+    return c.json({ output, exitCode: result.exitCode, finishedAt: new Date().toISOString(), truncated });
+  });
   api.get("/agents/:id/interactions", async (c) => {
     if (!channel.deps.interactions) return c.json({ error: "Interactions are unavailable" }, 503);
     const { conversation, sessionId } = await channel.interactionSession(identity(c), c.req.param("id"));
@@ -141,6 +203,26 @@ export function registerZakurabotAppRoutes(
     const snapshot = await channel.respondInteraction(identity(c), c.req.param("id"), c.req.param("messageId"), input.data);
     await channel.resolveConversation(identity(c), c.req.param("id"));
     return c.json({ ok: true, ...snapshot });
+  });
+  api.get("/agents/:id/messages/:messageId/reactions", async (c) => {
+    const reactions = await channel.reactions(identity(c), c.req.param("id"), c.req.param("messageId"));
+    return c.json({ reactions: reactions.map((row) => ({ messageId: row.messageId, emoji: row.emoji,
+      userId: row.userId, createdAt: row.createdAt.getTime() })) });
+  });
+  api.post("/agents/:id/messages/:messageId/reactions", bodyLimit({ maxSize: 8 * 1024,
+    onError: (c) => c.json({ error: "Reaction is too large" }, 413) }), async (c) => {
+    const input = zakurabotReactionBody.safeParse(await c.req.json().catch(() => null));
+    if (!input.success) return c.json({ error: "emoji must be 1-16 characters" }, 400);
+    const reaction = await channel.addReaction(identity(c), c.req.param("id"), c.req.param("messageId"), input.data.emoji);
+    return c.json({ reaction }, 201);
+  });
+  api.delete("/agents/:id/messages/:messageId/reactions", async (c) => {
+    const body = await c.req.json().catch(() => null) as { emoji?: unknown } | null;
+    const raw = body && typeof body === "object" ? body.emoji : c.req.query("emoji");
+    const input = zakurabotReactionBody.safeParse({ emoji: raw });
+    if (!input.success) return c.json({ error: "emoji must be 1-16 characters" }, 400);
+    const removed = await channel.removeReaction(identity(c), c.req.param("id"), c.req.param("messageId"), input.data.emoji);
+    return c.json({ removed });
   });
   app.route("/api/zakurabot", api);
 }

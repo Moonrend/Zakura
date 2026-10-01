@@ -6,7 +6,7 @@ import {
   listEnabledAcpSetups,
   publicProfileForSetup,
 } from "@zakura/shared";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import { readAgentAcpConfig } from "../acp/config.js";
 import type { AcpSessionService } from "../acp/session.js";
 
@@ -19,7 +19,7 @@ export function isAcpToolName(name: string): boolean {
   return ACP_TOOL_SET.has(name);
 }
 
-export function listAcpToolDefinitions(agent: Agent): ModelToolDefinition[] {
+export function listAcpToolDefinitions(agent: AgentWithSpace): ModelToolDefinition[] {
   const enabled = listEnabledAcpSetups(readAgentAcpConfig(agent));
   if (enabled.length === 0) return [];
   const catalog = enabled
@@ -68,7 +68,7 @@ export function listAcpToolDefinitions(agent: Agent): ModelToolDefinition[] {
 
 export async function callAcpTool(
   acp: AcpSessionService,
-  agent: Agent,
+  agent: AgentWithSpace,
   tenantId: string,
   name: string,
   args: Record<string, unknown>,

@@ -53,7 +53,7 @@ export class ZakurabotChannel {
     ingress: import("./remote-agent-ingress.js").RemoteAgentIngress;
     sessions: RemoteChannelToolPort;
     sessionStore: CloudAgentSessionStore;
-    agents: Pick<AgentService, "get" | "list">;
+    agents: Pick<AgentService, "get" | "list" | "spaces">;
     files?: ZakurabotFileService;
     interactions?: ZakurabotInteractionService;
     desktopAvailable?: boolean;
@@ -188,8 +188,10 @@ export class ZakurabotChannel {
       const c = this.conversation(identity, binding);
       const status = await this.deps.ingress.getThreadStatus(identity.tenantId, binding.id, zakurabotThreadId(c));
       agents.push({ id: agent.id, name: agent.name || "Agent", title: binding.label, description: agent.description,
+        spaceId: agent.spaceId, spaceName: agent.spaceName,
+        avatarColor: agent.avatarColor, avatarShape: agent.avatarShape, avatarUrl: agent.avatarUrl,
         status: status?.activeRunId ? "busy" : "idle", color: "#1084fe", unread: false, bindingId: binding.id,
-        capabilities: { files: Boolean(agent.enableFs && this.deps.files), desktop: Boolean(agent.enableComputer && this.deps.desktopAvailable),
+        capabilities: { files: Boolean(agent.enableComputer && this.deps.files), desktop: Boolean(agent.enableComputer && this.deps.desktopAvailable),
           interactions: Boolean(this.deps.interactions) } });
       conversations.push(c);
     }
@@ -204,11 +206,34 @@ export class ZakurabotChannel {
     return () => { listeners.delete(subscriber); if (!listeners.size) this.subscribers.delete(key); };
   }
 
-  async history(c: ZakurabotConversation, limit?: number) {
+  async history(c: ZakurabotConversation, limit?: number, beforeSeq?: number) {
     await this.authorize(c);
     const status = await this.deps.ingress.getThreadStatus(c.tenantId, c.bindingId, zakurabotThreadId(c));
     if (status) await this.watchInteractions(c, status.sessionId);
-    return this.deps.store.history(c, limit);
+    return this.deps.store.history(c, limit, beforeSeq);
+  }
+
+  async addReaction(identity: ZakurabotIdentity, agentId: string, messageId: string, emoji: string) {
+    const { conversation: c } = await this.resolveConversation(identity, agentId);
+    await this.authorize(c);
+    const row = await this.deps.store.addReaction(c, messageId, identity.userId, emoji);
+    await this.publish(c, { type: "reaction", messageId, emoji: row.emoji, userId: identity.userId, op: "add", at: Date.now() });
+    return { messageId, emoji: row.emoji, userId: identity.userId, createdAt: row.createdAt.getTime() };
+  }
+
+  async removeReaction(identity: ZakurabotIdentity, agentId: string, messageId: string, emoji: string) {
+    const { conversation: c } = await this.resolveConversation(identity, agentId);
+    await this.authorize(c);
+    const row = await this.deps.store.removeReaction(c, messageId, identity.userId, emoji);
+    if (!row) return false;
+    await this.publish(c, { type: "reaction", messageId, emoji, userId: identity.userId, op: "remove", at: Date.now() });
+    return true;
+  }
+
+  async reactions(identity: ZakurabotIdentity, agentId: string, messageId: string) {
+    const { conversation: c } = await this.resolveConversation(identity, agentId);
+    await this.authorize(c);
+    return this.deps.store.reactions(c, messageId);
   }
 
   private async watchInteractions(c: ZakurabotConversation, sessionId: string) {
@@ -227,7 +252,7 @@ export class ZakurabotChannel {
       const threadId = zakurabotThreadId(c);
       const chat = createZakurabotChat({ agentId: c.agentId, deviceId: c.deviceId, deviceName: "Zakura Bot", threadId,
         interaction,
-        history: (limit) => this.history(c, limit), publishFile: (path) => this.deps.publishFile(c, path),
+        history: async (limit) => (await this.history(c, limit)).items.map((item) => item.frame), publishFile: (path) => this.deps.publishFile(c, path),
         post: async (frame) => {
           if (frame.type === "chat_reply") {
             await this.publish(c, { ...frame, messageId: row.id, createdAt: row.createdAt.getTime() });
@@ -299,7 +324,7 @@ export class ZakurabotChannel {
     };
     const chat = createZakurabotChat({ agentId: c.agentId, deviceId: c.deviceId, deviceName: sender, threadId,
       post: (frame) => this.publish(c, frame, () => { requireCurrent(); return true; }),
-      history: (limit) => { requireCurrent(); return this.history(c, limit); },
+      history: async (limit) => { requireCurrent(); return (await this.history(c, limit)).items.map((item) => item.frame); },
       publishFile: async (path) => { requireCurrent(); await this.authorize(c); return this.deps.publishFile(c, path); },
     });
     const handle: RemoteChannelSessionHandle = { chat, threadId, channelId: threadId, platform: "zakurabot", bindingId: c.bindingId,
@@ -394,7 +419,7 @@ export class ZakurabotChannel {
           requireCurrentTurn();
           return message.type !== "typing" || !message.active || this.runs.get(threadId)?.handle === handle;
         }),
-        history: (limit) => { requireCurrentTurn(); return this.history(c, limit); },
+        history: async (limit) => { requireCurrentTurn(); return (await this.history(c, limit)).items.map((item) => item.frame); },
         publishFile: async (path) => { requireCurrentTurn(); await this.authorize(c); return this.deps.publishFile(c, path); },
       });
       const handle: RemoteChannelSessionHandle = {

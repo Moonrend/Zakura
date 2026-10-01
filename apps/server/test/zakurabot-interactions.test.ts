@@ -62,7 +62,7 @@ describe("Zakura Bot interactions", () => {
     await socket.wait("typing", (frame) => frame.agentId === agentId && !frame.active);
     const history = await (await get(`agents/${agentId}/history`, ctx.token)).json();
     assert.equal(JSON.stringify(history).includes("super-secret-answer"), false);
-    assert.equal(history.messages.filter((frame: { messageId?: string }) => frame.messageId === question.messageId).length, 1);
+    assert.equal(history.items.filter((item: { frame: { messageId?: string } }) => item.frame.messageId === question.messageId).length, 1);
     assert.equal(JSON.stringify(socket.frames).includes("super-secret-answer"), false);
     assert.ok(socket.frames.filter((frame) => frame.type === "chat_reply").every((frame) => frame.payload.interaction));
     const stored = await h.db.select().from(zakurabotInteractions).where(eq(zakurabotInteractions.id, question.messageId));

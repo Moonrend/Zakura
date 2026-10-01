@@ -63,6 +63,19 @@ function sha256(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
 
+async function publish(replacement: string, path: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      if (process.platform === "win32") await rm(path, { force: true });
+      await rename(replacement, path);
+      return;
+    } catch (error) {
+      if (attempt >= 5 || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+    }
+  }
+}
+
 const baseTarget = { publicBaseUrl: "https://zakura.example/", os: "linux", arch: "amd64" };
 
 test("normalizes supported platforms and rejects malformed download URLs", () => {
@@ -189,7 +202,7 @@ test("an opened download stays on the verified inode while a new release is publ
   try {
     const replacement = join(catalog, "replacement");
     await writeFile(replacement, executable("linux", "amd64", 2));
-    await rename(replacement, path);
+    await publish(replacement, path);
     const chunks: Buffer[] = [];
     for await (const chunk of stream) chunks.push(Buffer.from(chunk));
     assert.deepEqual(Buffer.concat(chunks), old);

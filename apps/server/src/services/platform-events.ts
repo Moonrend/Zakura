@@ -16,7 +16,7 @@ import {
   REDIS_KEYS,
   type ZakuraRedis,
 } from "./redis.js";
-import type { AgentProgressSnapshot } from "./agent-progress.js";
+import type { AgentProgressSnapshot } from "./space-progress.js";
 
 import type { PlatformServiceProgressSnapshot } from "./platform-service-progress.js";
 

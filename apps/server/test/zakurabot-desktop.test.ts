@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { and, eq } from "drizzle-orm";
-import { agents, tenantMemberships } from "../src/db/schema.js";
+import { agents, spaces, tenantMemberships } from "../src/db/schema.js";
 import { MAX_SCREENSHOT_BYTES } from "../src/services/agent-screenshot.js";
 import { zakurabotHarness } from "./helpers/zakurabot.js";
 
@@ -11,7 +11,12 @@ describe("Zakura Bot desktop frames", () => {
   let afterCapture: (() => Promise<void>) | undefined;
   let supported = true;
   let capture = () => ({ stdout: png.toString("base64"), stderr: "", exitCode: 0 });
-  before(async () => { h = await zakurabotHarness({ workspace: {
+  const setComputer = async (agentId: string, enabled: boolean) => {
+    const row = await h.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    assert.ok(row);
+    await h.db.update(spaces).set({ enableComputer: enabled }).where(eq(spaces.id, row.spaceId));
+  };
+  before(async () => { h = await zakurabotHarness({ agentComputer: false, workspace: {
     async getDesktopInfo() { return { enabled: supported, supported, containerStatus: "running", width: 1, height: 1,
       coordinateSpace: "desktop pixels, origin top-left", cdpUrl: "http://private-runner:9222", novncUrl: "http://private-runner:6080",
       dockerId: "PRIVATE_CONTAINER" } as never; },
@@ -28,7 +33,7 @@ describe("Zakura Bot desktop frames", () => {
     const path = `agents/${agentId}/desktop`;
     assert.equal((await get(path, ctx.token)).status, 409);
     assert.equal((await get(`${path}/frame`, ctx.token)).status, 409);
-    await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
+    await setComputer(agentId, true);
     assert.equal((await (await get(`agents/${agentId}`, ctx.token)).json()).agent.capabilities.desktop, true);
     const response = await get(path, ctx.token);
     assert.equal(response.status, 200);
@@ -62,13 +67,13 @@ describe("Zakura Bot desktop frames", () => {
   it("rechecks revocation and Computer access after a slow capture", async () => {
     const ctx = await h.access();
     const agentId = ctx.bindings[0]!.agentId;
-    await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
-    afterCapture = async () => { await h.db.update(agents).set({ enableComputer: false }).where(eq(agents.id, agentId)); };
+    await setComputer(agentId, true);
+    afterCapture = async () => { await setComputer(agentId, false); };
     try {
       const disabled = await get(`agents/${agentId}/desktop/frame`, ctx.token);
       assert.equal(disabled.status, 409);
       assert.match(disabled.headers.get("content-type")!, /application\/json/);
-      await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
+      await setComputer(agentId, true);
       afterCapture = async () => {
         await h.db.update(tenantMemberships).set({ status: "suspended" })
           .where(and(eq(tenantMemberships.tenantId, ctx.tenantId), eq(tenantMemberships.userId, ctx.userId)));
@@ -83,7 +88,7 @@ describe("Zakura Bot desktop frames", () => {
   it("reports unsupported workspaces and sanitizes capture failures or incomplete images", async () => {
     const ctx = await h.access();
     const agentId = ctx.bindings[0]!.agentId;
-    await h.db.update(agents).set({ enableComputer: true }).where(eq(agents.id, agentId));
+    await setComputer(agentId, true);
     supported = false;
     try {
       const info = await (await get(`agents/${agentId}/desktop`, ctx.token)).json();

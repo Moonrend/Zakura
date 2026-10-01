@@ -176,8 +176,8 @@ export class ZakurabotGateway {
         }
       });
       for (const c of roster.conversations) {
-        const messages = await this.channel.history(c);
-        for (const frame of messages) {
+        const { items } = await this.channel.history(c);
+        for (const { frame } of items) {
           if (connection.phase !== "ready") return;
           await this.write(connection, frame);
         }

@@ -268,7 +268,7 @@ async function gunzipBuffer(data: Buffer): Promise<Buffer> {
 }
 
 export type ExportOptions = {
-  agentId: string;
+  spaceId: string;
   sourceNodeId: string;
   workspaceRoot: string;
   excludePatterns?: string[];
@@ -310,7 +310,7 @@ export async function exportWorkspace(opts: ExportOptions): Promise<ExportResult
 
   const manifest: MigrationManifest = {
     version: 1,
-    agentId: opts.agentId,
+    spaceId: opts.spaceId,
     exportedAt: new Date().toISOString(),
     sourceNodeId: opts.sourceNodeId,
     compression: "gzip",

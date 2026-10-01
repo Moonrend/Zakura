@@ -1,10 +1,10 @@
 /**
- * 技能相关的 Agent 原生工具执行：list_skills / read_skill / search_skills / install_skill。
+ * 技能相关的 AgentWithSpace 原生工具执行：list_skills / read_skill / search_skills / install_skill。
  * 工具定义在 agent-tools.ts，执行放这里以免 callAgentNativeTool 再吃一个位置参数。
  */
 import { textResult, type WorkspaceFsProvider } from "@zakura/core";
 import { SKILL_MANIFEST_FILE, type McpToolResult, type SkillStoreId } from "@zakura/shared";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import { normalizeSkillName } from "./source.js";
 import type { SkillsService } from "./service.js";
 import { listProjectSkills, readProjectSkillFile } from "../project-config.js";
@@ -21,13 +21,13 @@ function str(value: unknown): string | undefined {
 
 async function loadProjectSkillList(
   fsProvider: WorkspaceFsProvider | null | undefined,
-  agent: Agent,
+  agent: AgentWithSpace,
   projectSlug?: string,
 ) {
   if (!fsProvider || !projectSlug) return [];
   try {
     const fs = await fsProvider.forAgentBinding({
-      id: agent.id,
+      spaceId: agent.spaceId,
       tenantId: agent.tenantId,
       runtimeNodeId: agent.runtimeNodeId,
     });
@@ -39,7 +39,7 @@ async function loadProjectSkillList(
 
 export async function callSkillTool(
   service: SkillsService | null,
-  agent: Agent,
+  agent: AgentWithSpace,
   name: string,
   args: Record<string, unknown>,
   extra?: { projectSlug?: string; fsProvider?: WorkspaceFsProvider | null },
@@ -93,7 +93,7 @@ export async function callSkillTool(
       if (extra?.projectSlug && extra.fsProvider) {
         try {
           const fs = await extra.fsProvider.forAgentBinding({
-            id: agent.id,
+            spaceId: agent.spaceId,
             tenantId: agent.tenantId,
             runtimeNodeId: agent.runtimeNodeId,
           });
@@ -172,7 +172,7 @@ export async function callSkillTool(
       if (scope === "project") {
         if (!projectSlug) {
           return textResult(
-            "scope=project 需要当前会话已绑定项目，或显式传 project=<slug>。装到本 Agent 全部项目共用则用 scope=agent。",
+            "scope=project 需要当前会话已绑定项目，或显式传 project=<slug>。装到本 AgentWithSpace 全部项目共用则用 scope=agent。",
             true,
           );
         }
@@ -215,7 +215,7 @@ export async function callSkillTool(
               installed: record.name,
               path: `/skills/${record.name}`,
               description: record.description,
-              note: "已登记到本 Agent 全局 /skills/，所有会话可用。",
+              note: "已登记到本 AgentWithSpace 全局 /skills/，所有会话可用。",
             },
             null,
             2,
@@ -244,7 +244,7 @@ export async function callSkillTool(
               path: `/skills/${s.name}/${SKILL_MANIFEST_FILE}`,
             })),
             warnings: result.warnings,
-            note: "已写入本 Agent 全局 /skills/，所有项目的会话都能用。现在用 read_skill 读取内容并按其执行当前任务。",
+            note: "已写入本 AgentWithSpace 全局 /skills/，所有项目的会话都能用。现在用 read_skill 读取内容并按其执行当前任务。",
           },
           null,
           2,

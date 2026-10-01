@@ -435,6 +435,41 @@
       "when": 1789862400000,
       "tag": "0061_zakurabot_oauth_user",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1789948800000,
+      "tag": "0062_spaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1790035200000,
+      "tag": "0063_space_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1790121600000,
+      "tag": "0064_space_computer",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1790208000000,
+      "tag": "0065_agent_avatar",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1790294400000,
+      "tag": "0066_reactions",
+      "breakpoints": true
     }
   ]
 }

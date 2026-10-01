@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 const SCRATCH =
   process.env.GROK_SCRATCH || join(tmpdir(), "grok-events-around");
@@ -44,7 +45,9 @@ describe("listEventsAround", () => {
       createdAt: now,
       updatedAt: now,
     });
+        const spaceId = await ensureTestSpace(created.db, tenantId, { enableComputer: false });
     await created.db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "a",

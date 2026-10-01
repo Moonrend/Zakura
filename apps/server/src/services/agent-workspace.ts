@@ -27,8 +27,8 @@ import {
   agents,
   managedContainers,
   newId,
+  spaces,
   tenants,
-  type Agent,
   type RuntimeNode,
 } from "../db/schema.js";
 import type { DockerPullEvent, DockerRuntime, TcpTunnel } from "../runtime/docker.js";
@@ -36,8 +36,10 @@ import {
   beginAgentProgress,
   finishAgentProgress,
   logAgentProgress,
-} from "./agent-progress.js";
+} from "./space-progress.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
+import { spaceWorkspaceHostPath } from "./spaces.js";
+import type { AgentWithSpace, WorkspaceScope } from "./agent-view.js";
 import { workspaceReadyCommand } from "./workspace-readiness.js";
 import { openWorkspaceTcpTunnel } from "./workspace-tcp-tunnel.js";
 
@@ -51,8 +53,8 @@ export const WORKSPACE_EXEC_PATH =
 export const ACP_ADAPTER_HOME = "/opt/zakura/acp-home";
 
 /** Per agent × adapter credential volume name. */
-export function acpAdapterCredVolume(agentId: string, adapterId: string): string {
-  return `zakura-acpcred-${adapterId}-${agentId}`
+export function acpAdapterCredVolume(spaceId: string, adapterId: string): string {
+  return `zakura-acpcred-${adapterId}-${spaceId}`
     .replace(/[^a-zA-Z0-9_.-]/g, "-")
     .slice(0, 63);
 }
@@ -113,8 +115,10 @@ export function agentDataDir(config: AppConfig, agentId: string): string {
   return join(config.dataDir, "agents", agentId);
 }
 
-export function agentWorkspaceHostPath(config: AppConfig, agentId: string): string {
-  return join(agentDataDir(config, agentId), "workspace");
+/** @deprecated 工作区归 Space：新代码用 spaceWorkspaceHostPath */
+
+export function agentWorkspaceHostPath(config: AppConfig, spaceId: string): string {
+  return spaceWorkspaceHostPath(config, spaceId);
 }
 
 /**
@@ -126,9 +130,9 @@ export function agentWorkspaceHostPath(config: AppConfig, agentId: string): stri
  * translated, or the host silently mounts a different, empty directory and the
  * workspace splits in two. See `mapContainerPathToHost`.
  */
-export function agentWorkspaceBindSource(config: AppConfig, agentId: string): string {
+export function agentWorkspaceBindSource(config: AppConfig, spaceId: string): string {
   return mapContainerPathToHost(
-    agentWorkspaceHostPath(config, agentId),
+    spaceWorkspaceHostPath(config, spaceId),
     config.dataDir,
     config.hostDataDir ?? undefined,
   );
@@ -136,7 +140,7 @@ export function agentWorkspaceBindSource(config: AppConfig, agentId: string): st
 
 export type StackMode = "none" | "shell" | "display";
 
-export function resolveStackMode(agent: Agent): StackMode {
+export function resolveStackMode(agent: { enableComputer?: boolean }): StackMode {
   if (agent.enableComputer) return "display";
   // All agents get at least a shell container (lite image) for ACP / MCP / exec.
   // Agents that genuinely need no container stay at "none" only when no
@@ -245,7 +249,7 @@ export class AgentWorkspaceService {
     return next;
   }
 
-  async isWorkspaceRunning(agent: Agent): Promise<boolean> {
+  async isWorkspaceRunning(agent: AgentWithSpace): Promise<boolean> {
     try {
       await this.resolveDockerId(agent);
       return true;
@@ -265,14 +269,14 @@ export class AgentWorkspaceService {
    *   desktop-proxy 等真正消费桌面的路径才需要。
    */
   async ensureStarted(
-    agent: Agent,
+    agent: AgentWithSpace,
     opts?: { require?: "shell" | "display" },
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     const require = opts?.require ?? "shell";
     if (require === "display" && this.isHostWorkspace(agent)) {
       throw new Error("本机工作区提供文件和终端；虚拟桌面与浏览器需要容器工作区（Docker）。");
     }
-    return this.withStartLock(agent.id, async () => {
+    return this.withStartLock(agent.spaceId, async () => {
       if (await this.isWorkspaceRunning(agent)) {
         if (require === "display") {
           const { client } = await this.requireRunnerClient(agent);
@@ -284,9 +288,9 @@ export class AgentWorkspaceService {
     });
   }
 
-  private async waitUntilReady(agent: Agent, client: RunnerClient, require: "shell" | "display") {
+  private async waitUntilReady(agent: AgentWithSpace, client: RunnerClient, require: "shell" | "display") {
     if (this.isHostWorkspace(agent)) return;
-    const result = await client.execWorkspace(agent.id, workspaceReadyCommand(require), {
+    const result = await client.execWorkspace(agent.spaceId, workspaceReadyCommand(require), {
       env: { DISPLAY: ":99" }, timeoutMs: 40_000,
     });
     if (result.exitCode !== 0) {
@@ -294,27 +298,27 @@ export class AgentWorkspaceService {
     }
   }
 
-  hostRoot(agent: Agent): string {
-    return agentWorkspaceHostPath(this.config, agent.id);
+  hostRoot(agent: WorkspaceScope): string {
+    return spaceWorkspaceHostPath(this.config, agent.spaceId);
   }
 
-  ensureLocal(agent: Agent): string {
+  ensureLocal(agent: WorkspaceScope): string {
     const root = this.hostRoot(agent);
     ensureWorkspaceDir(root);
     return root;
   }
 
   /** An explicit local or remote binding is required; null never falls back. */
-  private hasRuntimeNode(agent: Agent): boolean {
+  private hasRuntimeNode(agent: WorkspaceScope): boolean {
     return Boolean(agent.runtimeNodeId);
   }
 
-  isHostWorkspace(agent: Agent): boolean {
-    return (agent as Agent & { workspaceKind?: string }).workspaceKind === "host";
+  isHostWorkspace(agent: WorkspaceScope): boolean {
+    return agent.workspaceKind === "host";
   }
 
   private async requireRunnerClient(
-    agent: Agent,
+    agent: WorkspaceScope,
   ): Promise<{ client: RunnerClient; node: RuntimeNode }> {
     if (!this.hasRuntimeNode(agent)) {
       throw new Error("请先绑定一台电脑或服务器");
@@ -327,13 +331,13 @@ export class AgentWorkspaceService {
     });
   }
 
-  async getWorkspaceContainer(agentId: string) {
+  async getWorkspaceContainer(spaceId: string) {
     const rows = await this.db
       .select()
       .from(managedContainers)
       .where(
         and(
-          eq(managedContainers.agentId, agentId),
+          eq(managedContainers.spaceId, spaceId),
           eq(managedContainers.purpose, "workspace"),
         ),
       );
@@ -397,52 +401,60 @@ export class AgentWorkspaceService {
     }
   }
 
-  async getCdpBaseUrl(agentId: string): Promise<string | null> {
-    const resolved = await this.resolveCdp(agentId);
+  async getCdpBaseUrl(spaceId: string): Promise<string | null> {
+    const resolved = await this.resolveCdp(spaceId);
     return resolved.url;
   }
 
   /**
    * Resolve a host-reachable CDP endpoint, attempting Chrome recovery when needed.
    */
-  async resolveCdp(agentId: string): Promise<{
+  async resolveCdp(spaceId: string): Promise<{
     url: string | null;
     reason: string;
     containerStatus: string | null;
     chromeInside: boolean;
   }> {
-    return this.withStartLock(agentId, async () => {
-      const row = await this.getWorkspaceContainer(agentId);
+    return this.withStartLock(spaceId, async () => {
+      const row = await this.getWorkspaceContainer(spaceId);
       const unavailable = (reason: string, status: string | null = row?.status ?? null) => ({ url: null, reason, containerStatus: status, chromeInside: false });
-      const agent = await this.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
-      if (!agent || !this.hasRuntimeNode(agent)) return unavailable("请先绑定一台在线的电脑或服务器");
-      if (this.isHostWorkspace(agent)) return unavailable("本机工作区提供文件和终端；虚拟浏览器需要容器工作区（Docker）。");
+      const space = await this.db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
+      const scope: WorkspaceScope | null = space
+        ? {
+            tenantId: space.tenantId,
+            spaceId: space.id,
+            runtimeNodeId: space.runtimeNodeId,
+            workspaceKind: space.workspaceKind,
+          }
+        : null;
+      if (!scope || !this.hasRuntimeNode(scope)) return unavailable("请先绑定一台在线的电脑或服务器");
+      if (this.isHostWorkspace(scope)) return unavailable("本机工作区提供文件和终端；虚拟浏览器需要容器工作区（Docker）。");
       try {
-        const { client } = await this.requireRunnerClient(agent);
-        const ws = await client.getWorkspace(agentId);
+        const { client } = await this.requireRunnerClient(scope);
+        const ws = await client.getWorkspace(spaceId);
         if (!ws || ws.status !== "running") return unavailable("工作区未运行，请先启动电脑。", ws?.status ?? null);
-        const key = `${agentId}:${agent.runtimeNodeId}:${ws.dockerId}:${AGENT_PORT_CDP}`;
+        const key = `${spaceId}:${scope.runtimeNodeId}:${ws.dockerId}:${AGENT_PORT_CDP}`;
         const cached = this.tunnels.get(key);
         if (cached && await this.probeHttp(`${cached.url}/json/version`)) {
           return { url: cached.url, reason: "ok", containerStatus: ws.status, chromeInside: true };
         }
-        this.closeTunnelsForAgent(agentId);
-        const inside = await client.execWorkspace(agentId, ["curl", "--fail", "--silent", "--max-time", "2", `http://127.0.0.1:${AGENT_PORT_CDP}/json/version`], { timeoutMs: 3000 });
+        this.closeTunnelsForAgent(spaceId);
+        const inside = await client.execWorkspace(spaceId, ["curl", "--fail", "--silent", "--max-time", "2", `http://127.0.0.1:${AGENT_PORT_CDP}/json/version`], { timeoutMs: 3000 });
         if (inside.exitCode !== 0) return unavailable("Chromium CDP 尚未就绪。检查工作区启动日志和浏览器启用标志；旧容器需重新启动。", ws.status);
         // Chrome binds container localhost. Published ports and PUBLIC_HOST cannot
         // reach it reliably, especially behind NAT; carry HTTP + WS over Runner.
         const tunnel = await openWorkspaceTcpTunnel(
-          () => client.startStdio(agentId, ["socat", "STDIO", `TCP:127.0.0.1:${AGENT_PORT_CDP},connect-timeout=5`], { workingDir: AGENT_WORKSPACE_ROOT }),
+          () => client.startStdio(spaceId, ["socat", "STDIO", `TCP:127.0.0.1:${AGENT_PORT_CDP},connect-timeout=5`], { workingDir: AGENT_WORKSPACE_ROOT }),
           (error) => recordPlatformFault("agent_ws.cdp_tunnel", error, { subsystem: "agent_ws" }),
         );
         this.tunnels.set(key, tunnel);
         if (!await this.probeHttp(`${tunnel.url}/json/version`, 8000)) {
-          this.closeTunnelsForAgent(agentId);
+          this.closeTunnelsForAgent(spaceId);
           return unavailable("CDP 代理连接失败。检查 Runner 通道和工作区 socat/Chromium 日志。", ws.status);
         }
         return { url: tunnel.url, reason: "ok", containerStatus: ws.status, chromeInside: true };
       } catch (error) {
-        this.closeTunnelsForAgent(agentId);
+        this.closeTunnelsForAgent(spaceId);
         return unavailable(error instanceof Error ? error.message : "运行节点或 CDP 代理不可用");
       }
     });
@@ -453,7 +465,7 @@ export class AgentWorkspaceService {
    * 详情页与轮询会频繁调用；恢复逻辑留在 resolveCdp（工具实际使用时）。
    * 远程 Runner：从 Runner endpoints API 读取 noVNC/CDP。
    */
-  async getDesktopInfo(agent: Agent) {
+  async getDesktopInfo(agent: AgentWithSpace) {
     const computerOn = Boolean(agent.enableComputer);
     const supported = computerOn && !this.isHostWorkspace(agent);
     const display = {
@@ -466,13 +478,13 @@ export class AgentWorkspaceService {
       dimensionsSource: "configured",
       reason: !computerOn ? "电脑未启用" : this.isHostWorkspace(agent) ? "本机工作区提供文件和终端；虚拟桌面与浏览器需要容器工作区（Docker）。" : undefined,
     };
-    const row = await this.getWorkspaceContainer(agent.id);
+    const row = await this.getWorkspaceContainer(agent.spaceId);
 
     if (this.hasRuntimeNode(agent)) {
       // Remote: never fall through to local Docker inspect
       try {
         const { client, node } = await this.requireRunnerClient(agent);
-        const ws = await client.getWorkspace(agent.id);
+        const ws = await client.getWorkspace(agent.spaceId);
         if (ws?.endpoints) {
           if (row && ws.status && ws.status !== row.status) {
             await this.db
@@ -537,19 +549,19 @@ export class AgentWorkspaceService {
     };
   }
 
-  async start(agent: Agent): Promise<Agent> {
-    return this.withStartLock(agent.id, () => this.startUnlocked(agent, { require: "display" }));
+  async start(agent: AgentWithSpace): Promise<AgentWithSpace> {
+    return this.withStartLock(agent.spaceId, () => this.startUnlocked(agent, { require: "display" }));
   }
 
   private async startUnlocked(
-    agent: Agent,
+    agent: AgentWithSpace,
     opts: { require: "shell" | "display" } = { require: "display" },
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     const mode = resolveStackMode(agent);
     const log = (step: string, message: string, percent?: number, phase?: string) =>
       logAgentProgress(agent.id, step, message, { percent, phase });
 
-    this.closeTunnelsForAgent(agent.id);
+    this.closeTunnelsForAgent(agent.spaceId);
     beginAgentProgress(agent.id, "starting", agent.tenantId);
     log("init", "准备工作区环境", 2, "init");
 
@@ -559,7 +571,7 @@ export class AgentWorkspaceService {
 
     if (mode === "none") {
       const { client } = await this.requireRunnerClient(agent);
-      await client.mkdir(agent.id, "/");
+      await client.mkdir(agent.spaceId, "/");
       log("fs", "已在所选节点准备目录", 100, "ready");
       const [updated] = await this.db
         .update(agents)
@@ -567,7 +579,7 @@ export class AgentWorkspaceService {
         .where(eq(agents.id, agent.id))
         .returning();
       finishAgentProgress(agent.id, { ok: true, message: "就绪" });
-      return updated ?? agent;
+      return updated ? { ...agent, lastError: updated.lastError, updatedAt: updated.updatedAt } : agent;
     }
 
     // 仅清理上次错误；不把 Agent 标成 starting/running（状态在 managedContainers）
@@ -583,11 +595,11 @@ export class AgentWorkspaceService {
 
   /** Start workspace container on a remote Runner Agent. */
   private async startOnRunner(
-    agent: Agent,
+    agent: AgentWithSpace,
     client: RunnerClient,
     log: (step: string, message: string, percent?: number, phase?: string) => void,
     require: "shell" | "display",
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     try {
       log("runner", "连接远程 Runner…", 10, "docker");
       const ping = await client.ping();
@@ -604,7 +616,7 @@ export class AgentWorkspaceService {
       if (!tenant) throw new Error("Tenant not found");
 
       // Clear local container bookkeeping if any leftover
-      const existing = await this.getWorkspaceContainer(agent.id);
+      const existing = await this.getWorkspaceContainer(agent.spaceId);
       if (existing) {
         await this.db
           .update(managedContainers)
@@ -619,8 +631,8 @@ export class AgentWorkspaceService {
       log("container", `在所选节点启动${mode === "display" ? "电脑环境" : "精简工作区"}（${image}）…`, 40, "container");
 
       const ws = await client.startWorkspace({
-        agentId: agent.id,
-        agentSlug: agent.slug,
+        spaceId: agent.spaceId,
+        spaceSlug: agent.space.slug,
         tenantSlug: tenant.slug,
         image,
         network: this.config.dockerNetwork,
@@ -633,8 +645,8 @@ export class AgentWorkspaceService {
           ZAKURA_DESKTOP_HEIGHT: String(AGENT_DESKTOP_HEIGHT),
         },
         labels: {
-          "zakura.agent": agent.id,
-          "zakura.agent_slug": agent.slug,
+          "zakura.space": agent.spaceId,
+          "zakura.space_slug": agent.space.slug,
         },
       });
 
@@ -642,7 +654,7 @@ export class AgentWorkspaceService {
       await this.db.insert(managedContainers).values({
         id: newId(),
         tenantId: agent.tenantId,
-        agentId: agent.id,
+        spaceId: agent.spaceId,
         dockerId: ws.dockerId,
         name: ws.name,
         image: ws.image,
@@ -650,7 +662,7 @@ export class AgentWorkspaceService {
         status: ws.status,
         labelsJson: JSON.stringify(ws.labels ?? {}),
         portsJson: JSON.stringify(ws.ports ?? []),
-        allocatedTo: agent.id,
+        allocatedTo: agent.spaceId,
         runtimeNodeId: agent.runtimeNodeId,
         createdAt: now,
         updatedAt: now,
@@ -663,7 +675,7 @@ export class AgentWorkspaceService {
 
       let running = false;
       for (let i = 0; i < 15; i++) {
-        const cur = await client.getWorkspace(agent.id);
+        const cur = await client.getWorkspace(agent.spaceId);
         if (cur?.status === "running") { running = true; break; }
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -679,7 +691,7 @@ export class AgentWorkspaceService {
         .where(eq(agents.id, agent.id))
         .returning();
       finishAgentProgress(agent.id, { ok: true, message: "工作区运行中" });
-      return updated ?? agent;
+      return updated ? { ...agent, lastError: updated.lastError, updatedAt: updated.updatedAt } : agent;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logAgentProgress(agent.id, "failed", message, { level: "error", phase: "error" });
@@ -695,9 +707,9 @@ export class AgentWorkspaceService {
     }
   }
 
-  async stop(agent: Agent, opts?: { removeContainer?: boolean }): Promise<Agent> {
-    this.closeTunnelsForAgent(agent.id);
-    await this.shellJobs.killAgent(agent.id);
+  async stop(agent: AgentWithSpace, opts?: { removeContainer?: boolean }): Promise<AgentWithSpace> {
+    this.closeTunnelsForAgent(agent.spaceId);
+    await this.shellJobs.killAgent(agent.spaceId);
 
     if (this.hasRuntimeNode(agent)) {
       // Remote-bound: only stop on Runner — never touch local Docker
@@ -710,12 +722,12 @@ export class AgentWorkspaceService {
           agent.runtimeNodeId!,
           { allowOffline: true },
         );
-        await client.stopWorkspace(agent.id, opts?.removeContainer !== false);
+        await client.stopWorkspace(agent.spaceId, opts?.removeContainer !== false);
       } catch (err) {
         remoteErr = err;
         recordPlatformFault("agent_ws.remote_stop", err, { subsystem: "agent_ws" });
       }
-      const row = await this.getWorkspaceContainer(agent.id);
+      const row = await this.getWorkspaceContainer(agent.spaceId);
       if (row) {
         await this.db
           .update(managedContainers)
@@ -749,16 +761,16 @@ export class AgentWorkspaceService {
       .set({ lastError: null, updatedAt: new Date() })
       .where(eq(agents.id, agent.id))
       .returning();
-    return updated ?? agent;
+    return updated ? { ...agent, lastError: updated.lastError, updatedAt: updated.updatedAt } : agent;
   }
 
-  async resolveDockerId(agent: Agent): Promise<string> {
-    const row = await this.getWorkspaceContainer(agent.id);
+  async resolveDockerId(agent: AgentWithSpace): Promise<string> {
+    const row = await this.getWorkspaceContainer(agent.spaceId);
     if (!row?.dockerId) {
       throw new Error("Workspace container not running. Start the agent first.");
     }
     const { client } = await this.requireRunnerClient(agent);
-    const ws = await client.getWorkspace(agent.id);
+    const ws = await client.getWorkspace(agent.spaceId);
     if (!ws || ws.status !== "running") {
       throw new Error("工作区未在所选节点运行");
     }
@@ -766,7 +778,7 @@ export class AgentWorkspaceService {
   }
 
   async execInWorkspace(
-    agent: Agent,
+    agent: AgentWithSpace,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ) {
@@ -785,7 +797,7 @@ export class AgentWorkspaceService {
     };
 
     const { client } = await this.requireRunnerClient(agent);
-    return client.execWorkspace(agent.id, command, { workingDir, env, timeoutMs: opts?.timeoutMs });
+    return client.execWorkspace(agent.spaceId, command, { workingDir, env, timeoutMs: opts?.timeoutMs });
   }
 
   private shellCwd(workingDir?: string): string {
@@ -815,7 +827,7 @@ export class AgentWorkspaceService {
   }
 
   async startShellJob(
-    agent: Agent,
+    agent: AgentWithSpace,
     command: string[],
     opts?: {
       workingDir?: string;
@@ -831,7 +843,7 @@ export class AgentWorkspaceService {
     const timeoutMs = opts?.timeoutMs;
 
     const { client } = await this.requireRunnerClient(agent);
-    return client.startExecJob(agent.id, command, {
+    return client.startExecJob(agent.spaceId, command, {
       workingDir,
       env,
       timeoutMs,
@@ -840,7 +852,7 @@ export class AgentWorkspaceService {
   }
 
   async waitShellJob(
-    agent: Agent,
+    agent: AgentWithSpace,
     jobId: string,
     waitMs: number,
     opts?: { stdin?: string; onOutput?: (snap: ShellJobSnapshot) => void },
@@ -849,28 +861,28 @@ export class AgentWorkspaceService {
       const { client } = await this.requireRunnerClient(agent);
       if (opts?.onOutput) {
         void client
-          .getExecJob(agent.id, jobId)
+          .getExecJob(agent.spaceId, jobId)
           .then((snap) => opts.onOutput?.(snap))
           .catch(() => undefined);
         const poll = setInterval(() => {
           void client
-            .getExecJob(agent.id, jobId)
+            .getExecJob(agent.spaceId, jobId)
             .then((snap) => opts.onOutput?.(snap))
             .catch(() => undefined);
         }, 400);
         try {
-          return await client.waitExecJob(agent.id, jobId, waitMs, opts.stdin);
+          return await client.waitExecJob(agent.spaceId, jobId, waitMs, opts.stdin);
         } finally {
           clearInterval(poll);
         }
       }
-      return client.waitExecJob(agent.id, jobId, waitMs, opts?.stdin);
+      return client.waitExecJob(agent.spaceId, jobId, waitMs, opts?.stdin);
     }
     throw new Error("请先绑定一台电脑或服务器");
   }
 
   async startStdio(
-    agent: Agent,
+    agent: AgentWithSpace,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
   ): Promise<{
@@ -883,22 +895,22 @@ export class AgentWorkspaceService {
     const workingDir = this.shellCwd(opts?.workingDir);
     const env = this.shellEnv(opts?.env);
     const { client } = await this.requireRunnerClient(agent);
-    return client.startStdio(agent.id, command, { workingDir, env });
+    return client.startStdio(agent.spaceId, command, { workingDir, env });
   }
 
-  async getShellJob(agent: Agent, jobId: string): Promise<ShellJobSnapshot> {
+  async getShellJob(agent: AgentWithSpace, jobId: string): Promise<ShellJobSnapshot> {
     const { client } = await this.requireRunnerClient(agent);
-    return client.getExecJob(agent.id, jobId);
+    return client.getExecJob(agent.spaceId, jobId);
   }
 
-  async killShellJob(agent: Agent, jobId: string): Promise<ShellJobSnapshot> {
+  async killShellJob(agent: AgentWithSpace, jobId: string): Promise<ShellJobSnapshot> {
     const { client } = await this.requireRunnerClient(agent);
-    return client.killExecJob(agent.id, jobId);
+    return client.killExecJob(agent.spaceId, jobId);
   }
 
-  async resizeShellJob(agent: Agent, jobId: string, cols: number, rows: number): Promise<void> {
+  async resizeShellJob(agent: AgentWithSpace, jobId: string, cols: number, rows: number): Promise<void> {
     const { client } = await this.requireRunnerClient(agent);
-    await client.resizeExecJob(agent.id, jobId, cols, rows);
+    await client.resizeExecJob(agent.spaceId, jobId, cols, rows);
   }
 
   // ── ACP Sidecar ────────────────────────────────────────────────────────────
@@ -919,41 +931,41 @@ export class AgentWorkspaceService {
    * the adapter lifecycle independent of the workspace container.
    */
   async ensureAcpSidecar(
-    agent: Agent,
+    agent: AgentWithSpace,
   ): Promise<{ dockerId: string; image: string }> {
     const { client } = await this.requireRunnerClient(agent);
     const image = this.resolveAcpSidecarImage();
     const result = await client.ensureAcpSidecar({
-      agentId: agent.id,
+      spaceId: agent.spaceId,
       image,
       network: this.config.dockerNetwork,
     });
     await this.upsertManagedContainer(agent, {
       dockerId: result.dockerId,
-      name: `zakura-acp-${agent.id}`.slice(0, 63),
+      name: `zakura-acp-${agent.spaceId}`.slice(0, 63),
       image: result.image,
       purpose: "acp-sidecar",
       status: result.status,
-      labels: { "zakura.agent": agent.id, "zakura.purpose": "acp-sidecar" },
+      labels: { "zakura.space": agent.spaceId, "zakura.purpose": "acp-sidecar" },
     });
     return { dockerId: result.dockerId, image: result.image };
   }
 
   /** Execute a command inside the ACP sidecar container. */
   async execInSidecar(
-    agent: Agent,
+    agent: AgentWithSpace,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string>; timeoutMs?: number },
   ) {
     const { client } = await this.requireRunnerClient(agent);
     const workingDir = this.shellCwd(opts?.workingDir);
     const env = this.shellEnv(opts?.env);
-    return client.execInSidecar(agent.id, command, { workingDir, env, timeoutMs: opts?.timeoutMs });
+    return client.execInSidecar(agent.spaceId, command, { workingDir, env, timeoutMs: opts?.timeoutMs });
   }
 
   /** Start an ACP adapter stdio session inside the sidecar. */
   async startStdioInSidecar(
-    agent: Agent,
+    agent: AgentWithSpace,
     command: string[],
     opts?: { workingDir?: string; env?: Record<string, string> },
   ): Promise<{
@@ -965,13 +977,13 @@ export class AgentWorkspaceService {
     const { client } = await this.requireRunnerClient(agent);
     const workingDir = this.shellCwd(opts?.workingDir);
     const env = this.shellEnv(opts?.env);
-    return client.startStdioInSidecar(agent.id, command, { workingDir, env });
+    return client.startStdioInSidecar(agent.spaceId, command, { workingDir, env });
   }
 
   /** Tear down the ACP sidecar for an agent. */
-  async stopAcpSidecar(agent: Agent): Promise<void> {
+  async stopAcpSidecar(agent: AgentWithSpace): Promise<void> {
     const { client } = await this.requireRunnerClient(agent);
-    await client.stopAcpSidecar(agent.id);
+    await client.stopAcpSidecar(agent.spaceId);
   }
 
   // ── ACP adapter containers (one per agent × adapter) ──────────────────────
@@ -984,7 +996,7 @@ export class AgentWorkspaceService {
    * back through the Hub; image contents stay on the runner.
    */
   async ensureAcpAdapterImage(
-    agent: Agent,
+    agent: AgentWithSpace,
     image: string,
     onProgress?: (line: string, event?: DockerPullEvent) => void,
     opts: { forcePull?: boolean } = {},
@@ -1019,7 +1031,7 @@ export class AgentWorkspaceService {
    * bug this exists to prevent.
    */
   async acpAdapterImagePresence(
-    agent: Agent,
+    agent: AgentWithSpace,
     images: string[],
   ): Promise<Map<string, boolean | undefined>> {
     const out = new Map<string, boolean | undefined>();
@@ -1055,14 +1067,14 @@ export class AgentWorkspaceService {
    * attach corrupts the JSON-RPC stream.
    */
   async ensureAcpAdapterContainer(
-    agent: Agent,
+    agent: AgentWithSpace,
     adapterId: string,
     image: string,
     sessionKey: string,
     opts?: { env?: Record<string, string>; specHash?: string },
   ): Promise<{ dockerId: string; image: string }> {
     const { client } = await this.requireRunnerClient(agent);
-    const result = await client.ensureAcpAdapterContainer(agent.id, adapterId, {
+    const result = await client.ensureAcpAdapterContainer(agent.spaceId, adapterId, {
       image,
       network: this.config.dockerNetwork,
       env: opts?.env,
@@ -1076,7 +1088,7 @@ export class AgentWorkspaceService {
       purpose: "acp-adapter",
       status: result.status,
       labels: {
-        "zakura.agent": agent.id,
+        "zakura.space": agent.spaceId,
         "zakura.purpose": "acp-adapter",
         "zakura.adapter": adapterId,
       },
@@ -1095,7 +1107,7 @@ export class AgentWorkspaceService {
    * Adapter images are minimal — `sh` is assumed, `bash` is not.
    */
   private async stageAcpAdapterFiles(
-    agent: Agent,
+    agent: AgentWithSpace,
     dockerId: string,
     files?: { dest: string; content: string }[],
   ): Promise<void> {
@@ -1136,7 +1148,7 @@ export class AgentWorkspaceService {
    * Best-effort — a missing source dir simply means "nothing to migrate".
    */
   private async seedAcpAdapterHome(
-    agent: Agent,
+    agent: AgentWithSpace,
     dockerId: string,
     seedFrom?: string,
   ): Promise<void> {
@@ -1158,7 +1170,7 @@ export class AgentWorkspaceService {
   }
 
   async attachStdioInAcpAdapter(
-    agent: Agent,
+    agent: AgentWithSpace,
     adapterId: string,
     image: string,
     sessionKey: string,
@@ -1207,18 +1219,18 @@ export class AgentWorkspaceService {
    * Keeps the cred volume so the next session does not re-authenticate.
    */
   async stopAcpAdapterContainer(
-    agent: Agent,
+    agent: AgentWithSpace,
     adapterId: string,
     sessionKey: string,
   ): Promise<void> {
     const { client } = await this.requireRunnerClient(agent);
     await client
-      .removeAcpAdapterContainer(agent.id, adapterId, sessionKey)
+      .removeAcpAdapterContainer(agent.spaceId, adapterId, sessionKey)
       .catch(() => undefined);
   }
 
   private async upsertManagedContainer(
-    agent: Agent,
+    agent: AgentWithSpace,
     row: {
       dockerId: string;
       name: string;
@@ -1232,7 +1244,7 @@ export class AgentWorkspaceService {
     const existing = await this.db
       .select()
       .from(managedContainers)
-      .where(and(eq(managedContainers.agentId, agent.id), eq(managedContainers.name, row.name)));
+      .where(and(eq(managedContainers.spaceId, agent.spaceId), eq(managedContainers.name, row.name)));
     if (existing[0]) {
       await this.db
         .update(managedContainers)
@@ -1250,7 +1262,7 @@ export class AgentWorkspaceService {
     await this.db.insert(managedContainers).values({
       id: newId(),
       tenantId: agent.tenantId,
-      agentId: agent.id,
+      spaceId: agent.spaceId,
       dockerId: row.dockerId,
       name: row.name,
       image: row.image,
@@ -1258,7 +1270,7 @@ export class AgentWorkspaceService {
       status: row.status,
       labelsJson: JSON.stringify(row.labels),
       portsJson: "[]",
-      allocatedTo: agent.id,
+      allocatedTo: agent.spaceId,
       runtimeNodeId: agent.runtimeNodeId,
       createdAt: now,
       updatedAt: now,
@@ -1266,15 +1278,15 @@ export class AgentWorkspaceService {
   }
 
   /** Remove ACP adapter containers on the agent's bound computer. */
-  async removeAcpAdapterContainers(agent: Agent, adapterId: string): Promise<number> {
+  async removeAcpAdapterContainers(agent: AgentWithSpace, adapterId: string): Promise<number> {
     if (!this.hasRuntimeNode(agent)) return 0;
     const { client } = await this.requireRunnerClient(agent);
-    const n = await client.removeAcpAdapterContainers(agent.id, adapterId);
+    const n = await client.removeAcpAdapterContainers(agent.spaceId, adapterId);
     const rows = await this.db
       .select()
       .from(managedContainers)
       .where(
-        and(eq(managedContainers.agentId, agent.id), eq(managedContainers.purpose, "acp-adapter")),
+        and(eq(managedContainers.spaceId, agent.spaceId), eq(managedContainers.purpose, "acp-adapter")),
       );
     for (const row of rows) {
       let labels: Record<string, string> = {};
@@ -1303,7 +1315,7 @@ export class AgentWorkspaceService {
    * PID 1 is the adapter's JSON-RPC stream and must not be disturbed.
    */
   async startAcpAdapterLoginShell(
-    agent: Agent,
+    agent: AgentWithSpace,
     adapterId: string,
     sessionKey: string | undefined,
     opts?: {
@@ -1324,7 +1336,7 @@ export class AgentWorkspaceService {
       : ["/bin/sh", "-c", "exec /bin/bash -i || exec /bin/sh -i"];
 
     const { client } = await this.requireRunnerClient(agent);
-    return client.startAcpAdapterLoginShell(agent.id, adapterId, {
+    return client.startAcpAdapterLoginShell(agent.spaceId, adapterId, {
       sessionKey,
       command,
       cols: opts?.cols,

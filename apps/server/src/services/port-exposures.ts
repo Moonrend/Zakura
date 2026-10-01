@@ -12,6 +12,7 @@ import {
   newId,
   portExposures,
   runtimeNodes,
+  spaces,
   type PortExposure,
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
@@ -313,12 +314,17 @@ export class ExposureService {
     });
     if (!agent) throw new Error("Agent not found");
 
+    const space = await this.db.query.spaces.findFirst({
+      where: and(eq(spaces.id, agent.spaceId), eq(spaces.tenantId, tenantId)),
+    });
+    if (!space) throw new Error("Space not found");
+
     const node =
-      agent.runtimeNodeId && this.nodes
-        ? await this.nodes.getAccessible(tenantId, agent.runtimeNodeId)
-        : agent.runtimeNodeId
+      space.runtimeNodeId && this.nodes
+        ? await this.nodes.getAccessible(tenantId, space.runtimeNodeId)
+        : space.runtimeNodeId
           ? await this.db.query.runtimeNodes.findFirst({
-              where: eq(runtimeNodes.id, agent.runtimeNodeId),
+              where: eq(runtimeNodes.id, space.runtimeNodeId),
             })
           : null;
 
@@ -326,12 +332,12 @@ export class ExposureService {
 
     // 本机：需 workspace 容器在 Server Docker；远程：由 Runner 侧校验容器状态
     if (!isRemote) {
-      const container = await this.workspace.getWorkspaceContainer(agentId);
+      const container = await this.workspace.getWorkspaceContainer(agent.spaceId);
       if (!container?.dockerId || container.status !== "running") {
         throw new Error("Workspace 容器未运行，无法暴露端口");
       }
     } else {
-      const container = await this.workspace.getWorkspaceContainer(agentId);
+      const container = await this.workspace.getWorkspaceContainer(agent.spaceId);
       if (!container || (container.status !== "running" && container.status !== "starting")) {
         throw new Error("远程工作区未运行，无法暴露端口");
       }
@@ -351,7 +357,7 @@ export class ExposureService {
         id: newId(),
         tenantId,
         agentId,
-        runtimeNodeId: agent.runtimeNodeId,
+        runtimeNodeId: space.runtimeNodeId,
         name: input.name?.trim() || `port-${port}`,
         port,
         protocol,
@@ -383,7 +389,7 @@ export class ExposureService {
         const { client } = await this.nodes!.requireRunnerClient(tenantId, node!.id);
         const remote = await client.startExposure({
           exposureId: row!.id,
-          agentId,
+          spaceId: agent.spaceId,
           port,
           provider: providerId,
           protocol,
@@ -396,7 +402,7 @@ export class ExposureService {
           await client.stopExposure(row!.id).catch(() => undefined);
         };
       } else {
-        const container = await this.workspace.getWorkspaceContainer(agentId);
+        const container = await this.workspace.getWorkspaceContainer(agent.spaceId);
         const relay = await this.runtime.openTcpTunnel(container!.dockerId!, port);
         relayClose = relay.close;
         relayHost = relay.host;

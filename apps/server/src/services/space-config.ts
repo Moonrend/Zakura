@@ -2,7 +2,7 @@
  * 空间级配置：一个 Space 只存一份，成员 Agent 读取时叠加上去，不再各存一份。
  * 目前归空间所有的键：acp、mcp（原 providers.mcp）。
  */
-import type { AgentRow } from "../db/schema.js";
+import type { Agent } from "../db/schema.js";
 
 export function parseConfigJson(raw: string | null | undefined): Record<string, unknown> {
   try {
@@ -38,7 +38,7 @@ export function overlaySpaceConfig(agentConfigRaw: string, spaceConfig: Record<s
   return changed ? JSON.stringify(cfg) : agentConfigRaw;
 }
 
-export function overlayAgentConfig<T extends Pick<AgentRow, "configJson">>(
+export function overlayAgentConfig<T extends Pick<Agent, "configJson">>(
   agent: T,
   spaceConfig: Record<string, unknown>,
 ): T {

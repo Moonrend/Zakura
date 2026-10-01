@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { newId } from "../src/db/schema.js";
 import { agents } from "../src/db/schema.js";
 import { within, zakurabotHarness } from "./helpers/zakurabot.js";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("Zakura Bot user access", () => {
   let h: Awaited<ReturnType<typeof zakurabotHarness>>;
@@ -16,8 +17,9 @@ describe("Zakura Bot user access", () => {
     assert.deepEqual(ready.agents, [], "an empty tenant connects with an empty roster");
 
     const id = newId();
-    await h.db.insert(agents).values({ id, tenantId: ctx.tenantId, name: "Fresh", slug: id,
-      status: "ready", configJson: "{}" });
+    const spaceId = await ensureTestSpace(h.db, ctx.tenantId, { slug: "fresh" });
+    await h.db.insert(agents).values({ spaceId, id, tenantId: ctx.tenantId, name: "Fresh", slug: id,
+      configJson: "{}" });
     await h.gateway.refresh();
     const roster = await socket.wait("agents", (frame) => frame.agents.some((agent) => agent.id === id));
     const entry = roster.agents.find((agent) => agent.id === id)!;

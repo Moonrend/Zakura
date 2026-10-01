@@ -341,6 +341,7 @@ export class ConnectionCatalogService {
 
     const bindByInstance = new Map<string, string[]>();
     for (const b of bindings) {
+      if (!b.agentId) continue;
       const list = bindByInstance.get(b.instanceId) ?? [];
       list.push(b.agentId);
       bindByInstance.set(b.instanceId, list);

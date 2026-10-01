@@ -31,7 +31,7 @@ import {
   acpSnapshotVersion,
   applyAcpRegistryIndex,
 } from "@zakura/shared";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import type { DockerPullEvent } from "../../runtime/docker.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import { readAgentAcpConfig } from "./config.js";
@@ -176,7 +176,7 @@ export class AcpRegistryService {
    * than imported so the registry stays free of a dependency on the session
    * service (which already depends on the registry).
    */
-  private inUseVersions: ((agent: Agent) => Array<{ id: string; version: string }>) | null = null;
+  private inUseVersions: ((agent: AgentWithSpace) => Array<{ id: string; version: string }>) | null = null;
 
   constructor(
     private readonly workspace: AgentWorkspaceService,
@@ -185,7 +185,7 @@ export class AcpRegistryService {
 
   /** Wired up at composition time by the ACP session service. */
   setInUseVersionsProvider(
-    provider: (agent: Agent) => Array<{ id: string; version: string }>,
+    provider: (agent: AgentWithSpace) => Array<{ id: string; version: string }>,
   ): void {
     this.inUseVersions = provider;
   }
@@ -203,7 +203,7 @@ export class AcpRegistryService {
     this.inFlight = (async () => {
       try {
         const res = await this.fetchImpl(ACP_REGISTRY_URL, {
-          headers: { Accept: "application/json", "User-Agent": "zakura/1.0" },
+          headers: { Accept: "application/json", "User-AgentWithSpace": "zakura/1.0" },
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -245,7 +245,7 @@ export class AcpRegistryService {
     const before = acpRegistryDigest();
     try {
       const res = await this.fetchImpl(CURATED_REGISTRY_URL, {
-        headers: { Accept: "application/json", "User-Agent": "zakura/1.0" },
+        headers: { Accept: "application/json", "User-AgentWithSpace": "zakura/1.0" },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -408,7 +408,7 @@ export class AcpRegistryService {
    * /workspace volume either way.
    */
   async ensureInstalled(
-    agent: Agent,
+    agent: AgentWithSpace,
     registryId: string,
     useSidecar = false,
     opts?: {
@@ -506,7 +506,7 @@ export class AcpRegistryService {
   }
 
   /** Installed versions + disk usage + whether the registry has something newer. */
-  async status(agent: Agent, opts?: { force?: boolean }): Promise<AcpAdapterStatus[]> {
+  async status(agent: AgentWithSpace, opts?: { force?: boolean }): Promise<AcpAdapterStatus[]> {
     // The Moonrend registry is the only ACP catalog. Do not probe the workspace
     // container here: a stopped/not-yet-created workspace is a valid state for
     // the settings page, and every supported adapter now runs from an image.
@@ -581,7 +581,7 @@ export class AcpRegistryService {
    * Prune everything except the registry-pinned version of each installed adapter.
    * Called after an install and from the maintenance path.
    */
-  async collectGarbage(agent: Agent): Promise<{ pruned: string[] }> {
+  async collectGarbage(agent: AgentWithSpace): Promise<{ pruned: string[] }> {
     const [statuses, index] = await Promise.all([this.rawInstalled(agent), this.getIndex()]);
     const keep: Array<{ id: string; version: string }> = [];
     for (const [id, versions] of statuses) {
@@ -622,7 +622,7 @@ export class AcpRegistryService {
    * explicit uninstall is the only way for the user to reclaim that disk.
    */
   async uninstall(
-    agent: Agent,
+    agent: AgentWithSpace,
     registryId: string,
     version?: string,
   ): Promise<{ removed: boolean }> {
@@ -644,7 +644,7 @@ export class AcpRegistryService {
     return { removed };
   }
 
-  private async rawInstalled(agent: Agent): Promise<Map<string, string[]>> {
+  private async rawInstalled(agent: AgentWithSpace): Promise<Map<string, string[]>> {
     const out = await this.workspace.execInWorkspace(agent, [
       "bash",
       "-lc",

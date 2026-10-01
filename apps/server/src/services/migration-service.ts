@@ -13,6 +13,7 @@ import {
   agents,
   newId,
   runtimeNodes,
+  spaces,
   workspaceMigrations,
   type WorkspaceMigration,
 } from "../db/schema.js";
@@ -24,7 +25,7 @@ export function mapMigration(row: WorkspaceMigration) {
   return {
     id: row.id,
     tenantId: row.tenantId,
-    agentId: row.agentId,
+    spaceId: row.spaceId,
     sourceNodeId: row.sourceNodeId,
     targetNodeId: row.targetNodeId,
     status: row.status,
@@ -58,10 +59,14 @@ export class MigrationService {
   }
 
   async listForAgent(tenantId: string, agentId: string): Promise<WorkspaceMigration[]> {
+    const agent = await this.db.query.agents.findFirst({
+      where: and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)),
+    });
+    if (!agent) return [];
     return this.db.query.workspaceMigrations.findMany({
       where: and(
         eq(workspaceMigrations.tenantId, tenantId),
-        eq(workspaceMigrations.agentId, agentId),
+        eq(workspaceMigrations.spaceId, agent.spaceId),
       ),
       orderBy: [desc(workspaceMigrations.createdAt)],
     });
@@ -87,14 +92,18 @@ export class MigrationService {
       where: and(eq(agents.tenantId, tenantId), eq(agents.id, agentId)),
     });
     if (!agent) throw new Error("Agent not found");
-    if (agent.workspaceStatus === "migrating" || agent.workspaceStatus === "locked") {
-      throw new Error("Agent workspace is locked or already migrating");
+    const space = await this.db.query.spaces.findFirst({
+      where: and(eq(spaces.tenantId, tenantId), eq(spaces.id, agent.spaceId)),
+    });
+    if (!space) throw new Error("Space not found");
+    if (space.workspaceStatus === "migrating" || space.workspaceStatus === "locked") {
+      throw new Error("Space workspace is locked or already migrating");
     }
 
-    if (!agent.runtimeNodeId) {
+    if (!space.runtimeNodeId) {
       throw new Error("请先绑定一台电脑或服务器，再迁移工作区");
     }
-    const sourceNodeId = agent.runtimeNodeId;
+    const sourceNodeId = space.runtimeNodeId;
     if (input.userId) {
       for (const nodeId of [sourceNodeId, input.targetNodeId]) {
         await assertNodeBindAllowed(this.db, this.config, { tenantId, userId: input.userId, nodeId, excludeAgentId: agent.id });
@@ -117,7 +126,7 @@ export class MigrationService {
       .values({
         id,
         tenantId,
-        agentId,
+        spaceId: space.id,
         sourceNodeId,
         targetNodeId,
         status: "pending",
@@ -133,9 +142,9 @@ export class MigrationService {
       .returning();
 
     await this.db
-      .update(agents)
+      .update(spaces)
       .set({ workspaceStatus: "migrating", lastMigrationId: id, updatedAt: now })
-      .where(eq(agents.id, agentId));
+      .where(eq(spaces.id, space.id));
 
     // Run async without blocking (catch failures into job row)
     void this.runJob(job!).catch(async (err) => {
@@ -173,14 +182,14 @@ export class MigrationService {
 
   private async exportFromNode(
     node: { id: string; kind: string; endpoint: string | null; tenantId?: string },
-    agentId: string,
+    spaceId: string,
     excludePatterns: string[],
     tenantId: string,
   ): Promise<{ archive: Buffer; manifest: unknown; archiveSha256: string }> {
     if (this.isLocalNode(node.id, node.kind)) {
-      const root = agentWorkspaceHostPath(this.config, agentId);
+      const root = agentWorkspaceHostPath(this.config, spaceId);
       return exportWorkspace({
-        agentId,
+        spaceId,
         sourceNodeId: node.id,
         workspaceRoot: root,
         excludePatterns,
@@ -188,7 +197,7 @@ export class MigrationService {
     }
     // Remote source: require online runner — never invent local path
     const { client } = await this.nodes.requireRunnerClient(tenantId, node.id);
-    return client.exportMigration(agentId, {
+    return client.exportMigration(spaceId, {
       sourceNodeId: node.id,
       excludePatterns,
     });
@@ -196,13 +205,13 @@ export class MigrationService {
 
   private async importToNode(
     node: { id: string; kind: string; endpoint: string | null },
-    agentId: string,
+    spaceId: string,
     archive: Buffer,
     archiveSha256: string,
     tenantId: string,
   ): Promise<void> {
     if (this.isLocalNode(node.id, node.kind)) {
-      const root = agentWorkspaceHostPath(this.config, agentId);
+      const root = agentWorkspaceHostPath(this.config, spaceId);
       await importWorkspace({
         archive,
         targetWorkspaceRoot: root,
@@ -212,18 +221,18 @@ export class MigrationService {
       return;
     }
     const { client } = await this.nodes.requireRunnerClient(tenantId, node.id);
-    await client.importMigration(agentId, archive, {
+    await client.importMigration(spaceId, archive, {
       expectedSha256: archiveSha256,
       atomic: true,
     });
   }
 
   async runJob(job: WorkspaceMigration): Promise<void> {
-    const agent = await this.db.query.agents.findFirst({
-      where: eq(agents.id, job.agentId),
+    const space = await this.db.query.spaces.findFirst({
+      where: eq(spaces.id, job.spaceId),
     });
-    if (!agent) {
-      await this.updateJob(job.id, { status: "failed", error: "Agent missing", completedAt: new Date() });
+    if (!space) {
+      await this.updateJob(job.id, { status: "failed", error: "Space missing", completedAt: new Date() });
       return;
     }
 
@@ -234,7 +243,7 @@ export class MigrationService {
       where: eq(runtimeNodes.id, job.targetNodeId),
     });
     if (!source || !target) {
-      await this.fail(job, agent.id, "Source or target node missing");
+      await this.fail(job, space.id, "Source or target node missing");
       return;
     }
 
@@ -250,7 +259,7 @@ export class MigrationService {
 
       const { archive, manifest, archiveSha256 } = await this.exportFromNode(
         source,
-        agent.id,
+        space.id,
         excludePatterns,
         job.tenantId,
       );
@@ -276,7 +285,7 @@ export class MigrationService {
         message: "Importing on target",
       });
 
-      await this.importToNode(target, agent.id, archive, archiveSha256, job.tenantId);
+      await this.importToNode(target, space.id, archive, archiveSha256, job.tenantId);
 
       await this.updateJob(job.id, {
         status: "verifying",
@@ -287,7 +296,7 @@ export class MigrationService {
 
       const now = new Date();
       await this.db
-        .update(agents)
+        .update(spaces)
         .set({
           runtimeNodeId: target.id,
           workspaceStatus: "ready",
@@ -295,7 +304,7 @@ export class MigrationService {
           lastMigrationId: job.id,
           updatedAt: now,
         })
-        .where(eq(agents.id, agent.id));
+        .where(eq(spaces.id, space.id));
 
       // Source retained — do not delete source workspace
       await this.updateJob(job.id, {
@@ -309,11 +318,11 @@ export class MigrationService {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.fail(job, agent.id, message);
+      await this.fail(job, space.id, message);
     }
   }
 
-  private async fail(job: WorkspaceMigration, agentId: string, message: string) {
+  private async fail(job: WorkspaceMigration, spaceId: string, message: string) {
     const now = new Date();
     await this.updateJob(job.id, {
       status: "failed",
@@ -323,9 +332,9 @@ export class MigrationService {
       completedAt: now,
     });
     await this.db
-      .update(agents)
+      .update(spaces)
       .set({ workspaceStatus: "ready", updatedAt: now })
-      .where(eq(agents.id, agentId));
+      .where(eq(spaces.id, spaceId));
   }
 
   /**
@@ -333,7 +342,7 @@ export class MigrationService {
    * drives the same exportWorkspace / importWorkspace shipped functions.
    */
   async runLocalPathMigration(opts: {
-    agentId: string;
+    spaceId: string;
     sourceRoot: string;
     targetRoot: string;
     sourceNodeId: string;
@@ -347,7 +356,7 @@ export class MigrationService {
   }> {
     const excludePatterns = mergeExcludePatterns(opts.excludePatterns);
     const { archive, manifest, archiveSha256 } = await exportWorkspace({
-      agentId: opts.agentId,
+      spaceId: opts.spaceId,
       sourceNodeId: opts.sourceNodeId,
       workspaceRoot: opts.sourceRoot,
       excludePatterns,

@@ -19,7 +19,7 @@ import {
   pickGrantedOptionId,
   type AcpAgentConfig,
 } from "@zakura/shared";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import type { CloudAgentSessionStore } from "../cloud-agent-session.js";
 import type { ServerWorkspaceFsProvider } from "../workspace-fs-provider.js";
@@ -46,7 +46,7 @@ export interface AcpClientHandlerDeps {
 export interface AcpClientHandlerContext {
   deps: AcpClientHandlerDeps;
   live: LiveRuntime;
-  agent: Agent;
+  agent: AgentWithSpace;
   chatSessionId: string;
   /** Snapshot of the agent's ACP config; drives the permission fast-path. */
   config: AcpAgentConfig;

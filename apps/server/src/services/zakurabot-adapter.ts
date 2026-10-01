@@ -15,7 +15,11 @@ export function createZakurabotFilePublisher(deps: {
     if (!deps.fileShares || !deps.workspaceFs) throw new Error("工作区文件分享未启用");
     const agent = await deps.agents.get(conversation.tenantId, conversation.agentId);
     if (!agent?.enableFs) throw new Error("Agent 工作区文件访问未启用");
-    const fs = await deps.workspaceFs.forAgentBinding(agent);
+    const fs = await deps.workspaceFs.forAgentBinding({
+      spaceId: agent.spaceId,
+      tenantId: agent.tenantId,
+      runtimeNodeId: agent.runtimeNodeId,
+    });
     const stat = await fs.stat(path);
     if (stat.type !== "file" || !stat.size || stat.size > 16 * 1024 * 1024) {
       throw new Error("附件必须是非空文件，且不超过 16MB");

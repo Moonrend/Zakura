@@ -13,14 +13,14 @@ import {
 import type { Db } from "../db/client.js";
 import { agentSchedules, cloudAgentSessions } from "../db/schema.js";
 import {
-  deleteAgentProjectRow,
-  getAgentProject,
-  listAgentProjectRows,
+  deleteSpaceProjectRow,
+  getSpaceProject,
+  listSpaceProjectRows,
   listWorkspaceSlugs,
-  renameAgentProjectRow,
+  renameSpaceProjectRow,
   syncProjectsFromWorkspace,
   toProjectDto,
-  upsertAgentProject,
+  upsertSpaceProject,
 } from "../services/agent-projects.js";
 import type { AgentService } from "../services/agents.js";
 import type { ServerWorkspaceFsProvider } from "../services/workspace-fs-provider.js";
@@ -91,7 +91,7 @@ async function resolveAgentFs(
     return { agent, denied: true as const };
   }
   const fs = await fsProvider.forAgentBinding({
-    id: agent.id,
+    spaceId: agent.spaceId,
     tenantId: agent.tenantId,
     runtimeNodeId: agent.runtimeNodeId,
   });
@@ -375,9 +375,9 @@ export function registerAgentFsRoutes(
       }
     }
     if (diskSlugs) {
-      await syncProjectsFromWorkspace(db, agent.tenantId, agent.id, diskSlugs);
+      await syncProjectsFromWorkspace(db, agent.tenantId, agent.spaceId, diskSlugs);
     }
-    const rows = await listAgentProjectRows(db, agent.id);
+    const rows = await listSpaceProjectRows(db, agent.spaceId);
     return c.json({
       projects: rows
         .map(toProjectDto)
@@ -416,7 +416,7 @@ export function registerAgentFsRoutes(
       return c.json({ error: "gitUrl 仅支持 https:// 或 git@host:path" }, 400);
     }
     const wantWorkspace = Boolean(body.withWorkspace) || Boolean(gitUrl);
-    if (await getAgentProject(db, agent.id, name)) {
+    if (await getSpaceProject(db, agent.spaceId, name)) {
       return c.json({ error: "项目已存在" }, 409);
     }
     let cloneError: string | undefined;
@@ -469,9 +469,9 @@ export function registerAgentFsRoutes(
         return c.json(e.body, e.status);
       }
     }
-    const row = await upsertAgentProject(db, {
+    const row = await upsertSpaceProject(db, {
       tenantId: agent.tenantId,
-      agentId: agent.id,
+      spaceId: agent.spaceId,
       slug: name,
       name,
       description: (body.description ?? "").trim(),
@@ -490,7 +490,7 @@ export function registerAgentFsRoutes(
     if (!isValidProjectSlug(from)) return c.json({ error: "无效的项目名" }, 400);
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
-    const existing = await getAgentProject(db, agent.id, from);
+    const existing = await getSpaceProject(db, agent.spaceId, from);
     if (!existing) return c.json({ error: "项目不存在" }, 404);
     const body = await c.req
       .json<{
@@ -574,14 +574,14 @@ export function registerAgentFsRoutes(
 
     let row = existing;
     if (nextSlug !== from) {
-      const renamed = await renameAgentProjectRow(db, agent.id, from, nextSlug);
+      const renamed = await renameSpaceProjectRow(db, agent.spaceId, from, nextSlug);
       if (!renamed) return c.json({ error: "无法重命名项目" }, 409);
       await rebindProjectRefs(db, agent.tenantId, agent.id, from, nextSlug);
       row = renamed;
     }
-    row = await upsertAgentProject(db, {
+    row = await upsertSpaceProject(db, {
       tenantId: agent.tenantId,
-      agentId: agent.id,
+      spaceId: agent.spaceId,
       slug: nextSlug,
       name: displayName,
       description: body.description ?? row.description,
@@ -597,7 +597,7 @@ export function registerAgentFsRoutes(
     if (!isValidProjectSlug(slug)) return c.json({ error: "无效的项目名" }, 400);
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
-    const existing = await getAgentProject(db, agent.id, slug);
+    const existing = await getSpaceProject(db, agent.spaceId, slug);
     if (!existing) return c.json({ error: "项目不存在" }, 404);
     let deletedDir = false;
     if (existing.hasWorkspace) {
@@ -624,7 +624,7 @@ export function registerAgentFsRoutes(
         }
       }
     }
-    await deleteAgentProjectRow(db, agent.id, slug);
+    await deleteSpaceProjectRow(db, agent.spaceId, slug);
     await rebindProjectRefs(db, agent.tenantId, agent.id, slug, null);
     return c.json({ ok: true, deleted: true, deletedDir });
   });

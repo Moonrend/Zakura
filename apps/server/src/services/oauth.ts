@@ -271,6 +271,19 @@ type IdTokenClaims = {
   preferred_username?: string;
 };
 
+function isPrivateNetworkHost(hostname: string): boolean {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => Number(part));
+  if (octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return false;
+  const [a, b] = octets as [number, number, number, number];
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
 export function isAllowedRedirectUri(uri: string): boolean {
   try {
     const u = new URL(uri);
@@ -279,7 +292,8 @@ export function isAllowedRedirectUri(uri: string): boolean {
       return (
         u.hostname === "127.0.0.1" ||
         u.hostname === "localhost" ||
-        u.hostname === "[::1]"
+        u.hostname === "[::1]" ||
+        isPrivateNetworkHost(u.hostname)
       );
     }
     // Zakura Bot 原生 App（Expo openAuthSessionAsync）回跳 scheme

@@ -7,10 +7,12 @@ import { api } from "@/lib/api";
 import type { AgentListItem } from "@/lib/agents";
 
 /**
- * 旧 /dashboard/agents/* 路由迁移：
+ * 旧 /dashboard/agents/* 未知子路由迁移：
  * - 子设置页（acp/connect/platforms 等）→ 所属 space 的设置页
  * - 其余（overview 等）→ /dashboard/spaces/<spaceId>/agents/<agentId>/...
- * space 解析失败时回退 spaces 列表页。
+ * - space 解析失败时回退 spaces 列表页。
+ * 注意：使用必选 catch-all [...rest]，避免与同级 page.tsx
+ * （/dashboard/agents/[id]）的 specificity 冲突。
  */
 const MOVED_TO_SPACE = new Set([
   "acp",
@@ -25,7 +27,7 @@ const MOVED_TO_SPACE = new Set([
 ]);
 
 export default function AgentsRedirectPage() {
-  const params = useParams<{ id: string; rest?: string[] }>();
+  const params = useParams<{ id: string; rest: string[] }>();
   const router = useRouter();
 
   useEffect(() => {

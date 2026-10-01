@@ -14,7 +14,7 @@ import { WebSocket } from "ws";
 import type { AppConfig } from "../../src/config.js";
 import { createDb } from "../../src/db/client.js";
 import { runMigrations } from "../../src/db/migrate.js";
-import { agents, newId, tenantMemberships, tenants, users } from "../../src/db/schema.js";
+import { agents, newId, spaces, tenantMemberships, tenants, users } from "../../src/db/schema.js";
 import type { AppVariables } from "../../src/api/routes.js";
 import { registerFileShareRoutes } from "../../src/api/file-share-routes.js";
 import { registerZakurabotAppRoutes } from "../../src/api/zakurabot-app-routes.js";
@@ -26,6 +26,7 @@ import type { AcpSessionService } from "../../src/services/acp/session.js";
 import type { AgentWorkspaceService } from "../../src/services/agent-workspace.js";
 import { createSocketGateway } from "../../src/realtime/socket-gateway.js";
 import { signSession, verifySession } from "../../src/services/auth.js";
+import { ensureTestSpace } from "./spaces.js";
 import { CloudAgentSessionStore } from "../../src/services/cloud-agent-session.js";
 import { FileShareService } from "../../src/services/file-shares.js";
 import { RemoteAgentIngress } from "../../src/services/remote-agent-ingress.js";
@@ -88,6 +89,8 @@ export async function zakurabotHarness(options: {
   workspace?: Pick<AgentWorkspaceService, "getDesktopInfo" | "execInWorkspace" | "ensureStarted">;
   acp?: Pick<AcpSessionService, "resolvePermission" | "resolveElicitation">;
   onStart?: (run: { sessionId: string; runId: string }) => Promise<void>;
+  /** 默认给测试空间开电脑（files/desktop 能力）；桌面用例可关掉再单独打开 */
+  agentComputer?: boolean;
 } = {}) {
   process.env.REDIS_URL = "off";
   const dataDir = mkdtempSync(join(tmpdir(), "zakurabot-test-"));
@@ -127,13 +130,40 @@ export async function zakurabotHarness(options: {
   });
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   config.publicBaseUrl = url;
+  const hydrateAgent = async <T extends { spaceId: string }>(row: T) => {
+    const space = await db.query.spaces.findFirst({ where: eq(spaces.id, row.spaceId) });
+    return {
+      ...row,
+      space,
+      spaceName: space?.name ?? "",
+      enableComputer: Boolean(space?.enableComputer),
+      enableFs: Boolean(space?.enableComputer),
+      runtimeNodeId: space?.runtimeNodeId ?? null,
+      workspaceKind: space?.workspaceKind ?? "container",
+    };
+  };
   const agentService = {
-    get: async (tenantId: string, agentId: string) => (await db.select().from(agents)
-      .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId))).limit(1))[0] ?? null,
-    list: async (tenantId: string) => db.select().from(agents).where(eq(agents.tenantId, tenantId)),
+    get: async (tenantId: string, agentId: string) => {
+      const row = (await db.select().from(agents)
+        .where(and(eq(agents.tenantId, tenantId), eq(agents.id, agentId))).limit(1))[0];
+      return row ? hydrateAgent(row) : null;
+    },
+    list: async (tenantId: string) =>
+      Promise.all(
+        (await db.select().from(agents).where(eq(agents.tenantId, tenantId))).map(hydrateAgent),
+      ),
+    spaces: {
+      list: async (tenantId: string) => db.select().from(spaces).where(eq(spaces.tenantId, tenantId)),
+      get: async (tenantId: string, idOrSlug: string) =>
+        (await db.query.spaces.findFirst({
+          where: and(eq(spaces.tenantId, tenantId), eq(spaces.id, idOrSlug)),
+        })) ?? null,
+      serialize: (space: { id: string; name: string; slug: string }) => space,
+    },
   };
   const workspaceFs = {
-    forAgentBinding: async (binding: { id: string }) => new LocalWorkspaceFs(join(dataDir, "workspaces", binding.id)),
+    forAgentBinding: async (binding: { id?: string; spaceId?: string }) =>
+      new LocalWorkspaceFs(join(dataDir, "workspaces", binding.spaceId ?? binding.id ?? "unknown")),
   };
   const fileShares = new FileShareService(db, config);
   const sessions = new CloudAgentSessionStore(db);
@@ -210,11 +240,14 @@ export async function zakurabotHarness(options: {
       await db.insert(tenantMemberships).values({ tenantId, userId: tenantId, role: "owner", status: "active" });
     }
     const bindings = [];
+    const spaceId = await ensureTestSpace(db, tenantId, {
+      enableComputer: options.agentComputer ?? true,
+    });
     for (let i = 0; i < count; i++) {
       const id = newId();
-      await db.insert(agents).values({ id, tenantId, name: `Agent ${i + 1}`, slug: id,
-        enableFs: true, status: "ready", configJson: JSON.stringify({ cloud: { model: "test-model" } }) });
-      const fs = await workspaceFs.forAgentBinding({ id });
+      await db.insert(agents).values({ spaceId, id, tenantId, name: `Agent ${i + 1}`, slug: id,
+        configJson: JSON.stringify({ cloud: { model: "test-model" } }) });
+      const fs = await workspaceFs.forAgentBinding({ spaceId });
       writeFileSync(join(fs.getRoot(), "report.txt"), "hello from the workspace");
       writeFileSync(join(fs.getRoot(), "empty.txt"), "");
       bindings.push((await ingress.saveBinding(tenantId, { agentId: id, platform: "zakurabot", profileKey: "remote-zakurabot",

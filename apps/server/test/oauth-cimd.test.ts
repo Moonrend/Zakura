@@ -87,6 +87,7 @@ describe("oauth CIMD", () => {
     assert.ok(meta.token_endpoint_auth_methods_supported.includes("private_key_jwt"));
     assert.deepEqual(meta.scopes_supported, [
       "mcp",
+      "api",
       "openid",
       "email",
       "profile",

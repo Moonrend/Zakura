@@ -73,7 +73,7 @@ it("kills a bridge that finishes starting after its client has disconnected", as
 });
 
 it("resolves CDP via authenticated stdio when public Runner ports are unreachable", async (t) => {
-  const agent = { id: "a", tenantId: "t", runtimeNodeId: "n", enableComputer: true } as Agent;
+  const agent = { id: "a", spaceId: "s", space: { slug: "s" }, tenantId: "t", runtimeNodeId: "n", enableComputer: true } as Agent;
   const commands: string[][] = [];
   const client = {
     getWorkspace: async () => ({ dockerId: "ctr", status: "running", endpoints: { cdpUrl: "http://127.0.0.1:65534" } }),
@@ -91,17 +91,27 @@ it("resolves CDP via authenticated stdio when public Runner ports are unreachabl
   };
   const db = {
     select: () => ({ from: () => ({ where: async () => [{ dockerId: "ctr", status: "running" }] }) }),
-    query: { agents: { findFirst: async () => agent } },
+    query: {
+      agents: { findFirst: async () => agent },
+      spaces: {
+        findFirst: async () => ({
+          id: "s",
+          tenantId: "t",
+          runtimeNodeId: "n",
+          workspaceKind: "container",
+        }),
+      },
+    },
     update: () => ({ set: () => ({ where: () => ({ returning: async () => [agent] }) }) }),
   };
   const workspace = new AgentWorkspaceService(db as never, {} as never, {} as never, {
     requireRunnerClient: async () => ({ client, node: { id: "n", hostInfoJson: '{"primaryIp":"192.0.2.1"}' } }),
   } as never);
   t.after(() => workspace.stop(agent));
-  const first = await workspace.resolveCdp(agent.id);
+  const first = await workspace.resolveCdp(agent.spaceId);
   assert.equal(first.reason, "ok");
   assert.match(first.url!, /^http:\/\/127\.0\.0\.1:/);
   assert.ok(commands.every((command) => command[0] === "socat" && command[2]?.startsWith("TCP:127.0.0.1:9222")));
-  const second = await workspace.resolveCdp(agent.id);
+  const second = await workspace.resolveCdp(agent.spaceId);
   assert.equal(second.url, first.url);
 });

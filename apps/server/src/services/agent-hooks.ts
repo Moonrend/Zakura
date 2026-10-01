@@ -1,5 +1,5 @@
 /**
- * Agent hooks 执行器：读取 agent.configJson.hooks + 项目 extraPackages，
+ * AgentWithSpace hooks 执行器：读取 agent.configJson.hooks + 项目 extraPackages，
  * 在会话/工具生命周期触发。command 型对齐 Claude：stdin JSON、exit 2 拦截。
  */
 import {
@@ -12,7 +12,7 @@ import {
   type AgentHookPackage,
   type AgentHooksByEvent,
 } from "@zakura/shared";
-import type { Agent } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import { parseAgentConfig } from "./agent-providers.js";
 import type { AgentWorkspaceService } from "./agent-workspace.js";
 
@@ -149,7 +149,7 @@ export function parseHookCommandOutput(
   return { ok: true, deny, reason, injectText, stdout: stdout || undefined };
 }
 
-export function getAgentHookPackages(agent: Agent): AgentHookPackage[] {
+export function getAgentHookPackages(agent: AgentWithSpace): AgentHookPackage[] {
   const cfg = parseAgentConfig(agent);
   return parseAgentHookPackages(cfg.hooks).filter((p) => p.enabled);
 }
@@ -180,7 +180,7 @@ export class AgentHooksService {
   constructor(private readonly workspace?: AgentWorkspaceService | null) {}
 
   async runEvent(
-    agent: Agent,
+    agent: AgentWithSpace,
     event: AgentHookEvent,
     opts?: HookRunOpts,
   ): Promise<HookRunResult[]> {
@@ -200,7 +200,7 @@ export class AgentHooksService {
   }
 
   private async runAction(
-    agent: Agent,
+    agent: AgentWithSpace,
     event: AgentHookEvent,
     action: AgentHookAction,
     pluginRoot: string | undefined,
@@ -215,7 +215,7 @@ export class AgentHooksService {
     if (!agent.enableComputer || !this.workspace) {
       return {
         ok: false,
-        reason: "command hook 需要 Agent 开启电脑环境",
+        reason: "command hook 需要 AgentWithSpace 开启电脑环境",
       };
     }
     const cmd = substituteRoot(action.command, pluginRoot, opts?.workingDir);

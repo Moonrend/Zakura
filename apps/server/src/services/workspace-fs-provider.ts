@@ -4,13 +4,14 @@ import {
 } from "@zakura/core";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
-import { agents } from "../db/schema.js";
+import { agents, spaces } from "../db/schema.js";
 import { and, eq } from "drizzle-orm";
 import { agentWorkspaceHostPath } from "./agent-workspace.js";
 import { type RuntimeNodeService } from "./runtime-nodes.js";
 
 export type AgentFsBinding = {
-  id: string;
+  /** 工作区归 Space 所有；这里传 spaceId（不是 agentId） */
+  spaceId: string;
   tenantId: string;
   runtimeNodeId?: string | null;
 };
@@ -37,20 +38,24 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
       where: and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
     });
     if (!agent) throw new Error(`Agent not found: ${agentId}`);
+    const space = await this.db.query.spaces.findFirst({
+      where: eq(spaces.id, agent.spaceId),
+    });
+    if (!space) throw new Error(`Space not found for agent: ${agentId}`);
     return this.forAgentBinding({
-      id: agent.id,
+      spaceId: space.id,
       tenantId: agent.tenantId,
-      runtimeNodeId: agent.runtimeNodeId,
+      runtimeNodeId: space.runtimeNodeId,
     });
   }
 
   async forAgentBinding(binding: AgentFsBinding): Promise<WorkspaceFs> {
     const nodeId = binding.runtimeNodeId;
     if (!nodeId) {
-      throw new Error("该 Agent 未绑定运行节点，无法访问工作区文件");
+      throw new Error("该空间未绑定运行节点，无法访问工作区文件");
     }
 
-    const cacheKey = `${binding.id}:${nodeId}`;
+    const cacheKey = `${binding.spaceId}:${nodeId}`;
     const cached = this.runnerFsCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.clientFs;
@@ -62,7 +67,7 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
       nodeId,
       { skipHeartbeatRefresh: true },
     );
-    const clientFs = client.workspaceFs(binding.id);
+    const clientFs = client.workspaceFs(binding.spaceId);
     this.runnerFsCache.set(cacheKey, {
       clientFs,
       expiresAt: Date.now() + 30_000,
@@ -80,7 +85,7 @@ export class ServerWorkspaceFsProvider implements WorkspaceFsProvider {
   }
 
   /** Local path helper (local runner only). */
-  localRoot(agentId: string): string {
-    return agentWorkspaceHostPath(this.config, agentId);
+  localRoot(spaceId: string): string {
+    return agentWorkspaceHostPath(this.config, spaceId);
   }
 }

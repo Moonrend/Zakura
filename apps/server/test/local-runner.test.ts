@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { ShellJob, type CreateContainerOptions, type RunningContainer } from "@zakura/core";
 import { createDb, type Db } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
-import { agents, runtimeNodes, tenants, users } from "../src/db/schema.js";
+import { agents, runtimeNodes, tenants, users , spaces } from "../src/db/schema.js";
 import type { AppConfig } from "../src/config.js";
 import type { DockerRuntime } from "../src/runtime/docker.js";
 import { RuntimeNodeService, mapRuntimeNode } from "../src/services/runtime-nodes.js";
@@ -17,6 +17,7 @@ import { ServerWorkspaceFsProvider } from "../src/services/workspace-fs-provider
 import { registerRuntimeNodeRoutes } from "../src/api/runtime-node-routes.js";
 import { MigrationService } from "../src/services/migration-service.js";
 import { registerMigrationRoutes } from "../src/api/migration-routes.js";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 class TestDocker {
   readonly containers = new Map<string, RunningContainer>();
@@ -129,7 +130,9 @@ describe("explicit Local Runner", () => {
   }
 
   async function newAgent(tenantId = "saas") {
-    const [agent] = await db.insert(agents).values({ tenantId, name: "Local Agent", slug: `agent-${++sequence}` }).returning();
+    const seq = ++sequence;
+    const spaceId = await ensureTestSpace(db, tenantId, { slug: `space-${seq}` });
+    const [agent] = await db.insert(agents).values({ spaceId, tenantId, name: "Local Agent", slug: `agent-${seq}` }).returning();
     return agent;
   }
 
@@ -184,7 +187,7 @@ describe("explicit Local Runner", () => {
       } else {
         await assert.rejects(agentService.update("saas", agent.id, { runtimeNodeId: local.id, userId }), { status: 403 });
         await assert.rejects(agentService.startAsync("saas", agent.id, { runtimeNodeId: "local", userId }), { status: 403 });
-        assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, null);
+        assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, null);
       }
     }
   });
@@ -196,17 +199,17 @@ describe("explicit Local Runner", () => {
     assert.notEqual(bound.runtimeNodeId, "local");
     const fs = await fsProvider.forAgent(agent.id, "saas");
     await fs.writeText("/outputs/local.txt", "本地文件");
-    assert.equal(readFileSync(join(dir, "agents", agent.id, "workspace/outputs/local.txt"), "utf8"), "本地文件");
+    assert.equal(readFileSync(join(dir, "spaces", agent.spaceId, "workspace/outputs/local.txt"), "utf8"), "本地文件");
     assert.equal((await fs.readText("/outputs/local.txt")).content, "本地文件");
     await assert.rejects(fs.writeText("../../escape.txt", "no"), /escapes/);
 
     const started = await agentService.startAsync("saas", agent.id, { userId: "allowed" });
-    const container = await agentService.workspace.getWorkspaceContainer(agent.id);
+    const container = await agentService.workspace.getWorkspaceContainer(agent.spaceId);
     assert.ok(container?.dockerId);
     assert.equal(container.runtimeNodeId, bound.runtimeNodeId);
-    const spec = docker.created.find((row) => row.spec.labels?.["zakura.agent"] === agent.id)!;
+    const spec = docker.created.find((row) => row.spec.labels?.["zakura.space"] === agent.spaceId)!;
     assert.equal(spec.tenantId, "saas");
-    assert.equal(spec.spec.volumes?.[0]?.hostPath, `/host/zakura/agents/${agent.id}/workspace`);
+    assert.equal(spec.spec.volumes?.[0]?.hostPath, `/host/zakura/spaces/${agent.spaceId}/workspace`);
     assert.equal((await agentService.workspace.execInWorkspace(started, ["echo", "local"])).stdout, "local execution");
     const job = await agentService.workspace.startShellJob(started, ["echo", "local"]);
     assert.equal(job.stdout, "local shell");
@@ -217,7 +220,7 @@ describe("explicit Local Runner", () => {
     assert.equal(docker.created.length, count);
     await agentService.workspace.stop(started);
     assert.equal(await agentService.workspace.isWorkspaceRunning(started), false);
-    assert.equal(existsSync(join(dir, "agents", agent.id, "workspace/outputs/local.txt")), true);
+    assert.equal(existsSync(join(dir, "spaces", agent.spaceId, "workspace/outputs/local.txt")), true);
   });
 
   it("reports missing local Docker without converting the node into an offline Go runner", async () => {
@@ -242,12 +245,12 @@ describe("explicit Local Runner", () => {
   it("repairs existing production records via the migration without changing bindings or remote nodes", async () => {
     await db.insert(runtimeNodes).values({ id: "upgrade-local", tenantId: "upgrade", name: "本机", slug: "local", kind: "computer", status: "draining", storageRoot: dir });
     const agent = await newAgent("upgrade");
-    await db.update(agents).set({ runtimeNodeId: "upgrade-local" }).where(eq(agents.id, agent.id));
+    await db.update(spaces).set({ runtimeNodeId: "upgrade-local" }).where(eq(spaces.id, agent.spaceId));
     await db.execute(sql.raw(readFileSync(new URL("../drizzle/0054_restore_local_runtime.sql", import.meta.url), "utf8")));
     const repaired = await db.query.runtimeNodes.findFirst({ where: eq(runtimeNodes.id, "upgrade-local") });
     assert.equal(repaired?.kind, "local");
     assert.equal(repaired?.status, "draining");
-    assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, "upgrade-local");
+    assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, "upgrade-local");
     const remote = await db.query.runtimeNodes.findFirst({ where: eq(runtimeNodes.tenantId, "named") });
     assert.equal(remote?.kind, "computer");
     assert.ok(remote?.tokenHash);
@@ -264,7 +267,7 @@ describe("explicit Local Runner", () => {
     assert.equal(Buffer.from((await reader.read()).value!).toString(), "local rpc\n");
     await connection.writable.getWriter().write(Buffer.from("request\n"));
     assert.equal(docker.stdin.at(-1)?.toString(), "request\n");
-    const adapter = [...docker.containers.values()].find((row) => row.labels["zakura.agent"] === agent.id)!;
+    const adapter = [...docker.containers.values()].find((row) => row.labels["zakura.space"] === agent.spaceId)!;
     assert.equal(docker.attached.at(-1), adapter.id);
     const other = await nodes.ensureLocalNode("other");
     const { client } = await nodes.requireRunnerClient("other", other.id);
@@ -276,7 +279,7 @@ describe("explicit Local Runner", () => {
   it("requires a Local grant when migrating to the server", async () => {
     const remote = (await nodes.create("saas", { name: "Migration source" })).node;
     const agent = await newAgent();
-    await db.update(agents).set({ runtimeNodeId: remote.id }).where(eq(agents.id, agent.id));
+    await db.update(spaces).set({ runtimeNodeId: remote.id }).where(eq(spaces.id, agent.spaceId));
     const app = new Hono<any>();
     app.use("*", async (c, next) => { c.set("session", { tenantId: "saas", userId: "denied" }); await next(); });
     registerMigrationRoutes(app, { migrations: new MigrationService(db, config, nodes), agentService });
@@ -284,7 +287,7 @@ describe("explicit Local Runner", () => {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ targetNodeId: "local" }),
     });
     assert.equal(response.status, 403);
-    assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, remote.id);
+    assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, remote.id);
   });
 
   it("resolves the local alias before patching or checking residual workspace ownership", async () => {

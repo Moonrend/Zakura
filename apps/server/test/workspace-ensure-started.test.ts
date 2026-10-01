@@ -47,7 +47,7 @@ describe("workspace.ensureStarted", () => {
       { dataDir: "/tmp" } as AppConfig,
       nodes as never,
     );
-    const agent = { id: "agent-1", tenantId: "t1", runtimeNodeId: "n1" } as Agent;
+    const agent = { id: "agent-1", spaceId: "s1", space: { slug: "s1" }, tenantId: "t1", runtimeNodeId: "n1" } as Agent;
 
     assert.equal(await workspace.isWorkspaceRunning(agent), true);
     const out = await workspace.ensureStarted(agent);
@@ -69,7 +69,7 @@ describe("workspace.ensureStarted", () => {
         },
       }),
     } as never);
-    const agent = { id: "agent-1", tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
+    const agent = { id: "agent-1", spaceId: "s1", space: { slug: "s1" }, tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
     await workspace.ensureStarted(agent, { require: "display" });
     assert.equal(commands.length, 1);
     assert.equal(commands[0]!.at(-1), "display");
@@ -84,13 +84,13 @@ describe("workspace.ensureStarted", () => {
         execWorkspace: async () => ({ exitCode: 1, stdout: "", stderr: "DISPLAY=:99 is unavailable; restart workspace" }),
       } }),
     } as never);
-    const agent = { id: "agent-1", tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
+    const agent = { id: "agent-1", spaceId: "s1", space: { slug: "s1" }, tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
     await assert.rejects(workspace.ensureStarted(agent, { require: "display" }), /DISPLAY=:99/);
     assert.equal(starts, 0);
   });
 
   it("passes display enable flags and honors shell-only readiness on cold start", async () => {
-    const agent = { id: "agent-1", slug: "agent", tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
+    const agent = { id: "agent-1", spaceId: "s1", space: { slug: "agent" }, tenantId: "t1", runtimeNodeId: "n1", enableComputer: true } as Agent;
     let startArgs: Record<string, any> | undefined;
     const commands: string[][] = [];
     const db = {

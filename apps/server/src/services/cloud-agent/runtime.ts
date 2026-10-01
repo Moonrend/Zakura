@@ -1,9 +1,9 @@
 /**
- * Cloud Agent 运行时编排：三条执行路径共用 ./loop.js 的统一引擎，
+ * Cloud AgentWithSpace 运行时编排：三条执行路径共用 ./loop.js 的统一引擎，
  * 差异只在上下文构建与工具面：
  * - 主对话（kind=chat）：分支链历史 + 记忆召回 + 委派/子代理工具
  * - 子代理（kind=subagent）：隔离上下文，任务契约提示词，剔除派生工具防递归
- * - 跨 Agent 委派（kind=delegate）：目标 Agent 的身份、工具与提示词
+ * - 跨 AgentWithSpace 委派（kind=delegate）：目标 AgentWithSpace 的身份、工具与提示词
  *
  * 所有路径的对话历史（含系统触发的）都以各自类型标记的会话完整落库，
  * 可经同一事件流 SSE 实时观看与回放；父会话 tool_call_result 携带
@@ -11,7 +11,7 @@
  */
 import { loadProjectContext, type LoadedProjectContext } from "../project-config.js";
 import {
-  getAgentProject,
+  getSpaceProject,
   mergeProjectInstructions,
 } from "../agent-projects.js";
 import type { Db } from "../../db/client.js";
@@ -40,7 +40,7 @@ import {
   type WorkspaceFs,
 } from "@zakura/core";
 import { recordUserUsage } from "../user-usage.js";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import { newId } from "../../db/schema.js";
 import { SUBAGENT_TOOL_QUALIFIED, type McpGateway } from "../mcp-gateway.js";
 import {
@@ -163,8 +163,8 @@ const FORK_SKIP_EVENT_TYPES = new Set<string>([
   "queue_update",
 ]);
 
-/** Agent.configJson → cloud 配置（宽容解析） */
-export function agentCloudConfig(agent: Agent): CloudAgentConfig {
+/** AgentWithSpace.configJson → cloud 配置（宽容解析） */
+export function agentCloudConfig(agent: AgentWithSpace): CloudAgentConfig {
   try {
     return parseCloudAgentConfig(JSON.parse(agent.configJson || "{}"));
   } catch {
@@ -200,7 +200,7 @@ export type CloudAgentRuntimeDeps = {
   workspaceFsProvider?: WorkspaceFsProvider | null;
   /** 技能服务（可选；缺省时不注入技能摘要） */
   skills?: import("../skills/service.js").SkillsService | null;
-  /** Agent hooks（可选；缺省时不触发插件 hooks） */
+  /** AgentWithSpace hooks（可选；缺省时不触发插件 hooks） */
   agentHooks?: import("../agent-hooks.js").AgentHooksService | null;
   /** 远程 Chat SDK 通道工具（可选；远程会话注入 chat_* 发帖/回帖工具） */
   remoteChannels?: import("../remote-channel-tools.js").RemoteChannelToolPort | null;
@@ -210,7 +210,7 @@ export type CloudAgentRuntimeDeps = {
   askUser?: AskUserService | null;
   /** 工具调用审批（可选；缺省时不做审批门控） */
   toolApproval?: import("../tool-approval.js").ToolApprovalService | null;
-  /** 第三方 ACP Agent（可选；主 chat 注入 list/spawn_acp_agent） */
+  /** 第三方 ACP AgentWithSpace（可选；主 chat 注入 list/spawn_acp_agent） */
   acp?: AcpSessionService | null;
   /** 项目记录（可选；缺省时只读目录里的 AGENTS.md） */
   db?: Db | null;
@@ -280,7 +280,7 @@ export class CloudAgentRuntime {
   /** 主对话 / 子代理 / 委派共用的循环内压缩钩子 */
   private makeCompactInLoopHook(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     cloud: CloudAgentConfig;
@@ -319,7 +319,7 @@ export class CloudAgentRuntime {
     const prompt = input.prompt.trim();
     if (!prompt) throw new Error("automation prompt is empty");
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
 
     const session = await this.store.createSession({
       tenantId: input.tenantId,
@@ -337,7 +337,7 @@ export class CloudAgentRuntime {
       },
     });
 
-    // 标明自动触发，避免 Agent 当成用户实时对话去追问/寒暄
+    // 标明自动触发，避免 AgentWithSpace 当成用户实时对话去追问/寒暄
     const name = input.scheduleName?.trim();
     const cwdHint = input.project
       ? `若任务会写文件，优先在项目「${input.project}」相关目录内完成。`
@@ -389,7 +389,7 @@ export class CloudAgentRuntime {
     retry?: boolean;
     /** 从上次中断（cancelled）的 Run 接着做，不展示为新用户气泡 */
     continue?: boolean;
-    /** 随消息上传的附件（已在 Agent 工作区） */
+    /** 随消息上传的附件（已在 AgentWithSpace 工作区） */
     attachments?: CloudAgentAttachment[];
     /** 本次用户触发 Run 的调用时模型选项。 */
     options?: CloudAgentRunOptions;
@@ -413,7 +413,7 @@ export class CloudAgentRuntime {
     if (session.activeRunId) throw new Error("当前会话已有进行中的 Run，请先等待或取消");
 
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
 
     let content = input.content?.trim() ?? "";
     let parentRunId = input.parentRunId;
@@ -761,7 +761,7 @@ export class CloudAgentRuntime {
    */
   private async compactHistoryRealtime(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string | null;
     cloud: CloudAgentConfig;
@@ -1032,7 +1032,7 @@ export class CloudAgentRuntime {
    */
   private async compactMessagesInPlace(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     cloud: CloudAgentConfig;
@@ -1126,7 +1126,7 @@ export class CloudAgentRuntime {
     previousSummary?: string;
     previousOps?: CompactionFileOps | null;
     audit?: {
-      agent: Agent;
+      agent: AgentWithSpace;
       parentSessionId: string;
       parentTitle: string;
     };
@@ -1241,7 +1241,7 @@ export class CloudAgentRuntime {
     if (!session) throw new Error("会话不存在");
     if (session.activeRunId) throw new Error("当前会话正在运行，请结束后再压缩");
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
     const cloud = agentCloudConfig(agent);
 
     const lastCompaction = await this.store.getLastCompaction(input.sessionId);
@@ -1387,7 +1387,7 @@ export class CloudAgentRuntime {
     );
     if (!source) throw new Error("源会话不存在");
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
 
     // 直接拷贝终态事件：保留 messageId/runId，UI 可见历史，编辑/重生可继续；无 LLM 摘要
     const history = await this.store.listEvents(input.sourceSessionId, { limit: 2000 });
@@ -1435,7 +1435,7 @@ export class CloudAgentRuntime {
 
   private async executeRun(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     targetMessageId: string;
@@ -1653,7 +1653,7 @@ export class CloudAgentRuntime {
     const toolsPromise = (async () => {
       let definitions: ModelToolDefinition[] = [];
       let nameMap = new Map<string, string>();
-      let peerAgents: Agent[] = [];
+      let peerAgents: AgentWithSpace[] = [];
       let peerAgentsDesc = "";
       if (!enableTools) {
         return { definitions, nameMap, peerAgents, peerAgentsDesc };
@@ -1958,9 +1958,9 @@ export class CloudAgentRuntime {
             }
           : {}),
         toolTitle: (modelName) => {
-          if (modelName === DELEGATE_TOOL_NAME) return "委派 Agent";
+          if (modelName === DELEGATE_TOOL_NAME) return "委派 AgentWithSpace";
           if (isAcpToolName(modelName)) {
-            return modelName === "spawn_acp_agent" ? "调用 ACP Agent" : "列出 ACP Agent";
+            return modelName === "spawn_acp_agent" ? "调用 ACP AgentWithSpace" : "列出 ACP AgentWithSpace";
           }
           if (isSessionToolName(modelName)) {
             if (modelName === "list_chat_sessions") return "列出会话";
@@ -1992,7 +1992,7 @@ export class CloudAgentRuntime {
           isCancelled: () => this.store.isCancelRequested(runId),
           project: sessionPreferences?.project ?? null,
         }),
-        // 远程通道 / 跨 Agent 委派 / 会话复用 + 插件 PreToolUse
+        // 远程通道 / 跨 AgentWithSpace 委派 / 会话复用 + 插件 PreToolUse
         interceptCall: async (call, args) => {
           const hooked = await hookFns.interceptCall?.(call, args);
           if (hooked) return hooked;
@@ -2108,7 +2108,7 @@ export class CloudAgentRuntime {
                 const provider = this.deps.workspaceFsProvider;
                 if (!provider) throw new Error("工作区未就绪，无法发送附件");
                 const fs = await provider.forAgentBinding({
-                  id: agent.id,
+                  spaceId: agent.spaceId,
                   tenantId: agent.tenantId,
                   runtimeNodeId: agent.runtimeNodeId,
                 });
@@ -2165,7 +2165,7 @@ export class CloudAgentRuntime {
   }
 
   private makeHookLoopFns(
-    agent: Agent,
+    agent: AgentWithSpace,
     hookOpts: {
       extraPackages?: LoadedProjectContext["hookPackages"];
       workingDir?: string;
@@ -2284,7 +2284,7 @@ export class CloudAgentRuntime {
   }
 
   private wrapCompactHook(
-    agent: Agent,
+    agent: AgentWithSpace,
     inner: NonNullable<AgentLoopHooks["compactInLoop"]> | undefined,
     hookOpts: {
       extraPackages?: LoadedProjectContext["hookPackages"];
@@ -2307,7 +2307,7 @@ export class CloudAgentRuntime {
   }
 
   private async loadProjectContext(
-    agent: Agent,
+    agent: AgentWithSpace,
     slug: string,
   ): Promise<LoadedProjectContext> {
     const empty: LoadedProjectContext = {
@@ -2317,7 +2317,7 @@ export class CloudAgentRuntime {
       hasWorkspace: false,
     };
     const row = this.deps.db
-      ? await getAgentProject(this.deps.db, agent.id, slug).catch(() => null)
+      ? await getSpaceProject(this.deps.db, agent.spaceId, slug).catch(() => null)
       : null;
     let fsCtx = empty;
     if (row ? row.hasWorkspace : true) {
@@ -2325,7 +2325,7 @@ export class CloudAgentRuntime {
       if (provider) {
         try {
           const fs = await provider.forAgentBinding({
-            id: agent.id,
+            spaceId: agent.spaceId,
             tenantId: agent.tenantId,
             runtimeNodeId: agent.runtimeNodeId,
           });
@@ -2349,7 +2349,7 @@ export class CloudAgentRuntime {
    * 不支持图片的路由会在协议适配器里丢弃 image part。
    */
   private async resolveWorkspaceImages(
-    agent: Agent,
+    agent: AgentWithSpace,
     messages: ModelChatMessage[],
   ): Promise<void> {
     const provider = this.deps.workspaceFsProvider;
@@ -2386,7 +2386,7 @@ export class CloudAgentRuntime {
         try {
           if (fs === undefined) {
             fs = await provider.forAgentBinding({
-              id: agent.id,
+              spaceId: agent.spaceId,
               tenantId: agent.tenantId,
               runtimeNodeId: agent.runtimeNodeId,
             });
@@ -2419,7 +2419,7 @@ export class CloudAgentRuntime {
    */
   private spawnSubagentsHook(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     nameMap: Map<string, string>;
     /** 派生出的子代理的嵌套深度（主循环派生 = 1） */
     childDepth: number;
@@ -2477,7 +2477,7 @@ export class CloudAgentRuntime {
   }
 
   /**
-   * 云端子代理：与主 Agent 共享工作区和工具面，但上下文完全隔离。
+   * 云端子代理：与主 AgentWithSpace 共享工作区和工具面，但上下文完全隔离。
    * 未达嵌套深度上限（cloud.maxSubagentDepth，默认 2）时可继续派生
    * 下一级子代理分层拆解任务；达到上限后派生工具从工具面剔除，防止递归爆炸。
    * 运行全程落库为 kind=subagent 的会话（可实时观看/回放），
@@ -2486,7 +2486,7 @@ export class CloudAgentRuntime {
    */
   async runSubagent(
     tenantId: string,
-    agent: Agent,
+    agent: AgentWithSpace,
     args: Record<string, unknown>,
     opts: {
       isCancelled?: () => Promise<boolean>;
@@ -2614,11 +2614,11 @@ export class CloudAgentRuntime {
         compactBudget: budget,
         // 不额外给子代理设上限：硬编码的 16 轮会在用户毫不知情的情况下把任务截断，
         // 而父代理只会收到一段「可能未完成」的文字，看起来就像子代理自己放弃了。
-        // 只有用户在 Agent 设置里显式配了 maxToolRounds 才限制，否则跑到模型收手为止。
+        // 只有用户在 AgentWithSpace 设置里显式配了 maxToolRounds 才限制，否则跑到模型收手为止。
         ...(cloud.maxToolRounds != null ? { maxRounds: cloud.maxToolRounds } : {}),
         maxRoundsNote: (max, lastText) =>
           `子代理达到你配置的轮次上限（${max}），任务可能未完成。${
-            lastText ? `最后进展：${lastText.slice(0, 2000)}` : "可在 Agent 设置里调高或清空「最大工具轮次」。"
+            lastText ? `最后进展：${lastText.slice(0, 2000)}` : "可在 AgentWithSpace 设置里调高或清空「最大工具轮次」。"
           }`,
         ...(opts.isCancelled ? { isCancelled: opts.isCancelled } : {}),
         ...(opts.project && projectCtx.hasWorkspace !== false
@@ -2680,13 +2680,13 @@ export class CloudAgentRuntime {
   }
 
   /**
-   * 跨 Agent 委派：目标 Agent 以自己的身份、工具与提示词执行任务，
-   * 运行全程落库为目标 Agent 名下 kind=delegate 的会话（origin 记录调用方）。
+   * 跨 AgentWithSpace 委派：目标 AgentWithSpace 以自己的身份、工具与提示词执行任务，
+   * 运行全程落库为目标 AgentWithSpace 名下 kind=delegate 的会话（origin 记录调用方）。
    */
   private async delegateToAgent(
     tenantId: string,
-    caller: Agent,
-    peers: Agent[],
+    caller: AgentWithSpace,
+    peers: AgentWithSpace[],
     args: Record<string, unknown>,
     opts: {
       isCancelled: () => Promise<boolean>;
@@ -2699,7 +2699,7 @@ export class CloudAgentRuntime {
     if (!slug || !task) throw new Error("agentSlug 与 task 必填");
     if (slug === caller.slug) throw new Error("不能委派给自己");
     const target = peers.find((a) => a.slug === slug || a.id === slug);
-    if (!target) throw new Error(`未找到 Agent: ${slug}`);
+    if (!target) throw new Error(`未找到 AgentWithSpace: ${slug}`);
 
     const targetCloud = agentCloudConfig(target);
     const tools = await this.deps.gateway.listToolsForAgent(target);
@@ -2720,7 +2720,7 @@ export class CloudAgentRuntime {
     const run = await this.store.createRun(session.id);
     await this.store.markRunStarted(run.id);
 
-    const userContent = `来自 Agent「${caller.name}」的委派任务：\n${task}${
+    const userContent = `来自 AgentWithSpace「${caller.name}」的委派任务：\n${task}${
       context ? `\n\n补充上下文：\n${context}` : ""
     }`;
     const messageId = newId();
@@ -2773,12 +2773,12 @@ export class CloudAgentRuntime {
         definitions,
         nameMap,
         compactBudget: budget,
-        // 同上：委派不再硬编码 12 轮，只认目标 Agent 自己配置的上限。
+        // 同上：委派不再硬编码 12 轮，只认目标 AgentWithSpace 自己配置的上限。
         ...(targetCloud.maxToolRounds != null ? { maxRounds: targetCloud.maxToolRounds } : {}),
         maxRoundsNote: (max) =>
           `委派目标达到其配置的轮次上限（${max}），任务可能未完成。`,
         isCancelled: opts.isCancelled,
-        // 目标 Agent 在委派中派生子代理：同样并行执行、记录链接、传导取消
+        // 目标 AgentWithSpace 在委派中派生子代理：同样并行执行、记录链接、传导取消
         hooks: {
           ...(compactHook
             ? {
@@ -2830,7 +2830,7 @@ export class CloudAgentRuntime {
 
   private async postRun(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     cloud: CloudAgentConfig;
@@ -2946,7 +2946,7 @@ export class CloudAgentRuntime {
    */
   private async maybeSoftCompactAfterRun(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     cloud: CloudAgentConfig;

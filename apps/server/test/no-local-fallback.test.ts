@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { generateRunnerToken, hashRunnerToken } from "@zakura/core";
 import { eq } from "drizzle-orm";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("no silent local fallback when Runner offline", () => {
   let dataDir: string;
@@ -77,7 +78,9 @@ describe("no silent local fallback when Runner offline", () => {
     });
 
     agentId = newId();
+        const spaceId = await ensureTestSpace(db, tenantId, { enableComputer: true, runtimeNodeId: nodeId });
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "Remote Bound",

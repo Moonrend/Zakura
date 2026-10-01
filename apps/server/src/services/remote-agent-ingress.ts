@@ -336,6 +336,7 @@ export class RemoteAgentIngress {
       const [updated] = await this.db
         .update(agentChannelBindings)
         .set({
+          spaceId: agent.spaceId,
           agentId: input.agentId,
           platform,
           profileKey,
@@ -362,6 +363,7 @@ export class RemoteAgentIngress {
       .values({
         id,
         tenantId,
+        spaceId: agent.spaceId,
         agentId: input.agentId,
         platform,
         profileKey,

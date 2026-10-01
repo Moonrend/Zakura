@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import type { WorkspaceFs } from "@zakura/core";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 const SCRATCH = process.env.GROK_SCRATCH || join(tmpdir(), "grok-skill-auto");
 
@@ -47,7 +48,9 @@ describe("内置技能自动安装与更新", () => {
       createdAt: now,
       updatedAt: now,
     });
+        const spaceId = await ensureTestSpace(db, tenantId, { enableComputer: false });
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "Skill Agent",

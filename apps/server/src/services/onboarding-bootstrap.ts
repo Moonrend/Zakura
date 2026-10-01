@@ -58,9 +58,15 @@ export async function bootstrapOnboarding(deps: {
 
   if (!agent) {
     try {
+      // 引导先建默认 Space（OSS 开电脑），Agent 归入其中。
+      const space = await agentService.spaces.ensureDefault(tenantId);
+      if (isOss && !space.enableComputer) {
+        await agentService.spaces.update(tenantId, space.id, { enableComputer: true });
+      }
       const result = await agentService.create(tenantId, {
         name: DEFAULT_AGENT_NAME,
         description: "引导自动创建的默认 Agent",
+        spaceId: space.id,
         createApiKey: false,
         enableMemory: true,
         enableComputer: isOss,
@@ -71,6 +77,7 @@ export async function bootstrapOnboarding(deps: {
 
       // 默认 MCP 属于增强能力，后台安装，避免远程服务启动阻塞首次进入。
       const createdAgentId = agent.id;
+      const createdSpaceId = agent.spaceId;
       void (async () => {
         try {
           const { ensureDefaultAgentMcps, bindDefaultMcpsToAgent } = await import(
@@ -83,7 +90,7 @@ export async function bootstrapOnboarding(deps: {
             tenantId,
           );
           if (defaultIds.length) {
-            await bindDefaultMcpsToAgent(db, tenantId, createdAgentId, defaultIds);
+            await bindDefaultMcpsToAgent(db, tenantId, createdSpaceId, defaultIds, createdAgentId);
           }
         } catch (err) {
           console.warn(

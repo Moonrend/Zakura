@@ -16,10 +16,10 @@ import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
   agentBindings,
-  agents,
   componentInstances,
   managedContainers,
   newId,
+  spaces,
   tenants,
   type ComponentInstance,
   type RuntimeNode,
@@ -173,9 +173,9 @@ export class Orchestrator {
   /** stdio MCP 跑在当前绑定 Agent 所选 runner 上，不读 instance.runtime_node_id。 */
   async resolveStdioRuntimeNodeId(tenantId: string, instance: ComponentInstance): Promise<string> {
     const bound = await this.db
-      .select({ runtimeNodeId: agents.runtimeNodeId, workspaceKind: agents.workspaceKind })
+      .select({ runtimeNodeId: spaces.runtimeNodeId, workspaceKind: spaces.workspaceKind })
       .from(agentBindings)
-      .innerJoin(agents, eq(agents.id, agentBindings.agentId))
+      .innerJoin(spaces, eq(spaces.id, agentBindings.spaceId))
       .where(and(eq(agentBindings.instanceId, instance.id), eq(agentBindings.tenantId, tenantId)));
     const fromAgent = bound.map((b) => b.runtimeNodeId).find((id) => id && !isLocalRuntimeNodeId(id));
     if (fromAgent) return fromAgent;

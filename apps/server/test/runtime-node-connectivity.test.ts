@@ -11,12 +11,13 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createDb, type Db } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
-import { agents, runtimeNodes, tenants } from "../src/db/schema.js";
+import { agents, runtimeNodes, spaces, tenants } from "../src/db/schema.js";
 import type { AppConfig } from "../src/config.js";
 import { RuntimeNodeService, mapRuntimeNode } from "../src/services/runtime-nodes.js";
 import { RunnerHub } from "../src/services/runner-hub.js";
 import { AgentService } from "../src/services/agents.js";
 import { registerRuntimeNodeRoutes } from "../src/api/runtime-node-routes.js";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 async function until(check: () => boolean | Promise<boolean>) {
   const deadline = Date.now() + 5000;
@@ -98,8 +99,9 @@ describe("Go runner availability and shared node selection", () => {
 
   async function newAgent(nodeId: string | null = null) {
     const number = ++sequence;
+    const spaceId = await ensureTestSpace(db, "consumer", { runtimeNodeId: nodeId });
     const [agent] = await db.insert(agents).values({
-      tenantId: "consumer", name: "ACP", slug: `acp-${number}`, runtimeNodeId: nodeId,
+      spaceId, tenantId: "consumer", name: "ACP", slug: `acp-${number}`,
     }).returning();
     return agent;
   }
@@ -147,7 +149,7 @@ describe("Go runner availability and shared node selection", () => {
     });
     const agent = await newAgent();
     await assert.rejects(agentService.update("consumer", agent.id, { runtimeNodeId: node.id, userId: "member" }), /当前离线/);
-    assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, null);
+    assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, null);
     const bound = await newAgent(node.id);
     await assert.rejects(agentService.startAsync("consumer", bound.id), /当前离线/);
 

@@ -114,12 +114,13 @@ export async function ensureDefaultAgentMcps(
   return instanceIds;
 }
 
-/** 将默认 MCP 绑定到 Agent（幂等） */
+/** 将默认 MCP 绑定到 Space（幂等）；agentId 仅用于保留来源归属 */
 export async function bindDefaultMcpsToAgent(
   db: Db,
   tenantId: string,
-  agentId: string,
+  spaceId: string,
   instanceIds: string[],
+  agentId?: string,
 ): Promise<void> {
   const now = new Date();
   for (const instanceId of instanceIds) {
@@ -129,14 +130,15 @@ export async function bindDefaultMcpsToAgent(
         .values({
           id: newId(),
           tenantId,
-          agentId,
+          spaceId,
+          agentId: agentId ?? null,
           instanceId,
           createdAt: now,
         })
         .onConflictDoNothing();
     } catch (err) {
       console.warn(
-        `[default-mcps] bind ${instanceId} -> ${agentId} failed:`,
+        `[default-mcps] bind ${instanceId} -> space ${spaceId} failed:`,
         err instanceof Error ? err.message : err,
       );
     }

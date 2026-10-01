@@ -19,7 +19,7 @@ import { findAgentBinary } from "./agent-binaries.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import type { RuntimeNodeService } from "./runtime-nodes.js";
 import type { Db } from "../db/client.js";
-import { runtimeNodes, agents } from "../db/schema.js";
+import { runtimeNodes, spaces } from "../db/schema.js";
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const STALE_AFTER_MS = 15 * 60 * 1000;
@@ -41,9 +41,9 @@ export async function collectNodeImages(
   out.set(DEFAULT_WORKSPACE_IMAGE, "workspace");
 
   const bound = await db
-    .select({ workspaceImage: agents.workspaceImage })
-    .from(agents)
-    .where(eq(agents.runtimeNodeId, nodeId));
+    .select({ workspaceImage: spaces.workspaceImage })
+    .from(spaces)
+    .where(eq(spaces.runtimeNodeId, nodeId));
   for (const row of bound) {
     const img = row.workspaceImage?.trim();
     if (img && !out.has(img)) out.set(img, "workspace");

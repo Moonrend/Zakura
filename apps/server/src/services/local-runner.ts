@@ -9,7 +9,7 @@ import {
 import type { ContainerSpec } from "@zakura/shared";
 import type { AppConfig } from "../config.js";
 import type { DockerRuntime } from "../runtime/docker.js";
-import { agentWorkspaceHostPath } from "./agent-workspace.js";
+import { spaceWorkspaceHostPath } from "./spaces.js";
 
 /** In-process implementation of the primitives used by RunnerClient. */
 class LocalRunnerBackend {
@@ -19,9 +19,9 @@ class LocalRunnerBackend {
     readonly tenantId: string,
   ) {}
 
-  workspaceFs(agentId: string): LocalWorkspaceFs {
-    if (!/^[a-zA-Z0-9_-]+$/.test(agentId)) throw new Error("Invalid agent ID");
-    return new LocalWorkspaceFs(agentWorkspaceHostPath(this.config, agentId));
+  workspaceFs(spaceId: string): LocalWorkspaceFs {
+    if (!/^[a-zA-Z0-9_-]+$/.test(spaceId)) throw new Error("Invalid space ID");
+    return new LocalWorkspaceFs(spaceWorkspaceHostPath(this.config, spaceId));
   }
 
   async container(id: string): Promise<RunningContainer | null> {
@@ -47,8 +47,8 @@ class LocalRunnerBackend {
       return { storageRoot: this.config.dataDir, docker: await this.runtime.ping() };
     }
     if (method.startsWith("host.fs.")) {
-      const p = params as { agentId: string; path: string; content?: string; base64?: string; recursive?: boolean; oldPath: string; newPath: string };
-      const fs = this.workspaceFs(p.agentId);
+      const p = params as { spaceId: string; path: string; content?: string; base64?: string; recursive?: boolean; oldPath: string; newPath: string };
+      const fs = this.workspaceFs(p.spaceId);
       switch (method) {
         case "host.fs.mkdir": return { ...await fs.mkdirApi(p.path), abs: fs.getRoot() };
         case "host.fs.list": return fs.listDetailed(p.path);
@@ -81,12 +81,12 @@ class LocalRunnerBackend {
         }
         if (existing) await this.runtime.remove(existing.id);
         if (spec.network) await this.runtime.ensureNetwork(spec.network);
-        const agentId = spec.labels?.["zakura.agent"];
-        const purpose = spec.labels?.["zakura.purpose"] ?? (agentId ? "workspace" : "component");
+        const spaceId = spec.labels?.["zakura.space"];
+        const purpose = spec.labels?.["zakura.purpose"] ?? (spaceId ? "workspace" : "component");
         const row = await this.runtime.createAndStart({
           tenantId: this.tenantId,
           instanceId: spec.labels?.["zakura.instance"],
-          allocatedTo: agentId,
+          allocatedTo: spaceId,
           purpose,
           spec: {
             ...spec,
@@ -132,24 +132,24 @@ export class LocalRunnerClient extends RunnerClient {
     this.local = local;
   }
 
-  override workspaceFs(agentId: string) {
-    return this.local.workspaceFs(agentId);
+  override workspaceFs(spaceId: string) {
+    return this.local.workspaceFs(spaceId);
   }
 
-  override readText(agentId: string, path: string) {
-    return this.workspaceFs(agentId).readText(path);
+  override readText(spaceId: string, path: string) {
+    return this.workspaceFs(spaceId).readText(path);
   }
 
-  override writeText(agentId: string, path: string, content: string, expectedRevision?: string | null) {
-    return this.workspaceFs(agentId).writeText(path, content, expectedRevision);
+  override writeText(spaceId: string, path: string, content: string, expectedRevision?: string | null) {
+    return this.workspaceFs(spaceId).writeText(path, content, expectedRevision);
   }
 
-  override archivePaths(agentId: string, paths: string[]) {
-    return this.workspaceFs(agentId).archive(paths);
+  override archivePaths(spaceId: string, paths: string[]) {
+    return this.workspaceFs(spaceId).archive(paths);
   }
 
-  override extractArchive(agentId: string, path: string, destination?: string) {
-    return this.workspaceFs(agentId).extract(path, destination);
+  override extractArchive(spaceId: string, path: string, destination?: string) {
+    return this.workspaceFs(spaceId).extract(path, destination);
   }
 
   override async startWorkspace(body: Parameters<RunnerClient["startWorkspace"]>[0]) {
@@ -157,9 +157,9 @@ export class LocalRunnerClient extends RunnerClient {
     return super.startWorkspace(body);
   }
 
-  override async getWorkspace(agentId: string) {
+  override async getWorkspace(spaceId: string) {
     const rows = (await this.local.runtime.list({ tenantId: this.local.tenantId, purpose: "workspace" }))
-      .filter((row) => row.labels["zakura.agent"] === agentId);
+      .filter((row) => row.labels["zakura.space"] === spaceId);
     const row = rows.find((item) => item.status === "running") ?? rows[0];
     if (!row) return null;
     const novncPort = row.ports.find((port) => port.containerPort === 6080)?.hostPort ?? null;
@@ -175,9 +175,9 @@ export class LocalRunnerClient extends RunnerClient {
     };
   }
 
-  override async stopWorkspace(agentId: string, remove = true) {
-    await this.jobs.killAgent(agentId);
-    await super.stopWorkspace(agentId, remove);
+  override async stopWorkspace(spaceId: string, remove = true) {
+    await this.jobs.killAgent(spaceId);
+    await super.stopWorkspace(spaceId, remove);
   }
 
   override async checkImageUpdates(body: Parameters<RunnerClient["checkImageUpdates"]>[0]) {
@@ -195,8 +195,8 @@ export class LocalRunnerClient extends RunnerClient {
     return { image: body.image, status: "updated", recreated };
   }
 
-  override async startStdio(agentId: string, command: string[], opts?: Parameters<RunnerClient["startStdio"]>[2]) {
-    const dockerId = opts?.dockerId ?? (await this.getWorkspace(agentId))?.dockerId;
+  override async startStdio(spaceId: string, command: string[], opts?: Parameters<RunnerClient["startStdio"]>[2]) {
+    const dockerId = opts?.dockerId ?? (await this.getWorkspace(spaceId))?.dockerId;
     if (!dockerId) throw new Error("本机工作区容器未运行");
     await this.local.requireContainer(dockerId);
     const exec = opts?.attach
@@ -205,15 +205,15 @@ export class LocalRunnerClient extends RunnerClient {
     return { ...exec.toWebStreams(), kill: () => exec.kill(), onStderr: (fn: (chunk: string) => void) => exec.onStderr(fn) };
   }
 
-  private job(agentId: string, jobId: string): ShellJob {
-    const job = this.jobs.getForAgent(agentId, jobId);
+  private job(spaceId: string, jobId: string): ShellJob {
+    const job = this.jobs.getForAgent(spaceId, jobId);
     if (!job) throw new Error("Shell job not found");
     return job;
   }
 
-  private async startContainerJob(agentId: string, dockerId: string, command: string[], opts?: Parameters<RunnerClient["startExecJob"]>[2]) {
+  private async startContainerJob(spaceId: string, dockerId: string, command: string[], opts?: Parameters<RunnerClient["startExecJob"]>[2]) {
     await this.local.requireContainer(dockerId);
-    const job = await this.local.runtime.execJob(dockerId, command, { agentId, ...opts });
+    const job = await this.local.runtime.execJob(dockerId, command, { agentId: spaceId, ...opts });
     this.jobs.add(job);
     setTimeout(() => {
       if (job.snapshot().running) void job.kill();
@@ -222,36 +222,36 @@ export class LocalRunnerClient extends RunnerClient {
     return job.snapshot();
   }
 
-  override async startExecJob(agentId: string, command: string[], opts?: Parameters<RunnerClient["startExecJob"]>[2]) {
-    const ws = await this.getWorkspace(agentId);
+  override async startExecJob(spaceId: string, command: string[], opts?: Parameters<RunnerClient["startExecJob"]>[2]) {
+    const ws = await this.getWorkspace(spaceId);
     if (!ws?.dockerId) throw new Error("本机工作区容器未运行");
-    return this.startContainerJob(agentId, ws.dockerId, command, opts);
+    return this.startContainerJob(spaceId, ws.dockerId, command, opts);
   }
 
-  override async getExecJob(agentId: string, jobId: string) {
-    return this.job(agentId, jobId).snapshot();
+  override async getExecJob(spaceId: string, jobId: string) {
+    return this.job(spaceId, jobId).snapshot();
   }
 
-  override async waitExecJob(agentId: string, jobId: string, waitMs: number, stdin?: string) {
-    const job = this.job(agentId, jobId);
+  override async waitExecJob(spaceId: string, jobId: string, waitMs: number, stdin?: string) {
+    const job = this.job(spaceId, jobId);
     if (stdin) job.write(stdin);
     return job.wait(waitMs);
   }
 
-  override async killExecJob(agentId: string, jobId: string) {
-    const job = this.job(agentId, jobId);
+  override async killExecJob(spaceId: string, jobId: string) {
+    const job = this.job(spaceId, jobId);
     await job.kill();
     return job.snapshot();
   }
 
-  override async resizeExecJob(agentId: string, jobId: string, cols: number, rows: number) {
-    await this.job(agentId, jobId).resize(cols, rows);
+  override async resizeExecJob(spaceId: string, jobId: string, cols: number, rows: number) {
+    await this.job(spaceId, jobId).resize(cols, rows);
   }
 
-  override async startAcpAdapterLoginShell(agentId: string, adapterId: string, opts?: Parameters<RunnerClient["startAcpAdapterLoginShell"]>[2]) {
-    const name = `zakura-acpa-${agentId}-${adapterId}-${opts?.sessionKey ?? ""}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
-    const snap = await this.startContainerJob(agentId, name, opts?.command ?? ["sh"], { env: opts?.env, workingDir: "/workspace" });
-    await this.resizeExecJob(agentId, snap.jobId, opts?.cols ?? 80, opts?.rows ?? 24);
+  override async startAcpAdapterLoginShell(spaceId: string, adapterId: string, opts?: Parameters<RunnerClient["startAcpAdapterLoginShell"]>[2]) {
+    const name = `zakura-acpa-${spaceId}-${adapterId}-${opts?.sessionKey ?? ""}`.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 63);
+    const snap = await this.startContainerJob(spaceId, name, opts?.command ?? ["sh"], { env: opts?.env, workingDir: "/workspace" });
+    await this.resizeExecJob(spaceId, snap.jobId, opts?.cols ?? 80, opts?.rows ?? 24);
     return snap;
   }
 }

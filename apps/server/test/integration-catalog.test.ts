@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("integration catalog credentials", () => {
   let dataDir: string;
@@ -209,7 +210,9 @@ describe("integration catalog credentials", () => {
       updatedAt: now,
     }).onConflictDoNothing();
     const agentId = newId();
+    const spaceId = await ensureTestSpace(db, tenantId);
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       slug: `agent-${newId().slice(0, 6)}`,

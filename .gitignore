@@ -21,3 +21,5 @@ certs/
 apps/server/src/mcp/stdio-bridge.bundle.mjs
 .claude/
 tsc-out.txt
+
+grok-bot-0.18-reconstructed-main

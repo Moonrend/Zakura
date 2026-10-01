@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
-import { agents, managedContainers, runtimeNodes } from "../db/schema.js";
+import { agents, managedContainers, runtimeNodes, spaces } from "../db/schema.js";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { agentWorkspaceHostPath } from "../services/agent-workspace.js";
 import {
@@ -772,7 +772,7 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
 
     const { client } = await nodes.requireRunnerClient(session.tenantId, node.id);
     try {
-      const recreated: Array<{ agentId: string; dockerId: string; name: string }> = [];
+      const recreated: Array<{ spaceId: string; dockerId: string; name: string }> = [];
       for (const image of images) {
         const result = await client.refreshWorkspaceImage({
           image,
@@ -868,12 +868,16 @@ $env:ZAKURA_AGENT_KIND = ${JSON.stringify(kind)}
       where: and(eq(agents.tenantId, session.tenantId), eq(agents.id, agentId)),
     });
     if (!agent) return c.json({ error: "Agent not found" }, 404);
-    // Only allow deleting residual when agent is no longer bound to this node
-    if (agent.runtimeNodeId === node.id) {
-      return c.json({ error: "Agent still bound to this node; unbind or migrate first" }, 400);
+    const space = await db.query.spaces.findFirst({
+      where: and(eq(spaces.tenantId, session.tenantId), eq(spaces.id, agent.spaceId)),
+    });
+    if (!space) return c.json({ error: "Space not found" }, 404);
+    // Only allow deleting residual when the space is no longer bound to this node
+    if (space.runtimeNodeId === node.id) {
+      return c.json({ error: "Space still bound to this node; unbind or migrate first" }, 400);
     }
     if (node.kind === "local") {
-      const root = agentWorkspaceHostPath(config, agentId);
+      const root = agentWorkspaceHostPath(config, space.id);
       if (existsSync(root)) {
         rmSync(root, { recursive: true, force: true });
       }

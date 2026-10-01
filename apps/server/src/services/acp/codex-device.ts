@@ -8,7 +8,7 @@ import {
   preferNewerCodexAuth,
 } from "@zakura/shared";
 import { newId } from "../../db/schema.js";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
 import { defaultJsonHttp, type JsonHttp } from "../model-upstream-auth/http.js";
 import {
@@ -75,7 +75,7 @@ export class CodexDeviceAuth {
     this.jsonHttp = asJsonHttp(http);
   }
 
-  async start(agent: Agent): Promise<CodexDeviceSnapshot> {
+  async start(agent: AgentWithSpace): Promise<CodexDeviceSnapshot> {
     this.dropExpired();
     const started = await requestCodexUserCode(this.jsonHttp);
     const row: PendingLogin = {
@@ -92,7 +92,7 @@ export class CodexDeviceAuth {
     return snapshot(row);
   }
 
-  async poll(agent: Agent, loginId: string): Promise<CodexDeviceSnapshot> {
+  async poll(agent: AgentWithSpace, loginId: string): Promise<CodexDeviceSnapshot> {
     const row = this.pending.get(loginId);
     if (!row || row.agentId !== agent.id) throw new Error("没有进行中的设备码登录");
     if (row.status !== "pending") return snapshot(row);
@@ -125,7 +125,7 @@ export class CodexDeviceAuth {
     return snapshot(row);
   }
 
-  cancel(agent: Agent, loginId: string): CodexDeviceSnapshot {
+  cancel(agent: AgentWithSpace, loginId: string): CodexDeviceSnapshot {
     const row = this.pending.get(loginId);
     if (!row || row.agentId !== agent.id) throw new Error("没有进行中的设备码登录");
     row.status = "cancelled";
@@ -142,7 +142,7 @@ export class CodexDeviceAuth {
 
 export async function writeDurableAuthJson(
   workspace: AgentWorkspaceService,
-  agent: Agent,
+  agent: AgentWithSpace,
   runtimeRaw: string,
 ): Promise<void> {
   const dest = `${acpDurableDir("codex")}/.codex/auth.json`;

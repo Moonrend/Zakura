@@ -166,6 +166,24 @@ export function registerAutomationRoutes(
     }
   });
 
+  app.get("/api/agents/:id/routines/:sid/runs", async (c) => {
+    const session = c.get("session")!;
+    const agent = await requireAgent(session.tenantId, c.req.param("id"));
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+    const schedule = await automation.getSchedule(
+      session.tenantId,
+      agent.id,
+      c.req.param("sid"),
+    );
+    if (!schedule) return c.json({ error: "Not found" }, 404);
+    const limitRaw = Number(c.req.query("limit") ?? "30");
+    const runs = await automation.listRuns(session.tenantId, agent.id, {
+      limit: Number.isFinite(limitRaw) ? limitRaw : 30,
+      scheduleId: schedule.id,
+    });
+    return c.json({ runs });
+  });
+
   // ── audit log ───────────────────────────────────────────────
 
   app.get("/api/agents/:id/automation/runs", async (c) => {

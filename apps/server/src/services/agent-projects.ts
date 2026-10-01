@@ -1,5 +1,6 @@
 /**
- * Agent 项目记录：对话分组与说明。工作区目录可选。
+ * Space 项目记录：对话分组与说明。工作区目录可选。
+ * 项目归 Space 所有，空间内成员 Agent 共享。
  */
 import { and, eq } from "drizzle-orm";
 import {
@@ -10,7 +11,7 @@ import {
 } from "@zakura/shared";
 import type { WorkspaceFs } from "@zakura/core";
 import type { Db } from "../db/client.js";
-import { agentProjects, newId, type AgentProjectRow } from "../db/schema.js";
+import { newId, spaceProjects, type SpaceProjectRow } from "../db/schema.js";
 
 export type AgentProjectDto = {
   slug: string;
@@ -21,7 +22,7 @@ export type AgentProjectDto = {
   path: string | null;
 };
 
-export function toProjectDto(row: AgentProjectRow): AgentProjectDto {
+export function toProjectDto(row: SpaceProjectRow): AgentProjectDto {
   return {
     slug: row.slug,
     name: row.name,
@@ -43,40 +44,40 @@ export function mergeProjectInstructions(
   return parts.length ? parts.join("\n\n") : undefined;
 }
 
-export async function getAgentProject(
+export async function getSpaceProject(
   db: Db,
-  agentId: string,
+  spaceId: string,
   slug: string,
-): Promise<AgentProjectRow | null> {
+): Promise<SpaceProjectRow | null> {
   const [row] = await db
     .select()
-    .from(agentProjects)
-    .where(and(eq(agentProjects.agentId, agentId), eq(agentProjects.slug, slug)))
+    .from(spaceProjects)
+    .where(and(eq(spaceProjects.spaceId, spaceId), eq(spaceProjects.slug, slug)))
     .limit(1);
   return row ?? null;
 }
 
-export async function listAgentProjectRows(db: Db, agentId: string): Promise<AgentProjectRow[]> {
-  return db.select().from(agentProjects).where(eq(agentProjects.agentId, agentId));
+export async function listSpaceProjectRows(db: Db, spaceId: string): Promise<SpaceProjectRow[]> {
+  return db.select().from(spaceProjects).where(eq(spaceProjects.spaceId, spaceId));
 }
 
-export async function upsertAgentProject(
+export async function upsertSpaceProject(
   db: Db,
   input: {
     tenantId: string;
-    agentId: string;
+    spaceId: string;
     slug: string;
     name?: string;
     description?: string;
     instructions?: string;
     hasWorkspace?: boolean;
   },
-): Promise<AgentProjectRow> {
-  const existing = await getAgentProject(db, input.agentId, input.slug);
+): Promise<SpaceProjectRow> {
+  const existing = await getSpaceProject(db, input.spaceId, input.slug);
   const now = new Date();
   if (existing) {
     const [row] = await db
-      .update(agentProjects)
+      .update(spaceProjects)
       .set({
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
@@ -84,16 +85,16 @@ export async function upsertAgentProject(
         ...(input.hasWorkspace !== undefined ? { hasWorkspace: input.hasWorkspace } : {}),
         updatedAt: now,
       })
-      .where(eq(agentProjects.id, existing.id))
+      .where(eq(spaceProjects.id, existing.id))
       .returning();
     return row ?? existing;
   }
   const [row] = await db
-    .insert(agentProjects)
+    .insert(spaceProjects)
     .values({
       id: newId(),
       tenantId: input.tenantId,
-      agentId: input.agentId,
+      spaceId: input.spaceId,
       slug: input.slug,
       name: input.name ?? input.slug,
       description: input.description ?? "",
@@ -105,27 +106,27 @@ export async function upsertAgentProject(
   return row;
 }
 
-export async function renameAgentProjectRow(
+export async function renameSpaceProjectRow(
   db: Db,
-  agentId: string,
+  spaceId: string,
   from: string,
   to: string,
-): Promise<AgentProjectRow | null> {
-  const existing = await getAgentProject(db, agentId, from);
+): Promise<SpaceProjectRow | null> {
+  const existing = await getSpaceProject(db, spaceId, from);
   if (!existing) return null;
   const now = new Date();
   const [row] = await db
-    .update(agentProjects)
+    .update(spaceProjects)
     .set({ slug: to, name: existing.name === from ? to : existing.name, updatedAt: now })
-    .where(eq(agentProjects.id, existing.id))
+    .where(eq(spaceProjects.id, existing.id))
     .returning();
   return row ?? null;
 }
 
-export async function deleteAgentProjectRow(db: Db, agentId: string, slug: string): Promise<boolean> {
-  const existing = await getAgentProject(db, agentId, slug);
+export async function deleteSpaceProjectRow(db: Db, spaceId: string, slug: string): Promise<boolean> {
+  const existing = await getSpaceProject(db, spaceId, slug);
   if (!existing) return false;
-  await db.delete(agentProjects).where(eq(agentProjects.id, existing.id));
+  await db.delete(spaceProjects).where(eq(spaceProjects.id, existing.id));
   return true;
 }
 
@@ -133,33 +134,33 @@ export async function deleteAgentProjectRow(db: Db, agentId: string, slug: strin
 export async function syncProjectsFromWorkspace(
   db: Db,
   tenantId: string,
-  agentId: string,
+  spaceId: string,
   slugs: string[],
 ): Promise<void> {
-  const rows = await listAgentProjectRows(db, agentId);
+  const rows = await listSpaceProjectRows(db, spaceId);
   const have = new Set(rows.map((r) => r.slug));
   const disk = new Set(slugs);
   for (const slug of slugs) {
     if (!isValidProjectSlug(slug)) continue;
     if (!have.has(slug)) {
-      await upsertAgentProject(db, {
+      await upsertSpaceProject(db, {
         tenantId,
-        agentId,
+        spaceId,
         slug,
         hasWorkspace: true,
       });
     } else {
       const row = rows.find((r) => r.slug === slug);
       if (row && !row.hasWorkspace) {
-        await upsertAgentProject(db, { tenantId, agentId, slug, hasWorkspace: true });
+        await upsertSpaceProject(db, { tenantId, spaceId, slug, hasWorkspace: true });
       }
     }
   }
   for (const row of rows) {
     if (row.hasWorkspace && !disk.has(row.slug)) {
-      await upsertAgentProject(db, {
+      await upsertSpaceProject(db, {
         tenantId,
-        agentId,
+        spaceId,
         slug: row.slug,
         hasWorkspace: false,
       });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { and, eq } from "drizzle-orm";
-import { agents, tenantMemberships, zakurabotFiles } from "../src/db/schema.js";
+import { agents, spaces, tenantMemberships, zakurabotFiles } from "../src/db/schema.js";
 import { ZAKURABOT_MAX_FILE_BYTES, type ZakurabotFileView } from "../src/services/zakurabot-protocol.js";
 import { zakurabotHarness } from "./helpers/zakurabot.js";
 
@@ -67,7 +67,8 @@ describe("Zakura Bot scoped App API", () => {
     await run.finish();
     const count = h.runs.length;
     const row = await h.db.query.zakurabotFiles.findFirst({ where: eq(zakurabotFiles.id, file.id) });
-    const fs = await h.workspaceFs.forAgentBinding({ id: agentId });
+    const agentRow = await h.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    const fs = await h.workspaceFs.forAgentBinding({ spaceId: agentRow!.spaceId });
     await fs.delete(row!.path);
     socket.send(frame);
     socket.send({ type: "ping" });
@@ -76,7 +77,7 @@ describe("Zakura Bot scoped App API", () => {
     socket.send({ ...frame, attachments: undefined });
     await socket.wait("error", (error) => error.clientMessageId === frame.clientMessageId);
     const history = await (await get(`agents/${agentId}/history`, ctx.token)).json();
-    assert.equal(history.messages.filter((message: { type: string }) => message.type === "message").length, 1);
+    assert.equal(history.items.filter((item: { frame: { type: string } }) => item.frame.type === "message").length, 1);
   });
 
   it("accepts attachment-only messages, rejects foreign files and enforces byte/capability limits", async () => {
@@ -96,7 +97,8 @@ describe("Zakura Bot scoped App API", () => {
     foreign.send({ type: "send", agentId: other.bindings[0]!.agentId, clientMessageId: "foreign-file", text: "hello", attachments: [{ fileId: file.id }] });
     await foreign.wait("error", (error) => error.clientMessageId === "foreign-file");
     assert.equal(h.runs.some((run) => run.handle.inboundMessageId === "foreign-file"), false);
-    await h.db.update(agents).set({ enableFs: false }).where(eq(agents.id, agentId));
+    const agentRow2 = await h.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    await h.db.update(spaces).set({ enableComputer: false }).where(eq(spaces.id, agentRow2!.spaceId));
     assert.equal((await upload(agentId, ctx.token)).status, 403);
     assert.equal((await fetch(file.url, { headers: headers(ctx.token) })).status, 403);
   });
@@ -116,7 +118,8 @@ describe("Zakura Bot scoped App API", () => {
     assert.match(download.headers.get("content-disposition")!, /%27s%20%281%29\.txt$/);
     assert.equal(await download.text(), "hello");
     const row = await h.db.query.zakurabotFiles.findFirst({ where: eq(zakurabotFiles.id, file.id) });
-    await (await h.workspaceFs.forAgentBinding({ id: agentId })).delete(row!.path);
+    const agentRow3 = await h.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    await (await h.workspaceFs.forAgentBinding({ spaceId: agentRow3!.spaceId })).delete(row!.path);
     assert.equal((await fetch(file.url, { headers: headers(ctx.token) })).status, 404);
     const socket = await h.connect(ctx.token);
     await socket.wait("ready");

@@ -793,6 +793,12 @@ function PlatformSidebar({
         children: buildServerChildren(showPlatformServices),
       },
       {
+        id: "spaces",
+        href: "/dashboard/spaces",
+        label: "Spaces",
+        icon: Monitor,
+      },
+      {
         id: "memory",
         href: "/dashboard/memory",
         label: "记忆",

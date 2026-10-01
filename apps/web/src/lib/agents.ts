@@ -14,6 +14,9 @@ export type AgentListItem = {
   name: string;
   slug: string;
   description?: string;
+  /** 所属空间（0062 起 Agent 归入 Space） */
+  spaceId?: string;
+  spaceName?: string;
   enableComputer: boolean;
   enableMemory: boolean;
   memoryProviderId?: string | null;

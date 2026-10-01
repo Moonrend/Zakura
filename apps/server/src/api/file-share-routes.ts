@@ -32,7 +32,7 @@ export function registerFileShareRoutes(
 
     try {
       const fs = await fsProvider.forAgentBinding({
-        id: agent.id,
+        spaceId: agent.spaceId,
         tenantId: agent.tenantId,
         runtimeNodeId: agent.runtimeNodeId,
       });

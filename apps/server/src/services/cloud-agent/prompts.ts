@@ -1,8 +1,8 @@
 /**
  * 系统提示词构建：主对话与子代理各一套结构化中文提示，
- * Agent 自定义指令（configJson.cloud.systemPrompt）在两者中均生效。
+ * AgentWithSpace 自定义指令（configJson.cloud.systemPrompt）在两者中均生效。
  */
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import { getAgentMcpMode, getAgentProviders } from "../agent-providers.js";
 import { SUBAGENT_TOOL_QUALIFIED } from "../mcp-gateway.js";
 import { DELEGATE_TOOL_NAME } from "./tools.js";
@@ -17,7 +17,7 @@ export const CONTINUE_TURN_PROMPT =
   "请从上次中断处继续执行当前任务。已完成的步骤不要重复，从未做完的地方接着做。";
 
 export function buildSystemPrompt(
-  agent: Agent,
+  agent: AgentWithSpace,
   cloud: CloudAgentConfig,
   extra?: {
     memoryContext?: string;
@@ -28,7 +28,7 @@ export function buildSystemPrompt(
     skills?: string;
     /** 用户本回合在 Composer 里显式点选的技能名 */
     requestedSkills?: string[];
-    /** 远程通道上下文（Chat SDK）；有则 Agent 须用 chat_reply 回复 */
+    /** 远程通道上下文（Chat SDK）；有则 AgentWithSpace 须用 chat_reply 回复 */
     remoteChannel?: string;
     /** 会话绑定的项目 slug */
     project?: string | null;
@@ -39,7 +39,7 @@ export function buildSystemPrompt(
   const providers = getAgentProviders(agent);
   const now = new Date();
   const lines = [
-    `你是 Zakura Agent「${agent.name}」（slug: ${agent.slug}），运行在 Zakura 多 Agent 平台上。`,
+    `你是 Zakura AgentWithSpace「${agent.name}」（slug: ${agent.slug}），运行在 Zakura 多 AgentWithSpace 平台上。`,
     `当前时间：${now.toISOString()}。会话持久化保存，用户可能随时从其他设备继续。`,
     "",
     "# 工作方式",
@@ -55,7 +55,7 @@ export function buildSystemPrompt(
     "- re_shell_exec 的输出会实时显示给用户。命令若停在提示符或长时间无输出，会先返回 status=running 和 job_id：用同一工具传 job_id 继续等待，stdin 回答提示（记得换行），kill=true 结束进程。",
     "- 用户要求定时/周期执行或「有事件就通知我」时，用 create_routine：cron 或 listener 二选一，不要假装已设置。产生文件的任务必须带 project。能听事件就不要用 @every 5m 轮询。",
     "- 需要用户做选择、确认或提供密钥时，用 ask_user（选项卡；secret 掩码；mode=sync 等待 / async 稍后送达）。Routine/长时间任务必须带 timeout_seconds 与 timeout_action=skip|default。",
-    "- 若工具列表中有 list_acp_agents / spawn_acp_agent：用户明确要 Claude Code、Codex 等第三方编码 Agent 时，用 spawn_acp_agent 开独立会话，不要假装已调用。",
+    "- 若工具列表中有 list_acp_agents / spawn_acp_agent：用户明确要 Claude Code、Codex 等第三方编码 AgentWithSpace 时，用 spawn_acp_agent 开独立会话，不要假装已调用。",
     extra?.remoteChannel
       ? "- 破坏性或不可逆操作（删除、覆盖、向无关频道/陌生人发送）前必须先向用户确认；向当前线程正常回帖不需要确认。"
       : "- 破坏性或不可逆操作（删除、覆盖、对外发送）前必须先向用户确认。",
@@ -85,7 +85,7 @@ export function buildSystemPrompt(
     lines.push(
       "",
       "# 协作",
-      `可通过 ${DELEGATE_TOOL_NAME} 将独立子任务委派给以下同租户 Agent（它们有各自的工具与记忆）：`,
+      `可通过 ${DELEGATE_TOOL_NAME} 将独立子任务委派给以下同租户 AgentWithSpace（它们有各自的工具与记忆）：`,
       extra.peerAgents,
     );
   }
@@ -161,10 +161,10 @@ export function buildSystemPrompt(
 
 /**
  * 子代理系统提示词：明确任务契约（范围、隔离、输出直达主代理）、
- * 工作方式与输出格式；Agent 自定义指令对子代理同样生效。
+ * 工作方式与输出格式；AgentWithSpace 自定义指令对子代理同样生效。
  */
 export function buildSubagentPrompt(
-  agent: Agent,
+  agent: AgentWithSpace,
   cloud: CloudAgentConfig,
   extra?: {
     expectedOutput?: string;
@@ -177,7 +177,7 @@ export function buildSubagentPrompt(
   },
 ): string {
   const lines = [
-    `你是 Zakura Agent「${agent.name}」派生的子代理（Subagent），为完成一个明确的子任务而临时创建，任务结束即销毁。`,
+    `你是 Zakura AgentWithSpace「${agent.name}」派生的子代理（Subagent），为完成一个明确的子任务而临时创建，任务结束即销毁。`,
     `当前时间：${new Date().toISOString()}。`,
     "",
     "# 任务契约",
@@ -215,7 +215,7 @@ export function buildSubagentPrompt(
     lines.push("", extra.projectInstructions.trim());
   }
   if (cloud.systemPrompt?.trim()) {
-    lines.push("", "# Agent 自定义指令（对你同样生效）", cloud.systemPrompt.trim());
+    lines.push("", "# AgentWithSpace 自定义指令（对你同样生效）", cloud.systemPrompt.trim());
   }
   return lines.join("\n");
 }

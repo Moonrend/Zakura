@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 const SCRATCH =
   process.env.GROK_SCRATCH || join(tmpdir(), "grok-cloud-session-seq");
@@ -47,7 +48,9 @@ describe("CloudAgentSessionStore.appendEvent concurrency", () => {
       createdAt: now,
       updatedAt: now,
     });
+        const spaceId = await ensureTestSpace(db, tenantId, { enableComputer: false });
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "a",

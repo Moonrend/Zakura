@@ -1276,10 +1276,7 @@ export function ToolActivity({
         agentId={agentId}
         sessionId={sessionId}
         open={openRows[`c:${s.call.toolCallId}`]}
-        onOpenChange={(next) => {
-          setRowOpen(`c:${s.call.toolCallId}`, next);
-          if (next) setExpanded(true);
-        }}
+        onOpenChange={(next) => setRowOpen(`c:${s.call.toolCallId}`, next)}
       />
     );
   };
@@ -1336,6 +1333,7 @@ export function ToolActivity({
                 setShowAll(false);
                 for (const s of middle) {
                   if (s.kind === "tool") setRowOpen(`c:${s.call.toolCallId}`, false);
+                  else if (s.kind === "reasoning") setRowOpen(`r:${s.id}`, false);
                 }
               } else {
                 setShowAll(true);
@@ -1356,8 +1354,9 @@ export function ToolActivity({
           type="button"
           onClick={() => {
             setExpanded(false);
-            for (const s of hydratedSteps.slice(1)) {
+            for (const s of hydratedSteps) {
               if (s.kind === "tool") setRowOpen(`c:${s.call.toolCallId}`, false);
+              else if (s.kind === "reasoning") setRowOpen(`r:${s.id}`, false);
             }
           }}
           className="group/more -ml-1.5 flex max-w-full items-center gap-2 rounded-lg py-1 pr-2 pl-1.5 text-left text-[12.5px] text-muted-foreground/70 transition-colors duration-150 hover:text-foreground"

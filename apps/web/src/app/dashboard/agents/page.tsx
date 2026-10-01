@@ -13,10 +13,18 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
+import { fetchSpaces, type SpaceItem } from "@/lib/spaces";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -96,6 +104,11 @@ function AgentCard({ agent }: { agent: AgentListItem }) {
           ) : (
             <p className="mt-0.5 truncate text-xs text-muted-foreground/70">{agent.slug}</p>
           )}
+          {agent.spaceName ? (
+            <p className="mt-0.5 truncate text-[11px] text-muted-foreground/70">
+              {agent.spaceName}
+            </p>
+          ) : null}
         </div>
 
         <span className="absolute top-4 right-4 hidden text-xs text-muted-foreground sm:block">
@@ -145,17 +158,29 @@ function EmptyState({ onNew }: { onNew: () => void }) {
 export default function AgentsListPage() {
   const router = useRouter();
   const [list, setList] = useState<AgentListItem[]>([]);
+  const [spaces, setSpaces] = useState<SpaceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [spaceId, setSpaceId] = useState("");
+  const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState("");
   const filtered = useFuzzySearch(list, q, { keys: AGENT_KEYS });
+  const spaceItems = useMemo(
+    () => spaces.map((s) => ({ value: s.id, label: s.name })),
+    [spaces],
+  );
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      setList(await fetchAgents());
+      const [agentRows, spaceRows] = await Promise.all([fetchAgents(), fetchSpaces()]);
+      setList(agentRows);
+      setSpaces(spaceRows);
+      setSpaceId(
+        (prev) => prev || (spaceRows.find((s) => s.isDefault) ?? spaceRows[0])?.id || "",
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -180,6 +205,8 @@ export default function AgentsListPage() {
 
   function resetCreate() {
     setName("");
+    setDescription("");
+    setSpaceId(spaces.find((s) => s.isDefault)?.id ?? spaces[0]?.id ?? "");
   }
 
   async function create() {
@@ -187,11 +214,20 @@ export default function AgentsListPage() {
       toast.error("请填写名称");
       return;
     }
+    if (!spaceId) {
+      toast.error("请选择所属空间");
+      return;
+    }
     setBusy(true);
     try {
       const res = await api<AgentListItem>("/api/agents", {
         method: "POST",
-        json: { name: name.trim(), createApiKey: false },
+        json: {
+          name: name.trim(),
+          spaceId,
+          description: description.trim() || undefined,
+          createApiKey: false,
+        },
       });
       setOpen(false);
       resetCreate();
@@ -287,6 +323,37 @@ export default function AgentsListPage() {
               <p className="text-xs text-muted-foreground">
                 你可以随时修改
               </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>所属空间</Label>
+              <Select
+                value={spaceId}
+                onValueChange={(v) => {
+                  if (v != null) setSpaceId(v);
+                }}
+                items={spaceItems}
+                disabled={busy || spaceItems.length === 0}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择空间" />
+                </SelectTrigger>
+                <SelectContent>
+                  {spaceItems.map((i) => (
+                    <SelectItem key={i.value} value={i.value}>
+                      {i.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="agent-desc">描述</Label>
+              <Input
+                id="agent-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="可选"
+              />
             </div>
             <DialogFooter>
               <Button

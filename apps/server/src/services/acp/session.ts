@@ -1,5 +1,5 @@
 /**
- * ACP 会话：在 workspace 容器里拉起第三方 Agent，把协议事件写入 Cloud 会话。
+ * ACP 会话：在 workspace 容器里拉起第三方 AgentWithSpace，把协议事件写入 Cloud 会话。
  */
 import * as acp from "@agentclientprotocol/sdk";
 import { createHash } from "node:crypto";
@@ -80,7 +80,7 @@ async function fetchAcpGatewayModels(
   }
 }
 import { newId } from "../../db/schema.js";
-import type { Agent } from "../../db/schema.js";
+import type { AgentWithSpace } from "../agent-view.js";
 import type { DockerPullEvent } from "../../runtime/docker.js";
 import type { AgentService } from "../agents.js";
 import type { AgentWorkspaceService } from "../agent-workspace.js";
@@ -169,7 +169,7 @@ type AdapterProcess = {
   zakuraRouted: boolean;
   gatewayModels?: LiveRuntime["gatewayModels"];
   /** Owning agent — needed at dispose time, when no refs remain to read it from. */
-  agent: Agent;
+  agent: AgentWithSpace;
   /**
    * Set once the shared connection has closed (adapter crash, container OOM,
    * attach stream drop). A dead process must never be handed out for reuse:
@@ -211,7 +211,7 @@ export type LiveRuntime = {
   permissions: Map<string, PendingPermission>;
   elicitations: Map<string, PendingDecision<acp.CreateElicitationResponse> & { requestId?: string }>;
   layout: AcpRuntimeLayout;
-  agent: Agent;
+  agent: AgentWithSpace;
   /** Registry adapter + version this process is executing from, when managed. */
   adapter?: { id: string; version: string };
   /** Zakura 路由：模型目录与切换都以网关别名表达 */
@@ -313,7 +313,7 @@ export class AcpSessionService {
   }
 
   /** Adapter versions currently backing a live runtime for `agent`. */
-  private inUseAdapterVersions(agent: Agent): Array<{ id: string; version: string }> {
+  private inUseAdapterVersions(agent: AgentWithSpace): Array<{ id: string; version: string }> {
     const out = new Map<string, { id: string; version: string }>();
     for (const rt of this.byChat.values()) {
       if (rt.agent.id !== agent.id || !rt.adapter) continue;
@@ -334,7 +334,7 @@ export class AcpSessionService {
     project?: string | null;
   }) {
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
     const setup = requireSetup(agent, input.profileId);
     if (this.countTenantActive(input.tenantId) >= this.maxConcurrentPerTenant) {
       throw new Error(
@@ -392,7 +392,7 @@ export class AcpSessionService {
     else this.tenantInflight.set(tenantId, cur);
   }
 
-  private async startDraftRuntime(agent: Agent, sessionId: string, setup: AcpAgentSetup) {
+  private async startDraftRuntime(agent: AgentWithSpace, sessionId: string, setup: AcpAgentSetup) {
     const epoch = (this.draftEpoch.get(sessionId) ?? 0) + 1;
     this.draftEpoch.set(sessionId, epoch);
     const boot = this.ensureRuntime(agent, sessionId, setup);
@@ -401,7 +401,7 @@ export class AcpSessionService {
       const live = await Promise.race([
         boot,
         sleep(DRAFT_BOOT_TIMEOUT_MS).then(() => {
-          throw new Error("Agent 启动超时");
+          throw new Error("AgentWithSpace 启动超时");
         }),
       ]);
       if (this.draftEpoch.get(sessionId) !== epoch) {
@@ -448,7 +448,7 @@ export class AcpSessionService {
     if (session.activeRunId) throw new Error(RUN_BUSY_MESSAGE);
 
     const agent = await this.deps.agentService.get(input.tenantId, input.agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
 
     const origin = safeOrigin(session.originJson);
     const profileId = origin.acpProfileId;
@@ -532,7 +532,7 @@ export class AcpSessionService {
    *   agent 自己去 fs/read_text_file，而不会整轮 prompt 被拒。
    */
   private async buildPromptBlocks(input: {
-    agent: Agent;
+    agent: AgentWithSpace;
     content: string;
     attachments: CloudAgentAttachment[] | null;
     capabilities: AcpPromptCapabilities;
@@ -569,7 +569,7 @@ export class AcpSessionService {
       try {
         if (fs === undefined) {
           fs = await provider.forAgentBinding({
-            id: input.agent.id,
+            spaceId: input.agent.spaceId,
             tenantId: input.agent.tenantId,
             runtimeNodeId: input.agent.runtimeNodeId,
           });
@@ -595,7 +595,7 @@ export class AcpSessionService {
 
   private async runPromptTurn(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     content: string;
@@ -654,7 +654,7 @@ export class AcpSessionService {
         new Promise<typeof TICK>((resolve) => setTimeout(() => resolve(TICK), 250)),
       ]);
       if (winner === CLOSED) {
-        throw new Error("ACP Agent 进程意外退出");
+        throw new Error("ACP AgentWithSpace 进程意外退出");
       }
       if (winner === TICK) {
         const now = Date.now();
@@ -764,7 +764,7 @@ export class AcpSessionService {
 
   async spawn(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     profileId: string;
     task: string;
     project?: string | null;
@@ -933,7 +933,7 @@ export class AcpSessionService {
       }
     }
     const agent = await this.deps.agentService.get(tenantId, agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
     const setup = requireSetup(agent, profileId);
     // A launch-time model change is a configuration boundary. Loading the old
     // ACP session can restore its old model from the adapter's own session DB
@@ -1089,7 +1089,7 @@ export class AcpSessionService {
   }
 
   async probe(
-    agent: Agent,
+    agent: AgentWithSpace,
     profileId: string,
   ): Promise<{ installed: boolean; command: string; output: string }> {
     const setup = requireSetup(agent, profileId, true);
@@ -1119,7 +1119,7 @@ export class AcpSessionService {
    *   - custom/自定义 → 沿用 installHint 白名单
    */
   async install(
-    agent: Agent,
+    agent: AgentWithSpace,
     profileId: string,
     opts?: {
       version?: string;
@@ -1190,7 +1190,7 @@ export class AcpSessionService {
    * same image.
    */
   startInstall(
-    agent: Agent,
+    agent: AgentWithSpace,
     profileId: string,
     opts?: { version?: string; update?: boolean; rebuild?: boolean },
   ): AcpAdapterInstallProgress {
@@ -1292,7 +1292,7 @@ export class AcpSessionService {
   }
 
   /** Stop every live/warm adapter process for an agent, optionally one profile. */
-  async invalidateAgentRuntimes(agent: Agent, profileId?: string): Promise<void> {
+  async invalidateAgentRuntimes(agent: AgentWithSpace, profileId?: string): Promise<void> {
     const lives = [...this.byChat.values()].filter(
       (live) => live.agent.id === agent.id && (!profileId || live.profileId === profileId),
     );
@@ -1321,7 +1321,7 @@ export class AcpSessionService {
    * skips the install step entirely. Called when an ACP profile is saved
    * or when the workspace starts.
    */
-  async preWarmAdapter(agent: Agent, profileId: string): Promise<void> {
+  async preWarmAdapter(agent: AgentWithSpace, profileId: string): Promise<void> {
     try {
       const setup = requireSetup(agent, profileId, true);
       const profile = publicProfileForSetup(setup);
@@ -1352,7 +1352,7 @@ export class AcpSessionService {
     const origin = safeOrigin(session.originJson);
     if (!origin.acpProfileId) throw new Error("会话未绑定 ACP profile");
     const agent = await this.deps.agentService.get(tenantId, agentId);
-    if (!agent) throw new Error("Agent 不存在");
+    if (!agent) throw new Error("AgentWithSpace 不存在");
     const setup = requireSetup(agent, origin.acpProfileId);
     const live = await this.ensureRuntime(agent, sessionId, setup, {
       existingAcpSessionId: origin.acpSessionId,
@@ -1362,7 +1362,7 @@ export class AcpSessionService {
   }
 
   private async ensureRuntime(
-    agent: Agent,
+    agent: AgentWithSpace,
     chatSessionId: string,
     setup: AcpAgentSetup,
     opts?: { existingAcpSessionId?: string; runId?: string },
@@ -1390,7 +1390,7 @@ export class AcpSessionService {
    * the caller falls back to the legacy per-binding fan-out.
    */
   private async resolveMcpGateway(
-    agent: Agent,
+    agent: AgentWithSpace,
     profileId: string,
   ): Promise<{ baseUrl: string; slug: string; apiKey: string } | undefined> {
     const baseUrl = this.deps.publicBaseUrl?.trim();
@@ -1421,7 +1421,7 @@ export class AcpSessionService {
    * mount), otherwise in the workspace container (legacy path).
    */
   private async provisionAdapter(
-    agent: Agent,
+    agent: AgentWithSpace,
     profileId: string,
     currentCommand: string,
     useSidecar: boolean,
@@ -1434,12 +1434,12 @@ export class AcpSessionService {
    * credentials and generated files can differ between chats; sharing PID 1
    * by agent/profile made model changes silently reconnect to stale state.
    */
-  private procKey(agent: Agent, profileId: string, chatSessionId: string): string {
+  private procKey(agent: AgentWithSpace, profileId: string, chatSessionId: string): string {
     return `${agent.tenantId}:${agent.id}:${profileId}:${chatSessionId}`;
   }
 
   private async bootRuntime(
-    agent: Agent,
+    agent: AgentWithSpace,
     chatSessionId: string,
     setup: AcpAgentSetup,
     opts?: { existingAcpSessionId?: string; runId?: string },
@@ -1558,12 +1558,12 @@ export class AcpSessionService {
     const [provisioned] = await Promise.all([provisionP, workspaceReady, sidecarReady]);
     if (provisioned) setup = provisioned.agents[setup.id] ?? setup;
     if (setup.modelProvider === "zakura" && !setup.managed.zakura_api_key?.trim()) {
-      throw new Error("Zakura 路由缺少 Agent Gateway API key，请重新保存 ACP 配置");
+      throw new Error("Zakura 路由缺少 AgentWithSpace Gateway API key，请重新保存 ACP 配置");
     }
 
     // Model selection made before the first prompt is stored on the chat
     // session. Overlay it onto this launch only: it must not mutate the
-    // Agent-wide ACP profile, and it lets every adapter receive its own
+    // AgentWithSpace-wide ACP profile, and it lets every adapter receive its own
     // environment/startup model before session/new.
     const launchSetup = withSessionModel(setup, session?.model);
     const profile = publicProfileForSetup(launchSetup);
@@ -1592,7 +1592,7 @@ export class AcpSessionService {
     // 只靠 env 传递）。所有走 Zakura 路由的 profile 都拉取网关模型别名：
     // 一是填充启动配置，二是运行时覆盖适配器自己公告的模型目录——
     // codex/pi 等公告的内置模型在网关侧都是无效别名。
-    // 未显式选模型时优先沿用 Agent 的 Zakura 默认 chat 模型，
+    // 未显式选模型时优先沿用 AgentWithSpace 的 Zakura 默认 chat 模型，
     // 避免落到网关列表里排最前的免费模型。
     let preferredModel: string | undefined;
     try {
@@ -1682,7 +1682,7 @@ export class AcpSessionService {
         if (result.exitCode !== 0) {
           const stderr = (result.stderr ?? "").trim();
           if (stderr.includes("ZAKURA_BIN_MISSING")) {
-            throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 Agent CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
+            throw new Error(`工作区里找不到 ${launch.command}（容器内未安装该 AgentWithSpace CLI，请到 Runner 详情页检查镜像更新并重建工作区后重试）`);
           }
           throw new Error(`工作区初始化脚本失败（exit ${result.exitCode}）：${stderr || "无 stderr 输出"}`);
         }
@@ -1986,7 +1986,7 @@ export class AcpSessionService {
     } catch (err) {
       await this.teardown(live).catch(() => undefined);
       await cleanupRuntimeDir();
-      // "ACP connection closed" 是 Agent 进程在 initialize 前后退出导致的含糊报错。
+      // "ACP connection closed" 是 AgentWithSpace 进程在 initialize 前后退出导致的含糊报错。
       // 现在有了 stderr 尾部就优先用它——fx 缺凭证/版本不兼容等真正的退出原因都在
       // stderr 里；只有真的没有 stderr 时才回退到「镜像过旧」的猜测提示。
       throw toAcpConnectionHint(err, stderrTail);
@@ -2007,7 +2007,7 @@ export class AcpSessionService {
    */
   private async joinProcess(
     proc: AdapterProcess,
-    agent: Agent,
+    agent: AgentWithSpace,
     chatSessionId: string,
     setup: AcpAgentSetup,
     opts?: { existingAcpSessionId?: string; runId?: string },
@@ -2385,7 +2385,7 @@ export class AcpSessionService {
   }
 }
 
-function requireSetup(agent: Agent, profileId: string, allowDisabled = false): AcpAgentSetup {
+function requireSetup(agent: AgentWithSpace, profileId: string, allowDisabled = false): AcpAgentSetup {
   const config = readAgentAcpConfig(agent);
   const existing = config.agents[profileId];
   if (existing && (existing.enabled || allowDisabled)) return existing;
@@ -2409,7 +2409,7 @@ function requireSetup(agent: Agent, profileId: string, allowDisabled = false): A
   throw new Error(
     enabled.length
       ? `ACP agent「${profileId}」未启用`
-      : "尚未启用任何 ACP agent，请到 Agent 设置里配置",
+      : "尚未启用任何 ACP agent，请到 AgentWithSpace 设置里配置",
   );
 }
 
@@ -2725,14 +2725,14 @@ export function isAuthRequiredError(err: unknown): boolean {
 }
 
 /**
- * Agent 进程在握持 stdio 阶段（initialize 或之前）就退出，导致 ACP SDK 把
+ * AgentWithSpace 进程在握持 stdio 阶段（initialize 或之前）就退出，导致 ACP SDK 把
  * pending request reject 成 "ACP connection closed"。最常见原因是工作区
- * 镜像过旧——里面没装该 Agent 的 CLI（如 fx），或版本过旧不兼容当前协议。
+ * 镜像过旧——里面没装该 AgentWithSpace 的 CLI（如 fx），或版本过旧不兼容当前协议。
  * 识别后转成可操作提示，而不是把含糊的 "ACP connection closed" 原样抛给用户。
  */
 export function isAcpConnectionClosed(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /ACP connection closed|ACP Agent 进程意外退出|connection closed/i.test(msg);
+  return /ACP connection closed|ACP AgentWithSpace 进程意外退出|connection closed/i.test(msg);
 }
 
 /** 把 connection-closed 类错误转成可操作提示。非此类错误原样返回。 */
@@ -2745,11 +2745,11 @@ function toAcpConnectionHint(err: unknown, stderrTail?: string): unknown {
   // 不再只猜测「镜像过旧」。stderr 尾部足以定位绝大多数启动失败。
   if (stderrTail?.trim()) {
     return new Error(
-      `Agent 进程在初始化时退出。进程 stderr 尾部：\n${stderrTail.trim()}`,
+      `AgentWithSpace 进程在初始化时退出。进程 stderr 尾部：\n${stderrTail.trim()}`,
     );
   }
   return new Error(
-    "Agent 进程在初始化时退出且未输出 stderr。这通常是工作区镜像过旧（未预装该 Agent 的 CLI 或版本不兼容），请到 Runner 详情页检查镜像更新并重建工作区后重试。",
+    "AgentWithSpace 进程在初始化时退出且未输出 stderr。这通常是工作区镜像过旧（未预装该 AgentWithSpace 的 CLI 或版本不兼容），请到 Runner 详情页检查镜像更新并重建工作区后重试。",
   );
 }
 

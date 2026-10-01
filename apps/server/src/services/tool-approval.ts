@@ -32,14 +32,14 @@ import {
 } from "@zakura/shared";
 import { recordPlatformFault } from "@zakura/core";
 import type { Db } from "../db/client.js";
-import type { Agent } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import { agentToolApprovals, agents, newId } from "../db/schema.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
 import type { ModelRouterService } from "./model-router.js";
 
 export type ToolApprovalGateInput = {
   tenantId: string;
-  agent: Agent;
+  agent: AgentWithSpace;
   sessionId: string;
   runId: string;
   sessionKind?: string;
@@ -187,7 +187,7 @@ export class ToolApprovalService {
 
   /** 工具注解读取（由运行时注入，基于 gateway 缓存；缺省按名字推断） */
   annotationsResolver:
-    | ((agent: Agent, qualifiedName: string) => Promise<McpToolAnnotations | undefined>)
+    | ((agent: AgentWithSpace, qualifiedName: string) => Promise<McpToolAnnotations | undefined>)
     | null = null;
 
   start(): void {
@@ -746,7 +746,7 @@ export class ToolApprovalService {
   }
 
   private async resolveAnnotations(
-    agent: Agent,
+    agent: AgentWithSpace,
     qualifiedName: string,
   ): Promise<McpToolAnnotations | undefined> {
     try {

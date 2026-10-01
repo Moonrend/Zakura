@@ -12,7 +12,9 @@ import {
   mcpPolicies,
   memoryProviders,
   newId,
+  spaces,
   type Agent,
+  type Space,
 } from "../db/schema.js";
 import type { DockerRuntime } from "../runtime/docker.js";
 import {
@@ -24,10 +26,11 @@ import {
 import {
   AgentWorkspaceService,
   agentDataDir,
-  agentWorkspaceHostPath,
   resolveStackMode,
 } from "./agent-workspace.js";
-import { isComputerEnvEnabled, needsContainer, normalizeCaps } from "./agent-caps.js";
+import { SpaceService } from "./spaces.js";
+import { hydrateAgent, type AgentWithSpace } from "./agent-view.js";
+import { isComputerEnvEnabled, needsContainer } from "./agent-caps.js";
 import {
   ensureCapabilityInstance,
   readInstanceConfig,
@@ -76,6 +79,7 @@ export { isComputerEnvEnabled, needsContainer, normalizeCaps } from "./agent-cap
 
 export class AgentService {
   readonly workspace: AgentWorkspaceService;
+  readonly spaces: SpaceService;
   private readonly agentCache = new TtlCache<Agent>(AGENT_CACHE_TTL_MS);
   /** 绑定变更时清 Agent 工具缓存（由 McpGateway 注入） */
   private toolsCacheInvalidator: ((agentId: string) => void) | null = null;
@@ -87,6 +91,32 @@ export class AgentService {
     private readonly nodes?: import("./runtime-nodes.js").RuntimeNodeService,
   ) {
     this.workspace = new AgentWorkspaceService(db, runtime, config, nodes);
+    this.spaces = new SpaceService(db, config);
+  }
+
+  /** 解析 Agent 的所属空间；不存在时报错。 */
+  async requireSpace(tenantId: string, spaceId: string): Promise<Space> {
+    const space = await this.spaces.get(tenantId, spaceId);
+    if (!space) throw new Error("Space not found");
+    return space;
+  }
+
+  /** Browser/CDP resolver：调用方只有 agentId，这里解析到所属 space。 */
+  async resolveCdpForAgent(
+    agentId: string,
+  ): Promise<Awaited<ReturnType<AgentWorkspaceService["resolveCdp"]>>> {
+    const row = await this.db.query.agents.findFirst({ where: eq(agents.id, agentId) });
+    if (!row) {
+      return { url: null, reason: "Agent not found", containerStatus: null, chromeInside: false };
+    }
+    return this.workspace.resolveCdp(row.spaceId);
+  }
+
+  /** 把数据库 Agent 行补全为「Agent + Space」视图。 */
+  async hydrate(row: Agent): Promise<AgentWithSpace> {
+    const space = await this.spaces.get(row.tenantId, row.spaceId);
+    if (!space) throw new Error(`Agent ${row.id} 的空间不存在`);
+    return hydrateAgent(row, space);
   }
 
   setToolsCacheInvalidator(fn: (agentId: string) => void): void {
@@ -108,55 +138,69 @@ export class AgentService {
     if (agent.slug) this.agentCache.invalidatePrefix(`${agent.tenantId}:${agent.slug}`);
   }
 
-  async list(tenantId: string): Promise<Agent[]> {
-    return this.db
+  async list(tenantId: string, opts?: { spaceId?: string }): Promise<AgentWithSpace[]> {
+    const rows = await this.db
       .select()
       .from(agents)
-      .where(eq(agents.tenantId, tenantId))
+      .where(
+        opts?.spaceId
+          ? and(eq(agents.tenantId, tenantId), eq(agents.spaceId, opts.spaceId))
+          : eq(agents.tenantId, tenantId),
+      )
       .orderBy(asc(agents.createdAt));
+    return Promise.all(rows.map((row) => this.hydrate(row)));
   }
 
-  async get(tenantId: string, idOrSlug: string): Promise<Agent | null> {
+  async get(tenantId: string, idOrSlug: string): Promise<AgentWithSpace | null> {
     const hit = this.agentCache.get(`${tenantId}:${idOrSlug}`);
-    if (hit) return hit;
-    const byId = await this.db.query.agents.findFirst({
-      where: and(eq(agents.tenantId, tenantId), eq(agents.id, idOrSlug)),
-    });
-    if (byId) return this.rememberAgent(byId);
-    const bySlug =
+    const raw =
+      hit ??
+      (await this.db.query.agents.findFirst({
+        where: and(eq(agents.tenantId, tenantId), eq(agents.id, idOrSlug)),
+      })) ??
       (await this.db.query.agents.findFirst({
         where: and(eq(agents.tenantId, tenantId), eq(agents.slug, idOrSlug)),
-      })) ?? null;
-    return bySlug ? this.rememberAgent(bySlug) : null;
+      })) ??
+      null;
+    if (!raw) return null;
+    this.rememberAgent(raw);
+    return this.hydrate(raw);
   }
 
   async create(
     tenantId: string,
     input: {
       name: string;
+      /** 归属空间；缺省用租户默认空间 */
+      spaceId?: string;
       description?: string;
-      workspaceImage?: string | null;
       config?: Record<string, unknown>;
       createApiKey?: boolean;
-      /** 默认 false；onboarding 可显式打开 */
-      enableComputer?: boolean;
-      /** 默认 false；onboarding 可显式打开 */
+      /** 默认 true；显式 false 可关闭 */
       enableMemory?: boolean;
       memoryProviderId?: string | null;
+      /** @deprecated 电脑/文件能力已迁到 Space；仅为旧调用保持兼容，不再写 Agent 行 */
+      enableComputer?: boolean;
+      workspaceImage?: string | null;
     },
   ) {
-    // 默认零能力；Slug 由名称自动生成；冲突时自动加后缀
-    const caps = normalizeCaps({
-      enableComputer: input.enableComputer,
-      enableMemory: input.enableMemory,
-    });
+    // Space 承载电脑/工作区；Agent 只保留身份与记忆。
+    const space = input.spaceId
+      ? await this.requireSpace(tenantId, input.spaceId)
+      : await this.spaces.ensureDefault(tenantId);
+    const spaceId = space.id;
+
     let slug = slugify(input.name);
     const now = new Date();
 
     for (let i = 0; i < 20; i++) {
       const candidate = i === 0 ? slug : `${slug.slice(0, 40)}-${i + 1}`;
       const existing = await this.db.query.agents.findFirst({
-        where: and(eq(agents.tenantId, tenantId), eq(agents.slug, candidate)),
+        where: and(
+          eq(agents.tenantId, tenantId),
+          eq(agents.spaceId, spaceId),
+          eq(agents.slug, candidate),
+        ),
       });
       if (!existing) {
         slug = candidate;
@@ -193,18 +237,12 @@ export class AgentService {
       .values({
         id: newId(),
         tenantId,
+        spaceId,
         name: input.name.trim(),
         slug,
         description: input.description?.trim() ?? "",
-        status: "ready",
-        workspaceProfile: caps.workspaceProfile,
-        enableFs: caps.enableFs,
-        enableShell: caps.enableShell,
-        enableComputer: caps.enableComputer,
-        enableBrowser: caps.enableBrowser,
-        enableMemory: caps.enableMemory,
-        memoryProviderId: input.memoryProviderId ?? null,
-        workspaceImage: input.workspaceImage ?? null,
+        enableMemory: input.enableMemory ?? true,
+        memoryProviderId: input.memoryProviderId?.trim() ? input.memoryProviderId.trim() : null,
         configJson: JSON.stringify(defaultConfig),
         createdAt: now,
         updatedAt: now,
@@ -222,6 +260,7 @@ export class AgentService {
         .values({
           id: newId(),
           tenantId,
+          spaceId,
           agentId: row.id,
           name: `agent:${slug}`,
           keyHash: key.hash,
@@ -244,14 +283,50 @@ export class AgentService {
 
     // 不再在创建时启动工作区容器；环境由后续配置后显式启动
     return {
-      agent: row,
+      agent: hydrateAgent(row, space),
+      space: this.spaces.serialize(space),
       starting: false,
       apiKey: apiKeyRow
         ? { id: apiKeyRow.id, name: apiKeyRow.name, keyPrefix: apiKeyRow.keyPrefix, rawKey }
         : null,
       mcpAgentUrl: `${this.config.publicBaseUrl}/mcp/agents/${row.slug}`,
-      workspaceHostPath: agentWorkspaceHostPath(this.config, row.id),
+      workspaceHostPath: this.workspace.hostRoot({ tenantId, spaceId }),
     };
+  }
+
+  async duplicate(tenantId: string, id: string, opts?: { name?: string }) {
+    const source = await this.get(tenantId, id);
+    if (!source) throw new Error("Agent not found");
+
+    const explicit = opts?.name?.trim();
+    const root = explicit || source.name;
+    let name = explicit || `${root} (copy)`;
+    for (let i = 1; i <= 20; i++) {
+      const existing = await this.db.query.agents.findFirst({
+        where: and(
+          eq(agents.tenantId, tenantId),
+          eq(agents.spaceId, source.spaceId),
+          eq(agents.name, name),
+        ),
+      });
+      if (!existing) break;
+      if (i === 20) throw new Error(`Agent name already exists: ${name}`);
+      name = `${root} (copy ${i + 1})`;
+    }
+
+    let config: Record<string, unknown> | undefined;
+    try {
+      config = JSON.parse(source.configJson) as Record<string, unknown>;
+    } catch {
+      config = undefined;
+    }
+
+    return this.create(tenantId, {
+      name,
+      spaceId: source.spaceId,
+      description: source.description,
+      config,
+    });
   }
 
   /**
@@ -262,7 +337,7 @@ export class AgentService {
     tenantId: string,
     id: string,
     opts?: { runtimeNodeId?: string | null; userId?: string },
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     let agent = await this.get(tenantId, id);
     if (!agent) throw new Error("Agent not found");
 
@@ -280,15 +355,11 @@ export class AgentService {
       if (nodeId) {
         await this.assertNodeAvailable(tenantId, nodeId);
       }
-      const [updated] = await this.db
-        .update(agents)
-        .set({
-          runtimeNodeId: nodeId || null,
-          updatedAt: new Date(),
-        })
-        .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
-        .returning();
-      agent = updated ? this.rememberAgent(updated) : agent;
+      await this.db
+        .update(spaces)
+        .set({ runtimeNodeId: nodeId || null, updatedAt: new Date() })
+        .where(and(eq(spaces.id, agent.spaceId), eq(spaces.tenantId, tenantId)));
+      agent = (await this.get(tenantId, agent.id)) ?? agent;
     } else if (opts?.userId) {
       await assertNodeBindAllowed(this.db, this.config, {
         userId: opts.userId,
@@ -333,19 +404,25 @@ export class AgentService {
     input: {
       name?: string;
       description?: string;
+      /** Space 级：电脑环境开关 */
       enableComputer?: boolean;
       enableMemory?: boolean;
       memoryProviderId?: string | null;
+      /** Space 级：工作区镜像 */
       workspaceImage?: string | null;
-      /** Bind agent to a runtime node */
+      /** Space 级：绑定 Runner */
       runtimeNodeId?: string | null;
+      /** Space 级：host | container */
       workspaceKind?: "host" | "container";
       config?: Record<string, unknown>;
+      avatarColor?: string | null;
+      avatarShape?: string | null;
+      avatarUrl?: string | null;
       /** Restart workspace after feature change when container-backed */
       restart?: boolean;
       userId?: string;
     },
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     const agent = await this.get(tenantId, id);
     if (!agent) throw new Error("Agent not found");
 
@@ -372,67 +449,59 @@ export class AgentService {
       if (!mp) throw new Error("Memory provider not found");
     }
 
-    const computerTouched = input.enableComputer !== undefined;
+    // 电脑 / 工作区字段写 Space；其余写 Agent。
+    const spacePatch: Record<string, unknown> = {};
+    if (input.enableComputer !== undefined) spacePatch.enableComputer = Boolean(input.enableComputer);
+    if (input.workspaceImage !== undefined) spacePatch.workspaceImage = input.workspaceImage;
+    if (runtimeNodeId !== undefined) spacePatch.runtimeNodeId = runtimeNodeId;
+    if (input.workspaceKind !== undefined) spacePatch.workspaceKind = input.workspaceKind;
+    if (Object.keys(spacePatch).length > 0) {
+      spacePatch.updatedAt = new Date();
+      await this.db
+        .update(spaces)
+        .set(spacePatch)
+        .where(and(eq(spaces.id, agent.spaceId), eq(spaces.tenantId, tenantId)));
+    }
 
-    const caps = computerTouched
-      ? normalizeCaps({
-          enableComputer: Boolean(input.enableComputer),
-          enableMemory: input.enableMemory ?? agent.enableMemory,
-        })
-      : {
-          workspaceProfile: agent.workspaceProfile,
-          enableFs: agent.enableFs,
-          enableShell: agent.enableShell,
-          enableComputer: agent.enableComputer,
-          enableBrowser: agent.enableBrowser,
-          enableMemory: input.enableMemory ?? agent.enableMemory,
-        };
+    const agentPatch = {
+      ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.enableMemory !== undefined ? { enableMemory: input.enableMemory } : {}),
+      ...(input.memoryProviderId !== undefined
+        ? { memoryProviderId: input.memoryProviderId }
+        : {}),
+      ...(input.config !== undefined ? { configJson: JSON.stringify(input.config) } : {}),
+      ...(input.avatarColor !== undefined ? { avatarColor: input.avatarColor } : {}),
+      ...(input.avatarShape !== undefined ? { avatarShape: input.avatarShape } : {}),
+      ...(input.avatarUrl !== undefined ? { avatarUrl: input.avatarUrl } : {}),
+    };
 
-    const [updated] = await this.db
-      .update(agents)
-      .set({
-        ...(input.name !== undefined ? { name: input.name.trim() } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        workspaceProfile: caps.workspaceProfile,
-        enableFs: caps.enableFs,
-        enableShell: caps.enableShell,
-        enableComputer: caps.enableComputer,
-        enableBrowser: caps.enableBrowser,
-        enableMemory: caps.enableMemory,
-        ...(input.memoryProviderId !== undefined
-          ? { memoryProviderId: input.memoryProviderId }
-          : {}),
-        ...(input.workspaceImage !== undefined
-          ? { workspaceImage: input.workspaceImage }
-          : {}),
-        ...(runtimeNodeId !== undefined
-          ? { runtimeNodeId }
-          : {}),
-        ...(input.workspaceKind !== undefined
-          ? { workspaceKind: input.workspaceKind }
-          : {}),
-        ...(input.config !== undefined ? { configJson: JSON.stringify(input.config) } : {}),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
-      .returning();
+    let result = agent;
+    if (Object.keys(agentPatch).length > 0) {
+      const [updated] = await this.db
+        .update(agents)
+        .set({ ...agentPatch, updatedAt: new Date() })
+        .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
+        .returning();
+      result = updated ? await this.hydrate(updated) : agent;
+    } else if (Object.keys(spacePatch).length > 0) {
+      result = (await this.get(tenantId, agent.id)) ?? agent;
+    }
 
-    let result = updated!;
-
-    const container = await this.workspace.getWorkspaceContainer(agent.id);
+    const container = await this.workspace.getWorkspaceContainer(agent.spaceId);
     const workspaceAlive =
       Boolean(container?.dockerId) &&
       container?.status !== "removed" &&
       container?.status !== "exited";
     const stackChanged =
-      isComputerEnvEnabled(agent) !== isComputerEnvEnabled(caps);
+      isComputerEnvEnabled(agent) !== Boolean(result.enableComputer);
 
     if (input.restart || (workspaceAlive && stackChanged)) {
       if (workspaceAlive) {
         await this.workspace.stop(result);
         result = (await this.get(tenantId, id)) ?? result;
       }
-      if (needsContainer(caps)) {
+      if (needsContainer(result)) {
         result = await this.workspace.start(result);
       } else {
         const [cleared] = await this.db
@@ -440,11 +509,12 @@ export class AgentService {
           .set({ lastError: null, updatedAt: new Date() })
           .where(eq(agents.id, result.id))
           .returning();
-        result = cleared ?? result;
+        result = cleared ? await this.hydrate(cleared) : result;
       }
     }
 
-    return this.rememberAgent(result);
+    this.rememberAgent(result);
+    return result;
   }
 
   async remove(tenantId: string, id: string, opts?: { purgeData?: boolean }) {
@@ -480,10 +550,13 @@ export class AgentService {
   }
 
   async listBindings(tenantId: string, agentId: string) {
+    const agent = await this.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent not found");
     const rows = await this.db
       .select({
         id: agentBindings.id,
         agentId: agentBindings.agentId,
+        spaceId: agentBindings.spaceId,
         instanceId: agentBindings.instanceId,
         createdAt: agentBindings.createdAt,
         instanceName: componentInstances.name,
@@ -496,7 +569,7 @@ export class AgentService {
       .innerJoin(componentInstances, eq(agentBindings.instanceId, componentInstances.id))
       .where(
         and(
-          eq(agentBindings.agentId, agentId),
+          eq(agentBindings.spaceId, agent.spaceId),
           eq(agentBindings.tenantId, tenantId),
         ),
       );
@@ -519,6 +592,7 @@ export class AgentService {
       .values({
         id: newId(),
         tenantId,
+        spaceId: agent.spaceId,
         agentId: agent.id,
         instanceId: instance.id,
         createdAt: new Date(),
@@ -576,7 +650,7 @@ export class AgentService {
       .delete(agentBindings)
       .where(
         and(
-          eq(agentBindings.agentId, agent.id),
+          eq(agentBindings.spaceId, agent.spaceId),
           eq(agentBindings.instanceId, instanceId),
           eq(agentBindings.tenantId, tenantId),
         ),
@@ -607,7 +681,11 @@ export class AgentService {
       .set({ configJson: JSON.stringify(config), updatedAt: new Date() })
       .where(and(eq(agents.id, agent.id), eq(agents.tenantId, tenantId)))
       .returning();
-    return this.rememberAgent(updated ?? agent);
+    if (updated) {
+      this.rememberAgent(updated);
+      return this.hydrate(updated);
+    }
+    return agent;
   }
 
   /** Replace MCP bindings when agent uses mode=selected */
@@ -636,13 +714,14 @@ export class AgentService {
     }
 
     await this.db.delete(agentBindings).where(
-      and(eq(agentBindings.agentId, agent.id), eq(agentBindings.tenantId, tenantId)),
+      and(eq(agentBindings.spaceId, agent.spaceId), eq(agentBindings.tenantId, tenantId)),
     );
     const now = new Date();
     for (const instanceId of unique) {
       await this.db.insert(agentBindings).values({
         id: newId(),
         tenantId,
+        spaceId: agent.spaceId,
         agentId: agent.id,
         instanceId,
         createdAt: now,
@@ -674,15 +753,19 @@ export class AgentService {
       this.invalidateToolsCache(agent.id);
     }
 
-    return this.rememberAgent(updated ?? agent);
+    if (updated) {
+      this.rememberAgent(updated);
+      return this.hydrate(updated);
+    }
+    return agent;
   }
 
   /** Ensure no-auth default MCPs (currently Grep) are installed, bound, and selected. */
   async ensureDefaultMcpBindings(
     tenantId: string,
-    agent: Agent,
+    agent: AgentWithSpace,
     orchestrator: Orchestrator,
-  ): Promise<Agent> {
+  ): Promise<AgentWithSpace> {
     const defaultIds = await ensureDefaultAgentMcps(
       this.db,
       orchestrator,
@@ -691,7 +774,7 @@ export class AgentService {
     );
     if (!defaultIds.length) return agent;
 
-    await bindDefaultMcpsToAgent(this.db, tenantId, agent.id, defaultIds);
+    await bindDefaultMcpsToAgent(this.db, tenantId, agent.spaceId, defaultIds, agent.id);
 
     const prefs = getAgentProviders(agent);
     if (prefs.mcp?.mode === "all") return agent;
@@ -828,12 +911,14 @@ export class AgentService {
   }
 
   async boundInstanceIds(tenantId: string, agentId: string): Promise<string[]> {
+    const agent = await this.get(tenantId, agentId);
+    if (!agent) throw new Error("Agent not found");
     const rows = await this.db
       .select({ instanceId: agentBindings.instanceId })
       .from(agentBindings)
       .where(
         and(
-          eq(agentBindings.agentId, agentId),
+          eq(agentBindings.spaceId, agentId),
           eq(agentBindings.tenantId, tenantId),
         ),
       );
@@ -855,6 +940,7 @@ export class AgentService {
       .values({
         id: newId(),
         tenantId,
+        spaceId: agent.spaceId,
         agentId: agent.id,
         name: name?.trim() || `agent:${agent.slug}`,
         keyHash: key.hash,
@@ -877,7 +963,7 @@ export class AgentService {
   }
 
   serialize(
-    agent: Agent,
+    agent: AgentWithSpace,
     opts?: {
       workspace?: {
         status: string | null;
@@ -898,6 +984,8 @@ export class AgentService {
     return {
       id: agent.id,
       tenantId: agent.tenantId,
+      spaceId: agent.spaceId,
+      spaceName: agent.spaceName,
       name: agent.name,
       slug: agent.slug,
       description: agent.description,
@@ -906,16 +994,19 @@ export class AgentService {
       memoryProviderId: agent.memoryProviderId,
       workspaceImage: agent.workspaceImage,
       runtimeNodeId: agent.runtimeNodeId ?? null,
-      workspaceKind: (agent as Agent & { workspaceKind?: string }).workspaceKind ?? "container",
+      workspaceKind: agent.workspaceKind ?? "container",
       workspaceStatus: agent.workspaceStatus ?? "ready",
       workspaceRevision: agent.workspaceRevision ?? null,
       lastMigrationId: agent.lastMigrationId ?? null,
       config,
       lastError: agent.lastError,
+      avatarColor: agent.avatarColor ?? null,
+      avatarShape: agent.avatarShape ?? null,
+      avatarUrl: agent.avatarUrl ?? null,
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       mcpAgentUrl: `${this.config.publicBaseUrl}/mcp/agents/${agent.slug}`,
-      workspaceHostPath: agentWorkspaceHostPath(this.config, agent.id),
+      workspaceHostPath: this.workspace.hostRoot(agent),
       needsContainer: needsContainer(agent),
       stackMode,
       workspace: {

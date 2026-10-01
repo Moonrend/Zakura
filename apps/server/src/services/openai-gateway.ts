@@ -8,7 +8,8 @@ import type {
   ModelToolChoice,
   ModelToolDefinition,
 } from "@zakura/shared";
-import { newId, type Agent } from "../db/schema.js";
+import { newId } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import type { AgentService } from "./agents.js";
 import { agentCloudConfig } from "./cloud-agent/runtime.js";
 import type { CloudAgentSessionStore } from "./cloud-agent-session.js";
@@ -60,7 +61,7 @@ export type OpenAiGatewayBody = {
 };
 
 export type OpenAiGatewayContext = {
-  agent: Agent;
+  agent: AgentWithSpace;
   sessionId: string;
   runId: string;
   model: string | undefined;
@@ -633,7 +634,7 @@ export class OpenAiGatewayService {
   /** 首轮完成后后台生成标题；失败静默，不拖慢 Gateway 响应 */
   private async maybeAutoTitle(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     sessionId: string;
     runId: string;
     userContent: string;
@@ -742,7 +743,7 @@ export class OpenAiGatewayService {
 
   private async getOrCreateSession(input: {
     tenantId: string;
-    agent: Agent;
+    agent: AgentWithSpace;
     clientSessionKey?: string | null;
     apiKeyId?: string | null;
     model: string | undefined;

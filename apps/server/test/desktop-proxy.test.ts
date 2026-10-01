@@ -12,6 +12,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function bridge() {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let killed = 0;
@@ -58,6 +66,7 @@ describe("desktop proxy", { timeout: 5000 }, () => {
     const app = await fixture(t, async () => stream.data);
     const ws = app.connect();
     await once(ws, "open");
+    await waitFor(() => app.readyChecks() === 1);
     assert.equal(app.readyChecks(), 1);
     const payload = Buffer.from([0, 255, 128, 13, 10]);
     const output = once(ws, "message");
@@ -69,6 +78,7 @@ describe("desktop proxy", { timeout: 5000 }, () => {
     await closed;
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(Buffer.concat(stream.received), payload);
+    await waitFor(() => stream.killed() === 1);
     assert.equal(stream.killed(), 1);
   });
 
@@ -98,7 +108,7 @@ describe("desktop proxy", { timeout: 5000 }, () => {
     ws.close();
     await once(ws, "close");
     pending.resolve(stream.data);
-    await new Promise((resolve) => setImmediate(resolve));
+    await waitFor(() => stream.killed() === 1);
     assert.equal(stream.killed(), 1);
   });
 

@@ -22,7 +22,11 @@ export class ZakurabotFileService {
     const agent = await this.deps.agents.get(c.tenantId, c.agentId);
     if (!agent) throw new ZakurabotFileError("Agent not found", 404);
     if (!agent.enableFs) throw new ZakurabotFileError("Filesystem is disabled for this agent", 403);
-    return this.deps.workspaceFs.forAgentBinding(agent);
+    return this.deps.workspaceFs.forAgentBinding({
+      spaceId: agent.spaceId,
+      tenantId: agent.tenantId,
+      runtimeNodeId: agent.runtimeNodeId,
+    });
   }
 
   view(file: ZakurabotFile): ZakurabotFileView {

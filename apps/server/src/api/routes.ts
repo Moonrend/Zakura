@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
-import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { z } from "zod";
 import {
   decryptJson,
   encryptJson,
@@ -15,6 +16,7 @@ import { mountPlatformProbes } from "../observability.js";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db/client.js";
 import {
+  agents,
   apiKeys,
   componentInstances,
   managedContainers,
@@ -238,6 +240,59 @@ function workspaceSocketUrl(
 function instanceErrorStatus(err: unknown): 404 | 500 {
   return err instanceof InstanceNotFoundError ? 404 : 500;
 }
+
+/** 把数据库/内部错误折叠成用户可读文案；SQL + params 只进日志。 */
+function friendlyError(err: unknown, fallback = "操作失败，请稍后重试"): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = (err as { cause?: unknown } | null)?.cause;
+  if (
+    cause !== undefined ||
+    /Failed query|insert into|update "|delete from|select .* from|params:/i.test(message)
+  ) {
+    log.error("api.internal_error", {
+      err: message,
+      cause: cause instanceof Error ? cause.message : cause,
+    });
+    return fallback;
+  }
+  return message;
+}
+
+const agentCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  spaceId: z.string().trim().min(1).optional(),
+  description: z.string().max(4000).optional(),
+  workspaceImage: z.string().trim().max(300).nullish(),
+  config: z.record(z.unknown()).optional(),
+  createApiKey: z.boolean().optional(),
+  enableMemory: z.boolean().optional(),
+  memoryProviderId: z.string().trim().min(1).nullable().optional(),
+});
+
+const spaceCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(4000).optional(),
+  workspaceImage: z.string().trim().max(400).nullable().optional(),
+});
+
+const spacePatchSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().max(4000).optional(),
+  enableComputer: z.boolean().optional(),
+  workspaceImage: z.string().trim().max(400).nullable().optional(),
+  runtimeNodeId: z.string().trim().min(1).nullable().optional(),
+  workspaceKind: z.enum(["host", "container"]).optional(),
+});
+
+const agentPatchSchema = z.object({
+  avatarColor: z.string().max(64).optional(),
+  avatarShape: z.string().max(32).optional(),
+  avatarUrl: z
+    .string()
+    .max(2048)
+    .refine((value) => /^https?:\/\//i.test(value), "avatarUrl must be http(s)")
+    .optional(),
+});
 
 
 export async function createApiApp(deps: {
@@ -996,6 +1051,7 @@ export async function createApiApp(deps: {
     }
 
     return c.json({
+      issuer: config.publicBaseUrl.replace(/\/$/, ""),
       client: {
         clientId: client.clientId,
         clientName: client.clientName || "MCP Client",
@@ -1042,8 +1098,11 @@ export async function createApiApp(deps: {
       const url = new URL(redirectUri);
       url.searchParams.set("code", code);
       if (body.state) url.searchParams.set("state", body.state);
-      // RFC 9207 / MCP：ChatGPT 校验 iss；缺失会 403 且不调用 /token
-      url.searchParams.set("iss", config.publicBaseUrl.replace(/\/$/, ""));
+      // RFC 9207 / MCP：https 客户端（ChatGPT 等）校验 iss，缺失会 403。
+      // 自定义 scheme 回跳（zakurabot://）的 origin 为 null，携带 iss 会被客户端判为跨域拒绝。
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        url.searchParams.set("iss", config.publicBaseUrl.replace(/\/$/, ""));
+      }
       return c.json({ redirect: url.toString() });
     } catch (err) {
       if (err instanceof OauthError) {
@@ -1736,10 +1795,11 @@ export async function createApiApp(deps: {
   // ── Agents (multi-agent isolated tool spaces) ──────────────────────────
   app.get("/api/agents", async (c) => {
     const session = c.get("session")!;
-    const rows = await agentService.list(session.tenantId);
+    const spaceId = c.req.query("spaceId")?.trim() || undefined;
+    const rows = await agentService.list(session.tenantId, { spaceId });
     const serialized = await Promise.all(
       rows.map(async (a) => {
-        const container = await agentService.workspace.getWorkspaceContainer(a.id);
+        const container = await agentService.workspace.getWorkspaceContainer(a.spaceId);
         return agentService.serialize(a, {
           workspace: container
             ? {
@@ -1756,16 +1816,15 @@ export async function createApiApp(deps: {
 
   app.post("/api/agents", async (c) => {
     const session = c.get("session")!;
-    const body = await c.req.json<{
-      name: string;
-      description?: string;
-      workspaceImage?: string | null;
-      config?: Record<string, unknown>;
-      createApiKey?: boolean;
-    }>();
-    if (!body.name?.trim()) return c.json({ error: "name required" }, 400);
+    const parsed = agentCreateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: "请求格式不正确：name 必填且不超过 120 字" }, 400);
+    }
     try {
-      let result = await agentService.create(session.tenantId, body);
+      let result = await agentService.create(session.tenantId, {
+        ...parsed.data,
+        memoryProviderId: parsed.data.memoryProviderId ?? null,
+      });
       // 无鉴权官方 MCP（如 Grep）：安装到租户并绑定到新 Agent
       try {
         const agent = await agentService.ensureDefaultMcpBindings(
@@ -1796,8 +1855,137 @@ export async function createApiApp(deps: {
         201,
       );
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+      return c.json(
+        { error: friendlyError(err, "创建 Agent 失败，请检查名称或所属空间后重试") },
+        400,
+      );
     }
+  });
+
+  const agentDuplicateSchema = z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+  });
+
+  app.post("/api/agents/:id/duplicate", async (c) => {
+    const session = c.get("session")!;
+    const parsed = agentDuplicateSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: "请求格式不正确：name 需为 1-120 字" }, 400);
+    }
+    try {
+      let result = await agentService.duplicate(session.tenantId, c.req.param("id"), {
+        name: parsed.data.name,
+      });
+      try {
+        const agent = await agentService.ensureDefaultMcpBindings(
+          session.tenantId,
+          result.agent,
+          orchestrator,
+        );
+        result = { ...result, agent };
+      } catch (err) {
+        recordPlatformFault("api.default_mcp_install", err, { subsystem: "api" });
+      }
+      try {
+        await integrationCatalog.auth.ensureInstallations(
+          session.tenantId,
+          "browser-notifications",
+          [result.agent.id],
+        );
+      } catch (err) {
+        recordPlatformFault("api.browser_notifications_install", err, { subsystem: "api" });
+      }
+      return c.json(
+        {
+          ...agentService.serialize(result.agent),
+          starting: false,
+          apiKey: result.apiKey,
+          mcpAgentUrl: result.mcpAgentUrl,
+        },
+        201,
+      );
+    } catch (err) {
+      return c.json({ error: friendlyError(err, "复制 Agent 失败，请重试") }, 400);
+    }
+  });
+
+  // ── Spaces（一台共享电脑） ──────────────────────────────────────────────
+  const spaceCounts = async (tenantId: string) => {
+    const rows = await db
+      .select({ spaceId: agents.spaceId, count: sql<number>`count(*)::int` })
+      .from(agents)
+      .where(eq(agents.tenantId, tenantId))
+      .groupBy(agents.spaceId);
+    return new Map(rows.map((row) => [row.spaceId, Number(row.count)]));
+  };
+
+  app.get("/api/spaces", async (c) => {
+    const session = c.get("session")!;
+    const [rows, counts] = await Promise.all([
+      agentService.spaces.list(session.tenantId),
+      spaceCounts(session.tenantId),
+    ]);
+    return c.json(
+      rows.map((space) =>
+        agentService.spaces.serialize(space, { agentCount: counts.get(space.id) ?? 0 }),
+      ),
+    );
+  });
+
+  app.get("/api/spaces/:id", async (c) => {
+    const session = c.get("session")!;
+    const space = await agentService.spaces.get(session.tenantId, c.req.param("id"));
+    if (!space) return c.json({ error: "Space not found" }, 404);
+    const counts = await spaceCounts(session.tenantId);
+    return c.json(agentService.spaces.serialize(space, { agentCount: counts.get(space.id) ?? 0 }));
+  });
+
+  app.post("/api/spaces", async (c) => {
+    const session = c.get("session")!;
+    const parsed = spaceCreateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "请求格式不正确：name 必填且不超过 120 字" }, 400);
+    try {
+      const space = await agentService.spaces.create(session.tenantId, parsed.data);
+      return c.json(agentService.spaces.serialize(space, { agentCount: 0 }), 201);
+    } catch (err) {
+      return c.json({ error: friendlyError(err, "创建空间失败，请稍后重试") }, 400);
+    }
+  });
+
+  app.patch("/api/spaces/:id", async (c) => {
+    const session = c.get("session")!;
+    const parsed = spacePatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "请求格式不正确" }, 400);
+    try {
+      const space = await agentService.spaces.update(
+        session.tenantId,
+        c.req.param("id"),
+        parsed.data,
+      );
+      if (!space) return c.json({ error: "Space not found" }, 404);
+      const counts = await spaceCounts(session.tenantId);
+      return c.json(agentService.spaces.serialize(space, { agentCount: counts.get(space.id) ?? 0 }));
+    } catch (err) {
+      return c.json({ error: friendlyError(err, "更新空间失败，请稍后重试") }, 400);
+    }
+  });
+
+  app.delete("/api/spaces/:id", async (c) => {
+    const session = c.get("session")!;
+    try {
+      const ok = await agentService.spaces.delete(session.tenantId, c.req.param("id"));
+      if (!ok) return c.json({ error: "Space not found" }, 404);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "删除空间失败" }, 400);
+    }
+  });
+
+  app.get("/api/spaces/:id/graph", async (c) => {
+    const session = c.get("session")!;
+    const graph = await agentService.spaces.graph(session.tenantId, c.req.param("id"));
+    if (!graph) return c.json({ error: "Space not found" }, 404);
+    return c.json(graph);
   });
 
   app.get("/api/agents/:id", async (c) => {
@@ -2002,7 +2190,12 @@ export async function createApiApp(deps: {
       workspaceKind?: "host" | "container";
       config?: Record<string, unknown>;
       restart?: boolean;
+      avatarColor?: string;
+      avatarShape?: string;
+      avatarUrl?: string;
     }>();
+    const avatar = agentPatchSchema.safeParse(body);
+    if (!avatar.success) return c.json({ error: "请求格式不正确：头像字段不合法" }, 400);
     try {
       const agent = await agentService.update(session.tenantId, c.req.param("id"), {
         ...body,
@@ -2074,7 +2267,7 @@ export async function createApiApp(deps: {
     const session = c.get("session")!;
     const agent = await agentService.get(session.tenantId, c.req.param("id"));
     if (!agent) return c.json({ error: "Not found" }, 404);
-    const { getAgentProgress } = await import("../services/agent-progress.js");
+    const { getAgentProgress } = await import("../services/space-progress.js");
     const container = await agentService.workspace.getWorkspaceContainer(agent.id);
     const progress = getAgentProgress(agent.id);
     const needsWs = agent.enableComputer;

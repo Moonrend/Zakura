@@ -53,7 +53,7 @@ test("ACP rebuild cleanup 在绑定电脑上删 adapter 容器", async () => {
   });
 
   const count = await service.removeAcpAdapterContainers(
-    { id: "agent-a", tenantId: "tenant-a", runtimeNodeId: "runner-a" } as never,
+    { id: "agent-a", spaceId: "agent-a", tenantId: "tenant-a", runtimeNodeId: "runner-a" } as never,
     "pi",
   );
 

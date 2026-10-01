@@ -9,11 +9,12 @@ import { createDb, type Db } from "../src/db/client.js";
 import { runMigrations } from "../src/db/migrate.js";
 import {
   agents, componentInstances, managedContainers, portExposures, providerCatalog,
-  runtimeNodes, tenants, workspaceMigrations,
+  runtimeNodes, spaces, tenants, workspaceMigrations,
 } from "../src/db/schema.js";
 import type { AppConfig } from "../src/config.js";
 import { RuntimeNodeService, getCachedRunnerToken } from "../src/services/runtime-nodes.js";
 import { registerRuntimeNodeRoutes } from "../src/api/runtime-node-routes.js";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("runtime node deletion with foreign key references", () => {
   let db: Db;
@@ -49,8 +50,9 @@ describe("runtime node deletion with foreign key references", () => {
   }
 
   async function newAgent(tenantId = "owner", runtimeNodeId: string | null = null) {
+    const spaceId = await ensureTestSpace(db, tenantId, { runtimeNodeId });
     const [agent] = await db.insert(agents).values({
-      tenantId, name: "Agent", slug: `agent-${++sequence}`, runtimeNodeId,
+      spaceId, tenantId, name: "Agent", slug: `agent-${++sequence}`,
     }).returning();
     return agent;
   }
@@ -71,20 +73,20 @@ describe("runtime node deletion with foreign key references", () => {
       const retained = await newNode();
       const agent = await newAgent("owner", retained.id);
       const [job] = await db.insert(workspaceMigrations).values({
-        tenantId: "owner", agentId: agent.id,
+        tenantId: "owner", spaceId: agent.spaceId,
         sourceNodeId: retained.id, targetNodeId: retained.id,
         [column]: node.id, status: "completed",
       }).returning();
-      await db.update(agents).set({ lastMigrationId: job.id }).where(eq(agents.id, agent.id));
+      await db.update(spaces).set({ lastMigrationId: job.id }).where(eq(spaces.id, agent.spaceId));
 
       const response = await appFor().request(`/api/runtime-nodes/${node.id}`, { method: "DELETE" });
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { ok: true });
       assert.equal(await nodes.get("owner", node.id), null);
       assert.equal(await db.query.workspaceMigrations.findFirst({ where: eq(workspaceMigrations.id, job.id) }), undefined);
-      const remainingAgent = await db.query.agents.findFirst({ where: eq(agents.id, agent.id) });
-      assert.equal(remainingAgent?.lastMigrationId, null);
-      assert.equal(remainingAgent?.runtimeNodeId, retained.id);
+      const remainingSpace = await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) });
+      assert.equal(remainingSpace?.lastMigrationId, null);
+      assert.equal(remainingSpace?.runtimeNodeId, retained.id);
       assert.ok(await nodes.get("owner", retained.id));
     }
   });
@@ -94,7 +96,10 @@ describe("runtime node deletion with foreign key references", () => {
     await db.update(runtimeNodes).set({ isShared: true }).where(eq(runtimeNodes.id, node.id));
     const owned = await newAgent("owner", node.id);
     const consumer = await newAgent("consumer", node.id);
-    const untouched = await newAgent("consumer");
+    const untouchedSpaceId = await ensureTestSpace(db, "consumer", { slug: "untouched" });
+    const [untouched] = await db.insert(agents).values({
+      spaceId: untouchedSpaceId, tenantId: "consumer", name: "Untouched", slug: `agent-${++sequence}`,
+    }).returning();
     const [instance] = await db.insert(componentInstances).values({
       tenantId: "consumer", name: "MCP", slug: `mcp-${++sequence}`, providerId: "stdio-mcp",
       configEnc: "test-config", runtimeNodeId: node.id, status: "running",
@@ -114,11 +119,11 @@ describe("runtime node deletion with foreign key references", () => {
 
     assert.deepEqual(await nodes.delete("owner", node.id), { ok: true });
     for (const agent of [owned, consumer]) {
-      const row = await db.query.agents.findFirst({ where: eq(agents.id, agent.id) });
+      const row = await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) });
       assert.equal(row?.runtimeNodeId, null);
       assert.match(row?.lastError ?? "", /节点.*删除.*重新绑定/);
     }
-    assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, untouched.id) }))?.lastError, null);
+    assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, untouched.spaceId) }))?.lastError, null);
     assert.deepEqual(await db.query.managedContainers.findMany({ where: eq(managedContainers.runtimeNodeId, node.id) }), []);
     assert.equal((await db.query.managedContainers.findFirst({ where: eq(managedContainers.id, localContainer.id) }))?.dockerId, "local-container");
     assert.equal((await db.query.managedContainers.findMany()).some((row) => row.dockerId?.startsWith("remote-")), false);
@@ -141,14 +146,14 @@ describe("runtime node deletion with foreign key references", () => {
     const target = await newNode();
     const agent = await newAgent("consumer", node.id);
     const [job] = await db.insert(workspaceMigrations).values({
-      tenantId: "consumer", agentId: agent.id, sourceNodeId: node.id,
+      tenantId: "consumer", spaceId: agent.spaceId, sourceNodeId: node.id,
       targetNodeId: target.id, status: "transferring",
     }).returning();
     const response = await appFor().request(`/api/runtime-nodes/${node.id}`, { method: "DELETE" });
     assert.equal(response.status, 400);
     assert.match((await response.json() as { error: string }).error, /迁移/);
     assert.ok(await nodes.get("owner", node.id));
-    assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, node.id);
+    assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, node.id);
     assert.equal((await db.query.workspaceMigrations.findFirst({ where: eq(workspaceMigrations.id, job.id) }))?.status, "transferring");
   });
 
@@ -165,13 +170,19 @@ describe("runtime node deletion with foreign key references", () => {
 
   it("rolls back dependency cleanup if the final delete fails", async () => {
     const node = await newNode();
-    const agent = await newAgent("owner", node.id);
+    const rollbackSpaceId = await ensureTestSpace(db, "owner", {
+      slug: "rollback",
+      runtimeNodeId: node.id,
+    });
+    const [agent] = await db.insert(agents).values({
+      spaceId: rollbackSpaceId, tenantId: "owner", name: "Rollback", slug: `agent-${++sequence}`,
+    }).returning();
     await db.execute(sql`CREATE TABLE node_delete_guard (node_id text REFERENCES runtime_nodes(id))`);
     await db.execute(sql`INSERT INTO node_delete_guard (node_id) VALUES (${node.id})`);
     try {
       await assert.rejects(nodes.delete("owner", node.id));
-      assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.runtimeNodeId, node.id);
-      assert.equal((await db.query.agents.findFirst({ where: eq(agents.id, agent.id) }))?.lastError, null);
+      assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.runtimeNodeId, node.id);
+      assert.equal((await db.query.spaces.findFirst({ where: eq(spaces.id, agent.spaceId) }))?.lastError, null);
       assert.ok(await nodes.get("owner", node.id));
       assert.ok(getCachedRunnerToken(node.id));
     } finally {

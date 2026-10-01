@@ -147,7 +147,8 @@ export default function SpacesListPage() {
               >
                 <Server className="size-3.5" />
                 <span>
-                  {space.agentCount} 个 Agent · {space.workspaceKind}
+                  <span className="font-mono">{space.slug}</span> · {space.agentCount} 个 Agent ·{" "}
+                  {space.workspaceKind}
                 </span>
               </div>
             </Link>

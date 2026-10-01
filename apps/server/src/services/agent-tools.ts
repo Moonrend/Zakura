@@ -10,7 +10,7 @@ import {
 } from "@zakura/core";
 import type { McpToolResult, MemoryProviderKind, McpToolAnnotations } from "@zakura/shared";
 import { AGENT_WORKSPACE_ROOT } from "@zakura/shared";
-import type { Agent } from "../db/schema.js";
+import type { AgentWithSpace } from "./agent-view.js";
 import type { AgentBrowserService } from "./agent-cdp.js";
 import { isComputerEnvEnabled } from "./agent-caps.js";
 import type { AgentWorkspaceService } from "./agent-workspace.js";
@@ -91,7 +91,7 @@ const workspacePathSchema = {
 
 /** Native tools Zakura implements for one agent (exposed via MCP). */
 export function listAgentNativeTools(
-  agent: Agent,
+  agent: AgentWithSpace,
   memoryKind?: MemoryProviderKind | null,
 ): AgentNativeToolDef[] {
   const tools: AgentNativeToolDef[] = [
@@ -156,7 +156,7 @@ export function listAgentNativeTools(
     tool(
       "list_skills",
       [
-        "List Agent Skills (workspace /skills plus current project .agents/skills or .claude/skills).",
+        "List AgentWithSpace Skills (workspace /skills plus current project .agents/skills or .claude/skills).",
         "Skills are reusable playbooks stored as SKILL.md files; read one with read_skill before doing the task it covers.",
       ].join(" "),
       {
@@ -923,7 +923,7 @@ function errText(err: unknown, workspaceRoot?: string): McpToolResult {
 }
 
 export async function callAgentNativeTool(
-  agent: Agent,
+  agent: AgentWithSpace,
   workspace: AgentWorkspaceService,
   name: string,
   args: Record<string, unknown>,
@@ -947,7 +947,7 @@ export async function callAgentNativeTool(
       if (fsOnce) return fsOnce;
       fsOnce = workspaceFsProvider
         ? await workspaceFsProvider.forAgentBinding({
-            id: agent.id,
+            spaceId: agent.spaceId,
             tenantId: agent.tenantId,
             runtimeNodeId: agent.runtimeNodeId,
           })

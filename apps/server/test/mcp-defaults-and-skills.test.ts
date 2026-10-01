@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { encryptJson } from "@zakura/core";
 import { eq } from "drizzle-orm";
+import { ensureTestSpace } from "./helpers/spaces.js";
 
 describe("MCP defaults and skill resources", () => {
   let dataDir: string;
@@ -50,7 +51,9 @@ describe("MCP defaults and skill resources", () => {
       createdAt: now,
       updatedAt: now,
     });
+        const spaceId = await ensureTestSpace(db, tenantId, { enableComputer: false });
     await db.insert(agents).values({
+      spaceId,
       id: agentId,
       tenantId,
       name: "MCP Agent",

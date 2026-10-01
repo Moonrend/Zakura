@@ -23,7 +23,7 @@ import type { Orchestrator } from "../services/orchestrator.js";
 import type { McpGateway } from "../services/mcp-gateway.js";
 import { applyOauthTokensToConfig } from "../providers/generic-mcp.js";
 import { randomBytes } from "node:crypto";
-import { decryptJson } from "@zakura/core";
+import { decryptJson, globalRegistry } from "@zakura/core";
 import { isSessionAdmin } from "../services/auth.js";
 import { isCimdClientId } from "../services/oauth-cimd.js";
 import { buildByoOauthClient } from "../services/mcp-oauth-clients.js";
@@ -34,6 +34,7 @@ import {
   provisionGoogleWorkspaceMcp,
 } from "../services/google-cloud-provision.js";
 import { noDcrOauthError, loadInstanceWithContainers } from "./route-helpers.js";
+import { readToolPermissionOverrides } from "../services/instance-tool-permissions.js";
 import {
   upstreamOauthPending,
   purgeUpstreamOauthPending,
@@ -123,6 +124,88 @@ export function registerMcpRoutes(
     const session = c.get("session")!;
     const tools = await gateway.listToolsForTenant(session.tenantId);
     return c.json(tools);
+  });
+
+  app.get("/api/instances/:id/tools", async (c) => {
+    const session = c.get("session")!;
+    const id = c.req.param("id");
+    const instance = await db.query.componentInstances.findFirst({
+      where: and(
+        eq(componentInstances.id, id),
+        eq(componentInstances.tenantId, session.tenantId),
+      ),
+    });
+    if (!instance) return c.json({ error: "Not found" }, 404);
+    if (!globalRegistry.has(instance.providerId)) {
+      return c.json({ error: `Unknown provider: ${instance.providerId}` }, 400);
+    }
+    let handle: Awaited<ReturnType<typeof orchestrator.toHandle>>;
+    try {
+      handle = await orchestrator.toHandle(session.tenantId, id);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+    const overrides = readToolPermissionOverrides(handle.config);
+    let defs: Array<{ name: string; description?: string }> = [];
+    try {
+      defs = await globalRegistry.get(instance.providerId).listTools(handle);
+    } catch {
+      defs = [];
+    }
+    return c.json(
+      defs.map((t) => ({
+        name: t.name,
+        description: t.description,
+        enabled: overrides[t.name] ?? true,
+      })),
+    );
+  });
+
+  app.patch("/api/instances/:id/tools/:toolName", async (c) => {
+    const session = c.get("session")!;
+    const id = c.req.param("id");
+    const toolName = decodeURIComponent(c.req.param("toolName"));
+    const body = await c.req
+      .json<{ enabled?: boolean }>()
+      .catch(() => ({} as { enabled?: boolean }));
+    if (typeof body.enabled !== "boolean") {
+      return c.json({ error: "enabled must be a boolean" }, 400);
+    }
+    const instance = await db.query.componentInstances.findFirst({
+      where: and(
+        eq(componentInstances.id, id),
+        eq(componentInstances.tenantId, session.tenantId),
+      ),
+    });
+    if (!instance) return c.json({ error: "Not found" }, 404);
+    if (!globalRegistry.has(instance.providerId)) {
+      return c.json({ error: `Unknown provider: ${instance.providerId}` }, 400);
+    }
+    let handle: Awaited<ReturnType<typeof orchestrator.toHandle>>;
+    try {
+      handle = await orchestrator.toHandle(session.tenantId, id);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+    let exists = false;
+    try {
+      exists = (await globalRegistry.get(instance.providerId).listTools(handle)).some(
+        (t) => t.name === toolName,
+      );
+    } catch {
+      exists = false;
+    }
+    if (!exists) return c.json({ error: "Unknown tool" }, 404);
+
+    const overrides = readToolPermissionOverrides(handle.config);
+    overrides[toolName] = body.enabled;
+    await orchestrator.updateInstanceConfig(session.tenantId, id, {
+      toolPermissions: overrides,
+    });
+    try {
+      await gateway.refreshInstanceTools(session.tenantId, id);
+    } catch {}
+    return c.json({ name: toolName, enabled: body.enabled });
   });
 
   /** 策略页首屏：policies + api-keys + instances 一次返回 */

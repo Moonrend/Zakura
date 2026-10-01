@@ -7,7 +7,7 @@ import {
   clearAgentProgress,
   finishAgentProgress,
   logAgentProgress,
-} from "../src/services/agent-progress.js";
+} from "../src/services/space-progress.js";
 
 after(async () => {
   // 订阅会惰性建立 Redis 连接，不关会吊住测试进程

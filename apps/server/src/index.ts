@@ -107,6 +107,15 @@ async function main() {
     await ensureSaasPlatformAdmin(db);
   }
   await syncProviderCatalog(db);
+  // Agent 上的 ACP/MCP 选择与工作区目录收归 Space（幂等；旧库升级路径）
+  await import("./services/space-settings-migration.js")
+    .then(async ({ migrateAgentSettingsToSpaces, migrateAgentWorkspacesToSpaces }) => {
+      await migrateAgentSettingsToSpaces(db, (msg) => log.info("boot.space_settings", { detail: msg }));
+      await migrateAgentWorkspacesToSpaces(db, config, (msg) =>
+        log.info("boot.space_workspace", { detail: msg }),
+      );
+    })
+    .catch((err) => log.warn("boot.space_settings_failed", { err_message: err instanceof Error ? err.message : String(err) }));
 
   const runtime = new DockerRuntime();
   const orchestrator = new Orchestrator(db, runtime, config);
@@ -254,7 +263,7 @@ async function main() {
   }, 6 * 60 * 60_000);
   identityCleanupTimer.unref?.();
   const browserService = new AgentBrowserService((agentId) =>
-    agentService.workspace.resolveCdp(agentId),
+    agentService.resolveCdpForAgent(agentId),
   );
   gateway.setAgentService(agentService);
   agentService.setToolsCacheInvalidator((agentId) => gateway.invalidateToolsCache(agentId));

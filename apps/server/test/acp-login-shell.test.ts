@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { RunnerClient } from "@zakura/core";
 import { AgentWorkspaceService } from "../src/services/agent-workspace.js";
 
@@ -20,7 +21,7 @@ const SOURCES = [
 ];
 
 function loginShellCommands(src: string): string[] {
-  const text = readFileSync(new URL(src, import.meta.url).pathname, "utf8");
+  const text = readFileSync(fileURLToPath(new URL(src, import.meta.url)), "utf8");
   // Grab the default shell command used by the adapter login-shell helpers.
   const matches = text.match(/exec \/bin\/bash [^"']*/g) ?? [];
   return matches;
@@ -39,7 +40,7 @@ describe("ACP adapter login shell", () => {
     } });
     const workspace = Object.create(AgentWorkspaceService.prototype) as AgentWorkspaceService;
     Object.assign(workspace, { requireRunnerClient: async () => ({ client }) });
-    await workspace.startAcpAdapterLoginShell({ id: "agent" } as never, "fx", "session");
+    await workspace.startAcpAdapterLoginShell({ id: "agent", spaceId: "agent" } as never, "fx", "session");
     assert.deepEqual(command, [
       "docker", "exec", "-i", "zakura-acpa-agent-fx-session",
       "/bin/sh", "-c", "exec /bin/bash -i || exec /bin/sh -i",
@@ -65,7 +66,7 @@ describe("ACP adapter login shell", () => {
 
   it("keeps the adapter bin dir first on the exec PATH", () => {
     const text = readFileSync(
-      new URL("../src/services/agent-workspace.ts", import.meta.url).pathname,
+      fileURLToPath(new URL("../src/services/agent-workspace.ts", import.meta.url)),
       "utf8",
     );
     const m = text.match(/WORKSPACE_EXEC_PATH\s*=\s*\n?\s*"([^"]+)"/);
