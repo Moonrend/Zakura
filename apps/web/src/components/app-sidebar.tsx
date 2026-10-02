@@ -39,6 +39,8 @@ import {
 } from "lucide-react";
 import { api, setSession } from "@/lib/api";
 import { AGENT_SUBNAV, fetchAgents, type AgentListItem } from "@/lib/agents";
+import { SPACE_SUBNAV } from "@/lib/space-subnav";
+import { fetchSpaces, type SpaceItem } from "@/lib/spaces";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
   Sidebar,
@@ -102,15 +104,19 @@ const AGENT_ICONS: Record<string, IconComp> = {
   overview: LayoutDashboard,
   settings: Settings2,
   approvals: ShieldCheck,
-  computer: Monitor,
-  projects: FolderKanban,
-  web: Globe,
   memory: Brain,
   skills: Blocks,
-  mcp: Cable,
-  connect: Plug,
-  gateway: Route,
+};
+
+const SPACE_ICONS: Record<string, IconComp> = {
   platforms: MessageSquare,
+  connect: Plug,
+  acp: Bot,
+  gateway: Route,
+  projects: FolderKanban,
+  computer: Monitor,
+  mcp: Cable,
+  web: Globe,
   automation: AlarmClock,
   "tool-calls": Wrench,
 };
@@ -121,6 +127,28 @@ function parseAgentId(pathname: string): string | null {
   const m = pathname.match(/^\/dashboard\/agents\/([^/]+)/);
   if (!m) return null;
   if (RESERVED_AGENT_SEGMENTS.has(m[1])) return null;
+  return m[1];
+}
+
+const RESERVED_SPACE_SEGMENTS = new Set(["new"]);
+
+/** 空间内 agent 详情页：/dashboard/spaces/<spaceId>/agents/<agentId>/... */
+function parseSpaceAgentRoute(
+  pathname: string,
+): { spaceId: string; agentId: string } | null {
+  const m = pathname.match(/^\/dashboard\/spaces\/([^/]+)\/agents\/([^/]+)/);
+  if (!m) return null;
+  if (RESERVED_SPACE_SEGMENTS.has(m[1]) || RESERVED_SPACE_SEGMENTS.has(m[2])) {
+    return null;
+  }
+  return { spaceId: m[1], agentId: m[2] };
+}
+
+/** Space 详情 / 配置页：/dashboard/spaces/<id> 或 /dashboard/spaces/<id>/settings/... */
+function parseSpaceId(pathname: string): string | null {
+  const m = pathname.match(/^\/dashboard\/spaces\/([^/]+)(?:\/|$)/);
+  if (!m) return null;
+  if (RESERVED_SPACE_SEGMENTS.has(m[1])) return null;
   return m[1];
 }
 
@@ -499,9 +527,11 @@ function TenantHeader({
 function AgentConfigSidebar({
   agentId,
   pathname,
+  spaceId,
 }: {
   agentId: string;
   pathname: string;
+  spaceId?: string;
 }) {
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -530,15 +560,20 @@ function AgentConfigSidebar({
   const activeSeg =
     AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "overview";
 
+  const backHref = spaceId ? `/dashboard/spaces/${spaceId}` : "/dashboard/agents";
+  const allAgentsHref = backHref;
+
   const navItems = useMemo(
     () =>
       AGENT_SUBNAV.map((item) => ({
-        href: `/dashboard/agents/${agentId}/${item.href}`,
+        href: spaceId
+          ? `/dashboard/spaces/${spaceId}/agents/${agentId}/${item.href}`
+          : `/dashboard/agents/${agentId}/${item.href}`,
         label: item.label,
         icon: AGENT_ICONS[item.href] ?? Settings2,
         seg: item.href,
       })),
-    [agentId],
+    [agentId, spaceId],
   );
 
   function closeMobile() {
@@ -551,8 +586,8 @@ function AgentConfigSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
-              tooltip="返回 Agents"
-              render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+              tooltip={spaceId ? "返回 Space" : "返回 Agents"}
+              render={<Link href={backHref} onClick={closeMobile} />}
             >
               <ArrowLeft />
               <span>返回</span>
@@ -580,7 +615,11 @@ function AgentConfigSidebar({
                     <DropdownMenuItem
                       key={a.id}
                       onClick={() => {
-                        router.push(`/dashboard/agents/${a.id}/${activeSeg}`);
+                        router.push(
+                          spaceId
+                            ? `/dashboard/spaces/${spaceId}/agents/${a.id}/${activeSeg}`
+                            : `/dashboard/agents/${a.id}/${activeSeg}`,
+                        );
                         closeMobile();
                       }}
                     >
@@ -593,7 +632,7 @@ function AgentConfigSidebar({
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
-                  render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+                  render={<Link href={allAgentsHref} onClick={closeMobile} />}
                 >
                   全部 Agents…
                 </DropdownMenuItem>
@@ -613,6 +652,160 @@ function AgentConfigSidebar({
           <SidebarGroupLabel>配置</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
+              {navItems.map((item) => {
+                const Icon = item.icon;
+                const active =
+                  pathname === item.href || pathname.endsWith(`/${item.seg}`);
+                return (
+                  <SidebarMenuItem key={item.seg}>
+                    <SidebarMenuButton
+                      isActive={active}
+                      tooltip={item.label}
+                      render={<Link href={item.href} onClick={closeMobile} />}
+                    >
+                      <Icon />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+
+      <SidebarUserFooter />
+    </>
+  );
+}
+
+/** Space 配置独立侧边栏：顶栏返回 + Space 子导航 */
+function SpaceConfigSidebar({
+  spaceId,
+  pathname,
+}: {
+  spaceId: string;
+  pathname: string;
+}) {
+  const router = useRouter();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const [spaces, setSpaces] = useState<SpaceItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      try {
+        const rows = await fetchSpaces();
+        if (!cancelled) setSpaces(rows);
+      } catch {
+        if (!cancelled) setSpaces([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [spaceId]);
+
+  const current = spaces.find((s) => s.id === spaceId);
+  const overviewHref = `/dashboard/spaces/${spaceId}`;
+
+  const navItems = useMemo(
+    () =>
+      SPACE_SUBNAV.map((item) => ({
+        href: `/dashboard/spaces/${spaceId}/settings/${item.href}`,
+        label: item.label,
+        icon: SPACE_ICONS[item.href] ?? Settings2,
+        seg: item.href,
+      })),
+    [spaceId],
+  );
+
+  function closeMobile() {
+    if (isMobile) setOpenMobile(false);
+  }
+
+  return (
+    <>
+      <SidebarHeader className="gap-2 border-b border-sidebar-border px-3 py-3">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="返回 Spaces"
+              render={<Link href="/dashboard/spaces" onClick={closeMobile} />}
+            >
+              <ArrowLeft />
+              <span>返回</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+
+        <div className="min-w-0 px-1 group-data-[collapsible=icon]:hidden">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            Space 配置
+          </div>
+          {loading && !current ? (
+            <ProgressLinear indeterminate className="mt-2 max-w-24" />
+          ) : spaces.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger className="mt-0.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-sm font-medium hover:text-foreground">
+                <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{current?.name ?? "Space"}</span>
+                <ChevronRight className="size-3 shrink-0 rotate-90 opacity-60" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>切换 Space</DropdownMenuLabel>
+                  {spaces.map((s) => (
+                    <DropdownMenuItem
+                      key={s.id}
+                      onClick={() => {
+                        router.push(`/dashboard/spaces/${s.id}/settings/platforms`);
+                        closeMobile();
+                      }}
+                    >
+                      <span className="truncate">{s.name}</span>
+                      {s.id === spaceId ? (
+                        <span className="ml-auto text-[10px] text-muted-foreground">当前</span>
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  render={<Link href="/dashboard/spaces" onClick={closeMobile} />}
+                >
+                  全部 Spaces…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium">
+              <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate">{current?.name ?? "Space"}</span>
+            </div>
+          )}
+        </div>
+      </SidebarHeader>
+
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupLabel>配置</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={pathname === overviewHref}
+                  tooltip="概况"
+                  render={<Link href={overviewHref} onClick={closeMobile} />}
+                >
+                  <LayoutDashboard />
+                  <span>概况</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
               {navItems.map((item) => {
                 const Icon = item.icon;
                 const active =
@@ -957,14 +1150,24 @@ export function AppSidebar({
   isPlatformAdmin?: boolean;
 }) {
   const pathname = usePathname();
-  const agentId = parseAgentId(pathname);
+  const spaceAgent = parseSpaceAgentRoute(pathname);
+  const agentId = spaceAgent ? null : parseAgentId(pathname);
+  const spaceId = spaceAgent ? null : parseSpaceId(pathname);
   const inAdmin =
     multiTenant && isPlatformAdmin && pathname.startsWith("/dashboard/admin");
 
   return (
     <Sidebar collapsible="icon" variant="inset">
-      {agentId ? (
+      {spaceAgent ? (
+        <AgentConfigSidebar
+          agentId={spaceAgent.agentId}
+          spaceId={spaceAgent.spaceId}
+          pathname={pathname}
+        />
+      ) : agentId ? (
         <AgentConfigSidebar agentId={agentId} pathname={pathname} />
+      ) : spaceId ? (
+        <SpaceConfigSidebar spaceId={spaceId} pathname={pathname} />
       ) : inAdmin ? (
         <AdminSidebar pathname={pathname} />
       ) : (

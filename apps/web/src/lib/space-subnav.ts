@@ -6,6 +6,7 @@ export const SPACE_SUBNAV = [
   { href: "projects", label: "项目" },
   { href: "computer", label: "电脑" },
   { href: "mcp", label: "MCP" },
+  { href: "web", label: "网页" },
   { href: "automation", label: "自动化" },
   { href: "tool-calls", label: "调用记录" },
 ] as const;

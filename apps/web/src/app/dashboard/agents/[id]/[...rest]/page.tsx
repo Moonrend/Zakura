@@ -1,20 +1,20 @@
 "use client";
 
 import { useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { notFound, useParams, useRouter } from "next/navigation";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { api } from "@/lib/api";
 import type { AgentListItem } from "@/lib/agents";
 
 /**
- * 旧 /dashboard/agents/* 未知子路由迁移：
- * - 子设置页（acp/connect/platforms 等）→ 所属 space 的设置页
+ * 旧 /dashboard/agents/* 未知子路由处理：
+ * - 已迁移到 Space 的子设置页（acp/connect/platforms 等）一律直接 404；
  * - 其余（overview 等）→ /dashboard/spaces/<spaceId>/agents/<agentId>/...
  * - space 解析失败时回退 spaces 列表页。
  * 注意：使用必选 catch-all [...rest]，避免与同级 page.tsx
  * （/dashboard/agents/[id]）的 specificity 冲突。
  */
-const MOVED_TO_SPACE = new Set([
+const REMOVED_SECTIONS = new Set([
   "acp",
   "automation",
   "computer",
@@ -24,13 +24,18 @@ const MOVED_TO_SPACE = new Set([
   "platforms",
   "projects",
   "tool-calls",
+  "web",
 ]);
 
-export default function AgentsRedirectPage() {
+export default function AgentsRemovedPage() {
   const params = useParams<{ id: string; rest: string[] }>();
   const router = useRouter();
+  const removed =
+    (params.rest?.length ?? 0) > 0 &&
+    REMOVED_SECTIONS.has(params.rest![0]);
 
   useEffect(() => {
+    if (removed) return;
     const agentId = params.id;
     if (!agentId) return;
     let cancelled = false;
@@ -41,14 +46,7 @@ export default function AgentsRedirectPage() {
         );
         if (cancelled) return;
         if (agent.spaceId) {
-          const rest = params.rest ?? [];
-          if (rest.length > 0 && MOVED_TO_SPACE.has(rest[0])) {
-            router.replace(
-              `/dashboard/spaces/${agent.spaceId}/settings/${rest.join("/")}`,
-            );
-          } else {
-            router.replace(`/dashboard/spaces/${agent.spaceId}/agents/${agentId}`);
-          }
+          router.replace(`/dashboard/spaces/${agent.spaceId}/agents/${agentId}`);
           return;
         }
       } catch {
@@ -59,7 +57,8 @@ export default function AgentsRedirectPage() {
     return () => {
       cancelled = true;
     };
-  }, [params, router]);
+  }, [params, router, removed]);
 
+  if (removed) notFound();
   return <PageLoading />;
 }
