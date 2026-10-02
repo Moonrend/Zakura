@@ -15,7 +15,14 @@ export default function AgentConnectionsRedirectPage() {
       .then((agents) => {
         if (cancelled) return;
         if (agents[0]) {
-          router.replace(`/dashboard/agents/${agents[0].id}/platforms`);
+          const first = agents[0];
+          if (first.spaceId) {
+            router.replace(
+              `/dashboard/spaces/${first.spaceId}/settings/platforms`,
+            );
+          } else {
+            router.replace(`/dashboard/agents/${first.id}`);
+          }
         } else {
           router.replace("/dashboard/agents");
         }

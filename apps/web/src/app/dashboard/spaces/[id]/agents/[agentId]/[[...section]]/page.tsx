@@ -8,7 +8,6 @@ import MemoryPage from "@/app/dashboard/agents/[id]/memory/page";
 import SkillsPage from "@/app/dashboard/agents/[id]/skills/page";
 import SkillsAddPage from "@/app/dashboard/agents/[id]/skills/add/page";
 import ApprovalsPage from "@/app/dashboard/agents/[id]/approvals/page";
-import WebPage from "@/app/dashboard/agents/[id]/web/page";
 
 const PAGES: Record<string, React.ComponentType> = {
   overview: OverviewPage,
@@ -18,7 +17,6 @@ const PAGES: Record<string, React.ComponentType> = {
   skills: SkillsPage,
   "skills/add": SkillsAddPage,
   approvals: ApprovalsPage,
-  web: WebPage,
 };
 
 export default function SpaceAgentSectionPage() {

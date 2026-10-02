@@ -15,6 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { fetchAgents } from "@/lib/agents";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -154,9 +155,11 @@ function StatCard({
 function CallRow({
   item,
   showAgent,
+  spaceId,
 }: {
   item: ToolCallItem;
   showAgent: boolean;
+  spaceId?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -200,13 +203,17 @@ function CallRow({
             <span>{formatDuration(item.durationMs)}</span>
             {showAgent ? (
               item.agentId ? (
-                <Link
-                  href={`/dashboard/agents/${item.agentId}/tool-calls`}
-                  onClick={(e) => e.stopPropagation()}
-                  className="hover:text-foreground hover:underline"
-                >
-                  {item.agentName || item.agentSlug || "Agent"}
-                </Link>
+                spaceId ? (
+                  <Link
+                    href={`/dashboard/spaces/${spaceId}/settings/tool-calls`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="hover:text-foreground hover:underline"
+                  >
+                    {item.agentName || item.agentSlug || "Agent"}
+                  </Link>
+                ) : (
+                  <span>{item.agentName || item.agentSlug || "Agent"}</span>
+                )
               ) : (
                 <span>团队级</span>
               )
@@ -261,6 +268,9 @@ export function ToolCallsPanel({
   const [status, setStatus] = useState<"all" | "ok" | "error">("all");
   const [keys, setKeys] = useState<KeyOption[]>([]);
   const [agents, setAgents] = useState<AgentOption[]>([]);
+  const [agentSpaceIds, setAgentSpaceIds] = useState<Map<string, string>>(
+    () => new Map(),
+  );
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const limit = 40;
@@ -317,6 +327,23 @@ export function ToolCallsPanel({
   useEffect(() => {
     void loadMeta();
   }, [loadMeta]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAgents()
+      .then((rows) => {
+        if (cancelled) return;
+        const map = new Map<string, string>();
+        for (const a of rows) {
+          if (a.spaceId) map.set(a.id, a.spaceId);
+        }
+        setAgentSpaceIds(map);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     void load();
@@ -541,7 +568,12 @@ export function ToolCallsPanel({
           </div>
         ) : (
           items.map((item) => (
-            <CallRow key={item.id} item={item} showAgent={!agentId} />
+            <CallRow
+              key={item.id}
+              item={item}
+              showAgent={!agentId}
+              spaceId={item.agentId ? agentSpaceIds.get(item.agentId) : undefined}
+            />
           ))
         )}
       </div>

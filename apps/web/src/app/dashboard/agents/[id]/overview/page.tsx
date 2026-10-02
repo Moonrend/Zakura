@@ -2,19 +2,13 @@
 
 import Link from "next/link";
 import {
-  AlarmClock,
+  ArrowUpRight,
+  Blocks,
   Brain,
-  Cable,
-  FolderKanban,
-  Globe,
-  HardDrive,
   MessageSquare,
-  Plug,
   Settings2,
   ShieldCheck,
-  Blocks,
-  Wrench,
-  ArrowUpRight,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { Button } from "@/components/ui/button";
@@ -24,17 +18,8 @@ import { cn } from "@/lib/utils";
 const QUICK_LINKS = [
   { href: "settings", label: "设置", icon: Settings2, hint: "模型、指令与 Agent 行为" },
   { href: "approvals", label: "工具审批", icon: ShieldCheck, hint: "审批策略、AI 门控与规则" },
-  { href: "computer", label: "电脑", icon: HardDrive, hint: "容器与开发环境" },
-  { href: "projects", label: "项目", icon: FolderKanban, hint: "系统指令与知识库" },
   { href: "skills", label: "技能", icon: Blocks, hint: "预装能力扩展" },
-  { href: "web", label: "网页", icon: Globe, hint: "网页搜索与内容抓取" },
   { href: "memory", label: "记忆", icon: Brain, hint: "跨会话长期记忆" },
-  { href: "mcp", label: "MCP", icon: Cable, hint: "MCP 工具服务器" },
-  { href: "connect", label: "接入", icon: Plug, hint: "对外 MCP 端点与凭据" },
-  { href: "gateway", label: "AI Gateway", icon: Plug, hint: "统一模型代理" },
-  { href: "platforms", label: "消息平台", icon: MessageSquare, hint: "Slack、飞书等渠道" },
-  { href: "automation", label: "自动化", icon: AlarmClock, hint: "定时与事件触发" },
-  { href: "tool-calls", label: "调用记录", icon: Wrench, hint: "工具调用历史" },
 ] as const;
 
 export default function AgentOverviewPage() {
@@ -43,6 +28,23 @@ export default function AgentOverviewPage() {
   if (loading || !agent) {
     return <PageLoading />;
   }
+
+  const quickLinks = [
+    ...QUICK_LINKS.map((item) => ({
+      ...item,
+      href: `/dashboard/agents/${id}/${item.href}`,
+    })),
+    ...(agent.spaceId
+      ? [
+          {
+            href: `/dashboard/spaces/${agent.spaceId}/settings`,
+            label: "空间设置",
+            icon: SlidersHorizontal,
+            hint: "ACP、MCP、接入等已移至空间",
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="space-y-8">
@@ -80,12 +82,12 @@ export default function AgentOverviewPage() {
       <section className="space-y-3">
         <h2 className="text-sm font-medium">配置</h2>
         <div className="stagger-rows grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {QUICK_LINKS.map((item) => {
+          {quickLinks.map((item) => {
             const Icon = item.icon;
             return (
               <Link
                 key={item.href}
-                href={`/dashboard/agents/${id}/${item.href}`}
+                href={item.href}
                 className={cn(
                   "animate-rise group flex min-h-[4.5rem] items-start gap-3 rounded-lg bg-card p-3 shadow-surface-2",
                   "surface-interactive hover:border-foreground/15",

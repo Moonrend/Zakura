@@ -139,6 +139,32 @@ function cloudToLocal(cloud: CloudAgentConfig): Pick<
   };
 }
 
+function CapabilityLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children: React.ReactNode;
+}) {
+  if (!href) {
+    return (
+      <Button size="sm" variant="outline">
+        {children}
+      </Button>
+    );
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      nativeButton={false}
+      render={<Link href={href} />}
+    >
+      {children}
+    </Button>
+  );
+}
+
 export default function AgentSettingsPage() {
   const router = useRouter();
   const { id, agent, refresh, patchAgent } = useAgentDetail();
@@ -528,38 +554,36 @@ export default function AgentSettingsPage() {
               />
             </SettingsRow>
             <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3">
-              <Button
-                size="sm"
-                variant="outline"
-                nativeButton={false}
-                render={<Link href={`/dashboard/agents/${id}/memory`} />}
-              >
+              <CapabilityLink href={`/dashboard/agents/${id}/memory`}>
                 记忆
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                nativeButton={false}
-                render={<Link href={`/dashboard/agents/${id}/web`} />}
+              </CapabilityLink>
+              <CapabilityLink
+                href={
+                  agent.spaceId
+                    ? `/dashboard/spaces/${agent.spaceId}/settings/web`
+                    : undefined
+                }
               >
                 网页
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                nativeButton={false}
-                render={<Link href={`/dashboard/agents/${id}/mcp`} />}
+              </CapabilityLink>
+              <CapabilityLink
+                href={
+                  agent.spaceId
+                    ? `/dashboard/spaces/${agent.spaceId}/settings/mcp`
+                    : undefined
+                }
               >
                 MCP
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                nativeButton={false}
-                render={<Link href={`/dashboard/agents/${id}/computer`} />}
+              </CapabilityLink>
+              <CapabilityLink
+                href={
+                  agent.spaceId
+                    ? `/dashboard/spaces/${agent.spaceId}/settings/computer`
+                    : undefined
+                }
               >
                 电脑
-              </Button>
+              </CapabilityLink>
             </div>
           </SettingsSection>
 
