@@ -10,7 +10,6 @@ import { PageLoading } from "@/components/ui/progress-linear";
 /** 这些页的数据跟着某个 Agent（会话、密钥、定时任务），不是空间上的一份配置。 */
 const PER_AGENT_SECTIONS = new Set([
   "automation",
-  "computer",
   "connect",
   "gateway",
   "projects",

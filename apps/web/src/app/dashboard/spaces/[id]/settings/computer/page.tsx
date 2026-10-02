@@ -1,1 +1,742 @@
-export { default } from "@/app/dashboard/agents/[id]/computer/page";
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import dynamic from "next/dynamic";
+import { toast } from "sonner";
+import {
+  HardDrive,
+  Loader2,
+  Monitor,
+  Play,
+  Square,
+  Terminal,
+  Trash2,
+  ArrowRightLeft,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import {
+  fetchAgentProgress,
+  getWorkspaceStatus,
+  levelColor,
+  needsContainer,
+  workspaceStatusLabel,
+  type ProgressSnapshot,
+} from "@/lib/agents";
+import {
+  kindLabel,
+  listRuntimeNodes,
+  statusLabel,
+  statusVariant,
+  type RuntimeNode,
+} from "@/lib/runners";
+// kindLabel 用于电脑/服务器区分
+import { useAgentDetail } from "@/components/agent-detail-context";
+import { AgentFileManager } from "@/components/agent-files/file-manager";
+import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
+import { Button } from "@/components/ui/button";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { PageLoading } from "@/components/ui/progress-linear";
+import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+import { subscribePlatformEvents } from "@/lib/platform-events";
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
+import { WorkspaceDesktop } from "@/components/workspace-desktop";
+
+export default function AgentComputerPage() {
+  const { confirm } = useConfirmDialog();
+  const { id, agent, refresh, patchAgent } = useAgentDetail();
+  const [nodes, setNodes] = useState<RuntimeNode[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [envBusy, setEnvBusy] = useState(false);
+  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
+  const [wsStatus, setWsStatus] = useState("idle");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createNodeId, setCreateNodeId] = useState("");
+  const [createWorkspaceKind, setCreateWorkspaceKind] = useState<"host" | "container">("container");
+  const [migrateOpen, setMigrateOpen] = useState(false);
+  const [migrateTarget, setMigrateTarget] = useState("");
+  const [migrateBusy, setMigrateBusy] = useState(false);
+  const [migrateStatus, setMigrateStatus] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [a, ns] = await Promise.all([refresh({ list: false }), listRuntimeNodes()]);
+      if (a) setWsStatus(getWorkspaceStatus(a));
+      setNodes(ns);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }, [refresh]);
+
+  useEffect(() => {
+    if (agent) setWsStatus(getWorkspaceStatus(agent));
+  }, [agent]);
+
+  useEffect(() => {
+    let alive = true;
+    const syncNodes = () => {
+      void listRuntimeNodes()
+        .then((rows) => {
+          if (alive) setNodes(rows);
+        })
+        .catch((err) => {
+          if (alive) toast.error(err instanceof Error ? err.message : String(err));
+        });
+    };
+    syncNodes();
+    const unsubscribe = subscribePlatformEvents((event) => {
+      if (event.type === "runner_node") syncNodes();
+    }, syncNodes);
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [id, createOpen, migrateOpen]);
+
+  // 进度经平台事件推送（SSE），只在挂载/重连/收尾时拉快照对齐
+  useEffect(() => {
+    let alive = true;
+
+    const syncSnapshot = async () => {
+      try {
+        const res = await fetchAgentProgress(id);
+        if (!alive) return;
+        setProgress(res.progress);
+        setWsStatus(res.workspace.status);
+        patchAgent({
+          lastError: res.agent.lastError,
+          workspace: res.workspace,
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    void syncSnapshot();
+    const unsubscribe = subscribePlatformEvents(
+      (ev) => {
+        if (ev.type !== "agent_progress" || ev.agentId !== id) return;
+        setProgress(ev.snapshot);
+        if (ev.snapshot.done) {
+          // 收尾：拉一次权威状态（workspace status / lastError）
+          void syncSnapshot();
+          void refresh({ list: false });
+        }
+      },
+      () => void syncSnapshot(),
+    );
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [id, patchAgent, refresh]);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [progress?.events.length]);
+
+  const currentNode = useMemo(() => {
+    if (!agent?.runtimeNodeId) return null;
+    return nodes.find((n) => n.id === agent.runtimeNodeId) ?? null;
+  }, [agent?.runtimeNodeId, nodes]);
+
+  const createNodeKind = nodes.find((node) => node.id === createNodeId)?.kind;
+  useEffect(() => {
+    setCreateWorkspaceKind(createNodeKind === "computer" ? "host" : "container");
+  }, [createNodeId, createNodeKind]);
+
+  // The API includes Local only when the current user has permission to use it.
+  const availableNodes = nodes;
+
+  useEffect(() => {
+    setCreateNodeId((current) =>
+      availableNodes.some((node) => node.id === current)
+        ? current
+        : availableNodes.find((node) => node.status === "online")?.id ?? "",
+    );
+  }, [availableNodes]);
+
+  const createItems = useMemo(
+    () =>
+      availableNodes.map((n) => ({
+        value: n.id,
+        label: `${n.name} · ${kindLabel(n.kind)}${n.access === "shared" ? " · 共享" : ""} · ${statusLabel(n.status)}`,
+        disabled: n.status !== "online",
+      })),
+    [availableNodes],
+  );
+
+  const migrateItems = useMemo(() => {
+    const current = agent?.runtimeNodeId || "";
+    return availableNodes
+      .filter((n) => n.status === "online")
+      .map((n) => ({
+        value: n.id,
+        label: `${n.name} · ${kindLabel(n.kind)} · ${statusLabel(n.status)}`,
+      }))
+      .filter((i) => i.value !== current);
+  }, [agent?.runtimeNodeId, availableNodes]);
+
+  async function createComputer() {
+    setCreating(true);
+    try {
+      const runtimeNodeId = createNodeId || null;
+      if (!runtimeNodeId) {
+        toast.error("请选择一台电脑或服务器");
+        return;
+      }
+      const workspaceKind = createWorkspaceKind;
+      await api(`/api/agents/${id}`, {
+        method: "PATCH",
+        json: { enableComputer: true, restart: false, runtimeNodeId, workspaceKind },
+      });
+      await api(`/api/agents/${id}/start`, {
+        method: "POST",
+        json: { runtimeNodeId, workspaceKind },
+      });
+      toast.success("已创建电脑");
+      setCreateOpen(false);
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function deleteComputer() {
+    if (!(await confirm({ title: "删除电脑？", description: "将停止环境并关闭电脑能力。", confirmLabel: "删除电脑" }))) return;
+    setDeleting(true);
+    try {
+      try {
+        await api(`/api/agents/${id}/stop`, { method: "POST" });
+      } catch {
+        /* already stopped */
+      }
+      await api(`/api/agents/${id}`, {
+        method: "PATCH",
+        json: { enableComputer: false, restart: true },
+      });
+      toast.success("已删除电脑");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function startWorkspace() {
+    setEnvBusy(true);
+    try {
+      // Keep current binding when restarting
+      await api(`/api/agents/${id}/start`, {
+        method: "POST",
+        json: {},
+      });
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEnvBusy(false);
+    }
+  }
+
+  async function enableGraphicalWorkspace() {
+    setEnvBusy(true);
+    try {
+      await api(`/api/agents/${id}`, { method: "PATCH", json: { workspaceKind: "container", restart: true } });
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEnvBusy(false);
+    }
+  }
+
+  async function stopWorkspace() {
+    setEnvBusy(true);
+    try {
+      await api(`/api/agents/${id}/stop`, { method: "POST" });
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setEnvBusy(false);
+    }
+  }
+
+  async function runMigrate() {
+    if (!migrateTarget) {
+      toast.error("请选择目标 Runner");
+      return;
+    }
+    setMigrateBusy(true);
+    setMigrateStatus("准备迁移…");
+    try {
+      // Stop workspace first
+      try {
+        await api(`/api/agents/${id}/stop`, { method: "POST" });
+      } catch {
+        /* ignore */
+      }
+
+      const targetNodeId = migrateTarget;
+      if (!targetNodeId) throw new Error("找不到目标节点");
+
+      const res = await api<{ migration: { id: string; status: string } }>(
+        `/api/agents/${id}/migrations`,
+        {
+          method: "POST",
+          json: { targetNodeId },
+        },
+      );
+      const jobId = res.migration.id;
+      setMigrateStatus(`迁移任务 ${jobId.slice(0, 8)}…`);
+
+      // Poll until terminal
+      for (let i = 0; i < 120; i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        const cur = await api<{
+          migration: { status: string; progressPct: number; message?: string | null; error?: string | null };
+        }>(`/api/migrations/${jobId}`);
+        const m = cur.migration;
+        setMigrateStatus(
+          `${m.status} ${m.progressPct}%${m.message ? ` · ${m.message}` : ""}`,
+        );
+        if (m.status === "completed") {
+          toast.success("迁移完成，正在目标节点启动…");
+          // Bind already updated by migration; start on new node
+          await api(`/api/agents/${id}/start`, { method: "POST", json: {} });
+          setMigrateOpen(false);
+          await load();
+          return;
+        }
+        if (m.status === "failed" || m.status === "cancelled") {
+          throw new Error(m.error || `迁移失败: ${m.status}`);
+        }
+      }
+      throw new Error("迁移超时，请稍后在 Runners 页查看任务状态");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMigrateBusy(false);
+      setMigrateStatus(null);
+    }
+  }
+
+  if (!agent) {
+    return <PageLoading />;
+  }
+
+  const hasComputer = needsContainer(agent);
+  const showLog =
+    progress &&
+    (progress.running ||
+      progress.events.length > 0 ||
+      wsStatus === "starting" ||
+      wsStatus === "error");
+  const workspaceRunning = wsStatus === "running";
+
+  if (!hasComputer) {
+    return (
+      <div className="space-y-5">
+        <SettingsHeader title="电脑" />
+        {agent.lastError ? (
+          <Alert variant="destructive">
+            <AlertDescription>{agent.lastError}</AlertDescription>
+          </Alert>
+        ) : null}
+        <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-16">
+          <Monitor className="size-8 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">尚未创建电脑</p>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Monitor />
+            创建电脑
+          </Button>
+        </div>
+
+        <CreateComputerDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          createNodeId={createNodeId}
+          setCreateNodeId={setCreateNodeId}
+          workspaceKind={createWorkspaceKind}
+          setWorkspaceKind={setCreateWorkspaceKind}
+          createItems={createItems}
+          availableNodes={availableNodes}
+          creating={creating}
+          onConfirm={() => void createComputer()}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <SettingsHeader
+        title="电脑"
+        actions={
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {workspaceStatusLabel(wsStatus)}
+            </span>
+            <Button
+              size="sm"
+              disabled={envBusy || progress?.running}
+              onClick={() => void startWorkspace()}
+            >
+              {envBusy || progress?.running ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Play />
+              )}
+              启动
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={envBusy}
+              onClick={() => void stopWorkspace()}
+            >
+              <Square />
+              停止
+            </Button>
+          </div>
+        }
+      />
+
+      <SettingsSection title="运行位置">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <HardDrive className="size-4 text-muted-foreground" />
+            {currentNode ? (
+              <>
+                <span className="font-medium">{currentNode.name}</span>
+                <Badge variant="outline">{kindLabel(currentNode.kind)}</Badge>
+                <Badge variant={statusVariant(currentNode.status)}>
+                  {statusLabel(currentNode.status)}
+                </Badge>
+                {currentNode.endpoint ? (
+                  <code className="text-[11px] text-muted-foreground">
+                    {currentNode.endpoint}
+                  </code>
+                ) : null}
+              </>
+            ) : (
+              <span className="text-muted-foreground">
+                {agent.runtimeNodeId ? `节点 ${agent.runtimeNodeId}` : "未绑定"}
+              </span>
+            )}
+            <Badge variant="secondary" className="ml-1 text-[10px]">
+              {agent.workspace?.profile === "full" ? "完整镜像" : "精简镜像"}
+            </Badge>
+          </div>
+          <div className="flex gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              nativeButton={false}
+              render={<Link href="/dashboard/runners" />}
+            >
+              管理 Runners
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={migrateItems.length === 0}
+              onClick={() => {
+                setMigrateTarget(migrateItems[0]?.value ?? "");
+                setMigrateOpen(true);
+              }}
+            >
+              <ArrowRightLeft />
+              迁移
+            </Button>
+          </div>
+        </div>
+      </SettingsSection>
+
+      {agent.lastError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{agent.lastError}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {showLog ? (
+        <SettingsSection title="日志">
+          <div className="max-h-56 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[11px] leading-relaxed">
+            {(progress?.events ?? []).map((e, i) => (
+              <div
+                key={`${e.ts}-${i}`}
+                className={cn("flex gap-2", levelColor(e.level))}
+              >
+                <span className="shrink-0 opacity-50">
+                  {new Date(e.ts).toLocaleTimeString()}
+                </span>
+                <span className="shrink-0 font-semibold">{e.step}</span>
+                <span className="min-w-0 break-all">{e.message}</span>
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+          {progress?.running ? (
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              {/* 只过渡 width：这里唯一会变的就是宽度，transition-all 会顺带把
+                  颜色、边框等一并纳入过渡，属于「没决定该动什么」。 */}
+              <div
+                className="h-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none"
+                style={{ width: `${progress.percent}%` }}
+              />
+            </div>
+          ) : null}
+        </SettingsSection>
+      ) : null}
+
+      <SettingsSection title="工作区访问">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">平台代理终端</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              通过 Zakura 与 Runner 的鉴权通道进入容器，不暴露 SSH 或桌面端口。
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!workspaceRunning}
+            onClick={() => setTerminalOpen(true)}
+          >
+            <Terminal />
+            打开终端
+          </Button>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={
+          <div className="flex items-center justify-between gap-2">
+            <span>桌面</span>
+          </div>
+        }
+      >
+        {agent.workspaceKind === "host" ? (
+          <div className="space-y-3 rounded-md border border-dashed p-5 text-sm">
+            <p className="text-muted-foreground">本机工作区支持文件和终端。图形桌面与浏览器需要该节点上的 Docker 容器。</p>
+            <Button size="sm" variant="outline" disabled={envBusy || currentNode?.status !== "online"} onClick={() => void enableGraphicalWorkspace()}>
+              {envBusy ? <Loader2 className="animate-spin" /> : <Monitor />}
+              启用图形桌面（Docker）
+            </Button>
+          </div>
+        ) : workspaceRunning ? (
+          <WorkspaceDesktop agentId={id} active={workspaceRunning} />
+        ) : (
+          <div className="flex min-h-[200px] items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
+            启动后可用
+          </div>
+        )}
+      </SettingsSection>
+
+      <SettingsSection title="文件">
+        <AgentFileManager agentId={id} canWrite />
+      </SettingsSection>
+
+      <div className="border-t pt-4">
+        <Button
+          size="sm"
+          variant="destructive"
+          disabled={deleting}
+          onClick={() => void deleteComputer()}
+        >
+          {deleting ? <Loader2 className="animate-spin" /> : <Trash2 />}
+          删除电脑
+        </Button>
+      </div>
+
+      <Dialog open={migrateOpen} onOpenChange={setMigrateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>迁移电脑工作区</DialogTitle>
+            <DialogDescription>迁移工作区到目标 Runner</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>目标 Runner</Label>
+              <Select
+                value={migrateTarget}
+                onValueChange={(v) => {
+                  if (v) setMigrateTarget(v);
+                }}
+                items={migrateItems}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {migrateItems.map((i) => (
+                    <SelectItem key={i.value} value={i.value}>
+                      {i.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {migrateStatus ? (
+              <p className="text-xs text-muted-foreground font-mono">{migrateStatus}</p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={migrateBusy}
+              onClick={() => setMigrateOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={migrateBusy || !migrateItems.some((item) => item.value === migrateTarget)}
+              onClick={() => void runMigrate()}
+            >
+              {migrateBusy ? <Loader2 className="animate-spin" /> : <ArrowRightLeft />}
+              开始迁移
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <WorkspaceTerminalDialog
+        agentId={id}
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+      />
+    </div>
+  );
+}
+
+function CreateComputerDialog({
+  open,
+  onOpenChange,
+  createNodeId,
+  setCreateNodeId,
+  workspaceKind,
+  setWorkspaceKind,
+  createItems,
+  availableNodes,
+  creating,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  createNodeId: string;
+  setCreateNodeId: (v: string) => void;
+  workspaceKind: "host" | "container";
+  setWorkspaceKind: (v: "host" | "container") => void;
+  createItems: Array<{ value: string; label: string; disabled: boolean }>;
+  availableNodes: RuntimeNode[];
+  creating: boolean;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>创建电脑</DialogTitle>
+          <DialogDescription>选择运行节点</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label>运行位置</Label>
+            <Select
+              value={createNodeId}
+              onValueChange={(v) => {
+                if (v) setCreateNodeId(v);
+              }}
+              items={createItems}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {createItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value} disabled={item.disabled}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <Label>工作区类型</Label>
+            <Select value={workspaceKind} onValueChange={(value) => { if (value === "host" || value === "container") setWorkspaceKind(value); }}
+              items={[{ value: "container", label: "图形工作区（Docker）" }, { value: "host", label: "本机文件与终端" }]}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="container">图形工作区（Docker）</SelectItem>
+                <SelectItem value="host">本机文件与终端</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{workspaceKind === "container" ? "提供浏览器、图形桌面与截图；所选节点需要 Docker。" : "使用节点本机文件和终端，不提供虚拟图形桌面。"}</p>
+          </div>
+          {availableNodes.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              尚未注册电脑或服务器。请前往{" "}
+              <Link href="/dashboard/runners" className="underline">
+                电脑与服务器
+              </Link>{" "}
+              安装 zakura-agent。
+            </p>
+          ) : null}
+          {availableNodes.length > 0 && createItems.every((item) => item.disabled) ? (
+            <p className="text-[11px] text-warning-foreground">
+              当前没有在线的电脑或服务器。
+              {availableNodes.some((node) => node.access === "shared")
+                ? "共享节点由平台管理员维护；也可接入自己的设备。"
+                : "请启动设备上的 zakura-agent 并检查网络连接。"}
+            </p>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button
+            disabled={
+              creating ||
+              !createItems.length ||
+              !createNodeId ||
+              availableNodes.find((n) => n.id === createNodeId)?.status !== "online"
+            }
+            onClick={onConfirm}
+          >
+            {creating ? <Loader2 className="animate-spin" /> : <Monitor />}
+            创建并启动
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

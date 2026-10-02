@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { toast } from "sonner";
 import {
   fetchAgentProviders,
   saveAgentProviders,
   type AgentProviderOptions,
 } from "@/lib/agents";
+import { useAgentDetail } from "@/components/agent-detail-context";
 import {
   SettingsHeader,
   SettingsRow,
@@ -37,8 +37,7 @@ type WebState = {
 };
 
 export default function AgentWebPage() {
-  const params = useParams<{ id: string }>();
-  const id = params.id;
+  const { id } = useAgentDetail();
   const [opts, setOpts] = useState<AgentProviderOptions | null>(null);
   const [state, setState] = useState<WebState | null>(null);
 
