@@ -18,6 +18,8 @@ on:
         options:
           - all
           - app
+          - server
+          - web
           - workspace
 
 permissions:
@@ -98,6 +100,20 @@ jobs:
             timeout: 60
             workspace_tags: "false"
             build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
+          - name: server
+            image: zakura-server
+            dockerfile: docker/server/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
+          - name: web
+            image: zakura-web
+            dockerfile: docker/web/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: "ZAKURA_API_URL=http://server:8787"
           - name: workspace
             image: zakura-workspace
             dockerfile: docker/workspace/Dockerfile
@@ -237,7 +253,7 @@ jobs:
             echo "### Pull (Docker Hub)"
             echo
             echo '```bash'
-            for img in zakura zakura-workspace; do
+            for img in zakura zakura-server zakura-web zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 echo "docker pull ${DH_USER}/${img}:${VERSION}"
               fi
@@ -247,7 +263,7 @@ jobs:
             echo "### Pull (GHCR)"
             echo
             echo '```bash'
-            for img in zakura zakura-workspace; do
+            for img in zakura zakura-server zakura-web zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 echo "docker pull ${REGISTRY}/${OWNER}/${img}:${VERSION}"
               fi
@@ -256,7 +272,7 @@ jobs:
             echo
             echo "### Digests"
             echo
-            for img in zakura zakura-workspace; do
+            for img in zakura zakura-server zakura-web zakura-workspace; do
               if [[ -f "digests/${img}.txt" ]]; then
                 digest="$(tr -d '[:space:]' < "digests/${img}.txt")"
                 echo "- \`${DH_USER}/${img}@${digest}\`"
@@ -270,6 +286,12 @@ jobs:
             echo "|-------|------|"
             if [[ -f digests/zakura.txt ]]; then
               echo "| \`${DH_USER}/zakura\` / \`${REGISTRY}/${OWNER}/zakura\` | \`${VERSION}\`, minor/major, \`latest\` |"
+            fi
+            if [[ -f digests/zakura-server.txt ]]; then
+              echo "| \`${DH_USER}/zakura-server\` / \`${REGISTRY}/${OWNER}/zakura-server\` | \`${VERSION}\`, minor/major, \`latest\` |"
+            fi
+            if [[ -f digests/zakura-web.txt ]]; then
+              echo "| \`${DH_USER}/zakura-web\` / \`${REGISTRY}/${OWNER}/zakura-web\` | \`${VERSION}\`, minor/major, \`latest\` |"
             fi
             if [[ -f digests/zakura-workspace.txt ]]; then
               echo "| \`${DH_USER}/zakura-workspace\` / \`${REGISTRY}/${OWNER}/zakura-workspace\` | \`${VERSION}\`, \`debian-${VERSION}\`, \`debian\`, \`latest\` |"

@@ -8,14 +8,16 @@ dist
 .turbo
 **/coverage
 **/*.tsbuildinfo
+go/server/bin
 
 # Local data & secrets
 data
 *.db
 *.db-journal
-.env
-.env.*
+**/.env
+**/.env.*
 !.env.example
+!**/.env.example
 
 # VCS & IDE
 .git

@@ -32,6 +32,8 @@ const markstreamAliases = {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
+  outputFileTracingRoot: path.join(__dirname, "../.."),
   transpilePackages: [
     "markstream-react",
     "katex",

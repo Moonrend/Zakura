@@ -20,6 +20,8 @@ on:
         options:
           - all
           - app
+          - server
+          - web
           - workspace
           - workspace-lite
 
@@ -89,6 +91,22 @@ jobs:
             timeout: 60
             workspace_tags: "false"
             build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
+            target: ""
+          - name: server
+            image: zakura-server-dev
+            dockerfile: docker/server/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
+            target: ""
+          - name: web
+            image: zakura-web-dev
+            dockerfile: docker/web/Dockerfile
+            context: .
+            timeout: 60
+            workspace_tags: "false"
+            build_args: "ZAKURA_API_URL=http://server:8787"
             target: ""
           - name: workspace
             image: zakura-workspace-dev

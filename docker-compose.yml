@@ -1,65 +1,48 @@
-# Zakura — AI 环境编排 & 统一 MCP 网关
+# Zakura — OSS quickstart（分服务镜像：server + web）
 #
-# 默认拉取 Docker Hub 开发镜像（自托管，内嵌 PGlite）：
+# 默认 SQLite（持久化到命名卷），server 与 web 两个容器：
 #   docker compose up -d
 #
-# 本地构建：
+# 使用 Postgres（内置 pgvector 服务，需把 DATABASE_URL 指过去）：
+#   DATABASE_URL=postgresql://zakura:zakura@postgres:5432/zakura \
+#     docker compose --profile postgres up -d
+#
+# 本地源码构建：
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
-# 使用外部 Postgres（多租户 / 生产）：
-#   docker compose --profile postgres up -d
-#   并将 zakura 的 DATABASE_URL 指到 postgres 服务
-#
-# 生产流式加速（默认强制 Redis，地址自配 REDIS_URL）：
-#   COMPOSE_PROFILES=postgres docker compose up -d
-#   REDIS_URL=redis://redis:6379
-# 本地无 Redis 时显式关闭：REDIS_URL=off
-# 详见 docs/deployment.md
-#
-# 可选组件：
-#   docker compose --profile components up -d
+# 健康检查：server 暴露 /livez（liveness）与 /readyz（readiness）。
+# 迁移：默认 AUTO_MIGRATE=true（首启建表）；生产多副本请设 AUTO_MIGRATE=false，
+#       并先用一次 release 任务应用迁移，详见 deploy/README.md。
+# 旧全栈镜像（回滚参考）：deploy/legacy-fullstack-compose.yml
 
 services:
-  zakura:
-    image: ${ZAKURA_IMAGE:-sunwuyuan/zakura-dev:latest}
-    container_name: zakura
-    # 经 nginx 对外；直连调试可取消注释
-    # ports:
-    #   - "8787:8787"
-    #   - "3000:3001"
-    expose:
-      - "8787"
-      - "3001"
+  server:
+    image: ${ZAKURA_SERVER_IMAGE:-sunwuyuan/zakura-server:latest}
+    container_name: zakura-server
+    ports:
+      - "8787:8787"
     environment:
-      # 默认内嵌 PGlite；云端改为 postgresql://zakura:zakura@postgres:5432/zakura
-      DATABASE_URL: ${DATABASE_URL:-pglite:/data/pglite}
-      # Redis 默认强制；请在 env 配置地址（见 docs/deployment.md）
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      LISTEN_ADDR: ":8787"
+      # 默认 SQLite；改用 Postgres：postgresql://zakura:zakura@postgres:5432/zakura
+      DATABASE_URL: ${DATABASE_URL:-file:/data/zakura.db}
+      DATA_DIR: /data
       ZAKURA_DATA_DIR: /data
-      # 本机运行工作区容器时，bind 源必须是宿主机路径：容器创建请求发给宿主机
-      # docker 守护进程，它按宿主机根解析 /data，会新建一个空目录，导致
-      # 「文件浏览看到的工作区」与「Agent 实际写入的工作区」分叉（浏览目录报 ENOENT）。
-      # 默认的 zakura-data 命名卷没有宿主机路径，所以本机工作区默认关闭；
-      # 需要本机工作区时，把 zakura-data 换成 bind 挂载并把这里设成同一路径。
-      ZAKURA_HOST_DATA_DIR: ${ZAKURA_HOST_DATA_DIR:-}
-      ZAKURA_PUBLIC_URL: ${ZAKURA_PUBLIC_URL:-https://zakura-local-api.190823.xyz}
-      ZAKURA_WEB_URL: ${ZAKURA_WEB_URL:-https://zakura-local.190823.xyz}
-      HOST: 0.0.0.0
-      PORT: 8787
-      # 部署形态：oss（默认单租户）| saas（多租户 / 自助注册，镜像内需含 @zakura/saas）
+      # 必填（>=32 字节）；quickstart 用占位默认值，部署时务必覆盖
+      ZAKURA_SECRET: ${ZAKURA_SECRET:-zakura-local-dev-secret-change-me-0123456789abcdef}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8787}
+      WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-http://localhost:3001}
       ZAKURA_EDITION: ${ZAKURA_EDITION:-oss}
-      # 工作区 / Runner 默认镜像（可由环境覆盖）
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      # 本机运行工作区容器时 bind 源必须是宿主机路径（详见 docs/deployment.md）
+      ZAKURA_HOST_DATA_DIR: ${ZAKURA_HOST_DATA_DIR:-}
+      # 工作区 / Runner 镜像直通（部署时按需覆盖）
       ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:latest}
       ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
-      # 可选：OTLP logs 完整 URL（Axiom: https://<region>.aws.edge.axiom.co/v1/logs）
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
-      # 平台自托管 Headscale：数据面由 zakura-host-ts（host 网 + kernel TUN）加入本机网。
-      # 控制面主机勿再跑个人 Tailscale 内核客户端，否则会与 host-ts 抢 TUN/100.x。
     volumes:
       - zakura-data:/data
     restart: unless-stopped
-    # 经 docker0 访问宿主机 tailscale0 上的 Runner（100.64/10）需要主机 ip_forward=1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -72,41 +55,34 @@ services:
       postgres:
         condition: service_healthy
         required: false
-      redis:
-        condition: service_healthy
-        required: true
     networks:
       - zakura
-  caddy:
-    image: caddy:2.9-alpine
-    container_name: zakura-caddy
+
+  web:
+    image: ${ZAKURA_WEB_IMAGE:-sunwuyuan/zakura-web:latest}
+    container_name: zakura-web
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "3001:3001"
     environment:
-      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@moonrend.com}
-    volumes:
-      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      PORT: 3001
+      HOSTNAME: 0.0.0.0
     depends_on:
-      - zakura
+      server:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - zakura
-      - headscale
 
   postgres:
     profiles: ["postgres"]
-    # 需带 pgvector（memory embedding / migrate 0010）
+    # 需带 pgvector（memory embedding / 迁移）
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     container_name: zakura-postgres
     environment:
       POSTGRES_USER: zakura
       POSTGRES_PASSWORD: zakura
       POSTGRES_DB: zakura
-    # 仅本机调试用；容器间走 zakura 网络，勿对公网暴露
+    # 仅本机调试用；容器间走 zakura 网络
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -121,9 +97,11 @@ services:
       retries: 10
 
   redis:
+    # 预留：Go 后端当前不使用 Redis（会话/事件直接落 SQL），此项仅为兼容旧栈
+    # 或未来演进保留，默认不启动：docker compose --profile redis up -d
+    profiles: ["redis"]
     image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: zakura-redis
-    # 仅本机调试；容器间走 zakura 网络
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -137,49 +115,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-  searxng:
-    profiles: ["components"]
-    image: searxng/searxng:latest
-    container_name: zakura-searxng
-    ports:
-      - "8080:8080"
-    environment:
-      SEARXNG_LIMITER: "false"
-      SEARXNG_SECRET: zakura-compose-searxng
-    volumes:
-      - ./docker/searxng:/etc/searxng:rw
-    networks:
-      - zakura
-    restart: unless-stopped
-
-  openviking:
-    profiles: ["components"]
-    image: ghcr.io/volcengine/openviking:latest
-    container_name: zakura-openviking
-    ports:
-      - "1933:1933"
-    environment:
-      OPENVIKING_PUBLIC_BASE_URL: http://127.0.0.1:1933
-      OPENVIKING_WITH_BOT: "0"
-      OPENVIKING_CONFIG_FILE: /app/.openviking/ov.conf
-    volumes:
-      - openviking-data:/app/.openviking
-    networks:
-      - zakura
-    restart: unless-stopped
 
 volumes:
   zakura-data:
-  openviking-data:
   postgres-data:
   redis-data:
-  caddy-data:
-  caddy-config:
 
 networks:
   zakura:
     name: zakura
     driver: bridge
-  headscale:
-    name: zakura-headscale
-    external: true

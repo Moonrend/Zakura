@@ -1,10 +1,20 @@
-# 本地从源码构建主应用（覆盖 docker-compose.yml 的 image）
+# 本地从源码构建 server / web（覆盖 docker-compose.yml 的 image）
 services:
-  zakura:
-    image: sunwuyuan/zakura-dev:local
+  server:
+    image: sunwuyuan/zakura-server:local
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/server/Dockerfile
+      args:
+        ZAKURA_AGENT_VERSION: ${ZAKURA_AGENT_VERSION:-dev}
+
+  web:
+    image: sunwuyuan/zakura-web:local
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+      args:
+        ZAKURA_API_URL: http://server:8787
 
   # 构建工作区镜像（不作为 compose 服务运行，仅构建用）
   # docker compose -f docker-compose.yml -f docker-compose.build.yml build workspace-full
