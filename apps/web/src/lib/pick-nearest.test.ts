@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { pickNearest } from "./pick-nearest.ts";
+import { pickNearest } from "../hooks/use-fluid-hover.ts";
 
 const rects = [
   { top: 0, height: 32, left: 0, width: 200 },
