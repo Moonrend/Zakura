@@ -1,7 +1,7 @@
 ---
 description: Read-only researcher (deepseek-v4.1-flash) for codebase exploration, API audits, and verification. Cannot edit files.
 mode: subagent
-model: cline-pass/deepseek-v4.1-flash
+model: wuyuan/cline-pass/deepseek-v4.1-flash
 permission:
   edit: deny
 ---
