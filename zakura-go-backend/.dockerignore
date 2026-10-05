@@ -1,0 +1,7 @@
+.git
+bin
+data
+docs/ROUTE_PARITY.md
+*.db
+*.log
+

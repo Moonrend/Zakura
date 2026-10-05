@@ -1,0 +1,157 @@
+name: Go backend CI
+
+on:
+  push:
+    branches:
+      - ci/go-backend-validation
+  pull_request:
+    paths:
+      - "zakura-go-backend/**"
+      - ".github/workflows/go-backend-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: zakura-go-backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: zakura_test
+          POSTGRES_USER: zakura
+          POSTGRES_PASSWORD: zakura-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zakura -d zakura_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      ZAKURA_TEST_POSTGRES_URL: postgres://zakura:zakura-test-only@127.0.0.1:5432/zakura_test?sslmode=disable
+      ZAKURA_REFERENCE_DRIZZLE_DIR: ${{ github.workspace }}/apps/server/drizzle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: zakura-go-backend/go.mod
+          cache: true
+          cache-dependency-path: zakura-go-backend/go.sum
+      - run: go test -race -count=1 ./...
+      - run: go vet ./...
+      - run: go build -buildvcs=false -trimpath ./cmd/...
+      - name: Build native stdio bridge images
+        run: |
+          set -euo pipefail
+          docker build --file Dockerfile.stdio --target npm --tag zakura/stdio-bridge-node:ci .
+          docker build --file Dockerfile.stdio --target pypi --tag zakura/stdio-bridge-python:ci .
+          docker build --file Dockerfile.stdio --target oci --tag zakura/stdio-bridge-oci:ci .
+          docker build --file Dockerfile.stdio --target binary --tag zakura/stdio-bridge-binary:ci .
+      - name: Boot and health-check every stdio bridge image
+        run: |
+          set -euo pipefail
+          images=(
+            "zakura/stdio-bridge-node:ci|node"
+            "zakura/stdio-bridge-python:ci|python"
+            "zakura/stdio-bridge-oci:ci|docker"
+            "zakura/stdio-bridge-binary:ci|/bin/echo"
+          )
+          containers=()
+          cleanup() { for id in "${containers[@]}"; do docker rm -f "$id" >/dev/null 2>&1 || true; done; }
+          trap cleanup EXIT
+          for item in "${images[@]}"; do
+            image="${item%%|*}"
+            command="${item#*|}"
+            id="$(docker run -d -p 127.0.0.1::3100 -e MCP_COMMAND="$command" "$image")"
+            containers+=("$id")
+            port="$(docker port "$id" 3100/tcp | awk -F: 'NR == 1 { print $NF }')"
+            test -n "$port"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent "http://127.0.0.1:${port}/health" | grep -q '"ok":true'; then break; fi
+              if [ "$attempt" = 30 ]; then docker logs "$id"; exit 1; fi
+              sleep 1
+            done
+          done
+
+  preserved-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: zakura-go-backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: zakura_browser
+          POSTGRES_USER: zakura
+          POSTGRES_PASSWORD: zakura-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zakura -d zakura_browser"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: zakura-go-backend/go.mod
+          cache: true
+          cache-dependency-path: zakura-go-backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: cd .. && pnpm install --frozen-lockfile
+      - run: cd .. && pnpm exec playwright install --with-deps chromium
+      - run: go build -trimpath -o bin/zakura-server ./cmd/zakura-server
+      - run: cd .. && pnpm --filter @zakura/shared build
+      - run: cd ../apps/web && ZAKURA_API_URL=http://127.0.0.1:8787 pnpm build
+      - name: Browser contract
+        env:
+          ZAKURA_SECRET: 0123456789abcdef0123456789abcdef
+          DATABASE_URL: postgres://zakura:zakura-test-only@127.0.0.1:5432/zakura_browser?sslmode=disable
+          LISTEN_ADDR: 127.0.0.1:8787
+          PUBLIC_BASE_URL: http://127.0.0.1:8787
+          WEB_PUBLIC_URL: http://127.0.0.1:3001
+          ZAKURA_EDITION: saas
+          MULTI_TENANT: "true"
+        run: |
+          set -euo pipefail
+          ./bin/zakura-server >/tmp/zakura-server.log 2>&1 & backend=$!
+          (cd ../apps/web && ZAKURA_API_URL="$PUBLIC_BASE_URL" pnpm start) >/tmp/zakura-web.log 2>&1 & frontend=$!
+          trap 'kill "$backend" "$frontend" 2>/dev/null || true; cat /tmp/zakura-server.log; cat /tmp/zakura-web.log' EXIT
+          for i in $(seq 1 90); do
+            if curl --fail --silent "$PUBLIC_BASE_URL/api/health" >/dev/null && curl --fail --silent "$WEB_PUBLIC_URL" >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent "$PUBLIC_BASE_URL/api/health" >/dev/null
+          curl --fail --silent "$WEB_PUBLIC_URL" >/dev/null
+          node scripts/frontend-browser.mjs "$WEB_PUBLIC_URL"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: go-backend-browser-logs
+          path: |
+            /tmp/zakura-server.log
+            /tmp/zakura-web.log
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: go-backend-browser-screenshots
+          path: zakura-go-backend/artifacts/go-backend-browser
+          if-no-files-found: error

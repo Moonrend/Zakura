@@ -1,0 +1,9 @@
+Zakura Go Backend
+
+This is an independent Go rewrite of the Zakura server. It is derived from
+and intended to remain API-compatible with Moonrend/Zakura, pinned for this
+rewrite at commit 74002770e283110b3dec860010998a6b5134c354.
+
+Copyright in the upstream work remains with the Moonrend/Zakura contributors.
+Copyright in the Go rewrite belongs to its respective contributors. The work
+is distributed under AGPL-3.0. No rights to third-party marks are implied.

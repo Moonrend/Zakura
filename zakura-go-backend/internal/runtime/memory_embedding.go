@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+)
+
+type memoryEmbeddingConfig struct {
+	RouteID    string
+	RouteSlug  string
+	BaseURL    string
+	APIKey     string
+	Model      string
+	Dimensions int
+}
+
+func (h *handler) agentEmbeddingConfig(ctx context.Context, tenant, agent string) (*memoryEmbeddingConfig, error) {
+	var providerID *string
+	if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT memory_provider_id FROM agents WHERE tenant_id=? AND id=?`), tenant, agent).Scan(&providerID); errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var id, kind, configRaw string
+	query := `SELECT id,kind,config_json FROM memory_providers WHERE tenant_id=? AND enabled=TRUE`
+	args := []any{tenant}
+	if providerID != nil && *providerID != "" {
+		query += ` AND id=?`
+		args = append(args, *providerID)
+	} else {
+		query += ` ORDER BY is_default DESC,created_at LIMIT 1`
+	}
+	if err := h.deps.DB.QueryRowContext(ctx, h.store.q(query), args...).Scan(&id, &kind, &configRaw); errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if kind != "builtin" {
+		return nil, nil
+	}
+	var config map[string]any
+	if json.Unmarshal([]byte(configRaw), &config) != nil {
+		return nil, nil
+	}
+	embedding, _ := config["embedding"].(map[string]any)
+	if embedding == nil || embedding["enabled"] != true {
+		return nil, nil
+	}
+	cfg := &memoryEmbeddingConfig{}
+	cfg.RouteID, _ = embedding["routeId"].(string)
+	cfg.RouteSlug, _ = embedding["routeSlug"].(string)
+	cfg.BaseURL, _ = embedding["baseUrl"].(string)
+	cfg.APIKey, _ = embedding["apiKey"].(string)
+	cfg.Model, _ = embedding["model"].(string)
+	if value, ok := embedding["dimensions"].(float64); ok && value > 0 {
+		cfg.Dimensions = int(value)
+	}
+	if cfg.APIKey == "" {
+		if value, ok := config["apiKey"].(string); ok {
+			cfg.APIKey = value
+		}
+		if enc, ok := config["apiKeyEnc"].(string); ok && enc != "" {
+			if plain, err := openSecretBox(h.deps.Secret, "memory-provider:"+id, enc); err == nil {
+				var secret struct {
+					APIKey string `json:"apiKey"`
+				}
+				if json.Unmarshal(plain, &secret) == nil {
+					cfg.APIKey = secret.APIKey
+				}
+			}
+		}
+	}
+	if cfg.BaseURL == "" && cfg.RouteID == "" && cfg.RouteSlug == "" {
+		cfg.Model = "router"
+	}
+	if cfg.BaseURL != "" && cfg.Model == "" {
+		return nil, nil
+	}
+	return cfg, nil
+}
+
+func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memoryEmbeddingConfig, text string) ([]float64, string, error) {
+	body := map[string]any{"input": strings.TrimSpace(text)}
+	if cfg.Model != "" && cfg.Model != "router" {
+		body["model"] = cfg.Model
+	}
+	if cfg.Dimensions > 0 {
+		body["dimensions"] = cfg.Dimensions
+	}
+	payload, _ := json.Marshal(body)
+	var raw []byte
+	if cfg.BaseURL == "" {
+		selector := cfg.RouteSlug
+		if cfg.RouteID != "" {
+			var slug string
+			if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT slug FROM model_routes WHERE tenant_id=? AND id=? AND capability='embedding'`), tenant, cfg.RouteID).Scan(&slug); err != nil {
+				return nil, "", errors.New("embedding model route not found")
+			}
+			selector = slug
+		}
+		resp, err := h.service.gateway.Do(ctx, tenant, "embedding", "embeddings", selector, payload)
+		if err != nil {
+			return nil, "", err
+		}
+		defer resp.Body.Close()
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		if err != nil {
+			return nil, "", err
+		}
+		if resp.Status < 200 || resp.Status >= 300 {
+			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.Status, string(raw))
+		}
+	} else {
+		u, err := safeProviderURL(strings.TrimRight(cfg.BaseURL, "/"), "embeddings")
+		if err != nil {
+			return nil, "", err
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		if cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		}
+		resp, err := h.service.gateway.client.Do(req)
+		if err != nil {
+			return nil, "", err
+		}
+		defer resp.Body.Close()
+		raw, err = io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		if err != nil {
+			return nil, "", err
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, "", fmt.Errorf("embedding failed HTTP %d: %s", resp.StatusCode, string(raw))
+		}
+	}
+	var decoded struct {
+		Data []struct {
+			Embedding []float64 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil || len(decoded.Data) != 1 || len(decoded.Data[0].Embedding) == 0 {
+		return nil, "", errors.New("embedding response missing vector")
+	}
+	model := decoded.Model
+	if model == "" {
+		model = cfg.Model
+	}
+	return decoded.Data[0].Embedding, model, nil
+}
+
+func (h *handler) setMemoryEmbedding(ctx context.Context, tenant, agent, id, content string, vector []float64, model string) error {
+	encoded, _ := json.Marshal(vector)
+	hash := sha256.Sum256([]byte(content))
+	result, err := h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE memories SET embedding=?,embedding_model=?,embedding_dim=?,content_hash=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=?`), string(encoded), model, len(vector), hex.EncodeToString(hash[:]), h.store.now(), tenant, agent, id)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
