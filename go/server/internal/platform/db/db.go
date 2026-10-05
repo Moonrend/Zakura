@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/gorm"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 )
@@ -21,6 +23,10 @@ type Connection struct {
 	DB      *sql.DB
 	Dialect string
 	Rebind  func(string) string
+
+	gormOnce sync.Once
+	gormDB   *gorm.DB
+	gormErr  error
 }
 
 func Open(ctx context.Context, databaseURL string) (*Connection, error) {
