@@ -141,14 +141,14 @@ export default function ConnectorsHub() {
   }, [searchParams]);
 
   useEffect(() => {
-    if (selectedSlug === "agent-remote") router.replace("/dashboard/agents");
+    if (selectedSlug === "agent-remote") router.replace("/dashboard/spaces");
     // 旧「邮箱」合并入口已拆成独立连接器
     if (selectedSlug === "email") router.replace("/dashboard/connectors");
   }, [router, selectedSlug]);
 
   /** Canonical URL for a connector row, so each row can be a real anchor. */
   function connectorHref(slug: string): string {
-    if (slug === "agent-remote") return "/dashboard/agents";
+    if (slug === "agent-remote") return "/dashboard/spaces";
     return `/dashboard/connectors?connector=${encodeURIComponent(slug)}`;
   }
 

@@ -26,7 +26,7 @@ function Inner() {
           json: { ticket },
         });
         setSession(res.session);
-        router.replace(res.next || "/dashboard/agents");
+        router.replace(res.next || "/dashboard/spaces");
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }

@@ -213,7 +213,7 @@ export default function TeamSettingsPage() {
       }>("/api/tenant/current", { method: "DELETE" });
       setSession(result.session);
       window.location.href =
-        result.team.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents";
+        result.team.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces";
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
       setDeleteBusy(false);

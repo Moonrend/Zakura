@@ -448,7 +448,7 @@ export default function AgentSettingsPage() {
         method: "DELETE",
       });
       toast.success("已删除");
-      router.replace("/dashboard/agents");
+      router.replace(agent.spaceId ? `/dashboard/spaces/${agent.spaceId}` : "/dashboard/spaces");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {

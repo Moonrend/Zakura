@@ -24,11 +24,11 @@ export default function AgentConnectionsRedirectPage() {
             router.replace(`/dashboard/agents/${first.id}`);
           }
         } else {
-          router.replace("/dashboard/agents");
+          router.replace("/dashboard/spaces");
         }
       })
       .catch(() => {
-        if (!cancelled) router.replace("/dashboard/agents");
+        if (!cancelled) router.replace("/dashboard/spaces");
       });
     return () => {
       cancelled = true;

@@ -35,7 +35,7 @@ function ConnectionsRedirectInner() {
       return;
     }
     // 旧「统一连接中心」默认入口 → agents（连接器已移入 agent 级）
-    router.replace("/dashboard/agents");
+    router.replace("/dashboard/spaces");
   }, [router, searchParams]);
 
   return <PageLoading />;

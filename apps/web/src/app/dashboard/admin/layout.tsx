@@ -18,7 +18,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   useEffect(() => {
     if (!me.multiTenant || !me.isPlatformAdmin) {
       toast.error("超级管理后台仅在 SaaS 多团队部署下可用");
-      router.replace("/dashboard/agents");
+      router.replace("/dashboard/spaces");
       return;
     }
     setAllowed(true);

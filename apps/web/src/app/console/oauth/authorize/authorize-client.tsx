@@ -124,7 +124,7 @@ export default function OauthAuthorizePage() {
       }
       window.location.href = url.toString();
     } catch {
-      router.push("/dashboard/agents");
+      router.push("/dashboard/spaces");
     }
   }
 

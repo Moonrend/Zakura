@@ -93,7 +93,7 @@ export default function TenantOnboardingPage() {
       ]);
 
       if (boot.completed) {
-        router.replace("/dashboard/agents");
+        router.replace("/dashboard/spaces");
         return;
       }
 
@@ -222,7 +222,7 @@ export default function TenantOnboardingPage() {
                     moveTo(hasChatModel ? "name" : "provider");
                   }}
                   onSkip={() => {
-                    void finishOnboarding({}, "/dashboard/agents");
+                    void finishOnboarding({}, "/dashboard/spaces");
                   }}
                 />
               ) : step === "mcp" ? (

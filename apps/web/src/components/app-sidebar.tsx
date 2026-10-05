@@ -473,7 +473,7 @@ function TenantHeader({
       );
       setSession(res.session);
       window.location.href =
-        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents";
+        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces";
     } catch (err) {
       console.error(err);
     }
@@ -560,7 +560,7 @@ function AgentConfigSidebar({
   const activeSeg =
     AGENT_SUBNAV.find((s) => pathname.endsWith(`/${s.href}`))?.href ?? "overview";
 
-  const backHref = spaceId ? `/dashboard/spaces/${spaceId}` : "/dashboard/agents";
+  const backHref = spaceId ? `/dashboard/spaces/${spaceId}` : "/dashboard/spaces";
   const allAgentsHref = backHref;
 
   const navItems = useMemo(
@@ -586,7 +586,7 @@ function AgentConfigSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
-              tooltip={spaceId ? "返回 Space" : "返回 Agents"}
+              tooltip={spaceId ? "返回 Space" : "返回 Spaces"}
               render={<Link href={backHref} onClick={closeMobile} />}
             >
               <ArrowLeft />
@@ -634,7 +634,7 @@ function AgentConfigSidebar({
                 <DropdownMenuItem
                   render={<Link href={allAgentsHref} onClick={closeMobile} />}
                 >
-                  全部 Agents…
+                  全部 Spaces…
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -883,7 +883,7 @@ function AdminSidebar({ pathname }: { pathname: string }) {
           <SidebarMenuItem>
             <SidebarMenuButton
               tooltip="返回控制台"
-              render={<Link href="/dashboard/agents" onClick={closeMobile} />}
+              render={<Link href="/dashboard/spaces" onClick={closeMobile} />}
             >
               <ArrowLeft />
               <span>返回</span>
@@ -953,12 +953,12 @@ function PlatformSidebar({
   const platformNav = useMemo<NavEntry[]>(() => {
     const nav: NavEntry[] = [
       {
-        id: "agents",
-        href: "/dashboard/agents",
-        label: "Agents",
-        icon: Bot,
+        id: "spaces",
+        href: "/dashboard/spaces",
+        label: "Spaces",
+        icon: Monitor,
         isActive: (path) =>
-          path === "/dashboard/agents" || path.startsWith("/dashboard/agents/"),
+          path === "/dashboard/spaces" || path.startsWith("/dashboard/spaces/"),
       },
       {
         id: "chat",
@@ -984,12 +984,6 @@ function PlatformSidebar({
         icon: Server,
         isActive: serverSectionActive,
         children: buildServerChildren(showPlatformServices),
-      },
-      {
-        id: "spaces",
-        href: "/dashboard/spaces",
-        label: "Spaces",
-        icon: Monitor,
       },
       {
         id: "memory",

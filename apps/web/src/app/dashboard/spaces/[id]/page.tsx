@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus, Server, Trash2 } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
+import { AgentCard } from "@/components/agent-card";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,10 +17,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { Empty, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
 import { FluidList } from "@/components/ui/fluid-hover";
+import { NoSearchResult, SearchField } from "@/components/ui/search-field";
+import { useFuzzySearch } from "@/hooks/use-fuzzy-search";
 import { api } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
 import {
@@ -29,13 +30,12 @@ import {
   updateSpace,
   type SpaceItem,
 } from "@/lib/spaces";
-import { chatAgentHref } from "@/lib/nav";
 
-function statusTone(status: string | undefined): "default" | "destructive" | "secondary" {
-  if (status === "ready") return "default";
-  if (status === "error" || status === "failed") return "destructive";
-  return "secondary";
-}
+const AGENT_KEYS = [
+  { name: "name", weight: 3 },
+  { name: "slug", weight: 2 },
+  { name: "description", weight: 1 },
+];
 
 export default function SpaceDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -44,6 +44,8 @@ export default function SpaceDetailPage() {
   const [agents, setAgents] = useState<AgentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [q, setQ] = useState("");
+  const filtered = useFuzzySearch(agents, q, { keys: AGENT_KEYS });
   const [createOpen, setCreateOpen] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [createBusy, setCreateBusy] = useState(false);
@@ -167,66 +169,50 @@ export default function SpaceDetailPage() {
         }
       />
 
-      {/* 共享电脑状态 */}
-      <div className="rounded-xl border bg-card p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <Server className="size-4 text-muted-foreground" />
-          <span className="text-sm font-medium">共享电脑</span>
-          <Badge variant={statusTone(space.workspaceStatus)}>
-            {space.workspaceStatus}
-          </Badge>
-          <span className="text-xs text-muted-foreground">
-            kind: {space.workspaceKind}
-            {space.runtimeNodeId ? ` · node: ${space.runtimeNodeId}` : ""}
-            {space.workspaceImage ? ` · image: ${space.workspaceImage}` : ""}
-          </span>
-        </div>
-        <p className="mt-2 font-mono text-xs text-muted-foreground">
-          {space.workspaceHostPath}
-        </p>
-      </div>
-
-      {/* 成员 agent 列表 */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-medium text-muted-foreground">
-          成员 Agent（{agents.length}）
-        </h2>
-        {agents.length === 0 ? (
-          <Empty>
-            <EmptyTitle>还没有 Agent</EmptyTitle>
-            <EmptyDescription>点击右上角「添加 Agent」创建</EmptyDescription>
-          </Empty>
-        ) : (
-          <div className="divide-y rounded-xl border bg-card">
-            {agents.map((a) => (
-              <div key={a.id} className="flex items-center gap-3 px-4 py-3">
-                <Link
-                  href={`/dashboard/spaces/${id}/agents/${a.id}/overview`}
-                  className="flex min-w-0 flex-1 items-center gap-3"
-                >
-                  <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-sm">
-                    {a.name.slice(0, 1).toUpperCase()}
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium">{a.name}</span>
-                    {a.description ? (
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {a.description}
-                      </span>
-                    ) : null}
-                  </span>
-                </Link>
-                <Badge variant={statusTone(a.workspaceStatus)}>
-                  {a.workspaceStatus ?? "ready"}
-                </Badge>
-                <Button size="sm" variant="ghost" render={<a href={chatAgentHref(a.id)} />}>
-                  会话
-                </Button>
-              </div>
-            ))}
+      {agents.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-24">
+          <div className="mb-5 flex size-12 items-center justify-center rounded-xl bg-muted">
+            <Plus className="size-5 text-muted-foreground" strokeWidth={1.5} />
           </div>
-        )}
-      </div>
+          <p className="text-base font-medium">还没有 Agent</p>
+          <p className="mx-auto mt-1.5 max-w-xs text-center text-sm text-muted-foreground">
+            创建第一个 Agent，给它工具、记忆和工作区。
+          </p>
+          <Button size="sm" className="mt-6" onClick={() => setCreateOpen(true)}>
+            <Plus />
+            添加 Agent
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {agents.length > 4 ? (
+            <SearchField
+              value={q}
+              onValueChange={setQ}
+              placeholder="搜索名称、slug 或描述"
+              className="max-w-sm"
+            />
+          ) : null}
+          {filtered.length === 0 ? (
+            <NoSearchResult query={q} />
+          ) : (
+            <FluidList
+              axis="xy"
+              gapClick={false}
+              className="grid gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-3 xl:grid-cols-4"
+              highlightClassName="rounded-xl"
+            >
+              {filtered.map((a) => (
+                <AgentCard
+                  key={a.id}
+                  agent={a}
+                  baseHref={`/dashboard/spaces/${id}/agents/${a.id}`}
+                />
+              ))}
+            </FluidList>
+          )}
+        </div>
+      )}
 
       {/* 设置 Dialog */}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>

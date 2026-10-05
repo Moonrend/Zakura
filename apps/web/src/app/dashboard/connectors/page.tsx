@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 export default function ConnectorsRedirect() {
   const router = useRouter();
   useEffect(() => {
-    router.replace("/dashboard/agents");
+    router.replace("/dashboard/spaces");
   }, [router]);
   return null;
 }

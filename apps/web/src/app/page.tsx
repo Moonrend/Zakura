@@ -27,7 +27,7 @@ export default function HomePage() {
           if (current.onboardingCompleted === false) {
             router.replace("/onboarding");
           } else {
-            router.replace("/dashboard/agents");
+            router.replace("/dashboard/spaces");
           }
         } catch {
           setSession(null);

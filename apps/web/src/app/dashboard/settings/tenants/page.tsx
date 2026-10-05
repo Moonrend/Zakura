@@ -81,7 +81,7 @@ export default function TeamsSettingsPage() {
       setSession(res.session);
       toast.success("已切换团队");
       router.push(
-        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents",
+        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces",
       );
       router.refresh();
     } catch (err) {

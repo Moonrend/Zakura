@@ -103,7 +103,7 @@ export default function LoginPage() {
   async function finishLogin(session: string) {
     setSession(session);
     const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
-    router.push(current.onboardingCompleted === false ? "/onboarding" : "/dashboard/agents");
+    router.push(current.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
   }
 
   async function startSso(hint: SsoHint) {
