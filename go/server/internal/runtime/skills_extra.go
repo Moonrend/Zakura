@@ -215,9 +215,9 @@ func (h *handler) syncSkillRepo(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) skillCacheStatus(w http.ResponseWriter, r *http.Request) {
 	var agg struct {
-		Repos  int64
-		Skills int64
-		Size   int64
+		Repos  int64 `gorm:"column:repos"`
+		Skills int64 `gorm:"column:skills"`
+		Size   int64 `gorm:"column:size"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformSkillRepo{}).Select("COUNT(*) AS repos, COALESCE(SUM(skill_count),0) AS skills, COALESCE(SUM(size_bytes),0) AS size").Scan(&agg).Error
 	if e != nil {
@@ -228,8 +228,8 @@ func (h *handler) skillCacheStatus(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) skillAutoUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var agg struct {
-		Enabled int64
-		Total   int64
+		Enabled int64 `gorm:"column:enabled"`
+		Total   int64 `gorm:"column:total"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ?", principal(r).TenantID).Select("COALESCE(SUM(CASE WHEN auto_update THEN 1 ELSE 0 END),0) AS enabled, COUNT(*) AS total").Scan(&agg).Error
 	if e != nil {

@@ -24,6 +24,15 @@
 //     default:'[...]' tag because embedded double quotes make the struct tag
 //     invalid.
 //   - gofmt -w internal/platform/db/models afterwards.
+//
+// Post-generation checklist (naming strategy is NoLowerCase, so GORM does NOT
+// snake_case field names — an untagged scan field silently reads the zero
+// value):
+//   - run CGO_ENABLED=1 go run -tags tools ./tools/scanlint — every struct
+//     scanned via gorm Take/First/Find/Scan/ScanRows/Pluck/Last must carry an
+//     explicit `gorm:"column:..."` tag on each mapped field;
+//   - when hand-writing new scan structs or converting database/sql scans,
+//     the same rule applies: alias aggregate SELECT columns (SUM(x) AS x).
 package main
 
 import (

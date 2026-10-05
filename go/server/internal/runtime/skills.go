@@ -272,16 +272,16 @@ func (h *handler) listAgentSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type agentSkillRecord struct {
-		ID          string
-		Name        string
-		Enabled     bool
-		Path        string
-		Version     *string
-		Status      string
-		Error       *string
-		SkillID     string `gorm:"column:skill_id"`
-		Title       string
-		Description string
+		ID          string  `gorm:"column:id"`
+		Name        string  `gorm:"column:name"`
+		Enabled     bool    `gorm:"column:enabled"`
+		Path        string  `gorm:"column:path"`
+		Version     *string `gorm:"column:version"`
+		Status      string  `gorm:"column:status"`
+		Error       *string `gorm:"column:error"`
+		SkillID     string  `gorm:"column:skill_id"`
+		Title       string  `gorm:"column:title"`
+		Description string  `gorm:"column:description"`
 	}
 	var recs []agentSkillRecord
 	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT a.id AS id, a.name AS name, a.enabled AS enabled, a.path AS path, a.version AS version, a.status AS status, a.error AS error, s.id AS skill_id, s.title AS title, s.description AS description FROM agent_skills a JOIN skills s ON s.id = a.skill_id WHERE a.tenant_id = ? AND a.agent_id = ? ORDER BY a.name`, p.TenantID, agent).Scan(&recs).Error; e != nil {
@@ -404,16 +404,16 @@ func (h *handler) patchAgentSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type agentSkillRow struct {
-		ID          string
-		Name        string
-		Enabled     bool
-		Path        string
-		Version     *string
-		Status      string
-		Error       *string
-		SkillID     string `gorm:"column:skill_id"`
-		Title       string
-		Description string
+		ID          string  `gorm:"column:id"`
+		Name        string  `gorm:"column:name"`
+		Enabled     bool    `gorm:"column:enabled"`
+		Path        string  `gorm:"column:path"`
+		Version     *string `gorm:"column:version"`
+		Status      string  `gorm:"column:status"`
+		Error       *string `gorm:"column:error"`
+		SkillID     string  `gorm:"column:skill_id"`
+		Title       string  `gorm:"column:title"`
+		Description string  `gorm:"column:description"`
 	}
 	var rec agentSkillRow
 	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_skills AS a").Select("a.id AS id, a.name AS name, a.enabled AS enabled, a.path AS path, a.version AS version, a.status AS status, a.error AS error, a.skill_id AS skill_id, s.title AS title, s.description AS description").Joins("JOIN skills s ON s.id = a.skill_id").Where("a.tenant_id = ? AND a.agent_id = ? AND a.name = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Take(&rec).Error
@@ -727,7 +727,7 @@ func (h *handler) healthMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var row struct {
-		Kind       string
+		Kind       string `gorm:"column:kind"`
 		ConfigJSON string `gorm:"column:config_json"`
 	}
 	if e := h.deps.Gorm.WithContext(r.Context()).Table("memory_providers").Select("kind, config_json").Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&row).Error; errors.Is(e, gorm.ErrRecordNotFound) {

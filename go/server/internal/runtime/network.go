@@ -341,7 +341,7 @@ func (h *handler) createExposure(w http.ResponseWriter, r *http.Request) {
 	provider := b.Provider
 	if provider == "" {
 		var row struct {
-			Provider string
+			Provider string `gorm:"column:provider"`
 		}
 		_ = h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("provider").Where("tenant_id = ? AND enabled = true", p.TenantID).Order("is_default DESC").Take(&row).Error
 		provider = row.Provider
@@ -444,8 +444,8 @@ func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 	var meshKind, meshStatus string
 	var display *string
 	var mesh struct {
-		Kind        string
-		Status      string
+		Kind        string  `gorm:"column:kind"`
+		Status      string  `gorm:"column:status"`
 		DisplayName *string `gorm:"column:display_name"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("kind, status, display_name").Where("tenant_id = ?", p.TenantID).Order("CASE WHEN status = 'connected' THEN 0 ELSE 1 END").Take(&mesh).Error
@@ -461,15 +461,15 @@ func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	var defaultProvider *string
 	var dp struct {
-		Provider string
+		Provider string `gorm:"column:provider"`
 	}
 	if e := h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("provider").Where("tenant_id = ? AND enabled = true", p.TenantID).Order("is_default DESC").Take(&dp).Error; e == nil {
 		defaultProvider = &dp.Provider
 	}
 	var total, online, active, today, audit int
 	var nodeAgg struct {
-		Total  int64
-		Online int64
+		Total  int64 `gorm:"column:total"`
+		Online int64 `gorm:"column:online"`
 	}
 	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("tenant_id = ?", p.TenantID).Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN status = 'online' OR kind = 'local' THEN 1 ELSE 0 END),0) AS online").Scan(&nodeAgg).Error
 	total, online = int(nodeAgg.Total), int(nodeAgg.Online)
@@ -516,7 +516,7 @@ func (h *handler) networkMesh(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) getHeadscale(w http.ResponseWriter, r *http.Request) {
 	var row struct {
-		Status   string
+		Status   string `gorm:"column:status"`
 		MetaJSON string `gorm:"column:meta_json"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("status, meta_json").Where("tenant_id = ? AND kind = 'headscale'", principal(r).TenantID).Take(&row).Error

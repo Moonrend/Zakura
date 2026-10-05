@@ -359,7 +359,7 @@ func (h *handler) platformServiceDiagnostics(w http.ResponseWriter, r *http.Requ
 }
 func (h *handler) platformServiceStart(w http.ResponseWriter, r *http.Request) {
 	var row struct {
-		Mode string
+		Mode string `gorm:"column:mode"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("mode").Where("service_key = ?", chi.URLParam(r, "key")).Take(&row).Error
 	if e != nil {
