@@ -286,8 +286,8 @@ func (h *handler) zakuraBotRoster(ctx context.Context, actor httpx.Principal) ([
 		var bindingID string
 		var enabled bool
 		var bindingRow struct {
-			ID      string
-			Enabled bool
+			ID      string `gorm:"column:id"`
+			Enabled bool   `gorm:"column:enabled"`
 		}
 		err := h.deps.Gorm.WithContext(ctx).Table("agent_channel_bindings").Select("id, enabled").Where("tenant_id = ? AND agent_id = ? AND platform = 'zakurabot'", actor.TenantID, item.ID).Order("created_at").Take(&bindingRow).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {

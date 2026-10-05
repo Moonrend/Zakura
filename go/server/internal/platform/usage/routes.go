@@ -147,7 +147,7 @@ func (s *store) bundle(w http.ResponseWriter, r *http.Request, userID string, te
 
 func (s *store) summary(ctx context.Context, userID string, tenantID *string, days int) (map[string]any, error) {
 	since := s.d.Clock().UTC().AddDate(0, 0, -(days - 1)).Format("2006-01-02")
-	query := `SELECT day,SUM(logins),SUM(sessions_started),SUM(runs_ok),SUM(runs_error),SUM(tool_calls),SUM(tool_errors),SUM(duration_ms),MAX(last_seen_at) FROM user_usage_daily WHERE user_id=? AND day>=?`
+	query := `SELECT day,SUM(logins) AS logins,SUM(sessions_started) AS sessions_started,SUM(runs_ok) AS runs_ok,SUM(runs_error) AS runs_error,SUM(tool_calls) AS tool_calls,SUM(tool_errors) AS tool_errors,SUM(duration_ms) AS duration_ms,MAX(last_seen_at) AS last_seen_at FROM user_usage_daily WHERE user_id=? AND day>=?`
 	args := []any{userID, since}
 	if tenantID != nil {
 		query += ` AND tenant_id=?`
