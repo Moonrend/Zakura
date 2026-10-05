@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // Dependencies is the deliberately small boundary shared by the platform,
@@ -17,6 +19,7 @@ import (
 type Dependencies struct {
 	Context                context.Context
 	DB                     *sql.DB
+	Gorm                   *gorm.DB
 	Dialect                string
 	Rebind                 func(string) string
 	Clock                  func() time.Time

@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -103,9 +104,12 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 
 func infoHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var setup bool
+		setup := false
 		version, mode := "go-rewrite", map[bool]string{true: "saas", false: "local"}[deps.MultiTenant]
-		_ = deps.DB.QueryRowContext(r.Context(), `SELECT setup_completed,version,mode FROM platform_meta WHERE singleton=1`).Scan(&setup, &version, &mode)
+		var meta models.PlatformMetum
+		if s.gdb(r.Context()).Where("singleton = ?", 1).Take(&meta).Error == nil {
+			setup, version, mode = meta.SetupCompleted, meta.Version, meta.Mode
+		}
 		providers := []map[string]any{}
 		ready := map[string]bool{}
 		if deps.Edition == "saas" {
@@ -120,12 +124,12 @@ func infoHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 		}
 		passwordEnabled := s.passwordLoginEnabled(r.Context())
 		highlighted := "auto"
-		var raw string
-		if deps.DB.QueryRowContext(r.Context(), s.q(`SELECT value FROM settings WHERE owner_key='platform' AND key='auth.login'`)).Scan(&raw) == nil {
+		var loginSetting models.Setting
+		if s.gdb(r.Context()).Where("owner_key = ? AND key = ?", "platform", "auth.login").Take(&loginSetting).Error == nil {
 			var policy struct {
 				Highlighted string `json:"highlightedMethod"`
 			}
-			_ = json.Unmarshal([]byte(raw), &policy)
+			_ = json.Unmarshal([]byte(loginSetting.Value), &policy)
 			if policy.Highlighted != "" {
 				highlighted = policy.Highlighted
 			}
@@ -242,10 +246,11 @@ func currentHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 		var t Tenant
 		var err error
 		if p.APIKey {
-			var steps string
-			err = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id,slug,name,is_default,onboarding_completed,onboarding_steps FROM tenants WHERE id=?`), p.TenantID).Scan(&t.ID, &t.Slug, &t.Name, &t.IsDefault, &t.OnboardingCompleted, &steps)
+			var dbTenant models.Tenant
+			err = s.gdb(r.Context()).Where("id = ?", p.TenantID).Take(&dbTenant).Error
 			if err == nil {
-				t.OnboardingSteps = decodeObject(steps)
+				t.ID, t.Slug, t.Name, t.IsDefault, t.OnboardingCompleted = derefString(dbTenant.ID), dbTenant.Slug, dbTenant.Name, dbTenant.IsDefault, dbTenant.OnboardingCompleted
+				t.OnboardingSteps = decodeObject(dbTenant.OnboardingSteps)
 			}
 			u = User{ID: "api-key", Email: p.Email, CanUseLocalRunner: false}
 		} else {
@@ -280,11 +285,12 @@ func patchMeHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "no changes")
 			return
 		}
-		var name, title, bio string
-		if err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COALESCE(name,''),COALESCE(title,''),COALESCE(bio,'') FROM users WHERE id=?`), p.UserID).Scan(&name, &title, &bio); err != nil {
+		var dbUser models.User
+		if err := s.gdb(r.Context()).Select("name,title,bio").Where("id = ?", p.UserID).Take(&dbUser).Error; err != nil {
 			httpx.Error(w, 404, "not found")
 			return
 		}
+		name, title, bio := derefString(dbUser.Name), derefString(dbUser.Title), derefString(dbUser.Bio)
 		if b.Name != nil {
 			name = strings.TrimSpace(*b.Name)
 		}
@@ -298,7 +304,7 @@ func patchMeHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "profile field too long")
 			return
 		}
-		_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE users SET name=?,title=?,bio=?,updated_at=? WHERE id=?`), name, title, bio, s.now(), p.UserID)
+		err := s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"name": name, "title": title, "bio": bio, "updated_at": s.now()}).Error
 		if err != nil {
 			httpx.Error(w, 500, "update failed")
 			return
@@ -322,8 +328,14 @@ func changePasswordHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "new password must contain at least 10 characters")
 			return
 		}
-		var old string
-		if s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COALESCE(password_hash,'') FROM users WHERE id=?`), p.UserID).Scan(&old) != nil || bcrypt.CompareHashAndPassword([]byte(old), []byte(b.Current)) != nil {
+		var dbUser models.User
+		old := ""
+		if err := s.gdb(r.Context()).Select("password_hash").Where("id = ?", p.UserID).Take(&dbUser).Error; err != nil {
+			httpx.Error(w, 400, "current password is incorrect")
+			return
+		}
+		old = derefString(dbUser.PasswordHash)
+		if bcrypt.CompareHashAndPassword([]byte(old), []byte(b.Current)) != nil {
 			httpx.Error(w, 400, "current password is incorrect")
 			return
 		}
@@ -347,17 +359,24 @@ func changePasswordHandler(s *Service) http.HandlerFunc {
 func listSessionsHandler(s *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, _ := httpx.PrincipalFrom(r.Context())
-		rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,COALESCE(ip,''),COALESCE(user_agent,''),COALESCE(CAST(last_seen_at AS TEXT),CAST(created_at AS TEXT)),CAST(created_at AS TEXT),CAST(expires_at AS TEXT) FROM user_sessions WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at DESC`), p.UserID)
-		if err != nil {
+		var sessions []struct {
+			ID         string `gorm:"column:id"`
+			IP         string `gorm:"column:ip"`
+			UserAgent  string `gorm:"column:user_agent"`
+			LastSeenAt string `gorm:"column:last_seen_at"`
+			CreatedAt  string `gorm:"column:created_at"`
+			ExpiresAt  string `gorm:"column:expires_at"`
+		}
+		if err := s.gdb(r.Context()).Table("user_sessions").
+			Select("id,COALESCE(ip,'') AS ip,COALESCE(user_agent,'') AS user_agent,COALESCE(last_seen_at,created_at) AS last_seen_at,created_at,expires_at").
+			Where("user_id = ? AND revoked_at IS NULL", p.UserID).
+			Order("created_at DESC").Find(&sessions).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		defer rows.Close()
 		items := []map[string]any{}
-		for rows.Next() {
-			var id, ip, ua, last, created, expires string
-			_ = rows.Scan(&id, &ip, &ua, &last, &created, &expires)
-			items = append(items, map[string]any{"id": id, "ip": ip, "userAgent": ua, "lastSeenAt": last, "createdAt": created, "expiresAt": expires, "current": id == p.SessionID})
+		for _, session := range sessions {
+			items = append(items, map[string]any{"id": session.ID, "ip": session.IP, "userAgent": session.UserAgent, "lastSeenAt": session.LastSeenAt, "createdAt": session.CreatedAt, "expiresAt": session.ExpiresAt, "current": session.ID == p.SessionID})
 		}
 		httpx.JSON(w, 200, map[string]any{"sessions": items})
 	}
@@ -369,8 +388,8 @@ func revokeSessionHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "forbidden")
 			return
 		}
-		res, _ := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE user_sessions SET revoked_at=? WHERE id=? AND user_id=? AND revoked_at IS NULL`), s.now(), httpx.Param(r, "id"), p.UserID)
-		n, _ := res.RowsAffected()
+		res := s.gdb(r.Context()).Model(&models.UserSession{}).Where("id = ? AND user_id = ? AND revoked_at IS NULL", httpx.Param(r, "id"), p.UserID).Update("revoked_at", s.now())
+		n := res.RowsAffected
 		httpx.JSON(w, 200, map[string]any{"ok": n > 0})
 	}
 }
@@ -381,8 +400,8 @@ func revokeOtherSessionsHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "forbidden")
 			return
 		}
-		res, _ := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE user_sessions SET revoked_at=? WHERE user_id=? AND id<>? AND revoked_at IS NULL`), s.now(), p.UserID, p.SessionID)
-		n, _ := res.RowsAffected()
+		res := s.gdb(r.Context()).Model(&models.UserSession{}).Where("user_id = ? AND id <> ? AND revoked_at IS NULL", p.UserID, p.SessionID).Update("revoked_at", s.now())
+		n := res.RowsAffected
 		httpx.JSON(w, 200, map[string]any{"count": n})
 	}
 }
@@ -394,18 +413,28 @@ func listTenantsHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "API keys cannot list tenants")
 			return
 		}
-		rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT m.id,m.role,m.status,t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.onboarding_steps FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id WHERE m.user_id=? AND m.status='active' ORDER BY t.created_at`), p.UserID)
-		if err != nil {
+		var rows []struct {
+			MembershipID        string `gorm:"column:membership_id"`
+			Role                string `gorm:"column:role"`
+			Status              string `gorm:"column:status"`
+			ID                  string `gorm:"column:id"`
+			Slug                string `gorm:"column:slug"`
+			Name                string `gorm:"column:name"`
+			IsDefault           bool   `gorm:"column:is_default"`
+			OnboardingCompleted bool   `gorm:"column:onboarding_completed"`
+			OnboardingSteps     string `gorm:"column:onboarding_steps"`
+		}
+		if err := s.gdb(r.Context()).Table("tenants AS t").
+			Select("m.id AS membership_id,m.role,m.status,t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.onboarding_steps").
+			Joins("JOIN tenant_memberships m ON m.tenant_id = t.id").
+			Where("m.user_id = ? AND m.status = 'active'", p.UserID).
+			Order("t.created_at").Find(&rows).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		defer rows.Close()
 		items := []map[string]any{}
-		for rows.Next() {
-			var t Tenant
-			var membershipID, role, status, steps string
-			_ = rows.Scan(&membershipID, &role, &status, &t.ID, &t.Slug, &t.Name, &t.IsDefault, &t.OnboardingCompleted, &steps)
-			items = append(items, map[string]any{"membershipId": membershipID, "role": role, "status": status, "tenant": map[string]any{"id": t.ID, "slug": t.Slug, "name": t.Name, "isDefault": t.IsDefault, "onboardingCompleted": t.OnboardingCompleted, "onboardingSteps": decodeObject(steps)}})
+		for _, row := range rows {
+			items = append(items, map[string]any{"membershipId": row.MembershipID, "role": row.Role, "status": row.Status, "tenant": map[string]any{"id": row.ID, "slug": row.Slug, "name": row.Name, "isDefault": row.IsDefault, "onboardingCompleted": row.OnboardingCompleted, "onboardingSteps": decodeObject(row.OnboardingSteps)}})
 		}
 		httpx.JSON(w, 200, map[string]any{"tenants": items, "currentTenantId": p.TenantID, "multiTenant": s.deps.MultiTenant, "edition": s.deps.Edition})
 	}
@@ -486,7 +515,7 @@ func patchTenantHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 404, "not found")
 			return
 		}
-		_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenants SET name=?,updated_at=? WHERE id=?`), strings.TrimSpace(*b.Name), s.now(), p.TenantID)
+		err := s.gdb(r.Context()).Model(&models.Tenant{}).Where("id = ?", p.TenantID).Updates(map[string]any{"name": strings.TrimSpace(*b.Name), "updated_at": s.now()}).Error
 		if err != nil {
 			httpx.Error(w, 500, "update failed")
 			return
@@ -505,27 +534,36 @@ func deleteTenantHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "Owner only")
 			return
 		}
-		var isDefault bool
-		if err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT is_default FROM tenants WHERE id=?`), p.TenantID).Scan(&isDefault); err != nil {
+		var defaultTenant models.Tenant
+		if err := s.gdb(r.Context()).Select("is_default").Where("id = ?", p.TenantID).Take(&defaultTenant).Error; err != nil {
 			httpx.Error(w, 404, "Team not found")
 			return
 		}
-		if isDefault {
+		if defaultTenant.IsDefault {
 			httpx.Error(w, 400, "The default team cannot be deleted")
 			return
 		}
 
 		var next Tenant
-		var nextSteps string
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.onboarding_steps
-			FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id
-			WHERE m.user_id=? AND m.status='active' AND t.id<>? ORDER BY t.created_at LIMIT 1`), p.UserID, p.TenantID).
-			Scan(&next.ID, &next.Slug, &next.Name, &next.IsDefault, &next.OnboardingCompleted, &nextSteps)
+		var nextRow struct {
+			ID                  string `gorm:"column:id"`
+			Slug                string `gorm:"column:slug"`
+			Name                string `gorm:"column:name"`
+			IsDefault           bool   `gorm:"column:is_default"`
+			OnboardingCompleted bool   `gorm:"column:onboarding_completed"`
+			OnboardingSteps     string `gorm:"column:onboarding_steps"`
+		}
+		err := s.gdb(r.Context()).Table("tenants AS t").
+			Select("t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.onboarding_steps").
+			Joins("JOIN tenant_memberships m ON m.tenant_id = t.id").
+			Where("m.user_id = ? AND m.status = 'active' AND t.id <> ?", p.UserID, p.TenantID).
+			Order("t.created_at").Take(&nextRow).Error
 		if err != nil {
 			httpx.Error(w, 400, "You must keep at least one team")
 			return
 		}
-		next.OnboardingSteps = decodeObject(nextSteps)
+		next = Tenant{ID: nextRow.ID, Slug: nextRow.Slug, Name: nextRow.Name, IsDefault: nextRow.IsDefault, OnboardingCompleted: nextRow.OnboardingCompleted}
+		next.OnboardingSteps = decodeObject(nextRow.OnboardingSteps)
 		// Issue the replacement session before deleting the current tenant, just as
 		// the TypeScript service does, so a successful response can immediately be
 		// used by the preserved frontend.
@@ -589,20 +627,28 @@ func listMembersHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "Admin only")
 			return
 		}
-		rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT m.id,u.id,u.email,u.name,m.role,m.status,m.created_at FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.created_at`), p.TenantID)
-		if err != nil {
+		var rows []struct {
+			ID        string  `gorm:"column:id"`
+			UserID    string  `gorm:"column:user_id"`
+			Email     string  `gorm:"column:email"`
+			Name      *string `gorm:"column:name"`
+			Role      string  `gorm:"column:role"`
+			Status    string  `gorm:"column:status"`
+			CreatedAt string  `gorm:"column:created_at"`
+		}
+		if err := s.gdb(r.Context()).Table("tenant_memberships AS m").
+			Select("m.id AS id,u.id AS user_id,u.email,u.name,m.role,m.status,m.created_at").
+			Joins("JOIN users u ON u.id = m.user_id").
+			Where("m.tenant_id = ?", p.TenantID).
+			Order("m.created_at").Find(&rows).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		defer rows.Close()
 		out := []map[string]any{}
-		for rows.Next() {
-			var mid, uid, email, role, status, created string
-			var name sql.NullString
-			_ = rows.Scan(&mid, &uid, &email, &name, &role, &status, &created)
+		for _, row := range rows {
 			out = append(out, map[string]any{
-				"id": mid, "role": role, "status": status, "createdAt": created,
-				"user": map[string]any{"id": uid, "email": email, "name": nullString(name)},
+				"id": row.ID, "role": row.Role, "status": row.Status, "createdAt": row.CreatedAt,
+				"user": map[string]any{"id": row.UserID, "email": row.Email, "name": nullableString(row.Name)},
 			})
 		}
 		httpx.JSON(w, 200, map[string]any{"members": out})
@@ -783,18 +829,14 @@ func listInvitesHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "Admin only")
 			return
 		}
-		rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,email,role,expires_at,accepted_at,created_at FROM tenant_invites WHERE tenant_id=? ORDER BY created_at DESC`), p.TenantID)
-		if err != nil {
+		var invites []models.TenantInvite
+		if err := s.gdb(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at DESC").Find(&invites).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		defer rows.Close()
 		out := []map[string]any{}
-		for rows.Next() {
-			var id, email, role, expires, created string
-			var accepted sql.NullString
-			_ = rows.Scan(&id, &email, &role, &expires, &accepted, &created)
-			out = append(out, map[string]any{"id": id, "email": email, "role": role, "expiresAt": expires, "acceptedAt": nullString(accepted), "createdAt": created})
+		for _, invite := range invites {
+			out = append(out, map[string]any{"id": derefString(invite.ID), "email": invite.Email, "role": invite.Role, "expiresAt": invite.ExpiresAt, "acceptedAt": nullableString(invite.AcceptedAt), "createdAt": invite.CreatedAt})
 		}
 		httpx.JSON(w, 200, map[string]any{"invites": out})
 	}
@@ -825,14 +867,18 @@ func createInviteHandler(s *Service) http.HandlerFunc {
 		h := sha256.Sum256([]byte(token))
 		id := s.deps.NewID()
 		expires := s.deps.Clock().UTC().Add(7 * 24 * time.Hour).Format(time.RFC3339Nano)
-		_, err := s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO tenant_invites(id,tenant_id,email,role,token_hash,expires_at,invited_by,created_at) VALUES(?,?,?,?,?,?,?,?)`), id, p.TenantID, strings.ToLower(strings.TrimSpace(b.Email)), b.Role, hex.EncodeToString(h[:]), expires, p.UserID, s.now())
+		invitedBy := p.UserID
+		err := s.gdb(r.Context()).Create(&models.TenantInvite{ID: &id, TenantID: p.TenantID, Email: strings.ToLower(strings.TrimSpace(b.Email)), Role: b.Role, TokenHash: hex.EncodeToString(h[:]), ExpiresAt: expires, InvitedBy: &invitedBy, CreatedAt: s.now()}).Error
 		if err != nil {
 			httpx.Error(w, 409, "invite exists")
 			return
 		}
 		acceptURL := s.deps.WebURL + "/invite/" + url.PathEscape(token)
 		tenantName := "Team"
-		_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT name FROM tenants WHERE id=?`), p.TenantID).Scan(&tenantName)
+		var tenantRow models.Tenant
+		if s.gdb(r.Context()).Select("name").Where("id = ?", p.TenantID).Take(&tenantRow).Error == nil {
+			tenantName = tenantRow.Name
+		}
 		emailed := false
 		if s.deps.SendTransactionalEmail != nil {
 			safeTeam, safeURL := html.EscapeString(tenantName), html.EscapeString(acceptURL)
@@ -850,21 +896,31 @@ func revokeInviteHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "Admin only")
 			return
 		}
-		res, _ := s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM tenant_invites WHERE id=? AND tenant_id=? AND accepted_at IS NULL`), httpx.Param(r, "id"), p.TenantID)
-		n, _ := res.RowsAffected()
+		res := s.gdb(r.Context()).Where("id = ? AND tenant_id = ? AND accepted_at IS NULL", httpx.Param(r, "id"), p.TenantID).Delete(&models.TenantInvite{})
+		n := res.RowsAffected
 		httpx.JSON(w, 200, map[string]any{"ok": n > 0})
 	}
 }
 func inspectInviteHandler(s *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		h := sha256.Sum256([]byte(httpx.Param(r, "token")))
-		var id, email, role, tenantID, tenantName, tenantSlug, expires string
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT i.id,i.email,i.role,t.id,t.name,t.slug,i.expires_at FROM tenant_invites i JOIN tenants t ON t.id=i.tenant_id WHERE i.token_hash=? AND i.accepted_at IS NULL AND i.expires_at>?`), hex.EncodeToString(h[:]), s.now()).Scan(&id, &email, &role, &tenantID, &tenantName, &tenantSlug, &expires)
+		var row struct {
+			Email      string `gorm:"column:email"`
+			Role       string `gorm:"column:role"`
+			TenantName string `gorm:"column:tenant_name"`
+			TenantSlug string `gorm:"column:tenant_slug"`
+			ExpiresAt  string `gorm:"column:expires_at"`
+		}
+		err := s.gdb(r.Context()).Table("tenant_invites AS i").
+			Select("i.email,i.role,t.name AS tenant_name,t.slug AS tenant_slug,i.expires_at").
+			Joins("JOIN tenants t ON t.id = i.tenant_id").
+			Where("i.token_hash = ? AND i.accepted_at IS NULL AND i.expires_at > ?", hex.EncodeToString(h[:]), s.now()).
+			Take(&row).Error
 		if err != nil {
 			httpx.Error(w, 404, "invite not found or expired")
 			return
 		}
-		httpx.JSON(w, 200, map[string]any{"email": email, "role": role, "expiresAt": expires, "tenant": map[string]any{"name": tenantName, "slug": tenantSlug}})
+		httpx.JSON(w, 200, map[string]any{"email": row.Email, "role": row.Role, "expiresAt": row.ExpiresAt, "tenant": map[string]any{"name": row.TenantName, "slug": row.TenantSlug}})
 	}
 }
 func acceptInviteHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
@@ -876,20 +932,21 @@ func acceptInviteHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFun
 		}
 		_ = httpx.DecodeJSON(r, &body)
 		h := sha256.Sum256([]byte(httpx.Param(r, "token")))
-		var inviteID, tenantID, email, role string
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id,tenant_id,email,role FROM tenant_invites WHERE token_hash=? AND accepted_at IS NULL AND expires_at>?`), hex.EncodeToString(h[:]), s.now()).Scan(&inviteID, &tenantID, &email, &role)
+		var invite models.TenantInvite
+		err := s.gdb(r.Context()).Where("token_hash = ? AND accepted_at IS NULL AND expires_at > ?", hex.EncodeToString(h[:]), s.now()).Take(&invite).Error
 		if err != nil {
 			httpx.Error(w, 404, "invite not found or expired")
 			return
 		}
+		inviteID, tenantID, email, role := derefString(invite.ID), invite.TenantID, invite.Email, invite.Role
 		p, ok := httpx.PrincipalFrom(r.Context())
 		if !ok {
 			if !strings.EqualFold(strings.TrimSpace(body.Email), email) || len(body.Password) < 8 {
 				httpx.Error(w, 400, "email and password required")
 				return
 			}
-			var existing string
-			if e := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id FROM users WHERE email=?`), strings.ToLower(email)).Scan(&existing); e == nil {
+			var existing models.User
+			if e := s.gdb(r.Context()).Select("id").Where("email = ?", strings.ToLower(email)).Take(&existing).Error; e == nil {
 				httpx.Error(w, 401, "existing account must sign in first")
 				return
 			}
@@ -899,7 +956,9 @@ func acceptInviteHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFun
 			if name == "" {
 				name = strings.Split(email, "@")[0]
 			}
-			if _, e := s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO users(id,email,password_hash,name,status,created_at,updated_at) VALUES(?,?,?,?,'active',?,?)`), uid, strings.ToLower(email), string(hash), name, s.now(), s.now()); e != nil {
+			hashValue := string(hash)
+			now := s.now()
+			if e := s.gdb(r.Context()).Create(&models.User{ID: &uid, Email: strings.ToLower(email), PasswordHash: &hashValue, Name: &name, Status: "active", CreatedAt: now, UpdatedAt: now}).Error; e != nil {
 				httpx.Error(w, 409, "account creation failed")
 				return
 			}
@@ -947,24 +1006,35 @@ func listPeopleHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "forbidden")
 			return
 		}
-		rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT u.id,u.email,COALESCE(u.name,''),COALESCE(u.title,''),COALESCE(u.bio,''),u.avatar_updated_at,u.last_login_at,u.created_at,m.role,m.created_at FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? AND m.status='active' ORDER BY m.created_at`), p.TenantID)
-		if err != nil {
+		var rows []struct {
+			ID        string  `gorm:"column:id"`
+			Email     string  `gorm:"column:email"`
+			Name      string  `gorm:"column:name"`
+			Title     string  `gorm:"column:title"`
+			Bio       string  `gorm:"column:bio"`
+			Avatar    *string `gorm:"column:avatar_updated_at"`
+			Last      *string `gorm:"column:last_login_at"`
+			CreatedAt string  `gorm:"column:created_at"`
+			Role      string  `gorm:"column:role"`
+			JoinedAt  string  `gorm:"column:joined_at"`
+		}
+		if err := s.gdb(r.Context()).Table("tenant_memberships AS m").
+			Select("u.id,u.email,COALESCE(u.name,'') AS name,COALESCE(u.title,'') AS title,COALESCE(u.bio,'') AS bio,u.avatar_updated_at,u.last_login_at,u.created_at,m.role,m.created_at AS joined_at").
+			Joins("JOIN users u ON u.id = m.user_id").
+			Where("m.tenant_id = ? AND m.status = 'active'", p.TenantID).
+			Order("m.created_at").Find(&rows).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		defer rows.Close()
 		people := []map[string]any{}
-		for rows.Next() {
-			var id, email, name, title, bio, created, role, joined string
-			var avatar, last sql.NullString
-			_ = rows.Scan(&id, &email, &name, &title, &bio, &avatar, &last, &created, &role, &joined)
+		for _, row := range rows {
 			avatarRev := int64(0)
-			if avatar.Valid {
-				if t, e := time.Parse(time.RFC3339Nano, avatar.String); e == nil {
+			if row.Avatar != nil {
+				if t, e := time.Parse(time.RFC3339Nano, *row.Avatar); e == nil {
 					avatarRev = t.UnixMilli()
 				}
 			}
-			people = append(people, map[string]any{"id": id, "email": email, "name": name, "title": title, "bio": bio, "avatarRev": avatarRev, "lastLoginAt": nullString(last), "createdAt": created, "role": role, "joinedAt": joined})
+			people = append(people, map[string]any{"id": row.ID, "email": row.Email, "name": row.Name, "title": row.Title, "bio": row.Bio, "avatarRev": avatarRev, "lastLoginAt": nullableString(row.Last), "createdAt": row.CreatedAt, "role": row.Role, "joinedAt": row.JoinedAt})
 		}
 		httpx.JSON(w, 200, map[string]any{"people": people})
 	}
@@ -972,20 +1042,34 @@ func listPeopleHandler(s *Service) http.HandlerFunc {
 func getPersonHandler(s *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, _ := httpx.PrincipalFrom(r.Context())
-		var id, email, name, title, bio, role, created, joined string
-		var avatar, last sql.NullString
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT u.id,u.email,COALESCE(u.name,''),COALESCE(u.title,''),COALESCE(u.bio,''),m.role,u.avatar_updated_at,u.last_login_at,u.created_at,m.created_at FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.id=? AND m.tenant_id=? AND m.status='active'`), httpx.Param(r, "id"), p.TenantID).Scan(&id, &email, &name, &title, &bio, &role, &avatar, &last, &created, &joined)
+		var row struct {
+			ID        string  `gorm:"column:id"`
+			Email     string  `gorm:"column:email"`
+			Name      string  `gorm:"column:name"`
+			Title     string  `gorm:"column:title"`
+			Bio       string  `gorm:"column:bio"`
+			Role      string  `gorm:"column:role"`
+			Avatar    *string `gorm:"column:avatar_updated_at"`
+			Last      *string `gorm:"column:last_login_at"`
+			CreatedAt string  `gorm:"column:created_at"`
+			JoinedAt  string  `gorm:"column:joined_at"`
+		}
+		err := s.gdb(r.Context()).Table("users AS u").
+			Select("u.id,u.email,COALESCE(u.name,'') AS name,COALESCE(u.title,'') AS title,COALESCE(u.bio,'') AS bio,m.role,u.avatar_updated_at,u.last_login_at,u.created_at,m.created_at AS joined_at").
+			Joins("JOIN tenant_memberships m ON m.user_id = u.id").
+			Where("u.id = ? AND m.tenant_id = ? AND m.status = 'active'", httpx.Param(r, "id"), p.TenantID).
+			Take(&row).Error
 		if err != nil {
 			httpx.Error(w, 404, "not found")
 			return
 		}
 		avatarRev := int64(0)
-		if avatar.Valid {
-			if t, e := time.Parse(time.RFC3339Nano, avatar.String); e == nil {
+		if row.Avatar != nil {
+			if t, e := time.Parse(time.RFC3339Nano, *row.Avatar); e == nil {
 				avatarRev = t.UnixMilli()
 			}
 		}
-		httpx.JSON(w, 200, map[string]any{"person": map[string]any{"id": id, "email": email, "name": name, "title": title, "bio": bio, "role": role, "avatarRev": avatarRev, "lastLoginAt": nullString(last), "createdAt": created, "joinedAt": joined}})
+		httpx.JSON(w, 200, map[string]any{"person": map[string]any{"id": row.ID, "email": row.Email, "name": row.Name, "title": row.Title, "bio": row.Bio, "role": row.Role, "avatarRev": avatarRev, "lastLoginAt": nullableString(row.Last), "createdAt": row.CreatedAt, "joinedAt": row.JoinedAt}})
 	}
 }
 func onboardingHandler(s *Service) http.HandlerFunc {
@@ -1014,13 +1098,13 @@ func patchOnboardingHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "invalid request")
 			return
 		}
-		var currentRaw string
-		var completed bool
-		if s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT onboarding_steps,onboarding_completed FROM tenants WHERE id=?`), p.TenantID).Scan(&currentRaw, &completed) != nil {
+		var dbTenant models.Tenant
+		if err := s.gdb(r.Context()).Select("onboarding_steps,onboarding_completed").Where("id = ?", p.TenantID).Take(&dbTenant).Error; err != nil {
 			httpx.Error(w, 404, "not found")
 			return
 		}
-		steps := decodeObject(currentRaw)
+		completed := dbTenant.OnboardingCompleted
+		steps := decodeObject(dbTenant.OnboardingSteps)
 		for k, v := range body.Steps {
 			steps[k] = v
 		}
@@ -1028,7 +1112,7 @@ func patchOnboardingHandler(s *Service) http.HandlerFunc {
 			completed = *body.Complete
 		}
 		raw, _ := json.Marshal(steps)
-		_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenants SET onboarding_steps=?,onboarding_completed=?,updated_at=? WHERE id=?`), string(raw), completed, s.now(), p.TenantID)
+		err := s.gdb(r.Context()).Model(&models.Tenant{}).Where("id = ?", p.TenantID).Updates(map[string]any{"onboarding_steps": string(raw), "onboarding_completed": completed, "updated_at": s.now()}).Error
 		if err != nil {
 			httpx.Error(w, 500, "update failed")
 			return
@@ -1043,14 +1127,14 @@ func completeOnboardingHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 403, "Forbidden")
 			return
 		}
-		_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenants SET onboarding_completed=TRUE,updated_at=? WHERE id=?`), s.now(), p.TenantID)
+		err := s.gdb(r.Context()).Model(&models.Tenant{}).Where("id = ?", p.TenantID).Updates(map[string]any{"onboarding_completed": true, "updated_at": s.now()}).Error
 		if err != nil {
 			httpx.Error(w, 500, "update failed")
 			return
 		}
-		var stepsRaw string
-		_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT onboarding_steps FROM tenants WHERE id=?`), p.TenantID).Scan(&stepsRaw)
-		httpx.JSON(w, 200, map[string]any{"completed": true, "steps": decodeObject(stepsRaw)})
+		var stepsTenant models.Tenant
+		_ = s.gdb(r.Context()).Select("onboarding_steps").Where("id = ?", p.TenantID).Take(&stepsTenant).Error
+		httpx.JSON(w, 200, map[string]any{"completed": true, "steps": decodeObject(stepsTenant.OnboardingSteps)})
 	}
 }
 
@@ -1063,11 +1147,13 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, "invalid request")
 			return
 		}
-		var uid, passwordHash, email string
-		if s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id,COALESCE(password_hash,''),email FROM users WHERE email=? AND status='active'`), strings.ToLower(strings.TrimSpace(b.Email))).Scan(&uid, &passwordHash, &email) == nil && passwordHash != "" {
+		var dbUser models.User
+		if s.gdb(r.Context()).Where("email = ? AND status = 'active'", strings.ToLower(strings.TrimSpace(b.Email))).Take(&dbUser).Error == nil && derefString(dbUser.PasswordHash) != "" {
+			userID, email := derefString(dbUser.ID), dbUser.Email
 			token, _ := randomToken(32)
 			h := sha256.Sum256([]byte(token))
-			_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,'password_reset',?,?,?)`), s.deps.NewID(), uid, hex.EncodeToString(h[:]), s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano), s.now())
+			tokenID := s.deps.NewID()
+			_ = s.gdb(r.Context()).Create(&models.AuthToken{ID: &tokenID, UserID: &userID, Kind: "password_reset", TokenHash: hex.EncodeToString(h[:]), ExpiresAt: s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 			if s.deps.SendTransactionalEmail != nil {
 				resetURL := s.deps.WebURL + "/reset-password?token=" + url.QueryEscape(token)
 				htmlBody := `<p>Reset your Zakura password:</p><p><a href="` + html.EscapeString(resetURL) + `">Reset password</a></p>`
@@ -1082,11 +1168,11 @@ func (s *Service) sendVerificationEmail(ctx context.Context, userID, email strin
 	if s.deps.SendTransactionalEmail == nil {
 		return false, nil
 	}
-	var verified sql.NullString
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT email_verified_at FROM users WHERE id=? AND status='active'`), userID).Scan(&verified); err != nil {
+	var account models.User
+	if err := s.gdb(ctx).Select("email_verified_at").Where("id = ? AND status = 'active'", userID).Take(&account).Error; err != nil {
 		return false, err
 	}
-	if verified.Valid {
+	if account.EmailVerifiedAt != nil {
 		return true, nil
 	}
 	token, err := randomToken(32)
@@ -1094,7 +1180,9 @@ func (s *Service) sendVerificationEmail(ctx context.Context, userID, email strin
 		return false, err
 	}
 	digest := sha256.Sum256([]byte(token))
-	if _, err = s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,'email_verify',?,?,?)`), s.deps.NewID(), userID, hex.EncodeToString(digest[:]), s.deps.Clock().UTC().Add(24*time.Hour).Format(time.RFC3339Nano), s.now()); err != nil {
+	tokenID := s.deps.NewID()
+	uid := userID
+	if err = s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: &uid, Kind: "email_verify", TokenHash: hex.EncodeToString(digest[:]), ExpiresAt: s.deps.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error; err != nil {
 		return false, err
 	}
 	verifyURL := s.deps.WebURL + "/verify-email?token=" + url.QueryEscape(token)
@@ -1174,9 +1262,11 @@ func verifyEmailTokenHandler(s *Service) http.HandlerFunc {
 			httpx.Error(w, 400, err.Error())
 			return
 		}
-		var email string
-		if verifiedUserID != "" && s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT email FROM users WHERE id=?`), verifiedUserID).Scan(&email) == nil {
-			_ = s.maybeAutoJoinTenant(r.Context(), verifiedUserID, email)
+		if verifiedUserID != "" {
+			var account models.User
+			if s.gdb(r.Context()).Select("email").Where("id = ?", verifiedUserID).Take(&account).Error == nil {
+				_ = s.maybeAutoJoinTenant(r.Context(), verifiedUserID, account.Email)
+			}
 		}
 		httpx.JSON(w, 200, map[string]any{"ok": true})
 	}
@@ -1202,6 +1292,18 @@ func nullString(v sql.NullString) any {
 		return v.String
 	}
 	return nil
+}
+func nullableString(v *string) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+func nullableNullString(v *string) sql.NullString {
+	if v == nil {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: *v, Valid: true}
 }
 func parseInt(v string, fallback int) int {
 	n, e := strconv.Atoi(v)

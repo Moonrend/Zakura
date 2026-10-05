@@ -14,7 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -39,20 +42,20 @@ func (s *Service) loadLoginProvider(ctx context.Context, id string) (loginProvid
 		return loginProviderConfig{}, def, errors.New("unknown oauth provider")
 	}
 	cfg := loginProviderConfig{AuthorizeURL: def.AuthorizeURL, TokenURL: def.TokenURL, UserinfoURL: def.UserinfoURL, Scope: def.Scope, AllowRegistration: true}
-	var raw string
-	if s.deps.DB.QueryRowContext(ctx, s.q(`SELECT value FROM settings WHERE owner_key='platform' AND key=?`), "auth.oauth."+id).Scan(&raw) == nil {
-		_ = json.Unmarshal([]byte(raw), &cfg)
+	var setting models.Setting
+	if s.gdb(ctx).Where("owner_key = ? AND key = ?", "platform", "auth.oauth."+id).Take(&setting).Error == nil {
+		_ = json.Unmarshal([]byte(setting.Value), &cfg)
 	}
 	return cfg, def, nil
 }
 func (s *Service) passwordLoginEnabled(ctx context.Context) bool {
-	var raw string
 	disabled := false
-	if s.deps.DB.QueryRowContext(ctx, s.q(`SELECT value FROM settings WHERE owner_key='platform' AND key='auth.login'`)).Scan(&raw) == nil {
+	var setting models.Setting
+	if s.gdb(ctx).Where("owner_key = ? AND key = ?", "platform", "auth.login").Take(&setting).Error == nil {
 		var policy struct {
 			DisablePasswordLogin bool `json:"disablePasswordLogin"`
 		}
-		_ = json.Unmarshal([]byte(raw), &policy)
+		_ = json.Unmarshal([]byte(setting.Value), &policy)
 		disabled = policy.DisablePasswordLogin
 	}
 	if !disabled {
@@ -89,7 +92,7 @@ func (s *Service) startOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	state := mustToken(24)
 	verifier := mustToken(32)
 	challenge := sha256.Sum256([]byte(verifier))
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO oauth_login_states(id,provider,code_verifier,expires_at,created_at) VALUES(?,?,?,?,?)`), state, id, verifier, s.deps.Clock().UTC().Add(10*time.Minute).Format(time.RFC3339Nano), s.now())
+	err = s.gdb(r.Context()).Create(&models.OauthLoginState{ID: &state, Provider: id, CodeVerifier: verifier, ExpiresAt: s.deps.Clock().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "state persistence failed")
 		return
@@ -312,10 +315,14 @@ func fetchGitHubEmail(ctx context.Context, client *http.Client, userinfoURL, tok
 
 func (s *Service) linkSocialIdentity(ctx context.Context, provider, subject, email, name string, verified, allowRegistration bool, profile []byte) (User, Tenant, string, error) {
 	var uid string
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT user_id FROM oauth_identities WHERE provider=? AND provider_user_id=?`), provider, subject).Scan(&uid)
-	if errors.Is(err, sql.ErrNoRows) {
+	var identity models.OauthIdentity
+	err := s.gdb(ctx).Select("user_id").Where("provider = ? AND provider_user_id = ?", provider, subject).Take(&identity).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		if verified {
-			_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id FROM users WHERE email=?`), email).Scan(&uid)
+			var existing models.User
+			if s.gdb(ctx).Select("id").Where("email = ?", email).Take(&existing).Error == nil {
+				uid = derefString(existing.ID)
+			}
 		}
 		if uid == "" {
 			if !allowRegistration {
@@ -339,35 +346,55 @@ func (s *Service) linkSocialIdentity(ctx context.Context, provider, subject, ema
 				return User{}, Tenant{}, "", err
 			}
 		}
-		_, err = s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO oauth_identities(id,provider,provider_user_id,user_id,profile_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`), s.deps.NewID(), provider, subject, uid, string(profile), s.now(), s.now())
-		if err != nil {
+		identityID := s.deps.NewID()
+		profileValue := string(profile)
+		if err = s.gdb(ctx).Create(&models.OauthIdentity{ID: &identityID, Provider: provider, ProviderUserID: subject, UserID: uid, ProfileJSON: &profileValue, CreatedAt: s.now(), UpdatedAt: s.now()}).Error; err != nil {
 			return User{}, Tenant{}, "", err
 		}
 	} else if err != nil {
 		return User{}, Tenant{}, "", err
 	} else {
-		_, _ = s.deps.DB.ExecContext(ctx, s.q(`UPDATE oauth_identities SET profile_json=?,updated_at=? WHERE provider=? AND provider_user_id=?`), string(profile), s.now(), provider, subject)
+		uid = identity.UserID
+		_ = s.gdb(ctx).Model(&models.OauthIdentity{}).Where("provider = ? AND provider_user_id = ?", provider, subject).Updates(map[string]any{"profile_json": string(profile), "updated_at": s.now()}).Error
 	}
 	var u User
-	if err = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,email,COALESCE(name,''),is_platform_admin FROM users WHERE id=? AND status='active'`), uid).Scan(&u.ID, &u.Email, &u.Name, &u.IsPlatformAdmin); err != nil {
+	var dbUser models.User
+	if err = s.gdb(ctx).Where("id = ? AND status = 'active'", uid).Take(&dbUser).Error; err != nil {
 		return u, Tenant{}, "", errors.New("account unavailable")
 	}
+	u = User{ID: derefString(dbUser.ID), Email: dbUser.Email, Name: derefString(dbUser.Name), IsPlatformAdmin: dbUser.IsPlatformAdmin}
 	var t Tenant
 	var role string
-	if err = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT t.id,t.slug,t.name,t.is_default,t.onboarding_completed,m.role FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id WHERE m.user_id=? AND m.status='active' AND t.status='active' ORDER BY t.created_at LIMIT 1`), uid).Scan(&t.ID, &t.Slug, &t.Name, &t.IsDefault, &t.OnboardingCompleted, &role); err != nil {
+	var tenantRow struct {
+		ID                  string `gorm:"column:id"`
+		Slug                string `gorm:"column:slug"`
+		Name                string `gorm:"column:name"`
+		IsDefault           bool   `gorm:"column:is_default"`
+		OnboardingCompleted bool   `gorm:"column:onboarding_completed"`
+		Role                string `gorm:"column:role"`
+	}
+	if err = s.gdb(ctx).Table("tenants AS t").
+		Select("t.id,t.slug,t.name,t.is_default,t.onboarding_completed,m.role").
+		Joins("JOIN tenant_memberships m ON m.tenant_id = t.id").
+		Where("m.user_id = ? AND m.status = 'active' AND t.status = 'active'", uid).
+		Order("t.created_at").Take(&tenantRow).Error; err != nil {
 		return u, t, "", errors.New("account has no active tenant")
 	}
+	t = Tenant{ID: tenantRow.ID, Slug: tenantRow.Slug, Name: tenantRow.Name, IsDefault: tenantRow.IsDefault, OnboardingCompleted: tenantRow.OnboardingCompleted}
+	role = tenantRow.Role
 	return u, t, role, nil
 }
 func (s *Service) socialAuthResult(ctx context.Context, u User, t Tenant, role, ip, ua string) (map[string]any, error) {
-	var totp sql.NullString
-	var passkeys int
-	var policy string
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT totp_enabled_at FROM users WHERE id=?`), u.ID).Scan(&totp)
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM user_webauthn_credentials WHERE user_id=?`), u.ID).Scan(&passkeys)
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT mfa_policy FROM tenants WHERE id=?`), t.ID).Scan(&policy)
+	var totpUser models.User
+	var policyTenant models.Tenant
+	var passkeys int64
+	_ = s.gdb(ctx).Select("totp_enabled_at").Where("id = ?", u.ID).Take(&totpUser).Error
+	_ = s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", u.ID).Count(&passkeys).Error
+	_ = s.gdb(ctx).Select("mfa_policy").Where("id = ?", t.ID).Take(&policyTenant).Error
+	totpEnabled := totpUser.TotpEnabledAt != nil
+	policy := policyTenant.MfaPolicy
 	methods := []string{}
-	if totp.Valid {
+	if totpEnabled {
 		methods = append(methods, "totp", "recovery")
 	}
 	if passkeys > 0 {

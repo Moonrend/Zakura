@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -217,7 +218,7 @@ func (s *Service) revokeToken(w http.ResponseWriter, r *http.Request) {
 	v, err := requestValues(r)
 	if err == nil {
 		h := sha256.Sum256([]byte(v.Get("token")))
-		_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE oauth_refresh_tokens SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`), s.now(), hex.EncodeToString(h[:]))
+		_ = s.gdb(r.Context()).Model(&models.OauthRefreshToken{}).Where("token_hash = ? AND revoked_at IS NULL", hex.EncodeToString(h[:])).Update("revoked_at", s.now()).Error
 	}
 	w.WriteHeader(200)
 }
@@ -258,11 +259,16 @@ func (s *Service) oauthBearer(next http.Handler) http.Handler {
 func (s *Service) userinfo(w http.ResponseWriter, r *http.Request) {
 	c, _ := r.Context().Value(oauthClaimsKey{}).(jwt.MapClaims)
 	subject, _ := c["sub"].(string)
-	var email, name string
-	if subject == "" || s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT email,COALESCE(name,'') FROM users WHERE id=? AND status='active'`), subject).Scan(&email, &name) != nil {
+	if subject == "" {
 		oauthError(w, 401, "invalid_token", "User not found")
 		return
 	}
+	var account models.User
+	if s.gdb(r.Context()).Select("email,name").Where("id = ? AND status = 'active'", subject).Take(&account).Error != nil {
+		oauthError(w, 401, "invalid_token", "User not found")
+		return
+	}
+	email, name := account.Email, derefString(account.Name)
 	out := map[string]any{"sub": subject}
 	scope, _ := c["scope"].(string)
 	if scopeContains(scope, "email") || scopeContains(scope, "openid") || scopeContains(scope, "mcp") {
@@ -287,34 +293,39 @@ func scopeContains(scope, expected string) bool {
 }
 func (s *Service) listOAuthClients(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT DISTINCT c.id,c.client_id,c.client_name,c.redirect_uris_json,c.grant_types_json,c.response_types_json,c.token_endpoint_auth_method,c.scope,c.registration_type,c.tenant_id,c.created_at
-		FROM oauth_clients c WHERE c.tenant_id=? OR (c.tenant_id IS NULL AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens rt WHERE rt.tenant_id=? AND rt.client_id=c.client_id) OR EXISTS(SELECT 1 FROM oauth_auth_codes ac WHERE ac.tenant_id=? AND ac.client_id=c.client_id))) ORDER BY c.created_at`), p.TenantID, p.TenantID, p.TenantID)
-	if err != nil {
+	var rows []struct {
+		ID           string  `gorm:"column:id"`
+		ClientID     string  `gorm:"column:client_id"`
+		ClientName   string  `gorm:"column:client_name"`
+		Redirects    string  `gorm:"column:redirect_uris_json"`
+		Grants       string  `gorm:"column:grant_types_json"`
+		Responses    string  `gorm:"column:response_types_json"`
+		Method       string  `gorm:"column:token_endpoint_auth_method"`
+		Scope        string  `gorm:"column:scope"`
+		Registration string  `gorm:"column:registration_type"`
+		TenantID     *string `gorm:"column:tenant_id"`
+		CreatedAt    string  `gorm:"column:created_at"`
+	}
+	if err := s.gdb(r.Context()).Table("oauth_clients AS c").
+		Select("DISTINCT c.id,c.client_id,c.client_name,c.redirect_uris_json,c.grant_types_json,c.response_types_json,c.token_endpoint_auth_method,c.scope,c.registration_type,c.tenant_id,c.created_at").
+		Where("c.tenant_id = ? OR (c.tenant_id IS NULL AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens rt WHERE rt.tenant_id = ? AND rt.client_id = c.client_id) OR EXISTS(SELECT 1 FROM oauth_auth_codes ac WHERE ac.tenant_id = ? AND ac.client_id = c.client_id)))", p.TenantID, p.TenantID, p.TenantID).
+		Order("c.created_at").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, cid, name, redirects, grants, responses, method, scope, reg, created string
-		var boundTenant sql.NullString
-		_ = rows.Scan(&id, &cid, &name, &redirects, &grants, &responses, &method, &scope, &reg, &boundTenant, &created)
-		items = append(items, map[string]any{"id": id, "clientId": cid, "clientName": name, "redirectUris": decodeStringArray(redirects), "grantTypes": decodeStringArray(grants), "responseTypes": decodeStringArray(responses), "tokenEndpointAuthMethod": method, "scope": scope, "registrationType": reg, "tenantBound": boundTenant.Valid && boundTenant.String == p.TenantID, "createdAt": created})
+	for _, row := range rows {
+		items = append(items, map[string]any{"id": row.ID, "clientId": row.ClientID, "clientName": row.ClientName, "redirectUris": decodeStringArray(row.Redirects), "grantTypes": decodeStringArray(row.Grants), "responseTypes": decodeStringArray(row.Responses), "tokenEndpointAuthMethod": row.Method, "scope": row.Scope, "registrationType": row.Registration, "tenantBound": row.TenantID != nil && *row.TenantID == p.TenantID, "createdAt": row.CreatedAt})
 	}
-	rows.Close()
-	rows2, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,mcp_url,host,client_id,client_name,source,secret_enc,registration_endpoint,scope,instance_id,created_at,updated_at FROM upstream_oauth_clients WHERE tenant_id=? ORDER BY created_at`), p.TenantID)
-	outbound := []map[string]any{}
-	if err != nil {
+	var upstream []models.UpstreamOauthClient
+	if err := s.gdb(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at").Find(&upstream).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	for rows2.Next() {
-		var id, mcpURL, host, clientID, clientName, source, created, updated string
-		var secret, registration, instance sql.NullString
-		var scope string
-		_ = rows2.Scan(&id, &mcpURL, &host, &clientID, &clientName, &source, &secret, &registration, &scope, &instance, &created, &updated)
-		outbound = append(outbound, map[string]any{"id": id, "mcpUrl": mcpURL, "host": host, "clientId": clientID, "clientName": clientName, "source": source, "hasSecret": secret.Valid && secret.String != "", "registrationEndpoint": nullString(registration), "scope": scope, "instanceId": nullString(instance), "createdAt": created, "updatedAt": updated})
+	outbound := []map[string]any{}
+	for _, record := range upstream {
+		outbound = append(outbound, map[string]any{"id": derefString(record.ID), "mcpUrl": record.McpURL, "host": record.Host, "clientId": record.ClientID, "clientName": record.ClientName, "source": record.Source, "hasSecret": record.SecretEnc != nil && *record.SecretEnc != "", "registrationEndpoint": nullableString(record.RegistrationEndpoint), "scope": record.Scope, "instanceId": nullableString(record.InstanceID), "createdAt": record.CreatedAt, "updatedAt": record.UpdatedAt})
 	}
-	rows2.Close()
 	dcr := []map[string]any{}
 	byo := []map[string]any{}
 	for _, item := range outbound {

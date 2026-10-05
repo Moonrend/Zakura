@@ -18,10 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
+	"github.com/go-chi/chi/v5"
+	_ "github.com/mattn/go-sqlite3"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func setup(t *testing.T) (*appdeps.Dependencies, string, string) {
@@ -36,8 +39,12 @@ func setup(t *testing.T) (*appdeps.Dependencies, string, string) {
 	if e = migrations.Apply(context.Background(), db, "sqlite", appdeps.IdentityRebind); e != nil {
 		t.Fatal(e)
 	}
+	gdb, e := gorm.Open(sqlite.New(sqlite.Config{Conn: db}), &gorm.Config{NamingStrategy: schema.NamingStrategy{NoLowerCase: true}})
+	if e != nil {
+		t.Fatal(e)
+	}
 	var seq atomic.Int64
-	d := &appdeps.Dependencies{DB: db, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("i-%06d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("k"), 32), PublicURL: "http://example.test"}
+	d := &appdeps.Dependencies{DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("i-%06d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("k"), 32), PublicURL: "http://example.test"}
 	for _, tenant := range []string{"ta", "tb"} {
 		now := d.Clock().Format(time.RFC3339Nano)
 		if _, e = db.Exec(`INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES(?,?,?,?,?)`, tenant, tenant, tenant, now, now); e != nil {

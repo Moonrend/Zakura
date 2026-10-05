@@ -2,13 +2,16 @@
 package integrations
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (h *handler) setConnectionState(w http.ResponseWriter, r *http.Request, enabled bool) {
@@ -19,23 +22,26 @@ func (h *handler) setConnectionState(w http.ResponseWriter, r *http.Request, ena
 		kind = "instance"
 		id = strings.TrimPrefix(raw, "instance:")
 	}
-	var res sql.Result
-	var e error
+	now := h.now().Format(time.RFC3339Nano)
+	var res *gorm.DB
 	if kind == "connector" {
-		res, e = h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE agent_connector_installations SET enabled=?,updated_at=? WHERE tenant_id=? AND id=?`), enabled, h.now(), p.TenantID, id)
+		res = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
+			Where("tenant_id = ? AND id = ?", p.TenantID, id).
+			Updates(map[string]any{"enabled": enabled, "updated_at": now})
 	} else {
 		status := "stopped"
 		if enabled {
 			status = "running"
 		}
-		res, e = h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE component_instances SET status=?,updated_at=? WHERE tenant_id=? AND id=?`), status, h.now(), p.TenantID, id)
+		res = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).
+			Where("tenant_id = ? AND id = ?", p.TenantID, id).
+			Updates(map[string]any{"status": status, "updated_at": now})
 	}
-	if e != nil {
-		writeErr(w, e)
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -64,8 +70,12 @@ func (h *handler) installConnection(w http.ResponseWriter, r *http.Request) {
 		for _, agent := range b.AgentIDs {
 			raw, _ := json.Marshal(map[string]any{"config": json.RawMessage(b.Config)})
 			enc, _ := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+ref, raw)
-			now := h.now()
-			if _, e := h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO agent_connector_installations(id,tenant_id,agent_id,connector_ref,enabled,config_enc,created_at,updated_at) VALUES(?,?,?,?,true,?,?,?) ON CONFLICT(agent_id,connector_ref) DO UPDATE SET enabled=true,config_enc=?,updated_at=?`), h.id(), p.TenantID, agent, ref, enc, now, now, enc, now); e == nil {
+			now := h.now().Format(time.RFC3339Nano)
+			row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: agent, ConnectorRef: ref, Enabled: true, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+			if e := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
+				DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
+			}).Create(&row).Error; e == nil {
 				installed++
 			}
 		}
@@ -91,7 +101,7 @@ func (h *handler) installConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cfgRaw, _ := json.Marshal(cfg)
-		now := h.now()
+		now := h.now().Format(time.RFC3339Nano)
 		created := []string{}
 		for _, agent := range b.AgentIDs {
 			id := h.id()
@@ -102,7 +112,8 @@ func (h *handler) installConnection(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			secretStored, _ := json.Marshal(map[string]any{"enc": enc, "configured": len(secretValues) > 0})
-			if _, e := h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO component_instances(id,tenant_id,agent_id,component_type,component_ref,name,config_json,secret_json,status,last_error,created_at,updated_at) VALUES(?,?,?,'mcp',?,?,?,?,'ready',NULL,?,?)`), id, p.TenantID, agent, slugifyLocal(b.Name), b.Name, string(cfgRaw), string(secretStored), now, now); e == nil {
+			row := models.ComponentInstance{ID: strPtr(id), TenantID: p.TenantID, AgentID: strPtr(agent), ComponentType: "mcp", ComponentRef: slugifyLocal(b.Name), Name: b.Name, ConfigJSON: string(cfgRaw), SecretJSON: string(secretStored), Status: "ready", CreatedAt: now, UpdatedAt: now}
+			if e := h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; e == nil {
 				created = append(created, id)
 			}
 		}
@@ -138,23 +149,22 @@ func (h *handler) createConnectionSource(w http.ResponseWriter, r *http.Request)
 	if b.Format == "" {
 		b.Format = "auto"
 	}
-	now := h.now()
+	now := h.now().Format(time.RFC3339Nano)
 	id := h.id()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO mcp_store_sources(id,tenant_id,name,description,source_url,format,manifest_json,servers_json,enabled,fetched_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','[]',true,NULL,?,?)`), id, p.TenantID, b.Name, b.Description, b.Repository, b.Format, now, now)
-	if e != nil {
+	row := models.McpStoreSource{ID: strPtr(id), TenantID: p.TenantID, Name: b.Name, Description: b.Description, SourceURL: b.Repository, Format: b.Format, ManifestJSON: "{}", ServersJSON: "[]", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if e := h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
 	httpx.JSON(w, 201, map[string]any{"source": map[string]any{"id": id, "name": b.Name, "sourceUrl": b.Repository, "format": b.Format}})
 }
 func (h *handler) deleteConnectionSource(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM mcp_store_sources WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.McpStoreSource{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -165,16 +175,12 @@ func (h *handler) listProviderCatalog(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		items = append(items, map[string]any{"id": p.Ref, "name": p.Name, "description": p.Description, "category": p.Category, "capabilities": p.Capabilities, "authKind": p.AuthKind})
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), `SELECT id,name,kind,manifest_json FROM provider_catalog WHERE enabled=true ORDER BY name`)
-	if e == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var id, name, kind, manifest string
-			if rows.Scan(&id, &name, &kind, &manifest) == nil {
-				var meta map[string]any
-				_ = json.Unmarshal([]byte(manifest), &meta)
-				items = append(items, map[string]any{"id": id, "name": name, "description": meta["description"], "category": kind, "capabilities": meta["capabilities"], "configSchema": meta["configSchema"]})
-			}
+	var rows []models.ProviderCatalog
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("enabled = true").Order("name").Find(&rows).Error; e == nil {
+		for _, row := range rows {
+			var meta map[string]any
+			_ = json.Unmarshal([]byte(row.ManifestJSON), &meta)
+			items = append(items, map[string]any{"id": *row.ID, "name": row.Name, "description": meta["description"], "category": row.Kind, "capabilities": meta["capabilities"], "configSchema": meta["configSchema"]})
 		}
 	}
 	httpx.JSON(w, 200, map[string]any{"providers": items})

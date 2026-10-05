@@ -3,18 +3,18 @@ package runtime
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func (h *handler) registerPlatformServices(r chi.Router) {
@@ -35,12 +35,12 @@ func (h *handler) registerPlatformServices(r chi.Router) {
 	r.Post("/platform-services/{key}/restart", h.platformServiceRestart)
 	r.Post("/platform-services/{key}/health", h.platformServiceHealth)
 }
-func scanPlatformService(row interface{ Scan(...any) error }) (map[string]any, error) {
-	var id, key, mode, desired, status, health, containers, c, u string
-	var endpoint, lastErr *string
-	var config string
-	e := row.Scan(&id, &key, &mode, &desired, &status, &health, &config, &endpoint, &containers, &lastErr, &c, &u)
-	return map[string]any{"id": id, "key": key, "mode": mode, "desiredState": desired, "status": status, "healthStatus": health, "endpointUrl": endpoint, "containers": json.RawMessage(containers), "lastError": lastErr, "createdAt": c, "updatedAt": u}, e
+func platformServiceFromModel(m models.PlatformService) map[string]any {
+	id := ""
+	if m.ID != nil {
+		id = *m.ID
+	}
+	return map[string]any{"id": id, "key": m.ServiceKey, "mode": m.Mode, "desiredState": m.DesiredState, "status": m.Status, "healthStatus": m.HealthStatus, "endpointUrl": m.EndpointURL, "containers": json.RawMessage(m.ContainersJSON), "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt}
 }
 
 var platformServiceCatalog = []map[string]any{
@@ -86,18 +86,15 @@ func platformServicePublic(raw map[string]any) map[string]any {
 	return out
 }
 func (h *handler) listPlatformServices(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), `SELECT id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at FROM platform_services ORDER BY service_key`)
-	if e != nil {
+	var ms []models.PlatformService
+	if e := h.deps.Gorm.WithContext(r.Context()).Order("service_key").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	byKey := map[string]map[string]any{}
-	for rows.Next() {
-		x, e := scanPlatformService(rows)
-		if e == nil {
-			byKey[x["key"].(string)] = x
-		}
+	for _, m := range ms {
+		x := platformServiceFromModel(m)
+		byKey[m.ServiceKey] = x
 	}
 	out := make([]map[string]any, 0, len(platformServiceCatalog))
 	for _, meta := range platformServiceCatalog {
@@ -113,11 +110,15 @@ func (h *handler) listPlatformServices(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"services": out, "catalog": platformServiceCatalog, "canManage": canManage, "multiTenant": h.deps.MultiTenant})
 }
 func (h *handler) getPlatformServiceRow(r *http.Request, key string) (map[string]any, error) {
-	x, e := scanPlatformService(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at FROM platform_services WHERE service_key=?`), key))
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.PlatformService
+	e := h.deps.Gorm.WithContext(r.Context()).Where("service_key = ?", key).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
-	return x, e
+	if e != nil {
+		return nil, e
+	}
+	return platformServiceFromModel(m), nil
 }
 func (h *handler) getPlatformService(w http.ResponseWriter, r *http.Request) {
 	x, e := h.getPlatformServiceRow(r, chi.URLParam(r, "key"))
@@ -161,8 +162,8 @@ func (h *handler) patchPlatformService(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'unknown',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode=?,desired_state=?,config_enc=?,endpoint_url=?,updated_at=?`), h.store.id(), key, b.Mode, b.DesiredState, "stopped", enc, nullString(b.EndpointURL), now, now, b.Mode, b.DesiredState, enc, nullString(b.EndpointURL), now)
+	now := runtimeTimeString(h.store.now())
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'unknown',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode=?,desired_state=?,config_enc=?,endpoint_url=?,updated_at=?`, h.store.id(), key, b.Mode, b.DesiredState, "stopped", enc, nullString(b.EndpointURL), now, now, b.Mode, b.DesiredState, enc, nullString(b.EndpointURL), now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -170,12 +171,14 @@ func (h *handler) patchPlatformService(w http.ResponseWriter, r *http.Request) {
 	h.getPlatformService(w, r)
 }
 func (h *handler) serviceConfig(key string) (map[string]any, error) {
-	var enc string
-	e := h.deps.DB.QueryRowContext(h.deps.RunContext(), h.store.q(`SELECT config_enc FROM platform_services WHERE service_key=?`), key).Scan(&enc)
+	var row struct {
+		ConfigEnc string `gorm:"column:config_enc"`
+	}
+	e := h.deps.Gorm.WithContext(h.deps.RunContext()).Table("platform_services").Select("config_enc").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
 		return nil, e
 	}
-	raw, e := openSecretBox(h.deps.Secret, "platform-service:"+key, enc)
+	raw, e := openSecretBox(h.deps.Secret, "platform-service:"+key, row.ConfigEnc)
 	if e != nil {
 		return nil, e
 	}
@@ -218,7 +221,7 @@ func (h *handler) deployPlatformService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	containers, _ := json.Marshal([]string{created.ID})
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE platform_services SET desired_state='running',status='running',health_status='unknown',containers_json=?,last_error=NULL,updated_at=? WHERE service_key=?`), string(containers), h.store.now(), key)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"desired_state": "running", "status": "running", "health_status": "unknown", "containers_json": string(containers), "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -267,8 +270,8 @@ func (h *handler) connectPlatformService(w http.ResponseWriter, r *http.Request)
 		statusErr(w, e)
 		return
 	}
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,'external','running','running','healthy',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode='external',desired_state='running',status='running',health_status='healthy',config_enc=?,endpoint_url=?,last_error=NULL,updated_at=?`), h.store.id(), key, enc, b.EndpointURL, now, now, enc, b.EndpointURL, now)
+	now := runtimeTimeString(h.store.now())
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,'external','running','running','healthy',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode='external',desired_state='running',status='running',health_status='healthy',config_enc=?,endpoint_url=?,last_error=NULL,updated_at=?`, h.store.id(), key, enc, b.EndpointURL, now, now, enc, b.EndpointURL, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -282,18 +285,20 @@ func (h *handler) disablePlatformService(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	key := chi.URLParam(r, "key")
-	var containersRaw string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT containers_json FROM platform_services WHERE service_key=?`), key).Scan(&containersRaw)
+	var row struct {
+		ContainersJSON string `gorm:"column:containers_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	var ids []string
-	_ = json.Unmarshal([]byte(containersRaw), &ids)
+	_ = json.Unmarshal([]byte(row.ContainersJSON), &ids)
 	for _, id := range ids {
 		_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/stop?t=10", nil)
 	}
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE platform_services SET mode='disabled',desired_state='stopped',status='stopped',health_status='unknown',updated_at=? WHERE service_key=?`), h.store.now(), key)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"mode": "disabled", "desired_state": "stopped", "status": "stopped", "health_status": "unknown", "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -310,14 +315,16 @@ func (h *handler) platformServiceProgress(w http.ResponseWriter, r *http.Request
 }
 func (h *handler) platformServiceLogs(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	var containersRaw string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT containers_json FROM platform_services WHERE service_key=?`), key).Scan(&containersRaw)
+	var row struct {
+		ContainersJSON string `gorm:"column:containers_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	var ids []string
-	_ = json.Unmarshal([]byte(containersRaw), &ids)
+	_ = json.Unmarshal([]byte(row.ContainersJSON), &ids)
 	logs := map[string]string{}
 	for _, id := range ids {
 		raw, _, e := dockerCall(r.Context(), http.MethodGet, "/v1.43/containers/"+id+"/logs?stdout=true&stderr=true&tail=500", nil)
@@ -351,50 +358,59 @@ func (h *handler) platformServiceDiagnostics(w http.ResponseWriter, r *http.Requ
 	httpx.JSON(w, 200, map[string]any{"diagnostics": diagnostics})
 }
 func (h *handler) platformServiceStart(w http.ResponseWriter, r *http.Request) {
-	var mode string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT mode FROM platform_services WHERE service_key=?`), chi.URLParam(r, "key")).Scan(&mode)
+	var row struct {
+		Mode string
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("mode").Where("service_key = ?", chi.URLParam(r, "key")).Take(&row).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	if mode == "managed" {
+	if row.Mode == "managed" {
 		h.deployPlatformService(w, r)
 		return
 	}
-	var endpoint *string
-	e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT endpoint_url FROM platform_services WHERE service_key=?`), chi.URLParam(r, "key")).Scan(&endpoint)
-	if e != nil || endpoint == nil {
+	var erow struct {
+		EndpointURL *string `gorm:"column:endpoint_url"`
+	}
+	e = h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("endpoint_url").Where("service_key = ?", chi.URLParam(r, "key")).Take(&erow).Error
+	if e != nil || erow.EndpointURL == nil {
 		httpx.Error(w, 409, "service endpoint is not configured")
 		return
 	}
-	body, _ := json.Marshal(map[string]any{"endpointUrl": *endpoint, "config": map[string]any{}})
+	body, _ := json.Marshal(map[string]any{"endpointUrl": *erow.EndpointURL, "config": map[string]any{}})
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	h.connectPlatformService(w, r)
 }
 func (h *handler) platformServiceRestart(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	var containers string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT containers_json FROM platform_services WHERE service_key=?`), key).Scan(&containers)
+	var row struct {
+		ContainersJSON string `gorm:"column:containers_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	var ids []string
-	_ = json.Unmarshal([]byte(containers), &ids)
+	_ = json.Unmarshal([]byte(row.ContainersJSON), &ids)
 	for _, id := range ids {
 		_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/restart?t=10", nil)
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE platform_services SET status='running',desired_state='running',updated_at=? WHERE service_key=?`), h.store.now(), key)
+	h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"status": "running", "desired_state": "running", "updated_at": runtimeTimeString(h.store.now())})
 	h.getPlatformService(w, r)
 }
 func (h *handler) platformServiceHealth(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
-	var endpoint *string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT endpoint_url FROM platform_services WHERE service_key=?`), key).Scan(&endpoint)
+	var erow struct {
+		EndpointURL *string `gorm:"column:endpoint_url"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("endpoint_url").Where("service_key = ?", key).Take(&erow).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
+	endpoint := erow.EndpointURL
 	healthy := false
 	var detail any
 	if endpoint != nil && *endpoint != "" {
@@ -412,28 +428,27 @@ func (h *handler) platformServiceHealth(w http.ResponseWriter, r *http.Request) 
 	if healthy {
 		status = "healthy"
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE platform_services SET health_status=?,last_error=?,updated_at=? WHERE service_key=?`), status, func() any {
+	h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"health_status": status, "last_error": func() any {
 		if healthy {
 			return nil
 		}
 		return fmt.Sprint(detail)
-	}(), h.store.now(), key)
+	}(), "updated_at": runtimeTimeString(h.store.now())})
 	httpx.JSON(w, 200, map[string]any{"healthy": healthy, "detail": detail})
 }
 func (h *handler) listServiceQuotas(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), `SELECT id,scope_key,service_key,monthly_limit,daily_limit,created_at,updated_at FROM platform_service_quotas ORDER BY scope_key,service_key`)
-	if e != nil {
+	var ms []models.PlatformServiceQuota
+	if e := h.deps.Gorm.WithContext(r.Context()).Order("scope_key, service_key").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, scope, key, c, u string
-		var monthly, daily *int64
-		if rows.Scan(&id, &scope, &key, &monthly, &daily, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "scopeKey": scope, "serviceKey": key, "monthlyLimit": monthly, "dailyLimit": daily, "createdAt": c, "updatedAt": u})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		out = append(out, map[string]any{"id": id, "scopeKey": m.ScopeKey, "serviceKey": m.ServiceKey, "monthlyLimit": m.MonthlyLimit, "dailyLimit": m.DailyLimit, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"quotas": out})
 }
@@ -451,8 +466,8 @@ func (h *handler) putServiceQuota(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "scopeKey and serviceKey required")
 		return
 	}
-	now := h.store.now()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO platform_service_quotas(id,scope_key,service_key,monthly_limit,daily_limit,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope_key,service_key) DO UPDATE SET monthly_limit=?,daily_limit=?,updated_at=?`), h.store.id(), b.ScopeKey, b.ServiceKey, b.MonthlyLimit, b.DailyLimit, now, now, b.MonthlyLimit, b.DailyLimit, now)
+	now := runtimeTimeString(h.store.now())
+	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_service_quotas(id,scope_key,service_key,monthly_limit,daily_limit,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope_key,service_key) DO UPDATE SET monthly_limit=?,daily_limit=?,updated_at=?`, h.store.id(), b.ScopeKey, b.ServiceKey, b.MonthlyLimit, b.DailyLimit, now, now, b.MonthlyLimit, b.DailyLimit, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -460,23 +475,14 @@ func (h *handler) putServiceQuota(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) serviceUsage(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), `SELECT tenant_id,user_id,service_key,period,request_count,error_count,created_at,updated_at FROM platform_service_usage ORDER BY period DESC,service_key LIMIT 1000`)
-	if e != nil {
+	var ms []models.PlatformServiceUsage
+	if e := h.deps.Gorm.WithContext(r.Context()).Order("period DESC, service_key").Limit(1000).Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var tenant, user, key, period, c, u string
-		var requests, errs int64
-		if rows.Scan(&tenant, &user, &key, &period, &requests, &errs, &c, &u) == nil {
-			out = append(out, map[string]any{"tenantId": tenant, "userId": user, "serviceKey": key, "period": period, "requestCount": requests, "errorCount": errs, "createdAt": c, "updatedAt": u})
-		}
+	for _, m := range ms {
+		out = append(out, map[string]any{"tenantId": m.TenantID, "userId": m.UserID, "serviceKey": m.ServiceKey, "period": m.Period, "requestCount": int64(m.RequestCount), "errorCount": int64(m.ErrorCount), "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"usage": out})
 }
-
-var _ = bytes.NewBuffer
-var _ = io.Copy
-var _ = strings.TrimSpace

@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -129,7 +131,12 @@ func (s *Service) registerClient(w http.ResponseWriter, r *http.Request) {
 	redirects, _ := json.Marshal(b.RedirectURIs)
 	grants, _ := json.Marshal(b.GrantTypes)
 	responses, _ := json.Marshal(b.ResponseTypes)
-	_, err := s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO oauth_clients(id,client_id,client_secret_hash,client_name,redirect_uris_json,grant_types_json,response_types_json,token_endpoint_auth_method,scope,registration_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'dynamic',?,?)`), s.deps.NewID(), clientID, nullIfEmpty(secretHash), b.ClientName, string(redirects), string(grants), string(responses), b.TokenEndpointAuthMethod, defaultString(b.Scope, "mcp"), s.now(), s.now())
+	clientRowID := s.deps.NewID()
+	var secretHashPtr *string
+	if secretHash != "" {
+		secretHashPtr = &secretHash
+	}
+	err := s.gdb(r.Context()).Create(&models.OauthClient{ID: &clientRowID, ClientID: clientID, ClientSecretHash: secretHashPtr, ClientName: b.ClientName, RedirectUrisJSON: string(redirects), GrantTypesJSON: string(grants), ResponseTypesJSON: string(responses), TokenEndpointAuthMethod: b.TokenEndpointAuthMethod, Scope: defaultString(b.Scope, "mcp"), RegistrationType: "dynamic", CreatedAt: s.now(), UpdatedAt: s.now()}).Error
 	if err != nil {
 		oauthError(w, 500, "server_error", "registration failed")
 		return
@@ -234,7 +241,7 @@ func (s *Service) consent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !c.TenantID.Valid {
-			if _, err = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE oauth_clients SET tenant_id=?,updated_at=? WHERE client_id=? AND tenant_id IS NULL`), p.TenantID, s.now(), c.ID); err != nil {
+			if err = s.gdb(r.Context()).Model(&models.OauthClient{}).Where("client_id = ? AND tenant_id IS NULL", c.ID).Updates(map[string]any{"tenant_id": p.TenantID, "updated_at": s.now()}).Error; err != nil {
 				oauthError(w, 500, "server_error", "client binding failed")
 				return
 			}
@@ -256,7 +263,7 @@ func (s *Service) consent(w http.ResponseWriter, r *http.Request) {
 	}
 	code := "zac_" + mustToken(32)
 	h := sha256.Sum256([]byte(code))
-	agentID := any(nil)
+	var agentID *string
 	slug := strings.TrimSpace(b.AgentSlug)
 	if slug == "" && b.Resource != "" {
 		if resourceURL, parseErr := url.Parse(b.Resource); parseErr == nil {
@@ -268,12 +275,20 @@ func (s *Service) consent(w http.ResponseWriter, r *http.Request) {
 	}
 	if slug != "" {
 		var resolved string
-		if queryErr := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id FROM agents WHERE tenant_id=? AND slug=?`), p.TenantID, slug).Scan(&resolved); queryErr == nil {
-			agentID = resolved
+		if queryErr := s.gdb(r.Context()).Table("agents").Select("id").Where("tenant_id = ? AND slug = ?", p.TenantID, slug).Take(&resolved).Error; queryErr == nil {
+			agentID = &resolved
 		}
 	}
 	scope := normalizeOAuthScope(defaultString(b.Scope, c.Scope), c.ID)
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO oauth_auth_codes(id,code_hash,client_id,user_id,tenant_id,agent_id,redirect_uri,scope,resource,code_challenge,code_challenge_method,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`), s.deps.NewID(), hex.EncodeToString(h[:]), b.ClientID, p.UserID, p.TenantID, agentID, b.RedirectURI, scope, nullIfEmpty(strings.TrimSpace(b.Resource)), b.CodeChallenge, "S256", s.deps.Clock().UTC().Add(5*time.Minute).Format(time.RFC3339Nano), s.now())
+	var resourcePtr *string
+	resource := strings.TrimSpace(b.Resource)
+	if resource != "" {
+		resourcePtr = &resource
+	}
+	challenge := b.CodeChallenge
+	methodS256 := "S256"
+	codeID := s.deps.NewID()
+	err = s.gdb(r.Context()).Create(&models.OauthAuthCode{ID: &codeID, CodeHash: hex.EncodeToString(h[:]), ClientID: b.ClientID, UserID: p.UserID, TenantID: p.TenantID, AgentID: agentID, RedirectURI: b.RedirectURI, Scope: scope, Resource: resourcePtr, CodeChallenge: &challenge, CodeChallengeMethod: &methodS256, ExpiresAt: s.deps.Clock().UTC().Add(5 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 	if err != nil {
 		oauthError(w, 500, "server_error", "code issue failed")
 		return

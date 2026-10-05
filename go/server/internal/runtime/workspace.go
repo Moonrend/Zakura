@@ -23,8 +23,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 const maxWorkspaceUpload = 100 << 20
@@ -32,14 +34,15 @@ const maxWorkspaceUpload = 100 << 20
 type workspaceFS struct{ root string }
 
 func (h *handler) workspaceFor(ctx context.Context, tenant, agent string) (workspaceFS, error) {
-	var space string
-	e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), tenant, agent).Scan(&space)
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.Agent
+	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, agent).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		return workspaceFS{}, ErrNotFound
 	}
 	if e != nil {
 		return workspaceFS{}, e
 	}
+	space := m.SpaceID
 	base := os.Getenv("ZAKURA_WORKSPACE_ROOT")
 	if base == "" {
 		base = filepath.Join("data", "workspaces")
@@ -957,12 +960,12 @@ func extractTar(src, dst string) error {
 }
 
 func (h *handler) spaceForAgent(ctx context.Context, tenant, agent string) (string, error) {
-	var id string
-	e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), tenant, agent).Scan(&id)
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.Agent
+	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, agent).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
-	return id, e
+	return m.SpaceID, e
 }
 func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -971,24 +974,22 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,slug,name,description,instructions,has_workspace,created_at,updated_at FROM space_projects WHERE tenant_id=? AND space_id=? ORDER BY name`), p.TenantID, space)
-	if e != nil {
+	var ms []models.SpaceProject
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ?", p.TenantID, space).Order("name").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, slug, name, desc, instr string
-		var has bool
-		var c, u flexibleTime
-		if rows.Scan(&id, &slug, &name, &desc, &instr, &has, &c, &u) == nil {
-			var path any
-			if has {
-				path = "/workspace/projects/" + slug
-			}
-			out = append(out, map[string]any{"id": id, "slug": slug, "name": name, "description": desc, "instructions": instr, "hasWorkspace": has, "path": path, "createdAt": c.Time, "updatedAt": u.Time})
+	out := make([]map[string]any, 0, len(ms))
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		var path any
+		if m.HasWorkspace {
+			path = "/workspace/projects/" + m.Slug
+		}
+		out = append(out, map[string]any{"id": id, "slug": m.Slug, "name": m.Name, "description": m.Description, "instructions": m.Instructions, "hasWorkspace": m.HasWorkspace, "path": path, "createdAt": parseTime(m.CreatedAt), "updatedAt": parseTime(m.UpdatedAt)})
 	}
 	httpx.JSON(w, 200, map[string]any{"projects": out})
 }
@@ -1024,23 +1025,23 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	now := h.store.now()
+	nowStr := runtimeTimeString(h.store.now())
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO space_projects(id,tenant_id,space_id,slug,name,description,instructions,has_workspace,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`), id, p.TenantID, space, b.Slug, b.Name, b.Description, b.Instructions, b.HasWorkspace, now, now)
-	if e != nil {
+	sp := models.SpaceProject{ID: &id, TenantID: p.TenantID, SpaceID: space, Slug: b.Slug, Name: b.Name, Description: b.Description, Instructions: b.Instructions, HasWorkspace: b.HasWorkspace, CreatedAt: nowStr, UpdatedAt: nowStr}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&sp).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	cloneError := ""
 	if b.HasWorkspace {
 		if remote, selected, remoteErr := h.remoteWorkspace(r.Context(), p.TenantID, agent); remoteErr != nil {
-			_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM space_projects WHERE id=?`), id)
+			_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
 			writeRemoteError(w, remoteErr)
 			return
 		} else if selected {
 			params, _ := remotePathParams(remote.spaceID, projectRemotePath(b.Slug))
 			if remoteErr = remote.runner.call(r.Context(), "host.fs.mkdir", params, nil); remoteErr != nil {
-				_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM space_projects WHERE id=?`), id)
+				_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
 				writeRemoteError(w, remoteErr)
 				return
 			}
@@ -1062,7 +1063,7 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if f, localErr := h.workspaceFor(r.Context(), p.TenantID, agent); localErr == nil {
 			if localErr = os.MkdirAll(filepath.Join(f.root, "projects", b.Slug), 0o750); localErr != nil {
-				_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM space_projects WHERE id=?`), id)
+				_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Delete(&models.SpaceProject{}).Error
 				statusErr(w, localErr)
 				return
 			}
@@ -1091,31 +1092,30 @@ func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oldSlug := chi.URLParam(r, "slug")
-	var existingHas bool
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT has_workspace FROM space_projects WHERE tenant_id=? AND space_id=? AND slug=?`), p.TenantID, space, oldSlug).Scan(&existingHas); errors.Is(e, sql.ErrNoRows) {
+	var existingRow struct {
+		HasWorkspace bool `gorm:"column:has_workspace"`
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Select("has_workspace").Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, oldSlug).Take(&existingRow).Error; errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	} else if e != nil {
 		statusErr(w, e)
 		return
 	}
-	sets := []string{}
-	args := []any{}
+	existingHas := existingRow.HasWorkspace
+	updates := map[string]any{}
 	for k, col := range map[string]string{"name": "name", "description": "description", "instructions": "instructions", "hasWorkspace": "has_workspace"} {
 		if v, ok := m[k]; ok {
-			sets = append(sets, col+"=?")
-			args = append(args, v)
+			updates[col] = v
 		}
 	}
 	if v, ok := m["withWorkspace"]; ok {
-		sets = append(sets, "has_workspace=?")
-		args = append(args, v)
+		updates["has_workspace"] = v
 	}
 	if v, ok := m["slug"].(string); ok && slugify(v) != "" {
-		sets = append(sets, "slug=?")
-		args = append(args, slugify(v))
+		updates["slug"] = slugify(v)
 	}
-	if len(sets) == 0 {
+	if len(updates) == 0 {
 		httpx.JSON(w, http.StatusBadRequest, map[string]any{"error": "no supported fields"})
 		return
 	}
@@ -1160,15 +1160,13 @@ func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), p.TenantID, space, chi.URLParam(r, "slug"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE space_projects SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND space_id=? AND slug=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	updates["updated_at"] = runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, chi.URLParam(r, "slug")).Updates(updates)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1176,17 +1174,20 @@ func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
 	if v, ok := m["slug"].(string); ok && slugify(v) != "" {
 		lookupSlug = slugify(v)
 	}
-	var id, name, description, instructions string
-	var has bool
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,description,instructions,has_workspace FROM space_projects WHERE tenant_id=? AND space_id=? AND slug=?`), p.TenantID, space, lookupSlug).Scan(&id, &name, &description, &instructions, &has); e != nil {
+	var proj models.SpaceProject
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, lookupSlug).Take(&proj).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
+	id := ""
+	if proj.ID != nil {
+		id = *proj.ID
+	}
 	var projectPath any
-	if has {
+	if proj.HasWorkspace {
 		projectPath = "/workspace/projects/" + lookupSlug
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"project": map[string]any{"id": id, "slug": lookupSlug, "name": name, "description": description, "instructions": instructions, "hasWorkspace": has, "path": projectPath}})
+	httpx.JSON(w, http.StatusOK, map[string]any{"project": map[string]any{"id": id, "slug": lookupSlug, "name": proj.Name, "description": proj.Description, "instructions": proj.Instructions, "hasWorkspace": proj.HasWorkspace, "path": projectPath}})
 }
 func (h *handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -1196,14 +1197,17 @@ func (h *handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slug := chi.URLParam(r, "slug")
-	var hasWorkspace bool
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT has_workspace FROM space_projects WHERE tenant_id=? AND space_id=? AND slug=?`), p.TenantID, space, slug).Scan(&hasWorkspace); errors.Is(e, sql.ErrNoRows) {
+	var existingRow struct {
+		HasWorkspace bool `gorm:"column:has_workspace"`
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Select("has_workspace").Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, slug).Take(&existingRow).Error; errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	} else if e != nil {
 		statusErr(w, e)
 		return
 	}
+	hasWorkspace := existingRow.HasWorkspace
 	if hasWorkspace {
 		if remote, selected, fsErr := h.remoteWorkspace(r.Context(), p.TenantID, chi.URLParam(r, "id")); fsErr != nil {
 			writeRemoteError(w, fsErr)
@@ -1222,13 +1226,12 @@ func (h *handler) deleteProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM space_projects WHERE tenant_id=? AND space_id=? AND slug=?`), p.TenantID, space, chi.URLParam(r, "slug"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND slug = ?", p.TenantID, space, chi.URLParam(r, "slug")).Delete(&models.SpaceProject{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1269,7 +1272,8 @@ func (h *handler) putProjectInstructions(w http.ResponseWriter, r *http.Request)
 			writeRemoteError(w, e)
 			return
 		}
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE space_projects SET instructions=?,updated_at=? WHERE tenant_id=? AND slug=? AND space_id=(SELECT space_id FROM agents WHERE tenant_id=? AND id=?)`), b.Content, h.store.now(), principal(r).TenantID, chi.URLParam(r, "slug"), principal(r).TenantID, chi.URLParam(r, "id"))
+		sub := h.deps.Gorm.Model(&models.Agent{}).Select("space_id").Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id"))
+		h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND slug = ? AND space_id = (?)", principal(r).TenantID, chi.URLParam(r, "slug"), sub).Updates(map[string]any{"instructions": b.Content, "updated_at": runtimeTimeString(h.store.now())})
 		httpx.JSON(w, http.StatusOK, map[string]any{"config": remote.projectSnapshot(r.Context(), chi.URLParam(r, "slug")), "path": "/workspace/projects/" + chi.URLParam(r, "slug") + "/" + b.File})
 		return
 	}
@@ -1282,35 +1286,46 @@ func (h *handler) putProjectInstructions(w http.ResponseWriter, r *http.Request)
 		statusErr(w, e)
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE space_projects SET instructions=?,updated_at=? WHERE tenant_id=? AND slug=? AND space_id=(SELECT space_id FROM agents WHERE tenant_id=? AND id=?)`), b.Content, h.store.now(), principal(r).TenantID, chi.URLParam(r, "slug"), principal(r).TenantID, chi.URLParam(r, "id"))
+	sub := h.deps.Gorm.Model(&models.Agent{}).Select("space_id").Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id"))
+	h.deps.Gorm.WithContext(r.Context()).Model(&models.SpaceProject{}).Where("tenant_id = ? AND slug = ? AND space_id = (?)", principal(r).TenantID, chi.URLParam(r, "slug"), sub).Updates(map[string]any{"instructions": b.Content, "updated_at": runtimeTimeString(h.store.now())})
 	httpx.JSON(w, http.StatusOK, map[string]any{"config": projectConfigSnapshot(chi.URLParam(r, "slug"), dir), "path": "/workspace/projects/" + chi.URLParam(r, "slug") + "/" + b.File})
 }
 
 func (h *handler) listRuntimeNodes(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE tenant_id=? OR is_shared=true ORDER BY is_shared,name`), p.TenantID)
-	if e != nil {
+	var ms []models.RuntimeNode
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? OR is_shared = true", p.TenantID).Order("is_shared, name").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		x, e := scanRuntimeNode(rows)
-		if e == nil {
-			if shared, _ := x["isShared"].(bool); shared {
-				x["access"] = "shared"
-			} else {
-				x["access"] = "owned"
-			}
-			out = append(out, x)
+	out := make([]map[string]any, 0, len(ms))
+	for _, m := range ms {
+		x := runtimeNodeFromModel(m)
+		if m.IsShared {
+			x["access"] = "shared"
+		} else {
+			x["access"] = "owned"
 		}
+		out = append(out, x)
 	}
 	canLocal := p.IsPlatformAdmin || !h.deps.MultiTenant
 	if !canLocal && !p.APIKey {
-		_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT can_use_local_runner FROM users WHERE id=?`), p.UserID).Scan(&canLocal)
+		var u models.User
+		_ = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", p.UserID).Take(&u).Error
+		canLocal = u.CanUseLocalRunner
 	}
 	httpx.JSON(w, 200, map[string]any{"nodes": out, "canUseLocalRunner": canLocal})
+}
+func runtimeNodeFromModel(m models.RuntimeNode) map[string]any {
+	id := ""
+	if m.ID != nil {
+		id = *m.ID
+	}
+	lastSeen := ""
+	if m.LastSeenAt != nil {
+		lastSeen = *m.LastSeenAt
+	}
+	return map[string]any{"id": id, "name": m.Name, "slug": m.Slug, "kind": m.Kind, "status": m.Status, "endpoint": m.Endpoint, "capabilities": json.RawMessage(m.CapabilitiesJSON), "hostInfo": json.RawMessage(m.HostInfoJSON), "storageRoot": m.StorageRoot, "agentVersion": m.AgentVersion, "lastSeenAt": lastSeen, "labels": json.RawMessage(m.LabelsJSON), "isShared": m.IsShared, "createdAt": parseTime(m.CreatedAt), "updatedAt": parseTime(m.UpdatedAt)}
 }
 func scanRuntimeNode(row interface{ Scan(...any) error }) (map[string]any, error) {
 	var id, name, slug, kind, status, storage, caps, host, labels string
@@ -1322,15 +1337,16 @@ func scanRuntimeNode(row interface{ Scan(...any) error }) (map[string]any, error
 	return map[string]any{"id": id, "name": name, "slug": slug, "kind": kind, "status": status, "endpoint": endpoint, "capabilities": json.RawMessage(caps), "hostInfo": json.RawMessage(host), "storageRoot": storage, "agentVersion": version, "lastSeenAt": seen.String, "labels": json.RawMessage(labels), "isShared": shared, "createdAt": c.Time, "updatedAt": u.Time}, e
 }
 func (h *handler) getRuntimeNode(w http.ResponseWriter, r *http.Request) {
-	x, e := scanRuntimeNode(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`), principal(r).TenantID, chi.URLParam(r, "id")))
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.RuntimeNode
+	e := h.deps.Gorm.WithContext(r.Context()).Where("(tenant_id = ? OR is_shared = true) AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"node": x})
+	httpx.JSON(w, 200, map[string]any{"node": runtimeNodeFromModel(m)})
 }
 func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -1363,21 +1379,26 @@ func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	var createdBy any = p.UserID
-	if p.APIKey {
-		createdBy = nil
+	var createdBy *string
+	if !p.APIKey {
+		createdBy = &p.UserID
 	}
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,token_hash,labels_json,is_shared,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,'offline',?,?,'{}',?,NULL,NULL,?,?,?, ?, ?,?)`), id, p.TenantID, b.Name, b.Slug, b.Kind, nullString(b.Endpoint), validJSON(b.Capabilities, "{}"), b.StorageRoot, hash, validJSON(b.Labels, "{}"), b.IsShared, createdBy, now, now)
-	if e != nil {
+	nowStr := runtimeTimeString(now)
+	rn := models.RuntimeNode{ID: &id, TenantID: p.TenantID, Name: b.Name, Slug: b.Slug, Kind: b.Kind, Status: "offline", CapabilitiesJSON: validJSON(b.Capabilities, "{}"), HostInfoJSON: "{}", StorageRoot: b.StorageRoot, TokenHash: &hash, LabelsJSON: validJSON(b.Labels, "{}"), IsShared: b.IsShared, CreatedByUserID: createdBy, CreatedAt: nowStr, UpdatedAt: nowStr}
+	if b.Endpoint != "" {
+		rn.Endpoint = &b.Endpoint
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&rn).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	runnerTokenCache.Store(id, token)
-	node, e := scanRuntimeNode(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE id=?`), id))
-	if e != nil {
+	var loaded models.RuntimeNode
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Take(&loaded).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
+	node := runtimeNodeFromModel(loaded)
 	httpx.JSON(w, http.StatusCreated, map[string]any{"node": node, "token": token, "install": h.runnerInstallPackage(node, token), "installTailscale": nil, "hostJoinsTailscale": false})
 }
 func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {
@@ -1386,44 +1407,39 @@ func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	sets := []string{}
-	args := []any{}
+	updates := map[string]any{}
 	for k, col := range map[string]string{"name": "name", "endpoint": "endpoint", "labels": "labels_json"} {
 		if v, ok := m[k]; ok {
 			if k == "labels" {
 				b, _ := json.Marshal(v)
 				v = string(b)
 			}
-			sets = append(sets, col+"=?")
-			args = append(args, v)
+			updates[col] = v
 		}
 	}
-	if len(sets) == 0 {
+	if len(updates) == 0 {
 		h.getRuntimeNode(w, r)
 		return
 	}
-	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE runtime_nodes SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	updates["updated_at"] = runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(updates)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	h.getRuntimeNode(w, r)
 }
 func (h *handler) deleteRuntimeNode(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM runtime_nodes WHERE tenant_id=? AND id=? AND is_shared=false`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ? AND is_shared = false", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.RuntimeNode{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1442,23 +1458,22 @@ func (h *handler) runtimeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	now := h.store.now()
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE runtime_nodes SET status='online',agent_version=?,capabilities_json=?,host_info_json=?,last_seen_at=?,updated_at=? WHERE id=?`), b.AgentVersion, validJSON(b.Capabilities, "{}"), validJSON(b.HostInfo, "{}"), now, now, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	now := runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", chi.URLParam(r, "id")).Updates(map[string]any{"status": "online", "agent_version": b.AgentVersion, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "last_seen_at": now, "updated_at": now})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	node, e := scanRuntimeNode(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE id=?`), chi.URLParam(r, "id")))
-	if e != nil {
+	var node models.RuntimeNode
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("id = ?", chi.URLParam(r, "id")).Take(&node).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"node": node})
+	httpx.JSON(w, http.StatusOK, map[string]any{"node": runtimeNodeFromModel(node)})
 }
 
 var _ = fmt.Sprintf

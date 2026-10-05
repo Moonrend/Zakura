@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 )
 
 type cimdDocument struct {
@@ -276,9 +279,9 @@ func (s *Service) resolveOAuthClient(ctx context.Context, clientID string) (oaut
 		name = "MCP Client (CIMD)"
 	}
 	now := s.now()
-	_, err = s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO oauth_clients(id,tenant_id,client_id,client_secret_hash,client_name,redirect_uris_json,grant_types_json,response_types_json,token_endpoint_auth_method,scope,registration_type,created_at,updated_at)
+	err = s.gdb(ctx).Exec(`INSERT INTO oauth_clients(id,tenant_id,client_id,client_secret_hash,client_name,redirect_uris_json,grant_types_json,response_types_json,token_endpoint_auth_method,scope,registration_type,created_at,updated_at)
 		VALUES(?,NULL,?,NULL,?,?,?,?,?,?,'cimd',?,?)
-		ON CONFLICT(client_id) DO UPDATE SET client_name=excluded.client_name,redirect_uris_json=excluded.redirect_uris_json,grant_types_json=excluded.grant_types_json,response_types_json=excluded.response_types_json,token_endpoint_auth_method=excluded.token_endpoint_auth_method,scope=excluded.scope,registration_type='cimd',updated_at=excluded.updated_at`), s.deps.NewID(), clientID, name, string(redirects), string(grantRaw), string(responseRaw), method, defaultString(strings.TrimSpace(doc.Scope), "mcp"), now, now)
+		ON CONFLICT(client_id) DO UPDATE SET client_name=excluded.client_name,redirect_uris_json=excluded.redirect_uris_json,grant_types_json=excluded.grant_types_json,response_types_json=excluded.response_types_json,token_endpoint_auth_method=excluded.token_endpoint_auth_method,scope=excluded.scope,registration_type='cimd',updated_at=excluded.updated_at`, s.deps.NewID(), clientID, name, string(redirects), string(grantRaw), string(responseRaw), method, defaultString(strings.TrimSpace(doc.Scope), "mcp"), now, now).Error
 	if err != nil {
 		return c, err
 	}
@@ -287,9 +290,17 @@ func (s *Service) resolveOAuthClient(ctx context.Context, clientID string) (oaut
 
 func (s *Service) getOAuthClient(ctx context.Context, clientID string) (oauthClient, error) {
 	var c oauthClient
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT client_id,client_name,COALESCE(client_secret_hash,''),redirect_uris_json,token_endpoint_auth_method,scope,registration_type,tenant_id FROM oauth_clients WHERE client_id=?`), clientID).
-		Scan(&c.ID, &c.Name, &c.SecretHash, &c.Redirects, &c.Method, &c.Scope, &c.Registration, &c.TenantID)
-	return c, err
+	var record models.OauthClient
+	err := s.gdb(ctx).Where("client_id = ?", clientID).Take(&record).Error
+	if err != nil {
+		return c, err
+	}
+	c.ID, c.Name, c.SecretHash, c.Redirects = record.ClientID, record.ClientName, derefString(record.ClientSecretHash), record.RedirectUrisJSON
+	c.Method, c.Scope, c.Registration = record.TokenEndpointAuthMethod, record.Scope, record.RegistrationType
+	if record.TenantID != nil {
+		c.TenantID = sql.NullString{String: *record.TenantID, Valid: true}
+	}
+	return c, nil
 }
 
 func allowedOAuthRedirect(raw string) bool {

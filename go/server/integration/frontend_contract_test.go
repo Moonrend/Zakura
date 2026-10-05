@@ -19,12 +19,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/config"
 	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
 	platformserver "github.com/Moonrend/Zakura/go/server/internal/platform/server"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestPreservedFrontendCoreContracts(t *testing.T) {
@@ -57,9 +57,13 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatal(err)
 	}
+	gormDB, err := conn.Gorm()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var seq atomic.Int64
 	cfg := config.Config{WebURL: "http://web.test", PublicURL: "http://api.test", Edition: "saas", MultiTenant: true}
-	deps := &appdeps.Dependencies{DB: conn.DB, Dialect: conn.Dialect, Rebind: conn.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("z"), 32), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: dataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: func(context.Context, string, string) error { return nil }}
+	deps := &appdeps.Dependencies{DB: conn.DB, Gorm: gormDB, Dialect: conn.Dialect, Rebind: conn.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: bytes.Repeat([]byte("z"), 32), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: dataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: func(context.Context, string, string) error { return nil }}
 	router := platformserver.Router(cfg, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv := httptest.NewServer(router)
 	defer srv.Close()

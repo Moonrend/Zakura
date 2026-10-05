@@ -11,9 +11,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
+	"gorm.io/gorm/clause"
 )
 
 type providerDef struct{ Name, AuthorizeURL, TokenURL, UserinfoURL, Scope string }
@@ -37,13 +39,15 @@ type providerStored struct {
 }
 
 func (a *routes) readSetting(ctx context.Context, key string) (string, error) {
-	var raw string
-	err := a.d.DB.QueryRowContext(ctx, a.q(`SELECT value FROM settings WHERE owner_key='platform' AND key=?`), key).Scan(&raw)
-	return raw, err
+	var row models.Setting
+	if err := a.d.Gorm.WithContext(ctx).Where("owner_key='platform' AND key=?", key).Take(&row).Error; err != nil {
+		return "", err
+	}
+	return row.Value, nil
 }
 func (a *routes) writeSetting(ctx context.Context, key, raw string) error {
-	_, err := a.d.DB.ExecContext(ctx, a.q(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,'platform',?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=excluded.value`), a.d.NewID(), key, raw)
-	return err
+	id := a.d.NewID()
+	return a.d.Gorm.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_key"}, {Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value"})}).Create(&models.Setting{ID: &id, OwnerKey: "platform", Key: key, Value: raw}).Error
 }
 func (a *routes) loadProvider(ctx context.Context, id string) (providerStored, providerDef, error) {
 	def, ok := providerDefs[id]

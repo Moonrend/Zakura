@@ -20,9 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
+	"gorm.io/gorm"
 )
 
 func secretBox(key []byte, scope string, plain []byte) (string, error) {
@@ -105,33 +107,31 @@ func (h *handler) skillStores(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"stores": []map[string]any{{"id": "github", "name": "GitHub", "supportsSearch": true}, {"id": "gitlab", "name": "GitLab", "supportsSearch": true}}, "builtin": []any{}})
 }
 func (h *handler) listSkillRepos(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), `SELECT repo_key,provider,source_json,version,skill_count,size_bytes,warnings_json,checked_at,fetched_at,last_error FROM platform_skill_repos ORDER BY checked_at DESC`)
-	if e != nil {
+	var ms []models.PlatformSkillRepo
+	if e := h.deps.Gorm.WithContext(r.Context()).Order("checked_at DESC").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var key, provider, source, warnings, checked, fetched string
-		var version, lastErr *string
-		var count int
-		var size int64
-		if rows.Scan(&key, &provider, &source, &version, &count, &size, &warnings, &checked, &fetched, &lastErr) == nil {
-			out = append(out, map[string]any{"repoKey": key, "provider": provider, "source": json.RawMessage(source), "version": version, "skillCount": count, "sizeBytes": size, "warnings": json.RawMessage(warnings), "checkedAt": checked, "fetchedAt": fetched, "lastError": lastErr})
+	out := make([]map[string]any, 0, len(ms))
+	for _, m := range ms {
+		if m.CheckedAt == nil {
+			continue
 		}
+		out = append(out, map[string]any{"repoKey": m.RepoKey, "provider": m.Provider, "source": json.RawMessage(m.SourceJSON), "version": m.Version, "skillCount": int(m.SkillCount), "sizeBytes": int64(m.SizeBytes), "warnings": json.RawMessage(m.WarningsJSON), "checkedAt": *m.CheckedAt, "fetchedAt": m.FetchedAt, "lastError": m.LastError})
 	}
 	httpx.JSON(w, 200, map[string]any{"repos": out})
 }
 func (h *handler) skillToken(ctx context.Context, tenant, provider string) (string, error) {
 	for _, scope := range []string{tenant, "platform"} {
-		var enc string
-		e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT token_enc FROM skill_source_tokens WHERE scope_key=? AND provider=?`), scope, provider).Scan(&enc)
+		var row struct {
+			TokenEnc string `gorm:"column:token_enc"`
+		}
+		e := h.deps.Gorm.WithContext(ctx).Table("skill_source_tokens").Select("token_enc").Where("scope_key = ? AND provider = ?", scope, provider).Take(&row).Error
 		if e == nil {
-			raw, e := openSecretBox(h.deps.Secret, scope+":"+provider, enc)
+			raw, e := openSecretBox(h.deps.Secret, scope+":"+provider, row.TokenEnc)
 			return string(raw), e
 		}
-		if !errors.Is(e, sql.ErrNoRows) {
+		if !errors.Is(e, gorm.ErrRecordNotFound) {
 			return "", e
 		}
 	}
@@ -197,9 +197,9 @@ func (h *handler) syncRepo(ctx context.Context, provider, owner, repo string) (m
 	}
 	packagesRaw, _ := json.Marshal(packages)
 	sourceRaw, _ := json.Marshal(map[string]any{"provider": "github", "owner": owner, "repo": repo, "ref": "HEAD"})
-	now := h.store.now()
+	now := runtimeTimeString(h.store.now())
 	key := "github:" + owner + "/" + repo + "@HEAD"
-	_, e = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO platform_skill_repos(id,repo_key,provider,source_json,ref,version,upstream_etag,packages_json,partial,skill_count,size_bytes,warnings_json,checked_at,fetched_at,ref_count,last_error,created_at,updated_at) VALUES(?,?, 'github',?,'HEAD',?,NULL,?,false,?,?,'[]',?,?,0,NULL,?,?) ON CONFLICT(repo_key) DO UPDATE SET version=?,packages_json=?,skill_count=?,size_bytes=?,checked_at=?,fetched_at=?,last_error=NULL,updated_at=?`), h.store.id(), key, string(sourceRaw), tree.SHA, string(packagesRaw), len(packages), total, now, now, now, now, tree.SHA, string(packagesRaw), len(packages), total, now, now, now)
+	e = h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO platform_skill_repos(id,repo_key,provider,source_json,ref,version,upstream_etag,packages_json,partial,skill_count,size_bytes,warnings_json,checked_at,fetched_at,ref_count,last_error,created_at,updated_at) VALUES(?,?, 'github',?,'HEAD',?,NULL,?,false,?,?,'[]',?,?,0,NULL,?,?) ON CONFLICT(repo_key) DO UPDATE SET version=?,packages_json=?,skill_count=?,size_bytes=?,checked_at=?,fetched_at=?,last_error=NULL,updated_at=?`, h.store.id(), key, string(sourceRaw), tree.SHA, string(packagesRaw), len(packages), total, now, now, now, now, tree.SHA, string(packagesRaw), len(packages), total, now, now, now).Error
 	if e != nil {
 		return nil, e
 	}
@@ -214,23 +214,29 @@ func (h *handler) syncSkillRepo(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"repo": x})
 }
 func (h *handler) skillCacheStatus(w http.ResponseWriter, r *http.Request) {
-	var repos, skills int
-	var bytes int64
-	e := h.deps.DB.QueryRowContext(r.Context(), `SELECT COUNT(*),COALESCE(SUM(skill_count),0),COALESCE(SUM(size_bytes),0) FROM platform_skill_repos`).Scan(&repos, &skills, &bytes)
+	var agg struct {
+		Repos  int64
+		Skills int64
+		Size   int64
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformSkillRepo{}).Select("COUNT(*) AS repos, COALESCE(SUM(skill_count),0) AS skills, COALESCE(SUM(size_bytes),0) AS size").Scan(&agg).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"repos": repos, "skills": skills, "sizeBytes": bytes})
+	httpx.JSON(w, 200, map[string]any{"repos": agg.Repos, "skills": agg.Skills, "sizeBytes": agg.Size})
 }
 func (h *handler) skillAutoUpdateStatus(w http.ResponseWriter, r *http.Request) {
-	var enabled, total int
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COALESCE(SUM(CASE WHEN auto_update THEN 1 ELSE 0 END),0),COUNT(*) FROM skills WHERE tenant_id=?`), principal(r).TenantID).Scan(&enabled, &total)
+	var agg struct {
+		Enabled int64
+		Total   int64
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ?", principal(r).TenantID).Select("COALESCE(SUM(CASE WHEN auto_update THEN 1 ELSE 0 END),0) AS enabled, COUNT(*) AS total").Scan(&agg).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"enabled": enabled > 0, "enabledSkills": enabled, "totalSkills": total})
+	httpx.JSON(w, 200, map[string]any{"enabled": agg.Enabled > 0, "enabledSkills": agg.Enabled, "totalSkills": agg.Total})
 }
 func (h *handler) putSkillAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -240,28 +246,19 @@ func (h *handler) putSkillAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "enabled is required")
 		return
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE skills SET auto_update=?,updated_at=? WHERE tenant_id=? AND builtin=false`), *b.Enabled, h.store.now(), principal(r).TenantID)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ? AND builtin = false", principal(r).TenantID).Updates(map[string]any{"auto_update": *b.Enabled, "updated_at": runtimeTimeString(h.store.now())})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"enabled": *b.Enabled, "updated": n})
+	httpx.JSON(w, 200, map[string]any{"enabled": *b.Enabled, "updated": res.RowsAffected})
 }
 func (h *handler) checkSkillUpdates(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT DISTINCT repo_key FROM skills WHERE tenant_id=? AND auto_update=true AND repo_key IS NOT NULL`), principal(r).TenantID)
-	if e != nil {
+	var keys []string
+	if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ? AND auto_update = true AND repo_key IS NOT NULL", principal(r).TenantID).Distinct().Pluck("repo_key", &keys).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	keys := []string{}
-	for rows.Next() {
-		var k string
-		if rows.Scan(&k) == nil {
-			keys = append(keys, k)
-		}
-	}
-	rows.Close()
 	updated := 0
 	failed := map[string]string{}
 	for _, key := range keys {
@@ -280,20 +277,18 @@ func (h *handler) checkSkillUpdates(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listSkillTokens(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT scope_key,provider,label,hint,last_used_at,created_at,updated_at FROM skill_source_tokens WHERE scope_key=? OR (scope_key='platform' AND ?=true) ORDER BY scope_key,provider`), p.TenantID, p.IsPlatformAdmin)
-	if e != nil {
+	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.SkillSourceToken{}).Where("scope_key = ?", p.TenantID)
+	if p.IsPlatformAdmin {
+		q = q.Or("scope_key = 'platform'")
+	}
+	var ms []models.SkillSourceToken
+	if e := q.Order("scope_key, provider").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var scope, provider string
-		var label, hint, last *string
-		var c, u string
-		if rows.Scan(&scope, &provider, &label, &hint, &last, &c, &u) == nil {
-			out = append(out, map[string]any{"scope": scope, "provider": provider, "label": label, "hint": hint, "lastUsedAt": last, "createdAt": c, "updatedAt": u})
-		}
+	out := make([]map[string]any, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, map[string]any{"scope": m.ScopeKey, "provider": m.Provider, "label": m.Label, "hint": m.Hint, "lastUsedAt": m.LastUsedAt, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"tokens": out})
 }
@@ -322,8 +317,8 @@ func (h *handler) putSkillToken(w http.ResponseWriter, r *http.Request) {
 	if len(hint) > 4 {
 		hint = hint[len(hint)-4:]
 	}
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO skill_source_tokens(id,scope_key,provider,token_enc,label,hint,last_used_at,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(scope_key,provider) DO UPDATE SET token_enc=?,label=?,hint=?,updated_at=?`), h.store.id(), scope, provider, enc, nullString(b.Label), hint, now, now, enc, nullString(b.Label), hint, now)
+	now := runtimeTimeString(h.store.now())
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO skill_source_tokens(id,scope_key,provider,token_enc,label,hint,last_used_at,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(scope_key,provider) DO UPDATE SET token_enc=?,label=?,hint=?,updated_at=?`, h.store.id(), scope, provider, enc, nullString(b.Label), hint, now, now, enc, nullString(b.Label), hint, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -341,13 +336,12 @@ func (h *handler) deleteSkillToken(w http.ResponseWriter, r *http.Request) {
 	} else {
 		scope = p.TenantID
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM skill_source_tokens WHERE scope_key=? AND provider=?`), scope, chi.URLParam(r, "provider"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ? AND provider = ?", scope, chi.URLParam(r, "provider")).Delete(&models.SkillSourceToken{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -359,12 +353,18 @@ func (h *handler) resolveSkill(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "repoKey and name required")
 		return
 	}
-	var packages string
-	e := h.deps.DB.QueryRowContext(r.Context(), `SELECT packages_json FROM platform_skill_repos WHERE repo_key=?`, b.RepoKey).Scan(&packages)
+	var row struct {
+		PackagesJSON string `gorm:"column:packages_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_skill_repos").Select("packages_json").Where("repo_key = ?", b.RepoKey).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		e = sql.ErrNoRows
+	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
+	packages := row.PackagesJSON
 	var all []map[string]any
 	if json.Unmarshal([]byte(packages), &all) != nil {
 		statusErr(w, errors.New("invalid repository cache"))
@@ -392,12 +392,18 @@ func (h *handler) updateSkill(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "skill has no cached repository source")
 		return
 	}
-	var packages string
-	e = h.deps.DB.QueryRowContext(r.Context(), `SELECT packages_json FROM platform_skill_repos WHERE repo_key=?`, source.RepoKey).Scan(&packages)
+	var repoRow struct {
+		PackagesJSON string `gorm:"column:packages_json"`
+	}
+	e = h.deps.Gorm.WithContext(r.Context()).Table("platform_skill_repos").Select("packages_json").Where("repo_key = ?", source.RepoKey).Take(&repoRow).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		e = sql.ErrNoRows
+	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
+	packages := repoRow.PackagesJSON
 	var all []struct {
 		Name, Version string
 		Files         []skillFile
@@ -416,8 +422,7 @@ func (h *handler) updateSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		files, _ := json.Marshal(x.Files)
-		_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE skills SET version=?,files_json=?,file_count=?,size_bytes=?,updated_at=? WHERE tenant_id=? AND id=?`), x.Version, string(files), len(x.Files), size, h.store.now(), principal(r).TenantID, skill.ID)
-		if e != nil {
+		if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ? AND id = ?", principal(r).TenantID, skill.ID).Updates(map[string]any{"version": x.Version, "files_json": string(files), "file_count": len(x.Files), "size_bytes": size, "updated_at": runtimeTimeString(h.store.now())}).Error; e != nil {
 			statusErr(w, e)
 			return
 		}

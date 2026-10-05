@@ -22,7 +22,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
+
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"golang.org/x/crypto/scrypt"
 )
@@ -87,9 +90,9 @@ func (s *Service) getMFAPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	var policy string
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT mfa_policy FROM tenants WHERE id=?`), p.TenantID).Scan(&policy)
-	httpx.JSON(w, 200, map[string]any{"policy": policy})
+	var policyTenant models.Tenant
+	_ = s.gdb(r.Context()).Select("mfa_policy").Where("id = ?", p.TenantID).Take(&policyTenant).Error
+	httpx.JSON(w, 200, map[string]any{"policy": policyTenant.MfaPolicy})
 }
 func (s *Service) putMFAPolicy(w http.ResponseWriter, r *http.Request) {
 	p, ok := adminPrincipal(r)
@@ -104,7 +107,7 @@ func (s *Service) putMFAPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "policy must be optional, admins, or all")
 		return
 	}
-	_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenants SET mfa_policy=?,updated_at=? WHERE id=?`), b.Policy, s.now(), p.TenantID)
+	err := s.gdb(r.Context()).Model(&models.Tenant{}).Where("id = ?", p.TenantID).Updates(map[string]any{"mfa_policy": b.Policy, "updated_at": s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
@@ -118,18 +121,24 @@ func (s *Service) listDomains(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,domain,join_mode,verification_token,verified_at,created_at,updated_at FROM tenant_domains WHERE tenant_id=? ORDER BY domain`), p.TenantID)
-	if err != nil {
+	var domains []struct {
+		ID                string  `gorm:"column:id"`
+		Domain            string  `gorm:"column:domain"`
+		JoinMode          string  `gorm:"column:join_mode"`
+		VerificationToken string  `gorm:"column:verification_token"`
+		VerifiedAt        *string `gorm:"column:verified_at"`
+		CreatedAt         string  `gorm:"column:created_at"`
+		UpdatedAt         string  `gorm:"column:updated_at"`
+	}
+	if err := s.gdb(r.Context()).Table("tenant_domains").
+		Select("id,domain,join_mode,COALESCE(verification_token,'') AS verification_token,verified_at,created_at,updated_at").
+		Where("tenant_id = ?", p.TenantID).Order("domain").Find(&domains).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, domain, mode, token, created, updated string
-		var verified sql.NullString
-		_ = rows.Scan(&id, &domain, &mode, &token, &verified, &created, &updated)
-		items = append(items, tenantDomainDTO(id, domain, mode, token, verified, created, updated))
+	for _, domain := range domains {
+		items = append(items, tenantDomainDTO(domain.ID, domain.Domain, domain.JoinMode, domain.VerificationToken, nullableNullString(domain.VerifiedAt), domain.CreatedAt, domain.UpdatedAt))
 	}
 	httpx.JSON(w, 200, map[string]any{"domains": items})
 }
@@ -161,17 +170,27 @@ func (s *Service) addDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	token, _ := randomToken(18)
 	id := s.deps.NewID()
-	var existingID, existingTenant, existingMode, existingToken, existingCreated, existingUpdated string
-	var existingVerified sql.NullString
-	if err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT id,tenant_id,join_mode,verification_token,verified_at,created_at,updated_at FROM tenant_domains WHERE domain=?`), domain).Scan(&existingID, &existingTenant, &existingMode, &existingToken, &existingVerified, &existingCreated, &existingUpdated); err == nil {
-		if existingTenant != p.TenantID {
+	var existing struct {
+		ID                string  `gorm:"column:id"`
+		TenantID          string  `gorm:"column:tenant_id"`
+		JoinMode          string  `gorm:"column:join_mode"`
+		VerificationToken string  `gorm:"column:verification_token"`
+		VerifiedAt        *string `gorm:"column:verified_at"`
+		CreatedAt         string  `gorm:"column:created_at"`
+		UpdatedAt         string  `gorm:"column:updated_at"`
+	}
+	if err := s.gdb(r.Context()).Table("tenant_domains").
+		Select("id,tenant_id,join_mode,COALESCE(verification_token,'') AS verification_token,verified_at,created_at,updated_at").
+		Where("domain = ?", domain).Take(&existing).Error; err == nil {
+		if existing.TenantID != p.TenantID {
 			httpx.Error(w, 400, "domain is already claimed by another team")
 			return
 		}
-		httpx.JSON(w, 201, map[string]any{"domain": tenantDomainDTO(existingID, domain, existingMode, existingToken, existingVerified, existingCreated, existingUpdated)})
+		httpx.JSON(w, 201, map[string]any{"domain": tenantDomainDTO(existing.ID, domain, existing.JoinMode, existing.VerificationToken, nullableNullString(existing.VerifiedAt), existing.CreatedAt, existing.UpdatedAt)})
 		return
 	}
-	_, err := s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO tenant_domains(id,tenant_id,domain,join_mode,verification_token,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`), id, p.TenantID, domain, b.JoinMode, token, s.now(), s.now())
+	now := s.now()
+	err := s.gdb(r.Context()).Create(&models.TenantDomain{ID: &id, TenantID: p.TenantID, Domain: domain, JoinMode: b.JoinMode, VerificationToken: token, CreatedAt: now, UpdatedAt: now}).Error
 	if err != nil {
 		httpx.Error(w, 400, "domain already configured")
 		return
@@ -192,32 +211,33 @@ func (s *Service) patchDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid joinMode")
 		return
 	}
-	var verified sql.NullString
-	if err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT verified_at FROM tenant_domains WHERE id=? AND tenant_id=?`), chi.URLParam(r, "id"), p.TenantID).Scan(&verified); err != nil {
+	var domainRecord models.TenantDomain
+	if err := s.gdb(r.Context()).Select("verified_at").Where("id = ? AND tenant_id = ?", chi.URLParam(r, "id"), p.TenantID).Take(&domainRecord).Error; err != nil {
 		httpx.Error(w, 400, "domain not found")
 		return
 	}
-	if b.JoinMode != "invite_only" && !verified.Valid {
+	verified := domainRecord.VerifiedAt != nil
+	if b.JoinMode != "invite_only" && !verified {
 		httpx.Error(w, 400, "verify the domain before enabling this join mode")
 		return
 	}
 	if b.JoinMode == "sso_required" {
-		var protocol, clientID, issuer, authorizeURL, idpEntityID, idpSSOURL, idpCert string
-		var enabled bool
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT protocol,enabled,COALESCE(client_id,''),COALESCE(issuer,''),COALESCE(authorize_url,''),COALESCE(idp_entity_id,''),COALESCE(idp_sso_url,''),COALESCE(idp_certificate_enc,'') FROM tenant_sso_configs WHERE tenant_id=?`), p.TenantID).Scan(&protocol, &enabled, &clientID, &issuer, &authorizeURL, &idpEntityID, &idpSSOURL, &idpCert)
-		complete := err == nil && enabled && (protocol == "saml" && idpEntityID != "" && idpSSOURL != "" && idpCert != "" || protocol == "oidc" && clientID != "" && (issuer != "" || authorizeURL != ""))
+		var sso models.TenantSsoConfig
+		err := s.gdb(r.Context()).Where("tenant_id = ?", p.TenantID).Take(&sso).Error
+		idpEntityID, idpSSOURL, idpCert := derefString(sso.IdpEntityID), derefString(sso.IdpSsoURL), derefString(sso.IdpCertificateEnc)
+		clientID, issuer, authorizeURL := derefString(sso.ClientID), derefString(sso.Issuer), derefString(sso.AuthorizeURL)
+		complete := err == nil && sso.Enabled && (sso.Protocol == "saml" && idpEntityID != "" && idpSSOURL != "" && idpCert != "" || sso.Protocol == "oidc" && clientID != "" && (issuer != "" || authorizeURL != ""))
 		if !complete {
 			httpx.Error(w, 400, "configure and enable SSO before requiring it")
 			return
 		}
 	}
-	res, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenant_domains SET join_mode=?,updated_at=? WHERE id=? AND tenant_id=?`), b.JoinMode, s.now(), chi.URLParam(r, "id"), p.TenantID)
-	if err != nil {
+	res := s.gdb(r.Context()).Model(&models.TenantDomain{}).Where("id = ? AND tenant_id = ?", chi.URLParam(r, "id"), p.TenantID).Updates(map[string]any{"join_mode": b.JoinMode, "updated_at": s.now()})
+	if res.Error != nil {
 		httpx.Error(w, 500, "update failed")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "not found")
 		return
 	}
@@ -230,9 +250,14 @@ func (s *Service) verifyDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	var domain, token string
 	id := chi.URLParam(r, "id")
-	if s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT domain,verification_token FROM tenant_domains WHERE id=? AND tenant_id=?`), id, p.TenantID).Scan(&domain, &token) != nil {
+	var domainRecord struct {
+		Domain            string `gorm:"column:domain"`
+		VerificationToken string `gorm:"column:verification_token"`
+	}
+	if s.gdb(r.Context()).Table("tenant_domains").
+		Select("domain,COALESCE(verification_token,'') AS verification_token").
+		Where("id = ? AND tenant_id = ?", id, p.TenantID).Take(&domainRecord).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
@@ -240,11 +265,11 @@ func (s *Service) verifyDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 503, "DNS verification is not configured")
 		return
 	}
-	if err := s.deps.VerifyDomain(r.Context(), domain, token); err != nil {
+	if err := s.deps.VerifyDomain(r.Context(), domainRecord.Domain, domainRecord.VerificationToken); err != nil {
 		httpx.Error(w, 400, err.Error())
 		return
 	}
-	if _, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenant_domains SET verified_at=?,updated_at=? WHERE id=? AND tenant_id=?`), s.now(), s.now(), id, p.TenantID); err != nil {
+	if err := s.gdb(r.Context()).Model(&models.TenantDomain{}).Where("id = ? AND tenant_id = ?", id, p.TenantID).Updates(map[string]any{"verified_at": s.now(), "updated_at": s.now()}).Error; err != nil {
 		httpx.Error(w, 500, "verification update failed")
 		return
 	}
@@ -257,13 +282,12 @@ func (s *Service) deleteDomain(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	res, err := s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM tenant_domains WHERE id=? AND tenant_id=?`), chi.URLParam(r, "id"), p.TenantID)
-	if err != nil {
+	res := s.gdb(r.Context()).Where("id = ? AND tenant_id = ?", chi.URLParam(r, "id"), p.TenantID).Delete(&models.TenantDomain{})
+	if res.Error != nil {
 		httpx.Error(w, 500, "delete failed")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "not found")
 		return
 	}
@@ -304,7 +328,7 @@ func (s *Service) getSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stored, err := s.loadTenantSSO(r.Context(), p.TenantID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		stored = tenantSSOStored{Protocol: "oidc", Scopes: "openid email profile", JITEnabled: true, DefaultRole: "member"}
 	} else if err != nil {
 		httpx.Error(w, 500, "query failed")
@@ -341,7 +365,7 @@ func (s *Service) putSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current, err := s.loadTenantSSO(r.Context(), p.TenantID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		current = tenantSSOStored{Protocol: "oidc", Scopes: "openid email profile", JITEnabled: true, DefaultRole: "member"}
 	} else if err != nil {
 		httpx.Error(w, 500, "query failed")
@@ -407,7 +431,8 @@ func (s *Service) putSSO(w http.ResponseWriter, r *http.Request) {
 	}
 	id := s.deps.NewID()
 	publicRaw, _ := json.Marshal(current.publicFields())
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO tenant_sso_configs(id,tenant_id,protocol,enabled,issuer,client_id,client_secret_enc,authorize_url,token_url,jwks_url,userinfo_url,scopes,idp_entity_id,idp_sso_url,idp_certificate_enc,jit_enabled,enforce_sso,default_role,config_json,secret_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}',?,?) ON CONFLICT(tenant_id) DO UPDATE SET protocol=excluded.protocol,enabled=excluded.enabled,issuer=excluded.issuer,client_id=excluded.client_id,client_secret_enc=excluded.client_secret_enc,authorize_url=excluded.authorize_url,token_url=excluded.token_url,jwks_url=excluded.jwks_url,userinfo_url=excluded.userinfo_url,scopes=excluded.scopes,idp_entity_id=excluded.idp_entity_id,idp_sso_url=excluded.idp_sso_url,idp_certificate_enc=excluded.idp_certificate_enc,jit_enabled=excluded.jit_enabled,enforce_sso=excluded.enforce_sso,default_role=excluded.default_role,config_json=excluded.config_json,updated_at=excluded.updated_at`), id, p.TenantID, current.Protocol, current.Enabled, nullIfBlank(current.Issuer), nullIfBlank(current.ClientID), nullIfBlank(current.ClientSecretEnc), nullIfBlank(current.AuthorizeURL), nullIfBlank(current.TokenURL), nullIfBlank(current.JWKSURL), nullIfBlank(current.UserinfoURL), current.Scopes, nullIfBlank(current.IDPEntityID), nullIfBlank(current.IDPSSOURL), nullIfBlank(current.IDPCertificateEnc), current.JITEnabled, current.EnforceSSO, current.DefaultRole, string(publicRaw), s.now(), s.now())
+	now := s.now()
+	err = s.gdb(r.Context()).Exec(`INSERT INTO tenant_sso_configs(id,tenant_id,protocol,enabled,issuer,client_id,client_secret_enc,authorize_url,token_url,jwks_url,userinfo_url,scopes,idp_entity_id,idp_sso_url,idp_certificate_enc,jit_enabled,enforce_sso,default_role,config_json,secret_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}',?,?) ON CONFLICT(tenant_id) DO UPDATE SET protocol=excluded.protocol,enabled=excluded.enabled,issuer=excluded.issuer,client_id=excluded.client_id,client_secret_enc=excluded.client_secret_enc,authorize_url=excluded.authorize_url,token_url=excluded.token_url,jwks_url=excluded.jwks_url,userinfo_url=excluded.userinfo_url,scopes=excluded.scopes,idp_entity_id=excluded.idp_entity_id,idp_sso_url=excluded.idp_sso_url,idp_certificate_enc=excluded.idp_certificate_enc,jit_enabled=excluded.jit_enabled,enforce_sso=excluded.enforce_sso,default_role=excluded.default_role,config_json=excluded.config_json,updated_at=excluded.updated_at`, id, p.TenantID, current.Protocol, current.Enabled, nullIfBlank(current.Issuer), nullIfBlank(current.ClientID), nullIfBlank(current.ClientSecretEnc), nullIfBlank(current.AuthorizeURL), nullIfBlank(current.TokenURL), nullIfBlank(current.JWKSURL), nullIfBlank(current.UserinfoURL), current.Scopes, nullIfBlank(current.IDPEntityID), nullIfBlank(current.IDPSSOURL), nullIfBlank(current.IDPCertificateEnc), current.JITEnabled, current.EnforceSSO, current.DefaultRole, string(publicRaw), now, now).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
@@ -424,8 +449,18 @@ type tenantSSOStored struct {
 
 func (s *Service) loadTenantSSO(ctx context.Context, tenantID string) (tenantSSOStored, error) {
 	var value tenantSSOStored
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,protocol,enabled,COALESCE(issuer,''),COALESCE(client_id,''),COALESCE(client_secret_enc,''),COALESCE(authorize_url,''),COALESCE(token_url,''),COALESCE(jwks_url,''),COALESCE(userinfo_url,''),COALESCE(scopes,'openid email profile'),COALESCE(idp_entity_id,''),COALESCE(idp_sso_url,''),COALESCE(idp_certificate_enc,''),jit_enabled,enforce_sso,default_role FROM tenant_sso_configs WHERE tenant_id=?`), tenantID).Scan(&value.ID, &value.Protocol, &value.Enabled, &value.Issuer, &value.ClientID, &value.ClientSecretEnc, &value.AuthorizeURL, &value.TokenURL, &value.JWKSURL, &value.UserinfoURL, &value.Scopes, &value.IDPEntityID, &value.IDPSSOURL, &value.IDPCertificateEnc, &value.JITEnabled, &value.EnforceSSO, &value.DefaultRole)
-	return value, err
+	var record models.TenantSsoConfig
+	err := s.gdb(ctx).Where("tenant_id = ?", tenantID).Take(&record).Error
+	if err != nil {
+		return value, err
+	}
+	value.ID, value.Protocol, value.Enabled = derefString(record.ID), record.Protocol, record.Enabled
+	value.Issuer, value.ClientID, value.ClientSecretEnc = derefString(record.Issuer), derefString(record.ClientID), derefString(record.ClientSecretEnc)
+	value.AuthorizeURL, value.TokenURL, value.JWKSURL, value.UserinfoURL = derefString(record.AuthorizeURL), derefString(record.TokenURL), derefString(record.JwksURL), derefString(record.UserinfoURL)
+	value.Scopes = record.Scopes
+	value.IDPEntityID, value.IDPSSOURL, value.IDPCertificateEnc = derefString(record.IdpEntityID), derefString(record.IdpSsoURL), derefString(record.IdpCertificateEnc)
+	value.JITEnabled, value.EnforceSSO, value.DefaultRole = record.JitEnabled, record.EnforceSso, record.DefaultRole
+	return value, nil
 }
 
 func (value tenantSSOStored) publicFields() map[string]any {
@@ -442,8 +477,9 @@ func (s *Service) publicTenantSSO(ctx context.Context, tenantID string, value te
 	if value.DefaultRole != "admin" {
 		value.DefaultRole = "member"
 	}
-	var slug string
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT slug FROM tenants WHERE id=?`), tenantID).Scan(&slug)
+	var tenantRow models.Tenant
+	_ = s.gdb(ctx).Select("slug").Where("id = ?", tenantID).Take(&tenantRow).Error
+	slug := tenantRow.Slug
 	result := value.publicFields()
 	result["hasClientSecret"] = value.ClientSecretEnc != ""
 	result["hasIdpCertificate"] = value.IDPCertificateEnc != ""
@@ -467,18 +503,14 @@ func (s *Service) getSCIM(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,name,token_prefix,group_role_map,last_used_at,revoked_at,created_at FROM tenant_scim_tokens WHERE tenant_id=? AND revoked_at IS NULL ORDER BY created_at DESC`), p.TenantID)
-	if err != nil {
+	var tokens []models.TenantScimToken
+	if err := s.gdb(r.Context()).Where("tenant_id = ? AND revoked_at IS NULL", p.TenantID).Order("created_at DESC").Find(&tokens).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, name, prefix, mapRaw, created string
-		var last, revoked sql.NullString
-		_ = rows.Scan(&id, &name, &prefix, &mapRaw, &last, &revoked, &created)
-		items = append(items, map[string]any{"id": id, "name": name, "tokenPrefix": prefix, "groupRoleMap": decodeObject(mapRaw), "lastUsedAt": nullString(last), "revokedAt": nullString(revoked), "createdAt": created})
+	for _, token := range tokens {
+		items = append(items, map[string]any{"id": derefString(token.ID), "name": token.Name, "tokenPrefix": token.TokenPrefix, "groupRoleMap": decodeObject(token.GroupRoleMap), "lastUsedAt": nullableString(token.LastUsedAt), "revokedAt": nullableString(token.RevokedAt), "createdAt": token.CreatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"tokens": items, "endpoint": s.deps.PublicURL + "/scim/v2"})
 }
@@ -509,7 +541,7 @@ func (s *Service) createSCIMToken(w http.ResponseWriter, r *http.Request) {
 	h := sha256.Sum256([]byte(raw))
 	prefix := raw[:12]
 	id := s.deps.NewID()
-	_, err := s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO tenant_scim_tokens(id,tenant_id,name,token_hash,token_prefix,group_role_map,created_at) VALUES(?,?,?,?,?,?,?)`), id, p.TenantID, b.Name, hex.EncodeToString(h[:]), prefix, encodeJSON(b.GroupRoleMap), s.now())
+	err := s.gdb(r.Context()).Create(&models.TenantScimToken{ID: &id, TenantID: p.TenantID, Name: b.Name, TokenHash: hex.EncodeToString(h[:]), TokenPrefix: prefix, GroupRoleMap: encodeJSON(b.GroupRoleMap), CreatedAt: s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "create failed")
 		return
@@ -531,13 +563,12 @@ func (s *Service) patchSCIMToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.GroupRoleMap = normalizeSCIMGroupRoleInput(b.GroupRoleMap)
-	res, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenant_scim_tokens SET group_role_map=? WHERE id=? AND tenant_id=? AND revoked_at IS NULL`), encodeJSON(b.GroupRoleMap), chi.URLParam(r, "id"), p.TenantID)
-	if err != nil {
+	res := s.gdb(r.Context()).Model(&models.TenantScimToken{}).Where("id = ? AND tenant_id = ? AND revoked_at IS NULL", chi.URLParam(r, "id"), p.TenantID).Update("group_role_map", encodeJSON(b.GroupRoleMap))
+	if res.Error != nil {
 		httpx.Error(w, 500, "update failed")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "SCIM token not found")
 		return
 	}
@@ -549,13 +580,12 @@ func (s *Service) deleteSCIMToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	res, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenant_scim_tokens SET revoked_at=? WHERE id=? AND tenant_id=? AND revoked_at IS NULL`), s.now(), chi.URLParam(r, "id"), p.TenantID)
-	if err != nil {
+	res := s.gdb(r.Context()).Model(&models.TenantScimToken{}).Where("id = ? AND tenant_id = ? AND revoked_at IS NULL", chi.URLParam(r, "id"), p.TenantID).Update("revoked_at", s.now())
+	if res.Error != nil {
 		httpx.Error(w, 500, "revoke failed")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "SCIM token not found")
 		return
 	}
@@ -577,12 +607,22 @@ func (s *Service) scimAuth(next http.Handler) http.Handler {
 		}
 		h := sha256.Sum256([]byte(parts[1]))
 		var token scimTokenContext
-		err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT st.id,st.tenant_id,st.group_role_map FROM tenant_scim_tokens st JOIN tenants t ON t.id=st.tenant_id WHERE st.token_hash=? AND st.revoked_at IS NULL AND t.status='active'`), hex.EncodeToString(h[:])).Scan(&token.ID, &token.TenantID, &token.GroupRoleMap)
+		var record struct {
+			ID           string `gorm:"column:id"`
+			TenantID     string `gorm:"column:tenant_id"`
+			GroupRoleMap string `gorm:"column:group_role_map"`
+		}
+		err := s.gdb(r.Context()).Table("tenant_scim_tokens AS st").
+			Select("st.id,st.tenant_id,st.group_role_map").
+			Joins("JOIN tenants t ON t.id = st.tenant_id").
+			Where("st.token_hash = ? AND st.revoked_at IS NULL AND t.status = ?", hex.EncodeToString(h[:]), "active").
+			Take(&record).Error
 		if err != nil {
 			scimError(w, 401, "invalidToken", "Invalid token")
 			return
 		}
-		_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenant_scim_tokens SET last_used_at=? WHERE token_hash=?`), s.now(), hex.EncodeToString(h[:]))
+		token = scimTokenContext{ID: record.ID, TenantID: record.TenantID, GroupRoleMap: record.GroupRoleMap}
+		_ = s.gdb(r.Context()).Model(&models.TenantScimToken{}).Where("token_hash = ?", hex.EncodeToString(h[:])).Update("last_used_at", s.now()).Error
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), scimCtxKey{}, token)))
 	})
 }
@@ -605,27 +645,40 @@ func (s *Service) scimUsers(w http.ResponseWriter, r *http.Request) {
 	startIndex := boundedInt(r.URL.Query().Get("startIndex"), 1, 1, 1_000_000)
 	count := boundedInt(r.URL.Query().Get("count"), 100, 1, 200)
 	email := parseSCIMEmailFilter(r.URL.Query().Get("filter"))
-	var total int
-	if err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COUNT(*) FROM scim_user_mappings sm JOIN users u ON u.id=sm.user_id WHERE sm.tenant_id=? AND (?='' OR LOWER(u.email)=?)`), tid, email, email).Scan(&total); err != nil {
+	var total int64
+	if err := s.gdb(r.Context()).Table("scim_user_mappings AS sm").
+		Joins("JOIN users u ON u.id = sm.user_id").
+		Where("sm.tenant_id = ? AND (? = '' OR LOWER(u.email) = ?)", tid, email, email).
+		Count(&total).Error; err != nil {
 		scimError(w, 500, "", "query failed")
 		return
 	}
-	rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT sm.id,sm.external_id,u.email,COALESCE(u.name,''),u.status,COALESCE(m.status,'suspended') FROM scim_user_mappings sm JOIN users u ON u.id=sm.user_id LEFT JOIN tenant_memberships m ON m.tenant_id=sm.tenant_id AND m.user_id=u.id WHERE sm.tenant_id=? AND (?='' OR LOWER(u.email)=?) ORDER BY sm.created_at,sm.id LIMIT ? OFFSET ?`), tid, email, email, count, startIndex-1)
-	if err != nil {
+	var rows []struct {
+		ID               string `gorm:"column:id"`
+		ExternalID       string `gorm:"column:external_id"`
+		Email            string `gorm:"column:email"`
+		Name             string `gorm:"column:name"`
+		UserStatus       string `gorm:"column:user_status"`
+		MembershipStatus string `gorm:"column:membership_status"`
+	}
+	if err := s.gdb(r.Context()).Table("scim_user_mappings AS sm").
+		Select("sm.id,sm.external_id,u.email,COALESCE(u.name,'') AS name,u.status AS user_status,COALESCE(m.status,'suspended') AS membership_status").
+		Joins("JOIN users u ON u.id = sm.user_id").
+		Joins("LEFT JOIN tenant_memberships m ON m.tenant_id = sm.tenant_id AND m.user_id = u.id").
+		Where("sm.tenant_id = ? AND (? = '' OR LOWER(u.email) = ?)", tid, email, email).
+		Order("sm.created_at,sm.id").
+		Limit(count).Offset(startIndex - 1).Find(&rows).Error; err != nil {
 		scimError(w, 500, "", "query failed")
 		return
 	}
-	defer rows.Close()
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, externalID, email, name, userStatus, membershipStatus string
-		_ = rows.Scan(&id, &externalID, &email, &name, &userStatus, &membershipStatus)
-		items = append(items, scimUserObject(id, externalID, email, name, userStatus == "active" && membershipStatus == "active"))
+	for _, row := range rows {
+		items = append(items, scimUserObject(row.ID, row.ExternalID, row.Email, row.Name, row.UserStatus == "active" && row.MembershipStatus == "active"))
 	}
 	httpx.JSON(w, 200, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": startIndex, "itemsPerPage": len(items), "Resources": items})
 }
 func (s *Service) scimUser(w http.ResponseWriter, r *http.Request) {
-	mapped, err := s.loadSCIMMappedUser(r.Context(), s.deps.DB, tenantFromSCIM(r), chi.URLParam(r, "id"))
+	mapped, err := s.loadSCIMMappedUserGorm(r.Context(), tenantFromSCIM(r), chi.URLParam(r, "id"))
 	if err != nil {
 		scimError(w, 404, "", "User not found")
 		return
@@ -695,7 +748,7 @@ func (s *Service) scimCreateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = s.auditSCIM(r.Context(), tokenFromSCIM(r), "scim.user_create", "user", mappingID, map[string]any{"userName": payload.Email})
-	created, loadErr := s.loadSCIMMappedUser(r.Context(), s.deps.DB, tid, mappingID)
+	created, loadErr := s.loadSCIMMappedUserGorm(r.Context(), tid, mappingID)
 	if loadErr != nil {
 		scimError(w, 500, "", "created user unavailable")
 		return
@@ -991,6 +1044,31 @@ func (s *Service) loadSCIMMappedUser(ctx context.Context, db scimQueryer, tenant
 	return out, err
 }
 
+func (s *Service) loadSCIMMappedUserGorm(ctx context.Context, tenantID, mappingID string) (scimMappedUser, error) {
+	var out scimMappedUser
+	var row struct {
+		MappingID        string `gorm:"column:mapping_id"`
+		ExternalID       string `gorm:"column:external_id"`
+		UserID           string `gorm:"column:user_id"`
+		Email            string `gorm:"column:email"`
+		Name             string `gorm:"column:name"`
+		UserStatus       string `gorm:"column:user_status"`
+		MembershipStatus string `gorm:"column:membership_status"`
+		Role             string `gorm:"column:role"`
+	}
+	err := s.gdb(ctx).Table("scim_user_mappings AS sm").
+		Select("sm.id AS mapping_id,sm.external_id,u.id AS user_id,u.email,COALESCE(u.name,'') AS name,u.status AS user_status,COALESCE(m.status,'suspended') AS membership_status,COALESCE(m.role,'member') AS role").
+		Joins("JOIN users u ON u.id = sm.user_id").
+		Joins("LEFT JOIN tenant_memberships m ON m.tenant_id = sm.tenant_id AND m.user_id = u.id").
+		Where("sm.tenant_id = ? AND sm.id = ?", tenantID, mappingID).
+		Take(&row).Error
+	if err != nil {
+		return out, err
+	}
+	out = scimMappedUser{MappingID: row.MappingID, ExternalID: row.ExternalID, UserID: row.UserID, Email: row.Email, Name: row.Name, UserStatus: row.UserStatus, MembershipStatus: row.MembershipStatus, Role: row.Role}
+	return out, nil
+}
+
 func readSCIMUserPayload(body map[string]any) (scimUserPayload, error) {
 	email := strings.ToLower(strings.TrimSpace(stringAny(body["userName"])))
 	if values, ok := body["emails"].([]any); ok && len(values) > 0 {
@@ -1115,8 +1193,9 @@ func (s *Service) auditSCIM(ctx context.Context, token scimTokenContext, action,
 		detail = map[string]any{}
 	}
 	raw, _ := json.Marshal(detail)
-	_, err := s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO security_audit_logs(id,tenant_id,action,actor_type,actor_id,target_type,target_id,detail_json,created_at) VALUES(?,?,?,'scim',?,?,?, ?,?)`), s.deps.NewID(), token.TenantID, action, token.ID, targetType, targetID, string(raw), s.now())
-	return err
+	id := s.deps.NewID()
+	actorID, targetTypeValue, targetIDValue := token.ID, targetType, targetID
+	return s.gdb(ctx).Create(&models.SecurityAuditLog{ID: &id, TenantID: token.TenantID, Action: action, ActorType: "scim", ActorID: &actorID, TargetType: &targetTypeValue, TargetID: &targetIDValue, DetailJSON: string(raw), CreatedAt: s.now()}).Error
 }
 
 func scimMembershipStatus(active bool) string {
@@ -1200,21 +1279,33 @@ func (s *Service) listAudit(w http.ResponseWriter, r *http.Request) {
 		tenantID = r.URL.Query().Get("tenantId")
 	}
 	action := r.URL.Query().Get("action")
-	rows, err := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,action,actor_type,COALESCE(actor_id,''),COALESCE(ip,''),COALESCE(target_type,''),COALESCE(target_id,''),detail_json,created_at FROM security_audit_logs WHERE tenant_id=? AND (?='' OR action=?) ORDER BY created_at DESC LIMIT ? OFFSET ?`), tenantID, action, action, limit, offset)
-	if err != nil {
+	var rows []struct {
+		ID         string `gorm:"column:id"`
+		Action     string `gorm:"column:action"`
+		ActorType  string `gorm:"column:actor_type"`
+		ActorID    string `gorm:"column:actor_id"`
+		IP         string `gorm:"column:ip"`
+		TargetType string `gorm:"column:target_type"`
+		TargetID   string `gorm:"column:target_id"`
+		Detail     string `gorm:"column:detail_json"`
+		CreatedAt  string `gorm:"column:created_at"`
+	}
+	if err := s.gdb(r.Context()).Table("security_audit_logs").
+		Select("id,action,actor_type,COALESCE(actor_id,'') AS actor_id,COALESCE(ip,'') AS ip,COALESCE(target_type,'') AS target_type,COALESCE(target_id,'') AS target_id,detail_json,created_at").
+		Where("tenant_id = ? AND (? = '' OR action = ?)", tenantID, action, action).
+		Order("created_at DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, act, actorType, actorID, ip, targetType, targetID, detail, created string
-		_ = rows.Scan(&id, &act, &actorType, &actorID, &ip, &targetType, &targetID, &detail, &created)
-		items = append(items, map[string]any{"id": id, "action": act, "actor": map[string]string{"type": actorType, "id": actorID, "ip": ip}, "targetType": targetType, "targetId": targetID, "detail": decodeObject(detail), "createdAt": created})
+	for _, row := range rows {
+		items = append(items, map[string]any{"id": row.ID, "action": row.Action, "actor": map[string]string{"type": row.ActorType, "id": row.ActorID, "ip": row.IP}, "targetType": row.TargetType, "targetId": row.TargetID, "detail": decodeObject(row.Detail), "createdAt": row.CreatedAt})
 	}
-	var total, retention int
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COUNT(*) FROM security_audit_logs WHERE tenant_id=? AND (?='' OR action=?)`), tenantID, action, action).Scan(&total)
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT audit_retention_days FROM tenants WHERE id=?`), tenantID).Scan(&retention)
+	var total int64
+	var retentionTenant models.Tenant
+	_ = s.gdb(r.Context()).Table("security_audit_logs").Where("tenant_id = ? AND (? = '' OR action = ?)", tenantID, action, action).Count(&total).Error
+	_ = s.gdb(r.Context()).Select("audit_retention_days").Where("id = ?", tenantID).Take(&retentionTenant).Error
+	retention := retentionTenant.AuditRetentionDays
 	if r.URL.Query().Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="audit.csv"`)
@@ -1227,7 +1318,7 @@ func (s *Service) listAudit(w http.ResponseWriter, r *http.Request) {
 		cw.Flush()
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "truncated": offset+len(items) < total, "retentionDays": retention})
+	httpx.JSON(w, 200, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset, "truncated": offset+len(items) < int(total), "retentionDays": retention})
 }
 func (s *Service) putAuditRetention(w http.ResponseWriter, r *http.Request) {
 	p, ok := adminPrincipal(r)
@@ -1246,7 +1337,7 @@ func (s *Service) putAuditRetention(w http.ResponseWriter, r *http.Request) {
 	if p.IsPlatformAdmin && r.URL.Query().Get("tenantId") != "" {
 		tenantID = r.URL.Query().Get("tenantId")
 	}
-	_, err := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE tenants SET audit_retention_days=?,updated_at=? WHERE id=?`), b.RetentionDays, s.now(), tenantID)
+	err := s.gdb(r.Context()).Model(&models.Tenant{}).Where("id = ?", tenantID).Updates(map[string]any{"audit_retention_days": b.RetentionDays, "updated_at": s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return

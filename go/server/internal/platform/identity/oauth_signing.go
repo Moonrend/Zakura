@@ -15,6 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gorm.io/gorm"
+
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 )
 
 type oauthSigningKey struct {
@@ -29,14 +33,14 @@ func (s *Service) signingKey(ctx context.Context) (*oauthSigningKey, error) {
 }
 
 func (s *Service) loadOrCreateSigningKey(ctx context.Context) (*oauthSigningKey, error) {
-	var persisted string
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT value FROM settings WHERE owner_key='platform' AND key='oauth_signing_key'`)).Scan(&persisted); err == nil {
-		opened, openErr := open(s.deps.Secret, persisted)
+	var setting models.Setting
+	if err := s.gdb(ctx).Where("owner_key = ? AND key = ?", "platform", "oauth_signing_key").Take(&setting).Error; err == nil {
+		opened, openErr := open(s.deps.Secret, setting.Value)
 		if openErr != nil {
 			return nil, openErr
 		}
 		return parseStoredSigningKey(opened)
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 	var candidate *oauthSigningKey

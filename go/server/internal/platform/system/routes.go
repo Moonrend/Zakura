@@ -22,10 +22,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
+	"gorm.io/gorm/clause"
 )
 
 type routes struct{ d *appdeps.Dependencies }
@@ -86,17 +88,23 @@ func (h *routes) ready(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true, "database": "ready", "oauthSigningKey": "ready"})
 }
 func (h *routes) metrics(w http.ResponseWriter, r *http.Request) {
-	var users, tenants, agents int
-	_ = h.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&users)
-	_ = h.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tenants`).Scan(&tenants)
-	_ = h.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM agents`).Scan(&agents)
+	var users, tenants, agents int64
+	_ = h.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Count(&users)
+	_ = h.d.Gorm.WithContext(r.Context()).Model(&models.Tenant{}).Count(&tenants)
+	_ = h.d.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Count(&agents)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = fmt.Fprintf(w, "# TYPE zakura_up gauge\nzakura_up 1\n# TYPE zakura_users gauge\nzakura_users %d\n# TYPE zakura_tenants gauge\nzakura_tenants %d\n# TYPE zakura_agents gauge\nzakura_agents %d\n", users, tenants, agents)
 }
 func (h *routes) platform(w http.ResponseWriter, r *http.Request) {
-	var setup bool
+	ctx := r.Context()
+	var meta models.PlatformMetum
+	setup := false
 	var version, mode string
-	_ = h.d.DB.QueryRowContext(r.Context(), `SELECT setup_completed,version,mode FROM platform_meta WHERE singleton=1`).Scan(&setup, &version, &mode)
+	if h.d.Gorm.WithContext(ctx).Select("setup_completed,version,mode").Where("singleton=1").Take(&meta).Error == nil {
+		setup = meta.SetupCompleted
+		version = meta.Version
+		mode = meta.Mode
+	}
 	if version == "" {
 		version = "go-rewrite"
 	}
@@ -108,14 +116,14 @@ func (h *routes) platform(w http.ResponseWriter, r *http.Request) {
 	if h.d.Edition == "saas" {
 		for _, provider := range []struct{ id, name string }{{"zerocat", "ZeroCat"}, {"google", "Google"}, {"github", "GitHub"}, {"microsoft", "Microsoft"}} {
 			id, name := provider.id, provider.name
-			var raw string
-			if h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT value FROM settings WHERE owner_key='platform' AND key=?`), "auth.oauth."+id).Scan(&raw) == nil {
+			var row models.Setting
+			if h.d.Gorm.WithContext(ctx).Where("owner_key='platform' AND key=?", "auth.oauth."+id).Take(&row).Error == nil {
 				var cfg struct {
 					Enabled         bool   `json:"enabled"`
 					ClientID        string `json:"clientId"`
 					ClientSecretEnc string `json:"clientSecretEnc"`
 				}
-				_ = json.Unmarshal([]byte(raw), &cfg)
+				_ = json.Unmarshal([]byte(row.Value), &cfg)
 				if cfg.Enabled && cfg.ClientID != "" && cfg.ClientSecretEnc != "" {
 					providers = append(providers, map[string]any{"id": id, "name": name, "enabled": true})
 					ready[id] = true
@@ -125,13 +133,13 @@ func (h *routes) platform(w http.ResponseWriter, r *http.Request) {
 	}
 	disabled := false
 	highlighted := "auto"
-	var policyRaw string
-	if h.d.Edition == "saas" && h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT value FROM settings WHERE owner_key='platform' AND key='auth.login'`)).Scan(&policyRaw) == nil {
+	var policyRow models.Setting
+	if h.d.Edition == "saas" && h.d.Gorm.WithContext(ctx).Where("owner_key='platform' AND key='auth.login'").Take(&policyRow).Error == nil {
 		var policy struct {
 			DisablePasswordLogin bool   `json:"disablePasswordLogin"`
 			HighlightedMethod    string `json:"highlightedMethod"`
 		}
-		_ = json.Unmarshal([]byte(policyRaw), &policy)
+		_ = json.Unmarshal([]byte(policyRow.Value), &policy)
 		disabled = policy.DisablePasswordLogin && len(ready) > 0
 		if policy.HighlightedMethod != "" {
 			highlighted = policy.HighlightedMethod
@@ -144,35 +152,32 @@ func (h *routes) platform(w http.ResponseWriter, r *http.Request) {
 }
 func (h *routes) connect(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	rows, err := h.d.DB.QueryContext(r.Context(), h.q(`SELECT id,name,slug FROM agents WHERE tenant_id=? ORDER BY created_at`), p.TenantID)
-	if err != nil {
+	var rows []models.Agent
+	if err := h.d.Gorm.WithContext(r.Context()).Select("id,name,slug").Where("tenant_id=?", p.TenantID).Order("created_at").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	agents := []map[string]any{}
-	for rows.Next() {
-		var id, name, slug string
-		_ = rows.Scan(&id, &name, &slug)
-		agents = append(agents, map[string]any{"id": id, "name": name, "slug": slug, "mcpUrl": h.d.PublicURL + "/mcp/agents/" + slug})
+	for _, agent := range rows {
+		agents = append(agents, map[string]any{"id": deref(agent.ID), "name": agent.Name, "slug": agent.Slug, "mcpUrl": h.d.PublicURL + "/mcp/agents/" + agent.Slug})
 	}
 	httpx.JSON(w, 200, map[string]any{"publicBaseUrl": h.d.PublicURL, "agentMcpPattern": h.d.PublicURL + "/mcp/agents/{slug}", "authorizationServer": map[string]any{"issuer": h.d.PublicURL, "authorization_endpoint": h.d.PublicURL + "/oauth/authorize", "token_endpoint": h.d.PublicURL + "/token", "registration_endpoint": h.d.PublicURL + "/oauth/register"}, "agents": agents, "authMethods": []map[string]string{{"id": "oauth21", "name": "OAuth 2.1 + PKCE"}, {"id": "api_key", "name": "API Key"}}})
 }
 
 func (h *routes) listKeys(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	rows, err := h.d.DB.QueryContext(r.Context(), h.q(`SELECT id,COALESCE(agent_id,''),name,key_prefix,scopes,expires_at,last_used_at,created_at FROM api_keys WHERE tenant_id=? AND revoked_at IS NULL ORDER BY created_at DESC`), p.TenantID)
-	if err != nil {
+	var rows []models.APIKey
+	if err := h.d.Gorm.WithContext(r.Context()).Where("tenant_id=? AND revoked_at IS NULL", p.TenantID).Order("created_at DESC").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, agentID, name, prefix, scopes, created string
-		var expires, last sql.NullString
-		_ = rows.Scan(&id, &agentID, &name, &prefix, &scopes, &expires, &last, &created)
-		items = append(items, map[string]any{"id": id, "agentId": agentID, "name": name, "keyPrefix": prefix, "scopes": decodeArray(scopes), "expiresAt": nullString(expires), "lastUsedAt": nullString(last), "createdAt": created})
+	for _, key := range rows {
+		agentID := ""
+		if key.AgentID != nil {
+			agentID = *key.AgentID
+		}
+		items = append(items, map[string]any{"id": deref(key.ID), "agentId": agentID, "name": key.Name, "keyPrefix": key.KeyPrefix, "scopes": decodeArray(key.Scopes), "expiresAt": nullStringPtr(key.ExpiresAt), "lastUsedAt": nullStringPtr(key.LastUsedAt), "createdAt": key.CreatedAt})
 	}
 	httpx.JSON(w, 200, items)
 }
@@ -208,8 +213,8 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID st
 		}
 	}
 	if agentID != "" {
-		var count int
-		_ = h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT COUNT(*) FROM agents WHERE id=? AND tenant_id=?`), agentID, p.TenantID).Scan(&count)
+		var count int64
+		_ = h.d.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("id=? AND tenant_id=?", agentID, p.TenantID).Count(&count)
 		if count != 1 {
 			httpx.Error(w, 404, "agent not found")
 			return
@@ -220,11 +225,12 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID st
 	prefix := raw[:12]
 	id := h.d.NewID()
 	scopes, _ := json.Marshal(b.Scopes)
-	var userID any = p.UserID
-	if p.APIKey {
-		userID = nil
+	var userID *string
+	if !p.APIKey {
+		uid := p.UserID
+		userID = &uid
 	}
-	_, err := h.d.DB.ExecContext(r.Context(), h.q(`INSERT INTO api_keys(id,tenant_id,user_id,agent_id,name,key_prefix,key_hash,scopes,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`), id, p.TenantID, userID, nullIfEmpty(agentID), b.Name, prefix, hex.EncodeToString(sum[:]), string(scopes), nullIfEmpty(b.ExpiresAt), h.now())
+	err := h.d.Gorm.WithContext(r.Context()).Create(&models.APIKey{ID: &id, TenantID: p.TenantID, UserID: userID, AgentID: strPtr(agentID), Name: b.Name, KeyPrefix: prefix, KeyHash: hex.EncodeToString(sum[:]), Scopes: string(scopes), ExpiresAt: strPtr(b.ExpiresAt), CreatedAt: h.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "create failed")
 		return
@@ -233,13 +239,12 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID st
 }
 func (h *routes) deleteKey(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	res, err := h.d.DB.ExecContext(r.Context(), h.q(`UPDATE api_keys SET revoked_at=? WHERE id=? AND tenant_id=? AND revoked_at IS NULL`), h.now(), chi.URLParam(r, "id"), p.TenantID)
-	if err != nil {
+	res := h.d.Gorm.WithContext(r.Context()).Model(&models.APIKey{}).Where("id=? AND tenant_id=? AND revoked_at IS NULL", chi.URLParam(r, "id"), p.TenantID).Update("revoked_at", h.now())
+	if res.Error != nil {
 		httpx.Error(w, 500, "revoke failed")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "API Key not found")
 		return
 	}
@@ -296,7 +301,7 @@ func (h *routes) putAvatar(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := h.now()
-	_, err := h.d.DB.ExecContext(r.Context(), h.q(`UPDATE users SET avatar_mime='image/jpeg',avatar_data=?,avatar_updated_at=?,updated_at=? WHERE id=?`), data, now, now, p.UserID)
+	err := h.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", p.UserID).Updates(map[string]any{"avatar_mime": "image/jpeg", "avatar_data": data, "avatar_updated_at": now, "updated_at": now}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
@@ -312,7 +317,7 @@ func (h *routes) deleteAvatar(w http.ResponseWriter, r *http.Request) {
 	if path, ok := h.avatarPath(p.UserID); ok {
 		_ = os.Remove(path)
 	}
-	if _, err := h.d.DB.ExecContext(r.Context(), h.q(`UPDATE users SET avatar_mime=NULL,avatar_data=NULL,avatar_updated_at=NULL,updated_at=? WHERE id=?`), h.now(), p.UserID); err != nil {
+	if err := h.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", p.UserID).Updates(map[string]any{"avatar_mime": nil, "avatar_data": nil, "avatar_updated_at": nil, "updated_at": h.now()}).Error; err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
 	}
@@ -323,7 +328,7 @@ func (h *routes) getAvatar(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var mime sql.NullString
 	var data []byte
-	err := h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT u.avatar_mime,u.avatar_data FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.id=? AND m.tenant_id=?`), id, p.TenantID).Scan(&mime, &data)
+	err := h.d.Gorm.WithContext(r.Context()).Raw(`SELECT u.avatar_mime,u.avatar_data FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.id=? AND m.tenant_id=?`, id, p.TenantID).Row().Scan(&mime, &data)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -366,19 +371,20 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "API keys cannot verify email")
 		return
 	}
-	var email string
-	var verified sql.NullString
-	if err := h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT email,email_verified_at FROM users WHERE id=? AND status='active'`), p.UserID).Scan(&email, &verified); err != nil {
+	var user models.User
+	if err := h.d.Gorm.WithContext(r.Context()).Select("email,email_verified_at").Where("id=? AND status='active'", p.UserID).Take(&user).Error; err != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
-	if verified.Valid {
+	if user.EmailVerifiedAt != nil {
 		httpx.JSON(w, 200, map[string]any{"sent": true})
 		return
 	}
 	raw := "zat_" + randomString(32)
 	sum := sha256.Sum256([]byte(raw))
-	_, err := h.d.DB.ExecContext(r.Context(), h.q(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,expires_at,created_at) VALUES(?,?,'email_verify',?,?,?)`), h.d.NewID(), p.UserID, hex.EncodeToString(sum[:]), h.d.Clock().UTC().Add(24*time.Hour).Format(time.RFC3339Nano), h.now())
+	id := h.d.NewID()
+	userID := p.UserID
+	err := h.d.Gorm.WithContext(r.Context()).Create(&models.AuthToken{ID: &id, UserID: &userID, Kind: "email_verify", TokenHash: hex.EncodeToString(sum[:]), MetaJSON: "{}", ExpiresAt: h.d.Clock().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano), CreatedAt: h.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "request failed")
 		return
@@ -387,7 +393,7 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	if h.d.SendTransactionalEmail != nil {
 		verifyURL := h.d.WebURL + "/verify-email?token=" + url.QueryEscape(raw)
 		htmlBody := `<p>Verify your Zakura email:</p><p><a href="` + html.EscapeString(verifyURL) + `">Verify email</a></p>`
-		sent = h.d.SendTransactionalEmail(r.Context(), email, "验证你的 Zakura 邮箱", htmlBody, "Verify your Zakura email:\n\n"+verifyURL) == nil
+		sent = h.d.SendTransactionalEmail(r.Context(), user.Email, "验证你的 Zakura 邮箱", htmlBody, "Verify your Zakura email:\n\n"+verifyURL) == nil
 	}
 	httpx.JSON(w, 200, map[string]any{"sent": sent})
 }
@@ -398,22 +404,19 @@ func (h *routes) listSettings(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	rows, err := h.d.DB.QueryContext(r.Context(), h.q(`SELECT key,value FROM settings WHERE owner_key=? ORDER BY key`), p.TenantID)
-	if err != nil {
+	var rows []models.Setting
+	if err := h.d.Gorm.WithContext(r.Context()).Where("owner_key=?", p.TenantID).Order("key").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	defer rows.Close()
 	items := map[string]any{}
-	for rows.Next() {
-		var key, raw string
-		_ = rows.Scan(&key, &raw)
-		if strings.Contains(key, "secret") || strings.Contains(key, "email_transactional") {
+	for _, row := range rows {
+		if strings.Contains(row.Key, "secret") || strings.Contains(row.Key, "email_transactional") {
 			continue
 		}
 		var value any
-		_ = json.Unmarshal([]byte(raw), &value)
-		items[key] = value
+		_ = json.Unmarshal([]byte(row.Value), &value)
+		items[row.Key] = value
 	}
 	httpx.JSON(w, 200, map[string]any{"settings": items})
 }
@@ -434,7 +437,8 @@ func (h *routes) putSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(value)
-	_, err := h.d.DB.ExecContext(r.Context(), h.q(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,?,?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=excluded.value`), h.d.NewID(), p.TenantID, key, string(raw))
+	id := h.d.NewID()
+	err := h.d.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_key"}, {Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value"})}).Create(&models.Setting{ID: &id, OwnerKey: p.TenantID, Key: key, Value: string(raw)}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
@@ -492,7 +496,8 @@ func (h *routes) putEmailSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	raw, _ := json.Marshal(stored)
-	_, err := h.d.DB.ExecContext(r.Context(), h.q(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,'platform','email.transactional',?) ON CONFLICT(owner_key,key) DO UPDATE SET value=excluded.value`), h.d.NewID(), string(raw))
+	id := h.d.NewID()
+	err := h.d.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_key"}, {Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value"})}).Create(&models.Setting{ID: &id, OwnerKey: "platform", Key: "email.transactional", Value: string(raw)}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
@@ -518,10 +523,10 @@ func (h *routes) canManageTransactionalEmail(p httpx.Principal) bool {
 	return p.IsPlatformAdmin || p.Role == "owner" || p.Role == "admin"
 }
 func (h *routes) loadTransactionalEmail(ctx context.Context) transactionalEmailStored {
-	var raw string
+	var row models.Setting
 	var stored transactionalEmailStored
-	if h.d.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE owner_key='platform' AND key='email.transactional'`).Scan(&raw) == nil {
-		_ = json.Unmarshal([]byte(raw), &stored)
+	if h.d.Gorm.WithContext(ctx).Where("owner_key='platform' AND key='email.transactional'").Take(&row).Error == nil {
+		_ = json.Unmarshal([]byte(row.Value), &stored)
 	}
 	return stored
 }
@@ -632,14 +637,17 @@ func (h *routes) bootstrap(w http.ResponseWriter, r *http.Request) {
 	var name, slug string
 	var enableComputer, enableMemory, completed bool
 	var stepsRaw string
-	if err = h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT a.name,a.slug,s.enable_computer,a.enable_memory FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.id=? AND a.tenant_id=?`), agentID, p.TenantID).Scan(&name, &slug, &enableComputer, &enableMemory); err != nil {
+	if err = h.d.Gorm.WithContext(r.Context()).Raw(`SELECT a.name,a.slug,s.enable_computer,a.enable_memory FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.id=? AND a.tenant_id=?`, agentID, p.TenantID).Row().Scan(&name, &slug, &enableComputer, &enableMemory); err != nil {
 		httpx.Error(w, 500, "bootstrap agent unavailable")
 		return
 	}
-	if err = h.d.DB.QueryRowContext(r.Context(), h.q(`SELECT onboarding_steps,onboarding_completed FROM tenants WHERE id=?`), p.TenantID).Scan(&stepsRaw, &completed); err != nil {
+	var tenantRow models.Tenant
+	if err = h.d.Gorm.WithContext(r.Context()).Select("onboarding_steps,onboarding_completed").Where("id=?", p.TenantID).Take(&tenantRow).Error; err != nil {
 		httpx.Error(w, 500, "bootstrap tenant unavailable")
 		return
 	}
+	stepsRaw = tenantRow.OnboardingSteps
+	completed = tenantRow.OnboardingCompleted
 	httpx.JSON(w, 200, map[string]any{
 		"edition": h.d.Edition,
 		"agent": map[string]any{
@@ -670,6 +678,24 @@ func nullString(v sql.NullString) any {
 		return v.String
 	}
 	return nil
+}
+func nullStringPtr(value *string) any {
+	if value != nil {
+		return *value
+	}
+	return nil
+}
+func deref(value *string) string {
+	if value != nil {
+		return *value
+	}
+	return ""
+}
+func strPtr(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
 }
 func decodeArray(raw string) []any {
 	var out []any

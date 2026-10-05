@@ -32,13 +32,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/admin"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/identity"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
+	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestSetupLoginAndTenantLifecycle(t *testing.T) {
@@ -966,8 +966,12 @@ func testDeps(t *testing.T) *appdeps.Dependencies {
 	if err := migrations.Apply(context.Background(), c.DB, c.Dialect, c.Rebind); err != nil {
 		t.Fatal(err)
 	}
+	gormDB, err := c.Gorm()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var seq atomic.Int64
-	return &appdeps.Dependencies{DB: c.DB, Dialect: c.Dialect, Rebind: c.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: []byte("0123456789abcdef0123456789abcdef"), PublicURL: "http://api.test", WebURL: "http://web.test", Edition: "self-hosted", MultiTenant: true}
+	return &appdeps.Dependencies{DB: c.DB, Gorm: gormDB, Dialect: c.Dialect, Rebind: c.Rebind, Clock: func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) }, NewID: func() string { return fmt.Sprintf("%026d", seq.Add(1)) }, Secret: []byte("0123456789abcdef0123456789abcdef"), PublicURL: "http://api.test", WebURL: "http://web.test", Edition: "self-hosted", MultiTenant: true}
 }
 func call(t *testing.T, h http.Handler, method, path string, body any, token string) *httptest.ResponseRecorder {
 	t.Helper()

@@ -2,7 +2,6 @@
 package runtime
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,11 +9,13 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 type skillFile struct {
@@ -54,50 +55,48 @@ func (h *handler) registerSkills(r chi.Router) {
 	r.Delete("/memory-providers/{id}", h.deleteMemoryProvider)
 	r.Post("/memory-providers/{id}/health", h.healthMemoryProvider)
 }
-func scanSkill(row interface{ Scan(...any) error }) (Skill, error) {
-	var x Skill
-	var src, files string
-	var c, u flexibleTime
-	e := row.Scan(&x.ID, &x.Name, &x.Title, &x.Description, &x.Version, &x.Builtin, &src, &x.Homepage, &x.License, &files, &x.FileCount, &x.SizeBytes, &x.AutoUpdate, &c, &u)
-	if e != nil {
-		return x, e
+func runtimeTimeString(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+func skillFromModel(m models.Skill) Skill {
+	x := Skill{Name: m.Name, Title: m.Title, Description: m.Description, Version: m.Version, Builtin: m.Builtin, Homepage: m.Homepage, License: m.License, FileCount: int(m.FileCount), SizeBytes: int64(m.SizeBytes), AutoUpdate: m.AutoUpdate}
+	if m.ID != nil {
+		x.ID = *m.ID
 	}
-	x.Source = json.RawMessage(src)
-	x.Files = json.RawMessage(files)
-	x.CreatedAt = c.Time
-	x.UpdatedAt = u.Time
-	return x, nil
+	x.Source = json.RawMessage(m.SourceJSON)
+	x.Files = json.RawMessage(m.FilesJSON)
+	var c, u flexibleTime
+	_ = c.Scan(m.CreatedAt)
+	_ = u.Scan(m.UpdatedAt)
+	x.CreatedAt, x.UpdatedAt = c.Time, u.Time
+	return x
 }
+
 func (h *handler) skillByID(r *http.Request, id string) (Skill, error) {
-	x, e := scanSkill(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,title,description,version,builtin,source_json,homepage,license,files_json,file_count,size_bytes,auto_update,created_at,updated_at FROM skills WHERE tenant_id=? AND id=?`), principal(r).TenantID, id))
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.Skill
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, id).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
-	return x, e
+	if e != nil {
+		return Skill{}, e
+	}
+	return skillFromModel(m), nil
 }
 func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	q := `SELECT id,name,title,description,version,builtin,source_json,homepage,license,files_json,file_count,size_bytes,auto_update,created_at,updated_at FROM skills WHERE tenant_id=?`
-	args := []any{p.TenantID}
+	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ?", p.TenantID)
 	if term := strings.TrimSpace(r.URL.Query().Get("q")); term != "" {
-		q += ` AND (LOWER(name) LIKE LOWER(?) OR LOWER(title) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?))`
-		x := "%" + term + "%"
-		args = append(args, x, x, x)
+		x := "%" + strings.ToLower(term) + "%"
+		q = q.Where(`(LOWER(name) LIKE ? OR LOWER(title) LIKE ? OR LOWER(description) LIKE ?)`, x, x, x)
 	}
-	q += ` ORDER BY builtin DESC,name`
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(q), args...)
-	if e != nil {
+	var ms []models.Skill
+	if e := q.Order("builtin DESC, name").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]Skill, 0)
-	for rows.Next() {
-		x, e := scanSkill(rows)
-		if e != nil {
-			statusErr(w, e)
-			return
-		}
+	out := make([]Skill, 0, len(ms))
+	for _, m := range ms {
+		x := skillFromModel(m)
 		x.Files = nil
 		out = append(out, x)
 	}
@@ -171,8 +170,8 @@ func (h *handler) installSkill(w http.ResponseWriter, r *http.Request) {
 	files, _ := json.Marshal(b.Files)
 	now := h.store.now()
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO skills(id,tenant_id,name,title,description,version,builtin,source_json,homepage,license,files_json,file_count,size_bytes,repo_key,auto_update,created_at,updated_at) VALUES(?,?,?,?,?,?,false,?,?,?,?,?,?,NULL,?,?,?)`), id, principal(r).TenantID, b.Name, b.Title, b.Description, b.Version, validJSON(b.Source, "{}"), b.Homepage, b.License, string(files), len(b.Files), size, auto, now, now)
-	if e != nil {
+	m := models.Skill{ID: &id, TenantID: principal(r).TenantID, Name: b.Name, Title: b.Title, Description: b.Description, Version: b.Version, SourceJSON: validJSON(b.Source, "{}"), Homepage: b.Homepage, License: b.License, FilesJSON: string(files), FileCount: int32(len(b.Files)), SizeBytes: int32(size), AutoUpdate: auto, CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -182,60 +181,39 @@ func (h *handler) installSkill(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) installExistingSkills(w http.ResponseWriter, r *http.Request, skillID string, names, agentIDs []string, all bool) {
 	tenant := principal(r).TenantID
-	query := `SELECT id,name,title,description,version,builtin,source_json,homepage,license,files_json,file_count,size_bytes,auto_update,created_at,updated_at FROM skills WHERE tenant_id=? AND (`
-	args := []any{tenant}
+	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ?", tenant)
 	if skillID != "" {
-		query += `id=?`
-		args = append(args, skillID)
+		q = q.Where("id = ?", skillID)
 	} else {
-		query += strings.TrimSuffix(strings.Repeat(`name=? OR `, len(names)), ` OR `)
+		slugs := make([]string, 0, len(names))
 		for _, name := range names {
-			args = append(args, slugify(name))
+			slugs = append(slugs, slugify(name))
 		}
+		q = q.Where("name IN ?", slugs)
 	}
-	query += `)`
-	rows, err := h.deps.DB.QueryContext(r.Context(), h.store.q(query), args...)
-	if err != nil {
+	var ms []models.Skill
+	if err := q.Find(&ms).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
 	skills := []Skill{}
-	for rows.Next() {
-		var skill Skill
-		var source, files string
-		var created, updated flexibleTime
-		if rows.Scan(&skill.ID, &skill.Name, &skill.Title, &skill.Description, &skill.Version, &skill.Builtin, &source, &skill.Homepage, &skill.License, &files, &skill.FileCount, &skill.SizeBytes, &skill.AutoUpdate, &created, &updated) == nil {
-			skill.Source = json.RawMessage(source)
-			skill.Files = json.RawMessage(files)
-			skill.CreatedAt = created.Time
-			skill.UpdatedAt = updated.Time
-			skills = append(skills, skill)
-		}
+	for _, m := range ms {
+		skills = append(skills, skillFromModel(m))
 	}
-	rows.Close()
 	if len(skills) == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	if all {
 		agentIDs = nil
-		arows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id FROM agents WHERE tenant_id=?`), tenant)
-		if e == nil {
-			for arows.Next() {
-				var id string
-				if arows.Scan(&id) == nil {
-					agentIDs = append(agentIDs, id)
-				}
-			}
-			arows.Close()
-		}
+		_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ?", tenant).Pluck("id", &agentIDs).Error
 	}
 	installs := []map[string]any{}
-	now := h.store.now()
+	now := runtimeTimeString(h.store.now())
 	for _, agent := range agentIDs {
 		for _, skill := range skills {
 			id := h.store.id()
-			_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO agent_skills(id,tenant_id,agent_id,skill_id,name,enabled,path,version,status,error,created_at,updated_at) VALUES(?,?,?,?,?,TRUE,?,?,'installed',NULL,?,?) ON CONFLICT(agent_id,name) DO UPDATE SET skill_id=excluded.skill_id,enabled=TRUE,version=excluded.version,status='installed',error=NULL,updated_at=excluded.updated_at`), id, tenant, agent, skill.ID, skill.Name, "/skills/"+skill.Name, skill.Version, now, now)
+			e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO agent_skills(id,tenant_id,agent_id,skill_id,name,enabled,path,version,status,error,created_at,updated_at) VALUES(?,?,?,?,?,TRUE,?,?,'installed',NULL,?,?) ON CONFLICT(agent_id,name) DO UPDATE SET skill_id=excluded.skill_id,enabled=TRUE,version=excluded.version,status='installed',error=NULL,updated_at=excluded.updated_at`, id, tenant, agent, skill.ID, skill.Name, "/skills/"+skill.Name, skill.Version, now, now).Error
 			if e == nil {
 				installs = append(installs, map[string]any{"id": id, "agentId": agent, "skillId": skill.ID, "name": skill.Name, "enabled": true, "path": "/skills/" + skill.Name, "version": skill.Version, "status": "installed"})
 			}
@@ -254,13 +232,12 @@ func (h *handler) getSkill(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"skill": x, "files": files})
 }
 func (h *handler) deleteSkill(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM skills WHERE tenant_id=? AND id=? AND builtin=false`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ? AND builtin = false", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.Skill{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found or builtin skill")
 		return
 	}
@@ -274,13 +251,12 @@ func (h *handler) patchSkillAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE skills SET auto_update=?,updated_at=? WHERE tenant_id=? AND id=?`), b.AutoUpdate, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"auto_update": b.AutoUpdate, "updated_at": runtimeTimeString(h.store.now())})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -295,26 +271,29 @@ func (h *handler) listAgentSkills(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT a.id,a.name,a.enabled,a.path,a.version,a.status,a.error,s.id,s.title,s.description FROM agent_skills a JOIN skills s ON s.id=a.skill_id WHERE a.tenant_id=? AND a.agent_id=? ORDER BY a.name`), p.TenantID, agent)
-	if e != nil {
+	type agentSkillRecord struct {
+		ID          string
+		Name        string
+		Enabled     bool
+		Path        string
+		Version     *string
+		Status      string
+		Error       *string
+		SkillID     string `gorm:"column:skill_id"`
+		Title       string
+		Description string
+	}
+	var recs []agentSkillRecord
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT a.id AS id, a.name AS name, a.enabled AS enabled, a.path AS path, a.version AS version, a.status AS status, a.error AS error, s.id AS skill_id, s.title AS title, s.description AS description FROM agent_skills a JOIN skills s ON s.id = a.skill_id WHERE a.tenant_id = ? AND a.agent_id = ? ORDER BY a.name`, p.TenantID, agent).Scan(&recs).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
 	registered := map[string]bool{}
-	for rows.Next() {
-		var id, name, pth, status, skillID, title, description string
-		var enabled bool
-		var version, errText *string
-		if e := rows.Scan(&id, &name, &enabled, &pth, &version, &status, &errText, &skillID, &title, &description); e != nil {
-			statusErr(w, e)
-			return
-		}
-		registered[name] = true
-		out = append(out, map[string]any{"id": id, "name": name, "enabled": enabled, "path": pth, "version": version, "status": status, "error": errText, "skillId": skillID, "title": title, "description": description})
+	for _, rec := range recs {
+		registered[rec.Name] = true
+		out = append(out, map[string]any{"id": rec.ID, "name": rec.Name, "enabled": rec.Enabled, "path": rec.Path, "version": rec.Version, "status": rec.Status, "error": rec.Error, "skillId": rec.SkillID, "title": rec.Title, "description": rec.Description})
 	}
-	rows.Close()
 	unregistered := []string{}
 	if remote, selected, err := h.remoteWorkspace(r.Context(), p.TenantID, agent); err == nil && selected {
 		_, entries, _ := remote.list(r.Context(), "/skills")
@@ -370,12 +349,14 @@ func (h *handler) attachSkill(w http.ResponseWriter, r *http.Request) {
 				b.Name = parts[len(parts)-1]
 			}
 		}
-		_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id FROM skills WHERE tenant_id=? AND name=?`), p.TenantID, slugify(b.Name)).Scan(&b.SkillID)
+		var found models.Skill
+		if err := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND name = ?", p.TenantID, slugify(b.Name)).Take(&found).Error; err == nil && found.ID != nil {
+			b.SkillID = *found.ID
+		}
 	}
-	var name string
-	var version *string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT name,version FROM skills WHERE tenant_id=? AND id=?`), p.TenantID, b.SkillID).Scan(&name, &version)
-	if errors.Is(e, sql.ErrNoRows) {
+	var sm models.Skill
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, b.SkillID).Take(&sm).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -383,6 +364,8 @@ func (h *handler) attachSkill(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	name := sm.Name
+	version := sm.Version
 	if b.Name != "" {
 		name = slugify(b.Name)
 	}
@@ -391,8 +374,9 @@ func (h *handler) attachSkill(w http.ResponseWriter, r *http.Request) {
 		enabled = *b.Enabled
 	}
 	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO agent_skills(id,tenant_id,agent_id,skill_id,name,enabled,path,version,status,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'installed',NULL,?,?)`), h.store.id(), p.TenantID, agent, b.SkillID, name, enabled, "/skills/"+name, version, now, now)
-	if e != nil {
+	asID := h.store.id()
+	as := models.AgentSkill{ID: &asID, TenantID: p.TenantID, AgentID: agent, SkillID: b.SkillID, Name: name, Enabled: enabled, Path: "/skills/" + name, Version: version, Status: "installed", CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&as).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -410,42 +394,47 @@ func (h *handler) patchAgentSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE agent_skills SET enabled=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND name=?`), b.Enabled, h.store.now(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentSkill{}).Where("tenant_id = ? AND agent_id = ? AND name = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Updates(map[string]any{"enabled": b.Enabled, "updated_at": runtimeTimeString(h.store.now())})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT a.id,a.name,a.enabled,a.path,a.version,a.status,a.error,a.skill_id,s.title,s.description FROM agent_skills a JOIN skills s ON s.id=a.skill_id WHERE a.tenant_id=? AND a.agent_id=? AND a.name=?`), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name"))
+	type agentSkillRow struct {
+		ID          string
+		Name        string
+		Enabled     bool
+		Path        string
+		Version     *string
+		Status      string
+		Error       *string
+		SkillID     string `gorm:"column:skill_id"`
+		Title       string
+		Description string
+	}
+	var rec agentSkillRow
+	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_skills AS a").Select("a.id AS id, a.name AS name, a.enabled AS enabled, a.path AS path, a.version AS version, a.status AS status, a.error AS error, a.skill_id AS skill_id, s.title AS title, s.description AS description").Joins("JOIN skills s ON s.id = a.skill_id").Where("a.tenant_id = ? AND a.agent_id = ? AND a.name = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Take(&rec).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		statusErr(w, ErrNotFound)
+		return
+	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	if rows.Next() {
-		var id, name, path, status, skillID, title, description string
-		var enabled bool
-		var version, errText *string
-		if rows.Scan(&id, &name, &enabled, &path, &version, &status, &errText, &skillID, &title, &description) == nil {
-			httpx.JSON(w, http.StatusOK, map[string]any{"skill": map[string]any{"id": id, "name": name, "enabled": enabled, "path": path, "version": version, "status": status, "error": errText, "skillId": skillID, "title": title, "description": description}})
-			return
-		}
-	}
-	statusErr(w, ErrNotFound)
+	httpx.JSON(w, http.StatusOK, map[string]any{"skill": map[string]any{"id": rec.ID, "name": rec.Name, "enabled": rec.Enabled, "path": rec.Path, "version": rec.Version, "status": rec.Status, "error": rec.Error, "skillId": rec.SkillID, "title": rec.Title, "description": rec.Description}})
 }
 func (h *handler) detachSkill(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM agent_skills WHERE tenant_id=? AND agent_id=? AND name=?`), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ? AND name = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Delete(&models.AgentSkill{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -453,9 +442,11 @@ func (h *handler) detachSkill(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) getAgentSkillFile(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var filesRaw string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.files_json FROM agent_skills a JOIN skills s ON s.id=a.skill_id WHERE a.tenant_id=? AND a.agent_id=? AND a.name=?`), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Scan(&filesRaw)
-	if errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		FilesJSON string `gorm:"column:files_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_skills AS a").Select("s.files_json AS files_json").Joins("JOIN skills s ON s.id = a.skill_id").Where("a.tenant_id = ? AND a.agent_id = ? AND a.name = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "name")).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -463,6 +454,7 @@ func (h *handler) getAgentSkillFile(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	filesRaw := row.FilesJSON
 	requested := path.Clean(strings.TrimPrefix(r.URL.Query().Get("path"), "/"))
 	var files []skillFile
 	_ = json.Unmarshal([]byte(filesRaw), &files)
@@ -499,7 +491,13 @@ func memoryProviderKindMeta(kind string) map[string]any {
 	return map[string]any{"kind": kind, "name": kind, "description": "", "storesLocally": false}
 }
 
-func (h *handler) memoryProviderDTO(id, tenant, name, slug, kind, configRaw string, isDefault bool, status string, lastError *string, created, updated flexibleTime) map[string]any {
+func memoryProviderTime(v string) time.Time {
+	var t flexibleTime
+	_ = t.Scan(v)
+	return t.Time
+}
+
+func (h *handler) memoryProviderDTO(id, tenant, name, slug, kind, configRaw string, isDefault bool, status string, lastError *string, created, updated time.Time) map[string]any {
 	config := map[string]any{}
 	_ = json.Unmarshal([]byte(configRaw), &config)
 	configured := false
@@ -515,40 +513,34 @@ func (h *handler) memoryProviderDTO(id, tenant, name, slug, kind, configRaw stri
 	} else {
 		delete(config, "apiKey")
 	}
-	return map[string]any{"id": id, "tenantId": tenant, "name": name, "slug": slug, "kind": kind, "config": config, "isDefault": isDefault, "status": status, "lastError": lastError, "createdAt": created.Time, "updatedAt": updated.Time, "meta": memoryProviderKindMeta(kind)}
+	return map[string]any{"id": id, "tenantId": tenant, "name": name, "slug": slug, "kind": kind, "config": config, "isDefault": isDefault, "status": status, "lastError": lastError, "createdAt": created, "updatedAt": updated, "meta": memoryProviderKindMeta(kind)}
 }
 
 func (h *handler) listMemoryProviders(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,tenant_id,name,slug,kind,config_json,is_default,status,last_error,created_at,updated_at FROM memory_providers WHERE tenant_id=? ORDER BY created_at`), p.TenantID)
-	if e != nil {
+	var ms []models.MemoryProvider
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, tenant, name, slug, kind, cfg, status string
-		var isDefault bool
-		var lastError *string
-		var c, u flexibleTime
-		if rows.Scan(&id, &tenant, &name, &slug, &kind, &cfg, &isDefault, &status, &lastError, &c, &u) != nil {
-			continue
+	out := make([]map[string]any, 0, len(ms))
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
-		out = append(out, h.memoryProviderDTO(id, tenant, name, slug, kind, cfg, isDefault, status, lastError, c, u))
+		out = append(out, h.memoryProviderDTO(id, m.TenantID, m.Name, m.Slug, m.Kind, m.ConfigJSON, m.IsDefault, m.Status, m.LastError, memoryProviderTime(m.CreatedAt), memoryProviderTime(m.UpdatedAt)))
 	}
 	agents := []map[string]any{}
-	agentRows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,name,slug,enable_memory,memory_provider_id FROM agents WHERE tenant_id=? ORDER BY name`), p.TenantID)
-	if e == nil {
-		for agentRows.Next() {
-			var id, name, slug string
-			var enabled bool
-			var providerID *string
-			if agentRows.Scan(&id, &name, &slug, &enabled, &providerID) == nil {
-				agents = append(agents, map[string]any{"id": id, "name": name, "slug": slug, "enableMemory": enabled, "memoryProviderId": providerID})
+	var ams []models.Agent
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("name").Find(&ams).Error; e == nil {
+		for _, a := range ams {
+			id := ""
+			if a.ID != nil {
+				id = *a.ID
 			}
+			agents = append(agents, map[string]any{"id": id, "name": a.Name, "slug": a.Slug, "enableMemory": a.EnableMemory, "memoryProviderId": a.MemoryProviderID})
 		}
-		agentRows.Close()
 	}
 	httpx.JSON(w, 200, map[string]any{"providers": out, "agents": agents, "kinds": memoryProviderKinds(), "note": "Manage memory providers here; select one for each Agent on its memory page."})
 }
@@ -586,37 +578,36 @@ func (h *handler) createMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		b.Config["apiKeyEnc"] = enc
 	}
 	now := h.store.now()
-	var existing int
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM memory_providers WHERE tenant_id=?`), p.TenantID).Scan(&existing)
+	nowStr := runtimeTimeString(now)
+	var existing int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.MemoryProvider{}).Where("tenant_id = ?", p.TenantID).Count(&existing).Error
 	if existing == 0 {
 		b.IsDefault = true
 	}
 	if b.IsDefault {
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE memory_providers SET is_default=FALSE,updated_at=? WHERE tenant_id=?`), now, p.TenantID)
+		h.deps.Gorm.WithContext(r.Context()).Model(&models.MemoryProvider{}).Where("tenant_id = ?", p.TenantID).Updates(map[string]any{"is_default": false, "updated_at": nowStr})
 	}
 	configRaw, _ := json.Marshal(b.Config)
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO memory_providers(id,tenant_id,name,slug,kind,config_json,secret_json,enabled,is_default,status,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?, '{}',TRUE,?,'ready',NULL,?,?)`), id, p.TenantID, strings.TrimSpace(b.Name), strings.ToLower(b.Slug), b.Kind, string(configRaw), b.IsDefault, now, now)
-	if e != nil {
+	m := models.MemoryProvider{ID: &id, TenantID: p.TenantID, Name: strings.TrimSpace(b.Name), Slug: strings.ToLower(b.Slug), Kind: b.Kind, ConfigJSON: string(configRaw), SecretJSON: "{}", Enabled: true, IsDefault: b.IsDefault, Status: "ready", CreatedAt: nowStr, UpdatedAt: nowStr}
+	if e := h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	var tenant, name, slug, kind, stored, status string
-	var isDefault bool
-	var lastError *string
-	var c, u flexibleTime
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT tenant_id,name,slug,kind,config_json,is_default,status,last_error,created_at,updated_at FROM memory_providers WHERE id=?`), id).Scan(&tenant, &name, &slug, &kind, &stored, &isDefault, &status, &lastError, &c, &u); e != nil {
+	var stored models.MemoryProvider
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("id = ?", id).Take(&stored).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, h.memoryProviderDTO(id, tenant, name, slug, kind, stored, isDefault, status, lastError, c, u))
+	sid := id
+	if stored.ID != nil {
+		sid = *stored.ID
+	}
+	httpx.JSON(w, http.StatusCreated, h.memoryProviderDTO(sid, stored.TenantID, stored.Name, stored.Slug, stored.Kind, stored.ConfigJSON, stored.IsDefault, stored.Status, stored.LastError, memoryProviderTime(stored.CreatedAt), memoryProviderTime(stored.UpdatedAt)))
 }
 func (h *handler) getMemoryProvider(w http.ResponseWriter, r *http.Request) {
-	var id, tenant, name, slug, kind, cfg, status string
-	var isDefault bool
-	var lastError *string
-	var c, u flexibleTime
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,tenant_id,name,slug,kind,config_json,is_default,status,last_error,created_at,updated_at FROM memory_providers WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id")).Scan(&id, &tenant, &name, &slug, &kind, &cfg, &isDefault, &status, &lastError, &c, &u)
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.MemoryProvider
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -624,7 +615,11 @@ func (h *handler) getMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, h.memoryProviderDTO(id, tenant, name, slug, kind, cfg, isDefault, status, lastError, c, u))
+	id := ""
+	if m.ID != nil {
+		id = *m.ID
+	}
+	httpx.JSON(w, 200, h.memoryProviderDTO(id, m.TenantID, m.Name, m.Slug, m.Kind, m.ConfigJSON, m.IsDefault, m.Status, m.LastError, memoryProviderTime(m.CreatedAt), memoryProviderTime(m.UpdatedAt)))
 }
 func (h *handler) patchMemoryProvider(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -637,22 +632,22 @@ func (h *handler) patchMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	sets := []string{}
-	args := []any{}
+	updates := map[string]any{}
 	for k, col := range map[string]string{"name": "name", "status": "status", "lastError": "last_error"} {
 		if v, ok := m[k]; ok {
-			sets = append(sets, col+"=?")
-			args = append(args, v)
+			updates[col] = v
 		}
 	}
 	if v, ok := m["config"]; ok {
-		var existingRaw string
-		if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT config_json FROM memory_providers WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&existingRaw); e != nil {
+		var existingRow struct {
+			ConfigJSON string `gorm:"column:config_json"`
+		}
+		if e = h.deps.Gorm.WithContext(r.Context()).Table("memory_providers").Select("config_json").Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&existingRow).Error; e != nil {
 			statusErr(w, ErrNotFound)
 			return
 		}
 		existing := map[string]any{}
-		_ = json.Unmarshal([]byte(existingRaw), &existing)
+		_ = json.Unmarshal([]byte(existingRow.ConfigJSON), &existing)
 		patch, _ := v.(map[string]any)
 		for key, value := range patch {
 			existing[key] = value
@@ -672,26 +667,23 @@ func (h *handler) patchMemoryProvider(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		b, _ := json.Marshal(existing)
-		sets = append(sets, "config_json=?")
-		args = append(args, string(b))
+		updates["config_json"] = string(b)
 	}
 	if value, ok := m["isDefault"].(bool); ok && value {
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE memory_providers SET is_default=FALSE,updated_at=? WHERE tenant_id=?`), h.store.now(), p.TenantID)
-		sets = append(sets, "is_default=TRUE")
+		h.deps.Gorm.WithContext(r.Context()).Model(&models.MemoryProvider{}).Where("tenant_id = ?", p.TenantID).Updates(map[string]any{"is_default": false, "updated_at": runtimeTimeString(h.store.now())})
+		updates["is_default"] = true
 	}
-	if len(sets) == 0 {
+	if len(updates) == 0 {
 		h.getMemoryProvider(w, r)
 		return
 	}
-	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), p.TenantID, chi.URLParam(r, "id"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE memory_providers SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	updates["updated_at"] = runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.MemoryProvider{}).Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Updates(updates)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -703,26 +695,28 @@ func (h *handler) deleteMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "Admin only")
 		return
 	}
-	var bound int
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM agents WHERE tenant_id=? AND memory_provider_id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&bound)
+	var bound int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ? AND memory_provider_id = ?", p.TenantID, chi.URLParam(r, "id")).Count(&bound).Error
 	if bound > 0 {
 		httpx.Error(w, http.StatusBadRequest, "agents are still bound to this provider")
 		return
 	}
 	var wasDefault bool
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT is_default FROM memory_providers WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&wasDefault)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM memory_providers WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	var mp models.MemoryProvider
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&mp).Error; e == nil {
+		wasDefault = mp.IsDefault
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Delete(&models.MemoryProvider{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	if wasDefault {
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE memory_providers SET is_default=TRUE,updated_at=? WHERE id=(SELECT id FROM memory_providers WHERE tenant_id=? ORDER BY created_at,id LIMIT 1)`), h.store.now(), p.TenantID)
+		h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE memory_providers SET is_default=TRUE,updated_at=? WHERE id=(SELECT id FROM memory_providers WHERE tenant_id=? ORDER BY created_at,id LIMIT 1)`, runtimeTimeString(h.store.now()), p.TenantID)
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
@@ -732,14 +726,18 @@ func (h *handler) healthMemoryProvider(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "Admin only")
 		return
 	}
-	var kind, cfgRaw string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT kind,config_json FROM memory_providers WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&kind, &cfgRaw); errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		Kind       string
+		ConfigJSON string `gorm:"column:config_json"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("memory_providers").Select("kind, config_json").Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&row).Error; errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	} else if e != nil {
 		statusErr(w, e)
 		return
 	}
+	kind, cfgRaw := row.Kind, row.ConfigJSON
 	if kind == "builtin" || kind == "traditional" {
 		httpx.JSON(w, http.StatusOK, map[string]any{"status": "healthy", "message": "local store"})
 		return
@@ -774,5 +772,3 @@ func (h *handler) healthMemoryProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"status": status, "message": resp.Status})
 }
-
-var _ = strconv.Itoa

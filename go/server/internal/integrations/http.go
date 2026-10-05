@@ -15,11 +15,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	internalruntime "github.com/Moonrend/Zakura/go/server/internal/runtime"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+func strPtr(v string) *string { return &v }
 
 type handler struct {
 	deps           *appdeps.Dependencies
@@ -94,7 +99,7 @@ func (h *handler) id() string {
 }
 func principal(r *http.Request) httpx.Principal { p, _ := httpx.PrincipalFrom(r.Context()); return p }
 func writeErr(w http.ResponseWriter, e error) {
-	if errors.Is(e, sql.ErrNoRows) {
+	if errors.Is(e, sql.ErrNoRows) || errors.Is(e, gorm.ErrRecordNotFound) {
 		httpx.Error(w, 404, "Not found")
 	} else {
 		httpx.Error(w, 400, e.Error())
@@ -104,21 +109,17 @@ func validRef(ref string) bool { _, ok := provider(ref); return ok }
 
 func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT connector_ref,enabled,created_at,updated_at FROM agent_connector_installations WHERE tenant_id=?`), p.TenantID)
-	if e != nil {
+	var installs []models.AgentConnectorInstallation
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Find(&installs).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
 	installed := map[string]int{}
-	for rows.Next() {
-		var ref string
-		var enabled bool
-		var c, u string
-		if rows.Scan(&ref, &enabled, &c, &u) == nil && enabled {
-			installed[ref]++
+	for _, row := range installs {
+		if row.Enabled {
+			installed[row.ConnectorRef]++
 		}
 	}
-	rows.Close()
 	type profileState struct {
 		scope   string
 		label   string
@@ -126,20 +127,17 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 		enabled bool
 	}
 	profiles := map[string]profileState{}
-	prows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT scope_key,profile_key,label,enabled,config_enc FROM connector_auth_profiles WHERE scope_key IN (?, 'platform') ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END`), p.TenantID, p.TenantID)
-	if e == nil {
-		defer prows.Close()
-		for prows.Next() {
-			var scope, key, label, enc string
-			var enabled bool
-			if prows.Scan(&scope, &key, &label, &enabled, &enc) != nil {
-				continue
-			}
-			if _, exists := profiles[key]; exists {
+	var prows []models.ConnectorAuthProfile
+	if e := h.deps.Gorm.WithContext(r.Context()).
+		Where("scope_key IN ?", []string{p.TenantID, "platform"}).
+		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN scope_key = ? THEN 0 ELSE 1 END", Vars: []any{p.TenantID}}}).
+		Find(&prows).Error; e == nil {
+		for _, row := range prows {
+			if _, exists := profiles[row.ProfileKey]; exists {
 				continue
 			}
 			fields := []string{}
-			if raw, de := decrypt(h.deps.Secret, scope+":"+key, enc); de == nil {
+			if raw, de := decrypt(h.deps.Secret, row.ScopeKey+":"+row.ProfileKey, row.ConfigEnc); de == nil {
 				var cfg map[string]any
 				if json.Unmarshal(raw, &cfg) == nil {
 					for k, v := range cfg {
@@ -149,7 +147,7 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			profiles[key] = profileState{scope: scope, label: label, fields: fields, enabled: enabled}
+			profiles[row.ProfileKey] = profileState{scope: row.ScopeKey, label: row.Label, fields: fields, enabled: row.Enabled}
 		}
 	}
 	items := make([]map[string]any, 0, len(providers))
@@ -196,21 +194,18 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,profile_key,label,kind,enabled,config_enc,created_at,updated_at FROM connector_auth_profiles WHERE scope_key IN (?, 'platform') ORDER BY scope_key DESC,profile_key`), p.TenantID)
-	if e != nil {
+	var rows []models.ConnectorAuthProfile
+	if e := h.deps.Gorm.WithContext(r.Context()).
+		Where("scope_key IN ?", []string{p.TenantID, "platform"}).
+		Order("scope_key DESC,profile_key").
+		Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, key, label, kind, enc, c, u string
-		var enabled bool
-		if rows.Scan(&id, &key, &label, &kind, &enabled, &enc, &c, &u) != nil {
-			continue
-		}
+	for _, row := range rows {
 		fields := []string{}
-		if raw, e := decrypt(h.deps.Secret, p.TenantID+":"+key, enc); e == nil {
+		if raw, e := decrypt(h.deps.Secret, p.TenantID+":"+row.ProfileKey, row.ConfigEnc); e == nil {
 			var cfg map[string]any
 			if json.Unmarshal(raw, &cfg) == nil {
 				for k, v := range cfg {
@@ -220,7 +215,7 @@ func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		items = append(items, map[string]any{"id": id, "profileKey": key, "label": label, "kind": kind, "enabled": enabled, "configuredFields": fields, "createdAt": c, "updatedAt": u})
+		items = append(items, map[string]any{"id": *row.ID, "profileKey": row.ProfileKey, "label": row.Label, "kind": row.Kind, "enabled": row.Enabled, "configuredFields": fields, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"profiles": items})
 }
@@ -248,8 +243,12 @@ func (h *handler) putProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	now := h.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO connector_auth_profiles(id,scope_key,profile_key,label,kind,enabled,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(scope_key,profile_key) DO UPDATE SET label=?,kind=?,enabled=?,config_enc=?,updated_at=?`), h.id(), p.TenantID, key, b.Label, b.Kind, enabled, enc, now, now, b.Label, b.Kind, enabled, enc, now)
+	now := h.now().Format(time.RFC3339Nano)
+	row := models.ConnectorAuthProfile{ID: strPtr(h.id()), ScopeKey: p.TenantID, ProfileKey: key, Label: b.Label, Kind: b.Kind, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "scope_key"}, {Name: "profile_key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"label", "kind", "enabled", "config_enc", "updated_at"}),
+	}).Create(&row).Error
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -258,42 +257,39 @@ func (h *handler) putProfile(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM connector_auth_profiles WHERE scope_key=? AND profile_key=?`), p.TenantID, chi.URLParam(r, "profileKey"))
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ? AND profile_key = ?", p.TenantID, chi.URLParam(r, "profileKey")).Delete(&models.ConnectorAuthProfile{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) sharedOAuth(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT profile_key,label,kind,enabled FROM connector_auth_profiles WHERE scope_key='platform' AND enabled=true ORDER BY profile_key`))
-	if e != nil {
+	var rows []models.ConnectorAuthProfile
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ? AND enabled = true", "platform").Order("profile_key").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var key, label, kind string
-		var enabled bool
-		if rows.Scan(&key, &label, &kind, &enabled) == nil {
-			items = append(items, map[string]any{"profileKey": key, "label": label, "kind": kind, "enabled": enabled})
-		}
+	for _, row := range rows {
+		items = append(items, map[string]any{"profileKey": row.ProfileKey, "label": row.Label, "kind": row.Kind, "enabled": row.Enabled})
 	}
 	httpx.JSON(w, 200, map[string]any{"profiles": items})
 }
 func (h *handler) profileConfig(ctx context.Context, tenant, key string) (map[string]any, error) {
-	var scope, enc string
-	e := h.deps.DB.QueryRowContext(ctx, h.q(`SELECT scope_key,config_enc FROM connector_auth_profiles WHERE scope_key IN (?, 'platform') AND profile_key=? AND enabled=true ORDER BY CASE WHEN scope_key=? THEN 0 ELSE 1 END LIMIT 1`), tenant, key, tenant).Scan(&scope, &enc)
+	var row models.ConnectorAuthProfile
+	e := h.deps.Gorm.WithContext(ctx).
+		Where("scope_key IN ? AND profile_key = ? AND enabled = true", []string{tenant, "platform"}, key).
+		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN scope_key = ? THEN 0 ELSE 1 END", Vars: []any{tenant}}}).
+		First(&row).Error
 	if e != nil {
 		return nil, e
 	}
-	raw, e := decrypt(h.deps.Secret, scope+":"+key, enc)
+	raw, e := decrypt(h.deps.Secret, row.ScopeKey+":"+key, row.ConfigEnc)
 	if e != nil {
 		return nil, e
 	}
@@ -367,8 +363,8 @@ func (h *handler) install(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "agentId required")
 		return
 	}
-	var count int
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT COUNT(*) FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, b.AgentID).Scan(&count); e != nil || count == 0 {
+	var count int64
+	if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ? AND id = ?", p.TenantID, b.AgentID).Count(&count).Error; e != nil || count == 0 {
 		httpx.Error(w, 404, "Agent not found")
 		return
 	}
@@ -383,8 +379,12 @@ func (h *handler) install(w http.ResponseWriter, r *http.Request) {
 	if b.Enabled != nil {
 		enabled = *b.Enabled
 	}
-	now := h.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO agent_connector_installations(id,tenant_id,agent_id,connector_ref,enabled,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,connector_ref) DO UPDATE SET enabled=?,config_enc=?,updated_at=?`), h.id(), p.TenantID, b.AgentID, ref, enabled, enc, now, now, enabled, enc, now)
+	now := h.now().Format(time.RFC3339Nano)
+	row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: b.AgentID, ConnectorRef: ref, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
+		DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
+	}).Create(&row).Error
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -393,13 +393,12 @@ func (h *handler) install(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) uninstall(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM agent_connector_installations WHERE tenant_id=? AND agent_id=? AND connector_ref=?`), p.TenantID, chi.URLParam(r, "agentId"), chi.URLParam(r, "ref"))
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ?", p.TenantID, chi.URLParam(r, "agentId"), chi.URLParam(r, "ref")).Delete(&models.AgentConnectorInstallation{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -407,20 +406,15 @@ func (h *handler) uninstall(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listAgentConnectors(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,connector_ref,enabled,created_at,updated_at FROM agent_connector_installations WHERE tenant_id=? AND agent_id=? ORDER BY connector_ref`), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
+	var rows []models.AgentConnectorInstallation
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ?", p.TenantID, chi.URLParam(r, "id")).Order("connector_ref").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, ref, c, u string
-		var enabled bool
-		if rows.Scan(&id, &ref, &enabled, &c, &u) == nil {
-			pr, _ := provider(ref)
-			items = append(items, map[string]any{"id": id, "ref": ref, "name": pr.Name, "enabled": enabled, "createdAt": c, "updatedAt": u})
-		}
+	for _, row := range rows {
+		pr, _ := provider(row.ConnectorRef)
+		items = append(items, map[string]any{"id": *row.ID, "ref": row.ConnectorRef, "name": pr.Name, "enabled": row.Enabled, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"connectors": items})
 }
@@ -434,15 +428,17 @@ func (h *handler) updateCredentials(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	var agent, ref string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT agent_id,connector_ref FROM agent_connector_installations WHERE tenant_id=? AND id=?`), p.TenantID, id).Scan(&agent, &ref)
+	var row models.AgentConnectorInstallation
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, id).First(&row).Error
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+ref, b.Config)
+	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+row.AgentID+":"+row.ConnectorRef, b.Config)
 	if e == nil {
-		_, e = h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE agent_connector_installations SET config_enc=?,updated_at=? WHERE tenant_id=? AND id=?`), enc, h.now(), p.TenantID, id)
+		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
+			Where("tenant_id = ? AND id = ?", p.TenantID, id).
+			Updates(map[string]any{"config_enc": enc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error
 	}
 	if e != nil {
 		writeErr(w, e)
@@ -467,8 +463,12 @@ func (h *handler) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	now := h.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO connector_settings(id,scope_key,connector_ref,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(scope_key,connector_ref) DO UPDATE SET config_enc=?,updated_at=?`), h.id(), p.TenantID, ref, enc, now, now, enc, now)
+	now := h.now().Format(time.RFC3339Nano)
+	row := models.ConnectorSetting{ID: strPtr(h.id()), ScopeKey: p.TenantID, ConnectorRef: ref, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "scope_key"}, {Name: "connector_ref"}},
+		DoUpdates: clause.AssignmentColumns([]string{"config_enc", "updated_at"}),
+	}).Create(&row).Error
 	if e != nil {
 		writeErr(w, e)
 		return

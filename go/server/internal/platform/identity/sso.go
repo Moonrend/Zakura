@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
+
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -104,7 +107,32 @@ func validSSOURL(raw string) bool {
 
 func (s *Service) loadSSO(ctx context.Context, slug string) (ssoConfig, error) {
 	var c ssoConfig
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT t.id,t.slug,t.name,c.protocol,COALESCE(c.issuer,''),COALESCE(c.client_id,''),COALESCE(c.client_secret_enc,''),COALESCE(c.authorize_url,''),COALESCE(c.token_url,''),COALESCE(c.jwks_url,''),COALESCE(c.userinfo_url,''),c.scopes,COALESCE(c.idp_entity_id,''),COALESCE(c.idp_sso_url,''),COALESCE(c.idp_certificate_enc,''),c.jit_enabled,c.enforce_sso,c.default_role FROM tenants t JOIN tenant_sso_configs c ON c.tenant_id=t.id WHERE t.slug=? AND t.status='active' AND c.enabled=TRUE`), slug).Scan(&c.TenantID, &c.TenantSlug, &c.TenantName, &c.Protocol, &c.Issuer, &c.ClientID, &c.ClientSecretEnc, &c.AuthorizeURL, &c.TokenURL, &c.JWKSURL, &c.UserinfoURL, &c.Scopes, &c.IDPEntityID, &c.IDPSSOURL, &c.IDPCertificateEnc, &c.JIT, &c.Enforce, &c.DefaultRole)
+	var row struct {
+		TenantID          string `gorm:"column:tenant_id"`
+		TenantSlug        string `gorm:"column:tenant_slug"`
+		TenantName        string `gorm:"column:tenant_name"`
+		Protocol          string `gorm:"column:protocol"`
+		Issuer            string `gorm:"column:issuer"`
+		ClientID          string `gorm:"column:client_id"`
+		ClientSecretEnc   string `gorm:"column:client_secret_enc"`
+		AuthorizeURL      string `gorm:"column:authorize_url"`
+		TokenURL          string `gorm:"column:token_url"`
+		JWKSURL           string `gorm:"column:jwks_url"`
+		UserinfoURL       string `gorm:"column:userinfo_url"`
+		Scopes            string `gorm:"column:scopes"`
+		IDPEntityID       string `gorm:"column:idp_entity_id"`
+		IDPSSOURL         string `gorm:"column:idp_sso_url"`
+		IDPCertificateEnc string `gorm:"column:idp_certificate_enc"`
+		JIT               bool   `gorm:"column:jit_enabled"`
+		Enforce           bool   `gorm:"column:enforce_sso"`
+		DefaultRole       string `gorm:"column:default_role"`
+	}
+	err := s.gdb(ctx).Table("tenants AS t").
+		Select("t.id AS tenant_id,t.slug AS tenant_slug,t.name AS tenant_name,c.protocol,COALESCE(c.issuer,'') AS issuer,COALESCE(c.client_id,'') AS client_id,COALESCE(c.client_secret_enc,'') AS client_secret_enc,COALESCE(c.authorize_url,'') AS authorize_url,COALESCE(c.token_url,'') AS token_url,COALESCE(c.jwks_url,'') AS jwks_url,COALESCE(c.userinfo_url,'') AS userinfo_url,c.scopes,COALESCE(c.idp_entity_id,'') AS idp_entity_id,COALESCE(c.idp_sso_url,'') AS idp_sso_url,COALESCE(c.idp_certificate_enc,'') AS idp_certificate_enc,c.jit_enabled,c.enforce_sso,c.default_role").
+		Joins("JOIN tenant_sso_configs c ON c.tenant_id = t.id").
+		Where("t.slug = ? AND t.status = 'active' AND c.enabled = ?", slug, true).
+		Take(&row).Error
+	c = ssoConfig{TenantID: row.TenantID, TenantSlug: row.TenantSlug, TenantName: row.TenantName, Protocol: row.Protocol, Issuer: row.Issuer, ClientID: row.ClientID, ClientSecretEnc: row.ClientSecretEnc, AuthorizeURL: row.AuthorizeURL, TokenURL: row.TokenURL, JWKSURL: row.JWKSURL, UserinfoURL: row.UserinfoURL, Scopes: row.Scopes, IDPEntityID: row.IDPEntityID, IDPSSOURL: row.IDPSSOURL, IDPCertificateEnc: row.IDPCertificateEnc, JIT: row.JIT, Enforce: row.Enforce, DefaultRole: row.DefaultRole}
 	return c, err
 }
 func (s *Service) discoverSSO(w http.ResponseWriter, r *http.Request) {
@@ -116,14 +144,22 @@ func (s *Service) discoverSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	domain := strings.ToLower(strings.TrimSpace(strings.SplitN(b.Email, "@", 2)[1]))
-	var slug, protocol string
-	var required bool
-	err := s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT t.slug,c.protocol,(c.enforce_sso OR d.join_mode='sso_required') FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN tenant_sso_configs c ON c.tenant_id=t.id WHERE d.domain=? AND d.verified_at IS NOT NULL AND c.enabled=TRUE AND t.status='active'`), domain).Scan(&slug, &protocol, &required)
+	var row struct {
+		Slug     string `gorm:"column:slug"`
+		Protocol string `gorm:"column:protocol"`
+		Required bool   `gorm:"column:required"`
+	}
+	err := s.gdb(r.Context()).Table("tenant_domains AS d").
+		Select("t.slug AS slug,c.protocol,(c.enforce_sso OR d.join_mode='sso_required') AS required").
+		Joins("JOIN tenants t ON t.id = d.tenant_id").
+		Joins("JOIN tenant_sso_configs c ON c.tenant_id = t.id").
+		Where("d.domain = ? AND d.verified_at IS NOT NULL AND c.enabled = ? AND t.status = ?", domain, true, "active").
+		Take(&row).Error
 	if err != nil {
 		httpx.JSON(w, 200, map[string]any{"sso": false})
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"sso": true, "required": required, "protocol": protocol, "tenantSlug": slug})
+	httpx.JSON(w, 200, map[string]any{"sso": true, "required": row.Required, "protocol": row.Protocol, "tenantSlug": row.Slug})
 }
 func (s *Service) startSSO(w http.ResponseWriter, r *http.Request) {
 	protocol := httpx.Param(r, "protocol")
@@ -138,7 +174,16 @@ func (s *Service) startSSO(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimSpace(b.TenantSlug)
 	if slug == "" && strings.Contains(b.Email, "@") {
 		domain := strings.ToLower(strings.TrimSpace(strings.SplitN(b.Email, "@", 2)[1]))
-		_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT t.slug FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.domain=? AND d.verified_at IS NOT NULL`), domain).Scan(&slug)
+		var row struct {
+			Slug string `gorm:"column:slug"`
+		}
+		if s.gdb(r.Context()).Table("tenant_domains AS d").
+			Select("t.slug AS slug").
+			Joins("JOIN tenants t ON t.id = d.tenant_id").
+			Where("d.domain = ? AND d.verified_at IS NOT NULL", domain).
+			Take(&row).Error == nil {
+			slug = row.Slug
+		}
 	}
 	if slug == "" {
 		httpx.Error(w, 400, "unable to determine tenant")
@@ -158,7 +203,7 @@ func (s *Service) startSSO(w http.ResponseWriter, r *http.Request) {
 	state := mustToken(24)
 	verifier := mustToken(48)
 	nonce := mustToken(24)
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO sso_login_states(id,tenant_id,protocol,code_verifier,nonce,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`), state, cfg.TenantID, protocol, verifier, nonce, s.deps.Clock().UTC().Add(10*time.Minute).Format(time.RFC3339Nano), s.now())
+	err = s.gdb(r.Context()).Create(&models.SsoLoginState{ID: &state, TenantID: cfg.TenantID, Protocol: protocol, CodeVerifier: &verifier, Nonce: &nonce, ExpiresAt: s.deps.Clock().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "state persistence failed")
 		return
@@ -367,13 +412,18 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 	email = strings.ToLower(strings.TrimSpace(email))
 	var uid, status string
 	var admin bool
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,status,is_platform_admin FROM users WHERE email=?`), email).Scan(&uid, &status, &admin)
-	if errors.Is(err, sql.ErrNoRows) {
+	var account models.User
+	err := s.gdb(ctx).Select("id,status,is_platform_admin").Where("email = ?", email).Take(&account).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		if !cfg.JIT {
 			return nil, errors.New("account is not provisioned")
 		}
 		uid = s.deps.NewID()
-		_, err = s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO users(id,email,name,is_platform_admin,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,FALSE,'active',?,?,?)`), uid, email, name, s.now(), s.now(), s.now())
+		now := s.now()
+		nameValue := name
+		err = s.gdb(ctx).Create(&models.User{ID: &uid, Email: email, Name: &nameValue, Status: "active", EmailVerifiedAt: &now, CreatedAt: now, UpdatedAt: now}).Error
+	} else if err == nil {
+		uid, status, admin = derefString(account.ID), account.Status, account.IsPlatformAdmin
 	}
 	if err != nil || status == "suspended" {
 		return nil, errors.New("account suspended")
@@ -382,20 +432,23 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 	if role != "owner" && role != "admin" && role != "member" {
 		role = "member"
 	}
-	_, err = s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,?,'active',?,?) ON CONFLICT(tenant_id,user_id) DO UPDATE SET status='active',updated_at=excluded.updated_at`), s.deps.NewID(), cfg.TenantID, uid, role, s.now(), s.now())
+	now := s.now()
+	err = s.gdb(ctx).Exec(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,?,'active',?,?) ON CONFLICT(tenant_id,user_id) DO UPDATE SET status='active',updated_at=excluded.updated_at`, s.deps.NewID(), cfg.TenantID, uid, role, now, now).Error
 	if err != nil {
 		return nil, errors.New("membership update failed")
 	}
 	t := Tenant{ID: cfg.TenantID, Slug: cfg.TenantSlug, Name: cfg.TenantName}
 	u := User{ID: uid, Email: email, Name: name, IsPlatformAdmin: admin}
-	var totp sql.NullString
-	var passkeys int
-	var policy string
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT totp_enabled_at FROM users WHERE id=?`), uid).Scan(&totp)
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM user_webauthn_credentials WHERE user_id=?`), uid).Scan(&passkeys)
-	_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT mfa_policy FROM tenants WHERE id=?`), cfg.TenantID).Scan(&policy)
+	var totpUser models.User
+	var policyTenant models.Tenant
+	var passkeys int64
+	_ = s.gdb(ctx).Select("totp_enabled_at").Where("id = ?", uid).Take(&totpUser).Error
+	_ = s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", uid).Count(&passkeys).Error
+	_ = s.gdb(ctx).Select("mfa_policy").Where("id = ?", cfg.TenantID).Take(&policyTenant).Error
+	totpEnabled := totpUser.TotpEnabledAt != nil
+	policy := policyTenant.MfaPolicy
 	methods := []string{}
-	if totp.Valid {
+	if totpEnabled {
 		methods = append(methods, "totp", "recovery")
 	}
 	if passkeys > 0 {

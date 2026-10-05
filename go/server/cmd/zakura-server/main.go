@@ -39,7 +39,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	deps := platformserver.NewDependencies(cfg, conn.DB, conn.Dialect, conn.Rebind)
+	gormDB, gormErr := conn.Gorm()
+	if gormErr != nil {
+		log.Error("gorm init failed", "error", gormErr)
+		os.Exit(1)
+	}
+	deps := platformserver.NewDependencies(cfg, conn.DB, conn.Dialect, conn.Rebind, gormDB)
 	deps.Context = ctx
 	if err := deps.Validate(); err != nil {
 		log.Error("invalid dependencies", "error", err)

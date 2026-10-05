@@ -19,9 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/golang-jwt/jwt/v5"
+	"gorm.io/gorm"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -240,77 +242,84 @@ func (h *handler) authenticateZakuraBot(ctx context.Context, raw string) (httpx.
 	if p.UserID == "" || p.TenantID == "" || !allowed {
 		return httpx.Principal{}, errors.New("insufficient scope")
 	}
-	var userStatus, membershipStatus string
-	err = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT u.email,u.is_platform_admin,u.status,m.role,m.status FROM users u JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=? WHERE u.id=?`), p.TenantID, p.UserID).Scan(&p.Email, &p.IsPlatformAdmin, &userStatus, &p.Role, &membershipStatus)
-	if err != nil || userStatus != "active" || membershipStatus != "active" {
+	var rec struct {
+		Email            string `gorm:"column:email"`
+		IsPlatformAdmin  bool   `gorm:"column:is_platform_admin"`
+		UserStatus       string `gorm:"column:user_status"`
+		Role             string `gorm:"column:role"`
+		MembershipStatus string `gorm:"column:membership_status"`
+	}
+	err = h.deps.Gorm.WithContext(ctx).Table("users AS u").Select("u.email AS email, u.is_platform_admin AS is_platform_admin, u.status AS user_status, m.role AS role, m.status AS membership_status").Joins("JOIN tenant_memberships m ON m.user_id = u.id AND m.tenant_id = ?", p.TenantID).Where("u.id = ?", p.UserID).Take(&rec).Error
+	if err != nil || rec.UserStatus != "active" || rec.MembershipStatus != "active" {
 		return httpx.Principal{}, errors.New("inactive OAuth principal")
 	}
+	p.Email, p.IsPlatformAdmin, p.Role = rec.Email, rec.IsPlatformAdmin, rec.Role
 	return p, nil
 }
 
 func (h *handler) zakuraBotRoster(ctx context.Context, actor httpx.Principal) ([]map[string]any, map[string]string, error) {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT a.id,a.name,a.description,a.space_id,s.name,a.avatar_color,a.avatar_shape,a.avatar_url,s.enable_computer FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? ORDER BY a.created_at,a.id`), actor.TenantID)
+	type rosterAgent struct {
+		ID             string  `gorm:"column:id"`
+		Name           string  `gorm:"column:name"`
+		Description    string  `gorm:"column:description"`
+		SpaceID        string  `gorm:"column:space_id"`
+		SpaceName      string  `gorm:"column:space_name"`
+		AvatarColor    *string `gorm:"column:avatar_color"`
+		AvatarShape    *string `gorm:"column:avatar_shape"`
+		AvatarURL      *string `gorm:"column:avatar_url"`
+		EnableComputer bool    `gorm:"column:enable_computer"`
+	}
+	var loaded []rosterAgent
+	err := h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("a.id AS id, a.name AS name, a.description AS description, a.space_id AS space_id, s.name AS space_name, a.avatar_color AS avatar_color, a.avatar_shape AS avatar_shape, a.avatar_url AS avatar_url, s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ?", actor.TenantID).Order("a.created_at, a.id").Find(&loaded).Error
 	if err != nil {
 		return nil, nil, err
 	}
-	type rosterAgent struct {
-		id, name, description, spaceID, spaceName string
-		color, shape, avatarURL                   sql.NullString
-		enableComputer                            bool
-	}
-	loaded := []rosterAgent{}
-	for rows.Next() {
-		var item rosterAgent
-		if err := rows.Scan(&item.id, &item.name, &item.description, &item.spaceID, &item.spaceName, &item.color, &item.shape, &item.avatarURL, &item.enableComputer); err != nil {
-			rows.Close()
-			return nil, nil, err
+	deref := func(v *string) any {
+		if v == nil {
+			return nil
 		}
-		loaded = append(loaded, item)
+		return *v
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, nil, err
-	}
-	rows.Close()
 	agents := []map[string]any{}
 	bindings := map[string]string{}
 	for _, item := range loaded {
 		var bindingID string
 		var enabled bool
-		err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT id,enabled FROM agent_channel_bindings WHERE tenant_id=? AND agent_id=? AND platform='zakurabot' ORDER BY created_at LIMIT 1`), actor.TenantID, item.id).Scan(&bindingID, &enabled)
-		if errors.Is(err, sql.ErrNoRows) {
+		var bindingRow struct {
+			ID      string
+			Enabled bool
+		}
+		err := h.deps.Gorm.WithContext(ctx).Table("agent_channel_bindings").Select("id, enabled").Where("tenant_id = ? AND agent_id = ? AND platform = 'zakurabot'", actor.TenantID, item.ID).Order("created_at").Take(&bindingRow).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			bindingID = h.store.id()
-			now := h.store.now()
-			_, err = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO agent_channel_bindings(id,tenant_id,space_id,agent_id,platform,profile_key,label,enabled,settings_json,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,'remote-zakurabot','Zakura Bot',TRUE,'{"allowAll":true}','',?,?)`), bindingID, actor.TenantID, item.spaceID, item.id, "zakurabot", now, now)
+			now := runtimeTimeString(h.store.now())
+			err = h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO agent_channel_bindings(id,tenant_id,space_id,agent_id,platform,profile_key,label,enabled,settings_json,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,'remote-zakurabot','Zakura Bot',TRUE,'{"allowAll":true}','',?,?)`, bindingID, actor.TenantID, item.SpaceID, item.ID, "zakurabot", now, now).Error
 			enabled = err == nil
+		} else if err == nil {
+			bindingID, enabled = bindingRow.ID, bindingRow.Enabled
 		}
 		if err != nil || !enabled {
 			continue
 		}
-		bindings[item.id] = bindingID
+		bindings[item.ID] = bindingID
 		agents = append(agents, map[string]any{
-			"id": item.id, "name": item.name, "status": "idle", "color": "#1084fe", "unread": false,
-			"title": "Zakura Bot", "bindingId": bindingID, "description": item.description, "spaceId": item.spaceID, "spaceName": item.spaceName,
-			"avatarColor": nullableString(item.color), "avatarShape": nullableString(item.shape), "avatarUrl": nullableString(item.avatarURL),
-			"capabilities": map[string]any{"files": item.enableComputer, "desktop": item.enableComputer, "interactions": true},
+			"id": item.ID, "name": item.Name, "status": "idle", "color": "#1084fe", "unread": false,
+			"title": "Zakura Bot", "bindingId": bindingID, "description": item.Description, "spaceId": item.SpaceID, "spaceName": item.SpaceName,
+			"avatarColor": deref(item.AvatarColor), "avatarShape": deref(item.AvatarShape), "avatarUrl": deref(item.AvatarURL),
+			"capabilities": map[string]any{"files": item.EnableComputer, "desktop": item.EnableComputer, "interactions": true},
 		})
 	}
 	return agents, bindings, nil
 }
 
 func (h *handler) replayZakuraBot(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID string) error {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT frame_json FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? ORDER BY seq DESC LIMIT 100`), actor.TenantID, actor.UserID, bindingID, agentID)
-	if err != nil {
+	var ms []models.ZakurabotMessage
+	if err := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Order("seq DESC").Limit(100).Find(&ms).Error; err != nil {
 		return err
 	}
-	defer rows.Close()
 	frames := []json.RawMessage{}
-	for rows.Next() {
-		var raw json.RawMessage
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		frames = append(frames, raw)
+	for _, m := range ms {
+		frames = append(frames, json.RawMessage(m.FrameJSON))
 	}
 	for i := len(frames) - 1; i >= 0; i-- {
 		var value any
@@ -320,7 +329,7 @@ func (h *handler) replayZakuraBot(ctx context.Context, socket *zakuraBotSocket, 
 			}
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID, clientMessageID, text string) error {
@@ -329,9 +338,12 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 		"clientMessageId": clientMessageID, "createdAt": h.store.now().UnixMilli(),
 	}}
 	raw, _ := json.Marshal(message)
-	var existing string
-	err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT frame_json FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND client_message_id=?`), actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID).Scan(&existing)
+	var existingRow struct {
+		FrameJSON string `gorm:"column:frame_json"`
+	}
+	err := h.deps.Gorm.WithContext(ctx).Table("zakurabot_messages").Select("frame_json").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND client_message_id = ?", actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID).Take(&existingRow).Error
 	if err == nil {
+		existing := existingRow.FrameJSON
 		if existing != string(raw) {
 			return errors.New("clientMessageId was already used with different content")
 		}
@@ -339,7 +351,7 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 		_ = json.Unmarshal([]byte(existing), &replay)
 		return socket.send(replay)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
 	var seq int64
@@ -373,12 +385,12 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 
 func (h *handler) zakuraBotSession(ctx context.Context, actor httpx.Principal, agentID, bindingID string) (string, error) {
 	key := "zakurabot:" + actor.TenantID + ":" + actor.UserID + ":" + bindingID + ":" + agentID
-	var sessionID string
-	err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT session_id FROM agent_channel_threads WHERE tenant_id=? AND binding_id=? AND external_thread_key=?`), actor.TenantID, bindingID, key).Scan(&sessionID)
+	var thread models.AgentChannelThread
+	err := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND binding_id = ? AND external_thread_key = ?", actor.TenantID, bindingID, key).Take(&thread).Error
 	if err == nil {
-		return sessionID, nil
+		return thread.SessionID, nil
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", err
 	}
 	origin, _ := json.Marshal(map[string]any{"platform": "zakurabot", "bindingId": bindingID, "userId": actor.UserID})
@@ -390,8 +402,10 @@ func (h *handler) zakuraBotSession(ctx context.Context, actor httpx.Principal, a
 	if err != nil {
 		return "", err
 	}
-	now := h.store.now()
-	_, err = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO agent_channel_threads(id,tenant_id,binding_id,session_id,external_thread_key,external_user_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`), h.store.id(), actor.TenantID, bindingID, session.ID, key, actor.UserID, now, now)
+	now := runtimeTimeString(h.store.now())
+	tid := h.store.id()
+	thread = models.AgentChannelThread{ID: &tid, TenantID: actor.TenantID, BindingID: bindingID, SessionID: session.ID, ExternalThreadKey: key, ExternalUserKey: &actor.UserID, CreatedAt: now, UpdatedAt: now}
+	err = h.deps.Gorm.WithContext(ctx).Create(&thread).Error
 	return session.ID, err
 }
 
@@ -522,8 +536,8 @@ func (h *handler) handleZakuraFrame(ctx context.Context, p httpx.Principal, raw 
 	if json.Unmarshal(raw, &frame) != nil || frame.DeviceID == "" || frame.BindingID == "" || frame.AgentID == "" {
 		return nil, errors.New("deviceId, bindingId and agentId required")
 	}
-	var count int
-	if e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT COUNT(*) FROM agent_channel_bindings WHERE tenant_id=? AND id=? AND agent_id=? AND enabled=true`), p.TenantID, frame.BindingID, frame.AgentID).Scan(&count); e != nil || count == 0 {
+	var count int64
+	if e := h.deps.Gorm.WithContext(ctx).Model(&models.AgentChannelBinding{}).Where("tenant_id = ? AND id = ? AND agent_id = ? AND enabled = true", p.TenantID, frame.BindingID, frame.AgentID).Count(&count).Error; e != nil || count == 0 {
 		return nil, errors.New("binding not found")
 	}
 	var seq int64

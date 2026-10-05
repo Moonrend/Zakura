@@ -47,11 +47,15 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("apply PostgreSQL migrations: %v", err)
 	}
+	gormDB, err := conn.Gorm()
+	if err != nil {
+		t.Fatalf("open gorm: %v", err)
+	}
 
 	var seq int
 	cfg := config.Config{WebURL: "http://web.test", PublicURL: "http://api.test", Edition: "saas", MultiTenant: true}
 	deps := &appdeps.Dependencies{
-		DB: conn.DB, Dialect: conn.Dialect, Rebind: conn.Rebind,
+		DB: conn.DB, Gorm: gormDB, Dialect: conn.Dialect, Rebind: conn.Rebind,
 		Clock:  func() time.Time { return time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC) },
 		NewID:  func() string { seq++; return fmt.Sprintf("pg-%023d", seq) },
 		Secret: bytes.Repeat([]byte("p"), 32), PublicURL: cfg.PublicURL,

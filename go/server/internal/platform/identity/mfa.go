@@ -23,45 +23,49 @@ import (
 	"time"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"golang.org/x/crypto/scrypt"
 )
 
 func (s *Service) myMFA(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	var enabled sql.NullString
-	var policy string
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT totp_enabled_at FROM users WHERE id=?`), p.UserID).Scan(&enabled)
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT mfa_policy FROM tenants WHERE id=?`), p.TenantID).Scan(&policy)
+	var totpUser models.User
+	var policyTenant models.Tenant
+	_ = s.gdb(r.Context()).Select("totp_enabled_at").Where("id = ?", p.UserID).Take(&totpUser).Error
+	_ = s.gdb(r.Context()).Select("mfa_policy").Where("id = ?", p.TenantID).Take(&policyTenant).Error
+	enabled := totpUser.TotpEnabledAt != nil
+	policy := policyTenant.MfaPolicy
 	methods := []string{}
-	if enabled.Valid {
+	if enabled {
 		methods = append(methods, "totp")
 	}
-	rows, _ := s.deps.DB.QueryContext(r.Context(), s.q(`SELECT id,COALESCE(name,'Passkey'),created_at FROM user_webauthn_credentials WHERE user_id=? ORDER BY created_at`), p.UserID)
-	credentials := []map[string]any{}
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var id, name, created string
-			_ = rows.Scan(&id, &name, &created)
-			credentials = append(credentials, map[string]any{"id": id, "name": name, "createdAt": created})
+	var credentials []models.UserWebauthnCredential
+	_ = s.gdb(r.Context()).Select("id,name,created_at").Where("user_id = ?", p.UserID).Order("created_at").Find(&credentials).Error
+	items := []map[string]any{}
+	for _, credential := range credentials {
+		name := "Passkey"
+		if credential.Name != nil {
+			name = *credential.Name
 		}
+		items = append(items, map[string]any{"id": derefString(credential.ID), "name": name, "createdAt": credential.CreatedAt})
 	}
-	if len(credentials) > 0 {
+	if len(items) > 0 {
 		methods = append(methods, "webauthn")
 	}
-	httpx.JSON(w, 200, map[string]any{"totp": enabled.Valid, "webauthn": len(credentials) > 0, "methods": methods, "credentials": credentials, "policy": policy, "required": policy == "all" || (policy == "admins" && (p.Role == "owner" || p.Role == "admin"))})
+	httpx.JSON(w, 200, map[string]any{"totp": enabled, "webauthn": len(items) > 0, "methods": methods, "credentials": items, "policy": policy, "required": policy == "all" || (policy == "admins" && (p.Role == "owner" || p.Role == "admin"))})
 }
 func (s *Service) startMyTOTP(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
 	s.startTOTPFor(w, r, p.UserID)
 }
 func (s *Service) startTOTPFor(w http.ResponseWriter, r *http.Request, userID string) {
-	var email string
-	if s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT email FROM users WHERE id=? AND status='active'`), userID).Scan(&email) != nil {
+	var account models.User
+	if s.gdb(r.Context()).Select("email").Where("id = ? AND status = 'active'", userID).Take(&account).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
+	email := account.Email
 	secretBytes := make([]byte, 20)
 	if _, err := rand.Read(secretBytes); err != nil {
 		httpx.Error(w, 500, "random source unavailable")
@@ -74,18 +78,18 @@ func (s *Service) startTOTPFor(w http.ResponseWriter, r *http.Request, userID st
 		httpx.Error(w, 500, "secret encryption failed")
 		return
 	}
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE users SET totp_pending_secret=?,updated_at=? WHERE id=?`), enc, s.now(), userID)
+	err = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{"totp_pending_secret": enc, "updated_at": s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "update failed")
 		return
 	}
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO user_totp(user_id,secret_enc,enabled_at,created_at) VALUES(?,?,NULL,?) ON CONFLICT(user_id) DO UPDATE SET secret_enc=excluded.secret_enc,enabled_at=NULL`), userID, enc, s.now())
+	_ = s.gdb(r.Context()).Exec(`INSERT INTO user_totp(user_id,secret_enc,enabled_at,created_at) VALUES(?,?,NULL,?) ON CONFLICT(user_id) DO UPDATE SET secret_enc=excluded.secret_enc,enabled_at=NULL`, userID, enc, s.now()).Error
 	uri := "otpauth://totp/" + url.PathEscape("Zakura:"+email) + "?issuer=Zakura&algorithm=SHA1&digits=6&period=30&secret=" + url.QueryEscape(secret)
 	httpx.JSON(w, 200, map[string]any{"secret": secret, "otpauthUrl": uri})
 }
 func (s *Service) cancelMyTOTP(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE users SET totp_pending_secret=NULL,updated_at=? WHERE id=?`), s.now(), p.UserID)
+	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"totp_pending_secret": nil, "updated_at": s.now()}).Error
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Service) enableMyTOTP(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +110,12 @@ func (s *Service) enableMyTOTP(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"recoveryCodes": codes})
 }
 func (s *Service) enableTOTP(ctx context.Context, userID, code string) ([]string, error) {
-	var enc string
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT COALESCE(totp_pending_secret,'') FROM users WHERE id=?`), userID).Scan(&enc); err != nil || enc == "" {
+	var pendingUser models.User
+	if err := s.gdb(ctx).Select("totp_pending_secret").Where("id = ?", userID).Take(&pendingUser).Error; err != nil {
+		return nil, errors.New("TOTP setup not started")
+	}
+	enc := derefString(pendingUser.TotpPendingSecret)
+	if enc == "" {
 		return nil, errors.New("TOTP setup not started")
 	}
 	plain, err := open(s.deps.Secret, enc)
@@ -148,8 +156,11 @@ func (s *Service) disableMyTOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "verification required")
 		return
 	}
-	var required int
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COUNT(*) FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' AND (t.mfa_policy='all' OR (t.mfa_policy='admins' AND m.role IN ('owner','admin')))`), p.UserID).Scan(&required)
+	var required int64
+	_ = s.gdb(r.Context()).Table("tenant_memberships AS m").
+		Joins("JOIN tenants t ON t.id = m.tenant_id").
+		Where("m.user_id = ? AND m.status = 'active' AND (t.mfa_policy = 'all' OR (t.mfa_policy = 'admins' AND m.role IN ('owner','admin')))", p.UserID).
+		Count(&required).Error
 	if required > 0 {
 		httpx.Error(w, 409, "team policy requires MFA")
 		return
@@ -158,9 +169,9 @@ func (s *Service) disableMyTOTP(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, err.Error())
 		return
 	}
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE users SET totp_secret=NULL,totp_pending_secret=NULL,totp_enabled_at=NULL,recovery_codes_json='[]',updated_at=? WHERE id=?`), s.now(), p.UserID)
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM user_totp WHERE user_id=?`), p.UserID)
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM user_recovery_codes WHERE user_id=?`), p.UserID)
+	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"totp_secret": nil, "totp_pending_secret": nil, "totp_enabled_at": nil, "recovery_codes_json": "[]", "updated_at": s.now()}).Error
+	_ = s.gdb(r.Context()).Where("user_id = ?", p.UserID).Delete(&models.UserTotp{}).Error
+	_ = s.gdb(r.Context()).Where("user_id = ?", p.UserID).Delete(&models.UserRecoveryCode{}).Error
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (s *Service) rotateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
@@ -173,10 +184,15 @@ func (s *Service) rotateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codes, hashes := newRecoveryCodes()
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE users SET recovery_codes_json=?,updated_at=? WHERE id=?`), encodeJSON(hashes), s.now(), p.UserID)
-	_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM user_recovery_codes WHERE user_id=?`), p.UserID)
+	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"recovery_codes_json": encodeJSON(hashes), "updated_at": s.now()}).Error
+	_ = s.gdb(r.Context()).Where("user_id = ?", p.UserID).Delete(&models.UserRecoveryCode{}).Error
+	recoveryCodes := make([]models.UserRecoveryCode, 0, len(hashes))
 	for _, hash := range hashes {
-		_, _ = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO user_recovery_codes(id,user_id,code_hash,created_at) VALUES(?,?,?,?)`), s.deps.NewID(), p.UserID, hash, s.now())
+		codeID := s.deps.NewID()
+		recoveryCodes = append(recoveryCodes, models.UserRecoveryCode{ID: &codeID, UserID: p.UserID, CodeHash: hash, CreatedAt: s.now()})
+	}
+	if len(recoveryCodes) > 0 {
+		_ = s.gdb(r.Context()).Create(&recoveryCodes).Error
 	}
 	httpx.JSON(w, 200, map[string]any{"recoveryCodes": codes})
 }
@@ -186,12 +202,13 @@ type authTicket struct{ ID, UserID, Kind, TenantID, Role string }
 func (s *Service) loadTicket(ctx context.Context, raw, kind string) (authTicket, error) {
 	h := sha256.Sum256([]byte(raw))
 	var t authTicket
-	var metaRaw string
-	err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,user_id,kind,meta_json FROM auth_tokens WHERE token_hash=? AND kind=? AND consumed_at IS NULL AND expires_at>?`), hex.EncodeToString(h[:]), kind, s.now()).Scan(&t.ID, &t.UserID, &t.Kind, &metaRaw)
+	var token models.AuthToken
+	err := s.gdb(ctx).Where("token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?", hex.EncodeToString(h[:]), kind, s.now()).Take(&token).Error
 	if err != nil {
 		return t, errors.New("invalid or expired ticket")
 	}
-	meta := decodeObject(metaRaw)
+	t.ID, t.UserID, t.Kind = derefString(token.ID), derefString(token.UserID), token.Kind
+	meta := decodeObject(token.MetaJSON)
 	t.TenantID, _ = meta["tenantId"].(string)
 	t.Role, _ = meta["role"].(string)
 	if t.TenantID == "" || t.Role == "" {
@@ -200,12 +217,11 @@ func (s *Service) loadTicket(ctx context.Context, raw, kind string) (authTicket,
 	return t, nil
 }
 func (s *Service) consumeTicket(ctx context.Context, id string) error {
-	res, err := s.deps.DB.ExecContext(ctx, s.q(`UPDATE auth_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL AND expires_at>?`), s.now(), id, s.now())
-	if err != nil {
-		return err
+	res := s.gdb(ctx).Model(&models.AuthToken{}).Where("id = ? AND consumed_at IS NULL AND expires_at > ?", id, s.now()).Update("consumed_at", s.now())
+	if res.Error != nil {
+		return res.Error
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		return errors.New("ticket already used")
 	}
 	return nil
@@ -299,12 +315,17 @@ func (s *Service) completeTicketTOTP(w http.ResponseWriter, r *http.Request) {
 func (s *Service) sessionForTicket(ctx context.Context, t authTicket, ip, ua string) (LoginResult, error) {
 	var u User
 	var tenant Tenant
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,email,COALESCE(name,''),is_platform_admin FROM users WHERE id=? AND status='active'`), t.UserID).Scan(&u.ID, &u.Email, &u.Name, &u.IsPlatformAdmin); err != nil {
+	var dbUser models.User
+	if err := s.gdb(ctx).Where("id = ? AND status = 'active'", t.UserID).Take(&dbUser).Error; err != nil {
 		return LoginResult{}, err
 	}
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,slug,name,is_default,onboarding_completed FROM tenants WHERE id=? AND status='active'`), t.TenantID).Scan(&tenant.ID, &tenant.Slug, &tenant.Name, &tenant.IsDefault, &tenant.OnboardingCompleted); err != nil {
+	u.ID, u.Email, u.IsPlatformAdmin = derefString(dbUser.ID), dbUser.Email, dbUser.IsPlatformAdmin
+	u.Name = derefString(dbUser.Name)
+	var dbTenant models.Tenant
+	if err := s.gdb(ctx).Where("id = ? AND status = 'active'", t.TenantID).Take(&dbTenant).Error; err != nil {
 		return LoginResult{}, err
 	}
+	tenant = Tenant{ID: derefString(dbTenant.ID), Slug: dbTenant.Slug, Name: dbTenant.Name, IsDefault: dbTenant.IsDefault, OnboardingCompleted: dbTenant.OnboardingCompleted}
 	token, err := s.issueSession(ctx, u, tenant, t.Role, ip, ua)
 	if err == nil {
 		s.recordLoginUsage(ctx, tenant.ID, u.ID, "mfa")
@@ -312,12 +333,16 @@ func (s *Service) sessionForTicket(ctx context.Context, t authTicket, ip, ua str
 	return LoginResult{Session: token, User: u, Tenant: tenant, Role: t.Role}, err
 }
 func (s *Service) verifySecondFactor(ctx context.Context, userID, code, recovery string) error {
-	var enc, recoveryRaw string
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT COALESCE(totp_secret,''),recovery_codes_json FROM users WHERE id=?`), userID).Scan(&enc, &recoveryRaw); err != nil {
+	var account models.User
+	if err := s.gdb(ctx).Select("totp_secret,recovery_codes_json").Where("id = ?", userID).Take(&account).Error; err != nil {
 		return errors.New("user not found")
 	}
+	enc, recoveryRaw := derefString(account.TotpSecret), account.RecoveryCodesJSON
 	if enc == "" {
-		_ = s.deps.DB.QueryRowContext(ctx, s.q(`SELECT secret_enc FROM user_totp WHERE user_id=? AND enabled_at IS NOT NULL`), userID).Scan(&enc)
+		var totp models.UserTotp
+		if s.gdb(ctx).Select("secret_enc").Where("user_id = ? AND enabled_at IS NOT NULL", userID).Take(&totp).Error == nil {
+			enc = totp.SecretEnc
+		}
 	}
 	if code != "" && enc != "" {
 		plain, err := open(s.deps.Secret, enc)
@@ -333,7 +358,7 @@ func (s *Service) verifySecondFactor(ctx context.Context, userID, code, recovery
 		for i, v := range hashes {
 			if hmac.Equal([]byte(v), []byte(needle)) {
 				hashes = append(hashes[:i], hashes[i+1:]...)
-				_, _ = s.deps.DB.ExecContext(ctx, s.q(`UPDATE users SET recovery_codes_json=?,updated_at=? WHERE id=?`), encodeJSON(hashes), s.now(), userID)
+				_ = s.gdb(ctx).Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{"recovery_codes_json": encodeJSON(hashes), "updated_at": s.now()}).Error
 				return nil
 			}
 		}
@@ -344,12 +369,9 @@ func (s *Service) verifySecondFactor(ctx context.Context, userID, code, recovery
 			return -1
 		}, recovery))
 		legacy := sha256.Sum256([]byte(normalized))
-		res, _ := s.deps.DB.ExecContext(ctx, s.q(`UPDATE user_recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL`), s.now(), userID, hex.EncodeToString(legacy[:]))
-		if res != nil {
-			n, _ := res.RowsAffected()
-			if n == 1 {
-				return nil
-			}
+		res := s.gdb(ctx).Model(&models.UserRecoveryCode{}).Where("user_id = ? AND code_hash = ? AND used_at IS NULL", userID, hex.EncodeToString(legacy[:])).Update("used_at", s.now())
+		if res.Error == nil && res.RowsAffected == 1 {
+			return nil
 		}
 	}
 	return errors.New("invalid MFA code")

@@ -45,7 +45,9 @@ func main() {
 	defer conn.DB.Close()
 	must(migrations.Apply(context.Background(), conn.DB, conn.Dialect, conn.Rebind))
 	cfg := config.Config{Secret: "0123456789abcdef0123456789abcdef", PublicURL: "http://localhost:8787", WebURL: "http://localhost:3000", Edition: "saas", MultiTenant: true}
-	deps := platformserver.NewDependencies(cfg, conn.DB, conn.Dialect, conn.Rebind)
+	gormDB, gormErr := conn.Gorm()
+	must(gormErr)
+	deps := platformserver.NewDependencies(cfg, conn.DB, conn.Dialect, conn.Rebind, gormDB)
 	handler := platformserver.Router(cfg, deps, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	routes, ok := handler.(chi.Routes)
 	if !ok {

@@ -13,8 +13,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm/clause"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
@@ -94,84 +96,78 @@ func likePattern(value string) string {
 	return "%" + strings.ToLower(value) + "%"
 }
 func (a *routes) stats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	since := a.d.Clock().UTC().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
-	var userTotal, userSuspended, userAdmins, userNew int
-	var tenantTotal, tenantSuspended, tenantNew int
+	var userTotal, userSuspended, userAdmins, userNew int64
+	var tenantTotal, tenantSuspended, tenantNew int64
 	var runnerTotal, runnerShared, runnerOnline int
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users`).Scan(&userTotal)
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE suspended_at IS NOT NULL`).Scan(&userSuspended)
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM users WHERE is_platform_admin=TRUE`).Scan(&userAdmins)
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users WHERE created_at>=?`), since).Scan(&userNew)
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tenants`).Scan(&tenantTotal)
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tenants WHERE suspended_at IS NOT NULL`).Scan(&tenantSuspended)
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM tenants WHERE created_at>=?`), since).Scan(&tenantNew)
-	_ = a.d.DB.QueryRowContext(r.Context(), `SELECT COUNT(*),COALESCE(SUM(CASE WHEN is_shared THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status IN ('online','ready') THEN 1 ELSE 0 END),0) FROM runtime_nodes WHERE kind<>'local'`).Scan(&runnerTotal, &runnerShared, &runnerOnline)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Count(&userTotal)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where("suspended_at IS NOT NULL").Count(&userSuspended)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where("is_platform_admin=TRUE").Count(&userAdmins)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where("created_at>=?", since).Count(&userNew)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.Tenant{}).Count(&tenantTotal)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.Tenant{}).Where("suspended_at IS NOT NULL").Count(&tenantSuspended)
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.Tenant{}).Where("created_at>=?", since).Count(&tenantNew)
+	_ = a.d.Gorm.WithContext(ctx).Raw(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN is_shared THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status IN ('online','ready') THEN 1 ELSE 0 END),0) FROM runtime_nodes WHERE kind<>'local'`).Row().Scan(&runnerTotal, &runnerShared, &runnerOnline)
 	httpx.JSON(w, 200, map[string]any{
-		"users":   map[string]int{"total": userTotal, "suspended": userSuspended, "admins": userAdmins, "newLast7d": userNew},
-		"tenants": map[string]int{"total": tenantTotal, "suspended": tenantSuspended, "newLast7d": tenantNew},
+		"users":   map[string]int{"total": int(userTotal), "suspended": int(userSuspended), "admins": int(userAdmins), "newLast7d": int(userNew)},
+		"tenants": map[string]int{"total": int(tenantTotal), "suspended": int(tenantSuspended), "newLast7d": int(tenantNew)},
 		"runners": map[string]int{"total": runnerTotal, "shared": runnerShared, "online": runnerOnline},
 	})
 }
 func (a *routes) users(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	p, n := page(r)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	pattern := likePattern(q)
 	statusFilter := r.URL.Query().Get("status")
 	roleFilter := r.URL.Query().Get("role")
-	where := ` WHERE (?='' OR LOWER(email) LIKE ? ESCAPE '\' OR LOWER(COALESCE(name,'')) LIKE ? ESCAPE '\')`
+	clauses := []string{`(?='' OR LOWER(email) LIKE ? ESCAPE '\' OR LOWER(COALESCE(name,'')) LIKE ? ESCAPE '\')`}
 	args := []any{q, pattern, pattern}
 	if statusFilter == "suspended" {
-		where += ` AND suspended_at IS NOT NULL`
+		clauses = append(clauses, `suspended_at IS NOT NULL`)
 	} else if statusFilter == "active" {
-		where += ` AND suspended_at IS NULL`
+		clauses = append(clauses, `suspended_at IS NULL`)
 	}
 	if roleFilter == "admin" {
-		where += ` AND is_platform_admin=TRUE`
+		clauses = append(clauses, `is_platform_admin=TRUE`)
 	} else if roleFilter == "user" {
-		where += ` AND is_platform_admin=FALSE`
+		clauses = append(clauses, `is_platform_admin=FALSE`)
 	}
 	if tenantID := strings.TrimSpace(r.URL.Query().Get("tenantId")); tenantID != "" {
-		where += ` AND EXISTS(SELECT 1 FROM tenant_memberships tm WHERE tm.user_id=users.id AND tm.tenant_id=? AND tm.status='active')`
+		clauses = append(clauses, `EXISTS(SELECT 1 FROM tenant_memberships tm WHERE tm.user_id=users.id AND tm.tenant_id=? AND tm.status='active')`)
 		args = append(args, tenantID)
 	}
-	var total int
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users`+where), args...).Scan(&total)
-	listArgs := append(append([]any{}, args...), n, (p-1)*n)
+	where := strings.Join(clauses, " AND ")
+	var total int64
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where(where, args...).Count(&total)
 	order := listOrder(r, map[string]string{"email": "email", "name": "name", "createdAt": "created_at"}, "createdAt")
-	rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT id,email,COALESCE(name,''),is_platform_admin,can_use_local_runner,COALESCE(password_hash,''),suspended_at,suspended_reason,suspended_by_user_id,created_at FROM users`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`), listArgs...)
-	if err != nil {
-		httpx.Error(w, 500, "query failed")
-		return
-	}
-	type userRow struct {
-		id, email, name, password, created string
-		admin, runner                      bool
-		suspendedAt, reason, suspendedBy   sql.NullString
-	}
-	userRows := []userRow{}
-	for rows.Next() {
-		var item userRow
-		if rows.Scan(&item.id, &item.email, &item.name, &item.admin, &item.runner, &item.password, &item.suspendedAt, &item.reason, &item.suspendedBy, &item.created) == nil {
-			userRows = append(userRows, item)
-		}
-	}
-	rows.Close()
+	var rows []models.User
+	_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where(where, args...).Select("id,email,name,is_platform_admin,can_use_local_runner,password_hash,suspended_at,suspended_reason,suspended_by_user_id,created_at").Order(order).Limit(n).Offset((p - 1) * n).Find(&rows)
 	items := []map[string]any{}
-	for _, item := range userRows {
-		tenantRows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT t.id,t.slug,t.name,m.role FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' ORDER BY m.created_at`), item.id)
-		tenants := []map[string]any{}
-		if tenantRows != nil {
-			for tenantRows.Next() {
-				var tid, slug, tenantName, role string
-				if tenantRows.Scan(&tid, &slug, &tenantName, &role) == nil {
-					tenants = append(tenants, map[string]any{"tenantId": tid, "slug": slug, "name": tenantName, "role": role})
-				}
-			}
-			tenantRows.Close()
+	for _, item := range rows {
+		var memberships []struct {
+			TenantID string `gorm:"column:tid"`
+			Slug     string `gorm:"column:slug"`
+			Name     string `gorm:"column:tname"`
+			Role     string `gorm:"column:role"`
 		}
-		items = append(items, map[string]any{"id": item.id, "email": item.email, "name": nullIfBlank(item.name), "isPlatformAdmin": item.admin, "canUseLocalRunner": item.runner || item.admin, "hasPassword": item.password != "", "tenants": tenants, "createdAt": item.created, "suspended": item.suspendedAt.Valid, "suspendedAt": nullString(item.suspendedAt), "suspendedReason": nullString(item.reason), "suspendedByUserId": nullString(item.suspendedBy)})
+		_ = a.d.Gorm.WithContext(ctx).Raw(`SELECT t.id AS tid,t.slug AS slug,t.name AS tname,m.role AS role FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' ORDER BY m.created_at`, deref(item.ID)).Scan(&memberships)
+		tenants := []map[string]any{}
+		for _, m := range memberships {
+			tenants = append(tenants, map[string]any{"tenantId": m.TenantID, "slug": m.Slug, "name": m.Name, "role": m.Role})
+		}
+		name := ""
+		if item.Name != nil {
+			name = *item.Name
+		}
+		password := ""
+		if item.PasswordHash != nil {
+			password = *item.PasswordHash
+		}
+		items = append(items, map[string]any{"id": deref(item.ID), "email": item.Email, "name": nullIfBlank(name), "isPlatformAdmin": item.IsPlatformAdmin, "canUseLocalRunner": item.CanUseLocalRunner || item.IsPlatformAdmin, "hasPassword": password != "", "tenants": tenants, "createdAt": item.CreatedAt, "suspended": item.SuspendedAt != nil, "suspendedAt": nullStringPtr(item.SuspendedAt), "suspendedReason": nullStringPtr(item.SuspendedReason), "suspendedByUserId": nullStringPtr(item.SuspendedByUserID)})
 	}
-	httpx.JSON(w, 200, map[string]any{"items": items, "total": total, "page": p, "pageSize": n})
+	httpx.JSON(w, 200, map[string]any{"items": items, "total": int(total), "page": p, "pageSize": n})
 }
 func (a *routes) createUser(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -215,57 +211,56 @@ func (a *routes) createUser(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 201, map[string]any{"user": map[string]any{"id": id, "email": email, "name": name, "isPlatformAdmin": b.IsPlatformAdmin}, "tenant": map[string]any{"id": tenantID, "slug": slug, "name": tenantName}})
 }
 func (a *routes) user(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := chi.URLParam(r, "id")
-	var email, name, password, created, updated string
-	var admin, runner bool
-	var suspendedAt, reason, suspendedByID sql.NullString
-	if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT email,COALESCE(name,''),is_platform_admin,can_use_local_runner,COALESCE(password_hash,''),created_at,updated_at,suspended_at,suspended_reason,suspended_by_user_id FROM users WHERE id=?`), id).Scan(&email, &name, &admin, &runner, &password, &created, &updated, &suspendedAt, &reason, &suspendedByID) != nil {
+	var u models.User
+	if a.d.Gorm.WithContext(ctx).Where("id=?", id).Take(&u).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
-	rows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT m.id,m.role,m.status,m.created_at,t.id,t.slug,t.name,t.suspended_at FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? ORDER BY m.created_at`), id)
+	var membershipRows []struct {
+		MembershipID    string  `gorm:"column:mid"`
+		Role            string  `gorm:"column:mrole"`
+		Status          string  `gorm:"column:mstatus"`
+		Joined          string  `gorm:"column:joined"`
+		TenantID        string  `gorm:"column:tid"`
+		Slug            string  `gorm:"column:slug"`
+		Name            string  `gorm:"column:tname"`
+		TenantSuspended *string `gorm:"column:tenant_suspended"`
+	}
+	_ = a.d.Gorm.WithContext(ctx).Raw(`SELECT m.id AS mid,m.role AS mrole,m.status AS mstatus,m.created_at AS joined,t.id AS tid,t.slug AS slug,t.name AS tname,t.suspended_at AS tenant_suspended FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? ORDER BY m.created_at`, id).Scan(&membershipRows)
 	memberships := []map[string]any{}
-	if rows != nil {
-		for rows.Next() {
-			var mid, role, status, joined, tid, slug, tenantName string
-			var tenantSuspended sql.NullString
-			if rows.Scan(&mid, &role, &status, &joined, &tid, &slug, &tenantName, &tenantSuspended) == nil {
-				memberships = append(memberships, map[string]any{"membershipId": mid, "role": role, "status": status, "joinedAt": joined, "tenantId": tid, "slug": slug, "name": tenantName, "tenantSuspended": tenantSuspended.Valid})
-			}
-		}
-		rows.Close()
+	for _, m := range membershipRows {
+		memberships = append(memberships, map[string]any{"membershipId": m.MembershipID, "role": m.Role, "status": m.Status, "joinedAt": m.Joined, "tenantId": m.TenantID, "slug": m.Slug, "name": m.Name, "tenantSuspended": m.TenantSuspended != nil})
 	}
 	identities := []map[string]any{}
-	identityRows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT provider,created_at FROM oauth_identities WHERE user_id=? ORDER BY created_at`), id)
-	if identityRows != nil {
-		for identityRows.Next() {
-			var provider, at string
-			if identityRows.Scan(&provider, &at) == nil {
-				identities = append(identities, map[string]any{"provider": provider, "createdAt": at})
-			}
-		}
-		identityRows.Close()
+	var identityRows []models.OauthIdentity
+	_ = a.d.Gorm.WithContext(ctx).Where("user_id=?", id).Order("created_at").Find(&identityRows)
+	for _, row := range identityRows {
+		identities = append(identities, map[string]any{"provider": row.Provider, "createdAt": row.CreatedAt})
 	}
 	runners := []map[string]any{}
-	runnerRows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT id,name,status,is_shared FROM runtime_nodes WHERE created_by_user_id=? ORDER BY created_at`), id)
-	if runnerRows != nil {
-		for runnerRows.Next() {
-			var rid, runnerName, status string
-			var shared bool
-			if runnerRows.Scan(&rid, &runnerName, &status, &shared) == nil {
-				runners = append(runners, map[string]any{"id": rid, "name": runnerName, "status": status, "isShared": shared})
-			}
-		}
-		runnerRows.Close()
+	var runnerRows []models.RuntimeNode
+	_ = a.d.Gorm.WithContext(ctx).Where("created_by_user_id=?", id).Order("created_at").Find(&runnerRows)
+	for _, row := range runnerRows {
+		runners = append(runners, map[string]any{"id": deref(row.ID), "name": row.Name, "status": row.Status, "isShared": row.IsShared})
 	}
 	var suspendedBy any
-	if suspendedByID.Valid {
-		var actorEmail string
-		if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT email FROM users WHERE id=?`), suspendedByID.String).Scan(&actorEmail) == nil {
-			suspendedBy = map[string]any{"id": suspendedByID.String, "email": actorEmail}
+	if u.SuspendedByUserID != nil {
+		var actor models.User
+		if a.d.Gorm.WithContext(ctx).Select("email").Where("id=?", *u.SuspendedByUserID).Take(&actor).Error == nil {
+			suspendedBy = map[string]any{"id": *u.SuspendedByUserID, "email": actor.Email}
 		}
 	}
-	httpx.JSON(w, 200, map[string]any{"user": map[string]any{"id": id, "email": email, "name": nullIfBlank(name), "isPlatformAdmin": admin, "canUseLocalRunner": runner || admin, "hasPassword": password != "", "createdAt": created, "updatedAt": updated, "suspended": suspendedAt.Valid, "suspendedAt": nullString(suspendedAt), "suspendedReason": nullString(reason), "suspendedByUserId": nullString(suspendedByID), "suspendedBy": suspendedBy}, "memberships": memberships, "identities": identities, "runners": runners})
+	name := ""
+	if u.Name != nil {
+		name = *u.Name
+	}
+	password := ""
+	if u.PasswordHash != nil {
+		password = *u.PasswordHash
+	}
+	httpx.JSON(w, 200, map[string]any{"user": map[string]any{"id": id, "email": u.Email, "name": nullIfBlank(name), "isPlatformAdmin": u.IsPlatformAdmin, "canUseLocalRunner": u.CanUseLocalRunner || u.IsPlatformAdmin, "hasPassword": password != "", "createdAt": u.CreatedAt, "updatedAt": u.UpdatedAt, "suspended": u.SuspendedAt != nil, "suspendedAt": nullStringPtr(u.SuspendedAt), "suspendedReason": nullStringPtr(u.SuspendedReason), "suspendedByUserId": nullStringPtr(u.SuspendedByUserID), "suspendedBy": suspendedBy}, "memberships": memberships, "identities": identities, "runners": runners})
 }
 func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -280,11 +275,19 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid request")
 		return
 	}
-	var name, email, password string
-	var admin, runner bool
-	if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COALESCE(name,''),email,is_platform_admin,can_use_local_runner,COALESCE(password_hash,'') FROM users WHERE id=?`), id).Scan(&name, &email, &admin, &runner, &password) != nil {
+	var current models.User
+	if a.d.Gorm.WithContext(r.Context()).Select("name,email,is_platform_admin,can_use_local_runner,password_hash").Where("id=?", id).Take(&current).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
+	}
+	name, email := "", current.Email
+	if current.Name != nil {
+		name = *current.Name
+	}
+	admin, runner := current.IsPlatformAdmin, current.CanUseLocalRunner
+	password := ""
+	if current.PasswordHash != nil {
+		password = *current.PasswordHash
 	}
 	if b.Name != nil {
 		name = strings.TrimSpace(*b.Name)
@@ -303,8 +306,8 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !*b.IsPlatformAdmin && admin {
-			var others int
-			_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users WHERE is_platform_admin=TRUE AND suspended_at IS NULL AND id<>?`), id).Scan(&others)
+			var others int64
+			_ = a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("is_platform_admin=TRUE AND suspended_at IS NULL AND id<>?", id).Count(&others)
 			if others == 0 {
 				httpx.Error(w, 400, "at least one platform administrator is required")
 				return
@@ -332,13 +335,13 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 		password = string(hash)
 		passwordChanged = true
 	}
-	_, err := a.d.DB.ExecContext(r.Context(), a.q(`UPDATE users SET name=?,email=?,password_hash=?,is_platform_admin=?,can_use_local_runner=?,updated_at=? WHERE id=?`), name, email, password, boolInt(admin), boolInt(runner), a.now(), id)
+	err := a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", id).Updates(map[string]any{"name": name, "email": email, "password_hash": password, "is_platform_admin": admin, "can_use_local_runner": runner, "updated_at": a.now()}).Error
 	if err != nil {
 		httpx.Error(w, 409, "update conflict")
 		return
 	}
 	if passwordChanged {
-		_, _ = a.d.DB.ExecContext(r.Context(), a.q(`UPDATE user_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`), a.now(), id)
+		_ = a.d.Gorm.WithContext(r.Context()).Model(&models.UserSession{}).Where("user_id=? AND revoked_at IS NULL", id).Update("revoked_at", a.now()).Error
 	}
 	httpx.JSON(w, 200, map[string]any{"user": map[string]any{"id": id, "email": email, "name": nullIfBlank(name), "isPlatformAdmin": admin, "canUseLocalRunner": runner || admin, "hasPassword": password != ""}})
 }
@@ -401,19 +404,11 @@ func (a *routes) setUserStatus(w http.ResponseWriter, r *http.Request, status st
 		return
 	}
 	if status == "suspended" && a.d.AfterMemberRemoved != nil {
-		rows, queryErr := a.d.DB.QueryContext(r.Context(), a.q(`SELECT tenant_id FROM tenant_memberships WHERE user_id=? AND status='active'`), id)
-		if queryErr != nil {
+		tenantIDs := []string{}
+		if queryErr := a.d.Gorm.WithContext(r.Context()).Model(&models.TenantMembership{}).Where("user_id=? AND status='active'", id).Pluck("tenant_id", &tenantIDs).Error; queryErr != nil {
 			httpx.Error(w, 503, "user suspended but runtime cleanup query failed")
 			return
 		}
-		tenantIDs := []string{}
-		for rows.Next() {
-			var tenantID string
-			if rows.Scan(&tenantID) == nil {
-				tenantIDs = append(tenantIDs, tenantID)
-			}
-		}
-		rows.Close()
 		for _, tenantID := range tenantIDs {
 			if hookErr := a.d.AfterMemberRemoved(r.Context(), tenantID, id); hookErr != nil {
 				httpx.Error(w, 503, "user suspended but runtime cleanup failed")
@@ -431,19 +426,12 @@ func (a *routes) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.d.BeforeTenantDelete != nil {
-		rows, queryErr := a.d.DB.QueryContext(r.Context(), a.q(`SELECT m.tenant_id FROM tenant_memberships m WHERE m.user_id=? AND m.role='owner' AND m.status='active' AND NOT EXISTS(SELECT 1 FROM tenant_memberships x WHERE x.tenant_id=m.tenant_id AND x.user_id<>m.user_id)`), id)
+		orphanCandidates := []string{}
+		queryErr := a.d.Gorm.WithContext(r.Context()).Model(&models.TenantMembership{}).Where("user_id=? AND role='owner' AND status='active' AND NOT EXISTS(SELECT 1 FROM tenant_memberships x WHERE x.tenant_id=tenant_memberships.tenant_id AND x.user_id<>?)", id, id).Pluck("tenant_id", &orphanCandidates).Error
 		if queryErr != nil {
 			httpx.Error(w, 500, "tenant cleanup query failed")
 			return
 		}
-		orphanCandidates := []string{}
-		for rows.Next() {
-			var tenantID string
-			if rows.Scan(&tenantID) == nil {
-				orphanCandidates = append(orphanCandidates, tenantID)
-			}
-		}
-		rows.Close()
 		for _, tenantID := range orphanCandidates {
 			if hookErr := a.d.BeforeTenantDelete(r.Context(), tenantID); hookErr != nil {
 				httpx.Error(w, 503, "runtime tenant cleanup failed")
@@ -536,41 +524,46 @@ func (a *routes) deleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *routes) tenants(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	p, n := page(r)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	pattern := likePattern(q)
-	where := ` WHERE (?='' OR LOWER(t.name) LIKE ? ESCAPE '\' OR LOWER(t.slug) LIKE ? ESCAPE '\')`
+	clauses := []string{`(?='' OR LOWER(t.name) LIKE ? ESCAPE '\' OR LOWER(t.slug) LIKE ? ESCAPE '\')`}
 	args := []any{q, pattern, pattern}
 	if status := r.URL.Query().Get("status"); status == "suspended" {
-		where += ` AND t.suspended_at IS NOT NULL`
+		clauses = append(clauses, `t.suspended_at IS NOT NULL`)
 	} else if status == "active" {
-		where += ` AND t.suspended_at IS NULL`
+		clauses = append(clauses, `t.suspended_at IS NULL`)
 	}
 	if onboarding := r.URL.Query().Get("onboarding"); onboarding == "completed" {
-		where += ` AND t.onboarding_completed=TRUE`
+		clauses = append(clauses, `t.onboarding_completed=TRUE`)
 	} else if onboarding == "pending" {
-		where += ` AND t.onboarding_completed=FALSE`
+		clauses = append(clauses, `t.onboarding_completed=FALSE`)
 	}
-	var total int
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM tenants t`+where), args...).Scan(&total)
-	listArgs := append(append([]any{}, args...), n, (p-1)*n)
+	where := strings.Join(clauses, " AND ")
+	var total int64
+	_ = a.d.Gorm.WithContext(ctx).Table("tenants t").Where(where, args...).Count(&total)
 	order := listOrder(r, map[string]string{"name": "t.name", "slug": "t.slug", "createdAt": "t.created_at"}, "createdAt")
-	rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.suspended_at,t.suspended_reason,t.suspended_by_user_id,t.created_at,(SELECT COUNT(*) FROM tenant_memberships m WHERE m.tenant_id=t.id AND m.status='active') FROM tenants t`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`), listArgs...)
-	if err != nil {
-		httpx.Error(w, 500, "query failed")
-		return
+	type tenantListRow struct {
+		ID                  string  `gorm:"column:id"`
+		Slug                string  `gorm:"column:slug"`
+		Name                string  `gorm:"column:name"`
+		IsDefault           bool    `gorm:"column:is_default"`
+		OnboardingCompleted bool    `gorm:"column:onboarding_completed"`
+		SuspendedAt         *string `gorm:"column:suspended_at"`
+		SuspendedReason     *string `gorm:"column:suspended_reason"`
+		SuspendedByUserID   *string `gorm:"column:suspended_by_user_id"`
+		CreatedAt           string  `gorm:"column:created_at"`
+		MemberCount         int     `gorm:"column:member_count"`
 	}
-	defer rows.Close()
+	var rows []tenantListRow
+	listArgs := append(append([]any{}, args...), n, (p-1)*n)
+	_ = a.d.Gorm.WithContext(ctx).Raw(`SELECT t.id,t.slug,t.name,t.is_default,t.onboarding_completed,t.suspended_at,t.suspended_reason,t.suspended_by_user_id,t.created_at,(SELECT COUNT(*) FROM tenant_memberships m WHERE m.tenant_id=t.id AND m.status='active') AS member_count FROM tenants t WHERE `+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, listArgs...).Scan(&rows)
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, slug, name, created string
-		var def, onboard bool
-		var suspendedAt, reason, suspendedBy sql.NullString
-		var members int
-		_ = rows.Scan(&id, &slug, &name, &def, &onboard, &suspendedAt, &reason, &suspendedBy, &created, &members)
-		items = append(items, map[string]any{"id": id, "slug": slug, "name": name, "isDefault": def, "onboardingCompleted": onboard, "memberCount": members, "createdAt": created, "suspended": suspendedAt.Valid, "suspendedAt": nullString(suspendedAt), "suspendedReason": nullString(reason), "suspendedByUserId": nullString(suspendedBy)})
+	for _, row := range rows {
+		items = append(items, map[string]any{"id": row.ID, "slug": row.Slug, "name": row.Name, "isDefault": row.IsDefault, "onboardingCompleted": row.OnboardingCompleted, "memberCount": row.MemberCount, "createdAt": row.CreatedAt, "suspended": row.SuspendedAt != nil, "suspendedAt": nullStringPtr(row.SuspendedAt), "suspendedReason": nullStringPtr(row.SuspendedReason), "suspendedByUserId": nullStringPtr(row.SuspendedByUserID)})
 	}
-	httpx.JSON(w, 200, map[string]any{"items": items, "total": total, "page": p, "pageSize": n})
+	httpx.JSON(w, 200, map[string]any{"items": items, "total": int(total), "page": p, "pageSize": n})
 }
 func (a *routes) createTenant(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -586,16 +579,18 @@ func (a *routes) createTenant(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
 	ownerID := strings.TrimSpace(b.OwnerUserID)
 	if ownerID == "" && strings.TrimSpace(b.OwnerEmail) != "" {
-		if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT id FROM users WHERE email=?`), strings.ToLower(strings.TrimSpace(b.OwnerEmail))).Scan(&ownerID) != nil {
+		var owner models.User
+		if a.d.Gorm.WithContext(r.Context()).Select("id").Where("email=?", strings.ToLower(strings.TrimSpace(b.OwnerEmail))).Take(&owner).Error != nil {
 			httpx.Error(w, 404, "owner email not found")
 			return
 		}
+		ownerID = deref(owner.ID)
 	}
 	if ownerID == "" {
 		ownerID = p.UserID
 	}
-	var ownerCount int
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users WHERE id=?`), ownerID).Scan(&ownerCount)
+	var ownerCount int64
+	_ = a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", ownerID).Count(&ownerCount)
 	if ownerCount != 1 {
 		httpx.Error(w, 404, "owner user not found")
 		return
@@ -619,47 +614,43 @@ func (a *routes) createTenant(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 201, map[string]any{"tenant": map[string]any{"id": tid, "slug": slug, "name": strings.TrimSpace(b.Name), "isDefault": false, "onboardingCompleted": false}})
 }
 func (a *routes) tenant(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	id := chi.URLParam(r, "id")
-	var slug, name, created string
-	var def, onboard bool
-	var suspendedAt, reason, suspendedByID sql.NullString
-	if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT slug,name,is_default,onboarding_completed,created_at,suspended_at,suspended_reason,suspended_by_user_id FROM tenants WHERE id=?`), id).Scan(&slug, &name, &def, &onboard, &created, &suspendedAt, &reason, &suspendedByID) != nil {
+	var t models.Tenant
+	if a.d.Gorm.WithContext(ctx).Where("id=?", id).Take(&t).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
-	rows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT m.id,m.role,m.status,m.created_at,u.id,u.email,COALESCE(u.name,''),u.suspended_at,u.is_platform_admin FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.created_at`), id)
+	var memberRows []struct {
+		MembershipID  string  `gorm:"column:mid"`
+		Role          string  `gorm:"column:mrole"`
+		Status        string  `gorm:"column:mstatus"`
+		Joined        string  `gorm:"column:joined"`
+		UserID        string  `gorm:"column:uid"`
+		Email         string  `gorm:"column:email"`
+		UserName      string  `gorm:"column:uname"`
+		UserSuspended *string `gorm:"column:ususpended"`
+		PlatformAdmin bool    `gorm:"column:platform_admin"`
+	}
+	_ = a.d.Gorm.WithContext(ctx).Raw(`SELECT m.id AS mid,m.role AS mrole,m.status AS mstatus,m.created_at AS joined,u.id AS uid,u.email AS email,COALESCE(u.name,'') AS uname,u.suspended_at AS ususpended,u.is_platform_admin AS platform_admin FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.created_at`, id).Scan(&memberRows)
 	members := []map[string]any{}
-	if rows != nil {
-		for rows.Next() {
-			var mid, role, status, joined, uid, email, userName string
-			var userSuspended sql.NullString
-			var platformAdmin bool
-			if rows.Scan(&mid, &role, &status, &joined, &uid, &email, &userName, &userSuspended, &platformAdmin) == nil {
-				members = append(members, map[string]any{"membershipId": mid, "role": role, "status": status, "joinedAt": joined, "user": map[string]any{"id": uid, "email": email, "name": nullIfBlank(userName), "suspended": userSuspended.Valid, "isPlatformAdmin": platformAdmin}})
-			}
-		}
-		rows.Close()
+	for _, m := range memberRows {
+		members = append(members, map[string]any{"membershipId": m.MembershipID, "role": m.Role, "status": m.Status, "joinedAt": m.Joined, "user": map[string]any{"id": m.UserID, "email": m.Email, "name": nullIfBlank(m.UserName), "suspended": m.UserSuspended != nil, "isPlatformAdmin": m.PlatformAdmin}})
 	}
 	runners := []map[string]any{}
-	runnerRows, _ := a.d.DB.QueryContext(r.Context(), a.q(`SELECT id,name,status,is_shared FROM runtime_nodes WHERE tenant_id=? ORDER BY created_at`), id)
-	if runnerRows != nil {
-		for runnerRows.Next() {
-			var rid, runnerName, status string
-			var shared bool
-			if runnerRows.Scan(&rid, &runnerName, &status, &shared) == nil {
-				runners = append(runners, map[string]any{"id": rid, "name": runnerName, "status": status, "isShared": shared})
-			}
-		}
-		runnerRows.Close()
+	var runnerRows []models.RuntimeNode
+	_ = a.d.Gorm.WithContext(ctx).Where("tenant_id=?", id).Order("created_at").Find(&runnerRows)
+	for _, row := range runnerRows {
+		runners = append(runners, map[string]any{"id": deref(row.ID), "name": row.Name, "status": row.Status, "isShared": row.IsShared})
 	}
 	var suspendedBy any
-	if suspendedByID.Valid {
-		var actorEmail string
-		if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT email FROM users WHERE id=?`), suspendedByID.String).Scan(&actorEmail) == nil {
-			suspendedBy = map[string]any{"id": suspendedByID.String, "email": actorEmail}
+	if t.SuspendedByUserID != nil {
+		var actor models.User
+		if a.d.Gorm.WithContext(ctx).Select("email").Where("id=?", *t.SuspendedByUserID).Take(&actor).Error == nil {
+			suspendedBy = map[string]any{"id": *t.SuspendedByUserID, "email": actor.Email}
 		}
 	}
-	httpx.JSON(w, 200, map[string]any{"tenant": map[string]any{"id": id, "slug": slug, "name": name, "isDefault": def, "onboardingCompleted": onboard, "createdAt": created, "suspended": suspendedAt.Valid, "suspendedAt": nullString(suspendedAt), "suspendedReason": nullString(reason), "suspendedByUserId": nullString(suspendedByID), "suspendedBy": suspendedBy}, "members": members, "runners": runners})
+	httpx.JSON(w, 200, map[string]any{"tenant": map[string]any{"id": id, "slug": t.Slug, "name": t.Name, "isDefault": t.IsDefault, "onboardingCompleted": t.OnboardingCompleted, "createdAt": t.CreatedAt, "suspended": t.SuspendedAt != nil, "suspendedAt": nullStringPtr(t.SuspendedAt), "suspendedReason": nullStringPtr(t.SuspendedReason), "suspendedByUserId": nullStringPtr(t.SuspendedByUserID), "suspendedBy": suspendedBy}, "members": members, "runners": runners})
 }
 func (a *routes) patchTenant(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -671,18 +662,19 @@ func (a *routes) patchTenant(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid request")
 		return
 	}
-	var name, slug string
-	if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT name,slug FROM tenants WHERE id=?`), id).Scan(&name, &slug) != nil {
+	var current models.Tenant
+	if a.d.Gorm.WithContext(r.Context()).Select("name,slug").Where("id=?", id).Take(&current).Error != nil {
 		httpx.Error(w, 404, "not found")
 		return
 	}
+	name, slug := current.Name, current.Slug
 	if b.Name != nil {
 		name = strings.TrimSpace(*b.Name)
 	}
 	if b.Slug != nil {
 		slug = strings.TrimSpace(*b.Slug)
 	}
-	_, err := a.d.DB.ExecContext(r.Context(), a.q(`UPDATE tenants SET name=?,slug=?,updated_at=? WHERE id=?`), name, slug, a.now(), id)
+	err := a.d.Gorm.WithContext(r.Context()).Model(&models.Tenant{}).Where("id=?", id).Updates(map[string]any{"name": name, "slug": slug, "updated_at": a.now()}).Error
 	if err != nil {
 		httpx.Error(w, 409, "update conflict")
 		return
@@ -709,12 +701,12 @@ func (a *routes) setTenantStatus(w http.ResponseWriter, r *http.Request, status 
 		reason = strings.TrimSpace(body.Reason)
 	}
 	if status == "suspended" {
-		var isDefault bool
-		if err := a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT is_default FROM tenants WHERE id=?`), id).Scan(&isDefault); err != nil {
+		var current models.Tenant
+		if err := a.d.Gorm.WithContext(r.Context()).Select("is_default").Where("id=?", id).Take(&current).Error; err != nil {
 			httpx.Error(w, 404, "Not found")
 			return
 		}
-		if isDefault {
+		if current.IsDefault {
 			httpx.Error(w, 409, "default tenant cannot be suspended")
 			return
 		}
@@ -748,12 +740,12 @@ func (a *routes) setTenantStatus(w http.ResponseWriter, r *http.Request, status 
 }
 func (a *routes) deleteTenant(w http.ResponseWriter, r *http.Request) {
 	tenantID := chi.URLParam(r, "id")
-	var isDefault bool
-	if err := a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT is_default FROM tenants WHERE id=?`), tenantID).Scan(&isDefault); err != nil {
+	var current models.Tenant
+	if err := a.d.Gorm.WithContext(r.Context()).Select("is_default").Where("id=?", tenantID).Take(&current).Error; err != nil {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
-	if isDefault {
+	if current.IsDefault {
 		httpx.Error(w, 409, "default tenant cannot be deleted")
 		return
 	}
@@ -814,25 +806,28 @@ func (a *routes) addMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenantID := chi.URLParam(r, "id")
-	var tenantStatus string
-	if err := a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT status FROM tenants WHERE id=?`), tenantID).Scan(&tenantStatus); err != nil {
+	var currentTenant models.Tenant
+	if err := a.d.Gorm.WithContext(r.Context()).Select("status").Where("id=?", tenantID).Take(&currentTenant).Error; err != nil {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
-	if tenantStatus != "active" {
+	if currentTenant.Status != "active" {
 		httpx.Error(w, 403, "tenant is suspended")
 		return
 	}
 	b.UserID = strings.TrimSpace(b.UserID)
 	if b.UserID == "" && strings.TrimSpace(b.Email) != "" {
-		_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT id FROM users WHERE email=?`), strings.ToLower(strings.TrimSpace(b.Email))).Scan(&b.UserID)
+		var owner models.User
+		if err := a.d.Gorm.WithContext(r.Context()).Select("id").Where("email=?", strings.ToLower(strings.TrimSpace(b.Email))).Take(&owner).Error; err == nil {
+			b.UserID = deref(owner.ID)
+		}
 	}
 	if b.UserID == "" {
 		httpx.Error(w, 404, "user not found")
 		return
 	}
-	var userExists int
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users WHERE id=?`), b.UserID).Scan(&userExists)
+	var userExists int64
+	_ = a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", b.UserID).Count(&userExists)
 	if userExists != 1 {
 		httpx.Error(w, 404, "user not found")
 		return
@@ -845,7 +840,7 @@ func (a *routes) addMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := a.d.NewID()
-	_, err := a.d.DB.ExecContext(r.Context(), a.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,?,'active',?,?)`), id, tenantID, b.UserID, b.Role, a.now(), a.now())
+	err := a.d.Gorm.WithContext(r.Context()).Create(&models.TenantMembership{ID: &id, TenantID: tenantID, UserID: b.UserID, Role: b.Role, Status: "active", CreatedAt: a.now(), UpdatedAt: a.now()}).Error
 	if err != nil {
 		httpx.Error(w, 409, "membership conflict")
 		return
@@ -967,23 +962,22 @@ func (a *routes) deleteMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *routes) applyAgentDefaults(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	userID := chi.URLParam(r, "id")
-	rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT m.tenant_id FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' AND t.suspended_at IS NULL ORDER BY m.tenant_id`), userID)
-	if err != nil {
+	var tenantRows []struct {
+		TenantID string `gorm:"column:tenant_id"`
+	}
+	if err := a.d.Gorm.WithContext(ctx).Raw(`SELECT m.tenant_id AS tenant_id FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' AND t.suspended_at IS NULL ORDER BY m.tenant_id`, userID).Scan(&tenantRows).Error; err != nil {
 		httpx.Error(w, 400, err.Error())
 		return
 	}
 	tenants := []string{}
-	for rows.Next() {
-		var tenantID string
-		if rows.Scan(&tenantID) == nil {
-			tenants = append(tenants, tenantID)
-		}
+	for _, row := range tenantRows {
+		tenants = append(tenants, row.TenantID)
 	}
-	rows.Close()
 	if len(tenants) == 0 {
-		var exists int
-		_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM users WHERE id=?`), userID).Scan(&exists)
+		var exists int64
+		_ = a.d.Gorm.WithContext(ctx).Model(&models.User{}).Where("id=?", userID).Count(&exists)
 		if exists == 0 {
 			httpx.Error(w, 404, "user not found")
 			return
@@ -991,23 +985,14 @@ func (a *routes) applyAgentDefaults(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := 0
 	for _, tenantID := range tenants {
-		agentRows, e := a.d.DB.QueryContext(r.Context(), a.q(`SELECT id,config_json FROM agents WHERE tenant_id=?`), tenantID)
-		if e != nil {
+		var agents []models.Agent
+		if e := a.d.Gorm.WithContext(ctx).Select("id,config_json").Where("tenant_id=?", tenantID).Find(&agents).Error; e != nil {
 			httpx.Error(w, 400, e.Error())
 			return
 		}
-		type agentConfig struct{ id, raw string }
-		agents := []agentConfig{}
-		for agentRows.Next() {
-			var agent agentConfig
-			if agentRows.Scan(&agent.id, &agent.raw) == nil {
-				agents = append(agents, agent)
-			}
-		}
-		agentRows.Close()
 		for _, agent := range agents {
 			bag := map[string]any{}
-			_ = json.Unmarshal([]byte(agent.raw), &bag)
+			_ = json.Unmarshal([]byte(agent.ConfigJSON), &bag)
 			providers, _ := bag["providers"].(map[string]any)
 			if providers == nil {
 				providers = map[string]any{}
@@ -1022,10 +1007,10 @@ func (a *routes) applyAgentDefaults(w http.ResponseWriter, r *http.Request) {
 			}
 			bag["providers"] = providers
 			next, _ := json.Marshal(bag)
-			if string(next) == agent.raw {
+			if string(next) == agent.ConfigJSON {
 				continue
 			}
-			if _, e = a.d.DB.ExecContext(r.Context(), a.q(`UPDATE agents SET config_json=?,updated_at=? WHERE id=? AND tenant_id=?`), string(next), a.now(), agent.id, tenantID); e != nil {
+			if e := a.d.Gorm.WithContext(ctx).Model(&models.Agent{}).Where("id=? AND tenant_id=?", deref(agent.ID), tenantID).Updates(map[string]any{"config_json": string(next), "updated_at": a.now()}).Error; e != nil {
 				httpx.Error(w, 400, e.Error())
 				return
 			}
@@ -1036,40 +1021,48 @@ func (a *routes) applyAgentDefaults(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *routes) runners(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	p, n := page(r)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	pattern := likePattern(q)
-	where := ` WHERE rn.kind<>'local' AND (?='' OR LOWER(rn.name) LIKE ? ESCAPE '\' OR LOWER(rn.slug) LIKE ? ESCAPE '\' OR LOWER(COALESCE(t.name,'')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(t.slug,'')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(u.email,'')) LIKE ? ESCAPE '\')`
+	clauses := []string{`rn.kind<>'local'`, `(?='' OR LOWER(rn.name) LIKE ? ESCAPE '\' OR LOWER(rn.slug) LIKE ? ESCAPE '\' OR LOWER(COALESCE(t.name,'')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(t.slug,'')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(u.email,'')) LIKE ? ESCAPE '\')`}
 	args := []any{q, pattern, pattern, pattern, pattern, pattern}
 	if status := r.URL.Query().Get("status"); status != "" && status != "all" {
-		where += ` AND rn.status=?`
+		clauses = append(clauses, `rn.status=?`)
 		args = append(args, status)
 	}
 	if shared := r.URL.Query().Get("shared"); shared == "shared" {
-		where += ` AND rn.is_shared=TRUE`
+		clauses = append(clauses, `rn.is_shared=TRUE`)
 	} else if shared == "private" {
-		where += ` AND rn.is_shared=FALSE`
+		clauses = append(clauses, `rn.is_shared=FALSE`)
 	}
-	var total int
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM runtime_nodes rn LEFT JOIN tenants t ON t.id=rn.tenant_id LEFT JOIN users u ON u.id=rn.created_by_user_id`+where), args...).Scan(&total)
-	listArgs := append(append([]any{}, args...), n, (p-1)*n)
+	where := strings.Join(clauses, " AND ")
+	query := a.d.Gorm.WithContext(ctx).Table("runtime_nodes rn").Joins("LEFT JOIN tenants t ON t.id=rn.tenant_id").Joins("LEFT JOIN users u ON u.id=rn.created_by_user_id").Where(where, args...)
+	var total int64
+	_ = query.Count(&total)
 	order := listOrder(r, map[string]string{"name": "rn.name", "status": "rn.status", "createdAt": "rn.created_at", "lastSeenAt": "rn.last_seen_at"}, "createdAt")
-	rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT rn.id,rn.name,rn.slug,rn.status,rn.is_shared,rn.tenant_id,t.slug,t.name,rn.created_by_user_id,u.email,COALESCE(u.is_platform_admin,FALSE),rn.last_seen_at,rn.created_at FROM runtime_nodes rn LEFT JOIN tenants t ON t.id=rn.tenant_id LEFT JOIN users u ON u.id=rn.created_by_user_id`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`), listArgs...)
-	if err != nil {
-		httpx.Error(w, 500, "query failed")
-		return
+	type runnerRow struct {
+		ID                   string  `gorm:"column:id"`
+		Name                 string  `gorm:"column:name"`
+		Slug                 string  `gorm:"column:slug"`
+		Status               string  `gorm:"column:status"`
+		IsShared             bool    `gorm:"column:is_shared"`
+		TenantID             string  `gorm:"column:tenant_id"`
+		TenantSlug           *string `gorm:"column:tenant_slug"`
+		TenantName           *string `gorm:"column:tenant_name"`
+		CreatedByUserID      *string `gorm:"column:created_by_user_id"`
+		CreatedByEmail       *string `gorm:"column:creator_email"`
+		OwnerIsPlatformAdmin bool    `gorm:"column:owner_admin"`
+		LastSeenAt           *string `gorm:"column:last_seen_at"`
+		CreatedAt            string  `gorm:"column:created_at"`
 	}
-	defer rows.Close()
+	var rows []runnerRow
+	_ = query.Select("rn.id,rn.name,rn.slug,rn.status,rn.is_shared,rn.tenant_id,t.slug AS tenant_slug,t.name AS tenant_name,rn.created_by_user_id,u.email AS creator_email,COALESCE(u.is_platform_admin,FALSE) AS owner_admin,rn.last_seen_at,rn.created_at").Order(order).Limit(n).Offset((p - 1) * n).Find(&rows)
 	items := []map[string]any{}
-	for rows.Next() {
-		var id, name, slug, status, tenantID, created string
-		var shared, ownerAdmin bool
-		var tenantSlug, tenantName, creatorID, creatorEmail, lastSeen sql.NullString
-		if rows.Scan(&id, &name, &slug, &status, &shared, &tenantID, &tenantSlug, &tenantName, &creatorID, &creatorEmail, &ownerAdmin, &lastSeen, &created) == nil {
-			items = append(items, map[string]any{"id": id, "name": name, "slug": slug, "status": status, "isShared": shared, "tenantId": tenantID, "tenantSlug": nullString(tenantSlug), "tenantName": nullString(tenantName), "createdByUserId": nullString(creatorID), "createdByEmail": nullString(creatorEmail), "ownerIsPlatformAdmin": ownerAdmin, "lastSeenAt": nullString(lastSeen), "createdAt": created})
-		}
+	for _, row := range rows {
+		items = append(items, map[string]any{"id": row.ID, "name": row.Name, "slug": row.Slug, "status": row.Status, "isShared": row.IsShared, "tenantId": row.TenantID, "tenantSlug": nullStringPtr(row.TenantSlug), "tenantName": nullStringPtr(row.TenantName), "createdByUserId": nullStringPtr(row.CreatedByUserID), "createdByEmail": nullStringPtr(row.CreatedByEmail), "ownerIsPlatformAdmin": row.OwnerIsPlatformAdmin, "lastSeenAt": nullStringPtr(row.LastSeenAt), "createdAt": row.CreatedAt})
 	}
-	httpx.JSON(w, 200, map[string]any{"items": items, "total": total, "page": p, "pageSize": n, "limits": map[string]any{"maxActiveWorkspacesPerTenant": 1, "maxActiveWorkspacesTotal": 40, "allowPortExposure": true, "allowContainerAllocate": false, "allowArchive": false}})
+	httpx.JSON(w, 200, map[string]any{"items": items, "total": int(total), "page": p, "pageSize": n, "limits": map[string]any{"maxActiveWorkspacesPerTenant": 1, "maxActiveWorkspacesTotal": 40, "allowPortExposure": true, "allowContainerAllocate": false, "allowArchive": false}})
 }
 
 func (a *routes) patchRunner(w http.ResponseWriter, r *http.Request) {
@@ -1081,28 +1074,31 @@ func (a *routes) patchRunner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	res, err := a.d.DB.ExecContext(r.Context(), a.q(`UPDATE runtime_nodes SET is_shared=?,updated_at=? WHERE id=? AND kind<>'local'`), *body.IsShared, a.now(), id)
-	if err != nil {
-		httpx.Error(w, 400, err.Error())
+	res := a.d.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id=? AND kind<>'local'", id).Updates(map[string]any{"is_shared": *body.IsShared, "updated_at": a.now()})
+	if res.Error != nil {
+		httpx.Error(w, 400, res.Error.Error())
 		return
 	}
-	count, _ := res.RowsAffected()
-	if count != 1 {
+	if res.RowsAffected != 1 {
 		httpx.Error(w, 404, "runner not found")
 		return
 	}
-	var name, tenantID string
-	var creator sql.NullString
-	_ = a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT name,tenant_id,created_by_user_id FROM runtime_nodes WHERE id=?`), id).Scan(&name, &tenantID, &creator)
-	httpx.JSON(w, 200, map[string]any{"runner": map[string]any{"id": id, "name": name, "tenantId": tenantID, "isShared": *body.IsShared, "createdByUserId": nullString(creator)}})
+	var runner models.RuntimeNode
+	_ = a.d.Gorm.WithContext(r.Context()).Select("name,tenant_id,created_by_user_id").Where("id=?", id).Take(&runner).Error
+	httpx.JSON(w, 200, map[string]any{"runner": map[string]any{"id": id, "name": runner.Name, "tenantId": runner.TenantID, "isShared": *body.IsShared, "createdByUserId": nullStringPtr(runner.CreatedByUserID)}})
 }
 
 func (a *routes) platform(w http.ResponseWriter, r *http.Request) {
+	var meta models.PlatformMetum
 	var setup bool
 	var mode, version string
-	if a.d.DB.QueryRowContext(r.Context(), `SELECT setup_completed,mode,version FROM platform_meta WHERE singleton=1`).Scan(&setup, &mode, &version) != nil {
+	if a.d.Gorm.WithContext(r.Context()).Where("singleton=1").Take(&meta).Error != nil {
 		mode = map[bool]string{true: "multi-tenant", false: "single-tenant"}[a.d.MultiTenant]
 		version = "go-rewrite"
+	} else {
+		setup = meta.SetupCompleted
+		mode = meta.Mode
+		version = meta.Version
 	}
 	httpx.JSON(w, 200, map[string]any{"setupCompleted": setup, "mode": mode, "multiTenant": a.d.MultiTenant, "edition": a.d.Edition, "version": version})
 }
@@ -1123,15 +1119,17 @@ func (a *routes) putAgentDefaults(w http.ResponseWriter, r *http.Request) {
 func (a *routes) setting(w http.ResponseWriter, r *http.Request, key string, value map[string]any) {
 	if value != nil {
 		raw, _ := json.Marshal(value)
-		_, err := a.d.DB.ExecContext(r.Context(), a.q(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,'platform',?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=excluded.value`), a.d.NewID(), key, string(raw))
+		id := a.d.NewID()
+		err := a.d.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_key"}, {Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value"})}).Create(&models.Setting{ID: &id, OwnerKey: "platform", Key: key, Value: string(raw)}).Error
 		if err != nil {
 			httpx.Error(w, 500, "update failed")
 			return
 		}
 	}
-	var raw string
-	if a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT value FROM settings WHERE owner_key='platform' AND key=?`), key).Scan(&raw) != nil {
-		raw = "{}"
+	var row models.Setting
+	raw := "{}"
+	if a.d.Gorm.WithContext(r.Context()).Where("owner_key='platform' AND key=?", key).Take(&row).Error == nil {
+		raw = row.Value
 	}
 	var out map[string]any
 	_ = json.Unmarshal([]byte(raw), &out)
@@ -1143,8 +1141,8 @@ func (a *routes) oauthClients(w http.ResponseWriter, r *http.Request) {
 	if tenantID == "" {
 		tenantID = p.TenantID
 	}
-	var exists int
-	if err := a.d.DB.QueryRowContext(r.Context(), a.q(`SELECT COUNT(*) FROM tenants WHERE id=?`), tenantID).Scan(&exists); err != nil || exists == 0 {
+	var exists int64
+	if err := a.d.Gorm.WithContext(r.Context()).Model(&models.Tenant{}).Where("id=?", tenantID).Count(&exists).Error; err != nil || exists == 0 {
 		httpx.Error(w, 404, "Tenant not found")
 		return
 	}
@@ -1170,36 +1168,41 @@ func (a *routes) oauthClients(w http.ResponseWriter, r *http.Request) {
 	needle := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	items := []map[string]any{}
 	if direction != "outbound" {
-		rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT DISTINCT c.id,c.client_id,c.client_name,c.token_endpoint_auth_method,c.registration_type,c.redirect_uris_json,c.scope,c.tenant_id,c.created_at
+		type inboundClientRow struct {
+			ID                      string  `gorm:"column:id"`
+			ClientID                string  `gorm:"column:client_id"`
+			ClientName              string  `gorm:"column:client_name"`
+			TokenEndpointAuthMethod string  `gorm:"column:token_endpoint_auth_method"`
+			RegistrationType        string  `gorm:"column:registration_type"`
+			RedirectUrisJSON        string  `gorm:"column:redirect_uris_json"`
+			Scope                   string  `gorm:"column:scope"`
+			TenantID                *string `gorm:"column:tenant_id"`
+			CreatedAt               string  `gorm:"column:created_at"`
+		}
+		var rows []inboundClientRow
+		if err := a.d.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT c.id,c.client_id,c.client_name,c.token_endpoint_auth_method,c.registration_type,c.redirect_uris_json,c.scope,c.tenant_id,c.created_at
 			FROM oauth_clients c
-			WHERE c.tenant_id=? OR (c.tenant_id IS NULL AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens rt WHERE rt.tenant_id=? AND rt.client_id=c.client_id) OR EXISTS(SELECT 1 FROM oauth_auth_codes ac WHERE ac.tenant_id=? AND ac.client_id=c.client_id)))`), tenantID, tenantID, tenantID)
-		if err != nil {
+			WHERE c.tenant_id=? OR (c.tenant_id IS NULL AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens rt WHERE rt.tenant_id=? AND rt.client_id=c.client_id) OR EXISTS(SELECT 1 FROM oauth_auth_codes ac WHERE ac.tenant_id=? AND ac.client_id=c.client_id)))`, tenantID, tenantID, tenantID).Scan(&rows).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		for rows.Next() {
-			var id, clientID, name, authMethod, registrationType, redirects, scope, created string
-			var boundTenant sql.NullString
-			if rows.Scan(&id, &clientID, &name, &authMethod, &registrationType, &redirects, &scope, &boundTenant, &created) == nil {
-				items = append(items, map[string]any{"id": id, "clientId": clientID, "clientName": name, "tokenEndpointAuthMethod": authMethod, "registrationType": registrationType, "redirectUris": decodeArray(redirects), "scope": scope, "tenantBound": boundTenant.Valid && boundTenant.String == tenantID, "createdAt": created, "direction": "inbound"})
-			}
+		for _, row := range rows {
+			items = append(items, map[string]any{"id": row.ID, "clientId": row.ClientID, "clientName": row.ClientName, "tokenEndpointAuthMethod": row.TokenEndpointAuthMethod, "registrationType": row.RegistrationType, "redirectUris": decodeArray(row.RedirectUrisJSON), "scope": row.Scope, "tenantBound": row.TenantID != nil && *row.TenantID == tenantID, "createdAt": row.CreatedAt, "direction": "inbound"})
 		}
-		rows.Close()
 	}
 	if direction != "inbound" {
-		rows, err := a.d.DB.QueryContext(r.Context(), a.q(`SELECT id,mcp_url,host,client_id,client_name,source,secret_enc,registration_endpoint,scope,instance_id,created_at,updated_at FROM upstream_oauth_clients WHERE tenant_id=?`), tenantID)
-		if err != nil {
+		var rows []models.UpstreamOauthClient
+		if err := a.d.Gorm.WithContext(r.Context()).Where("tenant_id=?", tenantID).Find(&rows).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
 			return
 		}
-		for rows.Next() {
-			var id, mcpURL, host, clientID, name, source, secret, scope, created, updated string
-			var registrationEndpoint, instanceID sql.NullString
-			if rows.Scan(&id, &mcpURL, &host, &clientID, &name, &source, &secret, &registrationEndpoint, &scope, &instanceID, &created, &updated) == nil {
-				items = append(items, map[string]any{"id": id, "mcpUrl": mcpURL, "host": host, "clientId": clientID, "clientName": name, "source": source, "hasSecret": secret != "", "registrationEndpoint": nullString(registrationEndpoint), "scope": scope, "instanceId": nullString(instanceID), "createdAt": created, "updatedAt": updated, "direction": "outbound"})
+		for _, row := range rows {
+			secret := ""
+			if row.SecretEnc != nil {
+				secret = *row.SecretEnc
 			}
+			items = append(items, map[string]any{"id": deref(row.ID), "mcpUrl": row.McpURL, "host": row.Host, "clientId": row.ClientID, "clientName": row.ClientName, "source": row.Source, "hasSecret": secret != "", "registrationEndpoint": nullStringPtr(row.RegistrationEndpoint), "scope": row.Scope, "instanceId": nullStringPtr(row.InstanceID), "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt, "direction": "outbound"})
 		}
-		rows.Close()
 	}
 	if needle != "" {
 		filtered := items[:0]
@@ -1342,6 +1345,18 @@ func nullString(value sql.NullString) any {
 		return value.String
 	}
 	return nil
+}
+func nullStringPtr(value *string) any {
+	if value != nil {
+		return *value
+	}
+	return nil
+}
+func deref(value *string) string {
+	if value != nil {
+		return *value
+	}
+	return ""
 }
 func decodeArray(raw string) []any {
 	var v []any

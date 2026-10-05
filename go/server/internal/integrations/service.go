@@ -17,9 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	internalruntime "github.com/Moonrend/Zakura/go/server/internal/runtime"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func merge(dst map[string]any, src map[string]any) {
@@ -28,34 +31,34 @@ func merge(dst map[string]any, src map[string]any) {
 	}
 }
 func (h *handler) installationConfig(ctx context.Context, tenant, agent, ref string) (map[string]any, error) {
-	var enc string
-	e := h.deps.DB.QueryRowContext(ctx, h.q(`SELECT config_enc FROM agent_connector_installations WHERE tenant_id=? AND agent_id=? AND connector_ref=? AND enabled=true`), tenant, agent, ref).Scan(&enc)
+	var install models.AgentConnectorInstallation
+	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ? AND enabled = true", tenant, agent, ref).First(&install).Error
 	if e != nil {
 		return nil, e
 	}
-	raw, e := decrypt(h.deps.Secret, tenant+":"+agent+":"+ref, enc)
+	raw, e := decrypt(h.deps.Secret, tenant+":"+agent+":"+ref, install.ConfigEnc)
 	if e != nil {
 		return nil, e
 	}
-	var install struct {
+	var installCfg struct {
 		ProfileKey string         `json:"profileKey"`
 		Config     map[string]any `json:"config"`
 	}
-	if e = json.Unmarshal(raw, &install); e != nil {
+	if e = json.Unmarshal(raw, &installCfg); e != nil {
 		return nil, e
 	}
 	out := map[string]any{}
-	if install.ProfileKey != "" {
-		cfg, e := h.profileConfig(ctx, tenant, install.ProfileKey)
+	if installCfg.ProfileKey != "" {
+		cfg, e := h.profileConfig(ctx, tenant, installCfg.ProfileKey)
 		if e != nil {
 			return nil, e
 		}
 		merge(out, cfg)
 	}
-	merge(out, install.Config)
-	var settingEnc string
-	if e := h.deps.DB.QueryRowContext(ctx, h.q(`SELECT config_enc FROM connector_settings WHERE scope_key=? AND connector_ref=?`), tenant, ref).Scan(&settingEnc); e == nil {
-		if raw, e := decrypt(h.deps.Secret, tenant+":"+ref, settingEnc); e == nil {
+	merge(out, installCfg.Config)
+	var setting models.ConnectorSetting
+	if e := h.deps.Gorm.WithContext(ctx).Where("scope_key = ? AND connector_ref = ?", tenant, ref).First(&setting).Error; e == nil {
+		if raw, e := decrypt(h.deps.Secret, tenant+":"+ref, setting.ConfigEnc); e == nil {
 			var cfg map[string]any
 			if json.Unmarshal(raw, &cfg) == nil {
 				merge(out, cfg)
@@ -241,10 +244,10 @@ func (h *handler) webhook(w http.ResponseWriter, r *http.Request) {
 	if agent != "" {
 		cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
 	} else {
-		var one string
-		e = h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT agent_id FROM agent_connector_installations WHERE tenant_id=? AND connector_ref=? AND enabled=true ORDER BY created_at LIMIT 1`), tenant, ref).Scan(&one)
-		agent = one
+		var install models.AgentConnectorInstallation
+		e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND connector_ref = ? AND enabled = true", tenant, ref).Order("created_at").First(&install).Error
 		if e == nil {
+			agent = install.AgentID
 			cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
 		}
 	}
@@ -272,7 +275,8 @@ func (h *handler) webhook(w http.ResponseWriter, r *http.Request) {
 	body["agentId"] = agent
 	body["raw"] = json.RawMessage(raw)
 	payload, _ := json.Marshal(body)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO channel_events(id,tenant_id,provider,external_id,payload_json,delivery_status,attempts,last_error,created_at,processed_at) VALUES(?,?,?,?,?,'pending',0,NULL,?,NULL) ON CONFLICT(provider,external_id) DO NOTHING`), h.id(), tenant, ref, external, string(payload), h.now())
+	event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: ref, ExternalID: external, PayloadJSON: string(payload), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -315,36 +319,21 @@ func (h *handler) startDeliverer(ctx context.Context) {
 	}()
 }
 func (h *handler) deliverPending(ctx context.Context) {
-	rows, e := h.deps.DB.QueryContext(ctx, h.q(`SELECT id,tenant_id,provider,payload_json,attempts FROM channel_events WHERE delivery_status IN ('pending','retry') AND attempts<8 ORDER BY created_at LIMIT 25`))
-	if e != nil {
+	var all []models.ChannelEvent
+	if e := h.deps.Gorm.WithContext(ctx).Where("delivery_status IN ? AND attempts < ?", []string{"pending", "retry"}, 8).Order("created_at").Limit(25).Find(&all).Error; e != nil {
 		return
 	}
-	type event struct {
-		id, tenant, ref, payload string
-		attempts                 int
-	}
-	all := []event{}
-	for rows.Next() {
-		var x event
-		if rows.Scan(&x.id, &x.tenant, &x.ref, &x.payload, &x.attempts) == nil {
-			all = append(all, x)
-		}
-	}
-	rows.Close()
 	for _, x := range all {
-		res, e := h.deps.DB.ExecContext(ctx, h.q(`UPDATE channel_events SET delivery_status='processing',attempts=attempts+1 WHERE id=? AND delivery_status IN ('pending','retry')`), x.id)
-		if e != nil {
+		res := h.deps.Gorm.WithContext(ctx).Model(&models.ChannelEvent{}).
+			Where("id = ? AND delivery_status IN ?", *x.ID, []string{"pending", "retry"}).
+			Updates(map[string]any{"delivery_status": "processing", "attempts": gorm.Expr("attempts + 1")})
+		if res.Error != nil || res.RowsAffected == 0 {
 			continue
 		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			continue
-		}
-		e = h.processChannel(ctx, x.tenant, x.ref, []byte(x.payload))
-		if e != nil {
-			_, _ = h.deps.DB.ExecContext(ctx, h.q(`UPDATE channel_events SET delivery_status='retry',last_error=? WHERE id=?`), e.Error(), x.id)
+		if e := h.processChannel(ctx, x.TenantID, x.Provider, []byte(x.PayloadJSON)); e != nil {
+			h.deps.Gorm.WithContext(ctx).Model(&models.ChannelEvent{}).Where("id = ?", *x.ID).Updates(map[string]any{"delivery_status": "retry", "last_error": e.Error()})
 		} else {
-			_, _ = h.deps.DB.ExecContext(ctx, h.q(`UPDATE channel_events SET delivery_status='processed',processed_at=?,last_error=NULL WHERE id=?`), h.now(), x.id)
+			h.deps.Gorm.WithContext(ctx).Model(&models.ChannelEvent{}).Where("id = ?", *x.ID).Updates(map[string]any{"delivery_status": "processed", "processed_at": h.now().Format(time.RFC3339Nano), "last_error": nil})
 		}
 	}
 }
@@ -390,24 +379,19 @@ func extractInboundText(ref string, p map[string]any) string {
 
 func (h *handler) listConnections(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,agent_id,connector_ref,enabled,created_at,updated_at FROM agent_connector_installations WHERE tenant_id=? ORDER BY created_at DESC`), p.TenantID)
-	if e != nil {
+	var rows []models.AgentConnectorInstallation
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at DESC").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, agent, ref, c, u string
-		var enabled bool
-		if rows.Scan(&id, &agent, &ref, &enabled, &c, &u) == nil {
-			meta, _ := provider(ref)
-			status := "disabled"
-			if enabled {
-				status = "installed"
-			}
-			items = append(items, map[string]any{"id": "connector:" + id, "installationId": id, "name": meta.Name, "kind": "platform", "status": status, "providerId": ref, "slug": ref, "agentIds": []string{agent}, "createdAt": c, "updatedAt": u})
+	for _, row := range rows {
+		meta, _ := provider(row.ConnectorRef)
+		status := "disabled"
+		if row.Enabled {
+			status = "installed"
 		}
+		items = append(items, map[string]any{"id": "connector:" + *row.ID, "installationId": *row.ID, "name": meta.Name, "kind": "platform", "status": status, "providerId": row.ConnectorRef, "slug": row.ConnectorRef, "agentIds": []string{row.AgentID}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"items": items})
 }
@@ -432,28 +416,28 @@ func (h *handler) connectionSources(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listPackages(w http.ResponseWriter, r *http.Request) {
 	term := "%" + r.URL.Query().Get("q") + "%"
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,slug,name,COALESCE(description,''),manifest_json,created_at,updated_at FROM integration_packages WHERE LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?) ORDER BY name LIMIT 100`), term, term)
-	if e != nil {
+	var rows []models.IntegrationPackage
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?)", term, term).Order("name").Limit(100).Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, slug, name, desc, manifest, c, u string
-		if rows.Scan(&id, &slug, &name, &desc, &manifest, &c, &u) == nil {
-			meta := map[string]any{}
-			_ = json.Unmarshal([]byte(manifest), &meta)
-			kind, _ := meta["kind"].(string)
-			if kind == "" {
-				kind = "plugin"
-			}
-			source := r.URL.Query().Get("source")
-			if source == "" {
-				source = "platform"
-			}
-			items = append(items, map[string]any{"id": id, "name": name, "description": desc, "kind": kind, "source": source, "icon": meta["icon"], "verified": meta["verified"], "featured": meta["featured"], "counts": map[string]int{}, "needsRunner": meta["needsRunner"], "publisher": meta["publisher"], "detailId": slug, "installRef": slug, "installed": false, "createdAt": c, "updatedAt": u})
+	for _, row := range rows {
+		desc := ""
+		if row.Description != nil {
+			desc = *row.Description
 		}
+		meta := map[string]any{}
+		_ = json.Unmarshal([]byte(row.ManifestJSON), &meta)
+		kind, _ := meta["kind"].(string)
+		if kind == "" {
+			kind = "plugin"
+		}
+		source := r.URL.Query().Get("source")
+		if source == "" {
+			source = "platform"
+		}
+		items = append(items, map[string]any{"id": *row.ID, "name": row.Name, "description": desc, "kind": kind, "source": source, "icon": meta["icon"], "verified": meta["verified"], "featured": meta["featured"], "counts": map[string]int{}, "needsRunner": meta["needsRunner"], "publisher": meta["publisher"], "detailId": row.Slug, "installRef": row.Slug, "installed": false, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	source := r.URL.Query().Get("source")
 	if source == "" {
@@ -462,39 +446,37 @@ func (h *handler) listPackages(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"items": items, "total": len(items), "sourceLabel": source, "sections": []any{}})
 }
 func (h *handler) getPackage(w http.ResponseWriter, r *http.Request) {
-	var id, slug, name, desc, manifest string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT id,slug,name,COALESCE(description,''),manifest_json FROM integration_packages WHERE id=? OR slug=?`), chi.URLParam(r, "id"), chi.URLParam(r, "id")).Scan(&id, &slug, &name, &desc, &manifest)
-	if e != nil {
+	var pkg models.IntegrationPackage
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("id = ? OR slug = ?", chi.URLParam(r, "id"), chi.URLParam(r, "id")).First(&pkg).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,ref,kind,manifest_json FROM integration_components WHERE package_id=? ORDER BY id`), id)
-	if e != nil {
+	var rows []models.IntegrationComponent
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("package_id = ?", pkg.ID).Order("id").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	components := make([]map[string]any, 0)
-	for rows.Next() {
-		var cid, ref, kind, m string
-		if rows.Scan(&cid, &ref, &kind, &m) == nil {
-			meta := map[string]any{}
-			_ = json.Unmarshal([]byte(m), &meta)
-			components = append(components, map[string]any{"id": cid, "installRef": ref, "name": func() string {
-				if v, _ := meta["name"].(string); v != "" {
-					return v
-				}
-				return ref
-			}(), "description": meta["description"], "kind": kind, "needsRunner": meta["needsRunner"], "auth": meta["auth"], "hookEvents": meta["hookEvents"]})
+	for _, row := range rows {
+		meta := map[string]any{}
+		_ = json.Unmarshal([]byte(row.ManifestJSON), &meta)
+		name := row.Ref
+		if v, _ := meta["name"].(string); v != "" {
+			name = v
 		}
+		components = append(components, map[string]any{"id": *row.ID, "installRef": row.Ref, "name": name, "description": meta["description"], "kind": row.Kind, "needsRunner": meta["needsRunner"], "auth": meta["auth"], "hookEvents": meta["hookEvents"]})
+	}
+	desc := ""
+	if pkg.Description != nil {
+		desc = *pkg.Description
 	}
 	meta := map[string]any{}
-	_ = json.Unmarshal([]byte(manifest), &meta)
+	_ = json.Unmarshal([]byte(pkg.ManifestJSON), &meta)
 	kind, _ := meta["kind"].(string)
 	if kind == "" {
 		kind = "plugin"
 	}
-	httpx.JSON(w, 200, map[string]any{"package": map[string]any{"id": id, "name": name, "description": desc, "summary": meta["summary"], "icon": meta["icon"], "kind": kind, "source": "platform", "sourceLabel": "platform", "homepage": meta["homepage"], "docsUrl": meta["docsUrl"], "publisher": meta["publisher"], "category": meta["category"], "version": meta["version"], "verified": meta["verified"], "featured": meta["featured"], "tags": meta["tags"], "installRef": slug, "components": components}})
+	httpx.JSON(w, 200, map[string]any{"package": map[string]any{"id": *pkg.ID, "name": pkg.Name, "description": desc, "summary": meta["summary"], "icon": meta["icon"], "kind": kind, "source": "platform", "sourceLabel": "platform", "homepage": meta["homepage"], "docsUrl": meta["docsUrl"], "publisher": meta["publisher"], "category": meta["category"], "version": meta["version"], "verified": meta["verified"], "featured": meta["featured"], "tags": meta["tags"], "installRef": pkg.Slug, "components": components}})
 }
 func (h *handler) installPackage(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -507,45 +489,44 @@ func (h *handler) installPackage(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "agentIds required")
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT c.id,c.ref,c.kind,c.manifest_json FROM integration_components c JOIN integration_packages p ON p.id=c.package_id WHERE p.id=? OR p.slug=?`), chi.URLParam(r, "id"), chi.URLParam(r, "id"))
-	if e != nil {
+	var all []models.IntegrationComponent
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("integration_components AS c").
+		Select("c.id, c.ref, c.kind, c.manifest_json").
+		Joins("JOIN integration_packages p ON p.id = c.package_id").
+		Where("p.id = ? OR p.slug = ?", chi.URLParam(r, "id"), chi.URLParam(r, "id")).
+		Find(&all).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
-	type comp struct{ id, ref, kind, manifest string }
-	all := []comp{}
-	for rows.Next() {
-		var x comp
-		if rows.Scan(&x.id, &x.ref, &x.kind, &x.manifest) == nil {
-			all = append(all, x)
-		}
-	}
-	rows.Close()
 	if len(all) == 0 {
 		httpx.Error(w, 404, "Package not found")
 		return
 	}
 	installed := 0
 	for _, agent := range b.AgentIDs {
-		var count int
-		if h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT COUNT(*) FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, agent).Scan(&count) != nil || count == 0 {
+		var count int64
+		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ? AND id = ?", p.TenantID, agent).Count(&count).Error; e != nil || count == 0 {
 			continue
 		}
 		for _, c := range all {
-			if len(b.ComponentIDs) > 0 && !contains(b.ComponentIDs, c.id) {
+			if len(b.ComponentIDs) > 0 && !contains(b.ComponentIDs, *c.ID) {
 				continue
 			}
-			if c.kind == "connector" && validRef(c.ref) {
+			if c.Kind == "connector" && validRef(c.Ref) {
 				data, _ := json.Marshal(map[string]any{"config": json.RawMessage(b.Config)})
-				enc, _ := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+c.ref, data)
-				now := h.now()
-				if _, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO agent_connector_installations(id,tenant_id,agent_id,connector_ref,enabled,config_enc,created_at,updated_at) VALUES(?,?,?,?,true,?,?,?) ON CONFLICT(agent_id,connector_ref) DO UPDATE SET enabled=true,config_enc=?,updated_at=?`), h.id(), p.TenantID, agent, c.ref, enc, now, now, enc, now); e == nil {
+				enc, _ := encrypt(h.deps.Secret, p.TenantID+":"+agent+":"+c.Ref, data)
+				now := h.now().Format(time.RFC3339Nano)
+				row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: agent, ConnectorRef: c.Ref, Enabled: true, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+				if err := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
+					DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
+				}).Create(&row).Error; err == nil {
 					installed++
 				}
 			} else {
-				now := h.now()
-				if _, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO component_instances(id,tenant_id,agent_id,component_type,component_ref,name,config_json,secret_json,status,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'{}','ready',NULL,?,?)`), h.id(), p.TenantID, agent, c.kind, c.ref, c.ref, c.manifest, now, now); e == nil {
+				now := h.now().Format(time.RFC3339Nano)
+				row := models.ComponentInstance{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: strPtr(agent), ComponentType: c.Kind, ComponentRef: c.Ref, Name: c.Ref, ConfigJSON: c.ManifestJSON, SecretJSON: "{}", Status: "ready", CreatedAt: now, UpdatedAt: now}
+				if err := h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; err == nil {
 					installed++
 				}
 			}
@@ -572,20 +553,21 @@ func (h *handler) bindConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "connector:")
 	p := principal(r)
-	var ref, oldAgent, enc string
-	var enabled bool
-	e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT connector_ref,agent_id,config_enc,enabled FROM agent_connector_installations WHERE tenant_id=? AND id=?`), p.TenantID, id).Scan(&ref, &oldAgent, &enc, &enabled)
+	var row models.AgentConnectorInstallation
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, id).First(&row).Error
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	raw, e := decrypt(h.deps.Secret, p.TenantID+":"+oldAgent+":"+ref, enc)
+	raw, e := decrypt(h.deps.Secret, p.TenantID+":"+row.AgentID+":"+row.ConnectorRef, row.ConfigEnc)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	newEnc, _ := encrypt(h.deps.Secret, p.TenantID+":"+b.AgentID+":"+ref, raw)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE agent_connector_installations SET agent_id=?,config_enc=?,updated_at=? WHERE tenant_id=? AND id=?`), b.AgentID, newEnc, h.now(), p.TenantID, id)
+	newEnc, _ := encrypt(h.deps.Secret, p.TenantID+":"+b.AgentID+":"+row.ConnectorRef, raw)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
+		Where("tenant_id = ? AND id = ?", p.TenantID, id).
+		Updates(map[string]any{"agent_id": b.AgentID, "config_enc": newEnc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -594,13 +576,12 @@ func (h *handler) bindConnection(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) deleteConnection(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(chi.URLParam(r, "id"), "connector:")
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM agent_connector_installations WHERE tenant_id=? AND id=?`), principal(r).TenantID, id)
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, id).Delete(&models.AgentConnectorInstallation{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}

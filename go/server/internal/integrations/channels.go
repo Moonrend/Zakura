@@ -5,16 +5,19 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (h *handler) registerChannels(r chi.Router) {
@@ -81,10 +84,20 @@ func (h *handler) bindingView(tenant string, row remoteChannelRow) map[string]an
 	}
 }
 
+func bindingRow(b models.AgentChannelBinding) remoteChannelRow {
+	return remoteChannelRow{
+		ID: *b.ID, SpaceID: b.SpaceID, AgentID: b.AgentID, Platform: b.Platform, ProfileKey: b.ProfileKey, Label: b.Label,
+		Enabled: b.Enabled, SettingsJSON: b.SettingsJSON, ConfigEnc: b.ConfigEnc, CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt,
+	}
+}
+
 func (h *handler) loadRemoteChannelRow(ctx context.Context, tenant, id string) (remoteChannelRow, error) {
-	var row remoteChannelRow
-	e := h.deps.DB.QueryRowContext(ctx, h.q(`SELECT id,space_id,agent_id,platform,profile_key,label,enabled,settings_json,config_enc,created_at,updated_at FROM agent_channel_bindings WHERE tenant_id=? AND id=?`), tenant, id).Scan(&row.ID, &row.SpaceID, &row.AgentID, &row.Platform, &row.ProfileKey, &row.Label, &row.Enabled, &row.SettingsJSON, &row.ConfigEnc, &row.CreatedAt, &row.UpdatedAt)
-	return row, e
+	var row models.AgentChannelBinding
+	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, id).First(&row).Error
+	if e != nil {
+		return remoteChannelRow{}, e
+	}
+	return bindingRow(row), nil
 }
 
 func emptyCredentials(raw json.RawMessage) bool {
@@ -119,19 +132,14 @@ func pendingUserKey(entry any) string {
 
 func (h *handler) listRemoteChannels(w http.ResponseWriter, r *http.Request) {
 	tenant := principal(r).TenantID
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,space_id,agent_id,platform,profile_key,label,enabled,settings_json,config_enc,created_at,updated_at FROM agent_channel_bindings WHERE tenant_id=? ORDER BY created_at DESC`), tenant)
-	if e != nil {
+	var rows []models.AgentChannelBinding
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", tenant).Order("created_at DESC").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var row remoteChannelRow
-		if rows.Scan(&row.ID, &row.SpaceID, &row.AgentID, &row.Platform, &row.ProfileKey, &row.Label, &row.Enabled, &row.SettingsJSON, &row.ConfigEnc, &row.CreatedAt, &row.UpdatedAt) != nil {
-			continue
-		}
-		out = append(out, h.bindingView(tenant, row))
+	for _, row := range rows {
+		out = append(out, h.bindingView(tenant, bindingRow(row)))
 	}
 	base := strings.TrimRight(h.deps.PublicURL, "/")
 	httpx.JSON(w, 200, map[string]any{
@@ -162,11 +170,12 @@ func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	var space string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, b.AgentID).Scan(&space); e != nil {
+	var agent models.Agent
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, b.AgentID).First(&agent).Error; e != nil {
 		httpx.Error(w, 404, "Agent not found")
 		return
 	}
+	space := agent.SpaceID
 	id := h.id()
 	profileKey := b.ProfileKey
 	if profileKey == "" {
@@ -181,9 +190,9 @@ func (h *handler) createRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		}
 		configEnc = enc
 	}
-	now := h.now()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO agent_channel_bindings(id,tenant_id,space_id,agent_id,platform,profile_key,label,enabled,settings_json,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`), id, p.TenantID, space, b.AgentID, b.Platform, profileKey, b.Label, b.Enabled, rawOr(b.Settings, "{}"), configEnc, now, now)
-	if e != nil {
+	now := h.now().Format(time.RFC3339Nano)
+	create := models.AgentChannelBinding{ID: strPtr(id), TenantID: p.TenantID, SpaceID: space, AgentID: b.AgentID, Platform: b.Platform, ProfileKey: profileKey, Label: b.Label, Enabled: b.Enabled, SettingsJSON: rawOr(b.Settings, "{}"), ConfigEnc: configEnc, CreatedAt: now, UpdatedAt: now}
+	if e := h.deps.Gorm.WithContext(r.Context()).Create(&create).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -208,16 +217,14 @@ func (h *handler) patchRemoteChannel(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	sets := []string{}
-	args := []any{}
+	updates := map[string]any{}
 	for k, col := range map[string]string{"label": "label", "enabled": "enabled", "profileKey": "profile_key", "settings": "settings_json"} {
 		if v, ok := m[k]; ok {
 			if k == "settings" {
 				raw, _ := json.Marshal(v)
 				v = string(raw)
 			}
-			sets = append(sets, col+"=?")
-			args = append(args, v)
+			updates[col] = v
 		}
 	}
 	if v, ok := m["config"]; ok {
@@ -227,8 +234,7 @@ func (h *handler) patchRemoteChannel(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, e)
 			return
 		}
-		sets = append(sets, "config_enc=?")
-		args = append(args, enc)
+		updates["config_enc"] = enc
 	}
 	if _, hasCreds := m["credentials"]; hasCreds {
 		creds := mustJSON(m["credentials"])
@@ -239,36 +245,31 @@ func (h *handler) patchRemoteChannel(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !enabled {
-			sets = append(sets, "config_enc=?")
-			args = append(args, "")
+			updates["config_enc"] = ""
 		} else if !emptyCredentials(creds) {
 			enc, e := encrypt(h.deps.Secret, p.TenantID+":"+id, creds)
 			if e != nil {
 				writeErr(w, e)
 				return
 			}
-			sets = append(sets, "config_enc=?")
-			args = append(args, enc)
+			updates["config_enc"] = enc
 		}
 	} else if v, ok := m["credentialsEnabled"]; ok {
 		if bv, ok := v.(bool); ok && !bv {
-			sets = append(sets, "config_enc=?")
-			args = append(args, "")
+			updates["config_enc"] = ""
 		}
 	}
-	if len(sets) == 0 {
+	if len(updates) == 0 {
 		httpx.Error(w, 400, "no supported fields")
 		return
 	}
-	sets = append(sets, "updated_at=?")
-	args = append(args, h.now(), p.TenantID, id)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE agent_channel_bindings SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		writeErr(w, e)
+	updates["updated_at"] = h.now().Format(time.RFC3339Nano)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentChannelBinding{}).Where("tenant_id = ? AND id = ?", p.TenantID, id).Updates(updates)
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -295,13 +296,12 @@ func decodeObject(r *http.Request) (map[string]any, error) {
 	return m, e
 }
 func (h *handler) deleteRemoteChannel(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM agent_channel_bindings WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.AgentChannelBinding{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -350,7 +350,10 @@ func (h *handler) updateRemoteChannelAccess(w http.ResponseWriter, r *http.Reque
 	settings["allowedUsers"] = allowed
 	settings["pendingUsers"] = kept
 	raw, _ := json.Marshal(settings)
-	if _, e = h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE agent_channel_bindings SET settings_json=?,updated_at=? WHERE tenant_id=? AND id=?`), string(raw), h.now(), p.TenantID, id); e != nil {
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentChannelBinding{}).
+		Where("tenant_id = ? AND id = ?", p.TenantID, id).
+		Updates(map[string]any{"settings_json": string(raw), "updated_at": h.now().Format(time.RFC3339Nano)}).Error
+	if e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -362,11 +365,10 @@ func (h *handler) updateRemoteChannelAccess(w http.ResponseWriter, r *http.Reque
 	httpx.JSON(w, 200, map[string]any{"ok": true, "binding": h.bindingView(p.TenantID, updated), "settings": settings})
 }
 func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
-	tenant, binding := chi.URLParam(r, "tenantId"), chi.URLParam(r, "bindingId")
-	var platform, agent, enc string
-	var enabled bool
-	e := h.deps.DB.QueryRowContext(r.Context(), h.q(`SELECT platform,agent_id,config_enc,enabled FROM agent_channel_bindings WHERE tenant_id=? AND id=?`), tenant, binding).Scan(&platform, &agent, &enc, &enabled)
-	if e != nil || !enabled {
+	tenant, bindingID := chi.URLParam(r, "tenantId"), chi.URLParam(r, "bindingId")
+	var binding models.AgentChannelBinding
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", tenant, bindingID).First(&binding).Error
+	if e != nil || !binding.Enabled {
 		httpx.Error(w, 404, "Channel not found")
 		return
 	}
@@ -375,14 +377,14 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 413, "payload too large")
 		return
 	}
-	configRaw, e := decrypt(h.deps.Secret, tenant+":"+binding, enc)
+	configRaw, e := decrypt(h.deps.Secret, tenant+":"+bindingID, binding.ConfigEnc)
 	if e != nil {
 		httpx.Error(w, 401, "invalid channel configuration")
 		return
 	}
 	var cfg map[string]any
 	_ = json.Unmarshal(configRaw, &cfg)
-	if !verifyWebhook(platform, cfg, r.Header, raw) {
+	if !verifyWebhook(binding.Platform, cfg, r.Header, raw) {
 		httpx.Error(w, 401, "invalid signature")
 		return
 	}
@@ -391,13 +393,12 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 		sum := sha256.Sum256(raw)
 		external = hex.EncodeToString(sum[:])
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO agent_channel_events(id,tenant_id,binding_id,external_event_id,received_at) VALUES(?,?,?,?,?) ON CONFLICT(binding_id,external_event_id) DO NOTHING`), h.id(), tenant, binding, external, h.now())
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "binding_id"}, {Name: "external_event_id"}}, DoNothing: true}).Create(&models.AgentChannelEvent{ID: strPtr(h.id()), TenantID: tenant, BindingID: bindingID, ExternalEventID: external, ReceivedAt: h.now().Format(time.RFC3339Nano)})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.JSON(w, 202, map[string]any{"accepted": true, "duplicate": true})
 		return
 	}
@@ -406,9 +407,10 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	payload["agentId"] = agent
+	payload["agentId"] = binding.AgentID
 	payloadRaw, _ := json.Marshal(payload)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO channel_events(id,tenant_id,provider,external_id,payload_json,delivery_status,attempts,last_error,created_at,processed_at) VALUES(?,?,?,?,?,'pending',0,NULL,?,NULL) ON CONFLICT(provider,external_id) DO NOTHING`), h.id(), tenant, platform, binding+":"+external, string(payloadRaw), h.now())
+	event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: binding.Platform, ExternalID: bindingID + ":" + external, PayloadJSON: string(payloadRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
 	if e != nil {
 		writeErr(w, e)
 		return
@@ -417,19 +419,14 @@ func (h *handler) remoteWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) listEmailConnectors(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.q(`SELECT id,name,product,enabled,created_at,updated_at FROM email_connector_instances WHERE tenant_id=? ORDER BY created_at DESC`), principal(r).TenantID)
-	if e != nil {
+	var rows []models.EmailConnectorInstance
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", principal(r).TenantID).Order("created_at DESC").Find(&rows).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, name, product, c, u string
-		var enabled bool
-		if rows.Scan(&id, &name, &product, &enabled, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "name": name, "product": product, "enabled": enabled, "createdAt": c, "updatedAt": u})
-		}
+	for _, row := range rows {
+		out = append(out, map[string]any{"id": *row.ID, "name": row.Name, "product": row.Product, "enabled": row.Enabled, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"connectors": out})
 }
@@ -450,9 +447,9 @@ func (h *handler) createEmailConnector(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	now := h.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO email_connector_instances(id,tenant_id,name,product,enabled,config_enc,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`), id, p.TenantID, b.Name, b.Product, b.Enabled, enc, now, now)
-	if e != nil {
+	now := h.now().Format(time.RFC3339Nano)
+	row := models.EmailConnectorInstance{ID: strPtr(id), TenantID: p.TenantID, Name: b.Name, Product: b.Product, Enabled: b.Enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&row).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -466,12 +463,10 @@ func (h *handler) patchEmailConnector(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	sets := []string{}
-	args := []any{}
+	updates := map[string]any{}
 	for k, col := range map[string]string{"name": "name", "product": "product", "enabled": "enabled"} {
 		if v, ok := m[k]; ok {
-			sets = append(sets, col+"=?")
-			args = append(args, v)
+			updates[col] = v
 		}
 	}
 	if v, ok := m["config"]; ok {
@@ -481,35 +476,31 @@ func (h *handler) patchEmailConnector(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, e)
 			return
 		}
-		sets = append(sets, "config_enc=?")
-		args = append(args, enc)
+		updates["config_enc"] = enc
 	}
-	if len(sets) == 0 {
+	if len(updates) == 0 {
 		httpx.Error(w, 400, "no supported fields")
 		return
 	}
-	sets = append(sets, "updated_at=?")
-	args = append(args, h.now(), p.TenantID, id)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`UPDATE email_connector_instances SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		writeErr(w, e)
+	updates["updated_at"] = h.now().Format(time.RFC3339Nano)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.EmailConnectorInstance{}).Where("tenant_id = ? AND id = ?", p.TenantID, id).Updates(updates)
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) deleteEmailConnector(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.q(`DELETE FROM email_connector_instances WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		writeErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.EmailConnectorInstance{})
+	if res.Error != nil {
+		writeErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, 404, "Not found")
 		return
 	}
@@ -517,16 +508,13 @@ func (h *handler) deleteEmailConnector(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 	tenant, id := chi.URLParam(r, "tenantId"), chi.URLParam(r, "connectorId")
-	q := `SELECT id,config_enc FROM email_connector_instances WHERE tenant_id=? AND enabled=true`
-	args := []any{tenant}
+	q := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND enabled = true", tenant)
 	if id != "" {
-		q += ` AND id=?`
-		args = append(args, id)
+		q = q.Where("id = ?", id)
 	}
-	q += ` ORDER BY created_at LIMIT 1`
-	var connector, enc string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.q(q), args...).Scan(&connector, &enc)
-	if errors.Is(e, sql.ErrNoRows) {
+	var connector models.EmailConnectorInstance
+	e := q.Order("created_at").First(&connector).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		httpx.Error(w, 404, "Email connector not found")
 		return
 	}
@@ -534,12 +522,13 @@ func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
+	enc := connector.ConfigEnc
 	raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 10<<20))
 	if e != nil {
 		httpx.Error(w, 413, "payload too large")
 		return
 	}
-	cfgRaw, e := decrypt(h.deps.Secret, tenant+":email:"+connector, enc)
+	cfgRaw, e := decrypt(h.deps.Secret, tenant+":email:"+*connector.ID, enc)
 	if e != nil {
 		httpx.Error(w, 401, "invalid connector configuration")
 		return
@@ -571,7 +560,8 @@ func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 		eventID = hex.EncodeToString(sum[:])
 	}
 	eventRaw, _ := json.Marshal(payload)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.q(`INSERT INTO channel_events(id,tenant_id,provider,external_id,payload_json,delivery_status,attempts,last_error,created_at,processed_at) VALUES(?,?,'email',?,?,'pending',0,NULL,?,NULL) ON CONFLICT(provider,external_id) DO NOTHING`), h.id(), tenant, eventID, string(eventRaw), h.now())
+	event := models.ChannelEvent{ID: strPtr(h.id()), TenantID: tenant, Provider: "email", ExternalID: eventID, PayloadJSON: string(eventRaw), DeliveryStatus: "pending", Attempts: 0, CreatedAt: h.now().Format(time.RFC3339Nano)}
+	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "provider"}, {Name: "external_id"}}, DoNothing: true}).Create(&event).Error
 	if e != nil {
 		writeErr(w, e)
 		return

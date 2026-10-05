@@ -23,6 +23,9 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func testDeps(t *testing.T) *appdeps.Dependencies {
@@ -40,7 +43,11 @@ func testDeps(t *testing.T) *appdeps.Dependencies {
 		t.Fatal(e)
 	}
 	var n atomic.Int64
-	return &appdeps.Dependencies{DB: db, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
+	gdb, gerr := gorm.Open(sqlite.New(sqlite.Config{Conn: db}), &gorm.Config{NamingStrategy: schema.NamingStrategy{NoLowerCase: true}})
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	return &appdeps.Dependencies{DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
 }
 func seedTenant(t *testing.T, d *appdeps.Dependencies, id string) string {
 	t.Helper()

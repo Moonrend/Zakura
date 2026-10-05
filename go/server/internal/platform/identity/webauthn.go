@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,9 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-webauthn/webauthn/protocol"
 	wa "github.com/go-webauthn/webauthn/webauthn"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 )
 
 type webUser struct {
@@ -46,30 +46,26 @@ func (s *Service) webAuthn() (*wa.WebAuthn, error) {
 }
 func (s *Service) loadWebUser(ctx context.Context, userID string) (webUser, error) {
 	var u webUser
-	if err := s.deps.DB.QueryRowContext(ctx, s.q(`SELECT id,email,COALESCE(name,'') FROM users WHERE id=? AND status='active'`), userID).Scan(&u.ID, &u.Email, &u.Name); err != nil {
+	var account models.User
+	if err := s.gdb(ctx).Select("id,email,name").Where("id = ? AND status = 'active'", userID).Take(&account).Error; err != nil {
 		return u, err
 	}
-	rows, err := s.deps.DB.QueryContext(ctx, s.q(`SELECT credential_id,public_key,counter,transports_json FROM user_webauthn_credentials WHERE user_id=? ORDER BY created_at`), userID)
-	if err != nil {
+	u.ID, u.Email, u.Name = derefString(account.ID), account.Email, derefString(account.Name)
+	var stored []models.UserWebauthnCredential
+	if err := s.gdb(ctx).Select("credential_id,public_key,counter,transports_json").Where("user_id = ?", userID).Order("created_at").Find(&stored).Error; err != nil {
 		return u, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, stored, transports string
-		var counter uint32
-		if err = rows.Scan(&id, &stored, &counter, &transports); err != nil {
-			return u, err
-		}
+	for _, record := range stored {
 		var cred wa.Credential
-		if json.Unmarshal([]byte(stored), &cred) != nil {
-			cred.ID, _ = base64.RawURLEncoding.DecodeString(id)
-			cred.PublicKey, _ = base64.RawURLEncoding.DecodeString(stored)
-			cred.Authenticator.SignCount = counter
-			_ = json.Unmarshal([]byte(transports), &cred.Transport)
+		if json.Unmarshal([]byte(record.PublicKey), &cred) != nil {
+			cred.ID, _ = base64.RawURLEncoding.DecodeString(record.CredentialID)
+			cred.PublicKey, _ = base64.RawURLEncoding.DecodeString(record.PublicKey)
+			cred.Authenticator.SignCount = uint32(record.Counter)
+			_ = json.Unmarshal([]byte(record.TransportsJSON), &cred.Transport)
 		}
 		u.Credentials = append(u.Credentials, cred)
 	}
-	return u, rows.Err()
+	return u, nil
 }
 func (s *Service) saveWebSession(ctx context.Context, userID, kind, parent string, session *wa.SessionData) error {
 	raw, _ := json.Marshal(session)
@@ -81,42 +77,37 @@ func (s *Service) saveWebSession(ctx context.Context, userID, kind, parent strin
 	meta, _ := json.Marshal(map[string]any{"session": json.RawMessage(raw), "parentHash": parentHash})
 	token := "wac_" + mustToken(24)
 	h := sha256.Sum256([]byte(token))
-	_, err := s.deps.DB.ExecContext(ctx, s.q(`INSERT INTO auth_tokens(id,user_id,kind,token_hash,meta_json,expires_at,created_at) VALUES(?,?,?,?,?,?,?)`), s.deps.NewID(), userID, kind, hex.EncodeToString(h[:]), string(meta), s.deps.Clock().UTC().Add(10*time.Minute).Format(time.RFC3339Nano), s.now())
-	return err
+	tokenID := s.deps.NewID()
+	uid := userID
+	return s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: &uid, Kind: kind, TokenHash: hex.EncodeToString(h[:]), MetaJSON: string(meta), ExpiresAt: s.deps.Clock().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 }
 func (s *Service) takeWebSession(ctx context.Context, userID, kind, parent string) (wa.SessionData, error) {
-	rows, err := s.deps.DB.QueryContext(ctx, s.q(`SELECT id,meta_json FROM auth_tokens WHERE user_id=? AND kind=? AND consumed_at IS NULL AND expires_at>? ORDER BY created_at DESC`), userID, kind, s.now())
-	if err != nil {
+	var tokens []models.AuthToken
+	if err := s.gdb(ctx).Select("id,meta_json").Where("user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?", userID, kind, s.now()).Order("created_at DESC").Find(&tokens).Error; err != nil {
 		return wa.SessionData{}, err
 	}
-	defer rows.Close()
 	parentHash := ""
 	if parent != "" {
 		h := sha256.Sum256([]byte(parent))
 		parentHash = hex.EncodeToString(h[:])
 	}
-	for rows.Next() {
-		var id, metaRaw string
-		if rows.Scan(&id, &metaRaw) != nil {
-			continue
-		}
+	for _, stored := range tokens {
 		var meta struct {
 			Session    json.RawMessage `json:"session"`
 			ParentHash string          `json:"parentHash"`
 		}
-		if json.Unmarshal([]byte(metaRaw), &meta) != nil || meta.ParentHash != parentHash {
+		if json.Unmarshal([]byte(stored.MetaJSON), &meta) != nil || meta.ParentHash != parentHash {
 			continue
 		}
 		var session wa.SessionData
 		if json.Unmarshal(meta.Session, &session) != nil {
 			continue
 		}
-		res, err := s.deps.DB.ExecContext(ctx, s.q(`UPDATE auth_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL`), s.now(), id)
-		if err != nil {
-			return wa.SessionData{}, err
+		res := s.gdb(ctx).Model(&models.AuthToken{}).Where("id = ? AND consumed_at IS NULL", derefString(stored.ID)).Update("consumed_at", s.now())
+		if res.Error != nil {
+			return wa.SessionData{}, res.Error
 		}
-		n, _ := res.RowsAffected()
-		if n == 1 {
+		if res.RowsAffected == 1 {
 			return session, nil
 		}
 	}
@@ -188,7 +179,7 @@ func (s *Service) finishWebAuthnRegistration(w http.ResponseWriter, r *http.Requ
 	if len(name) > 40 {
 		name = name[:40]
 	}
-	_, err = s.deps.DB.ExecContext(r.Context(), s.q(`INSERT INTO user_webauthn_credentials(id,user_id,credential_id,public_key,counter,name,transports_json,created_at) VALUES(?,?,?,?,?,?,?,?)`), id, p.UserID, base64.RawURLEncoding.EncodeToString(cred.ID), string(stored), cred.Authenticator.SignCount, name, string(transports), s.now())
+	err = s.gdb(r.Context()).Create(&models.UserWebauthnCredential{ID: &id, UserID: p.UserID, CredentialID: base64.RawURLEncoding.EncodeToString(cred.ID), PublicKey: string(stored), Counter: int32(cred.Authenticator.SignCount), Name: &name, TransportsJSON: string(transports), CreatedAt: s.now()}).Error
 	if err != nil {
 		httpx.Error(w, 409, "credential already registered")
 		return
@@ -250,12 +241,11 @@ func (s *Service) verifyWebAuthnLogin(ctx context.Context, userID, ticket string
 	}
 	stored, _ := json.Marshal(credential)
 	transports, _ := json.Marshal(credential.Transport)
-	res, err := s.deps.DB.ExecContext(ctx, s.q(`UPDATE user_webauthn_credentials SET public_key=?,counter=?,transports_json=? WHERE user_id=? AND credential_id=?`), string(stored), credential.Authenticator.SignCount, string(transports), userID, base64.RawURLEncoding.EncodeToString(credential.ID))
-	if err != nil {
-		return err
+	res := s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ? AND credential_id = ?", userID, base64.RawURLEncoding.EncodeToString(credential.ID)).Updates(map[string]any{"public_key": string(stored), "counter": int32(credential.Authenticator.SignCount), "transports_json": string(transports)})
+	if res.Error != nil {
+		return res.Error
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	if res.RowsAffected != 1 {
 		return errors.New("credential not found")
 	}
 	return nil
@@ -276,24 +266,25 @@ func (s *Service) renameWebAuthnCredential(w http.ResponseWriter, r *http.Reques
 	if len(name) > 40 {
 		name = name[:40]
 	}
-	res, _ := s.deps.DB.ExecContext(r.Context(), s.q(`UPDATE user_webauthn_credentials SET name=? WHERE id=? AND user_id=?`), name, httpx.Param(r, "id"), p.UserID)
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"ok": n == 1})
+	res := s.gdb(r.Context()).Model(&models.UserWebauthnCredential{}).Where("id = ? AND user_id = ?", httpx.Param(r, "id"), p.UserID).Update("name", name)
+	httpx.JSON(w, 200, map[string]any{"ok": res.RowsAffected == 1})
 }
 func (s *Service) deleteWebAuthnCredential(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	var totp sql.NullString
-	var count, required int
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT totp_enabled_at FROM users WHERE id=?`), p.UserID).Scan(&totp)
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COUNT(*) FROM user_webauthn_credentials WHERE user_id=?`), p.UserID).Scan(&count)
-	_ = s.deps.DB.QueryRowContext(r.Context(), s.q(`SELECT COUNT(*) FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=? AND m.status='active' AND (t.mfa_policy='all' OR (t.mfa_policy='admins' AND m.role IN ('owner','admin')))`), p.UserID).Scan(&required)
-	if required > 0 && !totp.Valid && count <= 1 {
+	var totpUser models.User
+	var count, required int64
+	_ = s.gdb(r.Context()).Select("totp_enabled_at").Where("id = ?", p.UserID).Take(&totpUser).Error
+	_ = s.gdb(r.Context()).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", p.UserID).Count(&count).Error
+	_ = s.gdb(r.Context()).Table("tenant_memberships AS m").
+		Joins("JOIN tenants t ON t.id = m.tenant_id").
+		Where("m.user_id = ? AND m.status = 'active' AND (t.mfa_policy = 'all' OR (t.mfa_policy = 'admins' AND m.role IN ('owner','admin')))", p.UserID).
+		Count(&required).Error
+	if required > 0 && totpUser.TotpEnabledAt == nil && count <= 1 {
 		httpx.Error(w, 409, "team policy requires at least one MFA method")
 		return
 	}
-	res, _ := s.deps.DB.ExecContext(r.Context(), s.q(`DELETE FROM user_webauthn_credentials WHERE id=? AND user_id=?`), httpx.Param(r, "id"), p.UserID)
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"ok": n == 1})
+	res := s.gdb(r.Context()).Where("id = ? AND user_id = ?", httpx.Param(r, "id"), p.UserID).Delete(&models.UserWebauthnCredential{})
+	httpx.JSON(w, 200, map[string]any{"ok": res.RowsAffected == 1})
 }
 
 var _ protocol.AuthenticatorTransport

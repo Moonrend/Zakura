@@ -18,9 +18,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func (h *handler) projectDir(r *http.Request) (workspaceFS, string, error) {
@@ -29,8 +31,8 @@ func (h *handler) projectDir(r *http.Request) (workspaceFS, string, error) {
 		return f, "", e
 	}
 	slug := chi.URLParam(r, "slug")
-	var count int
-	e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM space_projects p JOIN agents a ON a.space_id=p.space_id WHERE p.tenant_id=? AND a.id=? AND p.slug=?`), principal(r).TenantID, chi.URLParam(r, "id"), slug).Scan(&count)
+	var count int64
+	e = h.deps.Gorm.WithContext(r.Context()).Table("space_projects AS p").Joins("JOIN agents a ON a.space_id = p.space_id").Where("p.tenant_id = ? AND a.id = ? AND p.slug = ?", principal(r).TenantID, chi.URLParam(r, "id"), slug).Count(&count).Error
 	if e != nil || count == 0 {
 		return f, "", ErrNotFound
 	}
@@ -278,11 +280,15 @@ func (h *handler) getProjectSkillFile(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var enabled bool
-	var status, kind, spaceID string
-	var node *string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.enable_computer,s.workspace_status,s.workspace_kind,s.runtime_node_id,s.id FROM spaces s JOIN agents a ON a.space_id=s.id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&enabled, &status, &kind, &node, &spaceID)
-	if errors.Is(e, sql.ErrNoRows) {
+	var rec struct {
+		EnableComputer  bool    `gorm:"column:enable_computer"`
+		WorkspaceStatus string  `gorm:"column:workspace_status"`
+		WorkspaceKind   string  `gorm:"column:workspace_kind"`
+		RuntimeNodeID   *string `gorm:"column:runtime_node_id"`
+		ID              string  `gorm:"column:id"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("spaces AS s").Select("s.enable_computer AS enable_computer, s.workspace_status AS workspace_status, s.workspace_kind AS workspace_kind, s.runtime_node_id AS runtime_node_id, s.id AS id").Joins("JOIN agents a ON a.space_id = s.id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&rec).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -290,12 +296,16 @@ func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	enabled, status, kind, spaceID := rec.EnableComputer, rec.WorkspaceStatus, rec.WorkspaceKind, rec.ID
 	supported := enabled && kind != "host"
-	var dockerID sql.NullString
-	var containerStatus sql.NullString
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT docker_id,status FROM managed_containers WHERE tenant_id=? AND space_id=? AND purpose='workspace' ORDER BY created_at DESC LIMIT 1`), p.TenantID, spaceID).Scan(&dockerID, &containerStatus)
-	if containerStatus.Valid {
-		status = containerStatus.String
+	var mc models.ManagedContainer
+	_ = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, spaceID).Order("created_at DESC").Take(&mc).Error
+	if mc.ID != nil {
+		status = mc.Status
+	}
+	var dockerID *string
+	if mc.ID != nil {
+		dockerID = mc.DockerID
 	}
 	reason := any(nil)
 	if !enabled {
@@ -312,7 +322,7 @@ func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}(),
 		"coordinateSpace": "desktop pixels, origin top-left", "dimensionsSource": "configured", "reason": reason,
-		"containerStatus": status, "dockerId": nullableString(dockerID),
+		"containerStatus": status, "dockerId": dockerID,
 		"novncUrl": nil, "novncPort": nil, "cdpUrl": nil, "cdpPort": nil, "vncPort": nil,
 		"width": 1280, "height": 720,
 	})
@@ -320,12 +330,14 @@ func (h *handler) agentDesktop(w http.ResponseWriter, r *http.Request) {
 func (h *handler) workspaceTicket(w http.ResponseWriter, r *http.Request, kind string) {
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
-	var enabled bool
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.enable_computer FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, agent).Scan(&enabled); e != nil {
+	var rec struct {
+		EnableComputer bool `gorm:"column:enable_computer"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, agent).Take(&rec).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	if !enabled {
+	if !rec.EnableComputer {
 		httpx.Error(w, http.StatusConflict, "Desktop is disabled")
 		return
 	}
@@ -368,22 +380,23 @@ func (h *handler) spaceGraph(w http.ResponseWriter, r *http.Request) {
 		nodes = append(nodes, map[string]any{"id": a.ID, "kind": "agent", "name": a.Name})
 		edges = append(edges, map[string]any{"from": space, "to": a.ID, "kind": "contains"})
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT b.agent_id,i.id,i.name,i.component_type FROM agent_bindings b JOIN component_instances i ON i.id=b.instance_id WHERE b.tenant_id=? AND b.space_id=?`), p.TenantID, space)
-	if e != nil {
+	var recs []struct {
+		AgentID       string `gorm:"column:agent_id"`
+		ID            string `gorm:"column:id"`
+		Name          string `gorm:"column:name"`
+		ComponentType string `gorm:"column:component_type"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings AS b").Select("b.agent_id AS agent_id, i.id AS id, i.name AS name, i.component_type AS component_type").Joins("JOIN component_instances i ON i.id = b.instance_id").Where("b.tenant_id = ? AND b.space_id = ?", p.TenantID, space).Find(&recs).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	seen := map[string]bool{}
-	for rows.Next() {
-		var agentID, instance, name, kind string
-		if rows.Scan(&agentID, &instance, &name, &kind) == nil {
-			if !seen[instance] {
-				nodes = append(nodes, map[string]any{"id": instance, "kind": kind, "name": name})
-				seen[instance] = true
-			}
-			edges = append(edges, map[string]any{"from": agentID, "to": instance, "kind": "binding"})
+	for _, rec := range recs {
+		if !seen[rec.ID] {
+			nodes = append(nodes, map[string]any{"id": rec.ID, "kind": rec.ComponentType, "name": rec.Name})
+			seen[rec.ID] = true
 		}
+		edges = append(edges, map[string]any{"from": rec.AgentID, "to": rec.ID, "kind": "binding"})
 	}
 	httpx.JSON(w, 200, map[string]any{"nodes": nodes, "edges": edges})
 }
@@ -405,30 +418,29 @@ type migrationRow struct {
 	UpdatedAt    string  `json:"updatedAt"`
 }
 
-func scanMigration(row interface{ Scan(...any) error }) (migrationRow, error) {
-	var x migrationRow
-	e := row.Scan(&x.ID, &x.TenantID, &x.SpaceID, &x.SourceNodeID, &x.TargetNodeID, &x.Status, &x.Phase, &x.Progress, &x.Message, &x.Error, &x.StartedAt, &x.CompletedAt, &x.CreatedAt, &x.UpdatedAt)
-	return x, e
+func migrationFromModel(m models.WorkspaceMigration) migrationRow {
+	x := migrationRow{TenantID: m.TenantID, SpaceID: m.SpaceID, SourceNodeID: m.SourceNodeID, TargetNodeID: m.TargetNodeID, Status: m.Status, Phase: m.Phase, Message: m.Message, Error: m.Error, Progress: int(m.ProgressPct), StartedAt: m.StartedAt, CompletedAt: m.CompletedAt, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
+	if m.ID != nil {
+		x.ID = *m.ID
+	}
+	return x
 }
 func (h *handler) listWorkspaceMigrations(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var space string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&space); e != nil {
+	var agent models.Agent
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&agent).Error; e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,tenant_id,space_id,source_node_id,target_node_id,status,phase,progress_pct,message,error,started_at,completed_at,created_at,updated_at FROM workspace_migrations WHERE tenant_id=? AND space_id=? ORDER BY created_at DESC`), p.TenantID, space)
-	if e != nil {
+	space := agent.SpaceID
+	var ms []models.WorkspaceMigration
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ?", p.TenantID, space).Order("created_at DESC").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []migrationRow{}
-	for rows.Next() {
-		x, e := scanMigration(rows)
-		if e == nil {
-			out = append(out, x)
-		}
+	for _, m := range ms {
+		out = append(out, migrationFromModel(m))
 	}
 	httpx.JSON(w, 200, map[string]any{"migrations": out})
 }
@@ -449,8 +461,16 @@ func (h *handler) createWorkspaceMigration(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, 400, "targetNodeId required")
 		return
 	}
-	var space, source string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT a.space_id,s.runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&space, &source)
+	var rec struct {
+		SpaceID       string  `gorm:"column:space_id"`
+		RuntimeNodeID *string `gorm:"column:runtime_node_id"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("a.space_id AS space_id, s.runtime_node_id AS runtime_node_id").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&rec).Error
+	source := ""
+	if rec.RuntimeNodeID != nil {
+		source = *rec.RuntimeNodeID
+	}
+	space := rec.SpaceID
 	if e != nil || source == "" {
 		httpx.Error(w, 409, "source runtime node required")
 		return
@@ -459,15 +479,16 @@ func (h *handler) createWorkspaceMigration(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, http.StatusBadRequest, "source and target runtime nodes must differ")
 		return
 	}
-	var targetExists int
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM runtime_nodes WHERE id=? AND (tenant_id=? OR is_shared=true)`), b.TargetRuntimeNodeID, p.TenantID).Scan(&targetExists); e != nil || targetExists == 0 {
+	var targetExists int64
+	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ? AND (tenant_id = ? OR is_shared = true)", b.TargetRuntimeNodeID, p.TenantID).Count(&targetExists).Error; e != nil || targetExists == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	id := h.store.id()
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO workspace_migrations(id,tenant_id,space_id,source_node_id,target_node_id,status,phase,progress_pct,message,manifest_json,archive_path,archive_size,archive_sha256,exclude_patterns_json,source_retained,error,started_at,completed_at,created_at,updated_at) VALUES(?,?,?,?,?,'pending','queued',0,NULL,NULL,NULL,NULL,NULL,'[]',false,NULL,NULL,NULL,?,?)`), id, p.TenantID, space, source, b.TargetRuntimeNodeID, now, now)
-	if e != nil {
+	now := runtimeTimeString(h.store.now())
+	phase := "queued"
+	m := models.WorkspaceMigration{ID: &id, TenantID: p.TenantID, SpaceID: space, SourceNodeID: source, TargetNodeID: b.TargetRuntimeNodeID, Status: "pending", Phase: &phase, ProgressPct: 0, ExcludePatternsJSON: "[]", SourceRetained: false, CreatedAt: now, UpdatedAt: now}
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -484,14 +505,15 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 		httpx.Error(w, http.StatusBadRequest, "targetRuntimeNodeId required")
 		return
 	}
-	var configRaw, secretRaw, status, name, ref string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT name,component_ref,config_json,secret_json,status FROM component_instances WHERE tenant_id=? AND id=? AND component_type='mcp'`), p.TenantID, instanceID).Scan(&name, &ref, &configRaw, &secretRaw, &status); errors.Is(e, sql.ErrNoRows) {
+	var ci models.ComponentInstance
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ? AND component_type = 'mcp'", p.TenantID, instanceID).Take(&ci).Error; errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	} else if e != nil {
 		statusErr(w, e)
 		return
 	}
+	configRaw, secretRaw, status, name, ref := ci.ConfigJSON, ci.SecretJSON, ci.Status, ci.Name, ci.ComponentRef
 	body, ok, secretErr := h.stdioBodyForInstance(mcpInstance{ID: instanceID, TenantID: p.TenantID, Name: name, Ref: ref, Config: json.RawMessage(configRaw), Secret: json.RawMessage(secretRaw)})
 	if secretErr != nil {
 		httpx.Error(w, http.StatusBadRequest, secretErr.Error())
@@ -501,18 +523,31 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 		httpx.Error(w, http.StatusBadRequest, "only container stdio MCP instances support migration")
 		return
 	}
-	var containerID, sourceNode, dockerID, dataSpaceID string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,runtime_node_id,docker_id,space_id FROM managed_containers WHERE tenant_id=? AND instance_id=? AND runtime_node_id IS NOT NULL AND docker_id IS NOT NULL AND space_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`), p.TenantID, instanceID).Scan(&containerID, &sourceNode, &dockerID, &dataSpaceID)
+	var mc models.ManagedContainer
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND instance_id = ? AND runtime_node_id IS NOT NULL AND docker_id IS NOT NULL AND space_id IS NOT NULL", p.TenantID, instanceID).Order("created_at DESC").Take(&mc).Error
 	if e != nil {
 		httpx.Error(w, http.StatusBadRequest, "instance has no source runtime container")
 		return
+	}
+	containerID, sourceNode, dockerID, dataSpaceID := "", "", "", ""
+	if mc.ID != nil {
+		containerID = *mc.ID
+	}
+	if mc.RuntimeNodeID != nil {
+		sourceNode = *mc.RuntimeNodeID
+	}
+	if mc.DockerID != nil {
+		dockerID = *mc.DockerID
+	}
+	if mc.SpaceID != nil {
+		dataSpaceID = *mc.SpaceID
 	}
 	if sourceNode == request.TargetRuntimeNodeID {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "runtimeNodeId": sourceNode})
 		return
 	}
-	var targetCount int
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM runtime_nodes WHERE id=? AND (tenant_id=? OR is_shared=TRUE)`), request.TargetRuntimeNodeID, p.TenantID).Scan(&targetCount); e != nil || targetCount == 0 {
+	var targetCount int64
+	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ? AND (tenant_id = ? OR is_shared = TRUE)", request.TargetRuntimeNodeID, p.TenantID).Count(&targetCount).Error; e != nil || targetCount == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -527,7 +562,7 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 		return
 	}
 	wasRunning := status == "running" || status == "starting"
-	if _, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET status='migrating',updated_at=? WHERE tenant_id=? AND id=? AND status=?`), h.store.now(), p.TenantID, instanceID, status); e != nil {
+	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id = ? AND id = ? AND status = ?", p.TenantID, instanceID, status).Updates(map[string]any{"status": "migrating", "updated_at": runtimeTimeString(h.store.now())}).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -536,18 +571,18 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 		_ = json.Unmarshal([]byte(configRaw), &config)
 		config["runtimeNodeId"] = sourceNode
 		restored, _ := json.Marshal(config)
-		_, _ = h.deps.DB.ExecContext(context.WithoutCancel(r.Context()), h.store.q(`UPDATE component_instances SET config_json=?,status=?,last_error=?,updated_at=? WHERE tenant_id=? AND id=?`), string(restored), status, cause.Error(), h.store.now(), p.TenantID, instanceID)
+		h.deps.Gorm.WithContext(context.WithoutCancel(r.Context())).Model(&models.ComponentInstance{}).Where("tenant_id = ? AND id = ?", p.TenantID, instanceID).Updates(map[string]any{"config_json": string(restored), "status": status, "last_error": cause.Error(), "updated_at": runtimeTimeString(h.store.now())})
 		if wasRunning {
 			body.RuntimeNodeID = &sourceNode
 			_ = h.provisionStdioMCP(context.WithoutCancel(r.Context()), p.TenantID, instanceID, body)
 		}
 	}
 	if e = sourceRunner.call(r.Context(), "docker.stop", map[string]any{"id": dockerID, "remove": true}, nil); e != nil {
-		_, _ = h.deps.DB.ExecContext(context.WithoutCancel(r.Context()), h.store.q(`UPDATE component_instances SET status=?,last_error=?,updated_at=? WHERE tenant_id=? AND id=?`), status, e.Error(), h.store.now(), p.TenantID, instanceID)
+		h.deps.Gorm.WithContext(context.WithoutCancel(r.Context())).Model(&models.ComponentInstance{}).Where("tenant_id = ? AND id = ?", p.TenantID, instanceID).Updates(map[string]any{"status": status, "last_error": e.Error(), "updated_at": runtimeTimeString(h.store.now())})
 		httpx.Error(w, http.StatusBadGateway, e.Error())
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`), h.store.now(), containerID, p.TenantID)
+	h.deps.Gorm.WithContext(r.Context()).Model(&models.ManagedContainer{}).Where("id = ? AND tenant_id = ?", containerID, p.TenantID).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": runtimeTimeString(h.store.now())})
 	dataPath := ""
 	var storedConfig map[string]any
 	_ = json.Unmarshal([]byte(configRaw), &storedConfig)
@@ -582,7 +617,7 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 	if wasRunning {
 		nextStatus = "starting"
 	}
-	if _, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET config_json=?,status=?,last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`), string(updatedConfig), nextStatus, h.store.now(), p.TenantID, instanceID); e != nil {
+	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id = ? AND id = ?", p.TenantID, instanceID).Updates(map[string]any{"config_json": string(updatedConfig), "status": nextStatus, "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error; e != nil {
 		rollback(e)
 		statusErr(w, e)
 		return
@@ -598,8 +633,8 @@ func (h *handler) createInstanceMigration(w http.ResponseWriter, r *http.Request
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "runtimeNodeId": request.TargetRuntimeNodeID})
 }
 func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, source, target string) {
-	now := h.store.now()
-	_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE workspace_migrations SET status='running',phase='exporting',progress_pct=10,started_at=?,updated_at=? WHERE id=?`), now, now, id)
+	now := runtimeTimeString(h.store.now())
+	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "running", "phase": "exporting", "progress_pct": 10, "started_at": now, "updated_at": now})
 	sourceRunner, e := h.hub.get(source)
 	if e != nil {
 		h.failMigration(ctx, id, errors.New("source runtime node is offline"))
@@ -616,9 +651,9 @@ func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, 
 		return
 	}
 	digest := sha256.Sum256(archive)
-	_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE workspace_migrations SET phase='transferring',progress_pct=50,archive_size=?,archive_sha256=?,manifest_json=?,updated_at=? WHERE id=?`), fmt.Sprint(len(archive)), hex.EncodeToString(digest[:]), fmt.Sprintf(`{"format":"tar.gz","filesRoot":"/","sourceNodeId":%q}`, source), h.store.now(), id)
+	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"phase": "transferring", "progress_pct": 50, "archive_size": fmt.Sprint(len(archive)), "archive_sha256": hex.EncodeToString(digest[:]), "manifest_json": fmt.Sprintf(`{"format":"tar.gz","filesRoot":"/","sourceNodeId":%q}`, source), "updated_at": runtimeTimeString(h.store.now())})
 	targetWorkspace := &remoteWorkspace{runner: targetRunner, spaceID: space}
-	_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE workspace_migrations SET phase='importing',progress_pct=75,updated_at=? WHERE id=?`), h.store.now(), id)
+	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"phase": "importing", "progress_pct": 75, "updated_at": runtimeTimeString(h.store.now())})
 	tempPath := "/.zakura-migration-" + id + ".tar.gz"
 	if _, e = targetWorkspace.write(ctx, tempPath, archive); e == nil {
 		e = targetWorkspace.extract(ctx, tempPath, "/")
@@ -641,23 +676,31 @@ func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, 
 	}
 }
 func (h *handler) failMigration(ctx context.Context, id string, e error) {
-	_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE workspace_migrations SET status='failed',phase='failed',error=?,completed_at=?,updated_at=? WHERE id=?`), e.Error(), h.store.now(), h.store.now(), id)
+	now := runtimeTimeString(h.store.now())
+	h.deps.Gorm.WithContext(ctx).Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "failed", "phase": "failed", "error": e.Error(), "completed_at": now, "updated_at": now})
 }
 func (h *handler) getWorkspaceMigration(w http.ResponseWriter, r *http.Request) {
-	x, e := scanMigration(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,tenant_id,space_id,source_node_id,target_node_id,status,phase,progress_pct,message,error,started_at,completed_at,created_at,updated_at FROM workspace_migrations WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "jobId")))
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.WorkspaceMigration
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "jobId")).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"migration": x})
+	httpx.JSON(w, 200, map[string]any{"migration": migrationFromModel(m)})
 }
 func (h *handler) workspaceMigrationEvents(w http.ResponseWriter, r *http.Request) {
 	tenant, id := principal(r).TenantID, chi.URLParam(r, "jobId")
-	query := h.store.q(`SELECT id,tenant_id,space_id,source_node_id,target_node_id,status,phase,progress_pct,message,error,started_at,completed_at,created_at,updated_at FROM workspace_migrations WHERE tenant_id=? AND id=?`)
-	x, e := scanMigration(h.deps.DB.QueryRowContext(r.Context(), query, tenant, id))
+	load := func() (migrationRow, error) {
+		var m models.WorkspaceMigration
+		if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", tenant, id).Take(&m).Error; e != nil {
+			return migrationRow{}, e
+		}
+		return migrationFromModel(m), nil
+	}
+	x, e := load()
 	if e != nil {
 		statusErr(w, ErrNotFound)
 		return
@@ -688,7 +731,7 @@ func (h *handler) workspaceMigrationEvents(w http.ResponseWriter, r *http.Reques
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		next, e := scanMigration(h.deps.DB.QueryRowContext(r.Context(), query, tenant, id))
+		next, e := load()
 		if e != nil {
 			return
 		}

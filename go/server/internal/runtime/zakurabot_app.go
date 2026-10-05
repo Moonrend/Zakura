@@ -4,7 +4,6 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,8 +18,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func (h *handler) registerZakuraBotApp(r chi.Router) {
@@ -141,8 +142,8 @@ func (h *handler) zakuraBotHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p := h.zakuraActor(r)
-	rows, err := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT seq,frame_json FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND seq<? ORDER BY seq DESC LIMIT ?`), p.TenantID, p.UserID, binding, agent, before, limit)
-	if err != nil {
+	var ms []models.ZakurabotMessage
+	if err := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND seq < ?", p.TenantID, p.UserID, binding, agent, before).Order("seq DESC").Limit(limit).Find(&ms).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -151,17 +152,12 @@ func (h *handler) zakuraBotHistory(w http.ResponseWriter, r *http.Request) {
 		frame any
 	}
 	items := []item{}
-	for rows.Next() {
-		var seq int64
-		var raw string
-		if rows.Scan(&seq, &raw) == nil {
-			var frame any
-			if json.Unmarshal([]byte(raw), &frame) == nil {
-				items = append(items, item{seq, frame})
-			}
+	for _, m := range ms {
+		var frame any
+		if json.Unmarshal([]byte(m.FrameJSON), &frame) == nil {
+			items = append(items, item{int64(m.Seq), frame})
 		}
 	}
-	rows.Close()
 	out := []map[string]any{}
 	for i := len(items) - 1; i >= 0; i-- {
 		out = append(out, map[string]any{"seq": items[i].seq, "frame": items[i].frame})
@@ -178,14 +174,17 @@ func (h *handler) zakuraRunner(r *http.Request) (*runnerSession, string, bool, e
 	if _, err := h.zakuraAccess(r, agent); err != nil {
 		return nil, "", false, err
 	}
-	var nodeID, spaceID string
-	var enabled bool
-	err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COALESCE(s.runtime_node_id,''),s.id,s.enable_computer FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, agent).Scan(&nodeID, &spaceID, &enabled)
+	var rec struct {
+		RuntimeNodeID  string `gorm:"column:runtime_node_id"`
+		SpaceID        string `gorm:"column:space_id"`
+		EnableComputer bool   `gorm:"column:enable_computer"`
+	}
+	err := h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("COALESCE(s.runtime_node_id,'') AS runtime_node_id, s.id AS space_id, s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, agent).Take(&rec).Error
 	if err != nil {
 		return nil, "", false, err
 	}
-	session, err := h.hub.get(nodeID)
-	return session, spaceID, enabled, err
+	session, err := h.hub.get(rec.RuntimeNodeID)
+	return session, rec.SpaceID, rec.EnableComputer, err
 }
 func safeUploadName(name string) string {
 	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
@@ -243,8 +242,8 @@ func (h *handler) zakuraBotUpload(w http.ResponseWriter, r *http.Request) {
 	p := h.zakuraActor(r)
 	binding, _ := h.zakuraAccess(r, chi.URLParam(r, "id"))
 	now := h.store.now()
-	_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO zakurabot_files(id,tenant_id,device_id,binding_id,agent_id,path,name,mime,size,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`), id, p.TenantID, p.UserID, binding, chi.URLParam(r, "id"), path, name, mimeType, len(data), now)
-	if err != nil {
+	f := models.ZakurabotFile{ID: &id, TenantID: p.TenantID, DeviceID: p.UserID, BindingID: binding, AgentID: chi.URLParam(r, "id"), Path: path, Name: name, Mime: mimeType, Size: int32(len(data)), CreatedAt: runtimeTimeString(now)}
+	if err = h.deps.Gorm.WithContext(r.Context()).Create(&f).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -267,10 +266,9 @@ func (h *handler) zakuraBotDownload(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	var path, name, mimeType string
-	var size int
-	err = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT path,name,mime,size FROM zakurabot_files WHERE id=? AND tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?`), chi.URLParam(r, "fileId"), p.TenantID, p.UserID, binding, agent).Scan(&path, &name, &mimeType, &size)
-	if errors.Is(err, sql.ErrNoRows) {
+	var file models.ZakurabotFile
+	err = h.deps.Gorm.WithContext(r.Context()).Where("id = ? AND tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", chi.URLParam(r, "fileId"), p.TenantID, p.UserID, binding, agent).Take(&file).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -278,6 +276,7 @@ func (h *handler) zakuraBotDownload(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
+	path, name, mimeType, size := file.Path, file.Name, file.Mime, int(file.Size)
 	runner, space, _, err := h.zakuraRunner(r)
 	if err != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, "File downloads are unavailable")
@@ -317,7 +316,12 @@ func (h *handler) zakuraBotDesktop(w http.ResponseWriter, r *http.Request) {
 	}
 	p := h.zakuraActor(r)
 	var status, kind string
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.workspace_status,s.workspace_kind FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&status, &kind)
+	var deskRec struct {
+		WorkspaceStatus string `gorm:"column:workspace_status"`
+		WorkspaceKind   string `gorm:"column:workspace_kind"`
+	}
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("s.workspace_status AS workspace_status, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&deskRec).Error
+	status, kind = deskRec.WorkspaceStatus, deskRec.WorkspaceKind
 	supported := kind != "host"
 	enabled = supported && status == "running"
 	frameURL := any(nil)
@@ -338,7 +342,12 @@ func (h *handler) zakuraBotDesktopFrame(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var status, kind string
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.workspace_status,s.workspace_kind FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), h.zakuraActor(r).TenantID, chi.URLParam(r, "id")).Scan(&status, &kind)
+	var frameRec struct {
+		WorkspaceStatus string `gorm:"column:workspace_status"`
+		WorkspaceKind   string `gorm:"column:workspace_kind"`
+	}
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("s.workspace_status AS workspace_status, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", h.zakuraActor(r).TenantID, chi.URLParam(r, "id")).Take(&frameRec).Error
+	status, kind = frameRec.WorkspaceStatus, frameRec.WorkspaceKind
 	if status != "running" || kind == "host" {
 		httpx.Error(w, http.StatusConflict, "This workspace does not support a desktop")
 		return
@@ -377,8 +386,11 @@ func (h *handler) zakuraBotExec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "Workspace is not running. Start the agent first.")
 		return
 	}
-	var workspaceStatus string
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.workspace_status FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), h.zakuraActor(r).TenantID, chi.URLParam(r, "id")).Scan(&workspaceStatus)
+	var execRec struct {
+		WorkspaceStatus string `gorm:"column:workspace_status"`
+	}
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("s.workspace_status AS workspace_status").Joins("JOIN spaces s ON s.id = a.space_id").Where("a.tenant_id = ? AND a.id = ?", h.zakuraActor(r).TenantID, chi.URLParam(r, "id")).Take(&execRec).Error
+	workspaceStatus := execRec.WorkspaceStatus
 	if workspaceStatus != "running" {
 		httpx.Error(w, http.StatusConflict, "Workspace is not running. Start the agent first.")
 		return
@@ -416,22 +428,22 @@ func (h *handler) zakuraBotInteractions(w http.ResponseWriter, r *http.Request) 
 			_ = h.syncZakuraInteractions(r.Context(), p, agent, binding, sid)
 		}
 	}
-	rows, err := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,payload_json,created_at FROM zakurabot_interactions WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND status='pending' ORDER BY created_at`), p.TenantID, p.UserID, binding, agent)
-	if err != nil {
+	var ms []models.ZakurabotInteraction
+	if err := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND status = 'pending'", p.TenantID, p.UserID, binding, agent).Order("created_at").Find(&ms).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, payload, created string
-		if rows.Scan(&id, &payload, &created) == nil {
-			var interaction map[string]any
-			_ = json.Unmarshal([]byte(payload), &interaction)
-			interaction["status"] = "pending"
-			out = append(out, map[string]any{"messageId": id, "createdAt": parseTime(created).UnixMilli(), "interaction": interaction})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		var interaction map[string]any
+		_ = json.Unmarshal([]byte(m.PayloadJSON), &interaction)
+		interaction["status"] = "pending"
+		out = append(out, map[string]any{"messageId": id, "createdAt": parseTime(m.CreatedAt).UnixMilli(), "interaction": interaction})
 	}
-	rows.Close()
 	httpx.JSON(w, http.StatusOK, map[string]any{"interactions": out})
 }
 func (h *handler) getZakuraInteraction(r *http.Request) (map[string]any, error) {
@@ -446,69 +458,59 @@ func (h *handler) getZakuraInteraction(r *http.Request) (map[string]any, error) 
 			_ = h.syncZakuraInteractions(r.Context(), p, agent, binding, sid)
 		}
 	}
-	var id, payload, status, created, session, sourceSession, requestID, typ string
-	err = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,payload_json,status,created_at,session_id,source_session_id,request_id,type FROM zakurabot_interactions WHERE id=? AND tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?`), chi.URLParam(r, "messageId"), p.TenantID, p.UserID, binding, agent).Scan(&id, &payload, &status, &created, &session, &sourceSession, &requestID, &typ)
-	if errors.Is(err, sql.ErrNoRows) {
+	var m models.ZakurabotInteraction
+	err = h.deps.Gorm.WithContext(r.Context()).Where("id = ? AND tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", chi.URLParam(r, "messageId"), p.TenantID, p.UserID, binding, agent).Take(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	id := ""
+	if m.ID != nil {
+		id = *m.ID
+	}
 	var interaction map[string]any
-	_ = json.Unmarshal([]byte(payload), &interaction)
-	interaction["status"] = status
-	return map[string]any{"messageId": id, "createdAt": parseTime(created).UnixMilli(), "status": status, "sessionId": session, "sourceSessionId": sourceSession, "requestId": requestID, "type": typ, "interaction": interaction}, nil
+	_ = json.Unmarshal([]byte(m.PayloadJSON), &interaction)
+	interaction["status"] = m.Status
+	return map[string]any{"messageId": id, "createdAt": parseTime(m.CreatedAt).UnixMilli(), "status": m.Status, "sessionId": m.SessionID, "sourceSessionId": m.SourceSessionID, "requestId": m.RequestID, "type": m.Type, "interaction": interaction}, nil
 }
 
 func (h *handler) syncZakuraInteractions(ctx context.Context, p httpx.Principal, agent, binding, sessionID string) error {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id,seq,type,run_id,payload_json,created_at FROM cloud_agent_events WHERE session_id=? AND type IN ('ask_user_request','permission_request','elicitation_request','ask_user_resolved','permission_resolved','elicitation_resolved') ORDER BY seq`), sessionID)
-	if err != nil {
+	var ms []models.CloudAgentEvent
+	if err := h.deps.Gorm.WithContext(ctx).Where("session_id = ? AND type IN ?", sessionID, []string{"ask_user_request", "permission_request", "elicitation_request", "ask_user_resolved", "permission_resolved", "elicitation_resolved"}).Order("seq").Find(&ms).Error; err != nil {
 		return err
 	}
-	type sourceEvent struct {
-		id, typ, payload string
-		run              sql.NullString
-		seq              int64
-		created          time.Time
-	}
-	events := []sourceEvent{}
-	for rows.Next() {
-		var eventID, eventType, payloadRaw string
-		var runID sql.NullString
-		var seq int64
-		var created flexibleTime
-		if err := rows.Scan(&eventID, &seq, &eventType, &runID, &payloadRaw, &created); err != nil {
-			rows.Close()
-			return err
+	for _, event := range ms {
+		eventID := ""
+		if event.ID != nil {
+			eventID = *event.ID
 		}
-		events = append(events, sourceEvent{id: eventID, typ: eventType, payload: payloadRaw, run: runID, seq: seq, created: created.Time})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, event := range events {
+		runID := ""
+		if event.RunID != nil {
+			runID = *event.RunID
+		}
+		eventSeq := int64(event.Seq)
+		eventCreated := parseTime(event.CreatedAt)
 		payload := map[string]any{}
-		if json.Unmarshal([]byte(event.payload), &payload) != nil {
+		if json.Unmarshal([]byte(event.PayloadJSON), &payload) != nil {
 			continue
 		}
 		requestID := strings.TrimSpace(fmt.Sprint(payload["requestId"]))
 		if requestID == "" || requestID == "<nil>" {
 			continue
 		}
-		if event.typ == "ask_user_resolved" || event.typ == "permission_resolved" || event.typ == "elicitation_resolved" {
+		if event.Type == "ask_user_resolved" || event.Type == "permission_resolved" || event.Type == "elicitation_resolved" {
 			status := "answered"
 			if cancelled, _ := payload["cancelled"].(bool); cancelled || payload["outcome"] == "cancelled" || payload["status"] == "cancelled" {
 				status = "cancelled"
 			}
-			_, err = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE zakurabot_interactions SET status=?,event_seq=? WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND source_session_id=? AND request_id=? AND event_seq<?`), status, event.seq, p.TenantID, p.UserID, binding, agent, sessionID, requestID, event.seq)
-			if err != nil {
+			if err := h.deps.Gorm.WithContext(ctx).Model(&models.ZakurabotInteraction{}).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND source_session_id = ? AND request_id = ? AND event_seq < ?", p.TenantID, p.UserID, binding, agent, sessionID, requestID, eventSeq).Updates(map[string]any{"status": status, "event_seq": eventSeq}).Error; err != nil {
 				return err
 			}
 			continue
 		}
-		kind := map[string]string{"ask_user_request": "question", "permission_request": "approval", "elicitation_request": "form"}[event.typ]
+		kind := map[string]string{"ask_user_request": "question", "permission_request": "approval", "elicitation_request": "form"}[event.Type]
 		projected := map[string]any{"type": kind, "requestId": requestID, "status": "pending", "title": payload["title"], "options": payload["options"]}
 		if kind == "question" {
 			projected["title"], projected["allowMultiple"], projected["secret"], projected["mode"], projected["placeholder"], projected["expiresAt"] = payload["question"], payload["allowMultiple"], payload["secret"], payload["mode"], payload["placeholder"], payload["expiresAt"]
@@ -524,10 +526,9 @@ func (h *handler) syncZakuraInteractions(ctx context.Context, p httpx.Principal,
 			}
 		}
 		projectedRaw, _ := json.Marshal(projected)
-		digest := sha256.Sum256([]byte(p.TenantID + "\x00" + p.UserID + "\x00" + binding + "\x00" + agent + "\x00" + event.id))
+		digest := sha256.Sum256([]byte(p.TenantID + "\x00" + p.UserID + "\x00" + binding + "\x00" + agent + "\x00" + eventID))
 		id := "zbi_" + hex.EncodeToString(digest[:])
-		_, err = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO zakurabot_interactions(id,tenant_id,device_id,binding_id,agent_id,session_id,run_id,source_session_id,source_run_id,request_id,type,payload_json,reply_to,status,claimed_at,event_seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,'pending',NULL,?,?) ON CONFLICT(id) DO NOTHING`), id, p.TenantID, p.UserID, binding, agent, sessionID, nullString(event.run.String), sessionID, nullString(event.run.String), requestID, kind, string(projectedRaw), event.seq, event.created)
-		if err != nil {
+		if err := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO zakurabot_interactions(id,tenant_id,device_id,binding_id,agent_id,session_id,run_id,source_session_id,source_run_id,request_id,type,payload_json,reply_to,status,claimed_at,event_seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,'pending',NULL,?,?) ON CONFLICT(id) DO NOTHING`, id, p.TenantID, p.UserID, binding, agent, sessionID, nullString(runID), sessionID, nullString(runID), requestID, kind, string(projectedRaw), eventSeq, runtimeTimeString(eventCreated)).Error; err != nil {
 			return err
 		}
 	}
@@ -569,28 +570,26 @@ func (h *handler) answerZakuraBotInteraction(w http.ResponseWriter, r *http.Requ
 		status = "cancelled"
 	}
 	p := h.zakuraActor(r)
-	res, err := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE zakurabot_interactions SET status='resolving',claimed_at=? WHERE id=? AND tenant_id=? AND device_id=? AND status='pending'`), h.store.now(), chi.URLParam(r, "messageId"), p.TenantID, p.UserID)
-	if err != nil {
-		statusErr(w, err)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.ZakurabotInteraction{}).Where("id = ? AND tenant_id = ? AND device_id = ? AND status = 'pending'", chi.URLParam(r, "messageId"), p.TenantID, p.UserID).Updates(map[string]any{"status": "resolving", "claimed_at": runtimeTimeString(h.store.now())})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, http.StatusConflict, "Interaction is no longer pending")
 		return
 	}
 	if err = h.resolveZakuraInteractionSource(r.Context(), p, snapshot, answer); err != nil {
-		_, _ = h.deps.DB.ExecContext(context.WithoutCancel(r.Context()), h.store.q(`UPDATE zakurabot_interactions SET status='pending',claimed_at=NULL WHERE id=? AND tenant_id=? AND device_id=? AND status='resolving'`), chi.URLParam(r, "messageId"), p.TenantID, p.UserID)
+		_ = h.deps.Gorm.WithContext(context.WithoutCancel(r.Context())).Model(&models.ZakurabotInteraction{}).Where("id = ? AND tenant_id = ? AND device_id = ? AND status = 'resolving'", chi.URLParam(r, "messageId"), p.TenantID, p.UserID).Updates(map[string]any{"status": "pending", "claimed_at": nil}).Error
 		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
-	res, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE zakurabot_interactions SET status=?,claimed_at=NULL WHERE id=? AND tenant_id=? AND device_id=? AND status='resolving'`), status, chi.URLParam(r, "messageId"), p.TenantID, p.UserID)
-	if err != nil {
-		statusErr(w, err)
+	res = h.deps.Gorm.WithContext(r.Context()).Model(&models.ZakurabotInteraction{}).Where("id = ? AND tenant_id = ? AND device_id = ? AND status = 'resolving'", chi.URLParam(r, "messageId"), p.TenantID, p.UserID).Updates(map[string]any{"status": status, "claimed_at": nil})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ = res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		httpx.Error(w, http.StatusConflict, "Interaction is no longer pending")
 		return
 	}
@@ -639,11 +638,12 @@ func (h *handler) resolveZakuraInteractionSource(ctx context.Context, p httpx.Pr
 			status = "cancelled"
 		}
 		encoded, _ := json.Marshal(map[string]any{"cancelled": cancelled, "selected": answer["selected"], "text": answer["text"]})
-		result, err := h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE agent_user_questions SET status=?,answer_json=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`), status, string(encoded), h.store.now(), requestID, p.TenantID, agent, sourceSession, h.store.now())
-		if err != nil {
-			return err
+		nowStr := runtimeTimeString(h.store.now())
+		result := h.deps.Gorm.WithContext(ctx).Model(&models.AgentUserQuestion{}).Where("id = ? AND tenant_id = ? AND agent_id = ? AND session_id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > ?)", requestID, p.TenantID, agent, sourceSession, nowStr).Updates(map[string]any{"status": status, "answer_json": string(encoded), "resolved_at": nowStr})
+		if result.Error != nil {
+			return result.Error
 		}
-		if count, _ := result.RowsAffected(); count == 0 {
+		if result.RowsAffected == 0 {
 			return errors.New("Interaction source has ended or changed")
 		}
 		_, _ = h.store.AppendEvent(ctx, p.TenantID, agent, sourceSession, "ask_user_resolved", nil, map[string]any{"requestId": requestID, "status": status, "cancelled": cancelled})
@@ -690,19 +690,15 @@ func (h *handler) zakuraBotReactions(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	rows, err := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT message_id,emoji,user_id,created_at FROM message_reactions WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND message_id=? ORDER BY created_at`), p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"))
-	if err != nil {
+	var ms []models.MessageReaction
+	if err := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND message_id = ?", p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId")).Order("created_at").Find(&ms).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
 	out := []map[string]any{}
-	for rows.Next() {
-		var message, emoji, user, created string
-		if rows.Scan(&message, &emoji, &user, &created) == nil {
-			out = append(out, map[string]any{"messageId": message, "emoji": emoji, "userId": user, "createdAt": parseTime(created).UnixMilli()})
-		}
+	for _, m := range ms {
+		out = append(out, map[string]any{"messageId": m.MessageID, "emoji": m.Emoji, "userId": m.UserID, "createdAt": parseTime(m.CreatedAt).UnixMilli()})
 	}
-	rows.Close()
 	httpx.JSON(w, http.StatusOK, map[string]any{"reactions": out})
 }
 func (h *handler) addZakuraBotReaction(w http.ResponseWriter, r *http.Request) {
@@ -724,7 +720,7 @@ func (h *handler) addZakuraBotReaction(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO message_reactions(id,tenant_id,device_id,binding_id,agent_id,message_id,user_id,emoji,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,device_id,binding_id,agent_id,message_id,user_id) DO UPDATE SET emoji=excluded.emoji,created_at=excluded.created_at`), id, p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"), p.UserID, body.Emoji, now)
+	err = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO message_reactions(id,tenant_id,device_id,binding_id,agent_id,message_id,user_id,emoji,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,device_id,binding_id,agent_id,message_id,user_id) DO UPDATE SET emoji=excluded.emoji,created_at=excluded.created_at`, id, p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"), p.UserID, body.Emoji, runtimeTimeString(now)).Error
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -751,24 +747,24 @@ func (h *handler) deleteZakuraBotReaction(w http.ResponseWriter, r *http.Request
 		statusErr(w, ErrNotFound)
 		return
 	}
-	res, err := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM message_reactions WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=? AND message_id=? AND user_id=? AND emoji=?`), p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"), p.UserID, body.Emoji)
-	if err != nil {
-		statusErr(w, err)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ? AND message_id = ? AND user_id = ? AND emoji = ?", p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"), p.UserID, body.Emoji).Delete(&models.MessageReaction{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, http.StatusOK, map[string]any{"removed": n > 0})
+	httpx.JSON(w, http.StatusOK, map[string]any{"removed": res.RowsAffected > 0})
 }
 func (h *handler) zakuraSessionStatus(ctx context.Context, p httpx.Principal, agent, binding string) (map[string]any, error) {
 	key := "zakurabot:" + p.TenantID + ":" + p.UserID + ":" + binding + ":" + agent
-	var sid string
-	err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT session_id FROM agent_channel_threads WHERE tenant_id=? AND binding_id=? AND external_thread_key=?`), p.TenantID, binding, key).Scan(&sid)
-	if errors.Is(err, sql.ErrNoRows) {
+	var thread models.AgentChannelThread
+	err := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND binding_id = ? AND external_thread_key = ?", p.TenantID, binding, key).Take(&thread).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return map[string]any{"agentId": agent, "sessionId": nil, "status": "stopped", "activeRunId": nil}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	sid := thread.SessionID
 	session, err := h.store.GetSession(ctx, p.TenantID, agent, sid)
 	if err != nil {
 		return nil, err
@@ -817,7 +813,7 @@ func (h *handler) manageZakuraBotSession(w http.ResponseWriter, r *http.Request)
 	p := h.zakuraActor(r)
 	if body.Action == "new" {
 		key := "zakurabot:" + p.TenantID + ":" + p.UserID + ":" + binding + ":" + agent
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM agent_channel_threads WHERE tenant_id=? AND binding_id=? AND external_thread_key=?`), p.TenantID, binding, key)
+		_ = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND binding_id = ? AND external_thread_key = ?", p.TenantID, binding, key).Delete(&models.AgentChannelThread{}).Error
 		_, err = h.zakuraBotSession(r.Context(), p, agent, binding)
 	} else if body.Action == "start" {
 		_, err = h.zakuraBotSession(r.Context(), p, agent, binding)

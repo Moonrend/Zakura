@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 
 	"github.com/Moonrend/Zakura/go/server/internal/integrations"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/admin"
@@ -59,8 +60,8 @@ func Router(cfg config.Config, d *appdeps.Dependencies, log *slog.Logger) http.H
 	return r
 }
 
-func NewDependencies(cfg config.Config, db *sql.DB, dialect string, rebind func(string) string) *appdeps.Dependencies {
-	return &appdeps.Dependencies{DB: db, Dialect: dialect, Rebind: rebind, Clock: time.Now, NewID: newID, Secret: []byte(cfg.Secret), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: cfg.DataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: VerifyDNSDomain}
+func NewDependencies(cfg config.Config, db *sql.DB, dialect string, rebind func(string) string, gormDB *gorm.DB) *appdeps.Dependencies {
+	return &appdeps.Dependencies{DB: db, Gorm: gormDB, Dialect: dialect, Rebind: rebind, Clock: time.Now, NewID: newID, Secret: []byte(cfg.Secret), PublicURL: cfg.PublicURL, WebURL: cfg.WebURL, DataDir: cfg.DataDir, Edition: cfg.Edition, MultiTenant: cfg.MultiTenant, VerifyDomain: VerifyDNSDomain}
 }
 
 func newID() string {

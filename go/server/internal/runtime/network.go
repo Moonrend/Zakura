@@ -3,19 +3,19 @@ package runtime
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func (h *handler) registerNetwork(r chi.Router) {
@@ -50,18 +50,15 @@ func defaultPolicy() map[string]any {
 }
 func (h *handler) readPolicy(r *http.Request) (map[string]any, error) {
 	p := principal(r)
-	var enabled, exposure bool
-	var def, max, perAgent, perTenant, retention int
-	var denied string
-	var desktop, pub, tcp, agents, approval, tailscale bool
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT enabled,exposure_enabled,default_ttl_minutes,max_ttl_minutes,max_active_per_agent,max_active_per_tenant,denied_ports_json,allow_desktop_exposure,allow_public_exposure,allow_tcp_exposure,agents_can_expose,require_user_approval,require_tailscale_for_remote_runners,audit_retention_days FROM network_security_policies WHERE tenant_id=? AND scope='tenant'`), p.TenantID).Scan(&enabled, &exposure, &def, &max, &perAgent, &perTenant, &denied, &desktop, &pub, &tcp, &agents, &approval, &tailscale, &retention)
-	if errors.Is(e, sql.ErrNoRows) {
+	var m models.NetworkSecurityPolicy
+	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND scope = 'tenant'", p.TenantID).Take(&m).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		return defaultPolicy(), nil
 	}
 	if e != nil {
 		return nil, e
 	}
-	return map[string]any{"enabled": enabled, "exposureEnabled": exposure, "defaultTtlMinutes": def, "maxTtlMinutes": max, "maxActivePerAgent": perAgent, "maxActivePerTenant": perTenant, "deniedPorts": json.RawMessage(denied), "allowDesktopExposure": desktop, "allowPublicExposure": pub, "allowTcpExposure": tcp, "agentsCanExpose": agents, "requireUserApproval": approval, "requireTailscaleForRemoteRunners": tailscale, "auditRetentionDays": retention}, nil
+	return map[string]any{"enabled": m.Enabled, "exposureEnabled": m.ExposureEnabled, "defaultTtlMinutes": int(m.DefaultTTLMinutes), "maxTtlMinutes": int(m.MaxTTLMinutes), "maxActivePerAgent": int(m.MaxActivePerAgent), "maxActivePerTenant": int(m.MaxActivePerTenant), "deniedPorts": json.RawMessage(m.DeniedPortsJSON), "allowDesktopExposure": m.AllowDesktopExposure, "allowPublicExposure": m.AllowPublicExposure, "allowTcpExposure": m.AllowTcpExposure, "agentsCanExpose": m.AgentsCanExpose, "requireUserApproval": m.RequireUserApproval, "requireTailscaleForRemoteRunners": m.RequireTailscaleForRemoteRunners, "auditRetentionDays": int(m.AuditRetentionDays)}, nil
 }
 func (h *handler) getNetworkSecurity(w http.ResponseWriter, r *http.Request) {
 	x, e := h.readPolicy(r)
@@ -100,8 +97,8 @@ func (h *handler) putNetworkSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	denied, _ := json.Marshal(b.DeniedPorts)
 	p := principal(r)
-	now := h.store.now()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO network_security_policies(id,tenant_id,scope,enabled,exposure_enabled,default_ttl_minutes,max_ttl_minutes,max_active_per_agent,max_active_per_tenant,denied_ports_json,allow_desktop_exposure,allow_public_exposure,allow_tcp_exposure,agents_can_expose,require_user_approval,require_tailscale_for_remote_runners,audit_retention_days,updated_by,created_at,updated_at) VALUES(?,?,'tenant',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,scope) DO UPDATE SET enabled=?,exposure_enabled=?,default_ttl_minutes=?,max_ttl_minutes=?,max_active_per_agent=?,max_active_per_tenant=?,denied_ports_json=?,allow_desktop_exposure=?,allow_public_exposure=?,allow_tcp_exposure=?,agents_can_expose=?,require_user_approval=?,require_tailscale_for_remote_runners=?,audit_retention_days=?,updated_by=?,updated_at=?`), h.store.id(), p.TenantID, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now, now, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now)
+	now := runtimeTimeString(h.store.now())
+	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO network_security_policies(id,tenant_id,scope,enabled,exposure_enabled,default_ttl_minutes,max_ttl_minutes,max_active_per_agent,max_active_per_tenant,denied_ports_json,allow_desktop_exposure,allow_public_exposure,allow_tcp_exposure,agents_can_expose,require_user_approval,require_tailscale_for_remote_runners,audit_retention_days,updated_by,created_at,updated_at) VALUES(?,?,'tenant',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,scope) DO UPDATE SET enabled=?,exposure_enabled=?,default_ttl_minutes=?,max_ttl_minutes=?,max_active_per_agent=?,max_active_per_tenant=?,denied_ports_json=?,allow_desktop_exposure=?,allow_public_exposure=?,allow_tcp_exposure=?,agents_can_expose=?,require_user_approval=?,require_tailscale_for_remote_runners=?,audit_retention_days=?,updated_by=?,updated_at=?`, h.store.id(), p.TenantID, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now, now, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -112,41 +109,38 @@ func (h *handler) putNetworkSecurity(w http.ResponseWriter, r *http.Request) {
 func (h *handler) auditNetwork(r *http.Request, action, targetType, targetID string, detail any) {
 	raw, _ := json.Marshal(detail)
 	p := principal(r)
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO network_audit_logs(id,tenant_id,actor_type,actor_id,action,target_type,target_id,detail_json,ip,created_at) VALUES(?,?,'user',?,?,?,?,?,?,?)`), h.store.id(), p.TenantID, p.UserID, action, targetType, targetID, string(raw), r.RemoteAddr, h.store.now())
+	id := h.store.id()
+	_ = h.deps.Gorm.WithContext(r.Context()).Create(&models.NetworkAuditLog{ID: &id, TenantID: p.TenantID, ActorType: "user", ActorID: &p.UserID, Action: action, TargetType: &targetType, TargetID: &targetID, DetailJSON: string(raw), IP: &r.RemoteAddr, CreatedAt: runtimeTimeString(h.store.now())}).Error
 }
 func (h *handler) networkAudit(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,actor_type,actor_id,action,target_type,target_id,detail_json,ip,created_at FROM network_audit_logs WHERE tenant_id=? ORDER BY created_at DESC LIMIT 500`), principal(r).TenantID)
-	if e != nil {
+	var ms []models.NetworkAuditLog
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", principal(r).TenantID).Order("created_at DESC").Limit(500).Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, actorType, action, detail, created string
-		var actor, targetType, target, ip *string
-		if rows.Scan(&id, &actorType, &actor, &action, &targetType, &target, &detail, &ip, &created) == nil {
-			out = append(out, map[string]any{"id": id, "actorType": actorType, "actorId": actor, "action": action, "targetType": targetType, "targetId": target, "detail": json.RawMessage(detail), "ip": ip, "createdAt": created})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		out = append(out, map[string]any{"id": id, "actorType": m.ActorType, "actorId": m.ActorID, "action": m.Action, "targetType": m.TargetType, "targetId": m.TargetID, "detail": json.RawMessage(m.DetailJSON), "ip": m.IP, "createdAt": m.CreatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"items": out})
 }
 func (h *handler) listExposureProviders(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,provider,enabled,is_default,last_test_at,last_test_ok,last_error,created_at,updated_at FROM tunnel_provider_settings WHERE tenant_id=? ORDER BY provider`), principal(r).TenantID)
-	if e != nil {
+	var ms []models.TunnelProviderSetting
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", principal(r).TenantID).Order("provider").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, provider, c, u string
-		var enabled, def bool
-		var testAt, lastErr *string
-		var testOK *bool
-		if rows.Scan(&id, &provider, &enabled, &def, &testAt, &testOK, &lastErr, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "provider": provider, "enabled": enabled, "isDefault": def, "lastTestAt": testAt, "lastTestOk": testOK, "lastError": lastErr, "createdAt": c, "updatedAt": u})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		out = append(out, map[string]any{"id": id, "provider": m.Provider, "enabled": m.Enabled, "isDefault": m.IsDefault, "lastTestAt": m.LastTestAt, "lastTestOk": m.LastTestOk, "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"providers": out})
 }
@@ -166,11 +160,11 @@ func (h *handler) patchExposureProvider(w http.ResponseWriter, r *http.Request) 
 		statusErr(w, e)
 		return
 	}
-	now := h.store.now()
+	now := runtimeTimeString(h.store.now())
 	if b.IsDefault {
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE tunnel_provider_settings SET is_default=false,updated_at=? WHERE tenant_id=?`), now, p.TenantID)
+		h.deps.Gorm.WithContext(r.Context()).Model(&models.TunnelProviderSetting{}).Where("tenant_id = ?", p.TenantID).Updates(map[string]any{"is_default": false, "updated_at": now})
 	}
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO tunnel_provider_settings(id,tenant_id,provider,enabled,is_default,config_enc,last_test_at,last_test_ok,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(tenant_id,provider) DO UPDATE SET enabled=?,is_default=?,config_enc=?,updated_at=?`), h.store.id(), p.TenantID, provider, b.Enabled, b.IsDefault, enc, now, now, b.Enabled, b.IsDefault, enc, now)
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO tunnel_provider_settings(id,tenant_id,provider,enabled,is_default,config_enc,last_test_at,last_test_ok,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(tenant_id,provider) DO UPDATE SET enabled=?,is_default=?,config_enc=?,updated_at=?`, h.store.id(), p.TenantID, provider, b.Enabled, b.IsDefault, enc, now, now, b.Enabled, b.IsDefault, enc, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -180,12 +174,14 @@ func (h *handler) patchExposureProvider(w http.ResponseWriter, r *http.Request) 
 }
 func (h *handler) providerConfig(r *http.Request, provider string) (map[string]any, error) {
 	p := principal(r)
-	var enc string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT config_enc FROM tunnel_provider_settings WHERE tenant_id=? AND provider=? AND enabled=true`), p.TenantID, provider).Scan(&enc)
+	var row struct {
+		ConfigEnc string `gorm:"column:config_enc"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("config_enc").Where("tenant_id = ? AND provider = ? AND enabled = true", p.TenantID, provider).Take(&row).Error
 	if e != nil {
 		return nil, e
 	}
-	raw, e := openSecretBox(h.deps.Secret, "tunnel:"+p.TenantID+":"+provider, enc)
+	raw, e := openSecretBox(h.deps.Secret, "tunnel:"+p.TenantID+":"+provider, row.ConfigEnc)
 	if e != nil {
 		return nil, e
 	}
@@ -229,7 +225,8 @@ func (h *handler) testExposureProvider(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p := principal(r)
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE tunnel_provider_settings SET last_test_at=?,last_test_ok=?,last_error=?,updated_at=? WHERE tenant_id=? AND provider=?`), h.store.now(), ok, errText, h.store.now(), p.TenantID, provider)
+	now := runtimeTimeString(h.store.now())
+	h.deps.Gorm.WithContext(r.Context()).Model(&models.TunnelProviderSetting{}).Where("tenant_id = ? AND provider = ?", p.TenantID, provider).Updates(map[string]any{"last_test_at": now, "last_test_ok": ok, "last_error": errText, "updated_at": now})
 	httpx.JSON(w, 200, map[string]any{"ok": ok, "error": errText})
 }
 func (h *handler) createCloudflareTunnel(w http.ResponseWriter, r *http.Request) {
@@ -268,28 +265,31 @@ func (h *handler) createCloudflareTunnel(w http.ResponseWriter, r *http.Request)
 	httpx.JSON(w, 201, map[string]any{"tunnel": result})
 }
 func (h *handler) queryExposures(w http.ResponseWriter, r *http.Request, agent string) {
-	q := `SELECT id,agent_id,runtime_node_id,name,port,protocol,provider,status,public_url,relay_host,relay_port,ttl_minutes,expires_at,last_error,created_at,updated_at FROM port_exposures WHERE tenant_id=? AND status NOT IN ('stopped','expired')`
-	args := []any{principal(r).TenantID}
+	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND status NOT IN ('stopped','expired')", principal(r).TenantID)
 	if agent != "" {
-		q += ` AND agent_id=?`
-		args = append(args, agent)
+		q = q.Where("agent_id = ?", agent)
 	}
-	q += ` ORDER BY created_at DESC`
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(q), args...)
-	if e != nil {
+	var ms []models.PortExposure
+	if e := q.Order("created_at DESC").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, agent, protocol, provider, status, c, u string
-		var node, name, urlv, relay, expires, lastErr *string
-		var port int
-		var relayPort, ttl *int
-		if rows.Scan(&id, &agent, &node, &name, &port, &protocol, &provider, &status, &urlv, &relay, &relayPort, &ttl, &expires, &lastErr, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "agentId": agent, "runtimeNodeId": node, "name": name, "port": port, "protocol": protocol, "provider": provider, "status": status, "publicUrl": urlv, "relayHost": relay, "relayPort": relayPort, "ttlMinutes": ttl, "expiresAt": expires, "lastError": lastErr, "createdAt": c, "updatedAt": u})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		var relayPort, ttl *int
+		if m.RelayPort != nil {
+			v := int(*m.RelayPort)
+			relayPort = &v
+		}
+		if m.TTLMinutes != nil {
+			v := int(*m.TTLMinutes)
+			ttl = &v
+		}
+		out = append(out, map[string]any{"id": id, "agentId": m.AgentID, "runtimeNodeId": m.RuntimeNodeID, "name": m.Name, "port": int(m.Port), "protocol": m.Protocol, "provider": m.Provider, "status": m.Status, "publicUrl": m.PublicURL, "relayHost": m.RelayHost, "relayPort": relayPort, "ttlMinutes": ttl, "expiresAt": m.ExpiresAt, "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"exposures": out})
 }
@@ -340,9 +340,11 @@ func (h *handler) createExposure(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := b.Provider
 	if provider == "" {
-		var x string
-		_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT provider FROM tunnel_provider_settings WHERE tenant_id=? AND enabled=true ORDER BY is_default DESC LIMIT 1`), p.TenantID).Scan(&x)
-		provider = x
+		var row struct {
+			Provider string
+		}
+		_ = h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("provider").Where("tenant_id = ? AND enabled = true", p.TenantID).Order("is_default DESC").Take(&row).Error
+		provider = row.Provider
 	}
 	if provider == "" {
 		httpx.Error(w, 409, "no enabled exposure provider")
@@ -389,8 +391,22 @@ func (h *handler) createExposure(w http.ResponseWriter, r *http.Request) {
 	now := h.store.now()
 	expires := now.Add(time.Duration(b.TTLMinutes) * time.Minute)
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO port_exposures(id,tenant_id,agent_id,runtime_node_id,name,port,protocol,provider,status,public_url,relay_host,relay_port,integration_id,ttl_minutes,expires_at,last_error,created_by_type,created_by_id,stopped_at,created_at,updated_at) VALUES(?,?,?,NULL,?,?,?,?,'active',?,?,?,NULL,?,?,NULL,'user',?,NULL,?,?)`), id, p.TenantID, agent, nullString(b.Name), b.Port, b.Protocol, provider, nullString(remote.URL), nullString(remote.RelayHost), remote.RelayPort, b.TTLMinutes, expires, p.UserID, now, now)
-	if e != nil {
+	expStr := runtimeTimeString(expires)
+	ttl := int32(b.TTLMinutes)
+	createdByType := "user"
+	pe := models.PortExposure{ID: &id, TenantID: p.TenantID, AgentID: agent, Port: int32(b.Port), Protocol: b.Protocol, Provider: provider, Status: "active", TTLMinutes: &ttl, ExpiresAt: &expStr, CreatedByType: &createdByType, CreatedByID: &p.UserID, CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
+	if b.Name != "" {
+		pe.Name = &b.Name
+	}
+	if remote.URL != "" {
+		pe.PublicURL = &remote.URL
+	}
+	if remote.RelayHost != "" {
+		pe.RelayHost = &remote.RelayHost
+	}
+	rp := int32(remote.RelayPort)
+	pe.RelayPort = &rp
+	if e = h.deps.Gorm.WithContext(r.Context()).Create(&pe).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -400,13 +416,13 @@ func (h *handler) createExposure(w http.ResponseWriter, r *http.Request) {
 func (h *handler) deleteExposure(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	id := chi.URLParam(r, "id")
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE port_exposures SET status='stopped',stopped_at=?,updated_at=? WHERE tenant_id=? AND id=? AND status NOT IN ('stopped','expired')`), h.store.now(), h.store.now(), p.TenantID, id)
-	if e != nil {
-		statusErr(w, e)
+	now := runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND id = ? AND status NOT IN ('stopped','expired')", p.TenantID, id).Updates(map[string]any{"status": "stopped", "stopped_at": now, "updated_at": now})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -415,35 +431,58 @@ func (h *handler) deleteExposure(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) stopAllExposures(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE port_exposures SET status='stopped',stopped_at=?,updated_at=? WHERE tenant_id=? AND status NOT IN ('stopped','expired')`), h.store.now(), h.store.now(), p.TenantID)
-	if e != nil {
-		statusErr(w, e)
+	now := runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND status NOT IN ('stopped','expired')", p.TenantID).Updates(map[string]any{"status": "stopped", "stopped_at": now, "updated_at": now})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"stopped": n})
+	httpx.JSON(w, 200, map[string]any{"stopped": res.RowsAffected})
 }
 func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var meshKind, meshStatus string
 	var display *string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT kind,status,display_name FROM network_integrations WHERE tenant_id=? ORDER BY CASE WHEN status='connected' THEN 0 ELSE 1 END LIMIT 1`), p.TenantID).Scan(&meshKind, &meshStatus, &display)
-	if errors.Is(e, sql.ErrNoRows) {
+	var mesh struct {
+		Kind        string
+		Status      string
+		DisplayName *string `gorm:"column:display_name"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("kind, status, display_name").Where("tenant_id = ?", p.TenantID).Order("CASE WHEN status = 'connected' THEN 0 ELSE 1 END").Take(&mesh).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		meshStatus = "disconnected"
 		e = nil
+	} else if e == nil {
+		meshKind, meshStatus, display = mesh.Kind, mesh.Status, mesh.DisplayName
 	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	var defaultProvider *string
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT provider FROM tunnel_provider_settings WHERE tenant_id=? AND enabled=true ORDER BY is_default DESC LIMIT 1`), p.TenantID).Scan(&defaultProvider)
+	var dp struct {
+		Provider string
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("provider").Where("tenant_id = ? AND enabled = true", p.TenantID).Order("is_default DESC").Take(&dp).Error; e == nil {
+		defaultProvider = &dp.Provider
+	}
 	var total, online, active, today, audit int
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='online' OR kind='local' THEN 1 ELSE 0 END),0) FROM runtime_nodes WHERE tenant_id=?`), p.TenantID).Scan(&total, &online)
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM port_exposures WHERE tenant_id=? AND status='active'`), p.TenantID).Scan(&active)
+	var nodeAgg struct {
+		Total  int64
+		Online int64
+	}
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("tenant_id = ?", p.TenantID).Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN status = 'online' OR kind = 'local' THEN 1 ELSE 0 END),0) AS online").Scan(&nodeAgg).Error
+	total, online = int(nodeAgg.Total), int(nodeAgg.Online)
+	var activeCount int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND status = 'active'", p.TenantID).Count(&activeCount).Error
+	active = int(activeCount)
 	start := time.Now().UTC().Truncate(24 * time.Hour)
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM port_exposures WHERE tenant_id=? AND created_at>=?`), p.TenantID, start).Scan(&today)
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM network_audit_logs WHERE tenant_id=? AND created_at>=?`), p.TenantID, start).Scan(&audit)
+	var todayCount int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND created_at >= ?", p.TenantID, runtimeTimeString(start)).Count(&todayCount).Error
+	today = int(todayCount)
+	var auditCount int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.NetworkAuditLog{}).Where("tenant_id = ? AND created_at >= ?", p.TenantID, runtimeTimeString(start)).Count(&auditCount).Error
+	audit = int(auditCount)
 	policy, e := h.readPolicy(r)
 	if e != nil {
 		statusErr(w, e)
@@ -460,27 +499,28 @@ func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) networkMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,kind,status,display_name,meta_json,last_sync_at,last_error,created_at,updated_at FROM network_integrations WHERE tenant_id=? ORDER BY kind`), p.TenantID)
-	if e != nil {
+	var ms []models.NetworkIntegration
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("kind").Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var id, kind, status, meta, c, u string
-		var name, lastSync, lastErr *string
-		if rows.Scan(&id, &kind, &status, &name, &meta, &lastSync, &lastErr, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "kind": kind, "status": status, "displayName": name, "meta": json.RawMessage(meta), "lastSyncAt": lastSync, "lastError": lastErr, "createdAt": c, "updatedAt": u})
+	for _, m := range ms {
+		id := ""
+		if m.ID != nil {
+			id = *m.ID
 		}
+		out = append(out, map[string]any{"id": id, "kind": m.Kind, "status": m.Status, "displayName": m.DisplayName, "meta": json.RawMessage(m.MetaJSON), "lastSyncAt": m.LastSyncAt, "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"integrations": out})
 }
 func (h *handler) getHeadscale(w http.ResponseWriter, r *http.Request) {
-	var status string
-	var meta string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT status,meta_json FROM network_integrations WHERE tenant_id=? AND kind='headscale'`), principal(r).TenantID).Scan(&status, &meta)
-	if errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		Status   string
+		MetaJSON string `gorm:"column:meta_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("status, meta_json").Where("tenant_id = ? AND kind = 'headscale'", principal(r).TenantID).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		httpx.JSON(w, 200, map[string]any{"status": "disconnected", "config": map[string]any{}})
 		return
 	}
@@ -488,7 +528,7 @@ func (h *handler) getHeadscale(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"status": status, "config": json.RawMessage(meta)})
+	httpx.JSON(w, 200, map[string]any{"status": row.Status, "config": json.RawMessage(row.MetaJSON)})
 }
 func (h *handler) putHeadscale(w http.ResponseWriter, r *http.Request) {
 	var b struct{ URL, Token, DisplayName string }
@@ -508,8 +548,8 @@ func (h *handler) putHeadscale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta, _ := json.Marshal(map[string]any{"url": b.URL})
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO network_integrations(id,tenant_id,kind,status,display_name,credentials_enc,meta_json,last_sync_at,last_error,created_at,updated_at) VALUES(?,?,'headscale','connected',?,?,?,NULL,NULL,?,?) ON CONFLICT(tenant_id,kind) DO UPDATE SET status='connected',display_name=?,credentials_enc=?,meta_json=?,updated_at=?`), h.store.id(), p.TenantID, b.DisplayName, enc, string(meta), now, now, b.DisplayName, enc, string(meta), now)
+	now := runtimeTimeString(h.store.now())
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO network_integrations(id,tenant_id,kind,status,display_name,credentials_enc,meta_json,last_sync_at,last_error,created_at,updated_at) VALUES(?,?,'headscale','connected',?,?,?,NULL,NULL,?,?) ON CONFLICT(tenant_id,kind) DO UPDATE SET status='connected',display_name=?,credentials_enc=?,meta_json=?,updated_at=?`, h.store.id(), p.TenantID, b.DisplayName, enc, string(meta), now, now, b.DisplayName, enc, string(meta), now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -518,13 +558,13 @@ func (h *handler) putHeadscale(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) syncMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE network_integrations SET last_sync_at=?,updated_at=? WHERE tenant_id=? AND status='connected'`), h.store.now(), h.store.now(), p.TenantID)
-	if e != nil {
-		statusErr(w, e)
+	now := runtimeTimeString(h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.NetworkIntegration{}).Where("tenant_id = ? AND status = 'connected'", p.TenantID).Updates(map[string]any{"last_sync_at": now, "updated_at": now})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"synced": n})
+	httpx.JSON(w, 200, map[string]any{"synced": res.RowsAffected})
 }
 func (h *handler) disconnectMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -535,23 +575,24 @@ func (h *handler) disconnectMesh(w http.ResponseWriter, r *http.Request) {
 	if b.Kind == "" {
 		b.Kind = "tailscale"
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE network_integrations SET status='disconnected',credentials_enc='{}',updated_at=? WHERE tenant_id=? AND kind=?`), h.store.now(), p.TenantID, b.Kind)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.NetworkIntegration{}).Where("tenant_id = ? AND kind = ?", p.TenantID, b.Kind).Updates(map[string]any{"status": "disconnected", "credentials_enc": "{}", "updated_at": runtimeTimeString(h.store.now())})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"disconnected": n})
+	httpx.JSON(w, 200, map[string]any{"disconnected": res.RowsAffected})
 }
 func (h *handler) enablePlatformMesh(w http.ResponseWriter, r *http.Request) { h.putHeadscale(w, r) }
 func (h *handler) meshCredentials(r *http.Request, kind string) (map[string]any, error) {
 	p := principal(r)
-	var enc string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT credentials_enc FROM network_integrations WHERE tenant_id=? AND kind=? AND status='connected'`), p.TenantID, kind).Scan(&enc)
+	var row struct {
+		CredentialsEnc string `gorm:"column:credentials_enc"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("credentials_enc").Where("tenant_id = ? AND kind = ? AND status = 'connected'", p.TenantID, kind).Take(&row).Error
 	if e != nil {
 		return nil, e
 	}
-	raw, e := openSecretBox(h.deps.Secret, "network:"+p.TenantID+":"+kind, enc)
+	raw, e := openSecretBox(h.deps.Secret, "network:"+p.TenantID+":"+kind, row.CredentialsEnc)
 	if e != nil {
 		return nil, e
 	}
@@ -625,5 +666,3 @@ func (h *handler) meshOAuthStart(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) meshOAuthConnect(w http.ResponseWriter, r *http.Request) { h.putHeadscale(w, r) }
 func (h *handler) meshOAuthTags(w http.ResponseWriter, r *http.Request)    { h.ensureMeshACL(w, r) }
-
-var _ = strconv.Itoa
