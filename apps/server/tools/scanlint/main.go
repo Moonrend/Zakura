@@ -2,7 +2,7 @@
 
 // Command scanlint audits GORM struct scans for missing column tags.
 //
-// Run from the go/server module root:
+// Run from the apps/server module root:
 //
 //	CGO_ENABLED=1 go run -tags tools ./tools/scanlint
 //

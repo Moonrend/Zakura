@@ -3,7 +3,7 @@
 // Command gormgen regenerates GORM models for internal/platform/db/models from a
 // live SQLite database.
 //
-// Run from the go/server module root against a read-only copy of a migrated
+// Run from the apps/server module root against a read-only copy of a migrated
 // database:
 //
 //	CGO_ENABLED=1 go run -tags tools ./tools/gormgen -database 'file:data/zakura.db?mode=ro'
