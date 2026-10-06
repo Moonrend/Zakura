@@ -4,12 +4,9 @@ FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY apps/oauth-bridge/package.json apps/oauth-bridge/
 COPY packages/shared/package.json packages/shared/
-COPY packages/core/package.json packages/core/
-COPY packages/saas/package.json packages/saas/
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile
 
 FROM deps AS build

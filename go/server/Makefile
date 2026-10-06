@@ -1,7 +1,6 @@
 GO ?= go
-REFERENCE ?= ../zakura-rewrite/docs/ROUTE_ACCEPTANCE.md
 
-.PHONY: fmt test race vet build stdio-images route-ledger scanlint
+.PHONY: fmt test race vet build stdio-images scanlint
 scanlint:
 	CGO_ENABLED=1 $(GO) run -tags tools ./tools/scanlint
 fmt:
@@ -23,6 +22,3 @@ build:
 
 stdio-images:
 	./scripts/build-stdio-images.sh
-
-route-ledger:
-	CGO_ENABLED=1 $(GO) run ./cmd/route-inventory -reference $(REFERENCE) -output docs/ROUTE_PARITY.md

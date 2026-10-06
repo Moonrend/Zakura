@@ -93,13 +93,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: app
-            image: zakura
-            dockerfile: docker/Dockerfile
-            context: .
-            timeout: 60
-            workspace_tags: "false"
-            build_args: "ZAKURA_AGENT_VERSION=${{ github.sha }}"
           - name: server
             image: zakura-server
             dockerfile: docker/server/Dockerfile
