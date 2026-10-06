@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Loader2, Plus, Server } from "lucide-react";
+import { Loader2, Plus } from "lucide-react";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,11 +16,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
 import { PageLoading } from "@/components/ui/progress-linear";
-import { Empty, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
-import { FluidList } from "@/components/ui/fluid-hover";
-import { api } from "@/lib/api";
+import { Empty, EmptyContent, EmptyDescription, EmptyTitle } from "@/components/ui/empty";
+import { FluidItem, FluidList } from "@/components/ui/fluid-hover";
 import {
   createSpace,
   fetchSpaces,
@@ -28,10 +26,23 @@ import {
 } from "@/lib/spaces";
 import { cn } from "@/lib/utils";
 
-function statusTone(status: string | undefined): string {
-  if (status === "ready") return "default";
-  if (status === "error" || status === "failed") return "destructive";
-  return "secondary";
+function workspaceStatusView(status: string): { label: string; error?: boolean } {
+  switch (status) {
+    case "running":
+      return { label: "运行中" };
+    case "starting":
+    case "provisioning":
+      return { label: "启动中" };
+    case "error":
+    case "failed":
+      return { label: "启动失败", error: true };
+    case "stopped":
+    case "idle":
+    case "none":
+      return { label: "已停止" };
+    default:
+      return { label: "就绪" };
+  }
 }
 
 export default function SpacesListPage() {
@@ -66,6 +77,11 @@ export default function SpacesListPage() {
     setDescription("");
   }
 
+  function openCreate() {
+    resetCreate();
+    setOpen(true);
+  }
+
   async function create() {
     if (!name.trim()) {
       toast.error("请填写名称");
@@ -91,15 +107,8 @@ export default function SpacesListPage() {
     <div className="space-y-6">
       <SettingsHeader
         title="Spaces"
-        description="每个 Space 是一台共享电脑：其中的 Agent 共享 Shell / FS / 浏览器 / 桌面"
         actions={
-          <Button
-            size="sm"
-            onClick={() => {
-              resetCreate();
-              setOpen(true);
-            }}
-          >
+          <Button size="sm" onClick={openCreate}>
             <Plus />
             新建空间
           </Button>
@@ -112,47 +121,56 @@ export default function SpacesListPage() {
         <Empty>
           <EmptyTitle>还没有空间</EmptyTitle>
           <EmptyDescription>创建一个空间，把相关的 Agent 放到同一台共享电脑上</EmptyDescription>
+          <EmptyContent>
+            <Button size="sm" onClick={openCreate}>
+              <Plus />
+              新建空间
+            </Button>
+          </EmptyContent>
         </Empty>
       ) : (
         <FluidList
           axis="xy"
-          gapClick={false}
-          className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+          gapClick={{ maxDistance: 16 }}
+          className="grid gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-3"
           highlightClassName="rounded-xl"
         >
-          {list.map((space) => (
-            <Link
-              key={space.id}
-              href={`/dashboard/spaces/${space.id}`}
-              className="block rounded-xl border bg-card p-4 transition-colors hover:bg-accent/40"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium truncate">{space.name}</span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {space.isDefault ? <Badge variant="outline">默认</Badge> : null}
-                  <Badge variant={statusTone(space.workspaceStatus) as never}>
-                    {space.workspaceStatus}
-                  </Badge>
-                </div>
-              </div>
-              {space.description ? (
-                <p className="mt-1 text-sm text-muted-foreground line-clamp-2">
-                  {space.description}
-                </p>
-              ) : null}
-              <div
-                className={cn(
-                  "mt-3 flex items-center gap-1.5 text-xs text-muted-foreground",
-                )}
-              >
-                <Server className="size-3.5" />
-                <span>
-                  <span className="font-mono">{space.slug}</span> · {space.agentCount} 个 Agent ·{" "}
-                  {space.workspaceKind}
-                </span>
-              </div>
-            </Link>
-          ))}
+          {list.map((space) => {
+            const status = workspaceStatusView(space.workspaceStatus);
+            return (
+              <FluidItem key={space.id}>
+                <Link
+                  href={`/dashboard/spaces/${space.id}`}
+                  className="flex flex-col rounded-xl bg-card p-4 shadow-surface-2 focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <h3 className="min-w-0 truncate text-sm font-medium tracking-tight">
+                      {space.name}
+                      {space.isDefault ? (
+                        <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                          默认
+                        </span>
+                      ) : null}
+                    </h3>
+                    <span
+                      className={cn(
+                        "shrink-0 text-xs",
+                        status.error ? "text-destructive" : "text-muted-foreground",
+                      )}
+                    >
+                      {status.label}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                    {space.description || space.slug}
+                  </p>
+                  <div className="mt-auto pt-3 text-xs text-muted-foreground/70">
+                    {space.agentCount} 个 Agent
+                  </div>
+                </Link>
+              </FluidItem>
+            );
+          })}
         </FluidList>
       )}
 

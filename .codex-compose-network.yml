@@ -1,8 +1,0 @@
-services:
-  redis:
-    ports: !reset []
-
-networks:
-  zakura:
-    external: true
-    name: zakura
