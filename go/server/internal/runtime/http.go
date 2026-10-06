@@ -18,9 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 type handler struct {
@@ -209,8 +210,8 @@ func object(v any) map[string]any {
 }
 func (h *handler) spaceDTO(ctx context.Context, tenant string, x Space) map[string]any {
 	out := object(x)
-	var count int
-	_ = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT COUNT(*) FROM agents WHERE tenant_id=? AND space_id=?`), tenant, x.ID).Scan(&count)
+	var count int64
+	_ = h.deps.Gorm.WithContext(ctx).Model(&models.Agent{}).Where("tenant_id=? AND space_id=?", tenant, x.ID).Count(&count).Error
 	out["agentCount"] = count
 	root := os.Getenv("ZAKURA_WORKSPACE_ROOT")
 	if root == "" {
@@ -238,11 +239,13 @@ func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[stri
 				status = "idle"
 			}
 		}
-		var dockerID sql.NullString
-		var containerImage sql.NullString
-		var containerStatus sql.NullString
-		if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT docker_id,image,status FROM managed_containers WHERE tenant_id=? AND space_id=? AND purpose='workspace' ORDER BY created_at DESC LIMIT 1`), tenant, space.ID).Scan(&dockerID, &containerImage, &containerStatus); err == nil {
-			status = containerStatus.String
+		var container struct {
+			DockerID sql.NullString `gorm:"column:docker_id"`
+			Image    sql.NullString `gorm:"column:image"`
+			Status   sql.NullString `gorm:"column:status"`
+		}
+		if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("docker_id,image,status").Where("tenant_id=? AND space_id=? AND purpose='workspace'", tenant, space.ID).Order("created_at DESC").Take(&container).Error; err == nil {
+			status = container.Status.String
 		}
 		out["spaceName"] = space.Name
 		out["enableComputer"] = space.EnableComputer
@@ -264,10 +267,10 @@ func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[stri
 			profile = "full"
 		}
 		workspaceImage := any(space.WorkspaceImage)
-		if containerImage.Valid {
-			workspaceImage = containerImage.String
+		if container.Image.Valid {
+			workspaceImage = container.Image.String
 		}
-		out["workspace"] = map[string]any{"status": status, "dockerId": nullableString(dockerID), "image": workspaceImage, "running": status == "running", "profile": profile}
+		out["workspace"] = map[string]any{"status": status, "dockerId": nullableString(container.DockerID), "image": workspaceImage, "running": status == "running", "profile": profile}
 	}
 	out["mcpAgentUrl"] = strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/agents/" + a.Slug
 	return out
@@ -289,7 +292,7 @@ func (h *handler) createAgentAPIKey(ctx context.Context, p httpx.Principal, a Ag
 	if p.APIKey {
 		user = nil
 	}
-	_, e := h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO api_keys(id,tenant_id,user_id,agent_id,space_id,name,key_prefix,key_hash,scopes,expires_at,last_used_at,revoked_at,created_at) VALUES(?,?,?,?,?,?,?,?,'["*"]',NULL,NULL,NULL,?)`), id, p.TenantID, user, a.ID, a.SpaceID, name, prefix, hex.EncodeToString(sum[:]), h.store.now())
+	e := h.deps.Gorm.WithContext(ctx).Table("api_keys").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "user_id": user, "agent_id": a.ID, "space_id": a.SpaceID, "name": name, "key_prefix": prefix, "key_hash": hex.EncodeToString(sum[:]), "scopes": `["*"]`, "expires_at": nil, "last_used_at": nil, "revoked_at": nil, "created_at": h.store.now()}).Error
 	if e != nil {
 		return nil, e
 	}
@@ -448,9 +451,15 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 	out["prompts"] = prompts
 	out["resourceTemplates"] = templates
 	var container struct {
-		ID, DockerID, Name, Image, Status, CreatedAt, UpdatedAt string
+		ID        string `gorm:"column:id"`
+		DockerID  string `gorm:"column:docker_id"`
+		Name      string `gorm:"column:name"`
+		Image     string `gorm:"column:image"`
+		Status    string `gorm:"column:status"`
+		CreatedAt string `gorm:"column:created_at"`
+		UpdatedAt string `gorm:"column:updated_at"`
 	}
-	if h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,COALESCE(docker_id,''),name,image,status,created_at,updated_at FROM managed_containers WHERE tenant_id=? AND space_id=? AND purpose='workspace' ORDER BY created_at DESC LIMIT 1`), p.TenantID, x.SpaceID).Scan(&container.ID, &container.DockerID, &container.Name, &container.Image, &container.Status, &container.CreatedAt, &container.UpdatedAt) == nil {
+	if h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id,COALESCE(docker_id,'') AS docker_id,name,image,status,created_at,updated_at").Where("tenant_id=? AND space_id=? AND purpose='workspace'", p.TenantID, x.SpaceID).Order("created_at DESC").Take(&container).Error == nil {
 		out["workspaceContainer"] = map[string]any{"id": container.ID, "dockerId": container.DockerID, "name": container.Name, "image": container.Image, "status": container.Status, "createdAt": container.CreatedAt, "updatedAt": container.UpdatedAt}
 	} else {
 		out["workspaceContainer"] = nil
@@ -468,24 +477,18 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string) ([]map[string]any, []map[string]any, []map[string]any, []map[string]any) {
-	type bound struct{ id, ref string }
-	boundInstances := []bound{}
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT i.id,i.component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`), tenant, agentID)
-	if err == nil {
-		for rows.Next() {
-			var item bound
-			if rows.Scan(&item.id, &item.ref) == nil {
-				boundInstances = append(boundInstances, item)
-			}
-		}
-		rows.Close()
+	type bound struct {
+		ID  string `gorm:"column:id"`
+		Ref string `gorm:"column:component_ref"`
 	}
+	boundInstances := []bound{}
+	_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id AS id,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, tenant, agentID).Scan(&boundInstances).Error
 	tools := []map[string]any{}
 	resources := []map[string]any{}
 	prompts := []map[string]any{}
 	templates := []map[string]any{}
 	for _, item := range boundInstances {
-		instance, err := h.getMCPInstance(ctx, tenant, item.id)
+		instance, err := h.getMCPInstance(ctx, tenant, item.ID)
 		if err != nil {
 			continue
 		}
@@ -504,14 +507,14 @@ func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string)
 		}
 		call("tools/list", &listedTools)
 		for _, tool := range listedTools.Tools {
-			tools = append(tools, map[string]any{"name": "re_" + slugify(item.ref) + "__" + tool.Name, "qualifiedName": "re_" + slugify(item.ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.ref, "instanceId": item.id, "agentScoped": true})
+			tools = append(tools, map[string]any{"name": "re_" + slugify(item.Ref) + "__" + tool.Name, "qualifiedName": "re_" + slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "agentScoped": true})
 		}
 		var listedResources struct {
 			Resources []map[string]any `json:"resources"`
 		}
 		call("resources/list", &listedResources)
 		for _, resource := range listedResources.Resources {
-			resource["providerId"] = item.ref
+			resource["providerId"] = item.Ref
 			resources = append(resources, resource)
 		}
 		var listedPrompts struct {
@@ -519,7 +522,7 @@ func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string)
 		}
 		call("prompts/list", &listedPrompts)
 		for _, prompt := range listedPrompts.Prompts {
-			prompt["providerId"] = item.ref
+			prompt["providerId"] = item.Ref
 			prompts = append(prompts, prompt)
 		}
 		var listedTemplates struct {
@@ -527,7 +530,7 @@ func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string)
 		}
 		call("resources/templates/list", &listedTemplates)
 		for _, template := range listedTemplates.ResourceTemplates {
-			template["providerId"] = item.ref
+			template["providerId"] = item.Ref
 			templates = append(templates, template)
 		}
 	}
@@ -820,8 +823,8 @@ func (h *handler) cloudConfig(w http.ResponseWriter, r *http.Request) {
 	if cloud == nil {
 		cloud = map[string]any{}
 	}
-	var routes int
-	_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM model_routes WHERE tenant_id=? AND capability='chat' AND status='ready'`), principal(r).TenantID).Scan(&routes)
+	var routes int64
+	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelRoute{}).Where("tenant_id=? AND capability='chat' AND status='ready'", principal(r).TenantID).Count(&routes).Error
 	httpx.JSON(w, 200, map[string]any{"cloud": cloud, "hasChatRoute": routes > 0})
 }
 func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
@@ -864,25 +867,24 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT s.name,s.title,s.description FROM agent_skills a JOIN skills s ON s.id=a.skill_id WHERE a.tenant_id=? AND a.agent_id=? AND a.enabled=TRUE AND a.status<>'error' ORDER BY s.name`), p.TenantID, agent.ID)
-	if e != nil {
+	type skillRow struct {
+		Name        string `gorm:"column:name"`
+		Title       string `gorm:"column:title"`
+		Description string `gorm:"column:description"`
+	}
+	var skillRows []skillRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT s.name AS name,s.title AS title,s.description AS description FROM agent_skills a JOIN skills s ON s.id=a.skill_id WHERE a.tenant_id=? AND a.agent_id=? AND a.enabled=TRUE AND a.status<>'error' ORDER BY s.name`, p.TenantID, agent.ID).Scan(&skillRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	skills := []map[string]any{}
-	for rows.Next() {
-		var name, title, description string
-		if e := rows.Scan(&name, &title, &description); e != nil {
-			rows.Close()
-			statusErr(w, e)
-			return
-		}
+	for _, row := range skillRows {
+		title := row.Title
 		if strings.TrimSpace(title) == "" {
-			title = name
+			title = row.Name
 		}
-		skills = append(skills, map[string]any{"name": name, "title": title, "description": description})
+		skills = append(skills, map[string]any{"name": row.Name, "title": title, "description": row.Description})
 	}
-	rows.Close()
 	groups := []map[string]any{
 		{"id": "builtin:sessions", "kind": "builtin", "label": "Sessions", "tools": []string{"list_sessions", "search_sessions", "get_messages", "import_session"}},
 		{"id": "builtin:automation", "kind": "builtin", "label": "Routine", "tools": []string{"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine", "list_automation_runs"}},
@@ -900,28 +902,22 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 	if agent.EnableMemory {
 		groups = append(groups, map[string]any{"id": "builtin:memory", "kind": "builtin", "label": "Memory", "tools": []string{"memory_search", "memory_remember"}})
 	}
-	connectorRows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT connector_ref FROM agent_connector_installations WHERE tenant_id=? AND agent_id=? AND enabled=TRUE ORDER BY connector_ref`), p.TenantID, agent.ID)
-	if e != nil {
+	connectorRefs := []string{}
+	if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).Where("tenant_id=? AND agent_id=? AND enabled=TRUE", p.TenantID, agent.ID).Order("connector_ref").Pluck("connector_ref", &connectorRefs).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	connectorRefs := []string{}
-	for connectorRows.Next() {
-		var ref string
-		if connectorRows.Scan(&ref) == nil {
-			connectorRefs = append(connectorRefs, ref)
-		}
-	}
-	connectorRows.Close()
 	for _, ref := range connectorRefs {
-		var manifestRaw string
-		if h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT manifest_json FROM provider_catalog WHERE id=? AND enabled=TRUE`), ref).Scan(&manifestRaw) == nil {
+		var provider struct {
+			ManifestJSON string `gorm:"column:manifest_json"`
+		}
+		if h.deps.Gorm.WithContext(r.Context()).Table("provider_catalog").Select("manifest_json").Where("id=? AND enabled=TRUE", ref).Take(&provider).Error == nil {
 			var manifest struct {
 				Tools []struct {
 					Name string `json:"name"`
 				} `json:"tools"`
 			}
-			_ = json.Unmarshal([]byte(manifestRaw), &manifest)
+			_ = json.Unmarshal([]byte(provider.ManifestJSON), &manifest)
 			tools := make([]string, 0, len(manifest.Tools))
 			for _, tool := range manifest.Tools {
 				if tool.Name != "" {
@@ -933,22 +929,18 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	mcpRows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT i.id,i.name,i.component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`), p.TenantID, agent.ID)
-	if e != nil {
+	type mcpSummary struct {
+		ID   string `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+		Ref  string `gorm:"column:component_ref"`
+	}
+	var mcpInstances []mcpSummary
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT i.id AS id,i.name AS name,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, p.TenantID, agent.ID).Scan(&mcpInstances).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	type mcpSummary struct{ id, name, ref string }
-	mcpInstances := []mcpSummary{}
-	for mcpRows.Next() {
-		var id, name, ref string
-		if mcpRows.Scan(&id, &name, &ref) == nil {
-			mcpInstances = append(mcpInstances, mcpSummary{id: id, name: name, ref: ref})
-		}
-	}
-	mcpRows.Close()
 	for _, summary := range mcpInstances {
-		id, name, ref := summary.id, summary.name, summary.ref
+		id, name, ref := summary.ID, summary.Name, summary.Ref
 		instance, err := h.getMCPInstance(r.Context(), p.TenantID, id)
 		if err != nil {
 			continue
@@ -985,39 +977,41 @@ func (h *handler) memoryOverview(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	providers := []map[string]any{}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,name,kind,config_json,is_default,status FROM memory_providers WHERE tenant_id=? AND enabled=TRUE ORDER BY is_default DESC,name`), p.TenantID)
-	if e != nil {
+	type providerRow struct {
+		ID         string `gorm:"column:id"`
+		Name       string `gorm:"column:name"`
+		Kind       string `gorm:"column:kind"`
+		ConfigJSON string `gorm:"column:config_json"`
+		IsDefault  bool   `gorm:"column:is_default"`
+		Status     string `gorm:"column:status"`
+	}
+	var providerRows []providerRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("memory_providers").Select("id,name,kind,config_json,is_default,status").Where("tenant_id=? AND enabled=TRUE", p.TenantID).Order("is_default DESC,name").Find(&providerRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
+	providers := []map[string]any{}
 	var resolved map[string]any
-	for rows.Next() {
-		var id, name, kind, config, status string
-		var isDefault bool
-		if rows.Scan(&id, &name, &kind, &config, &isDefault, &status) == nil {
-			item := map[string]any{"id": id, "name": name, "kind": kind, "isDefault": isDefault, "status": status, "meta": map[string]any{"name": kind, "description": "", "storesLocally": kind != "traditional"}}
-			providers = append(providers, item)
-			if (agent.MemoryProviderID != nil && *agent.MemoryProviderID == id) || (agent.MemoryProviderID == nil && isDefault) {
-				cfg := map[string]any{}
-				_ = json.Unmarshal([]byte(config), &cfg)
-				resolved = map[string]any{"id": id, "name": name, "kind": kind, "config": redactConfig(cfg), "storesLocally": kind != "traditional"}
-			}
+	for _, row := range providerRows {
+		item := map[string]any{"id": row.ID, "name": row.Name, "kind": row.Kind, "isDefault": row.IsDefault, "status": row.Status, "meta": map[string]any{"name": row.Kind, "description": "", "storesLocally": row.Kind != "traditional"}}
+		providers = append(providers, item)
+		if (agent.MemoryProviderID != nil && *agent.MemoryProviderID == row.ID) || (agent.MemoryProviderID == nil && row.IsDefault) {
+			cfg := map[string]any{}
+			_ = json.Unmarshal([]byte(row.ConfigJSON), &cfg)
+			resolved = map[string]any{"id": row.ID, "name": row.Name, "kind": row.Kind, "config": redactConfig(cfg), "storesLocally": row.Kind != "traditional"}
 		}
 	}
-	rows.Close()
 	byLayer := map[string]int{}
 	var total, pinned int
-	statRows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT layer,COUNT(*),SUM(CASE WHEN pinned<>0 THEN 1 ELSE 0 END) FROM memories WHERE tenant_id=? AND agent_id=? GROUP BY layer`), p.TenantID, agent.ID)
-	if e == nil {
-		for statRows.Next() {
-			var layer string
-			var count, pinnedCount int
-			if statRows.Scan(&layer, &count, &pinnedCount) == nil {
-				byLayer[layer], total, pinned = count, total+count, pinned+pinnedCount
-			}
+	var statRows []struct {
+		Layer       string `gorm:"column:layer"`
+		Count       int    `gorm:"column:count"`
+		PinnedCount int    `gorm:"column:pinned_count"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("memories").Select("layer,COUNT(*) AS count,SUM(CASE WHEN pinned<>0 THEN 1 ELSE 0 END) AS pinned_count").Where("tenant_id=? AND agent_id=?", p.TenantID, agent.ID).Group("layer").Find(&statRows).Error; e == nil {
+		for _, row := range statRows {
+			byLayer[row.Layer], total, pinned = row.Count, total+row.Count, pinned+row.PinnedCount
 		}
-		statRows.Close()
 	}
 	embeddingStats := h.memoryEmbeddingCounts(r.Context(), p.TenantID, agent.ID)
 	embCfg, _ := h.agentEmbeddingConfig(r.Context(), p.TenantID, agent.ID)

@@ -2,15 +2,15 @@
 package runtime
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
@@ -47,42 +47,46 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE model_upstreams SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_upstreams SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	h.getUpstream(w, r)
 }
-func scanRoute(row interface{ Scan(...any) error }) (ModelRoute, error) {
-	var x ModelRoute
-	var opts, pri, wei string
-	var c, u flexibleTime
-	e := row.Scan(&x.ID, &x.Name, &x.Slug, &x.Capability, &x.Alias, &x.UpstreamID, &x.Model, &opts, &pri, &wei, &x.IsDefault, &x.Status, &x.LastError, &c, &u)
-	if e != nil {
-		return x, e
-	}
-	x.Options = json.RawMessage(opts)
-	x.Priority, _ = strconv.Atoi(pri)
-	x.Weight, _ = strconv.Atoi(wei)
-	x.CreatedAt = c.Time
-	x.UpdatedAt = u.Time
-	return x, nil
-}
 func (h *handler) getModelRoute(w http.ResponseWriter, r *http.Request) {
-	x, e := scanRoute(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,capability,alias,upstream_id,model,options_json,priority,weight,is_default,status,last_error,created_at,updated_at FROM model_routes WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id")))
-	if errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		ID         string  `gorm:"column:id"`
+		Name       string  `gorm:"column:name"`
+		Slug       string  `gorm:"column:slug"`
+		Capability string  `gorm:"column:capability"`
+		Alias      *string `gorm:"column:alias"`
+		UpstreamID string  `gorm:"column:upstream_id"`
+		Model      string  `gorm:"column:model"`
+		Options    string  `gorm:"column:options_json"`
+		Priority   string  `gorm:"column:priority"`
+		Weight     string  `gorm:"column:weight"`
+		IsDefault  bool    `gorm:"column:is_default"`
+		Status     string  `gorm:"column:status"`
+		LastError  *string `gorm:"column:last_error"`
+		CreatedAt  string  `gorm:"column:created_at"`
+		UpdatedAt  string  `gorm:"column:updated_at"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("model_routes").Select("id,name,slug,capability,alias,upstream_id,model,options_json,priority,weight,is_default,status,last_error,created_at,updated_at").Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		e = ErrNotFound
 	}
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
+	x := ModelRoute{ID: row.ID, Name: row.Name, Slug: row.Slug, Capability: row.Capability, Alias: row.Alias, UpstreamID: row.UpstreamID, Model: row.Model, Options: json.RawMessage(row.Options), IsDefault: row.IsDefault, Status: row.Status, LastError: row.LastError, CreatedAt: parseTime(row.CreatedAt), UpdatedAt: parseTime(row.UpdatedAt)}
+	x.Priority, _ = strconv.Atoi(row.Priority)
+	x.Weight, _ = strconv.Atoi(row.Weight)
 	httpx.JSON(w, 200, x)
 }
 func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
@@ -110,13 +114,12 @@ func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE model_routes SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_routes SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}

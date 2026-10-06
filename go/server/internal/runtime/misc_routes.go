@@ -4,7 +4,6 @@ package runtime
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,8 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 var modelAuthPolls sync.Map
@@ -56,12 +57,14 @@ func (h *handler) registerMisc(r chi.Router) {
 	r.Post("/system/image-updates/check-all", h.imageUpdateCheckAll)
 }
 func (h *handler) getSetting(ctx context.Context, owner, key string) (map[string]any, error) {
-	var enc string
-	e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT value FROM settings WHERE owner_key=? AND key=?`), owner, key).Scan(&enc)
+	var row struct {
+		Value string `gorm:"column:value"`
+	}
+	e := h.deps.Gorm.WithContext(ctx).Table("settings").Select("value").Where("owner_key=? AND key=?", owner, key).Take(&row).Error
 	if e != nil {
 		return map[string]any{}, e
 	}
-	raw, e := openSecretBox(h.deps.Secret, "setting:"+owner+":"+key, enc)
+	raw, e := openSecretBox(h.deps.Secret, "setting:"+owner+":"+key, row.Value)
 	if e != nil {
 		return nil, e
 	}
@@ -78,8 +81,9 @@ func (h *handler) putSetting(ctx context.Context, owner, key string, value map[s
 	if e != nil {
 		return e
 	}
-	_, e = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,?,?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=?`), h.store.id(), owner, key, enc, enc)
-	return e
+	// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
+	res := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,?,?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=?`, h.store.id(), owner, key, enc, enc)
+	return res.Error
 }
 func redactConfig(in map[string]any) map[string]any {
 	out := map[string]any{}
@@ -136,7 +140,7 @@ func webFetchBackendMeta() []map[string]any {
 }
 func (h *handler) getCapability(w http.ResponseWriter, r *http.Request, key string) {
 	cfg, e := h.getSetting(r.Context(), "tenant:"+principal(r).TenantID, key)
-	if errors.Is(e, sql.ErrNoRows) {
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		cfg = map[string]any{"enabled": false}
 		e = nil
 	}
@@ -207,7 +211,7 @@ func (h *handler) patchInstanceTool(w http.ResponseWriter, r *http.Request) {
 	tools[chi.URLParam(r, "toolName")] = map[string]any{"enabled": b.Enabled, "approval": b.Approval}
 	cfg["tools"] = tools
 	raw, _ := json.Marshal(cfg)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET config_json=?,updated_at=? WHERE tenant_id=? AND id=?`), string(raw), h.store.now(), p.TenantID, inst.ID)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id=? AND id=?", p.TenantID, inst.ID).Updates(map[string]any{"config_json": string(raw), "updated_at": h.store.now()}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -377,7 +381,7 @@ func (h *handler) modelAuthPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfgRaw, _ := json.Marshal(cfg)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE model_upstreams SET config_json=?,status='ready',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`), string(cfgRaw), h.store.now(), p.TenantID, id)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(cfgRaw), "status": "ready", "last_error": nil, "updated_at": h.store.now()}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -424,7 +428,7 @@ func (h *handler) modelAuthSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(cfg)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE model_upstreams SET config_json=?,status='ready',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`), string(raw), h.store.now(), p.TenantID, id)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "ready", "last_error": nil, "updated_at": h.store.now()}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -460,7 +464,7 @@ func (h *handler) modelAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(cfg, "credentialEnc")
 	raw, _ := json.Marshal(cfg)
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE model_upstreams SET config_json=?,status='auth_required',updated_at=? WHERE tenant_id=? AND id=?`), string(raw), h.store.now(), p.TenantID, id)
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "auth_required", "updated_at": h.store.now()}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -631,18 +635,10 @@ func (h *handler) imageUpdateCheckAll(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, result)
 }
 func (h *handler) globalImageUpdates(ctx context.Context, tenant string, pull bool) map[string]any {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id FROM runtime_nodes WHERE (tenant_id=? OR is_shared=TRUE) AND status IN ('online','draining') ORDER BY name`), tenant)
-	if err != nil {
+	ids := []string{}
+	if err := h.deps.Gorm.WithContext(ctx).Model(&models.RuntimeNode{}).Where("(tenant_id=? OR is_shared=TRUE) AND status IN ('online','draining')", tenant).Order("name").Pluck("id", &ids).Error; err != nil {
 		return map[string]any{"hasUpdates": false, "hasRunningStale": false, "hasErrors": true, "nodes": []any{}}
 	}
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
-		}
-	}
-	rows.Close()
 	nodes := []map[string]any{}
 	hasUpdates, hasStale, hasErrors := false, false, false
 	for _, id := range ids {
@@ -665,23 +661,20 @@ func (h *handler) globalImageUpdates(ctx context.Context, tenant string, pull bo
 	return map[string]any{"hasUpdates": hasUpdates, "hasRunningStale": hasStale, "hasErrors": hasErrors, "nodes": nodes}
 }
 func (h *handler) checkNodeImages(ctx context.Context, tenant, nodeID string, pull bool) (map[string]any, error) {
-	var name, status, kind string
-	var shared bool
-	if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT name,status,kind,is_shared FROM runtime_nodes WHERE (tenant_id=? OR is_shared=TRUE) AND id=?`), tenant, nodeID).Scan(&name, &status, &kind, &shared); err != nil {
+	var node struct {
+		Name     string `gorm:"column:name"`
+		Status   string `gorm:"column:status"`
+		Kind     string `gorm:"column:kind"`
+		IsShared bool   `gorm:"column:is_shared"`
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Select("name,status,kind,is_shared").Where("(tenant_id=? OR is_shared=TRUE) AND id=?", tenant, nodeID).Take(&node).Error; err != nil {
 		return nil, err
 	}
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT DISTINCT workspace_image FROM spaces WHERE tenant_id=? AND runtime_node_id=? AND workspace_image IS NOT NULL`), tenant, nodeID)
-	if err != nil {
-		return nil, err
-	}
+	name, status, kind, shared := node.Name, node.Status, node.Kind, node.IsShared
 	images := []string{}
-	for rows.Next() {
-		var image string
-		if rows.Scan(&image) == nil {
-			images = append(images, image)
-		}
+	if err := h.deps.Gorm.WithContext(ctx).Model(&models.Space{}).Where("tenant_id=? AND runtime_node_id=? AND workspace_image IS NOT NULL", tenant, nodeID).Distinct().Pluck("workspace_image", &images).Error; err != nil {
+		return nil, err
 	}
-	rows.Close()
 	session, err := h.hub.get(nodeID)
 	if err != nil {
 		return nil, err

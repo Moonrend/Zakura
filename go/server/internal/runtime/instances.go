@@ -16,8 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 type Instance struct {
@@ -58,19 +59,27 @@ func (h *handler) registerInstances(r chi.Router) {
 	r.Post("/containers/{id}/stop", h.stopContainer)
 	r.Get("/instances/{id}/containers/{containerId}/logs", h.containerLogs)
 }
-func scanInstance(row interface{ Scan(...any) error }) (Instance, error) {
-	var x Instance
-	var cfg string
-	e := row.Scan(&x.ID, &x.AgentID, &x.Type, &x.Ref, &x.Name, &cfg, &x.Status, &x.LastError, &x.CreatedAt, &x.UpdatedAt)
-	x.Config = json.RawMessage(cfg)
-	return x, e
-}
 func (h *handler) getInstance(ctx context.Context, tenant, id string) (Instance, error) {
-	x, e := scanInstance(h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT id,agent_id,component_type,component_ref,name,config_json,status,last_error,created_at,updated_at FROM component_instances WHERE tenant_id=? AND id=?`), tenant, id))
-	if errors.Is(e, sql.ErrNoRows) {
-		e = ErrNotFound
+	var c struct {
+		ID        string  `gorm:"column:id"`
+		AgentID   *string `gorm:"column:agent_id"`
+		Type      string  `gorm:"column:component_type"`
+		Ref       string  `gorm:"column:component_ref"`
+		Name      string  `gorm:"column:name"`
+		Config    string  `gorm:"column:config_json"`
+		Status    string  `gorm:"column:status"`
+		LastError *string `gorm:"column:last_error"`
+		CreatedAt string  `gorm:"column:created_at"`
+		UpdatedAt string  `gorm:"column:updated_at"`
 	}
-	return x, e
+	e := h.deps.Gorm.WithContext(ctx).Table("component_instances").Select("id,agent_id,component_type,component_ref,name,config_json,status,last_error,created_at,updated_at").Where("tenant_id = ? AND id = ?", tenant, id).Take(&c).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		return Instance{}, ErrNotFound
+	}
+	if e != nil {
+		return Instance{}, e
+	}
+	return Instance{ID: c.ID, AgentID: c.AgentID, Type: c.Type, Ref: c.Ref, Name: c.Name, Config: json.RawMessage(c.Config), Status: c.Status, LastError: c.LastError, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}, nil
 }
 func (h *handler) instanceDTO(ctx context.Context, tenant string, instance Instance, details bool) map[string]any {
 	out := map[string]any{
@@ -93,23 +102,28 @@ func (h *handler) instanceDTO(ctx context.Context, tenant string, instance Insta
 	} else {
 		out["endpointUrl"] = nil
 	}
-	var providerName, providerKind string
-	if h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT name,kind FROM provider_catalog WHERE id=?`), instance.Ref).Scan(&providerName, &providerKind) == nil {
-		out["provider"] = map[string]any{"id": instance.Ref, "name": providerName, "category": providerKind}
+	var providerRow struct {
+		Name string `gorm:"column:name"`
+		Kind string `gorm:"column:kind"`
+	}
+	if e := h.deps.Gorm.WithContext(ctx).Table("provider_catalog").Select("name, kind").Where("id = ?", instance.Ref).Take(&providerRow).Error; e == nil {
+		out["provider"] = map[string]any{"id": instance.Ref, "name": providerRow.Name, "category": providerRow.Kind}
 	} else {
 		out["provider"] = nil
 	}
-	containerRows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id,name,image,status,docker_id,ports_json FROM managed_containers WHERE tenant_id=? AND instance_id=? ORDER BY created_at`), tenant, instance.ID)
+	var containerRows []struct {
+		ID       string  `gorm:"column:id"`
+		Name     string  `gorm:"column:name"`
+		Image    string  `gorm:"column:image"`
+		Status   string  `gorm:"column:status"`
+		DockerID *string `gorm:"column:docker_id"`
+		Ports    string  `gorm:"column:ports_json"`
+	}
 	containers := []map[string]any{}
-	if err == nil {
-		for containerRows.Next() {
-			var id, name, image, status, ports string
-			var dockerID sql.NullString
-			if containerRows.Scan(&id, &name, &image, &status, &dockerID, &ports) == nil {
-				containers = append(containers, map[string]any{"id": id, "name": name, "image": image, "status": status, "dockerId": nullableString(dockerID), "portsJson": ports})
-			}
+	if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("id,name,image,status,docker_id,ports_json").Where("tenant_id = ? AND instance_id = ?", tenant, instance.ID).Order("created_at").Find(&containerRows).Error; err == nil {
+		for _, cr := range containerRows {
+			containers = append(containers, map[string]any{"id": cr.ID, "name": cr.Name, "image": cr.Image, "status": cr.Status, "dockerId": cr.DockerID, "portsJson": cr.Ports})
 		}
-		containerRows.Close()
 	}
 	out["containers"] = containers
 	if !details {
@@ -159,22 +173,26 @@ func (h *handler) instanceDTO(ctx context.Context, tenant string, instance Insta
 
 func (h *handler) listInstances(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,agent_id,component_type,component_ref,name,config_json,status,last_error,created_at,updated_at FROM component_instances WHERE tenant_id=? ORDER BY created_at DESC`), p.TenantID)
-	if e != nil {
+	var rows []struct {
+		ID        string  `gorm:"column:id"`
+		AgentID   *string `gorm:"column:agent_id"`
+		Type      string  `gorm:"column:component_type"`
+		Ref       string  `gorm:"column:component_ref"`
+		Name      string  `gorm:"column:name"`
+		Config    string  `gorm:"column:config_json"`
+		Status    string  `gorm:"column:status"`
+		LastError *string `gorm:"column:last_error"`
+		CreatedAt string  `gorm:"column:created_at"`
+		UpdatedAt string  `gorm:"column:updated_at"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Select("id,agent_id,component_type,component_ref,name,config_json,status,last_error,created_at,updated_at").Where("tenant_id = ?", p.TenantID).Order("created_at DESC").Find(&rows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	instances := []Instance{}
-	for rows.Next() {
-		x, err := scanInstance(rows)
-		if err != nil {
-			rows.Close()
-			statusErr(w, err)
-			return
-		}
-		instances = append(instances, x)
+	for _, c := range rows {
+		instances = append(instances, Instance{ID: c.ID, AgentID: c.AgentID, Type: c.Type, Ref: c.Ref, Name: c.Name, Config: json.RawMessage(c.Config), Status: c.Status, LastError: c.LastError, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
 	}
-	rows.Close()
 	out := make([]map[string]any, 0, len(instances))
 	for _, instance := range instances {
 		out = append(out, h.instanceDTO(r.Context(), p.TenantID, instance, false))
@@ -236,7 +254,7 @@ func (h *handler) createInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretStored, _ := json.Marshal(map[string]any{"enc": enc, "configured": len(secretValues) > 0})
-	_, err := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO component_instances(id,tenant_id,agent_id,component_type,component_ref,name,config_json,secret_json,status,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'stopped',NULL,?,?)`), id, p.TenantID, body.AgentID, body.Type, body.Ref, body.Name, configPlain, string(secretStored), now, now)
+	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": body.AgentID, "component_type": body.Type, "component_ref": body.Ref, "name": body.Name, "config_json": configPlain, "secret_json": string(secretStored), "status": "stopped", "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -284,12 +302,12 @@ func (h *handler) patchInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sets, args = append(sets, "updated_at=?"), append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	result, err := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if err != nil {
+	result := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	if err := result.Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
+	if result.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -298,25 +316,23 @@ func (h *handler) patchInstance(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) deleteInstance(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM component_instances WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`DELETE FROM component_instances WHERE tenant_id=? AND id=?`, p.TenantID, chi.URLParam(r, "id"))
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) setInstanceStatus(ctx context.Context, tenant, id, status string, errText *string) error {
-	res, e := h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE component_instances SET status=?,last_error=?,updated_at=? WHERE tenant_id=? AND id=?`), status, errText, h.store.now(), tenant, id)
-	if e != nil {
-		return e
+	res := h.deps.Gorm.WithContext(ctx).Exec(`UPDATE component_instances SET status=?,last_error=?,updated_at=? WHERE tenant_id=? AND id=?`, status, errText, h.store.now(), tenant, id)
+	if res.Error != nil {
+		return res.Error
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -328,8 +344,8 @@ func (h *handler) startInstanceValue(ctx context.Context, tenant string, instanc
 			if body, stdio, secretErr := h.stdioBodyForInstance(mcp); secretErr != nil {
 				err = secretErr
 			} else if stdio {
-				var active int
-				_ = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT COUNT(*) FROM managed_containers WHERE tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')`), tenant, instance.ID).Scan(&active)
+				var active int64
+				_ = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Where("tenant_id = ? AND instance_id = ? AND docker_id IS NOT NULL AND status IN ('created','running')", tenant, instance.ID).Count(&active).Error
 				if active == 0 {
 					err = h.provisionStdioMCP(ctx, tenant, instance.ID, body)
 				}
@@ -365,20 +381,22 @@ func (h *handler) startInstance(w http.ResponseWriter, r *http.Request) {
 func (h *handler) stopInstance(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	instanceID := chi.URLParam(r, "id")
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')`), p.TenantID, instanceID)
-	if e != nil {
+	var rows []struct {
+		ID     string  `gorm:"column:id"`
+		Docker *string `gorm:"column:docker_id"`
+		Node   *string `gorm:"column:runtime_node_id"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id,docker_id,runtime_node_id").Where("tenant_id = ? AND instance_id = ? AND docker_id IS NOT NULL AND status IN ('created','running')", p.TenantID, instanceID).Find(&rows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	type activeContainer struct{ id, docker, node string }
 	containers := []activeContainer{}
-	for rows.Next() {
-		var item activeContainer
-		if rows.Scan(&item.id, &item.docker, &item.node) == nil {
-			containers = append(containers, item)
+	for _, item := range rows {
+		if item.Docker != nil && item.Node != nil {
+			containers = append(containers, activeContainer{id: item.ID, docker: *item.Docker, node: *item.Node})
 		}
 	}
-	rows.Close()
 	for _, item := range containers {
 		runner, err := h.hub.get(item.node)
 		if err != nil {
@@ -389,9 +407,9 @@ func (h *handler) stopInstance(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`), h.store.now(), item.id, p.TenantID)
+		_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`, h.store.now(), item.id, p.TenantID).Error
 	}
-	e = h.setInstanceStatus(r.Context(), p.TenantID, instanceID, "stopped", nil)
+	e := h.setInstanceStatus(r.Context(), p.TenantID, instanceID, "stopped", nil)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -405,69 +423,65 @@ func (h *handler) instanceRuntime(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND instance_id=? ORDER BY created_at`), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
+	var stored []struct {
+		ID     string  `gorm:"column:id"`
+		Docker *string `gorm:"column:docker_id"`
+		Node   *string `gorm:"column:runtime_node_id"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id,docker_id,runtime_node_id").Where("tenant_id = ? AND instance_id = ?", p.TenantID, chi.URLParam(r, "id")).Order("created_at").Find(&stored).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	type row struct {
-		id           string
-		docker, node *string
-	}
-	stored := []row{}
-	for rows.Next() {
-		var item row
-		if rows.Scan(&item.id, &item.docker, &item.node) == nil {
-			stored = append(stored, item)
-		}
-	}
-	rows.Close()
 	out := []map[string]any{}
 	for _, item := range stored {
 		var live any
-		if item.docker != nil && item.node != nil {
-			if runner, err := h.hub.get(*item.node); err == nil {
+		if item.Docker != nil && item.Node != nil {
+			if runner, err := h.hub.get(*item.Node); err == nil {
 				var inspected map[string]any
-				if runner.call(r.Context(), "docker.inspect", map[string]any{"id": *item.docker}, &inspected) == nil {
+				if runner.call(r.Context(), "docker.inspect", map[string]any{"id": *item.Docker}, &inspected) == nil {
 					live = inspected
 				}
 			}
 		}
-		out = append(out, map[string]any{"id": item.id, "runtime": live})
+		out = append(out, map[string]any{"id": item.ID, "runtime": live})
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"containers": out})
 }
 func (h *handler) reconcileInstances(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND status='starting' AND updated_at<?`), h.store.now(), p.TenantID, h.store.now().Add(-10*time.Minute))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND status='starting' AND updated_at<?`, h.store.now(), p.TenantID, h.store.now().Add(-10*time.Minute))
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	httpx.JSON(w, 200, map[string]any{"reconciled": n})
+	httpx.JSON(w, 200, map[string]any{"reconciled": res.RowsAffected})
 }
 
 func (h *handler) listBindings(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
-	var space string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, agent).Scan(&space); e != nil {
+	var spaceRow struct {
+		SpaceID string `gorm:"column:space_id"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id = ? AND id = ?", p.TenantID, agent).Take(&spaceRow).Error; e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT b.id,b.instance_id,b.created_at,i.name,i.component_type,i.status FROM agent_bindings b JOIN component_instances i ON i.id=b.instance_id WHERE b.tenant_id=? AND b.space_id=? ORDER BY b.created_at`), p.TenantID, space)
-	if e != nil {
+	var rows []struct {
+		ID        string `gorm:"column:id"`
+		Instance  string `gorm:"column:instance_id"`
+		CreatedAt string `gorm:"column:created_at"`
+		Name      string `gorm:"column:name"`
+		Type      string `gorm:"column:component_type"`
+		Status    string `gorm:"column:status"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT b.id,b.instance_id,b.created_at,i.name,i.component_type,i.status FROM agent_bindings b JOIN component_instances i ON i.id=b.instance_id WHERE b.tenant_id=? AND b.space_id=? ORDER BY b.created_at`, p.TenantID, spaceRow.SpaceID).Scan(&rows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, instance, created, name, typ, status string
-		if rows.Scan(&id, &instance, &created, &name, &typ, &status) == nil {
-			out = append(out, map[string]any{"id": id, "instanceId": instance, "createdAt": created, "name": name, "type": typ, "status": status})
-		}
+	out := make([]map[string]any, 0, len(rows))
+	for _, item := range rows {
+		out = append(out, map[string]any{"id": item.ID, "instanceId": item.Instance, "createdAt": item.CreatedAt, "name": item.Name, "type": item.Type, "status": item.Status})
 	}
 	httpx.JSON(w, http.StatusOK, out)
 }
@@ -481,33 +495,34 @@ func (h *handler) createBinding(w http.ResponseWriter, r *http.Request) {
 	}
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
-	var space string
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, agent).Scan(&space); e != nil {
+	var spaceRow struct {
+		SpaceID string `gorm:"column:space_id"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id = ? AND id = ?", p.TenantID, agent).Take(&spaceRow).Error; e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	var count int
-	if e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM component_instances WHERE tenant_id=? AND id=?`), p.TenantID, b.InstanceID).Scan(&count); e != nil || count == 0 {
+	var count int64
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Where("tenant_id = ? AND id = ?", p.TenantID, b.InstanceID).Count(&count).Error; e != nil || count == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	id := h.store.id()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO agent_bindings(id,tenant_id,space_id,agent_id,instance_id,created_at) VALUES(?,?,?,?,?,?)`), id, p.TenantID, space, agent, b.InstanceID, h.store.now())
+	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "space_id": spaceRow.SpaceID, "agent_id": agent, "instance_id": b.InstanceID, "created_at": h.store.now()}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, map[string]any{"id": id, "instanceId": b.InstanceID, "agentId": agent, "spaceId": space, "createdAt": h.store.now()})
+	httpx.JSON(w, http.StatusCreated, map[string]any{"id": id, "instanceId": b.InstanceID, "agentId": agent, "spaceId": spaceRow.SpaceID, "createdAt": h.store.now()})
 }
 func (h *handler) deleteBinding(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM agent_bindings WHERE tenant_id=? AND agent_id=? AND instance_id=?`), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "instanceId"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`DELETE FROM agent_bindings WHERE tenant_id=? AND agent_id=? AND instance_id=?`, p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "instanceId"))
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -542,22 +557,19 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 	if !ok {
 		exposeWorkspaceFS = true
 	}
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT i.id,i.name,i.component_ref,i.status,CASE WHEN b.id IS NULL THEN false ELSE true END FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.agent_id=? WHERE i.tenant_id=? AND i.component_type='mcp' ORDER BY i.name`), agentID, tenant)
-	if err != nil {
+	var rows []struct {
+		ID     string `gorm:"column:id"`
+		Name   string `gorm:"column:name"`
+		Slug   string `gorm:"column:component_ref"`
+		Status string `gorm:"column:status"`
+		Bound  bool   `gorm:"column:bound"`
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id,i.name,i.component_ref,i.status,CASE WHEN b.id IS NULL THEN false ELSE true END AS bound FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.agent_id=? WHERE i.tenant_id=? AND i.component_type='mcp' ORDER BY i.name`, agentID, tenant).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	instances := []map[string]any{}
-	for rows.Next() {
-		var id, name, slug, status string
-		var bound bool
-		if err := rows.Scan(&id, &name, &slug, &status, &bound); err != nil {
-			return nil, err
-		}
-		instances = append(instances, map[string]any{"id": id, "name": name, "slug": slug, "providerId": slug, "status": status, "bound": bound})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, item := range rows {
+		instances = append(instances, map[string]any{"id": item.ID, "name": item.Name, "slug": item.Slug, "providerId": item.Slug, "status": item.Status, "bound": item.Bound})
 	}
 	webSearchCfg, _ := providers["webSearch"].(map[string]any)
 	webFetchCfg, _ := providers["webFetch"].(map[string]any)
@@ -665,7 +677,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE spaces SET workspace_status='starting',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`), h.store.now(), p.TenantID, space.ID)
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE spaces SET workspace_status='starting',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`, h.store.now(), p.TenantID, space.ID).Error
 	var mkdir struct {
 		Abs string `json:"abs"`
 	}
@@ -720,24 +732,25 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 			ports = []byte("[]")
 		}
 		now := h.store.now()
-		var managedID string
-		scanErr := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id FROM managed_containers WHERE tenant_id=? AND space_id=? AND purpose='workspace' ORDER BY created_at DESC LIMIT 1`), p.TenantID, space.ID).Scan(&managedID)
-		if scanErr == nil {
-			_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE managed_containers SET docker_id=?,name=?,image=?,status='running',labels_json=?,ports_json=?,runtime_node_id=?,updated_at=? WHERE id=?`), running.DockerID, running.Name, image, string(labels), string(ports), space.RuntimeNodeID, now, managedID)
+		var managedRow struct {
+			ID string `gorm:"column:id"`
+		}
+		g := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Order("created_at DESC").Limit(1)
+		if e := g.Take(&managedRow).Error; e == nil {
+			err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET docker_id=?,name=?,image=?,status='running',labels_json=?,ports_json=?,runtime_node_id=?,updated_at=? WHERE id=?`, running.DockerID, running.Name, image, string(labels), string(ports), space.RuntimeNodeID, now, managedRow.ID).Error
 		} else {
-			_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO managed_containers(id,tenant_id,space_id,agent_id,docker_id,name,image,purpose,status,labels_json,ports_json,runtime_node_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'workspace','running',?,?,?, ?,?)`), h.store.id(), p.TenantID, space.ID, agent.ID, running.DockerID, running.Name, image, string(labels), string(ports), space.RuntimeNodeID, now, now)
+			err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": space.ID, "agent_id": agent.ID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "workspace", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": space.RuntimeNodeID, "created_at": now, "updated_at": now}).Error
 		}
 		if err != nil {
 			statusErr(w, err)
 			return
 		}
 	}
-	_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE spaces SET workspace_status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`), h.store.now(), p.TenantID, space.ID)
-	if err != nil {
+	if err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE spaces SET workspace_status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id=?`, h.store.now(), p.TenantID, space.ID).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`), h.store.now(), p.TenantID, agent.ID)
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, h.store.now(), p.TenantID, agent.ID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	result := h.agentDTO(r.Context(), p.TenantID, agent)
 	result["starting"] = true
@@ -746,7 +759,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) failWorkspaceStart(ctx context.Context, tenant, spaceID string, cause error) {
 	message := cause.Error()
-	_, _ = h.deps.DB.ExecContext(context.WithoutCancel(ctx), h.store.q(`UPDATE spaces SET workspace_status='error',last_error=?,updated_at=? WHERE tenant_id=? AND id=?`), message, h.store.now(), tenant, spaceID)
+	_ = h.deps.Gorm.WithContext(context.WithoutCancel(ctx)).Exec(`UPDATE spaces SET workspace_status='error',last_error=?,updated_at=? WHERE tenant_id=? AND id=?`, message, h.store.now(), tenant, spaceID).Error
 }
 
 func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
@@ -763,9 +776,11 @@ func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if space.RuntimeNodeID != nil && space.WorkspaceKind != "host" {
 		if runner, hubErr := h.hub.get(*space.RuntimeNodeID); hubErr == nil {
-			var dockerID string
-			if h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT docker_id FROM managed_containers WHERE tenant_id=? AND space_id=? AND purpose='workspace' ORDER BY created_at DESC LIMIT 1`), p.TenantID, space.ID).Scan(&dockerID) == nil && dockerID != "" {
-				if err = runner.call(r.Context(), "docker.stop", map[string]any{"id": dockerID, "remove": false}, nil); err != nil {
+			var containerRow struct {
+				DockerID *string `gorm:"column:docker_id"`
+			}
+			if e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("docker_id").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Order("created_at DESC").Limit(1).Take(&containerRow).Error; e == nil && containerRow.DockerID != nil && *containerRow.DockerID != "" {
+				if err = runner.call(r.Context(), "docker.stop", map[string]any{"id": *containerRow.DockerID, "remove": false}, nil); err != nil {
 					httpx.Error(w, http.StatusBadGateway, err.Error())
 					return
 				}
@@ -773,13 +788,12 @@ func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := h.store.now()
-	_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE spaces SET workspace_status='stopped',updated_at=? WHERE tenant_id=? AND id=?`), now, p.TenantID, space.ID)
-	if err != nil {
+	if err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE spaces SET workspace_status='stopped',updated_at=? WHERE tenant_id=? AND id=?`, now, p.TenantID, space.ID).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE managed_containers SET status='stopped',updated_at=? WHERE tenant_id=? AND space_id=? AND purpose='workspace'`), now, p.TenantID, space.ID)
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`), now, p.TenantID, agent.ID)
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET status='stopped',updated_at=? WHERE tenant_id=? AND space_id=? AND purpose='workspace'`, now, p.TenantID, space.ID).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, now, p.TenantID, agent.ID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	httpx.JSON(w, http.StatusOK, h.agentDTO(r.Context(), p.TenantID, agent))
 }
@@ -804,19 +818,22 @@ func (h *handler) agentProgress(w http.ResponseWriter, r *http.Request) {
 			workspaceStatus = "none"
 		}
 	}
-	var dockerID, image sql.NullString
-	var containerStatus sql.NullString
-	err = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT docker_id,image,status FROM managed_containers WHERE tenant_id=? AND space_id=? ORDER BY created_at DESC LIMIT 1`), p.TenantID, space.ID).Scan(&dockerID, &image, &containerStatus)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var containerRow struct {
+		DockerID *string `gorm:"column:docker_id"`
+		Image    *string `gorm:"column:image"`
+		Status   *string `gorm:"column:status"`
+	}
+	err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("docker_id,image,status").Where("tenant_id = ? AND space_id = ?", p.TenantID, space.ID).Order("created_at DESC").Limit(1).Take(&containerRow).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		statusErr(w, err)
 		return
 	}
-	if containerStatus.Valid {
-		workspaceStatus = containerStatus.String
+	if containerRow.Status != nil {
+		workspaceStatus = *containerRow.Status
 	}
 	workspaceImage := any(nil)
-	if image.Valid {
-		workspaceImage = image.String
+	if containerRow.Image != nil {
+		workspaceImage = *containerRow.Image
 	} else if space.WorkspaceImage != nil {
 		workspaceImage = *space.WorkspaceImage
 	}
@@ -837,7 +854,7 @@ func (h *handler) agentProgress(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{"id": agent.ID, "lastError": agent.LastError},
 		"workspace": map[string]any{
-			"status": workspaceStatus, "dockerId": nullableString(dockerID), "image": workspaceImage,
+			"status": workspaceStatus, "dockerId": containerRow.DockerID, "image": workspaceImage,
 			"running": workspaceStatus == "running",
 		},
 		"progress": map[string]any{
@@ -896,19 +913,30 @@ func dockerCall(ctx context.Context, method, path string, body any) ([]byte, int
 	return raw, resp.StatusCode, nil
 }
 func (h *handler) listContainers(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,instance_id,space_id,agent_id,docker_id,name,image,purpose,status,labels_json,ports_json,allocated_to,runtime_node_id,created_at,updated_at FROM managed_containers WHERE tenant_id=? ORDER BY created_at DESC`), principal(r).TenantID)
-	if e != nil {
+	var rows []struct {
+		ID        string  `gorm:"column:id"`
+		Instance  *string `gorm:"column:instance_id"`
+		Space     *string `gorm:"column:space_id"`
+		Agent     *string `gorm:"column:agent_id"`
+		DockerID  *string `gorm:"column:docker_id"`
+		Name      string  `gorm:"column:name"`
+		Image     string  `gorm:"column:image"`
+		Purpose   string  `gorm:"column:purpose"`
+		Status    string  `gorm:"column:status"`
+		Labels    string  `gorm:"column:labels_json"`
+		Ports     string  `gorm:"column:ports_json"`
+		Allocated *string `gorm:"column:allocated_to"`
+		Node      *string `gorm:"column:runtime_node_id"`
+		CreatedAt string  `gorm:"column:created_at"`
+		UpdatedAt string  `gorm:"column:updated_at"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id,instance_id,space_id,agent_id,docker_id,name,image,purpose,status,labels_json,ports_json,allocated_to,runtime_node_id,created_at,updated_at").Where("tenant_id = ?", principal(r).TenantID).Order("created_at DESC").Find(&rows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
-	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, name, image, purpose, status, labels, ports, c, u string
-		var instance, space, agent, dockerID, allocated, node *string
-		if rows.Scan(&id, &instance, &space, &agent, &dockerID, &name, &image, &purpose, &status, &labels, &ports, &allocated, &node, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "instanceId": instance, "spaceId": space, "agentId": agent, "dockerId": dockerID, "name": name, "image": image, "purpose": purpose, "status": status, "labels": json.RawMessage(labels), "ports": json.RawMessage(ports), "allocatedTo": allocated, "runtimeNodeId": node, "createdAt": c, "updatedAt": u})
-		}
+	out := make([]map[string]any, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, map[string]any{"id": c.ID, "instanceId": c.Instance, "spaceId": c.Space, "agentId": c.Agent, "dockerId": c.DockerID, "name": c.Name, "image": c.Image, "purpose": c.Purpose, "status": c.Status, "labels": json.RawMessage(c.Labels), "ports": json.RawMessage(c.Ports), "allocatedTo": c.Allocated, "runtimeNodeId": c.Node, "createdAt": c.CreatedAt, "updatedAt": c.UpdatedAt})
 	}
 	httpx.JSON(w, http.StatusOK, out)
 }
@@ -935,11 +963,15 @@ func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
 	}
 	p := principal(r)
 	if b.RuntimeNodeID == nil || *b.RuntimeNodeID == "" {
-		if b.SpaceID != nil {
-			_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT runtime_node_id FROM spaces WHERE tenant_id=? AND id=?`), p.TenantID, *b.SpaceID).Scan(&b.RuntimeNodeID)
-		} else if b.AgentID != nil {
-			_ = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT s.runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), p.TenantID, *b.AgentID).Scan(&b.RuntimeNodeID)
+		var nodeRow struct {
+			NodeID *string `gorm:"column:runtime_node_id"`
 		}
+		if b.SpaceID != nil {
+			_ = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Select("runtime_node_id").Where("tenant_id = ? AND id = ?", p.TenantID, *b.SpaceID).Take(&nodeRow).Error
+		} else if b.AgentID != nil {
+			_ = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT s.runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`, p.TenantID, *b.AgentID).Scan(&nodeRow).Error
+		}
+		b.RuntimeNodeID = nodeRow.NodeID
 	}
 	if b.RuntimeNodeID == nil || *b.RuntimeNodeID == "" {
 		httpx.Error(w, http.StatusConflict, "runtimeNodeId is required")
@@ -977,7 +1009,7 @@ func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO managed_containers(id,tenant_id,instance_id,space_id,agent_id,docker_id,name,image,purpose,status,labels_json,ports_json,env_enc,allocated_to,runtime_node_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,NULL,?,?,?,?)`), id, p.TenantID, b.InstanceID, b.SpaceID, b.AgentID, created.DockerID, b.Name, b.Image, b.Purpose, string(labels), string(ports), nullString(b.AllocatedTo), b.RuntimeNodeID, now, now)
+	e = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "instance_id": b.InstanceID, "space_id": b.SpaceID, "agent_id": b.AgentID, "docker_id": created.DockerID, "name": b.Name, "image": b.Image, "purpose": b.Purpose, "status": "running", "labels_json": string(labels), "ports_json": string(ports), "env_enc": nil, "allocated_to": nullString(b.AllocatedTo), "runtime_node_id": b.RuntimeNodeID, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		_ = runner.call(context.WithoutCancel(r.Context()), "docker.stop", map[string]any{"id": created.DockerID, "remove": true}, nil)
 		statusErr(w, e)
@@ -987,12 +1019,16 @@ func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) stopContainer(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var dockerID, nodeID string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id")).Scan(&dockerID, &nodeID)
+	var row struct {
+		DockerID string `gorm:"column:docker_id"`
+		NodeID   string `gorm:"column:runtime_node_id"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("docker_id,runtime_node_id").Where("tenant_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id")).Take(&row).Error
 	if e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
+	dockerID, nodeID := row.DockerID, row.NodeID
 	runner, e := h.hub.get(nodeID)
 	if e != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, e.Error())
@@ -1014,7 +1050,7 @@ func (h *handler) stopContainer(w http.ResponseWriter, r *http.Request) {
 	if remove {
 		status = "removed"
 	}
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE managed_containers SET status=?,docker_id=CASE WHEN ? THEN NULL ELSE docker_id END,updated_at=? WHERE tenant_id=? AND id=?`), status, remove, h.store.now(), p.TenantID, chi.URLParam(r, "id"))
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET status=?,docker_id=CASE WHEN ? THEN NULL ELSE docker_id END,updated_at=? WHERE tenant_id=? AND id=?`, status, remove, h.store.now(), p.TenantID, chi.URLParam(r, "id")).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -1023,13 +1059,16 @@ func (h *handler) stopContainer(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) containerLogs(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var dockerID, nodeID string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND id=? AND instance_id=?`), p.TenantID, chi.URLParam(r, "containerId"), chi.URLParam(r, "id")).Scan(&dockerID, &nodeID)
+	var row struct {
+		DockerID string `gorm:"column:docker_id"`
+		NodeID   string `gorm:"column:runtime_node_id"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("docker_id,runtime_node_id").Where("tenant_id = ? AND id = ? AND instance_id = ?", p.TenantID, chi.URLParam(r, "containerId"), chi.URLParam(r, "id")).Take(&row).Error
 	if e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	runner, e := h.hub.get(nodeID)
+	runner, e := h.hub.get(row.NodeID)
 	if e != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, e.Error())
 		return
@@ -1037,7 +1076,7 @@ func (h *handler) containerLogs(w http.ResponseWriter, r *http.Request) {
 	var result struct {
 		Logs string `json:"logs"`
 	}
-	e = runner.call(r.Context(), "docker.logs", map[string]any{"id": dockerID, "tail": 500}, &result)
+	e = runner.call(r.Context(), "docker.logs", map[string]any{"id": row.DockerID, "tail": 500}, &result)
 	if e != nil {
 		httpx.Error(w, http.StatusBadGateway, e.Error())
 		return

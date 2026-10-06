@@ -12,8 +12,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 type UpstreamModel struct {
@@ -34,36 +35,36 @@ type UpstreamModel struct {
 	UpdatedAt      string          `json:"updatedAt"`
 }
 
-func scanUpstreamModel(row interface{ Scan(...any) error }) (UpstreamModel, error) {
-	var x UpstreamModel
-	var opts, meta string
-	e := row.Scan(&x.ID, &x.UpstreamID, &x.NativeModel, &x.CanonicalModel, &x.DisplayName, &x.Capability, &x.Weight, &x.IsDefault, &opts, &meta, &x.Status, &x.LastError, &x.SyncedAt, &x.CreatedAt, &x.UpdatedAt)
-	x.Options = json.RawMessage(opts)
-	x.Meta = json.RawMessage(meta)
-	return x, e
-}
 func (h *handler) queryUpstreamModels(r *http.Request, upstream string) ([]UpstreamModel, error) {
-	q := `SELECT id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at FROM upstream_models WHERE tenant_id=?`
-	args := []any{principal(r).TenantID}
+	q := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Select("id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID)
 	if upstream != "" {
-		q += ` AND upstream_id=?`
-		args = append(args, upstream)
+		q = q.Where("upstream_id=?", upstream)
 	}
-	q += ` ORDER BY canonical_model,native_model`
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(q), args...)
-	if e != nil {
+	var rows []struct {
+		ID             string  `gorm:"column:id"`
+		UpstreamID     string  `gorm:"column:upstream_id"`
+		NativeModel    string  `gorm:"column:native_model"`
+		CanonicalModel string  `gorm:"column:canonical_model"`
+		DisplayName    *string `gorm:"column:display_name"`
+		Capability     string  `gorm:"column:capability"`
+		Weight         string  `gorm:"column:weight"`
+		IsDefault      bool    `gorm:"column:is_default"`
+		OptionsJSON    string  `gorm:"column:options_json"`
+		MetaJSON       string  `gorm:"column:meta_json"`
+		Status         string  `gorm:"column:status"`
+		LastError      *string `gorm:"column:last_error"`
+		SyncedAt       *string `gorm:"column:synced_at"`
+		CreatedAt      string  `gorm:"column:created_at"`
+		UpdatedAt      string  `gorm:"column:updated_at"`
+	}
+	if e := q.Order("canonical_model,native_model").Find(&rows).Error; e != nil {
 		return nil, e
 	}
-	defer rows.Close()
-	out := make([]UpstreamModel, 0)
-	for rows.Next() {
-		x, e := scanUpstreamModel(rows)
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, x)
+	out := make([]UpstreamModel, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, UpstreamModel{ID: row.ID, UpstreamID: row.UpstreamID, NativeModel: row.NativeModel, CanonicalModel: row.CanonicalModel, DisplayName: row.DisplayName, Capability: row.Capability, Weight: row.Weight, IsDefault: row.IsDefault, Options: json.RawMessage(row.OptionsJSON), Meta: json.RawMessage(row.MetaJSON), Status: row.Status, LastError: row.LastError, SyncedAt: row.SyncedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 func (h *handler) listUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	x, e := h.queryUpstreamModels(r, r.URL.Query().Get("upstreamId"))
@@ -105,7 +106,7 @@ func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	x.ID = h.store.id()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)`), x.ID, principal(r).TenantID, x.UpstreamID, x.NativeModel, x.CanonicalModel, x.DisplayName, x.Capability, x.Weight, x.IsDefault, validJSON(x.Options, "{}"), validJSON(x.Meta, "{}"), x.Status, now, now, now)
+	e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": x.Weight, "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -139,13 +140,12 @@ func (h *handler) patchUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE upstream_models SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE upstream_models SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -163,13 +163,12 @@ func (h *handler) patchUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	statusErr(w, ErrNotFound)
 }
 func (h *handler) deleteUpstreamModel(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM upstream_models WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.UpstreamModel{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -190,13 +189,12 @@ func (h *handler) batchDeleteUpstreamModels(w http.ResponseWriter, r *http.Reque
 	}
 	n := int64(0)
 	for _, id := range ids {
-		res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM upstream_models WHERE tenant_id=? AND id=?`), principal(r).TenantID, id)
-		if e != nil {
-			statusErr(w, e)
+		res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, id).Delete(&models.UpstreamModel{})
+		if res.Error != nil {
+			statusErr(w, res.Error)
 			return
 		}
-		x, _ := res.RowsAffected()
-		n += x
+		n += res.RowsAffected
 	}
 	httpx.JSON(w, 200, map[string]any{"deleted": n})
 }
@@ -208,13 +206,12 @@ func (h *handler) batchDeleteUpstreams(w http.ResponseWriter, r *http.Request) {
 	}
 	n := int64(0)
 	for _, id := range ids {
-		res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM model_upstreams WHERE tenant_id=? AND id=?`), principal(r).TenantID, id)
-		if e != nil {
-			statusErr(w, e)
+		res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, id).Delete(&models.ModelUpstream{})
+		if res.Error != nil {
+			statusErr(w, res.Error)
 			return
 		}
-		x, _ := res.RowsAffected()
-		n += x
+		n += res.RowsAffected
 	}
 	httpx.JSON(w, 200, map[string]any{"deleted": n})
 }
@@ -275,9 +272,10 @@ func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string)
 		if m.ID == "" {
 			continue
 		}
-		_, e = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'chat','100',false,'{}','{}','ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET display_name=?,synced_at=?,updated_at=?,status='ready',last_error=NULL`), h.store.id(), tenant, id, m.ID, m.ID, nullString(m.Name), now, now, now, nullString(m.Name), now, now)
-		if e != nil {
-			return count, e
+		// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
+		res := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'chat','100',false,'{}','{}','ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET display_name=?,synced_at=?,updated_at=?,status='ready',last_error=NULL`, h.store.id(), tenant, id, m.ID, m.ID, nullString(m.Name), now, now, now, nullString(m.Name), now, now)
+		if res.Error != nil {
+			return count, res.Error
 		}
 		count++
 	}
@@ -340,8 +338,9 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 			m.Weight = "100"
 		}
 		now := h.store.now()
-		_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,? ,?,'ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET canonical_model=?,display_name=?,meta_json=?,updated_at=?`), h.store.id(), principal(r).TenantID, m.UpstreamID, m.NativeModel, m.CanonicalModel, m.DisplayName, m.Capability, m.Weight, m.IsDefault, validJSON(m.Options, "{}"), validJSON(m.Meta, "{}"), now, now, now, m.CanonicalModel, m.DisplayName, validJSON(m.Meta, "{}"), now)
-		if e == nil {
+		// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
+		res := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,? ,?,'ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET canonical_model=?,display_name=?,meta_json=?,updated_at=?`, h.store.id(), principal(r).TenantID, m.UpstreamID, m.NativeModel, m.CanonicalModel, m.DisplayName, m.Capability, m.Weight, m.IsDefault, validJSON(m.Options, "{}"), validJSON(m.Meta, "{}"), now, now, now, m.CanonicalModel, m.DisplayName, validJSON(m.Meta, "{}"), now)
+		if res.Error == nil {
 			count++
 		}
 	}

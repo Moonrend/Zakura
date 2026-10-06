@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,8 +17,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 type remoteWorkspace struct {
@@ -45,13 +45,18 @@ func runnerWorkspacePath(value string) (string, error) {
 
 func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*remoteWorkspace, bool, error) {
 	var spaceID, nodeID string
-	err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT a.space_id,COALESCE(s.runtime_node_id,'') FROM agents a JOIN spaces s ON s.id=a.space_id AND s.tenant_id=a.tenant_id WHERE a.tenant_id=? AND a.id=?`), tenant, agent).Scan(&spaceID, &nodeID)
-	if errors.Is(err, sql.ErrNoRows) {
+	var rec struct {
+		SpaceID string `gorm:"column:space_id"`
+		NodeID  string `gorm:"column:node_id"`
+	}
+	err := h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("a.space_id AS space_id, COALESCE(s.runtime_node_id,'') AS node_id").Joins("JOIN spaces s ON s.id=a.space_id AND s.tenant_id=a.tenant_id").Where("a.tenant_id=? AND a.id=?", tenant, agent).Take(&rec).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, ErrNotFound
 	}
 	if err != nil {
 		return nil, false, err
 	}
+	spaceID, nodeID = rec.SpaceID, rec.NodeID
 	if nodeID == "" {
 		return nil, false, nil
 	}
@@ -76,8 +81,8 @@ func (h *handler) remoteProject(r *http.Request) (*remoteWorkspace, bool, error)
 	if err != nil || !selected {
 		return remote, selected, err
 	}
-	var count int
-	err = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM space_projects p JOIN agents a ON a.space_id=p.space_id AND a.tenant_id=p.tenant_id WHERE p.tenant_id=? AND a.id=? AND p.slug=?`), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "slug")).Scan(&count)
+	var count int64
+	err = h.deps.Gorm.WithContext(r.Context()).Table("space_projects AS p").Joins("JOIN agents a ON a.space_id=p.space_id AND a.tenant_id=p.tenant_id").Where("p.tenant_id=? AND a.id=? AND p.slug=?", principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "slug")).Count(&count).Error
 	if err != nil {
 		return nil, true, err
 	}

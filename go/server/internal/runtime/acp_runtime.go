@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 )
 
 // acpRuntimeManager owns long-lived ACP adapter processes on selected runtime
@@ -197,10 +198,16 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	argv := append([]string{command}, stringSlice(profile["args"])...)
 	env := stringMap(profile["env"])
 	var nodeID, spaceID, workspaceKind string
-	err := m.h.deps.DB.QueryRowContext(ctx, m.h.store.q(`SELECT n.id,s.id,s.workspace_kind FROM agents a JOIN spaces s ON s.id=a.space_id JOIN runtime_nodes n ON n.id=s.runtime_node_id WHERE a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')`), tenantID, agentID).Scan(&nodeID, &spaceID, &workspaceKind)
+	var rec struct {
+		NodeID        string `gorm:"column:node_id"`
+		SpaceID       string `gorm:"column:space_id"`
+		WorkspaceKind string `gorm:"column:workspace_kind"`
+	}
+	err := m.h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenantID, agentID).Take(&rec).Error
 	if err != nil {
 		return nil, errors.New("agent runtime node is not online")
 	}
+	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
 	runner, err := m.h.hub.get(nodeID)
 	if err != nil {
 		return nil, err
@@ -593,7 +600,7 @@ func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
 	origin["acpSessionId"] = rt.acpSessionID
 	origin["acpRuntimeId"] = rt.processID
 	raw, _ := json.Marshal(origin)
-	_, err = rt.manager.h.deps.DB.ExecContext(ctx, rt.manager.h.store.q(`UPDATE cloud_agent_sessions SET origin_json=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=?`), string(raw), rt.manager.h.store.now(), rt.tenantID, rt.agentID, rt.sid)
+	err = rt.manager.h.deps.Gorm.WithContext(ctx).Model(&models.CloudAgentSession{}).Where("tenant_id=? AND agent_id=? AND id=?", rt.tenantID, rt.agentID, rt.sid).Updates(map[string]any{"origin_json": string(raw), "updated_at": rt.manager.h.store.now()}).Error
 	return err
 }
 

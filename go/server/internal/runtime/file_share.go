@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 func newShareToken() (string, string, error) {
@@ -73,21 +73,21 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 	now := h.store.now()
 	expires := now.Add(time.Duration(b.TTLMinutes) * time.Minute)
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO file_shares(id,tenant_id,agent_id,token_hash,path,file_name,mime_type,size_bytes,status,ttl_minutes,expires_at,download_count,disposition,revoked_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?,0,?,NULL,?,?)`), id, p.TenantID, chi.URLParam(r, "id"), hash, b.Path, b.FileName, nullString(b.MimeType), info.Size(), b.TTLMinutes, expires, b.Disposition, now, now)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO file_shares(id,tenant_id,agent_id,token_hash,path,file_name,mime_type,size_bytes,status,ttl_minutes,expires_at,download_count,disposition,revoked_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?,0,?,NULL,?,?)`, id, p.TenantID, chi.URLParam(r, "id"), hash, b.Path, b.FileName, nullString(b.MimeType), info.Size(), b.TTLMinutes, expires, b.Disposition, now, now)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
 	httpx.JSON(w, 201, map[string]any{"share": map[string]any{"id": id, "url": strings.TrimRight(h.deps.PublicURL, "/") + "/api/files/shared/" + token, "expiresAt": expires, "fileName": b.FileName, "sizeBytes": info.Size(), "disposition": b.Disposition}})
 }
 func (h *handler) revokeFileShare(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE file_shares SET status='revoked',revoked_at=?,updated_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND status='active'`), h.store.now(), h.store.now(), chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE file_shares SET status='revoked',revoked_at=?,updated_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND status='active'`, h.store.now(), h.store.now(), chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id"))
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
+	n := res.RowsAffected
 	if n == 0 {
 		statusErr(w, ErrNotFound)
 		return
@@ -100,7 +100,7 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 	hash := hex.EncodeToString(sum[:])
 	var id, tenant, agent, path, name, mime, disposition string
 	var size int64
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream'),size_bytes,disposition FROM file_shares WHERE token_hash=? AND status='active' AND revoked_at IS NULL AND expires_at>?`), hash, h.store.now()).Scan(&id, &tenant, &agent, &path, &name, &mime, &size, &disposition)
+	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream'),size_bytes,disposition FROM file_shares WHERE token_hash=? AND status='active' AND revoked_at IS NULL AND expires_at>?`, hash, h.store.now()).Row().Scan(&id, &tenant, &agent, &path, &name, &mime, &size, &disposition)
 	if errors.Is(e, sql.ErrNoRows) {
 		httpx.Error(w, 404, "Share not found or expired")
 		return
@@ -130,7 +130,7 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 404, "File no longer exists in workspace")
 		return
 	}
-	_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE file_shares SET download_count=download_count+1,updated_at=? WHERE id=?`), h.store.now(), id)
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE file_shares SET download_count=download_count+1,updated_at=? WHERE id=?`, h.store.now(), id)
 	safe := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(name)
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Content-Disposition", disposition+`; filename="`+safe+`"`)

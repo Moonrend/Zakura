@@ -16,8 +16,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 type workspaceConnectionTicket struct {
@@ -73,8 +73,8 @@ func (h *handler) verifyWorkspaceTicket(raw, agentID, kind string) (workspaceCon
 		return workspaceConnectionTicket{}, errors.New("invalid ticket")
 	}
 	if ticket.UserID != "" && ticket.UserID != "api-key" {
-		var active int
-		if err := h.deps.DB.QueryRowContext(context.Background(), h.store.q(`SELECT COUNT(*) FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? AND m.user_id=? AND m.status='active' AND u.status='active'`), ticket.TenantID, ticket.UserID).Scan(&active); err != nil || active == 0 {
+		var active int64
+		if err := h.deps.Gorm.WithContext(context.Background()).Table("tenant_memberships AS m").Joins("JOIN users u ON u.id=m.user_id").Where("m.tenant_id=? AND m.user_id=? AND m.status='active' AND u.status='active'", ticket.TenantID, ticket.UserID).Count(&active).Error; err != nil || active == 0 {
 			return workspaceConnectionTicket{}, errors.New("membership is no longer active")
 		}
 	}
@@ -95,12 +95,18 @@ func (h *handler) workspaceProxy(w http.ResponseWriter, r *http.Request, kind st
 		return
 	}
 	var nodeID, spaceID, workspaceKind string
-	var enabled bool
-	err = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT n.id,s.id,s.workspace_kind,s.enable_computer FROM agents a JOIN spaces s ON s.id=a.space_id JOIN runtime_nodes n ON n.id=s.runtime_node_id WHERE a.tenant_id=? AND a.id=?`), ticket.TenantID, ticket.AgentID).Scan(&nodeID, &spaceID, &workspaceKind, &enabled)
-	if err != nil || !enabled {
+	var rec struct {
+		NodeID         string `gorm:"column:node_id"`
+		SpaceID        string `gorm:"column:space_id"`
+		WorkspaceKind  string `gorm:"column:workspace_kind"`
+		EnableComputer bool   `gorm:"column:enable_computer"`
+	}
+	err = h.deps.Gorm.WithContext(r.Context()).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind, s.enable_computer AS enable_computer").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=?", ticket.TenantID, ticket.AgentID).Take(&rec).Error
+	if err != nil || !rec.EnableComputer {
 		httpx.Error(w, http.StatusForbidden, "desktop unavailable")
 		return
 	}
+	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
 	session, err := h.hub.get(nodeID)
 	if err != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())

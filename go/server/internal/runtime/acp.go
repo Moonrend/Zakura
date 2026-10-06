@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 type acpAdapter struct {
@@ -113,10 +113,16 @@ func findAdapter(id string) (acpAdapter, bool) {
 }
 func (h *handler) runtimeExec(ctx context.Context, tenant, agent, command string, args ...string) (map[string]any, error) {
 	var nodeID, spaceID, workspaceKind string
-	err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT n.id,s.id,s.workspace_kind FROM agents a JOIN spaces s ON s.id=a.space_id JOIN runtime_nodes n ON n.id=s.runtime_node_id WHERE a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')`), tenant, agent).Scan(&nodeID, &spaceID, &workspaceKind)
+	var rec struct {
+		NodeID        string `gorm:"column:node_id"`
+		SpaceID       string `gorm:"column:space_id"`
+		WorkspaceKind string `gorm:"column:workspace_kind"`
+	}
+	err := h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenant, agent).Take(&rec).Error
 	if err != nil {
 		return nil, errors.New("agent runtime node is not online")
 	}
+	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
 	session, err := h.hub.get(nodeID)
 	if err != nil {
 		return nil, err

@@ -16,9 +16,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 type mcpInstance struct {
@@ -59,14 +61,16 @@ func (h *handler) protectMCPConfig(id string, raw json.RawMessage) (string, stri
 func (h *handler) componentInstanceColumnExists(ctx context.Context, column string) bool {
 	if h.deps.Dialect == "postgres" {
 		var exists bool
-		err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT EXISTS (
+		// raw escape hatch: information_schema probe is PostgreSQL-specific
+		err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT EXISTS (
 			SELECT 1 FROM information_schema.columns
 			WHERE table_schema=current_schema() AND table_name=? AND column_name=?
-		)`), "component_instances", column).Scan(&exists)
+		)`, "component_instances", column).Row().Scan(&exists)
 		return err == nil && exists
 	}
 
-	rows, err := h.deps.DB.QueryContext(ctx, `PRAGMA table_info(component_instances)`)
+	// raw escape hatch: PRAGMA table_info is SQLite-specific
+	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`PRAGMA table_info(component_instances)`).Rows()
 	if err != nil {
 		return false
 	}
@@ -90,29 +94,24 @@ func (h *handler) migrateLegacyComponentConfigs(ctx context.Context) {
 	if !h.componentInstanceColumnExists(ctx, "config_enc") {
 		return
 	}
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id,config_enc FROM component_instances WHERE config_enc IS NOT NULL AND config_enc<>'' AND (config_json IS NULL OR config_json='{}')`))
-	if err != nil {
+	type legacy struct {
+		ID        string `gorm:"column:id"`
+		Encrypted string `gorm:"column:config_enc"`
+	}
+	items := []legacy{}
+	if err := h.deps.Gorm.WithContext(ctx).Table("component_instances").Select("id,config_enc").Where("config_enc IS NOT NULL AND config_enc<>'' AND (config_json IS NULL OR config_json='{}')").Find(&items).Error; err != nil {
 		return
 	}
-	type legacy struct{ id, encrypted string }
-	items := []legacy{}
-	for rows.Next() {
-		var item legacy
-		if rows.Scan(&item.id, &item.encrypted) == nil {
-			items = append(items, item)
-		}
-	}
-	rows.Close()
 	for _, item := range items {
-		plain, openErr := openSecretBox(h.deps.Secret, "component:"+item.id, item.encrypted)
+		plain, openErr := openSecretBox(h.deps.Secret, "component:"+item.ID, item.Encrypted)
 		if openErr != nil || !json.Valid(plain) {
 			continue
 		}
-		config, secret, protectErr := h.protectMCPConfig(item.id, plain)
+		config, secret, protectErr := h.protectMCPConfig(item.ID, plain)
 		if protectErr != nil {
 			continue
 		}
-		_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE component_instances SET config_json=?,secret_json=?,updated_at=? WHERE id=? AND (config_json IS NULL OR config_json='{}')`), config, secret, h.store.now(), item.id)
+		_ = h.deps.Gorm.WithContext(ctx).Model(&models.ComponentInstance{}).Where("id=? AND (config_json IS NULL OR config_json='{}')", item.ID).Updates(map[string]any{"config_json": config, "secret_json": secret, "updated_at": h.store.now()}).Error
 	}
 }
 
@@ -153,13 +152,26 @@ func (h *handler) registerMCP(r chi.Router) {
 }
 func (h *handler) getMCPInstance(ctx context.Context, tenant, id string) (mcpInstance, error) {
 	var x mcpInstance
-	var cfg, sec string
-	e := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT id,name,component_ref,status,agent_id,config_json,secret_json FROM component_instances WHERE tenant_id=? AND id=? AND component_type='mcp'`), tenant, id).Scan(&x.ID, &x.Name, &x.Ref, &x.Status, &x.AgentID, &cfg, &sec)
-	if errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		ID           string  `gorm:"column:id"`
+		Name         string  `gorm:"column:name"`
+		ComponentRef string  `gorm:"column:component_ref"`
+		Status       string  `gorm:"column:status"`
+		AgentID      *string `gorm:"column:agent_id"`
+		ConfigJSON   string  `gorm:"column:config_json"`
+		SecretJSON   string  `gorm:"column:secret_json"`
+	}
+	e := h.deps.Gorm.WithContext(ctx).Table("component_instances").Select("id,name,component_ref,status,agent_id,config_json,secret_json").Where("tenant_id=? AND id=? AND component_type='mcp'", tenant, id).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		return x, ErrNotFound
 	}
-	x.Config = json.RawMessage(cfg)
-	x.Secret = json.RawMessage(sec)
+	x.ID = row.ID
+	x.Name = row.Name
+	x.Ref = row.ComponentRef
+	x.Status = row.Status
+	x.AgentID = row.AgentID
+	x.Config = json.RawMessage(row.ConfigJSON)
+	x.Secret = json.RawMessage(row.SecretJSON)
 	x.TenantID = tenant
 	return x, e
 }
@@ -203,10 +215,13 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		if inst.TenantID == "" {
 			return nil, errors.New("runtime-scoped MCP instance has no tenant")
 		}
-		var hostInfo string
-		if e = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT host_info_json FROM runtime_nodes WHERE tenant_id=? AND id=?`), inst.TenantID, cfg.RuntimeNodeID).Scan(&hostInfo); e != nil {
+		var nodeRow struct {
+			HostInfoJSON string `gorm:"column:host_info_json"`
+		}
+		if e = h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Select("host_info_json").Where("tenant_id=? AND id=?", inst.TenantID, cfg.RuntimeNodeID).Take(&nodeRow).Error; e != nil {
 			return nil, errors.New("MCP runtime node is unavailable")
 		}
+		hostInfo := nodeRow.HostInfoJSON
 		var reported map[string]any
 		_ = json.Unmarshal([]byte(hostInfo), &reported)
 		primary, _ := reported["primaryIp"].(string)
@@ -376,21 +391,22 @@ func (h *handler) listInstanceTools(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) listMCPTools(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,name,component_ref,status,agent_id FROM component_instances WHERE tenant_id=? AND component_type='mcp' AND status IN ('ready','running') ORDER BY name`), p.TenantID)
-	if e != nil {
+	type instanceRow struct {
+		ID           string  `gorm:"column:id"`
+		Name         string  `gorm:"column:name"`
+		ComponentRef string  `gorm:"column:component_ref"`
+		Status       string  `gorm:"column:status"`
+		AgentID      *string `gorm:"column:agent_id"`
+	}
+	var instanceRows []instanceRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Select("id,name,component_ref,status,agent_id").Where("tenant_id=? AND component_type='mcp' AND status IN ('ready','running')", p.TenantID).Order("name").Find(&instanceRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	instances := []mcpInstance{}
-	for rows.Next() {
-		var id, name, ref, status string
-		var agent *string
-		if rows.Scan(&id, &name, &ref, &status, &agent) == nil {
-			instances = append(instances, mcpInstance{ID: id, Name: name, Ref: ref, Status: status, TenantID: p.TenantID, AgentID: agent})
-		}
+	for _, row := range instanceRows {
+		instances = append(instances, mcpInstance{ID: row.ID, Name: row.Name, Ref: row.ComponentRef, Status: row.Status, TenantID: p.TenantID, AgentID: row.AgentID})
 	}
-	rows.Close()
 	out := []map[string]any{}
 	for _, summary := range instances {
 		instance, err := h.getMCPInstance(r.Context(), p.TenantID, summary.ID)
@@ -416,20 +432,22 @@ func (h *handler) listMCPTools(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 func (h *handler) listMCPPolicies(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,agent_id,name,policy_json,created_at,updated_at FROM mcp_policies WHERE tenant_id=? ORDER BY created_at`), principal(r).TenantID)
-	if e != nil {
+	type policyRow struct {
+		ID         string  `gorm:"column:id"`
+		AgentID    *string `gorm:"column:agent_id"`
+		Name       string  `gorm:"column:name"`
+		PolicyJSON string  `gorm:"column:policy_json"`
+		CreatedAt  string  `gorm:"column:created_at"`
+		UpdatedAt  string  `gorm:"column:updated_at"`
+	}
+	var policyRows []policyRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("id,agent_id,name,policy_json,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID).Order("created_at").Find(&policyRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, name, policy string
-		var agent *string
-		var c, u flexibleTime
-		if rows.Scan(&id, &agent, &name, &policy, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "agentId": agent, "name": name, "policy": json.RawMessage(policy), "createdAt": c.Time, "updatedAt": u.Time})
-		}
+	for _, row := range policyRows {
+		out = append(out, map[string]any{"id": row.ID, "agentId": row.AgentID, "name": row.Name, "policy": json.RawMessage(row.PolicyJSON), "createdAt": parseTime(row.CreatedAt), "updatedAt": parseTime(row.UpdatedAt)})
 	}
 	httpx.JSON(w, 200, map[string]any{"policies": out})
 }
@@ -445,7 +463,7 @@ func (h *handler) createMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO mcp_policies(id,tenant_id,agent_id,name,policy_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`), id, principal(r).TenantID, b.AgentID, b.Name, validJSON(b.Policy, "{}"), now, now)
+	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -461,26 +479,24 @@ func (h *handler) updateMCPPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "name required")
 		return
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE mcp_policies SET name=?,policy_json=?,updated_at=? WHERE tenant_id=? AND id=?`), b.Name, validJSON(b.Policy, "{}"), h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.McpPolicy{}).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": h.store.now()})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) deleteMCPPolicy(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM mcp_policies WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.McpPolicy{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -584,15 +600,9 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 		body.AgentIDs = append(body.AgentIDs, *body.AgentID)
 	}
 	if body.All {
-		rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id FROM agents WHERE tenant_id=?`), p.TenantID)
-		if e == nil {
-			for rows.Next() {
-				var agent string
-				if rows.Scan(&agent) == nil {
-					body.AgentIDs = append(body.AgentIDs, agent)
-				}
-			}
-			rows.Close()
+		var agentIDs []string
+		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id=?", p.TenantID).Pluck("id", &agentIDs).Error; e == nil {
+			body.AgentIDs = append(body.AgentIDs, agentIDs...)
 		}
 	}
 	body.AgentIDs = uniqueStrings(body.AgentIDs)
@@ -617,15 +627,18 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	if body.Command != "" {
 		status = "stopped"
 	}
-	_, err := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO component_instances(id,tenant_id,agent_id,component_type,component_ref,name,config_json,secret_json,status,last_error,created_at,updated_at) VALUES(?,?,NULL,'mcp',?,?,?, ?,?,NULL,?,?)`), id, p.TenantID, slug, body.Name, string(cfgRaw), string(sec), status, now, now)
+	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slug, "name": body.Name, "config_json": string(cfgRaw), "secret_json": string(sec), "status": status, "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if err != nil {
 		statusErr(w, err)
 		return
 	}
 	for _, agent := range body.AgentIDs {
-		var space string
-		if h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT space_id FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, agent).Scan(&space) == nil {
-			_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO agent_bindings(id,tenant_id,space_id,agent_id,instance_id,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(space_id,instance_id) DO UPDATE SET agent_id=excluded.agent_id`), h.store.id(), p.TenantID, space, agent, id, now)
+		var agentRow struct {
+			SpaceID string `gorm:"column:space_id"`
+		}
+		if h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id=? AND id=?", p.TenantID, agent).Take(&agentRow).Error == nil {
+			// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
+			_ = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO agent_bindings(id,tenant_id,space_id,agent_id,instance_id,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(space_id,instance_id) DO UPDATE SET agent_id=excluded.agent_id`, h.store.id(), p.TenantID, agentRow.SpaceID, agent, id, now)
 		}
 	}
 	started := body.Command == ""
@@ -634,7 +647,7 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	if body.Command != "" && start {
 		if err = h.provisionStdioMCP(r.Context(), p.TenantID, id, body); err != nil {
 			startError = err.Error()
-			_, _ = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE component_instances SET status='error',last_error=?,updated_at=? WHERE id=?`), startError, h.store.now(), id)
+			_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("id=?", id).Updates(map[string]any{"status": "error", "last_error": startError, "updated_at": h.store.now()}).Error
 		} else {
 			started = true
 		}
@@ -665,7 +678,7 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		nodeID = *body.RuntimeNodeID
 	}
 	if nodeID == "" && len(body.AgentIDs) > 0 {
-		_ = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT COALESCE(s.runtime_node_id,'') FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`), tenant, body.AgentIDs[0]).Scan(&nodeID)
+		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(s.runtime_node_id,'') AS runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`, tenant, body.AgentIDs[0]).Row().Scan(&nodeID)
 	}
 	if nodeID == "" {
 		return errors.New("bind the agent to a runtime node before starting stdio MCP")
@@ -700,14 +713,18 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		body.WorkingDir = "/data"
 	}
 	var dataSpaceID string
-	if err = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT b.space_id FROM agent_bindings b JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id WHERE b.tenant_id=? AND b.instance_id=? ORDER BY b.created_at LIMIT 1`), tenant, instanceID).Scan(&dataSpaceID); err != nil {
+	if err = h.deps.Gorm.WithContext(ctx).Raw(`SELECT b.space_id AS space_id FROM agent_bindings b JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id WHERE b.tenant_id=? AND b.instance_id=? ORDER BY b.created_at LIMIT 1`, tenant, instanceID).Row().Scan(&dataSpaceID); err != nil {
 		return errors.New("bind the stdio MCP instance to an agent in the selected runtime node before starting")
 	}
 	dataPath := "/.zakura/components/" + instanceID
-	var hostInfo, capabilitiesRaw string
-	if err = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT host_info_json,capabilities_json FROM runtime_nodes WHERE tenant_id=? AND id=?`), tenant, nodeID).Scan(&hostInfo, &capabilitiesRaw); err != nil {
+	var nodeRow struct {
+		HostInfoJSON     string `gorm:"column:host_info_json"`
+		CapabilitiesJSON string `gorm:"column:capabilities_json"`
+	}
+	if err = h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Select("host_info_json,capabilities_json").Where("tenant_id=? AND id=?", tenant, nodeID).Take(&nodeRow).Error; err != nil {
 		return err
 	}
+	hostInfo, capabilitiesRaw := nodeRow.HostInfoJSON, nodeRow.CapabilitiesJSON
 	host := map[string]any{}
 	capabilities := map[string]any{}
 	_ = json.Unmarshal([]byte(hostInfo), &host)
@@ -965,25 +982,31 @@ func (h *handler) auditToolCall(ctx context.Context, p httpx.Principal, inst mcp
 	if isError {
 		result = errText
 	}
-	_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`INSERT INTO tool_call_logs(id,tenant_id,api_key_id,agent_id,qualified_name,local_name,provider_id,instance_id,args_json,result_json,is_error,duration_ms,created_at) VALUES(?,?,NULL,?,?,?,?,?,?,?,?,?,?)`), h.store.id(), p.TenantID, inst.AgentID, inst.Ref+":"+method, method, inst.Ref, inst.ID, string(raw), result, isError, d.Milliseconds(), h.store.now())
+	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nil, "agent_id": inst.AgentID, "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": inst.ID, "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": h.store.now()}).Error
 }
 
 func (h *handler) listMCPSources(w http.ResponseWriter, r *http.Request) {
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,name,description,source_url,format,manifest_json,servers_json,enabled,fetched_at,created_at,updated_at FROM mcp_store_sources WHERE tenant_id=? ORDER BY created_at`), principal(r).TenantID)
-	if e != nil {
+	type sourceRow struct {
+		ID           string         `gorm:"column:id"`
+		Name         string         `gorm:"column:name"`
+		Description  string         `gorm:"column:description"`
+		SourceURL    string         `gorm:"column:source_url"`
+		Format       string         `gorm:"column:format"`
+		ManifestJSON string         `gorm:"column:manifest_json"`
+		ServersJSON  string         `gorm:"column:servers_json"`
+		Enabled      bool           `gorm:"column:enabled"`
+		FetchedAt    sql.NullString `gorm:"column:fetched_at"`
+		CreatedAt    string         `gorm:"column:created_at"`
+		UpdatedAt    string         `gorm:"column:updated_at"`
+	}
+	var sourceRows []sourceRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_store_sources").Select("id,name,description,source_url,format,manifest_json,servers_json,enabled,fetched_at,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID).Order("created_at").Find(&sourceRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, name, desc, urlv, format, manifest, servers string
-		var enabled bool
-		var fetched sql.NullString
-		var c, u flexibleTime
-		if rows.Scan(&id, &name, &desc, &urlv, &format, &manifest, &servers, &enabled, &fetched, &c, &u) == nil {
-			out = append(out, map[string]any{"id": id, "name": name, "description": desc, "sourceUrl": urlv, "format": format, "manifest": json.RawMessage(manifest), "servers": json.RawMessage(servers), "enabled": enabled, "fetchedAt": fetched.String, "createdAt": c.Time, "updatedAt": u.Time})
-		}
+	for _, row := range sourceRows {
+		out = append(out, map[string]any{"id": row.ID, "name": row.Name, "description": row.Description, "sourceUrl": row.SourceURL, "format": row.Format, "manifest": json.RawMessage(row.ManifestJSON), "servers": json.RawMessage(row.ServersJSON), "enabled": row.Enabled, "fetchedAt": row.FetchedAt.String, "createdAt": parseTime(row.CreatedAt), "updatedAt": parseTime(row.UpdatedAt)})
 	}
 	httpx.JSON(w, 200, map[string]any{"sources": out})
 }
@@ -1004,7 +1027,7 @@ func (h *handler) createMCPSource(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	_, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO mcp_store_sources(id,tenant_id,name,description,source_url,format,manifest_json,servers_json,enabled,fetched_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,true,?,?,?)`), id, principal(r).TenantID, b.Name, b.Description, b.SourceURL, b.Format, validJSON(b.Manifest, "{}"), validJSON(b.Servers, "[]"), now, now, now)
+	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_store_sources").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "name": b.Name, "description": b.Description, "source_url": b.SourceURL, "format": b.Format, "manifest_json": validJSON(b.Manifest, "{}"), "servers_json": validJSON(b.Servers, "[]"), "enabled": true, "fetched_at": now, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -1012,13 +1035,12 @@ func (h *handler) createMCPSource(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 201, map[string]any{"source": map[string]any{"id": id, "name": b.Name, "sourceUrl": b.SourceURL}})
 }
 func (h *handler) deleteMCPSource(w http.ResponseWriter, r *http.Request) {
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM mcp_store_sources WHERE tenant_id=? AND id=?`), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.McpStoreSource{})
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1027,26 +1049,39 @@ func (h *handler) deleteMCPSource(w http.ResponseWriter, r *http.Request) {
 func (h *handler) searchMCPStore(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	term := "%" + r.URL.Query().Get("q") + "%"
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,source_id,kind,ref,name,description,meta_json,updated_at FROM store_catalog_entries WHERE (tenant_id IS NULL OR tenant_id=?) AND (LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?)) ORDER BY name LIMIT 100`), p.TenantID, term, term)
-	if e != nil {
+	type entryRow struct {
+		ID          string `gorm:"column:id"`
+		SourceID    string `gorm:"column:source_id"`
+		Kind        string `gorm:"column:kind"`
+		Ref         string `gorm:"column:ref"`
+		Name        string `gorm:"column:name"`
+		Description string `gorm:"column:description"`
+		MetaJSON    string `gorm:"column:meta_json"`
+		UpdatedAt   string `gorm:"column:updated_at"`
+	}
+	var entryRows []entryRow
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Select("id,source_id,kind,ref,name,description,meta_json,updated_at").Where("(tenant_id IS NULL OR tenant_id=?) AND (LOWER(name) LIKE LOWER(?) OR LOWER(description) LIKE LOWER(?))", p.TenantID, term, term).Order("name").Limit(100).Find(&entryRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	out := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, source, kind, ref, name, desc, meta string
-		var u flexibleTime
-		if rows.Scan(&id, &source, &kind, &ref, &name, &desc, &meta, &u) == nil {
-			out = append(out, map[string]any{"id": id, "sourceId": source, "kind": kind, "ref": ref, "name": name, "description": desc, "meta": json.RawMessage(meta), "updatedAt": u.Time})
-		}
+	for _, row := range entryRows {
+		out = append(out, map[string]any{"id": row.ID, "sourceId": row.SourceID, "kind": row.Kind, "ref": row.Ref, "name": row.Name, "description": row.Description, "meta": json.RawMessage(row.MetaJSON), "updatedAt": parseTime(row.UpdatedAt)})
 	}
 	httpx.JSON(w, 200, map[string]any{"items": out})
 }
 func (h *handler) getMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
-	var id, source, kind, ref, name, desc, meta string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,source_id,kind,ref,name,description,meta_json FROM store_catalog_entries WHERE (tenant_id IS NULL OR tenant_id=?) AND (id=? OR name=?)`), principal(r).TenantID, chi.URLParam(r, "name"), chi.URLParam(r, "name")).Scan(&id, &source, &kind, &ref, &name, &desc, &meta)
-	if errors.Is(e, sql.ErrNoRows) {
+	var entry struct {
+		ID          string `gorm:"column:id"`
+		SourceID    string `gorm:"column:source_id"`
+		Kind        string `gorm:"column:kind"`
+		Ref         string `gorm:"column:ref"`
+		Name        string `gorm:"column:name"`
+		Description string `gorm:"column:description"`
+		MetaJSON    string `gorm:"column:meta_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Select("id,source_id,kind,ref,name,description,meta_json").Where("(tenant_id IS NULL OR tenant_id=?) AND (id=? OR name=?)", principal(r).TenantID, chi.URLParam(r, "name"), chi.URLParam(r, "name")).Take(&entry).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1054,7 +1089,7 @@ func (h *handler) getMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"server": map[string]any{"id": id, "sourceId": source, "kind": kind, "ref": ref, "name": name, "description": desc, "meta": json.RawMessage(meta)}})
+	httpx.JSON(w, 200, map[string]any{"server": map[string]any{"id": entry.ID, "sourceId": entry.SourceID, "kind": entry.Kind, "ref": entry.Ref, "name": entry.Name, "description": entry.Description, "meta": json.RawMessage(entry.MetaJSON)}})
 }
 func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -1066,9 +1101,13 @@ func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "id required")
 		return
 	}
-	var name, ref, meta string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT name,ref,meta_json FROM store_catalog_entries WHERE (tenant_id IS NULL OR tenant_id=?) AND id=?`), principal(r).TenantID, b.ID).Scan(&name, &ref, &meta)
-	if errors.Is(e, sql.ErrNoRows) {
+	var entry struct {
+		Name     string `gorm:"column:name"`
+		Ref      string `gorm:"column:ref"`
+		MetaJSON string `gorm:"column:meta_json"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Select("name,ref,meta_json").Where("(tenant_id IS NULL OR tenant_id=?) AND id=?", principal(r).TenantID, b.ID).Take(&entry).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		statusErr(w, ErrNotFound)
 		return
 	}
@@ -1078,7 +1117,7 @@ func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := b.Config
 	if len(cfg) == 0 {
-		cfg = json.RawMessage(meta)
+		cfg = json.RawMessage(entry.MetaJSON)
 	}
 	now := h.store.now()
 	id := h.store.id()
@@ -1087,10 +1126,10 @@ func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, protectErr)
 		return
 	}
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO component_instances(id,tenant_id,agent_id,component_type,component_ref,name,config_json,secret_json,status,last_error,created_at,updated_at) VALUES(?,?,?,'mcp',?,?,?,?,'ready',NULL,?,?)`), id, principal(r).TenantID, b.AgentID, ref, name, configStored, secretStored, now, now)
+	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": entry.Ref, "name": entry.Name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"instance": map[string]any{"id": id, "name": name, "status": "ready"}})
+	httpx.JSON(w, 201, map[string]any{"instance": map[string]any{"id": id, "name": entry.Name, "status": "ready"}})
 }

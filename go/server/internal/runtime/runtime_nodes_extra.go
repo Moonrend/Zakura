@@ -22,8 +22,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-chi/chi/v5"
+	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 var runnerTokenCache sync.Map
@@ -48,7 +49,7 @@ func (h *handler) authorizeRunnerNode(r *http.Request, nodeID string, allowQuery
 	}
 	sum := sha256.Sum256([]byte(token))
 	var expected string
-	if err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT token_hash FROM runtime_nodes WHERE id=? AND token_hash IS NOT NULL`), nodeID).Scan(&expected); err != nil {
+	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT token_hash FROM runtime_nodes WHERE id=? AND token_hash IS NOT NULL`, nodeID).Row().Scan(&expected); err != nil {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(hex.EncodeToString(sum[:]))) == 1
@@ -78,22 +79,22 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	var nodeID string
 	var e error
 	if b.ID != "" {
-		e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id FROM runtime_nodes WHERE id=? AND token_hash=?`), b.ID, hash).Scan(&nodeID)
+		e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id FROM runtime_nodes WHERE id=? AND token_hash=?`, b.ID, hash).Row().Scan(&nodeID)
 	} else {
-		e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id FROM runtime_nodes WHERE token_hash=?`), hash).Scan(&nodeID)
+		e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id FROM runtime_nodes WHERE token_hash=?`, hash).Row().Scan(&nodeID)
 	}
 	if e != nil {
 		httpx.Error(w, 401, "unauthorized")
 		return
 	}
 	runnerTokenCache.Store(nodeID, b.Token)
-	now := h.store.now()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE runtime_nodes SET status='online',endpoint=?,capabilities_json=?,host_info_json=?,agent_version=?,last_seen_at=?,updated_at=? WHERE id=?`), b.Endpoint, validJSON(b.Capabilities, "{}"), validJSON(b.HostInfo, "{}"), nullString(b.AgentVersion), now, now, nodeID)
+	now := runtimeTimeString(h.store.now())
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", nodeID).Updates(map[string]any{"status": "online", "endpoint": b.Endpoint, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "agent_version": nullString(b.AgentVersion), "last_seen_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	node, e := scanRuntimeNode(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE id=?`), nodeID))
+	node, e := scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE id=?`, nodeID).Row())
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -116,7 +117,7 @@ func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	sum := sha256.Sum256([]byte(token))
 	var count int
-	if !strings.HasPrefix(token, "rnr_") || h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM runtime_nodes WHERE token_hash=?`), hex.EncodeToString(sum[:])).Scan(&count) != nil || count == 0 {
+	if !strings.HasPrefix(token, "rnr_") || h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT COUNT(*) FROM runtime_nodes WHERE token_hash=?`, hex.EncodeToString(sum[:])).Row().Scan(&count) != nil || count == 0 {
 		httpx.Error(w, 401, "unauthorized")
 		return
 	}
@@ -191,7 +192,7 @@ func (h *handler) runnerInstallPackage(node map[string]any, token string) map[st
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 func (h *handler) getRuntimeNodeMap(r *http.Request) (map[string]any, error) {
-	return scanRuntimeNode(h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`), principal(r).TenantID, chi.URLParam(r, "id")))
+	return scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
 }
 func (h *handler) runtimeInstallSh(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), true) {
@@ -423,7 +424,7 @@ func (h *handler) refreshWorkspaceImage(w http.ResponseWriter, r *http.Request) 
 }
 func (h *handler) runtimeImageUpdates(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	rows, err := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT DISTINCT workspace_image FROM spaces WHERE tenant_id=? AND runtime_node_id=? AND workspace_image IS NOT NULL`), p.TenantID, chi.URLParam(r, "id"))
+	rows, err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT workspace_image FROM spaces WHERE tenant_id=? AND runtime_node_id=? AND workspace_image IS NOT NULL`, p.TenantID, chi.URLParam(r, "id")).Rows()
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -464,7 +465,7 @@ func (h *handler) runtimeNodeContainers(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *handler) runtimeNodeContainerRows(ctx context.Context, tenant, nodeID string) ([]map[string]any, error) {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id,docker_id,name,image,purpose,status,allocated_to,runtime_node_id,created_at,updated_at FROM managed_containers WHERE tenant_id=? AND runtime_node_id=? ORDER BY created_at DESC`), tenant, nodeID)
+	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT id,docker_id,name,image,purpose,status,allocated_to,runtime_node_id,created_at,updated_at FROM managed_containers WHERE tenant_id=? AND runtime_node_id=? ORDER BY created_at DESC`, tenant, nodeID).Rows()
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +494,7 @@ func (h *handler) runtimeNodeAllocate(w http.ResponseWriter, r *http.Request) {
 func (h *handler) deleteWorkspaceResidual(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var storage, space string
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT n.storage_root,a.space_id FROM runtime_nodes n JOIN agents a ON a.tenant_id=n.tenant_id WHERE n.tenant_id=? AND n.id=? AND a.id=?`), p.TenantID, chi.URLParam(r, "nodeId"), chi.URLParam(r, "agentId")).Scan(&storage, &space)
+	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT n.storage_root,a.space_id FROM runtime_nodes n JOIN agents a ON a.tenant_id=n.tenant_id WHERE n.tenant_id=? AND n.id=? AND a.id=?`, p.TenantID, chi.URLParam(r, "nodeId"), chi.URLParam(r, "agentId")).Row().Scan(&storage, &space)
 	if e != nil {
 		statusErr(w, ErrNotFound)
 		return

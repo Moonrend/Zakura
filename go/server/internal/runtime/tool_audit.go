@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 func scanToolCall(row interface{ Scan(...any) error }) (map[string]any, error) {
@@ -82,18 +82,19 @@ func (h *handler) listToolCalls(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	forcedAgent := chi.URLParam(r, "id")
 	if forcedAgent != "" {
-		var exists int
-		if err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT 1 FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, forcedAgent).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-			statusErr(w, ErrNotFound)
-			return
-		} else if err != nil {
+		var exists int64
+		if err := h.deps.Gorm.WithContext(r.Context()).Table("agents").Where("tenant_id = ? AND id = ?", p.TenantID, forcedAgent).Count(&exists).Error; err != nil {
 			statusErr(w, err)
+			return
+		}
+		if exists == 0 {
+			statusErr(w, ErrNotFound)
 			return
 		}
 	}
 	where, args := h.toolCallWhere(r, forcedAgent)
 	var total int64
-	if err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM tool_call_logs l`+where), args...).Scan(&total); err != nil {
+	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT COUNT(*) FROM tool_call_logs l`+where, args...).Row().Scan(&total); err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -101,7 +102,7 @@ func (h *handler) listToolCalls(w http.ResponseWriter, r *http.Request) {
 	offset := boundedQueryInt(r.URL.Query().Get("offset"), 0, 0, 1_000_000)
 	q := toolCallSelect + where + ` ORDER BY l.created_at DESC,l.id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(q), args...)
+	rows, e := h.deps.Gorm.WithContext(r.Context()).Raw(q, args...).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -119,7 +120,7 @@ func (h *handler) listToolCalls(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"items": out, "total": total})
 }
 func (h *handler) getToolCall(w http.ResponseWriter, r *http.Request) {
-	x, e := scanToolCall(h.deps.DB.QueryRowContext(r.Context(), h.store.q(toolCallSelect+` WHERE l.tenant_id=? AND l.id=?`), principal(r).TenantID, chi.URLParam(r, "id")))
+	x, e := scanToolCall(h.deps.Gorm.WithContext(r.Context()).Raw(toolCallSelect+` WHERE l.tenant_id=? AND l.id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
 	if errors.Is(e, sql.ErrNoRows) {
 		e = ErrNotFound
 	}
@@ -136,12 +137,13 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 		agent = strings.TrimSpace(r.URL.Query().Get("agentId"))
 	}
 	if agent != "" {
-		var exists int
-		if err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT 1 FROM agents WHERE tenant_id=? AND id=?`), p.TenantID, agent).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
-			statusErr(w, ErrNotFound)
-			return
-		} else if err != nil {
+		var exists int64
+		if err := h.deps.Gorm.WithContext(r.Context()).Table("agents").Where("tenant_id = ? AND id = ?", p.TenantID, agent).Count(&exists).Error; err != nil {
 			statusErr(w, err)
+			return
+		}
+		if exists == 0 {
+			statusErr(w, ErrNotFound)
 			return
 		}
 	}
@@ -153,7 +155,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 	}
 	var total, failed, last24 int64
 	var avg float64
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(q), args...).Scan(&total, &failed, &avg)
+	e := h.deps.Gorm.WithContext(r.Context()).Raw(q, args...).Row().Scan(&total, &failed, &avg)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -164,7 +166,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 		lastQ += ` AND agent_id=?`
 		lastArgs = append(lastArgs, agent)
 	}
-	if e = h.deps.DB.QueryRowContext(r.Context(), h.store.q(lastQ), lastArgs...).Scan(&last24); e != nil {
+	if e = h.deps.Gorm.WithContext(r.Context()).Raw(lastQ, lastArgs...).Row().Scan(&last24); e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -175,7 +177,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 		groupArgs = append(groupArgs, agent)
 	}
 	byAgent := []map[string]any{}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT l.agent_id,a.name,COUNT(*) FROM tool_call_logs l LEFT JOIN agents a ON a.id=l.agent_id AND a.tenant_id=l.tenant_id`+groupWhere+` GROUP BY l.agent_id,a.name ORDER BY COUNT(*) DESC,l.agent_id LIMIT 20`), groupArgs...)
+	rows, e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT l.agent_id,a.name,COUNT(*) FROM tool_call_logs l LEFT JOIN agents a ON a.id=l.agent_id AND a.tenant_id=l.tenant_id`+groupWhere+` GROUP BY l.agent_id,a.name ORDER BY COUNT(*) DESC,l.agent_id LIMIT 20`, groupArgs...).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -189,7 +191,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 	byKey := []map[string]any{}
-	rows, e = h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT l.api_key_id,k.name,k.key_prefix,COUNT(*) FROM tool_call_logs l LEFT JOIN api_keys k ON k.id=l.api_key_id AND k.tenant_id=l.tenant_id`+groupWhere+` GROUP BY l.api_key_id,k.name,k.key_prefix ORDER BY COUNT(*) DESC,l.api_key_id LIMIT 20`), groupArgs...)
+	rows, e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT l.api_key_id,k.name,k.key_prefix,COUNT(*) FROM tool_call_logs l LEFT JOIN api_keys k ON k.id=l.api_key_id AND k.tenant_id=l.tenant_id`+groupWhere+` GROUP BY l.api_key_id,k.name,k.key_prefix ORDER BY COUNT(*) DESC,l.api_key_id LIMIT 20`, groupArgs...).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -203,7 +205,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 	byTool := []map[string]any{}
-	rows, e = h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT l.qualified_name,COUNT(*),COALESCE(SUM(CASE WHEN l.is_error THEN 1 ELSE 0 END),0) FROM tool_call_logs l`+groupWhere+` GROUP BY l.qualified_name ORDER BY COUNT(*) DESC,l.qualified_name LIMIT 20`), groupArgs...)
+	rows, e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT l.qualified_name,COUNT(*),COALESCE(SUM(CASE WHEN l.is_error THEN 1 ELSE 0 END),0) FROM tool_call_logs l`+groupWhere+` GROUP BY l.qualified_name ORDER BY COUNT(*) DESC,l.qualified_name LIMIT 20`, groupArgs...).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return

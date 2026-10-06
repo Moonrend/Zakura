@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
+	"github.com/go-chi/chi/v5"
+	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"

@@ -53,7 +53,7 @@ func (h *handler) closeLiveAccess(tenant, user string) {
 }
 
 func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT r.id,s.id,s.agent_id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running')`), tenant)
+	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT r.id,s.id,s.agent_id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running')`, tenant).Rows()
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 	if err := h.cancelTenantRuns(ctx, tenant); err != nil {
 		return err
 	}
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id,docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND docker_id IS NOT NULL AND status NOT IN ('removed','stopped') ORDER BY id`), tenant)
+	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT id,docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND docker_id IS NOT NULL AND status NOT IN ('removed','stopped') ORDER BY id`, tenant).Rows()
 	if err != nil {
 		return err
 	}
@@ -120,10 +120,10 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 		if err != nil {
 			return fmt.Errorf("container %s cleanup: %w", item.id, err)
 		}
-		_, _ = h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`), h.store.now(), item.id, tenant)
+		_ = h.deps.Gorm.WithContext(ctx).Exec(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`, h.store.now(), item.id, tenant)
 	}
 	var nodeRows *sql.Rows
-	nodeRows, err = h.deps.DB.QueryContext(ctx, h.store.q(`SELECT id FROM runtime_nodes WHERE tenant_id=?`), tenant)
+	nodeRows, err = h.deps.Gorm.WithContext(ctx).Raw(`SELECT id FROM runtime_nodes WHERE tenant_id=?`, tenant).Rows()
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 
 func (h *handler) afterMemberRemoved(ctx context.Context, tenant, user string) error {
 	h.closeLiveAccess(tenant, user)
-	rows, err := h.deps.DB.QueryContext(ctx, h.store.q(`SELECT s.agent_id,s.id FROM cloud_agent_sessions s WHERE s.tenant_id=? AND s.created_by_user_id=? AND s.active_run_id IS NOT NULL`), tenant, user)
+	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT s.agent_id,s.id FROM cloud_agent_sessions s WHERE s.tenant_id=? AND s.created_by_user_id=? AND s.active_run_id IS NOT NULL`, tenant, user).Rows()
 	if err != nil {
 		return err
 	}

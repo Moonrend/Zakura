@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 type QuestionRequest struct {
@@ -135,12 +135,12 @@ func (h *handler) resolveQuestion(w http.ResponseWriter, r *http.Request) {
 	if b.Cancelled {
 		status = "cancelled"
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE agent_user_questions SET status=?,answer_json=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`), status, string(answer), h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE agent_user_questions SET status=?,answer_json=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`, status, string(answer), h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
+	n := res.RowsAffected
 	if n == 0 {
 		httpx.Error(w, 409, "question is missing, expired, or already resolved")
 		return
@@ -172,12 +172,12 @@ func (h *handler) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "decision must be approved or denied")
 		return
 	}
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE agent_tool_approvals SET status=?,decided_by='user',always_allow=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`), b.Decision, b.AlwaysAllow, h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE agent_tool_approvals SET status=?,decided_by='user',always_allow=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`, b.Decision, b.AlwaysAllow, h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
+	n := res.RowsAffected
 	if n == 0 {
 		httpx.Error(w, 409, "approval is missing, expired, or already resolved")
 		return
@@ -192,16 +192,15 @@ func (h *handler) resolveApproval(w http.ResponseWriter, r *http.Request) {
 
 func (s *Store) ExpireInteractions(ctx context.Context) (int64, error) {
 	now := s.now()
-	a, e := s.deps.DB.ExecContext(ctx, s.q(`UPDATE agent_user_questions SET status=CASE WHEN timeout_action='default' THEN 'answered' ELSE 'timeout' END,answer_json=CASE WHEN timeout_action='default' THEN default_option_ids_json ELSE '{}' END,resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`), now, now)
-	if e != nil {
-		return 0, e
+	a := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_user_questions SET status=CASE WHEN timeout_action='default' THEN 'answered' ELSE 'timeout' END,answer_json=CASE WHEN timeout_action='default' THEN default_option_ids_json ELSE '{}' END,resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, now, now)
+	if a.Error != nil {
+		return 0, a.Error
 	}
-	b, e := s.deps.DB.ExecContext(ctx, s.q(`UPDATE agent_tool_approvals SET status='timeout',decided_by='timeout',resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`), now, now)
-	if e != nil {
-		return 0, e
+	b := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_tool_approvals SET status='timeout',decided_by='timeout',resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, now, now)
+	if b.Error != nil {
+		return 0, b.Error
 	}
-	an, _ := a.RowsAffected()
-	bn, _ := b.RowsAffected()
+	an, bn := a.RowsAffected, b.RowsAffected
 	return an + bn, nil
 }
 

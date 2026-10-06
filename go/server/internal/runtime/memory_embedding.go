@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 type memoryEmbeddingConfig struct {
@@ -25,26 +26,32 @@ type memoryEmbeddingConfig struct {
 }
 
 func (h *handler) agentEmbeddingConfig(ctx context.Context, tenant, agent string) (*memoryEmbeddingConfig, error) {
-	var providerID *string
-	if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT memory_provider_id FROM agents WHERE tenant_id=? AND id=?`), tenant, agent).Scan(&providerID); errors.Is(err, sql.ErrNoRows) {
+	var agentRow struct {
+		MemoryProviderID *string `gorm:"column:memory_provider_id"`
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Table("agents").Select("memory_provider_id").Where("tenant_id = ? AND id = ?", tenant, agent).Take(&agentRow).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
 	}
-	var id, kind, configRaw string
-	query := `SELECT id,kind,config_json FROM memory_providers WHERE tenant_id=? AND enabled=TRUE`
-	args := []any{tenant}
-	if providerID != nil && *providerID != "" {
-		query += ` AND id=?`
-		args = append(args, *providerID)
-	} else {
-		query += ` ORDER BY is_default DESC,created_at LIMIT 1`
+	providerID := agentRow.MemoryProviderID
+	var mpRow struct {
+		ID         string `gorm:"column:id"`
+		Kind       string `gorm:"column:kind"`
+		ConfigJSON string `gorm:"column:config_json"`
 	}
-	if err := h.deps.DB.QueryRowContext(ctx, h.store.q(query), args...).Scan(&id, &kind, &configRaw); errors.Is(err, sql.ErrNoRows) {
+	mp := h.deps.Gorm.WithContext(ctx).Table("memory_providers").Select("id, kind, config_json").Where("tenant_id = ? AND enabled = TRUE", tenant)
+	if providerID != nil && *providerID != "" {
+		mp = mp.Where("id = ?", *providerID)
+	} else {
+		mp = mp.Order("is_default DESC").Order("created_at").Limit(1)
+	}
+	if err := mp.Take(&mpRow).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	}
+	id, kind, configRaw := mpRow.ID, mpRow.Kind, mpRow.ConfigJSON
 	if kind != "builtin" {
 		return nil, nil
 	}
@@ -103,7 +110,7 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 		selector := cfg.RouteSlug
 		if cfg.RouteID != "" {
 			var slug string
-			if err := h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT slug FROM model_routes WHERE tenant_id=? AND id=? AND capability='embedding'`), tenant, cfg.RouteID).Scan(&slug); err != nil {
+			if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT slug FROM model_routes WHERE tenant_id=? AND id=? AND capability='embedding'`, tenant, cfg.RouteID).Row().Scan(&slug); err != nil {
 				return nil, "", errors.New("embedding model route not found")
 			}
 			selector = slug
@@ -164,12 +171,11 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 func (h *handler) setMemoryEmbedding(ctx context.Context, tenant, agent, id, content string, vector []float64, model string) error {
 	encoded, _ := json.Marshal(vector)
 	hash := sha256.Sum256([]byte(content))
-	result, err := h.deps.DB.ExecContext(ctx, h.store.q(`UPDATE memories SET embedding=?,embedding_model=?,embedding_dim=?,content_hash=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=?`), string(encoded), model, len(vector), hex.EncodeToString(hash[:]), h.store.now(), tenant, agent, id)
-	if err != nil {
-		return err
+	result := h.deps.Gorm.WithContext(ctx).Exec(`UPDATE memories SET embedding=?,embedding_model=?,embedding_dim=?,content_hash=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=?`, string(encoded), model, len(vector), hex.EncodeToString(hash[:]), h.store.now(), tenant, agent, id)
+	if result.Error != nil {
+		return result.Error
 	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
+	if result.RowsAffected == 0 {
 		return ErrNotFound
 	}
 	return nil

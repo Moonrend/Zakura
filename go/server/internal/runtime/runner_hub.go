@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"gorm.io/gorm"
 )
 
 // runnerHub is the native Go control plane for the existing zakura-agent. Agents
@@ -86,8 +86,11 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := sha256.Sum256([]byte(token))
 	var nodeID string
-	err := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT id FROM runtime_nodes WHERE token_hash=?`), hex.EncodeToString(sum[:])).Scan(&nodeID)
-	if errors.Is(err, sql.ErrNoRows) {
+	var node struct {
+		ID string `gorm:"column:id"`
+	}
+	err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash=?", hex.EncodeToString(sum[:])).Take(&node).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -95,6 +98,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
+	nodeID = node.ID
 	runnerTokenCache.Store(nodeID, token)
 	key := r.Header.Get("Sec-WebSocket-Key")
 	hijacker, ok := w.(http.Hijacker)
@@ -119,7 +123,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.close(errors.New("runner disconnected"))
 		h.hub.remove(s)
-		_, _ = h.deps.DB.ExecContext(h.deps.RunContext(), h.store.q(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`), h.store.now(), nodeID)
+		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, h.store.now(), nodeID).Error
 	}()
 	go s.readLoop()
 	if err := s.writeJSON(runnerFrame{Type: "welcome", ID: nodeID}); err != nil {
@@ -139,7 +143,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.store.now()
-	_, err = h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=?`), info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), now, now, nodeID)
+	err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), now, now, nodeID).Error
 	if err != nil {
 		return
 	}

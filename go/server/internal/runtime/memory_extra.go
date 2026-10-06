@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 func (h *handler) patchMemory(w http.ResponseWriter, r *http.Request) {
@@ -49,12 +49,12 @@ func (h *handler) patchMemory(w http.ResponseWriter, r *http.Request) {
 	sets = append(sets, "content_hash=NULL", "updated_at=?")
 	p := principal(r)
 	args = append(args, h.store.now(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "memId"))
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`UPDATE memories SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND agent_id=? AND id=?`), args...)
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE memories SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND agent_id=? AND id=?`, args...)
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
+	n := res.RowsAffected
 	if n == 0 {
 		statusErr(w, ErrNotFound)
 		return
@@ -80,7 +80,7 @@ func (h *handler) memoryGraph(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,from_memory_id,to_memory_id,relation,weight,created_at FROM memory_edges WHERE tenant_id=? AND agent_id=? ORDER BY created_at`), p.TenantID, agent)
+	rows, e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,from_memory_id,to_memory_id,relation,weight,created_at FROM memory_edges WHERE tenant_id=? AND agent_id=? ORDER BY created_at`, p.TenantID, agent).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -126,27 +126,27 @@ func (h *handler) createMemoryEdge(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
 	var count int
-	e := h.deps.DB.QueryRowContext(r.Context(), h.store.q(`SELECT COUNT(*) FROM memories WHERE tenant_id=? AND agent_id=? AND id IN (?,?)`), p.TenantID, agent, b.FromMemoryID, b.ToMemoryID).Scan(&count)
+	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT COUNT(*) FROM memories WHERE tenant_id=? AND agent_id=? AND id IN (?,?)`, p.TenantID, agent, b.FromMemoryID, b.ToMemoryID).Row().Scan(&count)
 	if e != nil || count != 2 {
 		httpx.Error(w, 404, "memory not found")
 		return
 	}
 	id := h.store.id()
-	_, e = h.deps.DB.ExecContext(r.Context(), h.store.q(`INSERT INTO memory_edges(id,tenant_id,agent_id,from_memory_id,to_memory_id,relation,weight,created_at) VALUES(?,?,?,?,?,?,?,?)`), id, p.TenantID, agent, b.FromMemoryID, b.ToMemoryID, b.Relation, weight, h.store.now())
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO memory_edges(id,tenant_id,agent_id,from_memory_id,to_memory_id,relation,weight,created_at) VALUES(?,?,?,?,?,?,?,?)`, id, p.TenantID, agent, b.FromMemoryID, b.ToMemoryID, b.Relation, weight, h.store.now())
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
 	httpx.JSON(w, 201, map[string]any{"edge": map[string]any{"id": id, "fromMemoryId": b.FromMemoryID, "toMemoryId": b.ToMemoryID, "relation": b.Relation, "weight": weight}})
 }
 func (h *handler) deleteMemoryEdge(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res, e := h.deps.DB.ExecContext(r.Context(), h.store.q(`DELETE FROM memory_edges WHERE tenant_id=? AND agent_id=? AND id=?`), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "edgeId"))
-	if e != nil {
-		statusErr(w, e)
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(`DELETE FROM memory_edges WHERE tenant_id=? AND agent_id=? AND id=?`, p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "edgeId"))
+	if res.Error != nil {
+		statusErr(w, res.Error)
 		return
 	}
-	n, _ := res.RowsAffected()
+	n := res.RowsAffected
 	if n == 0 {
 		statusErr(w, ErrNotFound)
 		return
@@ -165,7 +165,7 @@ func (h *handler) reembedMemory(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "enable embedding on a Built-in memory provider first")
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT id,content FROM memories WHERE tenant_id=? AND agent_id=? AND (embedding IS NULL OR content_hash IS NULL) ORDER BY updated_at LIMIT 100`), p.TenantID, agent)
+	rows, e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,content FROM memories WHERE tenant_id=? AND agent_id=? AND (embedding IS NULL OR content_hash IS NULL) ORDER BY updated_at LIMIT 100`, p.TenantID, agent).Rows()
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -221,6 +221,6 @@ func (h *handler) memoryEmbeddingStats(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) memoryEmbeddingCounts(ctx context.Context, tenant, agent string) map[string]any {
 	var total, embedded, stale int
-	_ = h.deps.DB.QueryRowContext(ctx, h.store.q(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN embedding IS NOT NULL AND content_hash IS NULL THEN 1 ELSE 0 END),0) FROM memories WHERE tenant_id=? AND agent_id=?`), tenant, agent).Scan(&total, &embedded, &stale)
+	_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN embedding IS NOT NULL AND content_hash IS NULL THEN 1 ELSE 0 END),0) FROM memories WHERE tenant_id=? AND agent_id=?`, tenant, agent).Row().Scan(&total, &embedded, &stale)
 	return map[string]any{"total": total, "withEmbedding": embedded, "missing": total - embedded, "stale": stale}
 }

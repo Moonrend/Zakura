@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 )
 
 func (h *handler) compactSession(w http.ResponseWriter, r *http.Request) {
@@ -120,12 +120,15 @@ func (h *handler) sessionTools(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"tools": []any{}})
 		return
 	}
-	rows, e := h.deps.DB.QueryContext(r.Context(), h.store.q(`SELECT type,payload_json,created_at FROM cloud_agent_events WHERE session_id=? AND type IN ('tool.started','tool.completed','tool.failed','tool_call_start','tool_call_args','tool_call_result') ORDER BY seq`), sid)
-	if e != nil {
+	var events []struct {
+		Type        string `gorm:"column:type"`
+		PayloadJSON string `gorm:"column:payload_json"`
+		CreatedAt   string `gorm:"column:created_at"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("cloud_agent_events").Select("type,payload_json,created_at").Where("session_id=? AND type IN ('tool.started','tool.completed','tool.failed','tool_call_start','tool_call_args','tool_call_result')", sid).Order("seq").Find(&events).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	defer rows.Close()
 	type detail struct {
 		ToolCallID    string `json:"toolCallId"`
 		Name          string `json:"name,omitempty"`
@@ -138,13 +141,8 @@ func (h *handler) sessionTools(w http.ResponseWriter, r *http.Request) {
 		startedMillis int64
 	}
 	details := map[string]*detail{}
-	for rows.Next() {
-		var eventType, payloadRaw string
-		var created flexibleTime
-		if e := rows.Scan(&eventType, &payloadRaw, &created); e != nil {
-			statusErr(w, e)
-			return
-		}
+	for _, row := range events {
+		eventType, payloadRaw, created := row.Type, row.PayloadJSON, parseTime(row.CreatedAt)
 		var payload map[string]any
 		if json.Unmarshal([]byte(payloadRaw), &payload) != nil {
 			continue
