@@ -16,6 +16,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (h *handler) registerNetwork(r chi.Router) {
@@ -98,7 +99,20 @@ func (h *handler) putNetworkSecurity(w http.ResponseWriter, r *http.Request) {
 	denied, _ := json.Marshal(b.DeniedPorts)
 	p := principal(r)
 	now := runtimeTimeString(h.store.now())
-	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO network_security_policies(id,tenant_id,scope,enabled,exposure_enabled,default_ttl_minutes,max_ttl_minutes,max_active_per_agent,max_active_per_tenant,denied_ports_json,allow_desktop_exposure,allow_public_exposure,allow_tcp_exposure,agents_can_expose,require_user_approval,require_tailscale_for_remote_runners,audit_retention_days,updated_by,created_at,updated_at) VALUES(?,?,'tenant',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,scope) DO UPDATE SET enabled=?,exposure_enabled=?,default_ttl_minutes=?,max_ttl_minutes=?,max_active_per_agent=?,max_active_per_tenant=?,denied_ports_json=?,allow_desktop_exposure=?,allow_public_exposure=?,allow_tcp_exposure=?,agents_can_expose=?,require_user_approval=?,require_tailscale_for_remote_runners=?,audit_retention_days=?,updated_by=?,updated_at=?`, h.store.id(), p.TenantID, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now, now, b.Enabled, b.ExposureEnabled, b.DefaultTtlMinutes, b.MaxTtlMinutes, b.MaxActivePerAgent, b.MaxActivePerTenant, string(denied), b.AllowDesktopExposure, b.AllowPublicExposure, b.AllowTcpExposure, b.AgentsCanExpose, b.RequireUserApproval, b.RequireTailscaleForRemoteRunners, b.AuditRetentionDays, p.UserID, now).Error
+	e := h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "scope"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"enabled": b.Enabled, "exposure_enabled": b.ExposureEnabled, "default_ttl_minutes": b.DefaultTtlMinutes,
+				"max_ttl_minutes": b.MaxTtlMinutes, "max_active_per_agent": b.MaxActivePerAgent, "max_active_per_tenant": b.MaxActivePerTenant,
+				"denied_ports_json": string(denied), "allow_desktop_exposure": b.AllowDesktopExposure, "allow_public_exposure": b.AllowPublicExposure,
+				"allow_tcp_exposure": b.AllowTcpExposure, "agents_can_expose": b.AgentsCanExpose, "require_user_approval": b.RequireUserApproval,
+				"require_tailscale_for_remote_runners": b.RequireTailscaleForRemoteRunners, "audit_retention_days": b.AuditRetentionDays,
+				"updated_by": p.UserID, "updated_at": now,
+			}),
+		}).
+		Table("network_security_policies").
+		Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "scope": "tenant", "enabled": b.Enabled, "exposure_enabled": b.ExposureEnabled, "default_ttl_minutes": b.DefaultTtlMinutes, "max_ttl_minutes": b.MaxTtlMinutes, "max_active_per_agent": b.MaxActivePerAgent, "max_active_per_tenant": b.MaxActivePerTenant, "denied_ports_json": string(denied), "allow_desktop_exposure": b.AllowDesktopExposure, "allow_public_exposure": b.AllowPublicExposure, "allow_tcp_exposure": b.AllowTcpExposure, "agents_can_expose": b.AgentsCanExpose, "require_user_approval": b.RequireUserApproval, "require_tailscale_for_remote_runners": b.RequireTailscaleForRemoteRunners, "audit_retention_days": b.AuditRetentionDays, "updated_by": p.UserID, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -549,7 +563,13 @@ func (h *handler) putHeadscale(w http.ResponseWriter, r *http.Request) {
 	}
 	meta, _ := json.Marshal(map[string]any{"url": b.URL})
 	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO network_integrations(id,tenant_id,kind,status,display_name,credentials_enc,meta_json,last_sync_at,last_error,created_at,updated_at) VALUES(?,?,'headscale','connected',?,?,?,NULL,NULL,?,?) ON CONFLICT(tenant_id,kind) DO UPDATE SET status='connected',display_name=?,credentials_enc=?,meta_json=?,updated_at=?`, h.store.id(), p.TenantID, b.DisplayName, enc, string(meta), now, now, b.DisplayName, enc, string(meta), now).Error
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "kind"}},
+			DoUpdates: clause.AssignmentColumns([]string{"status", "display_name", "credentials_enc", "meta_json", "updated_at"}),
+		}).
+		Table("network_integrations").
+		Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "kind": "headscale", "status": "connected", "display_name": b.DisplayName, "credentials_enc": enc, "meta_json": string(meta), "last_sync_at": nil, "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

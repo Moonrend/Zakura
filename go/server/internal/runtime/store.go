@@ -24,12 +24,6 @@ var (
 type Store struct{ deps *appdeps.Dependencies }
 
 func NewStore(deps *appdeps.Dependencies) *Store { return &Store{deps: deps} }
-func (s *Store) q(q string) string {
-	if s.deps.Rebind != nil {
-		return s.deps.Rebind(q)
-	}
-	return q
-}
 func (s *Store) now() time.Time {
 	if s.deps.Clock != nil {
 		return s.deps.Clock().UTC()
@@ -529,7 +523,7 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 	now := s.now()
 	run := Run{ID: s.id(), SessionID: session, Status: "running", StartedAt: &now, CreatedAt: now}
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=? AND active_run_id IS NULL`, run.ID, now, tenant, agent, session)
+		res := tx.Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ? AND active_run_id IS NULL", tenant, agent, session).Updates(map[string]any{"active_run_id": run.ID, "updated_at": now})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -593,14 +587,14 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 	}
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := s.now()
-		res := tx.Exec(`UPDATE cloud_agent_runs SET status=?,error=?,completed_at=? WHERE id=? AND session_id=? AND status IN ('running','queued')`, status, errText, now, runID, session)
+		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('running','queued')", runID, session).Updates(map[string]any{"status": status, "error": errText, "completed_at": now})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		if e := tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`, now, session, runID).Error; e != nil {
+		if e := tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, runID).Updates(map[string]any{"active_run_id": nil, "updated_at": now}).Error; e != nil {
 			return e
 		}
 		typ := "run_end"
@@ -657,14 +651,14 @@ func (s *Store) CancelRun(ctx context.Context, tenant, agent, session string) (R
 	rid := *sess.ActiveRunID
 	now := s.now()
 	e = s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Exec(`UPDATE cloud_agent_runs SET cancel_requested=true,status='cancelled',completed_at=? WHERE id=? AND session_id=? AND status IN ('queued','running')`, now, rid, session)
+		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('queued','running')", rid, session).Updates(map[string]any{"cancel_requested": true, "status": "cancelled", "completed_at": now})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		res = tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`, now, session, rid)
+		res = tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, rid).Updates(map[string]any{"active_run_id": nil, "updated_at": now})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -693,7 +687,8 @@ func (s *Store) RecoverRuns(ctx context.Context) (int64, error) {
 	items := []recovered{}
 	_ = s.deps.Gorm.WithContext(ctx).Raw(`SELECT cs.tenant_id,cs.agent_id,cs.id,r.id AS run_id FROM cloud_agent_runs r JOIN cloud_agent_sessions cs ON cs.id=r.session_id WHERE r.status='running'`).Scan(&items).Error
 	now := s.now()
-	res := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_runs SET status='failed',error='server restarted',completed_at=? WHERE status='running'`, now)
+	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_runs").Where("status = 'running'").Updates(map[string]any{"status": "failed", "error": "server restarted", "completed_at": now})
+	// phase5: NOT EXISTS subquery — keep Exec (gorm has no chain equivalent)
 	if res.Error != nil {
 		return 0, res.Error
 	}

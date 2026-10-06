@@ -74,7 +74,7 @@ func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
 		if err := tx.Exec(`UPDATE cloud_agent_runs SET cancel_requested=TRUE,status='cancelled',completed_at=? WHERE id IN (SELECT r.id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running'))`, now, tenant).Error; err != nil {
 			return err
 		}
-		return tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE tenant_id=?`, now, tenant).Error
+		return tx.Table("cloud_agent_sessions").Where("tenant_id = ?", tenant).Updates(map[string]any{"active_run_id": nil, "updated_at": now}).Error
 	})
 	if err == nil {
 		for _, item := range items {
@@ -119,7 +119,7 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 		if err != nil {
 			return fmt.Errorf("container %s cleanup: %w", item.id, err)
 		}
-		_ = h.deps.Gorm.WithContext(ctx).Exec(`UPDATE managed_containers SET status='removed',docker_id=NULL,updated_at=? WHERE id=? AND tenant_id=?`, h.store.now(), item.id, tenant)
+		_ = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Where("id = ? AND tenant_id = ?", item.id, tenant).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": h.store.now()})
 	}
 	var nodeRows *sql.Rows
 	nodeRows, err = h.deps.Gorm.WithContext(ctx).Raw(`SELECT id FROM runtime_nodes WHERE tenant_id=?`, tenant).Rows()

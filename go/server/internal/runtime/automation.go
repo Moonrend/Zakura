@@ -17,6 +17,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Schedule struct {
@@ -466,7 +467,13 @@ func (h *handler) patchHeartbeat(w http.ResponseWriter, r *http.Request) {
 	now := h.store.now()
 	next := now.Add(time.Duration(b.IntervalMinutes) * time.Minute)
 	nowStr, nextStr := runtimeTimeString(now), runtimeTimeString(next)
-	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO agent_heartbeats(agent_id,tenant_id,enabled,interval_minutes,prompt,next_run_at,last_run_at,last_status,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(agent_id) DO UPDATE SET enabled=?,interval_minutes=?,prompt=?,next_run_at=?,updated_at=?`, agent, p.TenantID, b.Enabled, b.IntervalMinutes, b.Prompt, nextStr, nowStr, nowStr, b.Enabled, b.IntervalMinutes, b.Prompt, nextStr, nowStr).Error
+	e := h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "agent_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"enabled", "interval_minutes", "prompt", "next_run_at", "updated_at"}),
+		}).
+		Table("agent_heartbeats").
+		Create(map[string]any{"agent_id": agent, "tenant_id": p.TenantID, "enabled": b.Enabled, "interval_minutes": b.IntervalMinutes, "prompt": b.Prompt, "next_run_at": nextStr, "last_run_at": nil, "last_status": nil, "last_error": nil, "created_at": nowStr, "updated_at": nowStr}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

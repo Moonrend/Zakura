@@ -663,10 +663,10 @@ func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, 
 		return
 	}
 	e = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := tx.Exec(`UPDATE spaces SET runtime_node_id=?,workspace_status='ready',updated_at=? WHERE tenant_id=? AND id=?`, target, h.store.now(), tenant, space).Error; e != nil {
+		if e := tx.Table("spaces").Where("tenant_id = ? AND id = ?", tenant, space).Updates(map[string]any{"runtime_node_id": target, "workspace_status": "ready", "updated_at": h.store.now()}).Error; e != nil {
 			return e
 		}
-		return tx.Exec(`UPDATE workspace_migrations SET status='completed',phase='completed',progress_pct=100,source_retained=true,completed_at=?,updated_at=? WHERE id=?`, h.store.now(), h.store.now(), id).Error
+		return tx.Model(&models.WorkspaceMigration{}).Where("id = ?", id).Updates(map[string]any{"status": "completed", "phase": "completed", "progress_pct": 100, "source_retained": true, "completed_at": h.store.now(), "updated_at": h.store.now()}).Error
 	})
 	if e != nil {
 		h.failMigration(ctx, id, e)

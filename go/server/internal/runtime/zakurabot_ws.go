@@ -22,6 +22,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -541,7 +542,13 @@ func (h *handler) handleZakuraFrame(ctx context.Context, p httpx.Principal, raw 
 		if e := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID).Scan(&seq).Error; e != nil {
 			return e
 		}
-		return tx.Exec(`INSERT INTO zakurabot_messages(id,seq,tenant_id,device_id,binding_id,agent_id,client_message_id,frame_json,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id,binding_id,agent_id,client_message_id) DO NOTHING`, h.store.id(), seq, p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID, nullString(frame.ClientMessageID), string(raw), h.store.now()).Error
+		return tx.
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "device_id"}, {Name: "binding_id"}, {Name: "agent_id"}, {Name: "client_message_id"}},
+				DoNothing: true,
+			}).
+			Table("zakurabot_messages").
+			Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": p.TenantID, "device_id": frame.DeviceID, "binding_id": frame.BindingID, "agent_id": frame.AgentID, "client_message_id": nullString(frame.ClientMessageID), "frame_json": string(raw), "created_at": h.store.now()}).Error
 	})
 	if e != nil {
 		return nil, e

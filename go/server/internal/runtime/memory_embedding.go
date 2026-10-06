@@ -109,11 +109,13 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 	if cfg.BaseURL == "" {
 		selector := cfg.RouteSlug
 		if cfg.RouteID != "" {
-			var slug string
-			if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT slug FROM model_routes WHERE tenant_id=? AND id=? AND capability='embedding'`, tenant, cfg.RouteID).Row().Scan(&slug); err != nil {
+			var slugRow struct {
+				Slug string `gorm:"column:slug"`
+			}
+			if err := h.deps.Gorm.WithContext(ctx).Table("model_routes").Select("slug").Where("tenant_id = ? AND id = ? AND capability = 'embedding'", tenant, cfg.RouteID).Take(&slugRow).Error; err != nil {
 				return nil, "", errors.New("embedding model route not found")
 			}
-			selector = slug
+			selector = slugRow.Slug
 		}
 		resp, err := h.service.gateway.Do(ctx, tenant, "embedding", "embeddings", selector, payload)
 		if err != nil {
@@ -171,7 +173,7 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 func (h *handler) setMemoryEmbedding(ctx context.Context, tenant, agent, id, content string, vector []float64, model string) error {
 	encoded, _ := json.Marshal(vector)
 	hash := sha256.Sum256([]byte(content))
-	result := h.deps.Gorm.WithContext(ctx).Exec(`UPDATE memories SET embedding=?,embedding_model=?,embedding_dim=?,content_hash=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=?`, string(encoded), model, len(vector), hex.EncodeToString(hash[:]), h.store.now(), tenant, agent, id)
+	result := h.deps.Gorm.WithContext(ctx).Table("memories").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"embedding": string(encoded), "embedding_model": model, "embedding_dim": len(vector), "content_hash": hex.EncodeToString(hash[:]), "updated_at": h.store.now()})
 	if result.Error != nil {
 		return result.Error
 	}

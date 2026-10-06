@@ -16,6 +16,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type skillFile struct {
@@ -213,7 +214,16 @@ func (h *handler) installExistingSkills(w http.ResponseWriter, r *http.Request, 
 	for _, agent := range agentIDs {
 		for _, skill := range skills {
 			id := h.store.id()
-			e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO agent_skills(id,tenant_id,agent_id,skill_id,name,enabled,path,version,status,error,created_at,updated_at) VALUES(?,?,?,?,?,TRUE,?,?,'installed',NULL,?,?) ON CONFLICT(agent_id,name) DO UPDATE SET skill_id=excluded.skill_id,enabled=TRUE,version=excluded.version,status='installed',error=NULL,updated_at=excluded.updated_at`, id, tenant, agent, skill.ID, skill.Name, "/skills/"+skill.Name, skill.Version, now, now).Error
+			e := h.deps.Gorm.WithContext(r.Context()).
+				Clauses(clause.OnConflict{
+					Columns: []clause.Column{{Name: "agent_id"}, {Name: "name"}},
+					DoUpdates: clause.Assignments(map[string]any{
+						"skill_id": gorm.Expr("excluded.skill_id"), "enabled": true, "version": gorm.Expr("excluded.version"),
+						"status": "installed", "error": nil, "updated_at": gorm.Expr("excluded.updated_at"),
+					}),
+				}).
+				Table("agent_skills").
+				Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "skill_id": skill.ID, "name": skill.Name, "enabled": true, "path": "/skills/" + skill.Name, "version": skill.Version, "status": "installed", "error": nil, "created_at": now, "updated_at": now}).Error
 			if e == nil {
 				installs = append(installs, map[string]any{"id": id, "agentId": agent, "skillId": skill.ID, "name": skill.Name, "enabled": true, "path": "/skills/" + skill.Name, "version": skill.Version, "status": "installed"})
 			}

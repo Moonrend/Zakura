@@ -20,6 +20,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type mcpInstance struct {
@@ -636,8 +637,13 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 			SpaceID string `gorm:"column:space_id"`
 		}
 		if h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id=? AND id=?", p.TenantID, agent).Take(&agentRow).Error == nil {
-			// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
-			_ = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO agent_bindings(id,tenant_id,space_id,agent_id,instance_id,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(space_id,instance_id) DO UPDATE SET agent_id=excluded.agent_id`, h.store.id(), p.TenantID, agentRow.SpaceID, agent, id, now)
+			_ = h.deps.Gorm.WithContext(r.Context()).
+				Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "space_id"}, {Name: "instance_id"}},
+					DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
+				}).
+				Table("agent_bindings").
+				Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": agentRow.SpaceID, "agent_id": agent, "instance_id": id, "created_at": now}).Error
 		}
 	}
 	started := body.Command == ""
@@ -677,7 +683,7 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 		nodeID = *body.RuntimeNodeID
 	}
 	if nodeID == "" && len(body.AgentIDs) > 0 {
-		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(s.runtime_node_id,'') AS runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`, tenant, body.AgentIDs[0]).Row().Scan(&nodeID)
+		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(s.runtime_node_id,'') AS runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`, tenant, body.AgentIDs[0]).Scan(&nodeID).Error
 	}
 	if nodeID == "" {
 		return errors.New("bind the agent to a runtime node before starting stdio MCP")
@@ -711,10 +717,21 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	if body.WorkingDir == "" {
 		body.WorkingDir = "/data"
 	}
-	var dataSpaceID string
-	if err = h.deps.Gorm.WithContext(ctx).Raw(`SELECT b.space_id AS space_id FROM agent_bindings b JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id WHERE b.tenant_id=? AND b.instance_id=? ORDER BY b.created_at LIMIT 1`, tenant, instanceID).Row().Scan(&dataSpaceID); err != nil {
+	var dataSpaceRow struct {
+		SpaceID string `gorm:"column:space_id"`
+	}
+	err = h.deps.Gorm.WithContext(ctx).
+		Table("agent_bindings b").
+		Select("b.space_id AS space_id").
+		Joins("JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id").
+		Where("b.tenant_id = ? AND b.instance_id = ?", tenant, instanceID).
+		Order("b.created_at").
+		Limit(1).
+		Take(&dataSpaceRow).Error
+	if err != nil {
 		return errors.New("bind the stdio MCP instance to an agent in the selected runtime node before starting")
 	}
+	dataSpaceID := dataSpaceRow.SpaceID
 	dataPath := "/.zakura/components/" + instanceID
 	var nodeRow struct {
 		HostInfoJSON     string `gorm:"column:host_info_json"`

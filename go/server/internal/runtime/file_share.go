@@ -4,7 +4,6 @@ package runtime
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 func newShareToken() (string, string, error) {
@@ -73,7 +73,7 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 	now := h.store.now()
 	expires := now.Add(time.Duration(b.TTLMinutes) * time.Minute)
 	id := h.store.id()
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO file_shares(id,tenant_id,agent_id,token_hash,path,file_name,mime_type,size_bytes,status,ttl_minutes,expires_at,download_count,disposition,revoked_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'active',?,?,0,?,NULL,?,?)`, id, p.TenantID, chi.URLParam(r, "id"), hash, b.Path, b.FileName, nullString(b.MimeType), info.Size(), b.TTLMinutes, expires, b.Disposition, now, now)
+	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": chi.URLParam(r, "id"), "token_hash": hash, "path": b.Path, "file_name": b.FileName, "mime_type": nullString(b.MimeType), "size_bytes": info.Size(), "status": "active", "ttl_minutes": b.TTLMinutes, "expires_at": expires, "download_count": 0, "disposition": b.Disposition, "revoked_at": nil, "created_at": now, "updated_at": now})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -82,7 +82,7 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) revokeFileShare(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE file_shares SET status='revoked',revoked_at=?,updated_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND status='active'`, h.store.now(), h.store.now(), chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id"))
+	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ? AND tenant_id = ? AND agent_id = ? AND status = 'active'", chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"status": "revoked", "revoked_at": h.store.now(), "updated_at": h.store.now()})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -98,10 +98,18 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	sum := sha256.Sum256([]byte(token))
 	hash := hex.EncodeToString(sum[:])
-	var id, tenant, agent, path, name, mime, disposition string
-	var size int64
-	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream'),size_bytes,disposition FROM file_shares WHERE token_hash=? AND status='active' AND revoked_at IS NULL AND expires_at>?`, hash, h.store.now()).Row().Scan(&id, &tenant, &agent, &path, &name, &mime, &size, &disposition)
-	if errors.Is(e, sql.ErrNoRows) {
+	var row struct {
+		ID          string `gorm:"column:id"`
+		Tenant      string `gorm:"column:tenant_id"`
+		Agent       string `gorm:"column:agent_id"`
+		Path        string `gorm:"column:path"`
+		Name        string `gorm:"column:file_name"`
+		Mime        string `gorm:"column:mime_type"`
+		Size        int64  `gorm:"column:size_bytes"`
+		Disposition string `gorm:"column:disposition"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Select("id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream') AS mime_type,size_bytes,disposition").Where("token_hash = ? AND status = 'active' AND revoked_at IS NULL AND expires_at > ?", hash, h.store.now()).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		httpx.Error(w, 404, "Share not found or expired")
 		return
 	}
@@ -109,12 +117,12 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	f, e := h.workspaceFor(r.Context(), tenant, agent)
+	f, e := h.workspaceFor(r.Context(), row.Tenant, row.Agent)
 	if e != nil {
 		httpx.Error(w, 404, "Share unavailable")
 		return
 	}
-	resolved, e := f.resolve(path, true)
+	resolved, e := f.resolve(row.Path, true)
 	if e != nil {
 		httpx.Error(w, 403, "Forbidden")
 		return
@@ -130,10 +138,10 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 404, "File no longer exists in workspace")
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE file_shares SET download_count=download_count+1,updated_at=? WHERE id=?`, h.store.now(), id)
-	safe := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(name)
-	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Content-Disposition", disposition+`; filename="`+safe+`"`)
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ?", row.ID).Updates(map[string]any{"download_count": gorm.Expr("download_count+1"), "updated_at": h.store.now()})
+	safe := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(row.Name)
+	w.Header().Set("Content-Type", row.Mime)
+	w.Header().Set("Content-Disposition", row.Disposition+`; filename="`+safe+`"`)
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	http.ServeContent(w, r, safe, info.ModTime(), file)

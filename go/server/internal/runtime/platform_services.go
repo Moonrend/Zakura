@@ -15,6 +15,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (h *handler) registerPlatformServices(r chi.Router) {
@@ -163,7 +164,13 @@ func (h *handler) patchPlatformService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'unknown',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode=?,desired_state=?,config_enc=?,endpoint_url=?,updated_at=?`, h.store.id(), key, b.Mode, b.DesiredState, "stopped", enc, nullString(b.EndpointURL), now, now, b.Mode, b.DesiredState, enc, nullString(b.EndpointURL), now).Error
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "service_key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"mode", "desired_state", "config_enc", "endpoint_url", "updated_at"}),
+		}).
+		Table("platform_services").
+		Create(map[string]any{"id": h.store.id(), "service_key": key, "mode": b.Mode, "desired_state": b.DesiredState, "status": "stopped", "health_status": "unknown", "config_enc": enc, "endpoint_url": nullString(b.EndpointURL), "containers_json": "[]", "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -271,7 +278,16 @@ func (h *handler) connectPlatformService(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_services(id,service_key,mode,desired_state,status,health_status,config_enc,endpoint_url,containers_json,last_error,created_at,updated_at) VALUES(?,?,'external','running','running','healthy',?,?,'[]',NULL,?,?) ON CONFLICT(service_key) DO UPDATE SET mode='external',desired_state='running',status='running',health_status='healthy',config_enc=?,endpoint_url=?,last_error=NULL,updated_at=?`, h.store.id(), key, enc, b.EndpointURL, now, now, enc, b.EndpointURL, now).Error
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "service_key"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"mode": "external", "desired_state": "running", "status": "running", "health_status": "healthy",
+				"config_enc": enc, "endpoint_url": b.EndpointURL, "last_error": nil, "updated_at": now,
+			}),
+		}).
+		Table("platform_services").
+		Create(map[string]any{"id": h.store.id(), "service_key": key, "mode": "external", "desired_state": "running", "status": "running", "health_status": "healthy", "config_enc": enc, "endpoint_url": b.EndpointURL, "containers_json": "[]", "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -467,7 +483,13 @@ func (h *handler) putServiceQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := runtimeTimeString(h.store.now())
-	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO platform_service_quotas(id,scope_key,service_key,monthly_limit,daily_limit,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope_key,service_key) DO UPDATE SET monthly_limit=?,daily_limit=?,updated_at=?`, h.store.id(), b.ScopeKey, b.ServiceKey, b.MonthlyLimit, b.DailyLimit, now, now, b.MonthlyLimit, b.DailyLimit, now).Error
+	e := h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "scope_key"}, {Name: "service_key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"monthly_limit", "daily_limit", "updated_at"}),
+		}).
+		Table("platform_service_quotas").
+		Create(map[string]any{"id": h.store.id(), "scope_key": b.ScopeKey, "service_key": b.ServiceKey, "monthly_limit": b.MonthlyLimit, "daily_limit": b.DailyLimit, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

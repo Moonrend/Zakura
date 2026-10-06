@@ -15,6 +15,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm/clause"
 )
 
 type UpstreamModel struct {
@@ -272,8 +273,16 @@ func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string)
 		if m.ID == "" {
 			continue
 		}
-		// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
-		res := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,'chat','100',false,'{}','{}','ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET display_name=?,synced_at=?,updated_at=?,status='ready',last_error=NULL`, h.store.id(), tenant, id, m.ID, m.ID, nullString(m.Name), now, now, now, nullString(m.Name), now, now)
+		res := h.deps.Gorm.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"display_name": nullString(m.Name), "synced_at": now, "updated_at": now,
+					"status": "ready", "last_error": nil,
+				}),
+			}).
+			Table("upstream_models").
+			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": "chat", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error != nil {
 			return count, res.Error
 		}
@@ -338,8 +347,16 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 			m.Weight = "100"
 		}
 		now := h.store.now()
-		// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
-		res := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO upstream_models(id,tenant_id,upstream_id,native_model,canonical_model,display_name,capability,weight,is_default,options_json,meta_json,status,last_error,synced_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,? ,?,'ready',NULL,?,?,?) ON CONFLICT(tenant_id,upstream_id,native_model,capability) DO UPDATE SET canonical_model=?,display_name=?,meta_json=?,updated_at=?`, h.store.id(), principal(r).TenantID, m.UpstreamID, m.NativeModel, m.CanonicalModel, m.DisplayName, m.Capability, m.Weight, m.IsDefault, validJSON(m.Options, "{}"), validJSON(m.Meta, "{}"), now, now, now, m.CanonicalModel, m.DisplayName, validJSON(m.Meta, "{}"), now)
+		res := h.deps.Gorm.WithContext(r.Context()).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"canonical_model": m.CanonicalModel, "display_name": m.DisplayName,
+					"meta_json": validJSON(m.Meta, "{}"), "updated_at": now,
+				}),
+			}).
+			Table("upstream_models").
+			Create(map[string]any{"id": h.store.id(), "tenant_id": principal(r).TenantID, "upstream_id": m.UpstreamID, "native_model": m.NativeModel, "canonical_model": m.CanonicalModel, "display_name": m.DisplayName, "capability": m.Capability, "weight": m.Weight, "is_default": m.IsDefault, "options_json": validJSON(m.Options, "{}"), "meta_json": validJSON(m.Meta, "{}"), "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error == nil {
 			count++
 		}

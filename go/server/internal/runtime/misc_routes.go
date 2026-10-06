@@ -19,6 +19,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var modelAuthPolls sync.Map
@@ -81,8 +82,13 @@ func (h *handler) putSetting(ctx context.Context, owner, key string, value map[s
 	if e != nil {
 		return e
 	}
-	// raw escape hatch: ON CONFLICT upsert kept verbatim (dialect-specific)
-	res := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO settings(id,owner_key,key,value) VALUES(?,?,?,?) ON CONFLICT(owner_key,key) DO UPDATE SET value=?`, h.store.id(), owner, key, enc, enc)
+	res := h.deps.Gorm.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "owner_key"}, {Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value"}),
+		}).
+		Table("settings").
+		Create(map[string]any{"id": h.store.id(), "owner_key": owner, "key": key, "value": enc})
 	return res.Error
 }
 func redactConfig(in map[string]any) map[string]any {

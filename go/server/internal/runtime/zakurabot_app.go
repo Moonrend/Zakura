@@ -22,6 +22,7 @@ import (
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (h *handler) registerZakuraBotApp(r chi.Router) {
@@ -528,7 +529,13 @@ func (h *handler) syncZakuraInteractions(ctx context.Context, p httpx.Principal,
 		projectedRaw, _ := json.Marshal(projected)
 		digest := sha256.Sum256([]byte(p.TenantID + "\x00" + p.UserID + "\x00" + binding + "\x00" + agent + "\x00" + eventID))
 		id := "zbi_" + hex.EncodeToString(digest[:])
-		if err := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO zakurabot_interactions(id,tenant_id,device_id,binding_id,agent_id,session_id,run_id,source_session_id,source_run_id,request_id,type,payload_json,reply_to,status,claimed_at,event_seq,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,'pending',NULL,?,?) ON CONFLICT(id) DO NOTHING`, id, p.TenantID, p.UserID, binding, agent, sessionID, nullString(runID), sessionID, nullString(runID), requestID, kind, string(projectedRaw), eventSeq, runtimeTimeString(eventCreated)).Error; err != nil {
+		if err := h.deps.Gorm.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "id"}},
+				DoNothing: true,
+			}).
+			Table("zakurabot_interactions").
+			Create(map[string]any{"id": id, "tenant_id": p.TenantID, "device_id": p.UserID, "binding_id": binding, "agent_id": agent, "session_id": sessionID, "run_id": nullString(runID), "source_session_id": sessionID, "source_run_id": nullString(runID), "request_id": requestID, "type": kind, "payload_json": string(projectedRaw), "reply_to": nil, "status": "pending", "claimed_at": nil, "event_seq": eventSeq, "created_at": runtimeTimeString(eventCreated)}).Error; err != nil {
 			return err
 		}
 	}
@@ -720,7 +727,13 @@ func (h *handler) addZakuraBotReaction(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	err = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO message_reactions(id,tenant_id,device_id,binding_id,agent_id,message_id,user_id,emoji,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,device_id,binding_id,agent_id,message_id,user_id) DO UPDATE SET emoji=excluded.emoji,created_at=excluded.created_at`, id, p.TenantID, p.UserID, binding, agent, chi.URLParam(r, "messageId"), p.UserID, body.Emoji, runtimeTimeString(now)).Error
+	err = h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "device_id"}, {Name: "binding_id"}, {Name: "agent_id"}, {Name: "message_id"}, {Name: "user_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"emoji", "created_at"}),
+		}).
+		Table("message_reactions").
+		Create(map[string]any{"id": id, "tenant_id": p.TenantID, "device_id": p.UserID, "binding_id": binding, "agent_id": agent, "message_id": chi.URLParam(r, "messageId"), "user_id": p.UserID, "emoji": body.Emoji, "created_at": runtimeTimeString(now)}).Error
 	if err != nil {
 		statusErr(w, err)
 		return

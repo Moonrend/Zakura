@@ -77,12 +77,6 @@ func (h *handler) routes(r chi.Router) {
 	r.Get("/api/providers", h.listProviderCatalog)
 	h.registerChannels(r)
 }
-func (h *handler) q(q string) string {
-	if h.deps.Rebind != nil {
-		return h.deps.Rebind(q)
-	}
-	return q
-}
 func (h *handler) now() time.Time {
 	if h.deps.Clock != nil {
 		return h.deps.Clock().UTC()

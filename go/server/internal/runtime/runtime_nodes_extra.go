@@ -48,10 +48,13 @@ func (h *handler) authorizeRunnerNode(r *http.Request, nodeID string, allowQuery
 		return false
 	}
 	sum := sha256.Sum256([]byte(token))
-	var expected string
-	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT token_hash FROM runtime_nodes WHERE id=? AND token_hash IS NOT NULL`, nodeID).Row().Scan(&expected); err != nil {
+	var expectedRow struct {
+		TokenHash string `gorm:"column:token_hash"`
+	}
+	if err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("token_hash").Where("id = ? AND token_hash IS NOT NULL", nodeID).Take(&expectedRow).Error; err != nil {
 		return false
 	}
+	expected := expectedRow.TokenHash
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(hex.EncodeToString(sum[:]))) == 1
 }
 func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
@@ -76,17 +79,20 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := sha256.Sum256([]byte(b.Token))
 	hash := hex.EncodeToString(sum[:])
-	var nodeID string
+	var nodeRow struct {
+		ID string `gorm:"column:id"`
+	}
 	var e error
 	if b.ID != "" {
-		e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id FROM runtime_nodes WHERE id=? AND token_hash=?`, b.ID, hash).Row().Scan(&nodeID)
+		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("id = ? AND token_hash = ?", b.ID, hash).Take(&nodeRow).Error
 	} else {
-		e = h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id FROM runtime_nodes WHERE token_hash=?`, hash).Row().Scan(&nodeID)
+		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash = ?", hash).Take(&nodeRow).Error
 	}
 	if e != nil {
 		httpx.Error(w, 401, "unauthorized")
 		return
 	}
+	nodeID := nodeRow.ID
 	runnerTokenCache.Store(nodeID, b.Token)
 	now := runtimeTimeString(h.store.now())
 	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", nodeID).Updates(map[string]any{"status": "online", "endpoint": b.Endpoint, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "agent_version": nullString(b.AgentVersion), "last_seen_at": now, "updated_at": now}).Error
@@ -116,8 +122,8 @@ func (h *handler) runtimeMeshStatus(w http.ResponseWriter, r *http.Request) {
 func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	sum := sha256.Sum256([]byte(token))
-	var count int
-	if !strings.HasPrefix(token, "rnr_") || h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT COUNT(*) FROM runtime_nodes WHERE token_hash=?`, hex.EncodeToString(sum[:])).Row().Scan(&count) != nil || count == 0 {
+	var count int64
+	if !strings.HasPrefix(token, "rnr_") || h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Where("token_hash = ?", hex.EncodeToString(sum[:])).Count(&count) != nil || count == 0 {
 		httpx.Error(w, 401, "unauthorized")
 		return
 	}
@@ -493,12 +499,16 @@ func (h *handler) runtimeNodeAllocate(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) deleteWorkspaceResidual(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var storage, space string
-	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT n.storage_root,a.space_id FROM runtime_nodes n JOIN agents a ON a.tenant_id=n.tenant_id WHERE n.tenant_id=? AND n.id=? AND a.id=?`, p.TenantID, chi.URLParam(r, "nodeId"), chi.URLParam(r, "agentId")).Row().Scan(&storage, &space)
+	var nodeSpaceRow struct {
+		Storage string `gorm:"column:storage_root"`
+		SpaceID string `gorm:"column:space_id"`
+	}
+	e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT n.storage_root AS storage_root,a.space_id AS space_id FROM runtime_nodes n JOIN agents a ON a.tenant_id=n.tenant_id WHERE n.tenant_id=? AND n.id=? AND a.id=?`, p.TenantID, chi.URLParam(r, "nodeId"), chi.URLParam(r, "agentId")).Take(&nodeSpaceRow).Error
 	if e != nil {
 		statusErr(w, ErrNotFound)
 		return
 	}
+	storage, space := nodeSpaceRow.Storage, nodeSpaceRow.SpaceID
 	root := filepath.Join(storage, "workspaces", p.TenantID, space)
 	base := filepath.Join(storage, "workspaces")
 	rel, e := filepath.Rel(base, root)

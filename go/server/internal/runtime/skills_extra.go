@@ -25,6 +25,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func secretBox(key []byte, scope string, plain []byte) (string, error) {
@@ -199,7 +200,16 @@ func (h *handler) syncRepo(ctx context.Context, provider, owner, repo string) (m
 	sourceRaw, _ := json.Marshal(map[string]any{"provider": "github", "owner": owner, "repo": repo, "ref": "HEAD"})
 	now := runtimeTimeString(h.store.now())
 	key := "github:" + owner + "/" + repo + "@HEAD"
-	e = h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO platform_skill_repos(id,repo_key,provider,source_json,ref,version,upstream_etag,packages_json,partial,skill_count,size_bytes,warnings_json,checked_at,fetched_at,ref_count,last_error,created_at,updated_at) VALUES(?,?, 'github',?,'HEAD',?,NULL,?,false,?,?,'[]',?,?,0,NULL,?,?) ON CONFLICT(repo_key) DO UPDATE SET version=?,packages_json=?,skill_count=?,size_bytes=?,checked_at=?,fetched_at=?,last_error=NULL,updated_at=?`, h.store.id(), key, string(sourceRaw), tree.SHA, string(packagesRaw), len(packages), total, now, now, now, now, tree.SHA, string(packagesRaw), len(packages), total, now, now, now).Error
+	e = h.deps.Gorm.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "repo_key"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"version": tree.SHA, "packages_json": string(packagesRaw), "skill_count": len(packages), "size_bytes": total,
+				"checked_at": now, "fetched_at": now, "last_error": nil, "updated_at": now,
+			}),
+		}).
+		Table("platform_skill_repos").
+		Create(map[string]any{"id": h.store.id(), "repo_key": key, "provider": "github", "source_json": string(sourceRaw), "ref": "HEAD", "version": tree.SHA, "upstream_etag": nil, "packages_json": string(packagesRaw), "partial": false, "skill_count": len(packages), "size_bytes": total, "warnings_json": "[]", "checked_at": now, "fetched_at": now, "ref_count": 0, "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		return nil, e
 	}
@@ -318,7 +328,13 @@ func (h *handler) putSkillToken(w http.ResponseWriter, r *http.Request) {
 		hint = hint[len(hint)-4:]
 	}
 	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO skill_source_tokens(id,scope_key,provider,token_enc,label,hint,last_used_at,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,?,?) ON CONFLICT(scope_key,provider) DO UPDATE SET token_enc=?,label=?,hint=?,updated_at=?`, h.store.id(), scope, provider, enc, nullString(b.Label), hint, now, now, enc, nullString(b.Label), hint, now).Error
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "scope_key"}, {Name: "provider"}},
+			DoUpdates: clause.AssignmentColumns([]string{"token_enc", "label", "hint", "updated_at"}),
+		}).
+		Table("skill_source_tokens").
+		Create(map[string]any{"id": h.store.id(), "scope_key": scope, "provider": provider, "token_enc": enc, "label": nullString(b.Label), "hint": hint, "last_used_at": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

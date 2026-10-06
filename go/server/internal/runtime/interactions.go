@@ -135,7 +135,7 @@ func (h *handler) resolveQuestion(w http.ResponseWriter, r *http.Request) {
 	if b.Cancelled {
 		status = "cancelled"
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE agent_user_questions SET status=?,answer_json=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`, status, string(answer), h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_user_questions").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, h.store.now()).Updates(map[string]any{"status": status, "answer_json": string(answer), "resolved_at": h.store.now()})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -172,7 +172,7 @@ func (h *handler) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "decision must be approved or denied")
 		return
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE agent_tool_approvals SET status=?,decided_by='user',always_allow=?,resolved_at=? WHERE id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)`, b.Decision, b.AlwaysAllow, h.store.now(), b.RequestID, p.TenantID, agent, session, h.store.now())
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_tool_approvals").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, h.store.now()).Updates(map[string]any{"status": b.Decision, "decided_by": "user", "always_allow": b.AlwaysAllow, "resolved_at": h.store.now()})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
