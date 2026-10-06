@@ -33,7 +33,6 @@ ensureSecret();
 
 const defaults = {
   DATABASE_URL: "file:./data/zakura.db",
-  DATA_DIR: "./data",
   PUBLIC_BASE_URL: "http://localhost:8787",
   WEB_PUBLIC_URL: "http://localhost:3001",
   CGO_ENABLED: "1",
