@@ -18,6 +18,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/config"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/identity"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/rediscache"
 	platformsystem "github.com/Moonrend/Zakura/apps/server/internal/platform/system"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/usage"
 	"github.com/Moonrend/Zakura/apps/server/internal/runtime"
@@ -50,6 +51,7 @@ func Router(cfg config.Config, d *appdeps.Dependencies, log *slog.Logger) http.H
 		httpx.JSON(w, 200, map[string]any{"ok": true, "database": "ready", "oauthSigningKey": "ready"})
 	})
 	r.Get("/api/livez", func(w http.ResponseWriter, r *http.Request) { httpx.JSON(w, 200, map[string]bool{"ok": true}) })
+	d.Redis = rediscache.Open(d.RunContext(), rediscache.URLFromSettings(d.RunContext(), d.Gorm, d.Secret))
 	identity.RegisterRoutes(r, d)
 	admin.RegisterRoutes(r, d)
 	usage.RegisterRoutes(r, d)

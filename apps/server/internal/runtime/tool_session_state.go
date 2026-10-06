@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func isBuiltinToolName(name string) bool {
@@ -93,10 +94,57 @@ func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session,
 	return []byte(b.String()), nil
 }
 
+type cachedLoaded struct {
+	tools map[string]bool
+	at    time.Time
+}
+
+func (h *handler) loadedToolsMemoryKey(tenant, agent, session string) string {
+	return tenant + "/" + agent + "/" + session
+}
+
+func (h *handler) loadedToolsRedisKey(tenant, agent, session string) string {
+	return "zakura:toolsloaded:" + tenant + ":" + agent + ":" + session
+}
+
+func (h *handler) storeLoadedToolsCache(memKey string, tools map[string]bool) {
+	h.loadedToolMu.Lock()
+	if h.loadedToolCache == nil {
+		h.loadedToolCache = map[string]cachedLoaded{}
+	}
+	h.loadedToolCache[memKey] = cachedLoaded{tools: tools, at: h.store.now()}
+	h.loadedToolMu.Unlock()
+}
+
 func (h *handler) sessionLoadedTools(ctx context.Context, tenant, agent, session string) map[string]bool {
 	out := map[string]bool{}
 	if session == "" {
 		return out
+	}
+	memKey := h.loadedToolsMemoryKey(tenant, agent, session)
+	h.loadedToolMu.Lock()
+	if h.loadedToolCache != nil {
+		if entry, ok := h.loadedToolCache[memKey]; ok && h.store.now().Sub(entry.at) < 5*time.Second {
+			cached := entry.tools
+			h.loadedToolMu.Unlock()
+			return cached
+		}
+	}
+	h.loadedToolMu.Unlock()
+	redisKey := h.loadedToolsRedisKey(tenant, agent, session)
+	if h.deps.Redis != nil && h.deps.Redis.Enabled() {
+		if raw, ok := h.deps.Redis.Get(ctx, redisKey); ok {
+			var names []string
+			if json.Unmarshal(raw, &names) == nil {
+				for _, name := range names {
+					if name != "" {
+						out[name] = true
+					}
+				}
+				h.storeLoadedToolsCache(memKey, out)
+				return out
+			}
+		}
 	}
 	var rows []struct {
 		PayloadJSON string `gorm:"column:payload_json"`
@@ -117,6 +165,16 @@ func (h *handler) sessionLoadedTools(ctx context.Context, tenant, agent, session
 			}
 		}
 	}
+	if h.deps.Redis != nil && h.deps.Redis.Enabled() {
+		names := make([]string, 0, len(out))
+		for name := range out {
+			names = append(names, name)
+		}
+		if raw, err := json.Marshal(names); err == nil {
+			h.deps.Redis.Set(ctx, redisKey, raw, 10*time.Second)
+		}
+	}
+	h.storeLoadedToolsCache(memKey, out)
 	return out
 }
 
@@ -125,7 +183,26 @@ func (h *handler) persistSessionLoadedTools(ctx context.Context, tenant, agent, 
 		return nil
 	}
 	_, err := h.store.AppendEvent(ctx, tenant, agent, session, "tools_loaded", nil, map[string]any{"tools": names})
-	return err
+	if err != nil {
+		return err
+	}
+	h.invalidateSessionLoadedTools(tenant, agent, session)
+	return nil
+}
+
+func (h *handler) invalidateSessionLoadedTools(tenant, agent, session string) {
+	if session == "" {
+		return
+	}
+	memKey := h.loadedToolsMemoryKey(tenant, agent, session)
+	h.loadedToolMu.Lock()
+	if h.loadedToolCache != nil {
+		delete(h.loadedToolCache, memKey)
+	}
+	h.loadedToolMu.Unlock()
+	if h.deps.Redis != nil && h.deps.Redis.Enabled() {
+		h.deps.Redis.Del(h.deps.RunContext(), h.loadedToolsRedisKey(tenant, agent, session))
+	}
 }
 
 func (h *handler) runCatalogMCPTool(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {

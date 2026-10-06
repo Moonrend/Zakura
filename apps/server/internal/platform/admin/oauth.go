@@ -250,6 +250,10 @@ func openAdmin(secret []byte, encoded string) (string, error) {
 	}
 	return string(plain), nil
 }
+
+func OpenAdminValue(secret []byte, sealed string) (string, error) {
+	return openAdmin(secret, sealed)
+}
 func contains(items []string, v string) bool {
 	for _, item := range items {
 		if item == v {

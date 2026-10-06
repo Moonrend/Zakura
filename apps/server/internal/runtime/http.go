@@ -34,6 +34,8 @@ type handler struct {
 	mcpSessions    map[string]spaceMCPSession
 	agentToolMu    sync.Mutex
 	agentToolCache map[string]cachedCatalog
+	loadedToolMu    sync.Mutex
+	loadedToolCache map[string]cachedLoaded
 	trigramMu      sync.Mutex
 	trigramStates  map[string]string
 }

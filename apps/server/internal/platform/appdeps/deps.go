@@ -13,6 +13,13 @@ import (
 	"gorm.io/gorm"
 )
 
+type RedisCache interface {
+	Get(ctx context.Context, key string) ([]byte, bool)
+	Set(ctx context.Context, key string, val []byte, ttl time.Duration)
+	Del(ctx context.Context, key string)
+	Enabled() bool
+}
+
 // Dependencies is the deliberately small boundary shared by the platform,
 // runtime and integration route packages. Business state is always persisted
 // through DB; Clock/NewID are replaceable so tests remain deterministic.
@@ -38,6 +45,7 @@ type Dependencies struct {
 	AfterMemberRemoved     func(context.Context, string, string) error
 	SendTransactionalEmail func(context.Context, string, string, string, string) error
 	RecordUsage            func(context.Context, UsageRecord) error
+	Redis                  RedisCache
 }
 
 type UsageRecord struct {

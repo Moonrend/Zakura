@@ -404,15 +404,34 @@ func (h *handler) cachedAgentToolCatalog(ctx context.Context, tenant, agentID st
 		}
 	}
 	h.agentToolMu.Unlock()
+	redisKey := "zakura:agenttools:" + tenant + ":" + agentID
+	if h.deps.Redis != nil && h.deps.Redis.Enabled() {
+		if raw, ok := h.deps.Redis.Get(ctx, redisKey); ok {
+			var catalog agentCatalog
+			if json.Unmarshal(raw, &catalog) == nil {
+				h.storeCatalogCache(key, catalog)
+				return catalog, nil
+			}
+		}
+	}
 	catalog, err := h.agentToolCatalog(ctx, tenant, agentID)
 	if err != nil {
 		return agentCatalog{}, err
 	}
+	if h.deps.Redis != nil && h.deps.Redis.Enabled() {
+		if raw, err := json.Marshal(catalog); err == nil {
+			h.deps.Redis.Set(ctx, redisKey, raw, 30*time.Second)
+		}
+	}
+	h.storeCatalogCache(key, catalog)
+	return catalog, nil
+}
+
+func (h *handler) storeCatalogCache(key string, catalog agentCatalog) {
 	h.agentToolMu.Lock()
 	if h.agentToolCache == nil {
 		h.agentToolCache = map[string]cachedCatalog{}
 	}
 	h.agentToolCache[key] = cachedCatalog{catalog: catalog, at: h.store.now()}
 	h.agentToolMu.Unlock()
-	return catalog, nil
 }
