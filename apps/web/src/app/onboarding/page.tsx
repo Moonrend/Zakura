@@ -12,7 +12,7 @@ import { StepAgentConnect } from "@/components/onboarding/step-agent-connect";
 import { StepProfileName } from "@/components/onboarding/step-profile-name";
 import { Button } from "@/components/ui/button";
 import { api, setSession } from "@/lib/api";
-import { fetchAgentProviders, saveAgentProviders } from "@/lib/agents";
+import { fetchSpaceProviders, saveSpaceProviders } from "@/lib/spaces";
 import { cn } from "@/lib/utils";
 import { BrandMark } from "@/components/brand-mark";
 
@@ -32,11 +32,18 @@ type BootstrapAgent = {
   slug: string;
   enableComputer: boolean;
   enableMemory: boolean;
-  mcpAgentUrl: string;
+};
+
+type BootstrapSpace = {
+  id: string;
+  name: string;
+  slug: string;
+  mcpUrl: string;
 };
 
 type BootstrapResult = {
   agent: BootstrapAgent;
+  spaces: BootstrapSpace[];
   completed: boolean;
 };
 
@@ -60,6 +67,7 @@ export default function TenantOnboardingPage() {
   const router = useRouter();
   const bootstrapOnce = useRef(false);
   const [agent, setAgent] = useState<BootstrapAgent | null>(null);
+  const [space, setSpace] = useState<BootstrapSpace | null>(null);
   const [protocols, setProtocols] = useState<ProtocolMeta[]>([]);
   const [configuredUpstream, setConfiguredUpstream] = useState<ModelUpstream | null>(null);
   const [hasChatModel, setHasChatModel] = useState(false);
@@ -98,6 +106,7 @@ export default function TenantOnboardingPage() {
       }
 
       setAgent(boot.agent);
+      setSpace(boot.spaces?.[0] ?? null);
       setProtocols(upstreams.protocols ?? []);
       const chatRoute = routes.routes[0];
       setHasChatModel(Boolean(chatRoute));
@@ -231,34 +240,56 @@ export default function TenantOnboardingPage() {
                   onBack={() => moveTo("choose", "back")}
                   onContinue={() => moveTo("connect")}
                   onInstalled={async (instanceIds) => {
-                    const options = await fetchAgentProviders(agent.id);
-                    const selected = options.mcp.instances
-                      .filter((instance) => instance.bound)
-                      .map((instance) => instance.id);
-                    await saveAgentProviders(agent.id, {
-                      mcp: {
-                        mode: "selected",
-                        instanceIds: [...new Set([...selected, ...instanceIds])],
-                      },
-                    });
+                    if (space) {
+                      const options = await fetchSpaceProviders(space.id);
+                      const selected = options.mcp.instances
+                        .filter((instance) => instance.bound)
+                        .map((instance) => instance.id);
+                      await saveSpaceProviders(space.id, {
+                        mcp: {
+                          mode: "selected",
+                          instanceIds: [...new Set([...selected, ...instanceIds])],
+                        },
+                      });
+                    }
                     await markProgress({ mcpConnected: true });
                   }}
                 />
               ) : step === "connect" ? (
-                <StepAgentConnect
-                  agent={agent}
-                  busy={busy}
-                  onBack={() => moveTo("mcp", "back")}
-                  onConfigured={() => {
-                    void markProgress({ connectReady: true });
-                  }}
-                  nextLabel={hasChatModel ? "下一步：开始对话" : "下一步：配置 AI"}
-                  onContinue={() => {
-                    void markProgress({ connectReady: true });
-                    setAiBackStep("connect");
-                    moveTo(hasChatModel ? "name" : "provider");
-                  }}
-                />
+                space ? (
+                  <StepAgentConnect
+                    space={space}
+                    busy={busy}
+                    onBack={() => moveTo("mcp", "back")}
+                    onConfigured={() => {
+                      void markProgress({ connectReady: true });
+                    }}
+                    nextLabel={hasChatModel ? "下一步：开始对话" : "下一步：配置 AI"}
+                    onContinue={() => {
+                      void markProgress({ connectReady: true });
+                      setAiBackStep("connect");
+                      moveTo(hasChatModel ? "name" : "provider");
+                    }}
+                  />
+                ) : (
+                  <div className="mx-auto max-w-sm space-y-4 py-10 text-center">
+                    <div>
+                      <p className="text-sm font-medium">暂无可接入的空间</p>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        初始化没有返回空间信息，可以稍后在空间设置里配置接入。
+                      </p>
+                    </div>
+                    <Button
+                      disabled={busy}
+                      onClick={() => {
+                        setAiBackStep("connect");
+                        moveTo(hasChatModel ? "name" : "provider");
+                      }}
+                    >
+                      {hasChatModel ? "下一步：开始对话" : "下一步：配置 AI"}
+                    </Button>
+                  </div>
+                )
               ) : step === "provider" ? (
                 <StepAiProvider
                   protocols={protocols}

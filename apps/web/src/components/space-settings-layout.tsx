@@ -10,7 +10,6 @@ import { PageLoading } from "@/components/ui/progress-linear";
 /** 这些页的数据跟着某个 Agent（会话、密钥、定时任务），不是空间上的一份配置。 */
 const PER_AGENT_SECTIONS = new Set([
   "automation",
-  "connect",
   "gateway",
   "projects",
   "tool-calls",
@@ -63,7 +62,8 @@ export default function SpaceSettingsLayout({
   if (!agents) return <PageLoading />;
 
   const host = agents.find((agent) => agent.id === pickedId) ?? agents[0];
-  if (!host) {
+
+  if (perAgent && !host) {
     return (
       <div className="space-y-3 p-2">
         <h1 className="text-lg font-medium">空间设置</h1>
@@ -79,7 +79,7 @@ export default function SpaceSettingsLayout({
   }
 
   return (
-    <SpaceSettingsContext.Provider value={{ spaceId, agents, hostAgentId: host.id }}>
+    <SpaceSettingsContext.Provider value={{ spaceId, agents, hostAgentId: host?.id ?? "" }}>
       {perAgent && agents.length > 1 ? (
         <div className="mb-4 flex items-center gap-2">
           <label htmlFor="space-record-agent" className="text-xs text-muted-foreground">
@@ -99,9 +99,13 @@ export default function SpaceSettingsLayout({
           </select>
         </div>
       ) : null}
-      <AgentDetailProvider key={host.id} id={host.id}>
-        {children}
-      </AgentDetailProvider>
+      {host ? (
+        <AgentDetailProvider key={host.id} id={host.id}>
+          {children}
+        </AgentDetailProvider>
+      ) : (
+        children
+      )}
     </SpaceSettingsContext.Provider>
   );
 }

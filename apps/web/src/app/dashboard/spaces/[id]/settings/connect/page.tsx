@@ -1,18 +1,36 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Cable, ShieldCheck } from "lucide-react";
-import { useAgentDetail } from "@/components/agent-detail-context";
-import { AgentConnectPanel } from "@/components/agent-connect-panel";
+import { useSpaceSettings } from "@/components/space-settings-layout";
+import { SpaceConnectPanel } from "@/components/space-connect-panel";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
 import { PageLoading } from "@/components/ui/progress-linear";
+import { fetchSpace, type SpaceItem } from "@/lib/spaces";
 
-export default function AgentConnectPage() {
-  const { id, agent, loading } = useAgentDetail();
+export default function SpaceConnectPage() {
+  const { spaceId } = useSpaceSettings();
+  const [space, setSpace] = useState<SpaceItem | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  if (loading) {
-    return <PageLoading />;
-  }
-  if (!agent) return <p className="text-sm text-muted-foreground">Agent 不存在或无权访问。</p>;
+  useEffect(() => {
+    let cancelled = false;
+    setSpace(null);
+    setError(null);
+    void fetchSpace(spaceId)
+      .then((row) => {
+        if (!cancelled) setSpace(row);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [spaceId]);
+
+  if (error) return <p className="text-sm text-muted-foreground">空间不存在或无权访问。</p>;
+  if (!space) return <PageLoading />;
 
   return (
     <div className="max-w-3xl space-y-5">
@@ -21,7 +39,12 @@ export default function AgentConnectPage() {
         description="作为远程 MCP 服务接入外部客户端"
       />
       <SettingsSection title="MCP 接入信息">
-        <AgentConnectPanel agentId={id} agentSlug={agent.slug} mcpAgentUrl={agent.mcpAgentUrl} />
+        <SpaceConnectPanel
+          spaceId={space.id}
+          spaceSlug={space.slug}
+          spaceName={space.name}
+          mcpUrl={space.mcpUrl}
+        />
       </SettingsSection>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex gap-3 rounded-lg border border-border/70 bg-muted/20 p-4">
@@ -30,7 +53,7 @@ export default function AgentConnectPage() {
         </div>
         <div className="flex gap-3 rounded-lg border border-border/70 bg-muted/20 p-4">
           <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <div><p className="text-sm font-medium">按 Agent 授权</p><p className="mt-1 text-xs leading-5 text-muted-foreground">生成的 Key 仅能访问当前 Agent，撤销后立即失效。</p></div>
+          <div><p className="text-sm font-medium">按空间授权</p><p className="mt-1 text-xs leading-5 text-muted-foreground">生成的 Key 可访问该空间内所有 Agent 共享的 MCP 工具，撤销后立即失效。</p></div>
         </div>
       </div>
     </div>

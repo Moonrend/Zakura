@@ -14,8 +14,37 @@ export type SpaceItem = {
   workspaceHostPath: string;
   isDefault: boolean;
   agentCount: number;
+  mcpUrl?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SpaceProviderOptions = {
+  mcp: {
+    mode: "all" | "selected";
+    exposeWorkspaceFs?: boolean;
+    instances: Array<{
+      id: string;
+      name: string;
+      slug: string;
+      providerId: string;
+      status: string;
+      bound: boolean;
+    }>;
+  };
+};
+
+export type SpaceKey = {
+  id: string;
+  name: string;
+  agentId: string | null;
+  spaceId: string | null;
+  keyPrefix: string;
+  scopes: string[];
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  rawKey: string;
 };
 
 export async function fetchSpaces(): Promise<SpaceItem[]> {
@@ -46,4 +75,31 @@ export async function updateSpace(
 
 export async function deleteSpace(id: string): Promise<void> {
   await api(`/api/spaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function fetchSpaceProviders(id: string): Promise<SpaceProviderOptions> {
+  return api<SpaceProviderOptions>(`/api/spaces/${encodeURIComponent(id)}/providers`);
+}
+
+export async function saveSpaceProviders(
+  id: string,
+  body: {
+    mcp: {
+      mode?: "all" | "selected";
+      instanceIds?: string[];
+      exposeWorkspaceFs?: boolean;
+    };
+  },
+): Promise<SpaceProviderOptions> {
+  return api<SpaceProviderOptions>(`/api/spaces/${encodeURIComponent(id)}/providers`, {
+    method: "PUT",
+    json: body,
+  });
+}
+
+export async function createSpaceKey(id: string, name: string): Promise<SpaceKey> {
+  return api<SpaceKey>(`/api/spaces/${encodeURIComponent(id)}/keys`, {
+    method: "POST",
+    json: { name },
+  });
 }

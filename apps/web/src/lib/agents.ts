@@ -24,7 +24,6 @@ export type AgentListItem = {
   workspaceKind?: "host" | "container";
   workspaceStatus?: string;
   lastError?: string | null;
-  mcpAgentUrl: string;
   needsContainer?: boolean;
   /** "shell" (lite image) | "display" (full image) */
   stackMode?: "none" | "shell" | "display";
@@ -53,7 +52,7 @@ export type AgentDetail = AgentListItem & {
   tools: Array<{
     name: string;
     description?: string;
-    agentScoped: boolean;
+    spaceScoped: boolean;
     providerId?: string;
     inputSchema?: Record<string, unknown>;
   }>;

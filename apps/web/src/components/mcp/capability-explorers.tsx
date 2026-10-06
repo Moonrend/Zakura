@@ -20,7 +20,7 @@ export type McpToolRow = {
   providerId?: string;
   inputSchema?: Record<string, unknown>;
   localName?: string;
-  agentScoped?: boolean;
+  spaceScoped?: boolean;
 };
 
 export type McpResourceRow = {
@@ -61,11 +61,9 @@ function EmptyRow({ colSpan, children }: { colSpan: number; children: React.Reac
 
 export function McpToolsExplorer({
   tools,
-  agentId,
   emptyHint = "暂无工具",
 }: {
   tools: McpToolRow[];
-  agentId?: string;
   emptyHint?: string;
 }) {
   const [selected, setSelected] = useState<McpToolRow | null>(null);
@@ -89,7 +87,6 @@ export function McpToolsExplorer({
         json: {
           qualifiedName: selected.qualifiedName,
           arguments: args,
-          agentId,
         },
       });
       setResultText(JSON.stringify(res.result, null, 2));
@@ -176,12 +173,10 @@ export function McpToolsExplorer({
 export function McpResourcesExplorer({
   resources,
   templates = [],
-  agentId,
   emptyHint = "暂无资源",
 }: {
   resources: McpResourceRow[];
   templates?: McpResourceTemplateRow[];
-  agentId?: string;
   emptyHint?: string;
 }) {
   const [selected, setSelected] = useState<McpResourceRow | null>(null);
@@ -195,7 +190,7 @@ export function McpResourcesExplorer({
     try {
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/resources/read", {
         method: "POST",
-        json: { uri: row.uri, agentId },
+        json: { uri: row.uri },
       });
       setResultText(JSON.stringify(res.result, null, 2));
     } catch (err) {
@@ -324,11 +319,9 @@ export function McpResourcesExplorer({
 
 export function McpPromptsExplorer({
   prompts,
-  agentId,
   emptyHint = "暂无 Prompts",
 }: {
   prompts: McpPromptRow[];
-  agentId?: string;
   emptyHint?: string;
 }) {
   const [selected, setSelected] = useState<McpPromptRow | null>(null);
@@ -367,7 +360,6 @@ export function McpPromptsExplorer({
         json: {
           name: selected.name,
           arguments: args,
-          agentId,
         },
       });
       setResultText(JSON.stringify(res.result, null, 2));
@@ -464,11 +456,9 @@ export function McpPromptsExplorer({
 export function McpPromptCompletePanel({
   promptName,
   argumentName,
-  agentId,
 }: {
   promptName: string;
   argumentName: string;
-  agentId?: string;
 }) {
   const [value, setValue] = useState("");
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -485,7 +475,6 @@ export function McpPromptCompletePanel({
         json: {
           ref: { type: "ref/prompt", name: promptName },
           argument: { name: argumentName, value },
-          agentId,
         },
       });
       setSuggestions(res.result.completion?.values ?? []);

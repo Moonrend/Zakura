@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Check, ChevronDown, KeyRound, Loader2, Package } from "lucide-react";
 import { api } from "@/lib/api";
-import { fetchAgents, type AgentListItem } from "@/lib/agents";
+import { fetchSpaces, type SpaceItem } from "@/lib/spaces";
 import {
   kindLabel,
   packageManagerLabel,
@@ -19,10 +19,10 @@ import {
   verifyUpstreamOauth,
 } from "@/lib/mcp-oauth";
 import {
-  AgentTargetPicker,
-  resolveAgentIds,
-  type AgentTargetValue,
-} from "@/components/agent-target-picker";
+  SpaceTargetPicker,
+  resolveSpaceIds,
+  type SpaceTargetValue,
+} from "@/components/space-target-picker";
 import { ProgressLinear } from "@/components/ui/progress-linear";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,15 +53,15 @@ type McpInstallFlowProps = {
   className?: string;
   /** 隐藏本组件内进度条（由卡片顶栏承担） */
   hideProgress?: boolean;
-  /** 预加载的 Agent 列表；不传则自行拉取，默认绑定全部 */
-  agents?: AgentListItem[];
-  defaultAgentIds?: string[];
+  /** 预加载的空间列表；不传则自行拉取，默认绑定全部 */
+  spaces?: SpaceItem[];
+  defaultSpaceIds?: string[];
 };
 
 /**
  * 统一安装面板：支持 HTTP OAuth / API Key、商店安装、stdio（npm / pypi / oci）。
  * 安装状态完全内聚；进度动画由外层卡片顶栏展示。
- * 默认绑定到全部 Agent，可在安装前改选。
+ * 默认绑定到全部空间，可在安装前改选。
  */
 export function McpInstallFlow({
   config: initial,
@@ -69,8 +69,8 @@ export function McpInstallFlow({
   onPhaseChange,
   className,
   hideProgress = false,
-  agents: agentsProp,
-  defaultAgentIds,
+  spaces: spacesProp,
+  defaultSpaceIds,
 }: McpInstallFlowProps) {
   const [config] = useState(initial);
   const [envValues, setEnvValues] = useState<Record<string, string>>(() => {
@@ -90,15 +90,15 @@ export function McpInstallFlow({
   );
   const [error, setError] = useState<string | null>(null);
   const [instanceId, setInstanceId] = useState<string | null>(null);
-  const [agents, setAgents] = useState<AgentListItem[]>(agentsProp ?? []);
-  const [agentTarget, setAgentTarget] = useState<AgentTargetValue>(() => ({
-    all: !defaultAgentIds?.length,
-    agentIds: defaultAgentIds ?? [],
+  const [spaces, setSpaces] = useState<SpaceItem[]>(spacesProp ?? []);
+  const [spaceTarget, setSpaceTarget] = useState<SpaceTargetValue>(() => ({
+    all: !defaultSpaceIds?.length,
+    spaceIds: defaultSpaceIds ?? [],
   }));
-  const agentTargetRef = useRef(agentTarget);
-  agentTargetRef.current = agentTarget;
-  const agentsRef = useRef(agents);
-  agentsRef.current = agents;
+  const spaceTargetRef = useRef(spaceTarget);
+  spaceTargetRef.current = spaceTarget;
+  const spacesRef = useRef(spaces);
+  spacesRef.current = spaces;
   const [showPat, setShowPat] = useState(false);
   const [pat, setPat] = useState("");
   const [sharedOauth, setSharedOauth] = useState<{
@@ -131,14 +131,14 @@ export function McpInstallFlow({
   useEffect(() => () => unsubRef.current?.(), []);
 
   useEffect(() => {
-    if (agentsProp) {
-      setAgents(agentsProp);
+    if (spacesProp) {
+      setSpaces(spacesProp);
       return;
     }
     let cancelled = false;
-    void fetchAgents()
+    void fetchSpaces()
       .then((list) => {
-        if (!cancelled) setAgents(list);
+        if (!cancelled) setSpaces(list);
       })
       .catch(() => {
         /* 绑定失败时仍可完成安装 */
@@ -146,7 +146,7 @@ export function McpInstallFlow({
     return () => {
       cancelled = true;
     };
-  }, [agentsProp]);
+  }, [spacesProp]);
 
   useEffect(() => {
     if (config.kind !== "http" || config.auth !== "oauth") return;
@@ -187,23 +187,23 @@ export function McpInstallFlow({
     };
   }, [config.kind, config.auth, config.mcpUrl, config.oauth?.providerId]);
 
-  async function bindAgents(id: string) {
-    // 服务端安装 API 已默认绑定；此处保留作 OAuth 完成等补绑，并避免 agents 未加载时静默跳过
-    let list = agentsRef.current;
-    if (agentTargetRef.current.all && !list.length) {
+  async function bindSpaces(id: string) {
+    // 服务端安装 API 已默认绑定；此处保留作 OAuth 完成等补绑，并避免 spaces 未加载时静默跳过
+    let list = spacesRef.current;
+    if (spaceTargetRef.current.all && !list.length) {
       try {
-        list = await fetchAgents();
-        setAgents(list);
-        agentsRef.current = list;
+        list = await fetchSpaces();
+        setSpaces(list);
+        spacesRef.current = list;
       } catch {
         /* 服务端已绑定则无妨 */
       }
     }
-    const ids = resolveAgentIds(agentTargetRef.current, list);
+    const ids = resolveSpaceIds(spaceTargetRef.current, list);
     if (!ids.length) return;
     await Promise.all(
-      ids.map((agentId) =>
-        api(`/api/agents/${agentId}/bindings`, {
+      ids.map((spaceId) =>
+        api(`/api/spaces/${spaceId}/bindings`, {
           method: "POST",
           json: { instanceId: id },
         }).catch(() => undefined),
@@ -211,14 +211,14 @@ export function McpInstallFlow({
     );
   }
 
-  function installAgentPayload() {
-    return agentTargetRef.current.all
+  function installSpacePayload() {
+    return spaceTargetRef.current.all
       ? { all: true as const }
-      : { all: false as const, agentIds: agentTargetRef.current.agentIds };
+      : { all: false as const, spaceIds: spaceTargetRef.current.spaceIds };
   }
 
   async function finishInstall(result: InstallResult) {
-    await bindAgents(result.instanceId);
+    await bindSpaces(result.instanceId);
     setPhase("done");
     onComplete?.(result);
   }
@@ -293,12 +293,12 @@ export function McpInstallFlow({
       } catch {
         /* 可能已在运行 */
       }
-      await bindAgents(id);
+      await bindSpaces(id);
       setPhase("done");
       toast.success("已授权并启动");
       onComplete?.({ instanceId: id, slug: config.name });
     },
-    // bindAgents 用 ref，故意不列入 deps
+    // bindSpaces 用 ref，故意不列入 deps
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [config.name, onComplete, setPhase],
   );
@@ -344,7 +344,7 @@ export function McpInstallFlow({
         env: envValues,
         displayName: config.name,
         start: true,
-        ...installAgentPayload(),
+        ...installSpacePayload(),
       },
     });
 
@@ -392,7 +392,7 @@ export function McpInstallFlow({
         workingDir: config.workingDir ?? "/data",
         packageManager: config.packageManager ?? "npm",
         start: true,
-        ...installAgentPayload(),
+        ...installSpacePayload(),
       },
     });
     if (!res.started && res.startError) {
@@ -426,7 +426,7 @@ export function McpInstallFlow({
           authMode: "oauth",
           start: false,
           ...oauthClientPayload(),
-          ...installAgentPayload(),
+          ...installSpacePayload(),
         },
       });
       setInstanceId(res.instance.id);
@@ -471,7 +471,7 @@ export function McpInstallFlow({
         apiKey: config.auth === "apiKey" ? config.apiKey || pat : "",
         headerName: config.headerName ?? "Authorization",
         start: true,
-        ...installAgentPayload(),
+        ...installSpacePayload(),
       },
     });
     if (res.authRequired) {
@@ -509,7 +509,7 @@ export function McpInstallFlow({
           apiKey: pat.trim(),
           headerName: "Authorization",
           start: true,
-          ...installAgentPayload(),
+          ...installSpacePayload(),
         },
       });
       toast.success("已接入并启动");
@@ -751,10 +751,10 @@ export function McpInstallFlow({
         ) : null}
 
         {phase === "idle" || phase === "error" ? (
-          <AgentTargetPicker
-            agents={agents}
-            value={agentTarget}
-            onChange={setAgentTarget}
+          <SpaceTargetPicker
+            spaces={spaces}
+            value={spaceTarget}
+            onChange={setSpaceTarget}
             disabled={busy}
           />
         ) : null}
@@ -764,8 +764,8 @@ export function McpInstallFlow({
             <Button
               disabled={
                 busy ||
-                (agents.length > 0 &&
-                  resolveAgentIds(agentTarget, agents).length === 0)
+                (spaces.length > 0 &&
+                  resolveSpaceIds(spaceTarget, spaces).length === 0)
               }
               onClick={() => void startInstall()}
             >

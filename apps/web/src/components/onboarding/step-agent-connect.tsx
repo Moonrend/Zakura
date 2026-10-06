@@ -2,16 +2,16 @@
 
 import { useState } from "react";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
-import { AgentConnectPanel } from "@/components/agent-connect-panel";
+import { SpaceConnectPanel } from "@/components/space-connect-panel";
 import { SettingsHeader } from "@/components/settings-shell";
 import { Button } from "@/components/ui/button";
 
 type Props = {
-  agent: {
+  space: {
     id: string;
     name: string;
     slug: string;
-    mcpAgentUrl: string;
+    mcpUrl: string;
   };
   busy?: boolean;
   onBack: () => void;
@@ -21,7 +21,7 @@ type Props = {
 };
 
 export function StepAgentConnect({
-  agent,
+  space,
   busy,
   onBack,
   onConfigured,
@@ -45,13 +45,14 @@ export function StepAgentConnect({
 
       <SettingsHeader
         title="接入代理工具"
-        description={`将 ${agent.name} 作为标准 MCP 服务接入其他代理或自动化系统。`}
+        description={`将 ${space.name} 作为标准 MCP 服务接入其他代理或自动化系统。`}
       />
 
-      <AgentConnectPanel
-        agentId={agent.id}
-        agentSlug={agent.slug}
-        mcpAgentUrl={agent.mcpAgentUrl}
+      <SpaceConnectPanel
+        spaceId={space.id}
+        spaceSlug={space.slug}
+        spaceName={space.name}
+        mcpUrl={space.mcpUrl}
         compact
         disabled={busy}
         onConfigured={() => {

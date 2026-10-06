@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ChevronDown, Copy, KeyRound, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { createSpaceKey } from "@/lib/spaces";
 import { Button } from "@/components/ui/button";
 import { PageLoading } from "@/components/ui/progress-linear";
 import {
@@ -21,6 +22,7 @@ type ConnectMeta = {
     authorization_endpoint: string;
     token_endpoint: string;
   };
+  spaces?: Array<{ id: string; name: string; slug: string; mcpUrl: string }>;
 };
 
 type FormatId = "mcpServers" | "servers" | "request";
@@ -60,25 +62,25 @@ function CopyBlock({ title, value }: { title: string; value: string }) {
   );
 }
 
-export type AgentConnectPanelProps = {
-  agentId: string;
-  agentSlug: string;
-  mcpAgentUrl?: string;
+export type SpaceConnectPanelProps = {
+  spaceId: string;
+  spaceSlug: string;
+  spaceName?: string;
+  mcpUrl?: string;
   compact?: boolean;
   onConfigured?: () => void;
   disabled?: boolean;
 };
 
-export function AgentConnectPanel({
-  agentId,
-  agentSlug,
-  mcpAgentUrl: mcpAgentUrlProp,
+export function SpaceConnectPanel({
+  spaceId,
+  spaceSlug,
+  mcpUrl: mcpUrlProp,
   compact = false,
   onConfigured,
   disabled,
-}: AgentConnectPanelProps) {
-  const [mcpUrl, setMcpUrl] = useState(mcpAgentUrlProp ?? "");
-  const [slug, setSlug] = useState(agentSlug);
+}: SpaceConnectPanelProps) {
+  const [mcpUrl, setMcpUrl] = useState(mcpUrlProp ?? "");
   const [meta, setMeta] = useState<ConnectMeta | null>(null);
   const [rawKey, setRawKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,20 +92,13 @@ export function AgentConnectPanel({
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([
-      mcpAgentUrlProp
-        ? Promise.resolve({ mcpAgentUrl: mcpAgentUrlProp, slug: agentSlug })
-        : api<{ mcpAgentUrl: string; slug: string }>(`/api/agents/${agentId}`),
-      api<ConnectMeta>("/api/connect").catch(() => null),
-    ])
-      .then(([agent, connectMeta]) => {
+    void api<ConnectMeta>("/api/connect")
+      .catch(() => null)
+      .then((connectMeta) => {
         if (cancelled) return;
-        setMcpUrl(agent.mcpAgentUrl);
-        setSlug(agent.slug);
         setMeta(connectMeta);
-      })
-      .catch((error) => {
-        if (!cancelled) toast.error(error instanceof Error ? error.message : String(error));
+        const fromSpaces = connectMeta?.spaces?.find((item) => item.id === spaceId)?.mcpUrl;
+        setMcpUrl(mcpUrlProp || fromSpaces || "");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -111,9 +106,9 @@ export function AgentConnectPanel({
     return () => {
       cancelled = true;
     };
-  }, [agentId, agentSlug, mcpAgentUrlProp]);
+  }, [spaceId, mcpUrlProp]);
 
-  const serverName = `zakura-${slug || "agent"}`;
+  const serverName = `zakura-${spaceSlug || "space"}`;
   const keyPlaceholder = rawKey || "<access-key>";
   const snippets = useMemo(() => {
     const connection = {
@@ -127,7 +122,7 @@ export function AgentConnectPanel({
         null,
         2,
       ),
-      request: `curl -s ${mcpUrl || "…"} \\\n+  -H "Authorization: Bearer ${keyPlaceholder}" \\\n+  -H "Content-Type: application/json" \\\n+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+      request: `curl -s ${mcpUrl || "…"} \\\n  -H "Authorization: Bearer ${keyPlaceholder}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
     } satisfies Record<FormatId, string>;
   }, [keyPlaceholder, mcpUrl, serverName]);
 
@@ -143,10 +138,7 @@ export function AgentConnectPanel({
   const mintKey = useCallback(async () => {
     setBusy(true);
     try {
-      const result = await api<{ rawKey: string }>(`/api/agents/${agentId}/keys`, {
-        method: "POST",
-        json: { name: compact ? "onboarding" : "connect" },
-      });
+      const result = await createSpaceKey(spaceId, compact ? "onboarding" : "connect");
       setRawKey(result.rawKey);
       setKeyCopied(false);
       onConfigured?.();
@@ -156,7 +148,7 @@ export function AgentConnectPanel({
     } finally {
       setBusy(false);
     }
-  }, [agentId, compact, onConfigured]);
+  }, [spaceId, compact, onConfigured]);
 
   async function copyKey() {
     if (!rawKey) return;
@@ -174,9 +166,9 @@ export function AgentConnectPanel({
 
   return (
     <div className={cn("space-y-6", compact && "mx-auto max-w-2xl")}>
-      <section aria-labelledby={`mcp-url-${agentId}`}>
+      <section aria-labelledby={`mcp-url-${spaceId}`}>
         <div>
-          <p id={`mcp-url-${agentId}`} className="text-sm font-medium">MCP URL</p>
+          <p id={`mcp-url-${spaceId}`} className="text-sm font-medium">MCP URL</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             在支持远程 MCP 的代理或自动化系统中添加此地址。
           </p>
@@ -192,10 +184,10 @@ export function AgentConnectPanel({
         </div>
       </section>
 
-      <section className="border-t border-border/70 pt-6" aria-labelledby={`access-key-${agentId}`}>
+      <section className="border-t border-border/70 pt-6" aria-labelledby={`access-key-${spaceId}`}>
         <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
           <div>
-            <p id={`access-key-${agentId}`} className="text-sm font-medium">访问凭据</p>
+            <p id={`access-key-${spaceId}`} className="text-sm font-medium">访问凭据</p>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
               请求时使用 <code className="font-mono text-foreground">Authorization: Bearer &lt;key&gt;</code>。
             </p>
@@ -262,7 +254,7 @@ export function AgentConnectPanel({
                 <dl className="mt-3 grid gap-2 break-all rounded-lg bg-muted/30 p-3 font-mono text-[11px]">
                   <div><dt className="text-foreground">Authorization</dt><dd>{meta.authorizationServer.authorization_endpoint}</dd></div>
                   <div><dt className="text-foreground">Token</dt><dd>{meta.authorizationServer.token_endpoint}</dd></div>
-                  <div><dt className="text-foreground">Protected resource</dt><dd>{meta.publicBaseUrl}/.well-known/oauth-protected-resource/mcp/agents/{slug}</dd></div>
+                  <div><dt className="text-foreground">Protected resource</dt><dd>{meta.publicBaseUrl}/.well-known/oauth-protected-resource/mcp/spaces/{spaceSlug}</dd></div>
                 </dl>
               </details>
             ) : null}

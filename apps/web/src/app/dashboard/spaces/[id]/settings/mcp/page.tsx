@@ -6,13 +6,15 @@ import { toast } from "sonner";
 import { CloudDownload, RefreshCw, Store } from "lucide-react";
 import {
   fetchAgent,
-  fetchAgentProviders,
-  saveAgentProviders,
   statusVariant,
   type AgentDetail,
-  type AgentProviderOptions,
 } from "@/lib/agents";
-import { useAgentDetail } from "@/components/agent-detail-context";
+import {
+  fetchSpaceProviders,
+  saveSpaceProviders,
+  type SpaceProviderOptions,
+} from "@/lib/spaces";
+import { useSpaceSettings } from "@/components/space-settings-layout";
 import {
   McpPromptsExplorer,
   McpResourcesExplorer,
@@ -65,18 +67,19 @@ type McpBindingState = {
   exposeFs: boolean;
 };
 
-export default function AgentMcpPage() {
-  const { id } = useAgentDetail();
-  const [opts, setOpts] = useState<AgentProviderOptions | null>(null);
+export default function SpaceMcpPage() {
+  const { spaceId, hostAgentId } = useSpaceSettings();
+  const [opts, setOpts] = useState<SpaceProviderOptions | null>(null);
   const [detail, setDetail] = useState<AgentDetail | null>(null);
   const [state, setState] = useState<McpBindingState | null>(null);
   const [capsBusy, setCapsBusy] = useState(false);
   const [tab, setTab] = useState("bindings");
   const selectedRef = useRef<string[]>([]);
+  const hasCapabilities = Boolean(hostAgentId);
 
   const loadBindings = useCallback(async () => {
     try {
-      const p = await fetchAgentProviders(id);
+      const p = await fetchSpaceProviders(spaceId);
       setOpts(p);
       const selected = p.mcp.instances.filter((i) => i.bound).map((i) => i.id);
       selectedRef.current = selected;
@@ -88,55 +91,56 @@ export default function AgentMcpPage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
-  }, [id]);
+  }, [spaceId]);
 
   const loadCapabilities = useCallback(async () => {
+    if (!hostAgentId) return;
     setCapsBusy(true);
     try {
-      const d = await fetchAgent(id);
+      const d = await fetchAgent(hostAgentId);
       setDetail(d);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setCapsBusy(false);
     }
-  }, [id]);
+  }, [hostAgentId]);
 
   useEffect(() => {
     void loadBindings();
   }, [loadBindings]);
 
   useEffect(() => {
-    if (tab !== "bindings" && !detail) {
+    if (tab !== "bindings" && !detail && hostAgentId) {
       void loadCapabilities();
     }
-  }, [tab, detail, loadCapabilities]);
+  }, [tab, detail, loadCapabilities, hostAgentId]);
 
   const persist = useCallback(
     async (patch: Partial<McpBindingState>) => {
       const mode = patch.mode ?? state?.mode ?? "selected";
       const selected = patch.selected ?? selectedRef.current;
       const exposeFs = patch.exposeFs ?? state?.exposeFs ?? true;
-      const res = await saveAgentProviders(id, {
+      const res = await saveSpaceProviders(spaceId, {
         mcp: {
           mode,
           instanceIds: mode === "selected" ? selected : undefined,
           exposeWorkspaceFs: exposeFs,
         },
       });
-      setOpts(res.options);
-      const nextSelected = res.options.mcp.instances
+      setOpts(res);
+      const nextSelected = res.mcp.instances
         .filter((i) => i.bound)
         .map((i) => i.id);
       selectedRef.current = nextSelected;
       setState({
-        mode: res.options.mcp.mode,
+        mode: res.mcp.mode,
         selected: nextSelected,
-        exposeFs: res.options.mcp.exposeWorkspaceFs !== false,
+        exposeFs: res.mcp.exposeWorkspaceFs !== false,
       });
       setDetail(null);
     },
-    [id, state?.mode, state?.exposeFs],
+    [spaceId, state?.mode, state?.exposeFs],
   );
 
   const { status, error, saveNow } = useAutoSave(persist);
@@ -176,7 +180,7 @@ export default function AgentMcpPage() {
       description: t.description,
       providerId: t.providerId,
       inputSchema: t.inputSchema,
-      agentScoped: t.agentScoped,
+      spaceScoped: t.spaceScoped,
     })) ?? [];
   const resources = detail?.resources ?? [];
   const prompts = detail?.prompts ?? [];
@@ -233,18 +237,22 @@ export default function AgentMcpPage() {
       >
         <TabsList variant="line" className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="bindings">绑定</TabsTrigger>
-          <TabsTrigger value="tools">
-            工具{detail ? ` · ${tools.length}` : ""}
-          </TabsTrigger>
-          <TabsTrigger value="resources">
-            资源
-            {detail
-              ? ` · ${resources.length}${templates.length ? ` / 模板 ${templates.length}` : ""}`
-              : ""}
-          </TabsTrigger>
-          <TabsTrigger value="prompts">
-            Prompts{detail ? ` · ${prompts.length}` : ""}
-          </TabsTrigger>
+          {hasCapabilities ? (
+            <>
+              <TabsTrigger value="tools">
+                工具{detail ? ` · ${tools.length}` : ""}
+              </TabsTrigger>
+              <TabsTrigger value="resources">
+                资源
+                {detail
+                  ? ` · ${resources.length}${templates.length ? ` / 模板 ${templates.length}` : ""}`
+                  : ""}
+              </TabsTrigger>
+              <TabsTrigger value="prompts">
+                Prompts{detail ? ` · ${prompts.length}` : ""}
+              </TabsTrigger>
+            </>
+          ) : null}
         </TabsList>
 
         <TabsContent value="bindings" className="mt-4 space-y-4">
@@ -278,6 +286,12 @@ export default function AgentMcpPage() {
               </Select>
             </div>
           </SettingsSection>
+
+          {!hasCapabilities ? (
+            <p className="text-xs text-muted-foreground">
+              此空间还没有 Agent，添加后可查看工具详情
+            </p>
+          ) : null}
 
           {instances.length === 0 ? (
             <div className="rounded-lg border border-dashed py-12 text-center">
@@ -362,42 +376,43 @@ export default function AgentMcpPage() {
 
         </TabsContent>
 
-        <TabsContent value="tools" className="mt-4">
-          {capsBusy && !detail ? (
-            <PageLoading />
-          ) : (
-            <McpToolsExplorer
-              tools={tools}
-              agentId={id}
-              emptyHint="当前绑定下暂无聚合工具（请确认实例运行中）"
-            />
-          )}
-        </TabsContent>
+        {hasCapabilities ? (
+          <>
+            <TabsContent value="tools" className="mt-4">
+              {capsBusy && !detail ? (
+                <PageLoading />
+              ) : (
+                <McpToolsExplorer
+                  tools={tools}
+                  emptyHint="当前绑定下暂无聚合工具（请确认实例运行中）"
+                />
+              )}
+            </TabsContent>
 
-        <TabsContent value="resources" className="mt-4">
-          {capsBusy && !detail ? (
-            <PageLoading />
-          ) : (
-            <McpResourcesExplorer
-              resources={resources}
-              templates={templates}
-              agentId={id}
-              emptyHint="当前绑定下暂无资源"
-            />
-          )}
-        </TabsContent>
+            <TabsContent value="resources" className="mt-4">
+              {capsBusy && !detail ? (
+                <PageLoading />
+              ) : (
+                <McpResourcesExplorer
+                  resources={resources}
+                  templates={templates}
+                  emptyHint="当前绑定下暂无资源"
+                />
+              )}
+            </TabsContent>
 
-        <TabsContent value="prompts" className="mt-4">
-          {capsBusy && !detail ? (
-            <PageLoading />
-          ) : (
-            <McpPromptsExplorer
-              prompts={prompts}
-              agentId={id}
-              emptyHint="当前绑定下暂无 Prompts"
-            />
-          )}
-        </TabsContent>
+            <TabsContent value="prompts" className="mt-4">
+              {capsBusy && !detail ? (
+                <PageLoading />
+              ) : (
+                <McpPromptsExplorer
+                  prompts={prompts}
+                  emptyHint="当前绑定下暂无 Prompts"
+                />
+              )}
+            </TabsContent>
+          </>
+        ) : null}
       </Tabs>
     </div>
   );
