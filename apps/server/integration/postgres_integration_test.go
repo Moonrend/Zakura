@@ -102,7 +102,7 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if migrationsApplied != 3 || users != 1 || tenants != 1 || agentCount != 1 {
+	if migrationsApplied != 4 || users != 1 || tenants != 1 || agentCount != 1 {
 		t.Fatalf("unexpected durable rows: migrations=%d users=%d tenants=%d agents=%d", migrationsApplied, users, tenants, agentCount)
 	}
 

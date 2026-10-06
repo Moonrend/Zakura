@@ -101,22 +101,28 @@ func (h *handler) runMemorySearch(ctx context.Context, tenant, agent string, arg
 	if limit < 1 || limit > 50 {
 		limit = 8
 	}
-	items, err := h.store.ListMemories(ctx, tenant, agent, builtinStringArg(args, "query"), "", limit)
+	query := builtinStringArg(args, "query")
+	items, err := h.store.ListMemories(ctx, tenant, agent, query, "", 100)
 	if err != nil {
 		return nil, err
 	}
-	results := make([]map[string]any, 0, len(items))
-	for _, item := range items {
+	scored, _ := h.memoryScoredSearch(ctx, tenant, agent, query, limit)
+	merged := mergeMemorySearch(limit, scored, items)
+	results := make([]map[string]any, 0, len(merged))
+	for _, hit := range merged {
 		entry := map[string]any{
-			"id":         item.ID,
-			"content":    item.Content,
-			"layer":      item.Layer,
-			"pinned":     item.Pinned,
-			"importance": item.Importance,
-			"createdAt":  item.CreatedAt,
+			"id":         hit.Memory.ID,
+			"content":    hit.Memory.Content,
+			"layer":      hit.Memory.Layer,
+			"pinned":     hit.Memory.Pinned,
+			"importance": hit.Memory.Importance,
+			"createdAt":  hit.Memory.CreatedAt,
 		}
-		if len(item.Tags) > 0 && string(item.Tags) != "null" {
-			entry["tags"] = json.RawMessage(item.Tags)
+		if len(hit.Memory.Tags) > 0 && string(hit.Memory.Tags) != "null" {
+			entry["tags"] = json.RawMessage(hit.Memory.Tags)
+		}
+		if hit.Semantic {
+			entry["score"] = memoryScoreValue(hit.Score)
 		}
 		results = append(results, entry)
 	}

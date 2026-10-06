@@ -34,6 +34,8 @@ type handler struct {
 	mcpSessions    map[string]spaceMCPSession
 	agentToolMu    sync.Mutex
 	agentToolCache map[string]cachedCatalog
+	trigramMu      sync.Mutex
+	trigramStates  map[string]string
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
@@ -891,7 +893,7 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 	if space.EnableComputer {
 		groups = append(groups,
 			map[string]any{"id": "builtin:computer", "kind": "builtin", "label": "Computer environment", "tools": []string{"fs_list", "fs_read", "fs_write", "shell_exec", "apply_patch"}},
-			map[string]any{"id": "builtin:desktop", "kind": "builtin", "label": "Desktop control", "tools": []string{"computer_screenshot", "computer_click", "computer_type", "desktop_info"}},
+			map[string]any{"id": "builtin:desktop", "kind": "builtin", "label": "Desktop control", "tools": []string{"computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info"}},
 			map[string]any{"id": "builtin:browser", "kind": "builtin", "label": "Browser", "tools": []string{"browser_open", "browser_click", "browser_type"}},
 		)
 	}

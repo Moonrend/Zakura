@@ -82,6 +82,9 @@ func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) 
 type columnSpec struct{ table, name, sqlite, postgres string }
 
 func ensureAdditiveCompatibility(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {
+	if dialect == "postgres" {
+		ensurePostgresTrigram(ctx, db)
+	}
 	specs := []columnSpec{
 		{"platform_meta", "singleton", "INTEGER", "INTEGER"}, {"platform_meta", "settings_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
 		{"users", "status", "TEXT NOT NULL DEFAULT 'active'", "TEXT NOT NULL DEFAULT 'active'"}, {"users", "avatar_mime", "TEXT", "TEXT"}, {"users", "avatar_data", "BLOB", "BYTEA"}, {"users", "totp_secret", "TEXT", "TEXT"}, {"users", "totp_pending_secret", "TEXT", "TEXT"}, {"users", "recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'", "TEXT NOT NULL DEFAULT '[]'"}, {"users", "suspended_reason", "TEXT", "TEXT"}, {"users", "suspended_by_user_id", "TEXT", "TEXT"},
@@ -209,6 +212,10 @@ func ensureAdditiveCompatibility(ctx context.Context, db *sql.DB, dialect string
 		}
 	}
 	return nil
+}
+
+func ensurePostgresTrigram(ctx context.Context, db *sql.DB) {
+	_, _ = db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS pg_trgm`)
 }
 
 func postgresColumnType(ctx context.Context, db *sql.DB, rebind func(string) string, table, column string) (string, error) {
