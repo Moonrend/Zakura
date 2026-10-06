@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,6 +57,63 @@ func mcpToolModelName(ref, instanceName, local string) string {
 		name = name[:55] + hex.EncodeToString(sum[:])[:8]
 	}
 	return name
+}
+
+func mcpExposureValue(value string) bool {
+	switch value {
+	case "direct", "deferred", "hidden":
+		return true
+	}
+	return false
+}
+
+func mcpToolPatternRegExp(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteString(".*")
+		case '.', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
+func toolExposureOf(config map[string]any, localToolName string) string {
+	exposure := "deferred"
+	if value, ok := config["exposure"].(string); ok && mcpExposureValue(value) {
+		exposure = value
+	}
+	overrides, _ := config["toolExposure"].(map[string]any)
+	if len(overrides) == 0 {
+		return exposure
+	}
+	if value, ok := overrides[localToolName].(string); ok && mcpExposureValue(value) {
+		return value
+	}
+	patterns := make([]string, 0, len(overrides))
+	for pattern := range overrides {
+		if strings.Contains(pattern, "*") {
+			patterns = append(patterns, pattern)
+		}
+	}
+	sort.Strings(patterns)
+	for _, pattern := range patterns {
+		value, ok := overrides[pattern].(string)
+		if !ok || !mcpExposureValue(value) {
+			continue
+		}
+		if regexp.MustCompile(mcpToolPatternRegExp(pattern)).MatchString(localToolName) {
+			return value
+		}
+	}
+	return exposure
 }
 
 func directBuiltin(name, description string, properties map[string]any, required ...string) agentTool {
@@ -158,13 +217,6 @@ func (h *handler) agentMCPCatalogTools(ctx context.Context, tenant, agentID, spa
 		}
 		cfg := map[string]any{}
 		_ = json.Unmarshal(inst.Config, &cfg)
-		exposure := "deferred"
-		if value, ok := cfg["exposure"].(string); ok {
-			switch value {
-			case "direct", "deferred", "hidden":
-				exposure = value
-			}
-		}
 		serverDescription, _ := cfg["description"].(string)
 		if serverDescription == "" {
 			serverDescription = inst.Name
@@ -203,7 +255,7 @@ func (h *handler) agentMCPCatalogTools(ctx context.Context, tenant, agentID, spa
 				LocalName:         local,
 				Description:       tool.Description,
 				InputSchema:       normalizeToolSchema(tool.InputSchema),
-				Exposure:          exposure,
+				Exposure:          toolExposureOf(cfg, local),
 				ServerName:        inst.Name,
 				ServerRef:         inst.Ref,
 				ServerDescription: serverDescription,
@@ -394,10 +446,23 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 		}, "agent", "prompt"),
 	)
 	if hasSearchableMCP {
-		tools = append(tools, directBuiltin("tool_search", TOOL_SEARCH_DESCRIPTION, map[string]any{
-			"query": map[string]any{"type": "string"},
-			"limit": map[string]any{"type": "integer", "description": "Max tools to load. Default 8."},
-		}, "query"))
+		tools = append(tools,
+			directBuiltin("tool_search", TOOL_SEARCH_DESCRIPTION, map[string]any{
+				"query": map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer", "description": "Max tools to load. Default 8."},
+			}, "query"),
+			deferredBuiltin("list_mcp_resources", "List resources provided by MCP servers. Resources share data such as files, database schemas or application-specific information. Prefer resources over web search when possible.", map[string]any{
+				"server": map[string]any{"type": "string", "description": "MCP server name, component ref or mcp__ slug. Omit to list every server with resources."},
+				"cursor": map[string]any{"type": "string", "description": "Opaque cursor from a previous call with the same server; omit for the first page."},
+			}),
+			deferredBuiltin("list_mcp_resource_templates", "List resource templates provided by MCP servers. Parameterized templates share data that takes parameters.", map[string]any{
+				"server": map[string]any{"type": "string", "description": "MCP server name, component ref or mcp__ slug. Omit to list every server with resources."},
+			}),
+			deferredBuiltin("read_mcp_resource", "Read a specific resource from an MCP server given the server name and resource URI.", map[string]any{
+				"server": map[string]any{"type": "string", "description": "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."},
+				"uri":    map[string]any{"type": "string", "description": "Resource URI to read. Must be one of the URIs returned by list_mcp_resources."},
+			}, "server", "uri"),
+		)
 	}
 	tools = append(tools, mcpTools...)
 	return agentCatalog{Tools: tools}, nil

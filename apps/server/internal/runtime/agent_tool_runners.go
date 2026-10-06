@@ -78,6 +78,8 @@ func (h *handler) runBuiltinTool(ctx context.Context, tenant, agent, name string
 		return h.runWebSearch(ctx, tenant, agent, args)
 	case "web_fetch":
 		return h.runWebFetch(ctx, tenant, agent, args)
+	case "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource":
+		return h.runBuiltinToolResources(ctx, tenant, agent, name, parsed)
 	default:
 		return nil, fmt.Errorf("unknown builtin tool %q", name)
 	}

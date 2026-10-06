@@ -60,6 +60,327 @@ func catalogByName(catalog agentCatalog) map[string]agentTool {
 	return out
 }
 
+func newFakeMCPExposureTools() *httptest.Server {
+	tool := func(name string) map[string]any {
+		return map[string]any{"name": name, "description": name, "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}}
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if method, _ := req["method"].(string); method == "tools/list" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{"tools": []any{
+				tool("get_issue"), tool("delete_issue"), tool("create_issue"), tool("update_issue"),
+			}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": map[string]any{}})
+	}))
+}
+
+func newFakeMCPResourceTools() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		method, _ := req["method"].(string)
+		params, _ := req["params"].(map[string]any)
+		id := req["id"]
+		switch method {
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"tools": []any{
+				map[string]any{"name": "search", "description": "search", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+			}}})
+		case "resources/list":
+			if cursor, _ := params["cursor"].(string); cursor == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"resources":  []any{map[string]any{"uri": "docs://a", "name": "A", "description": "first", "mimeType": "text/plain"}},
+					"nextCursor": "c2",
+				}})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"resources": []any{map[string]any{"uri": "docs://b", "name": "B", "mimeType": "text/plain"}},
+				}})
+			}
+		case "resources/templates/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+				"resourceTemplates": []any{map[string]any{"uriTemplate": "docs://{id}", "name": "Doc"}},
+			}})
+		case "resources/read":
+			uri, _ := params["uri"].(string)
+			if uri == "docs://blob" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"contents": []any{map[string]any{"uri": uri, "mimeType": "image/png", "blob": "aGVsbG8="}},
+				}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+				"contents": []any{map[string]any{"uri": uri, "mimeType": "text/plain", "text": "hello"}},
+			}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
+		}
+	}))
+}
+
+func TestToolExposureOf(t *testing.T) {
+	config := map[string]any{"exposure": "deferred", "toolExposure": map[string]any{
+		"get_issue": "hidden",
+		"get_*":     "direct",
+		"create_*":  "deferred",
+		"*_issue":   "hidden",
+	}}
+	if got := toolExposureOf(config, "get_issue"); got != "hidden" {
+		t.Fatalf("exact name should win over pattern, got %q", got)
+	}
+	if got := toolExposureOf(config, "get_milestone"); got != "direct" {
+		t.Fatalf("pattern should apply, got %q", got)
+	}
+	if got := toolExposureOf(config, "create_comment"); got != "deferred" {
+		t.Fatalf("pattern should apply, got %q", got)
+	}
+	if got := toolExposureOf(config, "list_issue"); got != "hidden" {
+		t.Fatalf("first matching pattern should win, got %q", got)
+	}
+	if got := toolExposureOf(map[string]any{}, "unknown"); got != "deferred" {
+		t.Fatalf("default exposure should be deferred, got %q", got)
+	}
+	if got := toolExposureOf(map[string]any{"exposure": "hidden"}, "unknown"); got != "hidden" {
+		t.Fatalf("instance exposure should apply, got %q", got)
+	}
+	if got := toolExposureOf(map[string]any{"exposure": "deferred", "toolExposure": map[string]any{"a.b*": "direct"}}, "a.bx"); got != "direct" {
+		t.Fatalf("escaped pattern must match literal dot, got %q", got)
+	}
+	if got := toolExposureOf(map[string]any{"exposure": "deferred", "toolExposure": map[string]any{"a.b*": "direct"}}, "axbx"); got != "deferred" {
+		t.Fatalf("regex metacharacters must be escaped, got %q", got)
+	}
+	if got := toolExposureOf(map[string]any{"exposure": "deferred", "toolExposure": map[string]any{"x+y*": "hidden"}}, "x+yz"); got != "hidden" {
+		t.Fatalf("plus must match literally, got %q", got)
+	}
+}
+
+func TestAgentToolCatalogToolExposureOverrides(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	store := NewStore(d)
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", WorkspaceKind: "container"})
+	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	server := newFakeMCPExposureTools()
+	defer server.Close()
+	insertMCPInstance(t, d, "mcp-exposure", "tenant", nil, "gh", "GitHub", map[string]any{
+		"url":      server.URL,
+		"exposure": "deferred",
+		"toolExposure": map[string]any{
+			"get_*":        "direct",
+			"delete_*":     "hidden",
+			"create_issue": "deferred",
+		},
+	})
+	insertMCPBinding(t, d, "bind-1", "tenant", space.ID, "mcp-exposure")
+	h := &handler{deps: d, store: store}
+	h.service = NewService(store)
+	catalog, err := h.agentToolCatalog(context.Background(), "tenant", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := catalogByName(catalog)
+	cases := map[string]string{
+		"mcp__gh__get_issue":    "direct",
+		"mcp__gh__delete_issue": "hidden",
+		"mcp__gh__create_issue": "deferred",
+		"mcp__gh__update_issue": "deferred",
+	}
+	for name, want := range cases {
+		tool, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing %s, got %v", name, catalog.Tools)
+		}
+		if tool.Exposure != want {
+			t.Fatalf("%s exposure = %q, want %q", name, tool.Exposure, want)
+		}
+	}
+}
+
+func TestAgentToolCatalogResourceToolsGate(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	store := NewStore(d)
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", WorkspaceKind: "container"})
+	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	h := &handler{deps: d, store: store}
+	h.service = NewService(store)
+	catalog, err := h.agentToolCatalog(context.Background(), "tenant", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"} {
+		if _, ok := catalogByName(catalog)[name]; ok {
+			t.Fatalf("%s registered without any MCP instance", name)
+		}
+	}
+
+	server := newFakeMCPResourceTools()
+	defer server.Close()
+	insertMCPInstance(t, d, "mcp-res", "tenant", nil, "docs", "Docs", map[string]any{"url": server.URL})
+	insertMCPBinding(t, d, "bind-1", "tenant", space.ID, "mcp-res")
+	catalog, err = h.agentToolCatalog(context.Background(), "tenant", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := catalogByName(catalog)
+	for _, name := range []string{"tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"} {
+		tool, ok := byName[name]
+		if !ok {
+			t.Fatalf("%s missing with a searchable MCP instance", name)
+		}
+		if tool.Kind != "builtin" {
+			t.Fatalf("%s kind = %q", name, tool.Kind)
+		}
+	}
+	if byName["list_mcp_resources"].Exposure != "deferred" || byName["read_mcp_resource"].Exposure != "deferred" {
+		t.Fatalf("resource tools should be deferred: %+v", byName)
+	}
+}
+
+func TestListMCPResourcesAggregatesAndPaginates(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	store := NewStore(d)
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", WorkspaceKind: "container"})
+	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	server := newFakeMCPResourceTools()
+	defer server.Close()
+	insertMCPInstance(t, d, "mcp-res", "tenant", nil, "docs", "Docs", map[string]any{"url": server.URL})
+	insertMCPBinding(t, d, "bind-1", "tenant", space.ID, "mcp-res")
+	h := &handler{deps: d, store: store}
+	h.service = NewService(store)
+	ctx := context.Background()
+
+	allRaw, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "list_mcp_resources", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all struct {
+		Resources  []map[string]any `json:"resources"`
+		NextCursor string           `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(allRaw, &all); err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Resources) != 2 {
+		t.Fatalf("expected two pages aggregated, got %#v", all.Resources)
+	}
+	if all.Resources[0]["server"] != "Docs" || all.Resources[0]["uri"] != "docs://a" || all.Resources[1]["uri"] != "docs://b" {
+		t.Fatalf("unexpected aggregation %#v", all.Resources)
+	}
+	if all.NextCursor != "" {
+		t.Fatalf("all-server listing should not carry a cursor, got %q", all.NextCursor)
+	}
+
+	firstRaw, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "list_mcp_resources", map[string]any{"server": "Docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first struct {
+		Resources  []map[string]any `json:"resources"`
+		NextCursor string           `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(firstRaw, &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Resources) != 1 || first.Resources[0]["uri"] != "docs://a" || first.NextCursor != "c2" {
+		t.Fatalf("single-page listing = %#v cursor %q", first.Resources, first.NextCursor)
+	}
+
+	secondRaw, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "list_mcp_resources", map[string]any{"server": "mcp__docs", "cursor": "c2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var second struct {
+		Resources  []map[string]any `json:"resources"`
+		NextCursor string           `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(secondRaw, &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Resources) != 1 || second.Resources[0]["uri"] != "docs://b" || second.NextCursor != "" {
+		t.Fatalf("second page = %#v cursor %q", second.Resources, second.NextCursor)
+	}
+}
+
+func TestListMCPResourceTemplates(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	store := NewStore(d)
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", WorkspaceKind: "container"})
+	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	server := newFakeMCPResourceTools()
+	defer server.Close()
+	insertMCPInstance(t, d, "mcp-res", "tenant", nil, "docs", "Docs", map[string]any{"url": server.URL})
+	insertMCPBinding(t, d, "bind-1", "tenant", space.ID, "mcp-res")
+	h := &handler{deps: d, store: store}
+	h.service = NewService(store)
+
+	raw, err := h.runBuiltinToolResources(context.Background(), "tenant", agent.ID, "list_mcp_resource_templates", map[string]any{"server": "docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed struct {
+		Templates []map[string]any `json:"templates"`
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Templates) != 1 || listed.Templates[0]["uriTemplate"] != "docs://{id}" || listed.Templates[0]["server"] != "Docs" {
+		t.Fatalf("unexpected templates %#v", listed.Templates)
+	}
+}
+
+func TestReadMCPResourceTextAndBlob(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	store := NewStore(d)
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", WorkspaceKind: "container"})
+	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	server := newFakeMCPResourceTools()
+	defer server.Close()
+	insertMCPInstance(t, d, "mcp-res", "tenant", nil, "docs", "Docs", map[string]any{"url": server.URL})
+	insertMCPBinding(t, d, "bind-1", "tenant", space.ID, "mcp-res")
+	h := &handler{deps: d, store: store}
+	h.service = NewService(store)
+	ctx := context.Background()
+
+	textRaw, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "read_mcp_resource", map[string]any{"server": "Docs", "uri": "docs://a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text struct {
+		Contents []map[string]any `json:"contents"`
+	}
+	if err := json.Unmarshal(textRaw, &text); err != nil {
+		t.Fatal(err)
+	}
+	if len(text.Contents) != 1 || text.Contents[0]["text"] != "hello" || text.Contents[0]["mimeType"] != "text/plain" {
+		t.Fatalf("unexpected text contents %#v", text.Contents)
+	}
+
+	blobRaw, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "read_mcp_resource", map[string]any{"server": "mcp__docs", "uri": "docs://blob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blob struct {
+		Contents []map[string]any `json:"contents"`
+	}
+	if err := json.Unmarshal(blobRaw, &blob); err != nil {
+		t.Fatal(err)
+	}
+	if len(blob.Contents) != 1 || blob.Contents[0]["blob"] != "aGVsbG8=" || blob.Contents[0]["mimeType"] != "image/png" {
+		t.Fatalf("unexpected blob contents %#v", blob.Contents)
+	}
+
+	if _, err := h.runBuiltinToolResources(ctx, "tenant", agent.ID, "read_mcp_resource", map[string]any{"server": "nope", "uri": "docs://a"}); err == nil {
+		t.Fatal("unknown server should error")
+	}
+}
+
 func TestAgentToolCatalogMCPDeferred(t *testing.T) {
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")

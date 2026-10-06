@@ -17,7 +17,8 @@ func isBuiltinToolName(name string) bool {
 		"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine",
 		"list_automation_runs", "delegate_agent", "apply_patch",
 		"computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info",
-		"browser_open", "browser_click", "browser_type", "web_search", "web_fetch":
+		"browser_open", "browser_click", "browser_type", "web_search", "web_fetch",
+		"list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource":
 		return true
 	}
 	return false
