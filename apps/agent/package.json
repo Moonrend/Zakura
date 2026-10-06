@@ -1,0 +1,14 @@
+{
+  "name": "@zakura/agent",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "author": "Sunwuyuan <wuyuan.dev>",
+  "private": true,
+  "description": "Zakura workspace agent (cross-platform binary)",
+  "scripts": {
+    "build": "go build -o bin/zakura-agent ./cmd/zakura-agent",
+    "pack": "bash scripts/pack.sh",
+    "test": "go test ./...",
+    "typecheck": "go vet ./..."
+  }
+}

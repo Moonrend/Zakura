@@ -1,0 +1,14 @@
+{
+  "name": "@zakura/server",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "author": "Sunwuyuan <wuyuan.dev>",
+  "private": true,
+  "description": "Zakura Go backend: zakura-server, zakura-db, zakura-stdio-bridge",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "go test ./...",
+    "typecheck": "go vet ./..."
+  }
+}

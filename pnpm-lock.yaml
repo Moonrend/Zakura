@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  apps/agent: {}
+
   apps/oauth-bridge:
     dependencies:
       '@hono/node-server':
@@ -26,6 +28,8 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
+
+  apps/server: {}
 
   apps/web:
     dependencies:

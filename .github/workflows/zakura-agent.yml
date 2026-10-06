@@ -7,7 +7,7 @@ on:
       - "v*"
   pull_request:
     paths:
-      - "go/agent/**"
+      - "apps/agent/**"
       - ".github/workflows/zakura-agent.yml"
 
 permissions:
@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: go/agent
+        working-directory: apps/agent
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-          cache-dependency-path: go/agent/go.sum
+          cache-dependency-path: apps/agent/go.sum
       - run: go test ./...
       - name: pack binaries
         env:
@@ -34,9 +34,9 @@ jobs:
         with:
           name: zakura-agent-binaries
           path: |
-            go/agent/dist/zakura-agent_*
-            go/agent/dist/VERSION
-            go/agent/dist/checksums.txt
+            apps/agent/dist/zakura-agent_*
+            apps/agent/dist/VERSION
+            apps/agent/dist/checksums.txt
           if-no-files-found: error
 
   release:
@@ -55,7 +55,7 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: release --clean
-          workdir: go/agent
+          workdir: apps/agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4

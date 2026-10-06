@@ -8,7 +8,8 @@ dist
 .turbo
 **/coverage
 **/*.tsbuildinfo
-go/server/bin
+**/bin
+**/data
 
 # Local data & secrets
 data

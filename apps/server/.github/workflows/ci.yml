@@ -6,7 +6,7 @@ on:
       - ci/go-backend-validation
   pull_request:
     paths:
-      - "go/server/**"
+      - "apps/server/**"
       - ".github/workflows/go-backend-ci.yml"
   workflow_dispatch:
 
@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
-        working-directory: go/server
+        working-directory: apps/server
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -41,9 +41,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go/server/go.mod
+          go-version-file: apps/server/go.mod
           cache: true
-          cache-dependency-path: go/server/go.sum
+          cache-dependency-path: apps/server/go.sum
       - run: go test -race -count=1 ./...
       - run: go vet ./...
       - run: CGO_ENABLED=1 go run -tags tools ./tools/scanlint
@@ -86,7 +86,7 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
-        working-directory: go/server
+        working-directory: apps/server
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -108,9 +108,9 @@ jobs:
           version: 10.33.4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go/server/go.mod
+          go-version-file: apps/server/go.mod
           cache: true
-          cache-dependency-path: go/server/go.sum
+          cache-dependency-path: apps/server/go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -154,5 +154,5 @@ jobs:
         if: always()
         with:
           name: go-backend-browser-screenshots
-          path: go/server/artifacts/go-backend-browser
+          path: apps/server/artifacts/go-backend-browser
           if-no-files-found: error

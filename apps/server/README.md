@@ -13,12 +13,23 @@ job; user-configured stdio MCP commands remain external component processes.
 
 ## Run locally
 
+From the repository root (or via pnpm from any workspace):
+
+```sh
+pnpm --filter @zakura/server dev
+```
+
+The dev launcher loads `data/dev.env` when present (process env wins), generates
+and persists a `ZAKURA_SECRET` if missing, builds `bin/zakura-server` and starts
+it with SQLite defaults (`PUBLIC_BASE_URL=http://localhost:8787`,
+`WEB_PUBLIC_URL=http://localhost:3001`). Equivalent manual invocation:
+
 ```sh
 export ZAKURA_SECRET='replace-with-at-least-32-random-bytes'
 export DATABASE_URL='file:./data/zakura.db'
 export DATA_DIR='./data'
 export PUBLIC_BASE_URL='http://localhost:8787'
-export WEB_PUBLIC_URL='http://localhost:3000'
+export WEB_PUBLIC_URL='http://localhost:3001'
 go run ./cmd/zakura-server
 ```
 
@@ -37,7 +48,6 @@ compatible with the pinned Zakura contract.
 make test
 make race
 make vet
-make route-ledger REFERENCE=../zakura-rewrite/docs/ROUTE_ACCEPTANCE.md
 make build
 # Requires Docker; builds the Node, Python/uv, OCI and binary stdio sidecars.
 make stdio-images
@@ -49,17 +59,14 @@ Run the real PostgreSQL wire/transaction workflow locally with Docker Compose:
 ./scripts/test-postgres.sh
 ```
 
-The route ledger compares the actual Chi router with the 474-row core manifest,
-46 routes dynamically loaded from the pinned SaaS package, and 18 public routes
-that the original manifest missed because they live behind mounted Hono
-subrouters. Registration is not treated as proof of behavioral parity; focused
-HTTP test evidence is tracked independently. Non-literal WebSocket, Engine.IO,
-MCP and sidecar surfaces are tracked in `docs/PROTOCOL_PARITY.md`.
+Route/protocol parity evidence gathered during the Node-to-Go migration is
+archived in `docs/ROUTE_PARITY.md` and `docs/PROTOCOL_PARITY.md`; the
+`route-inventory` generator was removed together with the legacy Node server.
 
 `./.github/workflows/ci.yml` is the publication template. GitHub discovers
 workflows only at the repository root, so an authorized integration of this
 subfolder must copy it to root `.github/workflows/go-backend-ci.yml`
-without changing its `go/server` working directory. The template runs
+without changing its `apps/server` working directory. The template runs
 real PostgreSQL/pgvector upgrades, the expanded preserved-frontend browser
 flow, race/vet/build, and all native stdio sidecar image builds.
 
