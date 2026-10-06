@@ -221,6 +221,35 @@ func sealAdmin(secret, plain []byte) (string, error) {
 	payload := append(append(append([]byte{}, nonce...), tag...), ciphertext...)
 	return base64.RawURLEncoding.EncodeToString(payload), nil
 }
+func openAdmin(secret []byte, encoded string) (string, error) {
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(payload) < 28 {
+		return "", errors.New("invalid encrypted value")
+	}
+	key, err := scrypt.Key(secret, []byte("zakura-v1"), 16384, 8, 1, 32)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce, tag, ciphertext := payload[:12], payload[12:28], payload[28:]
+	sealed := append(append([]byte{}, ciphertext...), tag...)
+	plain, err := gcm.Open(nil, nonce, sealed, nil)
+	if err != nil {
+		return "", err
+	}
+	var text string
+	if json.Unmarshal(plain, &text) == nil {
+		return text, nil
+	}
+	return string(plain), nil
+}
 func contains(items []string, v string) bool {
 	for _, item := range items {
 		if item == v {

@@ -58,6 +58,8 @@ func RegisterRoutes(r chi.Router, d *appdeps.Dependencies) {
 		ar.Put("/api/admin/oauth/login-policy", a.putLoginPolicy)
 		ar.Get("/api/admin/oauth/{provider}", a.oauthProvider)
 		ar.Put("/api/admin/oauth/{provider}", a.putOAuthProvider)
+		ar.Get("/api/admin/infra/redis", a.getRedisInfra)
+		ar.Put("/api/admin/infra/redis", a.putRedisInfra)
 	})
 }
 
