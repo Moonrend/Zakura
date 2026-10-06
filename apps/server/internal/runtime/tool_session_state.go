@@ -25,6 +25,9 @@ func isBuiltinToolName(name string) bool {
 }
 
 func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session, toolCallID, name string, args json.RawMessage) (json.RawMessage, error) {
+	if toolDisabled(ctx, name) {
+		return nil, fmt.Errorf("tool %s is disabled for this run", name)
+	}
 	switch {
 	case name == "tool_search":
 		return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
@@ -71,6 +74,15 @@ func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session,
 	}
 	loaded := h.sessionLoadedTools(ctx, tenant, agent, session)
 	matches := runToolSearch(catalog, loaded, query, limit)
+	if disabled := disabledToolsFromContext(ctx); len(disabled) > 0 {
+		filtered := matches[:0]
+		for _, tool := range matches {
+			if !toolNameDisabled(disabled, tool.Name) {
+				filtered = append(filtered, tool)
+			}
+		}
+		matches = filtered
+	}
 	newly := make([]string, 0, len(matches))
 	for _, tool := range matches {
 		if !loaded[tool.Name] {

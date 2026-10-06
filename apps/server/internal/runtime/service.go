@@ -42,11 +42,15 @@ func (s *Service) StartTurn(ctx context.Context, tenant, agent, session, content
 	s.mu.Lock()
 	s.cancels[run.ID] = cancel
 	s.mu.Unlock()
-	go s.execute(bg, tenant, agent, session, run.ID, content)
+	go s.execute(bg, tenant, agent, session, run.ID, content, options)
 	return run, nil, nil
 }
 
-func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, content string) {
+func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, content string, options json.RawMessage) {
+	disabled := disabledToolSet(options)
+	if len(disabled) > 0 {
+		ctx = context.WithValue(ctx, disabledToolsKey{}, disabled)
+	}
 	defer func() {
 		s.mu.Lock()
 		delete(s.cancels, runID)
@@ -97,7 +101,7 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 	var raw []byte
 	for turn := 0; turn < 8; turn++ {
 		payloadMap := map[string]any{"model": model, "stream": false, "messages": messages}
-		if tools := declaredTools(catalog, loaded); len(tools) > 0 {
+		if tools := declaredTools(catalog, loaded, disabled); len(tools) > 0 {
 			payloadMap["tools"] = tools
 		}
 		payload, _ := json.Marshal(payloadMap)
@@ -535,9 +539,112 @@ func extractAssistantText(raw []byte) string {
 	return string(raw)
 }
 
-func declaredTools(catalog agentCatalog, loaded map[string]bool) []map[string]any {
+type disabledToolsKey struct{}
+
+func normalizeToolOptionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(name, ':'); idx >= 0 {
+		return strings.TrimSpace(name[idx+1:])
+	}
+	if strings.HasPrefix(name, "re_") {
+		return name[len("re_"):]
+	}
+	if strings.HasPrefix(name, "mcp__") {
+		return name[len("mcp__"):]
+	}
+	return name
+}
+
+func disabledOptionKeys(name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if idx := strings.IndexByte(name, ':'); idx >= 0 {
+		local := strings.TrimSpace(name[idx+1:])
+		if local == "" {
+			return nil
+		}
+		return []string{"local:" + local}
+	}
+	if core := normalizeToolOptionName(name); core != "" {
+		return []string{core}
+	}
+	return nil
+}
+
+func toolNameMatchKeys(name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	core := normalizeToolOptionName(name)
+	if core == "" {
+		return nil
+	}
+	keys := []string{core}
+	if strings.HasPrefix(name, "mcp__") {
+		if idx := strings.LastIndex(core, "__"); idx >= 0 {
+			if local := core[idx+2:]; local != "" {
+				keys = append(keys, "local:"+local)
+			}
+		}
+	}
+	return keys
+}
+
+func disabledToolSet(options json.RawMessage) map[string]bool {
+	if len(options) == 0 {
+		return nil
+	}
+	var parsed struct {
+		DisabledTools []string `json:"disabledTools"`
+	}
+	if json.Unmarshal(options, &parsed) != nil {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, name := range parsed.DisabledTools {
+		for _, key := range disabledOptionKeys(name) {
+			set[key] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func disabledToolsFromContext(ctx context.Context) map[string]bool {
+	set, _ := ctx.Value(disabledToolsKey{}).(map[string]bool)
+	return set
+}
+
+func toolNameDisabled(set map[string]bool, name string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	for _, key := range toolNameMatchKeys(name) {
+		if set[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func toolDisabled(ctx context.Context, name string) bool {
+	return toolNameDisabled(disabledToolsFromContext(ctx), name)
+}
+
+func declaredTools(catalog agentCatalog, loaded map[string]bool, disabled map[string]bool) []map[string]any {
 	out := []map[string]any{}
 	for _, tool := range catalog.Tools {
+		if toolNameDisabled(disabled, tool.Name) {
+			continue
+		}
 		switch tool.Exposure {
 		case "direct":
 		case "deferred":
