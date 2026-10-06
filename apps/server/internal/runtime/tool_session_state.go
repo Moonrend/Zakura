@@ -11,20 +11,26 @@ import (
 
 func isBuiltinToolName(name string) bool {
 	switch name {
-	case "memory_search", "memory_remember", "fs_list", "fs_read", "fs_write", "shell_exec":
+	case "memory_search", "memory_remember", "fs_list", "fs_read", "fs_write", "shell_exec",
+		"list_sessions", "search_sessions", "get_messages", "import_session",
+		"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine",
+		"list_automation_runs", "delegate_agent", "apply_patch",
+		"computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info":
 		return true
 	}
 	return false
 }
 
-func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session, name string, args json.RawMessage) (json.RawMessage, error) {
+func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session, toolCallID, name string, args json.RawMessage) (json.RawMessage, error) {
 	switch {
 	case name == "tool_search":
-		return h.runToolSearchTool(ctx, tenant, agent, session, args)
+		return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
 	case name == "codemode":
-		return h.runCodemodeTool(ctx, tenant, agent, session, args)
+		return h.runCodemodeTool(ctx, tenant, agent, session, toolCallID, args)
+	case name == "ask_user":
+		return h.runAskUserTool(ctx, tenant, agent, session, toolCallID, args)
 	case isBuiltinToolName(name):
-		return h.runBuiltinTool(ctx, tenant, agent, name, args)
+		return h.runBuiltinToolForSession(ctx, tenant, agent, session, toolCallID, name, args)
 	case strings.HasPrefix(name, "mcp__"):
 		return h.runCatalogMCPTool(ctx, tenant, agent, name, args)
 	default:
@@ -40,7 +46,7 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 	}
 }
 
-func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session string, args json.RawMessage) (json.RawMessage, error) {
+func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session, toolCallID string, args json.RawMessage) (json.RawMessage, error) {
 	parsed := map[string]any{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &parsed); err != nil {

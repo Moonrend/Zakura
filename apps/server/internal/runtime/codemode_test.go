@@ -175,7 +175,7 @@ func TestRunCodemodeToolProtocol(t *testing.T) {
 			return nil, nil
 		}
 	})
-	raw, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", json.RawMessage(`{"code":"const r = await tools.mcp__echo__echo({ value: \"hi\" }); return r;"}`))
+	raw, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"const r = await tools.mcp__echo__echo({ value: \"hi\" }); return r;"}`))
 	if err != nil {
 		t.Fatalf("runCodemodeTool: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRunCodemodeToolRejectsNested(t *testing.T) {
 			return nil, nil
 		}
 	})
-	if _, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", json.RawMessage(`{"code":"await tools.codemode({});"}`)); err != nil {
+	if _, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"await tools.codemode({});"}`)); err != nil {
 		t.Fatalf("runCodemodeTool: %v", err)
 	}
 	mu.Lock()
@@ -287,7 +287,7 @@ func TestRunCodemodeToolScriptFailure(t *testing.T) {
 			return nil, nil
 		}
 	})
-	if _, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", json.RawMessage(`{"code":"throw new Error('boom')"}`)); err == nil || !strings.Contains(err.Error(), "codemode script failed: boom") {
+	if _, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"throw new Error('boom')"}`)); err == nil || !strings.Contains(err.Error(), "codemode script failed: boom") {
 		t.Fatalf("script failure error: %v", err)
 	}
 }

@@ -95,7 +95,7 @@ type codemodeEvent struct {
 	exit bool
 }
 
-func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session string, args json.RawMessage) (json.RawMessage, error) {
+func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, toolCallID string, args json.RawMessage) (json.RawMessage, error) {
 	parsed := map[string]any{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &parsed); err != nil {
@@ -244,7 +244,8 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session st
 						callArgs = json.RawMessage("{}")
 					}
 					callCtx, callCancel := context.WithTimeout(context.WithoutCancel(runCtx), codemodeCallMS*time.Millisecond)
-					result, callErr := h.dispatchAgentTool(callCtx, tenant, agent, session, message.Name, callArgs)
+					callToolCallID := fmt.Sprintf("codemode-%d", message.ID)
+					result, callErr := h.dispatchAgentTool(callCtx, tenant, agent, session, callToolCallID, message.Name, callArgs)
 					callCancel()
 					if callErr != nil {
 						_ = writeMessage(map[string]any{"op": "result", "id": message.ID, "ok": false, "error": callErr.Error()})

@@ -65,6 +65,12 @@ func directBuiltin(name, description string, properties map[string]any, required
 	return agentTool{Name: name, Kind: "builtin", LocalName: name, Description: description, InputSchema: schema, Exposure: "direct"}
 }
 
+func deferredBuiltin(name, description string, properties map[string]any, required ...string) agentTool {
+	tool := directBuiltin(name, description, properties, required...)
+	tool.Exposure = "deferred"
+	return tool
+}
+
 func normalizeToolSchema(schema map[string]any) map[string]any {
 	if schema == nil {
 		schema = map[string]any{}
@@ -258,8 +264,108 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 				"code":       map[string]any{"type": "string", "description": "JavaScript source."},
 				"timeout_ms": map[string]any{"type": "integer", "description": "Deadline in ms. Default 120000, max 600000."},
 			}, "code"),
+			directBuiltin("apply_patch", "Apply a unified diff patch to the workspace.", map[string]any{
+				"patch": map[string]any{"type": "string", "description": "Unified diff (git style)."},
+			}, "patch"),
+			deferredBuiltin("computer_screenshot", "Take a screenshot of the workspace desktop.", map[string]any{}),
+			deferredBuiltin("computer_click", "Click on the workspace desktop at pixel coordinates.", map[string]any{
+				"x":          map[string]any{"type": "integer", "description": "Pixel x coordinate."},
+				"y":          map[string]any{"type": "integer", "description": "Pixel y coordinate."},
+				"button":     map[string]any{"type": "string", "enum": []any{"left", "right", "middle"}, "description": "Mouse button. Default left."},
+				"count":      map[string]any{"type": "integer", "description": "Click count 1-3. Default 1. Use 2 for a double-click."},
+				"move_first": map[string]any{"type": "boolean", "description": "Move the pointer before clicking. Default true."},
+			}, "x", "y"),
+			deferredBuiltin("computer_type", "Type text into the focused window on the workspace desktop.", map[string]any{
+				"text":     map[string]any{"type": "string", "description": "Text to type."},
+				"delay_ms": map[string]any{"type": "integer", "description": "Delay between keystrokes in ms. Default 25, max 200."},
+			}, "text"),
+			deferredBuiltin("computer_key", "Press a key or key combination (e.g. Return, ctrl+c) on the workspace desktop.", map[string]any{
+				"key": map[string]any{"type": "string", "description": "Key or combination, e.g. Return or ctrl+c."},
+			}, "key"),
+			deferredBuiltin("desktop_info", "Inspect the workspace desktop: screen geometry, focused window and uptime.", map[string]any{}),
 		)
 	}
+	tools = append(tools,
+		directBuiltin("ask_user", "Ask the user a question and wait for their reply. Use when a decision, confirmation, or missing information blocks progress.", map[string]any{
+			"question": map[string]any{"type": "string", "description": "The question to ask the user."},
+			"title":    map[string]any{"type": "string", "description": "Optional short title for the question."},
+			"options": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":          map[string]any{"type": "string"},
+						"label":       map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+					},
+					"required": []any{"id", "label"},
+				},
+			},
+			"allowMultiple":    map[string]any{"type": "boolean"},
+			"secret":           map[string]any{"type": "boolean"},
+			"mode":             map[string]any{"type": "string", "enum": []any{"sync", "async"}},
+			"timeoutSeconds":   map[string]any{"type": "integer", "description": "Deadline in seconds. Default 600."},
+			"defaultOptionIds": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"placeholder":      map[string]any{"type": "string"},
+		}, "question"),
+	)
+	tools = append(tools,
+		deferredBuiltin("list_sessions", "List recent sessions for this agent.", map[string]any{
+			"limit": map[string]any{"type": "integer", "description": "Max sessions. Default 20."},
+			"kind":  map[string]any{"type": "string", "description": "Filter by session kind."},
+		}),
+		deferredBuiltin("search_sessions", "Search sessions by text across titles and messages.", map[string]any{
+			"query": map[string]any{"type": "string"},
+			"limit": map[string]any{"type": "integer", "description": "Max sessions. Default 20."},
+		}, "query"),
+		deferredBuiltin("get_messages", "Read recent messages from a session.", map[string]any{
+			"session_id": map[string]any{"type": "string", "description": "Session id. Defaults to the current session."},
+			"limit":      map[string]any{"type": "integer", "description": "Max messages. Default 200."},
+		}),
+		deferredBuiltin("import_session", "Create a session from a list of chat messages.", map[string]any{
+			"title": map[string]any{"type": "string", "description": "Session title. Default \"Imported session\"."},
+			"messages": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"role":    map[string]any{"type": "string", "enum": []any{"user", "assistant"}},
+						"content": map[string]any{"type": "string"},
+					},
+					"required": []any{"role", "content"},
+				},
+			},
+		}, "messages"),
+		deferredBuiltin("list_routines", "List automation routines for this agent.", map[string]any{}),
+		deferredBuiltin("create_routine", "Create a cron automation routine.", map[string]any{
+			"name":     map[string]any{"type": "string"},
+			"prompt":   map[string]any{"type": "string"},
+			"schedule": map[string]any{"type": "string", "description": "Cron expression, e.g. \"0 * * * *\" or @hourly."},
+		}, "name", "prompt", "schedule"),
+		deferredBuiltin("update_routine", "Update a routine's name, prompt, schedule or enabled state.", map[string]any{
+			"id":       map[string]any{"type": "string"},
+			"name":     map[string]any{"type": "string"},
+			"prompt":   map[string]any{"type": "string"},
+			"schedule": map[string]any{"type": "string"},
+			"enabled":  map[string]any{"type": "boolean"},
+		}, "id"),
+		deferredBuiltin("pause_routine", "Pause a routine.", map[string]any{
+			"id": map[string]any{"type": "string"},
+		}, "id"),
+		deferredBuiltin("delete_routine", "Delete a routine.", map[string]any{
+			"id": map[string]any{"type": "string"},
+		}, "id"),
+		deferredBuiltin("run_routine", "Run a routine now.", map[string]any{
+			"id": map[string]any{"type": "string"},
+		}, "id"),
+		deferredBuiltin("list_automation_runs", "List recent automation runs.", map[string]any{
+			"limit": map[string]any{"type": "integer", "description": "Max runs. Default 20."},
+		}),
+		deferredBuiltin("delegate_agent", "Delegate a task to another agent and wait for its result.", map[string]any{
+			"agent":  map[string]any{"type": "string", "description": "Target agent id, slug or name."},
+			"prompt": map[string]any{"type": "string"},
+		}, "agent", "prompt"),
+	)
 	if hasSearchableMCP {
 		tools = append(tools, directBuiltin("tool_search", TOOL_SEARCH_DESCRIPTION, map[string]any{
 			"query": map[string]any{"type": "string"},

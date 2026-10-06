@@ -152,13 +152,60 @@ func randomSecret() string {
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
+func (h *handler) createScheduleInternal(ctx context.Context, tenant, agent string, in Schedule) (Schedule, error) {
+	if _, e := h.store.GetAgent(ctx, tenant, agent); e != nil {
+		return Schedule{}, e
+	}
+	if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.Prompt) == "" {
+		return Schedule{}, errors.New("name and prompt required")
+	}
+	if in.TriggerKind == "" {
+		in.TriggerKind = "cron"
+	}
+	if in.TriggerKind != "cron" && in.TriggerKind != "listener" {
+		return Schedule{}, errors.New("invalid triggerKind")
+	}
+	if in.Timezone == "" {
+		in.Timezone = "UTC"
+	}
+	loc, e := time.LoadLocation(in.Timezone)
+	if e != nil {
+		return Schedule{}, errors.New("invalid timezone")
+	}
+	var next *time.Time
+	if in.TriggerKind == "cron" {
+		n, e := nextCron(in.Pattern, h.store.now().In(loc))
+		if e != nil {
+			return Schedule{}, e
+		}
+		nn := n.UTC()
+		next = &nn
+	}
+	now := runtimeTimeString(h.store.now())
+	id := h.store.id()
+	var maxRuns *int32
+	if in.MaxRuns != nil {
+		v := int32(*in.MaxRuns)
+		maxRuns = &v
+	}
+	var nextStr *string
+	if next != nil {
+		s := runtimeTimeString(*next)
+		nextStr = &s
+	}
+	secret := randomSecret()
+	description := in.Description
+	pattern := in.Pattern
+	m := models.AgentSchedule{ID: &id, TenantID: tenant, AgentID: agent, Name: in.Name, Description: &description, Pattern: &pattern, TriggerKind: in.TriggerKind, ListenerJSON: validJSON(in.Listener, "{}"), WebhookSecret: &secret, Prompt: in.Prompt, Project: in.Project, Enabled: in.Enabled, MaxRuns: maxRuns, Timezone: in.Timezone, NextRunAt: nextStr, CreatedAt: now, UpdatedAt: now}
+	if e = h.deps.Gorm.WithContext(ctx).Create(&m).Error; e != nil {
+		return Schedule{}, e
+	}
+	x, _, _ := h.getSchedule(ctx, tenant, agent, id)
+	return x, nil
+}
 func (h *handler) createSchedule(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent := chi.URLParam(r, "id")
-	if _, e := h.store.GetAgent(r.Context(), p.TenantID, agent); e != nil {
-		statusErr(w, e)
-		return
-	}
 	var b struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
@@ -175,58 +222,15 @@ func (h *handler) createSchedule(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	if strings.TrimSpace(b.Name) == "" || strings.TrimSpace(b.Prompt) == "" {
-		httpx.Error(w, 400, "name and prompt required")
-		return
-	}
-	if b.TriggerKind == "" {
-		b.TriggerKind = "cron"
-	}
-	if b.TriggerKind != "cron" && b.TriggerKind != "listener" {
-		httpx.Error(w, 400, "invalid triggerKind")
-		return
-	}
-	if b.Timezone == "" {
-		b.Timezone = "UTC"
-	}
-	loc, e := time.LoadLocation(b.Timezone)
-	if e != nil {
-		httpx.Error(w, 400, "invalid timezone")
-		return
-	}
-	var next *time.Time
-	if b.TriggerKind == "cron" {
-		n, e := nextCron(b.Pattern, h.store.now().In(loc))
-		if e != nil {
-			httpx.Error(w, 400, e.Error())
-			return
-		}
-		nn := n.UTC()
-		next = &nn
-	}
-	enabled := true
+	in := Schedule{Name: b.Name, Description: b.Description, TriggerKind: b.TriggerKind, Pattern: b.Pattern, Listener: b.Listener, Prompt: b.Prompt, Project: b.Project, MaxRuns: b.MaxRuns, Timezone: b.Timezone, Enabled: true}
 	if b.Enabled != nil {
-		enabled = *b.Enabled
+		in.Enabled = *b.Enabled
 	}
-	now := runtimeTimeString(h.store.now())
-	id := h.store.id()
-	var maxRuns *int32
-	if b.MaxRuns != nil {
-		v := int32(*b.MaxRuns)
-		maxRuns = &v
-	}
-	var nextStr *string
-	if next != nil {
-		s := runtimeTimeString(*next)
-		nextStr = &s
-	}
-	secret := randomSecret()
-	m := models.AgentSchedule{ID: &id, TenantID: p.TenantID, AgentID: agent, Name: b.Name, Description: &b.Description, Pattern: &b.Pattern, TriggerKind: b.TriggerKind, ListenerJSON: validJSON(b.Listener, "{}"), WebhookSecret: &secret, Prompt: b.Prompt, Project: b.Project, Enabled: enabled, MaxRuns: maxRuns, Timezone: b.Timezone, NextRunAt: nextStr, CreatedAt: now, UpdatedAt: now}
-	if e = h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
+	x, e := h.createScheduleInternal(r.Context(), p.TenantID, agent, in)
+	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	x, _, _ := h.getSchedule(r.Context(), p.TenantID, agent, id)
 	httpx.JSON(w, 201, map[string]any{"schedule": x})
 }
 func (h *handler) listSchedules(w http.ResponseWriter, r *http.Request) {
@@ -247,48 +251,38 @@ func (h *handler) getScheduleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"schedule": x})
 }
-func (h *handler) patchSchedule(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	agent, id := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
-	cur, _, e := h.getSchedule(r.Context(), p.TenantID, agent, id)
+func (h *handler) patchScheduleInternal(ctx context.Context, tenant, agent, id string, patch map[string]any) (Schedule, error) {
+	cur, _, e := h.getSchedule(ctx, tenant, agent, id)
 	if e != nil {
-		statusErr(w, e)
-		return
+		return Schedule{}, e
 	}
-	m, e := decodeMap(r)
-	if e != nil {
-		httpx.Error(w, 400, "invalid JSON")
-		return
-	}
-	if v, ok := m["name"].(string); ok {
+	if v, ok := patch["name"].(string); ok {
 		cur.Name = v
 	}
-	if v, ok := m["description"].(string); ok {
+	if v, ok := patch["description"].(string); ok {
 		cur.Description = v
 	}
-	if v, ok := m["pattern"].(string); ok {
+	if v, ok := patch["pattern"].(string); ok {
 		cur.Pattern = v
 	}
-	if v, ok := m["prompt"].(string); ok {
+	if v, ok := patch["prompt"].(string); ok {
 		cur.Prompt = v
 	}
-	if v, ok := m["timezone"].(string); ok {
+	if v, ok := patch["timezone"].(string); ok {
 		cur.Timezone = v
 	}
-	if v, ok := m["enabled"].(bool); ok {
+	if v, ok := patch["enabled"].(bool); ok {
 		cur.Enabled = v
 	}
 	loc, e := time.LoadLocation(cur.Timezone)
 	if e != nil {
-		httpx.Error(w, 400, "invalid timezone")
-		return
+		return Schedule{}, errors.New("invalid timezone")
 	}
 	var next *time.Time
 	if cur.TriggerKind == "cron" {
 		n, e := nextCron(cur.Pattern, h.store.now().In(loc))
 		if e != nil {
-			httpx.Error(w, 400, e.Error())
-			return
+			return Schedule{}, e
 		}
 		n = n.UTC()
 		next = &n
@@ -297,23 +291,42 @@ func (h *handler) patchSchedule(w http.ResponseWriter, r *http.Request) {
 	if next != nil {
 		nextVal = runtimeTimeString(*next)
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentSchedule{}).Where("tenant_id = ? AND agent_id = ? AND id = ?", p.TenantID, agent, id).Updates(map[string]any{"name": cur.Name, "description": cur.Description, "pattern": cur.Pattern, "prompt": cur.Prompt, "timezone": cur.Timezone, "enabled": cur.Enabled, "next_run_at": nextVal, "updated_at": runtimeTimeString(h.store.now())}).Error
+	e = h.deps.Gorm.WithContext(ctx).Model(&models.AgentSchedule{}).Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"name": cur.Name, "description": cur.Description, "pattern": cur.Pattern, "prompt": cur.Prompt, "timezone": cur.Timezone, "enabled": cur.Enabled, "next_run_at": nextVal, "updated_at": runtimeTimeString(h.store.now())}).Error
+	if e != nil {
+		return Schedule{}, e
+	}
+	x, _, _ := h.getSchedule(ctx, tenant, agent, id)
+	return x, nil
+}
+func (h *handler) patchSchedule(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	agent, id := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
+	m, e := decodeMap(r)
+	if e != nil {
+		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	x, e := h.patchScheduleInternal(r.Context(), p.TenantID, agent, id, m)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	x, _, _ := h.getSchedule(r.Context(), p.TenantID, agent, id)
 	httpx.JSON(w, 200, map[string]any{"schedule": x})
+}
+func (h *handler) deleteScheduleInternal(ctx context.Context, tenant, agent, id string) error {
+	res := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Delete(&models.AgentSchedule{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 func (h *handler) deleteSchedule(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ? AND id = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid")).Delete(&models.AgentSchedule{})
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
+	if e := h.deleteScheduleInternal(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid")); e != nil {
+		statusErr(w, e)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
@@ -337,21 +350,27 @@ func (h *handler) admitAutomation(ctx context.Context, tenant, agent, kind strin
 	e = h.deps.Gorm.WithContext(ctx).Create(&m).Error
 	return ar, e
 }
+func (h *handler) runScheduleInternal(ctx context.Context, tenant, agent, id string) (AutomationRun, error) {
+	sch, _, e := h.getSchedule(ctx, tenant, agent, id)
+	if e != nil {
+		return AutomationRun{}, e
+	}
+	run, e := h.admitAutomation(ctx, tenant, agent, "schedule", &id, sch.Prompt)
+	if e != nil {
+		return AutomationRun{}, e
+	}
+	nowStr := runtimeTimeString(h.store.now())
+	h.deps.Gorm.WithContext(ctx).Model(&models.AgentSchedule{}).Where("id = ?", id).Updates(map[string]any{"run_count": gorm.Expr("run_count + 1"), "last_run_at": nowStr, "last_status": "running", "updated_at": nowStr})
+	return run, nil
+}
 func (h *handler) runSchedule(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent, id := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
-	sch, _, e := h.getSchedule(r.Context(), p.TenantID, agent, id)
+	run, e := h.runScheduleInternal(r.Context(), p.TenantID, agent, id)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	run, e := h.admitAutomation(r.Context(), p.TenantID, agent, "schedule", &id, sch.Prompt)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	nowStr := runtimeTimeString(h.store.now())
-	h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentSchedule{}).Where("id = ?", id).Updates(map[string]any{"run_count": gorm.Expr("run_count + 1"), "last_run_at": nowStr, "last_status": "running", "updated_at": nowStr})
 	httpx.JSON(w, 202, map[string]any{"run": run})
 }
 func automationRunFromModel(m models.AgentAutomationRun) AutomationRun {
@@ -375,20 +394,33 @@ func automationRunFromModel(m models.AgentAutomationRun) AutomationRun {
 	x.CreatedAt = c.Time
 	return x
 }
-func (h *handler) listAutomationRuns(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentAutomationRun{}).Where("tenant_id = ? AND agent_id = ?", p.TenantID, chi.URLParam(r, "id"))
-	if sid := chi.URLParam(r, "sid"); sid != "" {
+func (h *handler) listAutomationRunsInternal(ctx context.Context, tenant, agent, sid string, limit int) ([]AutomationRun, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	q := h.deps.Gorm.WithContext(ctx).Model(&models.AgentAutomationRun{}).Where("tenant_id = ? AND agent_id = ?", tenant, agent)
+	if sid != "" {
 		q = q.Where("schedule_id = ?", sid)
 	}
 	var ms []models.AgentAutomationRun
-	if e := q.Order("created_at DESC").Limit(100).Find(&ms).Error; e != nil {
-		statusErr(w, e)
-		return
+	if e := q.Order("created_at DESC").Limit(limit).Find(&ms).Error; e != nil {
+		return nil, e
 	}
 	out := make([]AutomationRun, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, automationRunFromModel(m))
+	}
+	return out, nil
+}
+func (h *handler) listAutomationRuns(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	out, e := h.listAutomationRunsInternal(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"), 100)
+	if e != nil {
+		statusErr(w, e)
+		return
 	}
 	httpx.JSON(w, 200, map[string]any{"runs": out})
 }
@@ -570,6 +602,7 @@ func (h *handler) startScheduler(ctx context.Context) {
 				return
 			case <-ticker.C:
 				h.claimDue(ctx)
+				_, _ = h.store.ExpireInteractions(ctx)
 			}
 		}
 	}()

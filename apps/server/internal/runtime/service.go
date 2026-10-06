@@ -19,7 +19,7 @@ type Service struct {
 	gateway         *Gateway
 	mu              sync.Mutex
 	cancels         map[string]context.CancelFunc
-	toolRunner      func(context.Context, string, string, string, string, json.RawMessage) (json.RawMessage, error)
+	toolRunner      func(context.Context, string, string, string, string, string, json.RawMessage) (json.RawMessage, error)
 	acpRunner       func(context.Context, string, string, string, string, string) error
 	catalogProvider func(context.Context, string, string) (agentCatalog, error)
 	loadedTools     func(context.Context, string, string, string) map[string]bool
@@ -129,7 +129,7 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 			_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_start", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name})
 			arguments, _ := json.Marshal(call.Args)
 			_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_args", &runID, map[string]any{"toolCallId": call.ID, "arguments": string(arguments)})
-			result, e := s.toolRunner(ctx, tenant, agent, session, call.Name, argsRaw)
+			result, e := s.toolRunner(ctx, tenant, agent, session, call.ID, call.Name, argsRaw)
 			if e != nil {
 				duration := s.store.now().Sub(startedAt).Milliseconds()
 				_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_result", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name, "resultText": e.Error(), "isError": true, "durationMs": duration})

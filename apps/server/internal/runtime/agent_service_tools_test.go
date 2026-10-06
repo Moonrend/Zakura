@@ -22,10 +22,10 @@ func wireAgentToolService(h *handler) {
 		return h.cachedAgentToolCatalog(ctx, tenant, agent)
 	}
 	h.service.loadedTools = h.sessionLoadedTools
-	h.service.toolRunner = func(ctx context.Context, tenant, agent, session, name string, args json.RawMessage) (json.RawMessage, error) {
+	h.service.toolRunner = func(ctx context.Context, tenant, agent, session, toolCallID, name string, args json.RawMessage) (json.RawMessage, error) {
 		switch {
 		case name == "tool_search":
-			return h.runToolSearchTool(ctx, tenant, agent, session, args)
+			return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
 		case isBuiltinToolName(name):
 			return h.runBuiltinTool(ctx, tenant, agent, name, args)
 		case strings.HasPrefix(name, "mcp__"):

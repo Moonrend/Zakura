@@ -66,9 +66,25 @@ func (h *handler) runBuiltinTool(ctx context.Context, tenant, agent, name string
 		return h.runFSWrite(ctx, tenant, agent, parsed)
 	case "shell_exec":
 		return h.runShellExec(ctx, tenant, agent, parsed)
+	case "list_sessions", "search_sessions", "get_messages", "import_session",
+		"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine",
+		"list_automation_runs", "delegate_agent", "apply_patch":
+		return h.runBuiltinToolSessions(ctx, tenant, agent, name, parsed)
+	case "computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info":
+		return h.runBuiltinToolDesktop(ctx, tenant, agent, name, parsed)
 	default:
 		return nil, fmt.Errorf("unknown builtin tool %q", name)
 	}
+}
+
+func (h *handler) runBuiltinToolForSession(ctx context.Context, tenant, agent, session, toolCallID, name string, args json.RawMessage) (json.RawMessage, error) {
+	switch name {
+	case "get_messages":
+		return h.runGetMessages(ctx, tenant, agent, session, args)
+	case "delegate_agent":
+		return h.runDelegateAgent(ctx, tenant, agent, session, toolCallID, args)
+	}
+	return h.runBuiltinTool(ctx, tenant, agent, name, args)
 }
 
 func (h *handler) runMemorySearch(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
