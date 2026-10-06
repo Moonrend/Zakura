@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"zakura.dev/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/host"
 )
 
 func TestWorkspaceFsPathAliases(t *testing.T) {

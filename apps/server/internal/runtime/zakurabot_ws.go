@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"

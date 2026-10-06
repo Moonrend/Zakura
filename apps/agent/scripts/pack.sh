@@ -26,7 +26,7 @@ for os in linux darwin windows; do
     out="$stage/zakura-agent_${os}_${arch}${ext}"
     echo "$os/$arch -> $out"
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build \
-      -ldflags "-s -w -X zakura.dev/agent/internal/sys.Version=${ver}" \
+      -ldflags "-s -w -X github.com/Moonrend/Zakura/apps/agent/internal/sys.Version=${ver}" \
       -o "$out" ./cmd/zakura-agent
   done
 done

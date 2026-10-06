@@ -13,8 +13,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"zakura.dev/agent/internal/rpc"
-	"zakura.dev/agent/internal/sys"
+	"github.com/Moonrend/Zakura/apps/agent/internal/rpc"
+	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 type Config struct {

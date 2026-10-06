@@ -1,4 +1,4 @@
-module github.com/Moonrend/Zakura/go/server
+module github.com/Moonrend/Zakura/apps/server
 
 go 1.26.0
 

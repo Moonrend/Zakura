@@ -18,7 +18,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 )
 
 type oauthSigningKey struct {

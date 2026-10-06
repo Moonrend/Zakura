@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )

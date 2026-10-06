@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 )
 
 // acpRuntimeManager owns long-lived ACP adapter processes on selected runtime

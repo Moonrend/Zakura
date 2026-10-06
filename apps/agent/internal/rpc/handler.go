@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"zakura.dev/agent/internal/docker"
-	"zakura.dev/agent/internal/host"
-	"zakura.dev/agent/internal/sys"
+	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
+	"github.com/Moonrend/Zakura/apps/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 type Handler struct {

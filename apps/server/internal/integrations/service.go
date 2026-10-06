@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
-	internalruntime "github.com/Moonrend/Zakura/go/server/internal/runtime"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	internalruntime "github.com/Moonrend/Zakura/apps/server/internal/runtime"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"

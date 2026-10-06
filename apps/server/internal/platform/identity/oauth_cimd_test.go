@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

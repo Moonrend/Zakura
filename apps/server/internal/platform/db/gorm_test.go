@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
+	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
 )
 
 func TestGormSharesSQLiteConnectionPool(t *testing.T) {

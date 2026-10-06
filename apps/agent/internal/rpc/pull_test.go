@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"testing"
 
-	"zakura.dev/agent/internal/docker"
+	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
 )
 
 func TestDockerPullProgressFrames(t *testing.T) {

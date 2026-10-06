@@ -1,4 +1,4 @@
-module zakura.dev/agent
+module github.com/Moonrend/Zakura/apps/agent
 
 go 1.23.0
 

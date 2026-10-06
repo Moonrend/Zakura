@@ -10,10 +10,10 @@ import (
 	"runtime"
 	"strings"
 
-	"zakura.dev/agent/internal/dial"
-	"zakura.dev/agent/internal/host"
-	"zakura.dev/agent/internal/rpc"
-	"zakura.dev/agent/internal/sys"
+	"github.com/Moonrend/Zakura/apps/agent/internal/dial"
+	"github.com/Moonrend/Zakura/apps/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/rpc"
+	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 func main() {

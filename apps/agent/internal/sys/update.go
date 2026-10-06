@@ -253,7 +253,7 @@ func copyBinary(src, dest string) error {
 
 func validateAgentBinary(path string) error {
 	info, err := buildinfo.ReadFile(path)
-	if err != nil || info.Path != "zakura.dev/agent/cmd/zakura-agent" {
+	if err != nil || info.Path != "github.com/Moonrend/Zakura/apps/agent/cmd/zakura-agent" {
 		return fmt.Errorf("下载内容不是可用的 zakura-agent 二进制")
 	}
 	settings := map[string]string{}

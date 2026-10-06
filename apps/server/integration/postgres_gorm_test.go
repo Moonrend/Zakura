@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
+	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 )
 
 func TestPostgresGormConnection(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 )
 
 type cimdDocument struct {

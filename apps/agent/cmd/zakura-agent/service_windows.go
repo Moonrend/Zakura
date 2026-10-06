@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"golang.org/x/sys/windows/svc"
-	"zakura.dev/agent/internal/sys"
+	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 // The installer registers a real SCM service. A plain console main does not

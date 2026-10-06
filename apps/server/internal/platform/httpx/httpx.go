@@ -15,7 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 )
 
 const maxJSONBody = 2 << 20

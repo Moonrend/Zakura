@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/integrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/integrations"
 )
 
 func main() {

@@ -12,15 +12,15 @@ import (
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 
-	"github.com/Moonrend/Zakura/go/server/internal/integrations"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/admin"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/config"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/identity"
-	platformsystem "github.com/Moonrend/Zakura/go/server/internal/platform/system"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/usage"
-	"github.com/Moonrend/Zakura/go/server/internal/runtime"
+	"github.com/Moonrend/Zakura/apps/server/internal/integrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/admin"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/config"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/identity"
+	platformsystem "github.com/Moonrend/Zakura/apps/server/internal/platform/system"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/usage"
+	"github.com/Moonrend/Zakura/apps/server/internal/runtime"
 )
 
 func Router(cfg config.Config, d *appdeps.Dependencies, log *slog.Logger) http.Handler {

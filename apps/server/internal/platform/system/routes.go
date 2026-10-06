@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
 	"gorm.io/gorm/clause"

@@ -16,7 +16,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 )
 
 type Connection struct {

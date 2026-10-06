@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"zakura.dev/agent/internal/rpc"
+	"github.com/Moonrend/Zakura/apps/agent/internal/rpc"
 )
 
 func TestHubURL(t *testing.T) {

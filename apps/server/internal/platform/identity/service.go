@@ -18,9 +18,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
 
 type Service struct {

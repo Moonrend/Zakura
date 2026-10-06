@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/config"
-	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
-	"github.com/Moonrend/Zakura/go/server/internal/platform/migrations"
-	platformserver "github.com/Moonrend/Zakura/go/server/internal/platform/server"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/config"
+	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	platformserver "github.com/Moonrend/Zakura/apps/server/internal/platform/server"
 	"github.com/golang-jwt/jwt/v5"
 )
 

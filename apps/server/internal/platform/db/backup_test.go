@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	platformdb "github.com/Moonrend/Zakura/go/server/internal/platform/db"
+	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 )
 
 func TestSQLiteBackupRestore(t *testing.T) {

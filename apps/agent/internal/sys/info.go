@@ -5,7 +5,7 @@ import (
 	"os"
 	"runtime"
 
-	"zakura.dev/agent/internal/docker"
+	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
 )
 
 // Version 由 -ldflags 注入。

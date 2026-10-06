@@ -5,7 +5,7 @@ licensed under AGPL-3.0. The existing Zakura frontend can use this server
 without a TypeScript backend process.
 
 The published Go module path is
-`github.com/Moonrend/Zakura/go/server`.
+`github.com/Moonrend/Zakura/apps/server`.
 
 The production backend image contains no Node.js runtime or TypeScript server
 artifact. Node/pnpm appears only in the optional preserved-frontend browser CI

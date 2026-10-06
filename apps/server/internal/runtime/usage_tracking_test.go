@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	platformusage "github.com/Moonrend/Zakura/go/server/internal/platform/usage"
+	platformusage "github.com/Moonrend/Zakura/apps/server/internal/platform/usage"
 	"github.com/go-chi/chi/v5"
 )
 
