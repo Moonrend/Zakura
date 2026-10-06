@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
@@ -664,12 +662,11 @@ func (h *handler) runWorkspaceMigration(ctx context.Context, id, tenant, space, 
 		h.failMigration(ctx, id, e)
 		return
 	}
-	e = appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-		if _, e := tx.ExecContext(ctx, h.store.q(`UPDATE spaces SET runtime_node_id=?,workspace_status='ready',updated_at=? WHERE tenant_id=? AND id=?`), target, h.store.now(), tenant, space); e != nil {
+	e = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Exec(`UPDATE spaces SET runtime_node_id=?,workspace_status='ready',updated_at=? WHERE tenant_id=? AND id=?`, target, h.store.now(), tenant, space).Error; e != nil {
 			return e
 		}
-		_, e := tx.ExecContext(ctx, h.store.q(`UPDATE workspace_migrations SET status='completed',phase='completed',progress_pct=100,source_retained=true,completed_at=?,updated_at=? WHERE id=?`), h.store.now(), h.store.now(), id)
-		return e
+		return tx.Exec(`UPDATE workspace_migrations SET status='completed',phase='completed',progress_pct=100,source_retained=true,completed_at=?,updated_at=? WHERE id=?`, h.store.now(), h.store.now(), id).Error
 	})
 	if e != nil {
 		h.failMigration(ctx, id, e)

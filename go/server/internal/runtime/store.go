@@ -465,13 +465,13 @@ func (s *Store) DeleteSession(ctx context.Context, tenant, agent, id string) err
 	return nil
 }
 
-func (s *Store) appendEventTx(ctx context.Context, tx *sql.Tx, sessionID, typ string, runID *string, payload any) (Event, error) {
+func (s *Store) appendEventTx(ctx context.Context, tx *gorm.DB, sessionID, typ string, runID *string, payload any) (Event, error) {
 	raw, e := json.Marshal(payload)
 	if e != nil {
 		return Event{}, e
 	}
 	var seq int64
-	e = tx.QueryRowContext(ctx, s.q(`UPDATE cloud_agent_sessions SET last_seq=last_seq+1,updated_at=? WHERE id=? RETURNING last_seq`), s.now(), sessionID).Scan(&seq)
+	e = tx.Raw(`UPDATE cloud_agent_sessions SET last_seq=last_seq+1, updated_at=? WHERE id=? RETURNING last_seq`, s.now(), sessionID).Row().Scan(&seq)
 	if errors.Is(e, sql.ErrNoRows) {
 		return Event{}, ErrNotFound
 	}
@@ -479,7 +479,7 @@ func (s *Store) appendEventTx(ctx context.Context, tx *sql.Tx, sessionID, typ st
 		return Event{}, e
 	}
 	ev := Event{ID: s.id(), SessionID: sessionID, Seq: seq, Type: typ, RunID: runID, Payload: raw, CreatedAt: s.now()}
-	_, e = tx.ExecContext(ctx, s.q(`INSERT INTO cloud_agent_events(id,session_id,seq,type,run_id,payload_json,created_at) VALUES(?,?,?,?,?,?,?)`), ev.ID, sessionID, seq, typ, runID, string(raw), ev.CreatedAt)
+	e = tx.Table("cloud_agent_events").Create(map[string]any{"id": ev.ID, "session_id": sessionID, "seq": seq, "type": typ, "run_id": runID, "payload_json": string(raw), "created_at": ev.CreatedAt}).Error
 	return ev, e
 }
 func (s *Store) AppendEvent(ctx context.Context, tenant, agent, session, typ string, runID *string, payload any) (Event, error) {
@@ -487,7 +487,7 @@ func (s *Store) AppendEvent(ctx context.Context, tenant, agent, session, typ str
 		return Event{}, e
 	}
 	var out Event
-	e := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var x error
 		out, x = s.appendEventTx(ctx, tx, session, typ, runID, payload)
 		return x
@@ -528,23 +528,21 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 	}
 	now := s.now()
 	run := Run{ID: s.id(), SessionID: session, Status: "running", StartedAt: &now, CreatedAt: now}
-	e := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
-		r, e := tx.ExecContext(ctx, s.q(`UPDATE cloud_agent_sessions SET active_run_id=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=? AND active_run_id IS NULL`), run.ID, now, tenant, agent, session)
-		if e != nil {
-			return e
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=?,updated_at=? WHERE tenant_id=? AND agent_id=? AND id=? AND active_run_id IS NULL`, run.ID, now, tenant, agent, session)
+		if res.Error != nil {
+			return res.Error
 		}
-		n, _ := r.RowsAffected()
-		if n == 0 {
+		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		if _, e = tx.ExecContext(ctx, s.q(`INSERT INTO cloud_agent_runs(id,session_id,status,cancel_requested,error,started_at,completed_at,created_at) VALUES(?,?,?,false,NULL,?,NULL,?)`), run.ID, session, run.Status, now, now); e != nil {
+		if e := tx.Table("cloud_agent_runs").Create(map[string]any{"id": run.ID, "session_id": session, "status": run.Status, "cancel_requested": false, "error": nil, "started_at": now, "completed_at": nil, "created_at": now}).Error; e != nil {
 			return e
 		}
-		_, e = s.appendEventTx(ctx, tx, session, "user_message", &run.ID, map[string]any{"content": content, "attachments": json.RawMessage(validJSON(attachments, "[]")), "options": json.RawMessage(validJSON(options, "{}"))})
-		if e != nil {
+		if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, map[string]any{"content": content, "attachments": json.RawMessage(validJSON(attachments, "[]")), "options": json.RawMessage(validJSON(options, "{}"))}); e != nil {
 			return e
 		}
-		_, e = s.appendEventTx(ctx, tx, session, "run_start", &run.ID, map[string]any{"runId": run.ID, "status": "running"})
+		_, e := s.appendEventTx(ctx, tx, session, "run_start", &run.ID, map[string]any{"runId": run.ID, "status": "running"})
 		return e
 	})
 	if e == nil {
@@ -593,18 +591,16 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
 		return e
 	}
-	e := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := s.now()
-		r, e := tx.ExecContext(ctx, s.q(`UPDATE cloud_agent_runs SET status=?,error=?,completed_at=? WHERE id=? AND session_id=? AND status IN ('running','queued')`), status, errText, now, runID, session)
-		if e != nil {
-			return e
+		res := tx.Exec(`UPDATE cloud_agent_runs SET status=?,error=?,completed_at=? WHERE id=? AND session_id=? AND status IN ('running','queued')`, status, errText, now, runID, session)
+		if res.Error != nil {
+			return res.Error
 		}
-		n, _ := r.RowsAffected()
-		if n == 0 {
+		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		_, e = tx.ExecContext(ctx, s.q(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`), now, session, runID)
-		if e != nil {
+		if e := tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`, now, session, runID).Error; e != nil {
 			return e
 		}
 		typ := "run_end"
@@ -616,7 +612,7 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 			terminalPayload["error"] = *errText
 		}
 		terminalPayload["result"] = payload
-		_, e = s.appendEventTx(ctx, tx, session, typ, &runID, terminalPayload)
+		_, e := s.appendEventTx(ctx, tx, session, typ, &runID, terminalPayload)
 		return e
 	})
 	if e == nil {
@@ -660,24 +656,22 @@ func (s *Store) CancelRun(ctx context.Context, tenant, agent, session string) (R
 	}
 	rid := *sess.ActiveRunID
 	now := s.now()
-	e = appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
-		r, e := tx.ExecContext(ctx, s.q(`UPDATE cloud_agent_runs SET cancel_requested=true,status='cancelled',completed_at=? WHERE id=? AND session_id=? AND status IN ('queued','running')`), now, rid, session)
-		if e != nil {
-			return e
+	e = s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Exec(`UPDATE cloud_agent_runs SET cancel_requested=true,status='cancelled',completed_at=? WHERE id=? AND session_id=? AND status IN ('queued','running')`, now, rid, session)
+		if res.Error != nil {
+			return res.Error
 		}
-		n, _ := r.RowsAffected()
-		if n == 0 {
+		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		r, e = tx.ExecContext(ctx, s.q(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`), now, session, rid)
-		if e != nil {
-			return e
+		res = tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE id=? AND active_run_id=?`, now, session, rid)
+		if res.Error != nil {
+			return res.Error
 		}
-		n, _ = r.RowsAffected()
-		if n == 0 {
+		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		_, e = s.appendEventTx(ctx, tx, session, "run_end", &rid, map[string]any{"runId": rid, "status": "cancelled"})
+		_, e := s.appendEventTx(ctx, tx, session, "run_end", &rid, map[string]any{"runId": rid, "status": "cancelled"})
 		return e
 	})
 	if e != nil {

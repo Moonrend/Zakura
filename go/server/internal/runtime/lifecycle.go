@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
+	"gorm.io/gorm"
 )
 
 func (h *handler) closeLiveAccess(tenant, user string) {
@@ -70,12 +70,11 @@ func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
 	rows.Close()
 	h.service.cancelRunIDs(ids)
 	now := h.store.now()
-	err = appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, h.store.q(`UPDATE cloud_agent_runs SET cancel_requested=TRUE,status='cancelled',completed_at=? WHERE id IN (SELECT r.id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running'))`), now, tenant); err != nil {
+	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`UPDATE cloud_agent_runs SET cancel_requested=TRUE,status='cancelled',completed_at=? WHERE id IN (SELECT r.id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running'))`, now, tenant).Error; err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, h.store.q(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE tenant_id=?`), now, tenant)
-		return err
+		return tx.Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE tenant_id=?`, now, tenant).Error
 	})
 	if err == nil {
 		for _, item := range items {

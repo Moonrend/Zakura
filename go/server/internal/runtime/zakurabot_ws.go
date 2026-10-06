@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha1"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -19,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/golang-jwt/jwt/v5"
@@ -355,12 +353,11 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 		return err
 	}
 	var seq int64
-	err = appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, h.store.q(`SELECT COALESCE(MAX(seq),0)+1 FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?`), actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq); err != nil {
+	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, h.store.q(`INSERT INTO zakurabot_messages(id,seq,tenant_id,device_id,binding_id,agent_id,client_message_id,frame_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`), h.store.id(), seq, actor.TenantID, actor.UserID, bindingID, agentID, clientMessageID, string(raw), h.store.now())
-		return err
+		return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": clientMessageID, "frame_json": string(raw), "created_at": h.store.now()}).Error
 	})
 	if err != nil {
 		return err
@@ -447,12 +444,11 @@ func (h *handler) watchZakuraBotRun(socket *zakuraBotSocket, actor httpx.Princip
 						frame := map[string]any{"type": "chat_reply", "agentId": agentID, "messageId": event.ID, "createdAt": event.CreatedAt.UnixMilli(), "payload": map[string]any{"text": payload.Content, "format": "markdown"}}
 						raw, _ := json.Marshal(frame)
 						var seq int64
-						_ = appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-							if err := tx.QueryRowContext(ctx, h.store.q(`SELECT COALESCE(MAX(seq),0)+1 FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?`), actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq); err != nil {
+						_ = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+							if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
 								return err
 							}
-							_, err := tx.ExecContext(ctx, h.store.q(`INSERT INTO zakurabot_messages(id,seq,tenant_id,device_id,binding_id,agent_id,client_message_id,frame_json,created_at) VALUES(?,?,?,?,?,?,NULL,?,?)`), h.store.id(), seq, actor.TenantID, actor.UserID, bindingID, agentID, string(raw), h.store.now())
-							return err
+							return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": nil, "frame_json": string(raw), "created_at": h.store.now()}).Error
 						})
 						_ = socket.send(frame)
 					}
@@ -541,12 +537,11 @@ func (h *handler) handleZakuraFrame(ctx context.Context, p httpx.Principal, raw 
 		return nil, errors.New("binding not found")
 	}
 	var seq int64
-	e := appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-		if e := tx.QueryRowContext(ctx, h.store.q(`SELECT COALESCE(MAX(seq),0)+1 FROM zakurabot_messages WHERE tenant_id=? AND device_id=? AND binding_id=? AND agent_id=?`), p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID).Scan(&seq); e != nil {
+	e := h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID).Scan(&seq).Error; e != nil {
 			return e
 		}
-		_, e := tx.ExecContext(ctx, h.store.q(`INSERT INTO zakurabot_messages(id,seq,tenant_id,device_id,binding_id,agent_id,client_message_id,frame_json,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id,binding_id,agent_id,client_message_id) DO NOTHING`), h.store.id(), seq, p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID, nullString(frame.ClientMessageID), string(raw), h.store.now())
-		return e
+		return tx.Exec(`INSERT INTO zakurabot_messages(id,seq,tenant_id,device_id,binding_id,agent_id,client_message_id,frame_json,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id,binding_id,agent_id,client_message_id) DO NOTHING`, h.store.id(), seq, p.TenantID, frame.DeviceID, frame.BindingID, frame.AgentID, nullString(frame.ClientMessageID), string(raw), h.store.now()).Error
 	})
 	if e != nil {
 		return nil, e

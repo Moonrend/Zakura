@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
@@ -832,12 +831,11 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	now := h.store.now()
 	labels, _ := json.Marshal(map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component"})
 	ports, _ := json.Marshal(running.Ports)
-	err = appdeps.InTx(ctx, h.deps.DB, func(tx *sql.Tx) error {
-		if _, e := tx.ExecContext(ctx, h.store.q(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`), string(cfg), now, instanceID, tenant); e != nil {
+	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Exec(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`, string(cfg), now, instanceID, tenant).Error; e != nil {
 			return e
 		}
-		_, e := tx.ExecContext(ctx, h.store.q(`INSERT INTO managed_containers(id,tenant_id,instance_id,space_id,docker_id,name,image,purpose,status,labels_json,ports_json,runtime_node_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'component','running',?,?,?,?,?)`), h.store.id(), tenant, instanceID, dataSpaceID, running.DockerID, running.Name, image, string(labels), string(ports), nodeID, now, now)
-		return e
+		return tx.Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": now, "updated_at": now}).Error
 	})
 	if err != nil {
 		cleanup()

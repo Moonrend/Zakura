@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Moonrend/Zakura/go/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/go/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 type QuestionRequest struct {
@@ -64,8 +64,8 @@ func (s *Store) CreateQuestion(ctx context.Context, tenant, agent, session, runI
 		expires = &t
 	}
 	id := s.id()
-	e := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO agent_user_questions(id,tenant_id,agent_id,session_id,run_id,tool_call_id,question,options_json,allow_multiple,secret,mode,timeout_seconds,timeout_action,default_option_ids_json,placeholder,status,answer_json,expires_at,resolved_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','{}',?,NULL,?)`), id, tenant, agent, session, nullString(runID), nullString(toolCallID), in.Question, validJSON(in.Options, "[]"), in.AllowMultiple, in.Secret, in.Mode, in.TimeoutSeconds, in.TimeoutAction, validJSON(in.DefaultOptionIDs, "[]"), in.Placeholder, expires, s.now()); err != nil {
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("agent_user_questions").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "question": in.Question, "options_json": validJSON(in.Options, "[]"), "allow_multiple": in.AllowMultiple, "secret": in.Secret, "mode": in.Mode, "timeout_seconds": in.TimeoutSeconds, "timeout_action": in.TimeoutAction, "default_option_ids_json": validJSON(in.DefaultOptionIDs, "[]"), "placeholder": in.Placeholder, "status": "pending", "answer_json": "{}", "expires_at": expires, "resolved_at": nil, "created_at": s.now()}).Error; err != nil {
 			return err
 		}
 		var options any
@@ -97,8 +97,8 @@ func (s *Store) CreateApproval(ctx context.Context, tenant, agent, session, runI
 		expires = &t
 	}
 	id := s.id()
-	e := appdeps.InTx(ctx, s.deps.DB, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO agent_tool_approvals(id,tenant_id,agent_id,session_id,run_id,tool_call_id,tool_name,qualified_name,args_json,reason,ai_json,status,decided_by,always_allow,expires_at,resolved_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,false,?,NULL,?)`), id, tenant, agent, session, nullString(runID), nullString(toolCallID), in.ToolName, in.QualifiedName, validJSON(in.Args, "{}"), in.Reason, validJSON(in.AI, "{}"), expires, s.now()); err != nil {
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("agent_tool_approvals").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "tool_name": in.ToolName, "qualified_name": in.QualifiedName, "args_json": validJSON(in.Args, "{}"), "reason": in.Reason, "ai_json": validJSON(in.AI, "{}"), "status": "pending", "decided_by": nil, "always_allow": false, "expires_at": expires, "resolved_at": nil, "created_at": s.now()}).Error; err != nil {
 			return err
 		}
 		_, err := s.appendEventTx(ctx, tx, session, "permission_request", optionalString(runID), map[string]any{"requestId": id, "title": in.ToolName, "toolCallId": toolCallID, "options": []map[string]any{{"optionId": "approved", "name": "Allow", "kind": "allow_once"}, {"optionId": "denied", "name": "Deny", "kind": "reject_once"}}})
