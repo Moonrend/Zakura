@@ -72,6 +72,8 @@ func (h *handler) runBuiltinTool(ctx context.Context, tenant, agent, name string
 		return h.runBuiltinToolSessions(ctx, tenant, agent, name, parsed)
 	case "computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info":
 		return h.runBuiltinToolDesktop(ctx, tenant, agent, name, parsed)
+	case "browser_open", "browser_click", "browser_type":
+		return h.runBuiltinToolBrowser(ctx, tenant, agent, name, args)
 	default:
 		return nil, fmt.Errorf("unknown builtin tool %q", name)
 	}

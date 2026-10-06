@@ -283,6 +283,18 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 				"key": map[string]any{"type": "string", "description": "Key or combination, e.g. Return or ctrl+c."},
 			}, "key"),
 			deferredBuiltin("desktop_info", "Inspect the workspace desktop: screen geometry, focused window and uptime.", map[string]any{}),
+			deferredBuiltin("browser_open", "Open a URL in the workspace browser (Chromium via CDP) and return the page title and visible text.", map[string]any{
+				"url": map[string]any{"type": "string", "description": "http(s) URL to open."},
+			}, "url"),
+			deferredBuiltin("browser_click", "Click an element in the workspace browser by CSS selector.", map[string]any{
+				"selector":   map[string]any{"type": "string", "description": "CSS selector of the element to click."},
+				"timeout_ms": map[string]any{"type": "integer", "description": "Deadline in ms waiting for the element. Default 5000."},
+			}, "selector"),
+			deferredBuiltin("browser_type", "Type text into an element (or the focused element) in the workspace browser; optionally submit.", map[string]any{
+				"selector": map[string]any{"type": "string", "description": "CSS selector of the target element. Defaults to the focused element."},
+				"text":     map[string]any{"type": "string", "description": "Text to type."},
+				"submit":   map[string]any{"type": "boolean", "description": "Submit the surrounding form after typing."},
+			}, "text"),
 		)
 	}
 	tools = append(tools,
