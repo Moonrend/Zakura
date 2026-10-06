@@ -294,15 +294,31 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 	if agentID == "" {
 		t.Fatalf("bootstrap shape: %#v", boot)
 	}
-	for _, key := range []string{"name", "slug", "enableComputer", "enableMemory", "mcpAgentUrl"} {
+	for _, key := range []string{"name", "slug", "enableComputer", "enableMemory"} {
 		if _, ok := bootAgent[key]; !ok {
 			t.Fatalf("bootstrap agent missing %s: %#v", key, boot)
 		}
 	}
+	if _, ok := bootAgent["mcpAgentUrl"]; ok {
+		t.Fatalf("bootstrap agent should not expose mcpAgentUrl: %#v", boot)
+	}
+	bootSpaces, _ := boot["spaces"].([]any)
+	if len(bootSpaces) == 0 {
+		t.Fatalf("bootstrap spaces shape: %#v", boot)
+	}
+	bootSpace, _ := bootSpaces[0].(map[string]any)
+	bootSpaceSlug, _ := bootSpace["slug"].(string)
+	if bootSpaceSlug == "" || bootSpace["mcpUrl"] == nil {
+		t.Fatalf("bootstrap space shape: %#v", boot)
+	}
 	agentOAuth := signOAuthAgentAccess(t, deps.Secret, cfg.PublicURL, user["id"].(string), tenant["id"].(string), agentID, "mcp")
-	status, initialized = jsonCall(t, client, http.MethodPost, srv.URL+"/mcp/agents/"+bootAgent["slug"].(string), agentOAuth, map[string]any{"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": map[string]any{}})
+	status, initialized = jsonCall(t, client, http.MethodPost, srv.URL+"/mcp/spaces/"+bootSpaceSlug, agentOAuth, map[string]any{"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": map[string]any{}})
 	if status != http.StatusOK || initialized["result"] == nil {
-		t.Fatalf("agent-scoped OAuth MCP initialize: %d %#v", status, initialized)
+		t.Fatalf("space-scoped OAuth MCP initialize: %d %#v", status, initialized)
+	}
+	status, aliasInitialized := jsonCall(t, client, http.MethodPost, srv.URL+"/mcp/agents/"+bootAgent["slug"].(string), agentOAuth, map[string]any{"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": map[string]any{}})
+	if status != http.StatusOK || aliasInitialized["result"] == nil {
+		t.Fatalf("agent alias OAuth MCP initialize: %d %#v", status, aliasInitialized)
 	}
 	status, agentList := arrayCall(t, client, http.MethodGet, srv.URL+"/api/agents", session)
 	if status != 200 || len(agentList) != 1 {
@@ -320,7 +336,7 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("connect: %d %#v", status, connect)
 	}
-	for _, key := range []string{"publicBaseUrl", "agentMcpPattern", "authorizationServer", "agents", "authMethods"} {
+	for _, key := range []string{"publicBaseUrl", "spaceMcpPattern", "agentMcpPattern", "authorizationServer", "spaces", "authMethods"} {
 		if _, ok := connect[key]; !ok {
 			t.Errorf("/api/connect missing %s", key)
 		}

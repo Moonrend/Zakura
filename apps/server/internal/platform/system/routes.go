@@ -52,6 +52,7 @@ func RegisterRoutes(r chi.Router, d *appdeps.Dependencies) {
 		g.Post("/api/api-keys", h.createKey)
 		g.Delete("/api/api-keys/{id}", h.deleteKey)
 		g.Post("/api/agents/{id}/keys", h.createAgentKey)
+		g.Post("/api/spaces/{id}/keys", h.createSpaceKey)
 		g.Post("/api/me/avatar", h.putAvatar)
 		g.Delete("/api/me/avatar", h.deleteAvatar)
 		g.Get("/api/users/{id}/avatar", h.getAvatar)
@@ -150,16 +151,16 @@ func (h *routes) platform(w http.ResponseWriter, r *http.Request) {
 }
 func (h *routes) connect(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	var rows []models.Agent
+	var rows []models.Space
 	if err := h.d.Gorm.WithContext(r.Context()).Select("id,name,slug").Where("tenant_id=?", p.TenantID).Order("created_at").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
-	agents := []map[string]any{}
-	for _, agent := range rows {
-		agents = append(agents, map[string]any{"id": deref(agent.ID), "name": agent.Name, "slug": agent.Slug, "mcpUrl": h.d.PublicURL + "/mcp/agents/" + agent.Slug})
+	spaces := []map[string]any{}
+	for _, space := range rows {
+		spaces = append(spaces, map[string]any{"id": deref(space.ID), "name": space.Name, "slug": space.Slug, "mcpUrl": h.d.PublicURL + "/mcp/spaces/" + space.Slug})
 	}
-	httpx.JSON(w, 200, map[string]any{"publicBaseUrl": h.d.PublicURL, "agentMcpPattern": h.d.PublicURL + "/mcp/agents/{slug}", "authorizationServer": map[string]any{"issuer": h.d.PublicURL, "authorization_endpoint": h.d.PublicURL + "/oauth/authorize", "token_endpoint": h.d.PublicURL + "/token", "registration_endpoint": h.d.PublicURL + "/oauth/register"}, "agents": agents, "authMethods": []map[string]string{{"id": "oauth21", "name": "OAuth 2.1 + PKCE"}, {"id": "api_key", "name": "API Key"}}})
+	httpx.JSON(w, 200, map[string]any{"publicBaseUrl": h.d.PublicURL, "spaceMcpPattern": h.d.PublicURL + "/mcp/spaces/{slug}", "agentMcpPattern": h.d.PublicURL + "/mcp/agents/{slug}", "authorizationServer": map[string]any{"issuer": h.d.PublicURL, "authorization_endpoint": h.d.PublicURL + "/oauth/authorize", "token_endpoint": h.d.PublicURL + "/token", "registration_endpoint": h.d.PublicURL + "/oauth/register"}, "spaces": spaces, "authMethods": []map[string]string{{"id": "oauth21", "name": "OAuth 2.1 + PKCE"}, {"id": "api_key", "name": "API Key"}}})
 }
 
 func (h *routes) listKeys(w http.ResponseWriter, r *http.Request) {
@@ -175,15 +176,22 @@ func (h *routes) listKeys(w http.ResponseWriter, r *http.Request) {
 		if key.AgentID != nil {
 			agentID = *key.AgentID
 		}
-		items = append(items, map[string]any{"id": deref(key.ID), "agentId": agentID, "name": key.Name, "keyPrefix": key.KeyPrefix, "scopes": decodeArray(key.Scopes), "expiresAt": nullStringPtr(key.ExpiresAt), "lastUsedAt": nullStringPtr(key.LastUsedAt), "createdAt": key.CreatedAt})
+		spaceID := ""
+		if key.SpaceID != nil {
+			spaceID = *key.SpaceID
+		}
+		items = append(items, map[string]any{"id": deref(key.ID), "agentId": agentID, "spaceId": spaceID, "name": key.Name, "keyPrefix": key.KeyPrefix, "scopes": decodeArray(key.Scopes), "expiresAt": nullStringPtr(key.ExpiresAt), "lastUsedAt": nullStringPtr(key.LastUsedAt), "createdAt": key.CreatedAt})
 	}
 	httpx.JSON(w, 200, items)
 }
-func (h *routes) createKey(w http.ResponseWriter, r *http.Request) { h.createKeyFor(w, r, "") }
+func (h *routes) createKey(w http.ResponseWriter, r *http.Request) { h.createKeyFor(w, r, "", "") }
 func (h *routes) createAgentKey(w http.ResponseWriter, r *http.Request) {
-	h.createKeyFor(w, r, chi.URLParam(r, "id"))
+	h.createKeyFor(w, r, chi.URLParam(r, "id"), "")
 }
-func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID string) {
+func (h *routes) createSpaceKey(w http.ResponseWriter, r *http.Request) {
+	h.createKeyFor(w, r, "", chi.URLParam(r, "id"))
+}
+func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID, spaceID string) {
 	p, _ := httpx.PrincipalFrom(r.Context())
 	var b struct {
 		Name      string   `json:"name"`
@@ -218,6 +226,14 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID st
 			return
 		}
 	}
+	if spaceID != "" {
+		var count int64
+		_ = h.d.Gorm.WithContext(r.Context()).Model(&models.Space{}).Where("id=? AND tenant_id=?", spaceID, p.TenantID).Count(&count)
+		if count != 1 {
+			httpx.Error(w, 404, "space not found")
+			return
+		}
+	}
 	raw := "zak_" + randomString(32)
 	sum := sha256.Sum256([]byte(raw))
 	prefix := raw[:12]
@@ -228,12 +244,12 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID st
 		uid := p.UserID
 		userID = &uid
 	}
-	err := h.d.Gorm.WithContext(r.Context()).Create(&models.APIKey{ID: &id, TenantID: p.TenantID, UserID: userID, AgentID: strPtr(agentID), Name: b.Name, KeyPrefix: prefix, KeyHash: hex.EncodeToString(sum[:]), Scopes: string(scopes), ExpiresAt: strPtr(b.ExpiresAt), CreatedAt: h.now()}).Error
+	err := h.d.Gorm.WithContext(r.Context()).Create(&models.APIKey{ID: &id, TenantID: p.TenantID, UserID: userID, AgentID: strPtr(agentID), SpaceID: strPtr(spaceID), Name: b.Name, KeyPrefix: prefix, KeyHash: hex.EncodeToString(sum[:]), Scopes: string(scopes), ExpiresAt: strPtr(b.ExpiresAt), CreatedAt: h.now()}).Error
 	if err != nil {
 		httpx.Error(w, 500, "create failed")
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"id": id, "name": b.Name, "agentId": nullIfEmpty(agentID), "keyPrefix": prefix, "scopes": b.Scopes, "expiresAt": nullIfEmpty(b.ExpiresAt), "lastUsedAt": nil, "createdAt": h.now(), "rawKey": raw})
+	httpx.JSON(w, 201, map[string]any{"id": id, "name": b.Name, "agentId": nullIfEmpty(agentID), "spaceId": nullIfEmpty(spaceID), "keyPrefix": prefix, "scopes": b.Scopes, "expiresAt": nullIfEmpty(b.ExpiresAt), "lastUsedAt": nil, "createdAt": h.now(), "rawKey": raw})
 }
 func (h *routes) deleteKey(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
@@ -593,10 +609,10 @@ func (h *routes) bootstrap(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 500, "bootstrap failed")
 		return
 	}
-	var name, slug string
+	var name, slug, spaceName, spaceSlug string
 	var enableComputer, enableMemory, completed bool
 	var stepsRaw string
-	if err = h.d.Gorm.WithContext(r.Context()).Raw(`SELECT a.name,a.slug,s.enable_computer,a.enable_memory FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.id=? AND a.tenant_id=?`, agentID, p.TenantID).Row().Scan(&name, &slug, &enableComputer, &enableMemory); err != nil {
+	if err = h.d.Gorm.WithContext(r.Context()).Raw(`SELECT a.name,a.slug,s.name,s.slug,s.enable_computer,a.enable_memory FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.id=? AND a.tenant_id=?`, agentID, p.TenantID).Row().Scan(&name, &slug, &spaceName, &spaceSlug, &enableComputer, &enableMemory); err != nil {
 		httpx.Error(w, 500, "bootstrap agent unavailable")
 		return
 	}
@@ -612,8 +628,8 @@ func (h *routes) bootstrap(w http.ResponseWriter, r *http.Request) {
 		"agent": map[string]any{
 			"id": agentID, "name": name, "slug": slug,
 			"enableComputer": enableComputer, "enableMemory": enableMemory,
-			"mcpAgentUrl": strings.TrimRight(h.d.PublicURL, "/") + "/mcp/agents/" + slug,
 		},
+		"spaces":  []map[string]any{{"id": spaceID, "name": spaceName, "slug": spaceSlug, "mcpUrl": strings.TrimRight(h.d.PublicURL, "/") + "/mcp/spaces/" + spaceSlug}},
 		"created": created, "computerStarting": false,
 		"steps": decodeObject(stepsRaw), "completed": completed,
 	})

@@ -261,7 +261,7 @@ func currentHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 			return
 		}
 		platformAdmin := deps.MultiTenant && u.IsPlatformAdmin
-		httpx.JSON(w, 200, map[string]any{"user": u, "tenant": t, "role": p.Role, "isPlatformAdmin": platformAdmin, "canUseLocalRunner": u.CanUseLocalRunner, "multiTenant": deps.MultiTenant, "edition": deps.Edition, "registrationEnabled": deps.Edition == "saas", "connect": map[string]any{"agentMcpPattern": deps.PublicURL + "/mcp/agents/{slug}", "authorizeUrl": deps.WebURL + "/console/oauth/authorize", "tokenUrl": deps.PublicURL + "/token", "registerUrl": deps.PublicURL + "/oauth/register", "oauthMetadataUrl": deps.PublicURL + "/.well-known/oauth-authorization-server", "resourceMetadataUrl": deps.PublicURL + "/.well-known/oauth-protected-resource", "webPublicUrl": deps.WebURL, "clientIdMetadataDocumentSupported": true}})
+		httpx.JSON(w, 200, map[string]any{"user": u, "tenant": t, "role": p.Role, "isPlatformAdmin": platformAdmin, "canUseLocalRunner": u.CanUseLocalRunner, "multiTenant": deps.MultiTenant, "edition": deps.Edition, "registrationEnabled": deps.Edition == "saas", "connect": map[string]any{"spaceMcpPattern": deps.PublicURL + "/mcp/spaces/{slug}", "agentMcpPattern": deps.PublicURL + "/mcp/agents/{slug}", "authorizeUrl": deps.WebURL + "/console/oauth/authorize", "tokenUrl": deps.PublicURL + "/token", "registerUrl": deps.PublicURL + "/oauth/register", "oauthMetadataUrl": deps.PublicURL + "/.well-known/oauth-authorization-server", "resourceMetadataUrl": deps.PublicURL + "/.well-known/oauth-protected-resource", "webPublicUrl": deps.WebURL, "clientIdMetadataDocumentSupported": true}})
 	}
 }
 

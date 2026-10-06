@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS skills (id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL R
 -- statement-breakpoint
 CREATE TABLE IF NOT EXISTS agent_skills (id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,path TEXT NOT NULL,version TEXT,status TEXT NOT NULL DEFAULT 'installed',error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(agent_id,name));
 -- statement-breakpoint
-CREATE TABLE IF NOT EXISTS mcp_policies (id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,name TEXT NOT NULL,policy_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mcp_policies (id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,space_id TEXT,name TEXT NOT NULL,policy_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 -- statement-breakpoint
 CREATE TABLE IF NOT EXISTS provider_catalog (id TEXT PRIMARY KEY,name TEXT NOT NULL,kind TEXT NOT NULL,manifest_json TEXT NOT NULL DEFAULT '{}',enabled INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL);
 -- statement-breakpoint

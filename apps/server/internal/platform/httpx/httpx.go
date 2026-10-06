@@ -30,6 +30,7 @@ type Principal struct {
 	APIKey          bool   `json:"apiKey"`
 	APIKeyID        string `json:"-"`
 	AgentID         string `json:"-"`
+	SpaceID         string `json:"-"`
 	APIKeyScopes    string `json:"-"`
 	OAuth           bool   `json:"-"`
 	OAuthScope      string `json:"-"`
@@ -162,7 +163,7 @@ func authenticate(ctx context.Context, deps *appdeps.Dependencies, raw string) (
 	if strings.HasPrefix(raw, "zak_") || strings.HasPrefix(raw, "zk_") {
 		h := sha256.Sum256([]byte(raw))
 		p := Principal{UserID: "api-key", Role: "api_key", APIKey: true}
-		err := deps.DB.QueryRowContext(ctx, deps.Rebind(`SELECT k.id,k.tenant_id,k.name,COALESCE(k.agent_id,''),k.scopes FROM api_keys k JOIN tenants t ON t.id=k.tenant_id WHERE k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)`), hex.EncodeToString(h[:]), deps.Clock().UTC().Format(time.RFC3339Nano)).Scan(&p.APIKeyID, &p.TenantID, &p.Email, &p.AgentID, &p.APIKeyScopes)
+		err := deps.DB.QueryRowContext(ctx, deps.Rebind(`SELECT k.id,k.tenant_id,k.name,COALESCE(k.agent_id,''),k.scopes,COALESCE(k.space_id,'') FROM api_keys k JOIN tenants t ON t.id=k.tenant_id WHERE k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)`), hex.EncodeToString(h[:]), deps.Clock().UTC().Format(time.RFC3339Nano)).Scan(&p.APIKeyID, &p.TenantID, &p.Email, &p.AgentID, &p.APIKeyScopes, &p.SpaceID)
 		if err != nil {
 			return Principal{}, err
 		}

@@ -128,7 +128,7 @@ func TestHTTPDurabilityTenantIsolationAndQueue(t *testing.T) {
 		t.Fatalf("agent: %d %#v", code, out)
 	}
 	agent := out["id"].(string)
-	if out["starting"] != false || out["apiKey"] == nil || out["mcpAgentUrl"] == nil {
+	if out["starting"] != false || out["apiKey"] == nil || out["spaceId"] == nil {
 		t.Fatalf("agent create contract: %#v", out)
 	}
 	createdKey := out["apiKey"].(map[string]any)["rawKey"].(string)

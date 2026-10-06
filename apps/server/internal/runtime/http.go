@@ -31,11 +31,11 @@ type handler struct {
 	hub         *runnerHub
 	acp         *acpRuntimeManager
 	mcpMu       sync.Mutex
-	mcpSessions map[string]agentMCPSession
+	mcpSessions map[string]spaceMCPSession
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
-	h := &handler{deps: deps, store: NewStore(deps), mcpSessions: map[string]agentMCPSession{}}
+	h := &handler{deps: deps, store: NewStore(deps), mcpSessions: map[string]spaceMCPSession{}}
 	h.hub = newRunnerHub(deps)
 	h.service = NewService(h.store)
 	h.acp = newACPRuntimeManager(h)
@@ -221,6 +221,7 @@ func (h *handler) spaceDTO(ctx context.Context, tenant string, x Space) map[stri
 	out["lastMigrationId"] = nil
 	out["workspaceHostPath"] = filepath.Join(root, tenant, x.ID)
 	out["isDefault"] = x.Slug == "default"
+	out["mcpUrl"] = strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/spaces/" + x.Slug
 	return out
 }
 func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[string]any {
@@ -272,7 +273,6 @@ func (h *handler) agentDTO(ctx context.Context, tenant string, a Agent) map[stri
 		}
 		out["workspace"] = map[string]any{"status": status, "dockerId": nullableString(container.DockerID), "image": workspaceImage, "running": status == "running", "profile": profile}
 	}
-	out["mcpAgentUrl"] = strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/agents/" + a.Slug
 	return out
 }
 func (h *handler) createAgentAPIKey(ctx context.Context, p httpx.Principal, a Agent) (map[string]any, error) {
@@ -445,7 +445,7 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := h.agentDTO(r.Context(), p.TenantID, x)
-	tools, resources, prompts, templates := h.agentMCPInventory(r.Context(), p.TenantID, x.ID)
+	tools, resources, prompts, templates := h.agentMCPInventory(r.Context(), p.TenantID, x.SpaceID)
 	out["tools"] = tools
 	out["resources"] = resources
 	out["prompts"] = prompts
@@ -476,13 +476,13 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
-func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string) ([]map[string]any, []map[string]any, []map[string]any, []map[string]any) {
+func (h *handler) agentMCPInventory(ctx context.Context, tenant, spaceID string) ([]map[string]any, []map[string]any, []map[string]any, []map[string]any) {
 	type bound struct {
 		ID  string `gorm:"column:id"`
 		Ref string `gorm:"column:component_ref"`
 	}
 	boundInstances := []bound{}
-	_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id AS id,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, tenant, agentID).Scan(&boundInstances).Error
+	_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT DISTINCT i.id AS id,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.space_id=? AND b.agent_id IS NULL AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, tenant, spaceID).Scan(&boundInstances).Error
 	tools := []map[string]any{}
 	resources := []map[string]any{}
 	prompts := []map[string]any{}
@@ -507,7 +507,7 @@ func (h *handler) agentMCPInventory(ctx context.Context, tenant, agentID string)
 		}
 		call("tools/list", &listedTools)
 		for _, tool := range listedTools.Tools {
-			tools = append(tools, map[string]any{"name": "re_" + slugify(item.Ref) + "__" + tool.Name, "qualifiedName": "re_" + slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "agentScoped": true})
+			tools = append(tools, map[string]any{"name": "re_" + slugify(item.Ref) + "__" + tool.Name, "qualifiedName": "re_" + slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "spaceScoped": true})
 		}
 		var listedResources struct {
 			Resources []map[string]any `json:"resources"`
@@ -935,7 +935,7 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 		Ref  string `gorm:"column:component_ref"`
 	}
 	var mcpInstances []mcpSummary
-	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT i.id AS id,i.name AS name,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.agent_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, p.TenantID, agent.ID).Scan(&mcpInstances).Error; e != nil {
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT i.id AS id,i.name AS name,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.space_id=? AND b.agent_id IS NULL AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, p.TenantID, agent.SpaceID).Scan(&mcpInstances).Error; e != nil {
 		statusErr(w, e)
 		return
 	}

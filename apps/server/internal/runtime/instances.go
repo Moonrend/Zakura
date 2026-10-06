@@ -19,6 +19,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Instance struct {
@@ -51,6 +52,11 @@ func (h *handler) registerInstances(r chi.Router) {
 	r.Delete("/agents/{id}/bindings/{instanceId}", h.deleteBinding)
 	r.Get("/agents/{id}/providers", h.agentProviders)
 	r.Put("/agents/{id}/providers", h.putAgentProviders)
+	r.Get("/spaces/{id}/bindings", h.listSpaceBindings)
+	r.Post("/spaces/{id}/bindings", h.createSpaceBinding)
+	r.Delete("/spaces/{id}/bindings/{instanceId}", h.deleteSpaceBinding)
+	r.Get("/spaces/{id}/providers", h.spaceProviders)
+	r.Put("/spaces/{id}/providers", h.putSpaceProviders)
 	r.Post("/agents/{id}/start", h.startAgent)
 	r.Post("/agents/{id}/stop", h.stopAgent)
 	r.Get("/agents/{id}/progress", h.agentProgress)
@@ -485,6 +491,23 @@ func (h *handler) listBindings(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, out)
 }
+func (h *handler) upsertSpaceBinding(ctx context.Context, tenant, spaceID, instanceID string) (string, error) {
+	var count int64
+	if e := h.deps.Gorm.WithContext(ctx).Table("component_instances").Where("tenant_id = ? AND id = ?", tenant, instanceID).Count(&count).Error; e != nil || count == 0 {
+		return "", ErrNotFound
+	}
+	id := h.store.id()
+	e := h.deps.Gorm.WithContext(ctx).Table("agent_bindings").
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "space_id"}, {Name: "instance_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
+		}).
+		Create(map[string]any{"id": id, "tenant_id": tenant, "space_id": spaceID, "agent_id": nil, "instance_id": instanceID, "created_at": runtimeTimeString(h.store.now())}).Error
+	if e != nil {
+		return "", e
+	}
+	return id, nil
+}
 func (h *handler) createBinding(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		InstanceID string `json:"instanceId"`
@@ -494,30 +517,84 @@ func (h *handler) createBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	agent := chi.URLParam(r, "id")
-	var spaceRow struct {
-		SpaceID string `gorm:"column:space_id"`
-	}
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id = ? AND id = ?", p.TenantID, agent).Take(&spaceRow).Error; e != nil {
-		statusErr(w, ErrNotFound)
+	agent, err := h.store.GetAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	var count int64
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Where("tenant_id = ? AND id = ?", p.TenantID, b.InstanceID).Count(&count).Error; e != nil || count == 0 {
-		statusErr(w, ErrNotFound)
+	id, err := h.upsertSpaceBinding(r.Context(), p.TenantID, agent.SpaceID, b.InstanceID)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	id := h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "space_id": spaceRow.SpaceID, "agent_id": agent, "instance_id": b.InstanceID, "created_at": runtimeTimeString(h.store.now())}).Error
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, http.StatusCreated, map[string]any{"id": id, "instanceId": b.InstanceID, "agentId": agent, "spaceId": spaceRow.SpaceID, "createdAt": h.store.now()})
+	httpx.JSON(w, http.StatusCreated, map[string]any{"id": id, "instanceId": b.InstanceID, "agentId": agent.ID, "spaceId": agent.SpaceID, "createdAt": h.store.now()})
 }
 func (h *handler) deleteBinding(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Where("tenant_id = ? AND agent_id = ? AND instance_id = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "instanceId")).Delete(nil)
+	agent, err := h.store.GetAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Where("tenant_id = ? AND space_id = ? AND instance_id = ?", p.TenantID, agent.SpaceID, chi.URLParam(r, "instanceId")).Delete(nil)
+	if res.Error != nil {
+		statusErr(w, res.Error)
+		return
+	}
+	if res.RowsAffected == 0 {
+		statusErr(w, ErrNotFound)
+		return
+	}
+	httpx.JSON(w, 200, map[string]any{"ok": true})
+}
+func (h *handler) listSpaceBindings(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if _, err := h.store.GetSpace(r.Context(), p.TenantID, chi.URLParam(r, "id")); err != nil {
+		statusErr(w, err)
+		return
+	}
+	var rows []struct {
+		ID        string `gorm:"column:id"`
+		Instance  string `gorm:"column:instance_id"`
+		CreatedAt string `gorm:"column:created_at"`
+		Name      string `gorm:"column:name"`
+		Type      string `gorm:"column:component_type"`
+		Status    string `gorm:"column:status"`
+	}
+	if e := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT b.id,b.instance_id,b.created_at,i.name,i.component_type,i.status FROM agent_bindings b JOIN component_instances i ON i.id=b.instance_id WHERE b.tenant_id=? AND b.space_id=? ORDER BY b.created_at`, p.TenantID, chi.URLParam(r, "id")).Scan(&rows).Error; e != nil {
+		statusErr(w, e)
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, item := range rows {
+		out = append(out, map[string]any{"id": item.ID, "instanceId": item.Instance, "createdAt": item.CreatedAt, "name": item.Name, "type": item.Type, "status": item.Status})
+	}
+	httpx.JSON(w, http.StatusOK, out)
+}
+func (h *handler) createSpaceBinding(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		InstanceID string `json:"instanceId"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil || b.InstanceID == "" {
+		httpx.Error(w, 400, "instanceId required")
+		return
+	}
+	p := principal(r)
+	space, err := h.store.GetSpace(r.Context(), p.TenantID, chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	id, err := h.upsertSpaceBinding(r.Context(), p.TenantID, space.ID, b.InstanceID)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, map[string]any{"id": id, "instanceId": b.InstanceID, "agentId": nil, "spaceId": space.ID, "createdAt": h.store.now()})
+}
+func (h *handler) deleteSpaceBinding(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Where("tenant_id = ? AND space_id = ? AND instance_id = ?", p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "instanceId")).Delete(nil)
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -548,7 +625,12 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 	if providers == nil {
 		providers = map[string]any{"mcp": map[string]any{"mode": "all", "instanceIds": []any{}}}
 	}
-	mcpCfg, _ := providers["mcp"].(map[string]any)
+	spaceCfg := map[string]any{}
+	if space, e := h.store.GetSpace(ctx, tenant, agent.SpaceID); e == nil {
+		_ = json.Unmarshal(space.Config, &spaceCfg)
+	}
+	spaceProviders, _ := spaceCfg["providers"].(map[string]any)
+	mcpCfg, _ := spaceProviders["mcp"].(map[string]any)
 	mode, _ := mcpCfg["mode"].(string)
 	if mode != "selected" {
 		mode = "all"
@@ -564,7 +646,7 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 		Status string `gorm:"column:status"`
 		Bound  bool   `gorm:"column:bound"`
 	}
-	if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id,i.name,i.component_ref,i.status,CASE WHEN b.id IS NULL THEN false ELSE true END AS bound FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.agent_id=? WHERE i.tenant_id=? AND i.component_type='mcp' ORDER BY i.name`, agentID, tenant).Scan(&rows).Error; err != nil {
+	if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id,i.name,i.component_ref,i.status,CASE WHEN b.id IS NULL THEN false ELSE true END AS bound FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.space_id=? AND b.agent_id IS NULL WHERE i.tenant_id=? AND i.component_type='mcp' ORDER BY i.name`, agent.SpaceID, tenant).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	instances := []map[string]any{}
@@ -628,7 +710,7 @@ func (h *handler) putAgentProviders(w http.ResponseWriter, r *http.Request) {
 	if providers == nil {
 		providers = map[string]any{}
 	}
-	for _, key := range []string{"webSearch", "webFetch", "mcp"} {
+	for _, key := range []string{"webSearch", "webFetch"} {
 		if value, ok := patch[key]; ok {
 			providers[key] = value
 		}
@@ -646,6 +728,12 @@ func (h *handler) putAgentProviders(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
+	if value, ok := patch["mcp"]; ok {
+		if err := h.mergeSpaceMCPProviders(r.Context(), p.TenantID, agent.SpaceID, value); err != nil {
+			statusErr(w, err)
+			return
+		}
+	}
 	options, err := h.buildAgentProviders(r.Context(), p.TenantID, agent.ID)
 	if err != nil {
 		statusErr(w, err)
@@ -654,6 +742,92 @@ func (h *handler) putAgentProviders(w http.ResponseWriter, r *http.Request) {
 	result := h.agentDTO(r.Context(), p.TenantID, agent)
 	result["options"] = options
 	httpx.JSON(w, http.StatusOK, result)
+}
+
+func (h *handler) mergeSpaceMCPProviders(ctx context.Context, tenant, spaceID string, mcp any) error {
+	space, err := h.store.GetSpace(ctx, tenant, spaceID)
+	if err != nil {
+		return err
+	}
+	cfg := map[string]any{}
+	_ = json.Unmarshal(space.Config, &cfg)
+	providers, _ := cfg["providers"].(map[string]any)
+	if providers == nil {
+		providers = map[string]any{}
+	}
+	providers["mcp"] = mcp
+	cfg["providers"] = providers
+	_, err = h.store.UpdateSpace(ctx, tenant, spaceID, map[string]any{"config": cfg})
+	return err
+}
+
+func (h *handler) buildSpaceProviders(ctx context.Context, tenant, spaceID string) (map[string]any, error) {
+	space, err := h.store.GetSpace(ctx, tenant, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	cfg := map[string]any{}
+	_ = json.Unmarshal(space.Config, &cfg)
+	providers, _ := cfg["providers"].(map[string]any)
+	mcpCfg, _ := providers["mcp"].(map[string]any)
+	mode, _ := mcpCfg["mode"].(string)
+	if mode != "selected" {
+		mode = "all"
+	}
+	exposeWorkspaceFS, ok := mcpCfg["exposeWorkspaceFs"].(bool)
+	if !ok {
+		exposeWorkspaceFS = true
+	}
+	var rows []struct {
+		ID     string `gorm:"column:id"`
+		Name   string `gorm:"column:name"`
+		Slug   string `gorm:"column:component_ref"`
+		Status string `gorm:"column:status"`
+		Bound  bool   `gorm:"column:bound"`
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT i.id,i.name,i.component_ref,i.status,CASE WHEN b.id IS NULL THEN false ELSE true END AS bound FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.space_id=? AND b.agent_id IS NULL WHERE i.tenant_id=? AND i.component_type='mcp' ORDER BY i.name`, spaceID, tenant).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	instances := []map[string]any{}
+	for _, item := range rows {
+		instances = append(instances, map[string]any{"id": item.ID, "name": item.Name, "slug": item.Slug, "providerId": item.Slug, "status": item.Status, "bound": item.Bound})
+	}
+	return map[string]any{"mcp": map[string]any{"mode": mode, "exposeWorkspaceFs": exposeWorkspaceFS, "instances": instances}}, nil
+}
+
+func (h *handler) spaceProviders(w http.ResponseWriter, r *http.Request) {
+	options, err := h.buildSpaceProviders(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, options)
+}
+
+func (h *handler) putSpaceProviders(w http.ResponseWriter, r *http.Request) {
+	var patch map[string]any
+	if json.NewDecoder(r.Body).Decode(&patch) != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	p := principal(r)
+	space, err := h.store.GetSpace(r.Context(), p.TenantID, chi.URLParam(r, "id"))
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	if value, ok := patch["mcp"]; ok {
+		if err = h.mergeSpaceMCPProviders(r.Context(), p.TenantID, space.ID, value); err != nil {
+			statusErr(w, err)
+			return
+		}
+	}
+	options, err := h.buildSpaceProviders(r.Context(), p.TenantID, space.ID)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, options)
 }
 
 func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
@@ -750,7 +924,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, runtimeTimeString(h.store.now()), p.TenantID, agent.ID).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE space_id=? AND agent_id IS NULL)`, runtimeTimeString(h.store.now()), p.TenantID, agent.SpaceID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	result := h.agentDTO(r.Context(), p.TenantID, agent)
 	result["starting"] = true
@@ -793,7 +967,7 @@ func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Updates(map[string]any{"status": "stopped", "updated_at": runtimeTimeString(now)}).Error
-	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, runtimeTimeString(now), p.TenantID, agent.ID).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE space_id=? AND agent_id IS NULL)`, runtimeTimeString(now), p.TenantID, agent.SpaceID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	httpx.JSON(w, http.StatusOK, h.agentDTO(r.Context(), p.TenantID, agent))
 }

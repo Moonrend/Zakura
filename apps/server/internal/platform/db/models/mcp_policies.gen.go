@@ -11,6 +11,7 @@ type McpPolicy struct {
 	ID         *string `gorm:"column:id;type:TEXT;primaryKey" json:"id"`
 	TenantID   string  `gorm:"column:tenant_id;type:TEXT;not null" json:"tenant_id"`
 	AgentID    *string `gorm:"column:agent_id;type:TEXT" json:"agent_id"`
+	SpaceID    *string `gorm:"column:space_id;type:TEXT" json:"space_id"`
 	Name       string  `gorm:"column:name;type:TEXT;not null" json:"name"`
 	PolicyJSON string  `gorm:"column:policy_json;type:TEXT;not null;default:'{}'" json:"policy_json"`
 	CreatedAt  string  `gorm:"column:created_at;type:TEXT;not null" json:"created_at"`

@@ -372,13 +372,14 @@ func (h *handler) authenticateRealtime(ctx context.Context, raw string) (httpx.P
 			TenantID     string `gorm:"column:tenant_id"`
 			Name         string `gorm:"column:name"`
 			AgentID      string `gorm:"column:agent_id"`
+			SpaceID      string `gorm:"column:space_id"`
 			APIKeyScopes string `gorm:"column:scopes"`
 		}
-		e := h.deps.Gorm.WithContext(ctx).Table("api_keys AS k").Select("k.id AS api_key_id, k.tenant_id AS tenant_id, k.name AS name, COALESCE(k.agent_id,'') AS agent_id, k.scopes AS scopes").Joins("JOIN tenants t ON t.id=k.tenant_id").Where("k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)", hex.EncodeToString(sum[:]), runtimeTimeString(h.store.now())).Take(&rec).Error
+		e := h.deps.Gorm.WithContext(ctx).Table("api_keys AS k").Select("k.id AS api_key_id, k.tenant_id AS tenant_id, k.name AS name, COALESCE(k.agent_id,'') AS agent_id, k.scopes AS scopes, COALESCE(k.space_id,'') AS space_id").Joins("JOIN tenants t ON t.id=k.tenant_id").Where("k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)", hex.EncodeToString(sum[:]), runtimeTimeString(h.store.now())).Take(&rec).Error
 		if e != nil {
 			return httpx.Principal{}, e
 		}
-		p.APIKeyID, p.TenantID, p.Email, p.AgentID, p.APIKeyScopes = rec.APIKeyID, rec.TenantID, rec.Name, rec.AgentID, rec.APIKeyScopes
+		p.APIKeyID, p.TenantID, p.Email, p.AgentID, p.APIKeyScopes, p.SpaceID = rec.APIKeyID, rec.TenantID, rec.Name, rec.AgentID, rec.APIKeyScopes, rec.SpaceID
 		_ = h.deps.Gorm.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", p.APIKeyID).Update("last_used_at", runtimeTimeString(h.store.now())).Error
 		return p, nil
 	}

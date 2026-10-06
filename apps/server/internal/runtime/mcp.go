@@ -435,25 +435,27 @@ func (h *handler) listMCPPolicies(w http.ResponseWriter, r *http.Request) {
 	type policyRow struct {
 		ID         string  `gorm:"column:id"`
 		AgentID    *string `gorm:"column:agent_id"`
+		SpaceID    *string `gorm:"column:space_id"`
 		Name       string  `gorm:"column:name"`
 		PolicyJSON string  `gorm:"column:policy_json"`
 		CreatedAt  string  `gorm:"column:created_at"`
 		UpdatedAt  string  `gorm:"column:updated_at"`
 	}
 	var policyRows []policyRow
-	if e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("id,agent_id,name,policy_json,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID).Order("created_at").Find(&policyRows).Error; e != nil {
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("id,agent_id,space_id,name,policy_json,created_at,updated_at").Where("tenant_id=?", principal(r).TenantID).Order("created_at").Find(&policyRows).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
 	out := make([]map[string]any, 0)
 	for _, row := range policyRows {
-		out = append(out, map[string]any{"id": row.ID, "agentId": row.AgentID, "name": row.Name, "policy": json.RawMessage(row.PolicyJSON), "createdAt": parseTime(row.CreatedAt), "updatedAt": parseTime(row.UpdatedAt)})
+		out = append(out, map[string]any{"id": row.ID, "agentId": row.AgentID, "spaceId": row.SpaceID, "name": row.Name, "policy": json.RawMessage(row.PolicyJSON), "createdAt": parseTime(row.CreatedAt), "updatedAt": parseTime(row.UpdatedAt)})
 	}
 	httpx.JSON(w, 200, map[string]any{"policies": out})
 }
 func (h *handler) createMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		AgentID *string         `json:"agentId"`
+		SpaceID *string         `json:"spaceId"`
 		Name    string          `json:"name"`
 		Policy  json.RawMessage `json:"policy"`
 	}
@@ -463,23 +465,28 @@ func (h *handler) createMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "space_id": b.SpaceID, "name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"policy": map[string]any{"id": id, "agentId": b.AgentID, "name": b.Name, "policy": b.Policy}})
+	httpx.JSON(w, 201, map[string]any{"policy": map[string]any{"id": id, "agentId": b.AgentID, "spaceId": b.SpaceID, "name": b.Name, "policy": b.Policy}})
 }
 func (h *handler) updateMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	var b struct {
-		Name   string          `json:"name"`
-		Policy json.RawMessage `json:"policy"`
+		SpaceID *string         `json:"spaceId"`
+		Name    string          `json:"name"`
+		Policy  json.RawMessage `json:"policy"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil || b.Name == "" {
 		httpx.Error(w, 400, "name required")
 		return
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.McpPolicy{}).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": runtimeTimeString(h.store.now())})
+	updates := map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": runtimeTimeString(h.store.now())}
+	if b.SpaceID != nil {
+		updates["space_id"] = b.SpaceID
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.McpPolicy{}).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(updates)
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -524,6 +531,8 @@ type stdioImportBody struct {
 	Name, Slug, URL, Token, Command, PackageManager, Image, WorkingDir string
 	AgentID                                                            *string           `json:"agentId"`
 	AgentIDs                                                           []string          `json:"agentIds"`
+	SpaceID                                                            *string           `json:"spaceId"`
+	SpaceIDs                                                           []string          `json:"spaceIds"`
 	All                                                                bool              `json:"all"`
 	Start                                                              *bool             `json:"start"`
 	RuntimeNodeID                                                      *string           `json:"runtimeNodeId"`
@@ -599,13 +608,25 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	if body.AgentID != nil {
 		body.AgentIDs = append(body.AgentIDs, *body.AgentID)
 	}
-	if body.All {
-		var agentIDs []string
-		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id=?", p.TenantID).Pluck("id", &agentIDs).Error; e == nil {
-			body.AgentIDs = append(body.AgentIDs, agentIDs...)
+	body.AgentIDs = uniqueStrings(body.AgentIDs)
+	spaceIDs := append([]string{}, body.SpaceIDs...)
+	if body.SpaceID != nil {
+		spaceIDs = append(spaceIDs, *body.SpaceID)
+	}
+	if len(body.AgentIDs) > 0 {
+		var agentSpaceIDs []string
+		if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Where("tenant_id=? AND id IN ?", p.TenantID, body.AgentIDs).Pluck("space_id", &agentSpaceIDs).Error; e == nil {
+			spaceIDs = append(spaceIDs, agentSpaceIDs...)
 		}
 	}
-	body.AgentIDs = uniqueStrings(body.AgentIDs)
+	if body.All {
+		var allSpaceIDs []string
+		if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Space{}).Where("tenant_id=?", p.TenantID).Pluck("id", &allSpaceIDs).Error; e == nil {
+			spaceIDs = append(spaceIDs, allSpaceIDs...)
+		}
+	}
+	spaceIDs = uniqueStrings(spaceIDs)
+	body.SpaceIDs = spaceIDs
 	cfg := map[string]any{"url": body.URL}
 	if body.Command != "" {
 		envKeys := make([]string, 0, len(body.Env))
@@ -632,19 +653,14 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	for _, agent := range body.AgentIDs {
-		var agentRow struct {
-			SpaceID string `gorm:"column:space_id"`
-		}
-		if h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id=? AND id=?", p.TenantID, agent).Take(&agentRow).Error == nil {
-			_ = h.deps.Gorm.WithContext(r.Context()).
-				Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "space_id"}, {Name: "instance_id"}},
-					DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
-				}).
-				Table("agent_bindings").
-				Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": agentRow.SpaceID, "agent_id": agent, "instance_id": id, "created_at": runtimeTimeString(now)}).Error
-		}
+	for _, spaceID := range spaceIDs {
+		_ = h.deps.Gorm.WithContext(r.Context()).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "space_id"}, {Name: "instance_id"}},
+				DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
+			}).
+			Table("agent_bindings").
+			Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": spaceID, "agent_id": nil, "instance_id": id, "created_at": runtimeTimeString(now)}).Error
 	}
 	started := body.Command == ""
 	startError := ""
@@ -660,7 +676,7 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	instance, _ := h.getInstance(r.Context(), p.TenantID, id)
 	result := h.instanceDTO(r.Context(), p.TenantID, instance, false)
 	result["slug"] = slug
-	response := map[string]any{"instance": result, "started": started, "boundAgentIds": body.AgentIDs}
+	response := map[string]any{"instance": result, "started": started, "boundAgentIds": body.AgentIDs, "boundSpaceIds": spaceIDs}
 	if startError != "" {
 		response["startError"] = startError
 	}
@@ -682,11 +698,11 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	if body.RuntimeNodeID != nil {
 		nodeID = *body.RuntimeNodeID
 	}
-	if nodeID == "" && len(body.AgentIDs) > 0 {
-		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(s.runtime_node_id,'') AS runtime_node_id FROM agents a JOIN spaces s ON s.id=a.space_id WHERE a.tenant_id=? AND a.id=?`, tenant, body.AgentIDs[0]).Scan(&nodeID).Error
+	if nodeID == "" && len(body.SpaceIDs) > 0 {
+		_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT COALESCE(runtime_node_id,'') AS runtime_node_id FROM spaces WHERE tenant_id=? AND id=?`, tenant, body.SpaceIDs[0]).Scan(&nodeID).Error
 	}
 	if nodeID == "" {
-		return errors.New("bind the agent to a runtime node before starting stdio MCP")
+		return errors.New("bind the space to a runtime node before starting stdio MCP")
 	}
 	runner, err := h.hub.get(nodeID)
 	if err != nil {
@@ -720,18 +736,24 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	var dataSpaceRow struct {
 		SpaceID string `gorm:"column:space_id"`
 	}
-	err = h.deps.Gorm.WithContext(ctx).
-		Table("agent_bindings b").
-		Select("b.space_id AS space_id").
-		Joins("JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id").
-		Where("b.tenant_id = ? AND b.instance_id = ?", tenant, instanceID).
-		Order("b.created_at").
-		Limit(1).
-		Take(&dataSpaceRow).Error
-	if err != nil {
-		return errors.New("bind the stdio MCP instance to an agent in the selected runtime node before starting")
+	dataSpaceID := ""
+	if len(body.SpaceIDs) > 0 {
+		dataSpaceID = body.SpaceIDs[0]
 	}
-	dataSpaceID := dataSpaceRow.SpaceID
+	if dataSpaceID == "" {
+		err = h.deps.Gorm.WithContext(ctx).
+			Table("agent_bindings b").
+			Select("b.space_id AS space_id").
+			Joins("JOIN spaces s ON s.id=b.space_id AND s.tenant_id=b.tenant_id").
+			Where("b.tenant_id = ? AND b.instance_id = ?", tenant, instanceID).
+			Order("b.created_at").
+			Limit(1).
+			Take(&dataSpaceRow).Error
+		if err != nil {
+			return errors.New("bind the stdio MCP instance to a space in the selected runtime node before starting")
+		}
+		dataSpaceID = dataSpaceRow.SpaceID
+	}
 	dataPath := "/.zakura/components/" + instanceID
 	var nodeRow struct {
 		HostInfoJSON     string `gorm:"column:host_info_json"`

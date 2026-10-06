@@ -393,17 +393,17 @@ type exposedMCPTool struct {
 	Tool      map[string]any
 }
 
-type agentMCPSession struct {
+type spaceMCPSession struct {
 	TenantID string
-	AgentID  string
+	SpaceID  string
 	Expires  time.Time
 }
 
-func (h *handler) createAgentMCPSession(tenant, agent string) string {
+func (h *handler) createSpaceMCPSession(tenant, space string) string {
 	h.mcpMu.Lock()
 	defer h.mcpMu.Unlock()
 	if h.mcpSessions == nil {
-		h.mcpSessions = map[string]agentMCPSession{}
+		h.mcpSessions = map[string]spaceMCPSession{}
 	}
 	now := h.store.now()
 	for id, session := range h.mcpSessions {
@@ -412,18 +412,18 @@ func (h *handler) createAgentMCPSession(tenant, agent string) string {
 		}
 	}
 	id := h.store.id()
-	h.mcpSessions[id] = agentMCPSession{TenantID: tenant, AgentID: agent, Expires: now.Add(30 * time.Minute)}
+	h.mcpSessions[id] = spaceMCPSession{TenantID: tenant, SpaceID: space, Expires: now.Add(30 * time.Minute)}
 	return id
 }
 
-func (h *handler) validateAgentMCPSession(id, tenant, agent string) bool {
+func (h *handler) validateSpaceMCPSession(id, tenant, space string) bool {
 	if id == "" {
 		return false
 	}
 	h.mcpMu.Lock()
 	defer h.mcpMu.Unlock()
 	session, ok := h.mcpSessions[id]
-	if !ok || session.TenantID != tenant || session.AgentID != agent || session.Expires.Before(h.store.now()) {
+	if !ok || session.TenantID != tenant || session.SpaceID != space || session.Expires.Before(h.store.now()) {
 		delete(h.mcpSessions, id)
 		return false
 	}
@@ -432,35 +432,62 @@ func (h *handler) validateAgentMCPSession(id, tenant, agent string) bool {
 	return true
 }
 
-func (h *handler) deleteAgentMCPSession(id string) {
+func (h *handler) deleteSpaceMCPSession(id string) {
 	h.mcpMu.Lock()
 	delete(h.mcpSessions, id)
 	h.mcpMu.Unlock()
 }
 
-func (h *handler) mcpAgentForRequest(r *http.Request, p httpx.Principal) (string, string, error) {
-	prefix := "/mcp/agents/"
-	if !strings.HasPrefix(r.URL.Path, prefix) {
-		return "", "", ErrNotFound
+var errMCPTokenScope = errors.New("token is bound to a different space")
+
+func (h *handler) mcpSpaceForRequest(r *http.Request, p httpx.Principal) (string, string, bool, error) {
+	path := r.URL.Path
+	alias := strings.HasPrefix(path, "/mcp/agents/")
+	prefix := "/mcp/spaces/"
+	if alias {
+		prefix = "/mcp/agents/"
 	}
-	slug, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, prefix))
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false, ErrNotFound
+	}
+	slug, err := url.PathUnescape(strings.TrimPrefix(path, prefix))
 	if err != nil || slug == "" || strings.Contains(slug, "/") {
-		return "", "", ErrNotFound
+		return "", "", alias, ErrNotFound
 	}
-	var row struct {
-		ID string `gorm:"column:id"`
+	spaceID := ""
+	if alias {
+		var agentRow struct {
+			SpaceID string `gorm:"column:space_id"`
+		}
+		if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id=? AND slug=?", p.TenantID, slug).Take(&agentRow).Error; e != nil {
+			return "", "", alias, ErrNotFound
+		}
+		spaceID = agentRow.SpaceID
+	} else {
+		var spaceRow struct {
+			ID string `gorm:"column:id"`
+		}
+		if e := h.deps.Gorm.WithContext(r.Context()).Table("spaces").Select("id").Where("tenant_id=? AND slug=?", p.TenantID, slug).Take(&spaceRow).Error; e != nil {
+			return "", "", alias, ErrNotFound
+		}
+		spaceID = spaceRow.ID
 	}
-	err = h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("id").Where("tenant_id=? AND slug=?", p.TenantID, slug).Take(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", "", ErrNotFound
+	space, e := h.store.GetSpace(r.Context(), p.TenantID, spaceID)
+	if e != nil {
+		return "", "", alias, ErrNotFound
 	}
-	if err != nil {
-		return "", "", err
+	if p.SpaceID != "" && p.SpaceID != space.ID {
+		return "", "", alias, errMCPTokenScope
 	}
-	if p.AgentID != "" && p.AgentID != row.ID {
-		return "", "", errors.New("token is bound to a different agent")
+	if p.AgentID != "" {
+		var keyAgent struct {
+			SpaceID string `gorm:"column:space_id"`
+		}
+		if e := h.deps.Gorm.WithContext(r.Context()).Table("agents").Select("space_id").Where("tenant_id=? AND id=?", p.TenantID, p.AgentID).Take(&keyAgent).Error; e != nil || keyAgent.SpaceID != space.ID {
+			return "", "", alias, errMCPTokenScope
+		}
 	}
-	return row.ID, slug, nil
+	return space.ID, space.Slug, alias, nil
 }
 
 func mcpStringList(value any) []string {
@@ -488,21 +515,21 @@ func listContains(list []string, values ...string) bool {
 	return false
 }
 
-func (h *handler) exposedMCPTools(r *http.Request, p httpx.Principal, agentID string) ([]exposedMCPTool, error) {
+func (h *handler) exposedMCPTools(r *http.Request, p httpx.Principal, agentID, spaceID string) ([]exposedMCPTool, error) {
 	type summary struct {
 		ID   string `gorm:"column:id"`
 		Name string `gorm:"column:name"`
 		Ref  string `gorm:"column:component_ref"`
 	}
 	var instances []summary
-	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT i.id AS id,i.name AS name,i.component_ref AS component_ref FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.tenant_id=i.tenant_id WHERE i.tenant_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') AND (i.agent_id=? OR b.agent_id=?) ORDER BY i.name,i.id`, p.TenantID, agentID, agentID).Scan(&instances).Error; err != nil {
+	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT i.id AS id,i.name AS name,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id AND b.tenant_id=i.tenant_id WHERE i.tenant_id=? AND b.space_id=? AND b.agent_id IS NULL AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name,i.id`, p.TenantID, spaceID).Scan(&instances).Error; err != nil {
 		return nil, err
 	}
 	var policyRow struct {
 		PolicyJSON string `gorm:"column:policy_json"`
 	}
 	policy := map[string]any{}
-	if h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("policy_json").Where("tenant_id=? AND (agent_id=? OR agent_id IS NULL)", p.TenantID, agentID).Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN agent_id=? THEN 0 ELSE 1 END,created_at", Vars: []any{agentID}}}).Take(&policyRow).Error == nil {
+	if h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Select("policy_json").Where("tenant_id=? AND (agent_id=? OR (space_id=? AND agent_id IS NULL) OR (agent_id IS NULL AND space_id IS NULL))", p.TenantID, agentID, spaceID).Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN agent_id=? THEN 0 WHEN space_id=? AND agent_id IS NULL THEN 1 ELSE 2 END,created_at", Vars: []any{agentID, spaceID}}}).Take(&policyRow).Error == nil {
 		_ = json.Unmarshal([]byte(policyRow.PolicyJSON), &policy)
 	}
 	instanceAllow := mcpStringList(policy["instanceIds"])
@@ -544,11 +571,11 @@ func (h *handler) exposedMCPTools(r *http.Request, p httpx.Principal, agentID st
 	return out, nil
 }
 
-func (h *handler) accessibleMCPInstances(r *http.Request, p httpx.Principal, agentID string) ([]mcpInstance, error) {
+func (h *handler) accessibleMCPInstances(r *http.Request, p httpx.Principal, spaceID string) ([]mcpInstance, error) {
 	var rows []struct {
 		ID string `gorm:"column:id"`
 	}
-	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT i.id AS id FROM component_instances i LEFT JOIN agent_bindings b ON b.instance_id=i.id AND b.tenant_id=i.tenant_id WHERE i.tenant_id=? AND i.component_type='mcp' AND i.status IN ('ready','running') AND (i.agent_id=? OR b.agent_id=?) ORDER BY i.id`, p.TenantID, agentID, agentID).Scan(&rows).Error; err != nil {
+	if err := h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT DISTINCT i.id AS id FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id AND b.tenant_id=i.tenant_id WHERE i.tenant_id=? AND b.space_id=? AND b.agent_id IS NULL AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.id`, p.TenantID, spaceID).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(rows))
@@ -755,8 +782,8 @@ func decodeMCPResourceURI(value string) (string, string, error) {
 	return u.Host, upstream, nil
 }
 
-func (h *handler) accessibleMCPInstance(r *http.Request, p httpx.Principal, agentID, instanceID string) (mcpInstance, error) {
-	instances, err := h.accessibleMCPInstances(r, p, agentID)
+func (h *handler) accessibleMCPInstance(r *http.Request, p httpx.Principal, spaceID, instanceID string) (mcpInstance, error) {
+	instances, err := h.accessibleMCPInstances(r, p, spaceID)
 	if err != nil {
 		return mcpInstance{}, err
 	}
@@ -773,14 +800,23 @@ func (h *handler) mcpEntry(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if !strings.HasPrefix(r.URL.Path, "/mcp/agents/") {
-		httpx.JSON(w, http.StatusNotFound, map[string]any{"error": "tenant_mcp_removed", "message": "Zakura only supports Agent-scoped MCP. Use /mcp/agents/{slug} and bind upstream servers to that Agent.", "agentMcpPattern": strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/agents/{slug}"})
+	path := r.URL.Path
+	alias := strings.HasPrefix(path, "/mcp/agents/")
+	if !strings.HasPrefix(path, "/mcp/spaces/") && !alias {
+		httpx.JSON(w, http.StatusNotFound, map[string]any{"error": "tenant_mcp_removed", "message": "Zakura only supports Space-scoped MCP. Use /mcp/spaces/{slug} and bind upstream servers to that Space.", "spaceMcpPattern": strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/spaces/{slug}", "agentMcpPattern": strings.TrimRight(h.deps.PublicURL, "/") + "/mcp/agents/{slug}"})
 		return
 	}
-	if r.Method == http.MethodGet && strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") && strings.HasPrefix(r.URL.Path, "/mcp/agents/") {
-		slug, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/mcp/agents/"))
+	if alias {
+		w.Header().Set("Deprecation", "true")
+	}
+	if r.Method == http.MethodGet && strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
+		prefix, kind, field := "/mcp/spaces/", "Space", "spaceSlug"
+		if alias {
+			prefix, kind, field = "/mcp/agents/", "Agent", "agentSlug"
+		}
+		slug, err := url.PathUnescape(strings.TrimPrefix(path, prefix))
 		if err == nil && slug != "" && !strings.Contains(slug, "/") {
-			httpx.JSON(w, http.StatusOK, map[string]any{"name": "Zakura Agent MCP (" + slug + ")", "transport": "streamable-http", "auth": map[string]any{"methods": []string{"oauth2.1", "api_key"}}, "agentSlug": slug})
+			httpx.JSON(w, http.StatusOK, map[string]any{"name": "Zakura " + kind + " MCP (" + slug + ")", "transport": "streamable-http", "auth": map[string]any{"methods": []string{"oauth2.1", "api_key"}}, field: slug})
 			return
 		}
 	}
@@ -801,17 +837,17 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "insufficient_scope")
 		return
 	}
-	agentID, _, agentErr := h.mcpAgentForRequest(r, p)
-	if agentErr != nil {
-		if agentErr.Error() == "token is bound to a different agent" {
-			httpx.JSON(w, http.StatusForbidden, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32001, "message": agentErr.Error()}})
+	spaceID, _, _, spaceErr := h.mcpSpaceForRequest(r, p)
+	if spaceErr != nil {
+		if errors.Is(spaceErr, errMCPTokenScope) {
+			httpx.JSON(w, http.StatusForbidden, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32001, "message": spaceErr.Error()}})
 			return
 		}
-		if errors.Is(agentErr, ErrNotFound) {
-			httpx.JSON(w, http.StatusNotFound, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32004, "message": "Unknown agent"}})
+		if errors.Is(spaceErr, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32004, "message": "Unknown space"}})
 			return
 		}
-		statusErr(w, agentErr)
+		statusErr(w, spaceErr)
 		return
 	}
 	if r.Method == http.MethodOptions {
@@ -820,7 +856,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimSpace(r.Header.Get("Mcp-Session-Id"))
 	if r.Method == http.MethodGet {
-		if !h.validateAgentMCPSession(sessionID, p.TenantID, agentID) {
+		if !h.validateSpaceMCPSession(sessionID, p.TenantID, spaceID) {
 			httpx.Error(w, http.StatusBadRequest, "Invalid or missing session ID")
 			return
 		}
@@ -831,11 +867,11 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		if !h.validateAgentMCPSession(sessionID, p.TenantID, agentID) {
+		if !h.validateSpaceMCPSession(sessionID, p.TenantID, spaceID) {
 			httpx.Error(w, http.StatusBadRequest, "Invalid or missing session ID")
 			return
 		}
-		h.deleteAgentMCPSession(sessionID)
+		h.deleteSpaceMCPSession(sessionID)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -854,9 +890,9 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			httpx.JSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32000, "message": "initialize must not reuse a session"}})
 			return
 		}
-		sessionID = h.createAgentMCPSession(p.TenantID, agentID)
+		sessionID = h.createSpaceMCPSession(p.TenantID, spaceID)
 		w.Header().Set("Mcp-Session-Id", sessionID)
-	} else if req.Method != "ping" && !h.validateAgentMCPSession(sessionID, p.TenantID, agentID) {
+	} else if req.Method != "ping" && !h.validateSpaceMCPSession(sessionID, p.TenantID, spaceID) {
 		httpx.JSON(w, http.StatusBadRequest, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32000, "message": "Invalid or missing session ID"}})
 		return
 	}
@@ -879,7 +915,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		reply(map[string]any{}, nil)
 	case "tools/list":
-		exposed, e := h.exposedMCPTools(r, p, agentID)
+		exposed, e := h.exposedMCPTools(r, p, "", spaceID)
 		if e != nil {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
@@ -900,7 +936,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			Arguments any    `json:"arguments"`
 		}
 		_ = json.Unmarshal(raw, &pms)
-		exposed, e := h.exposedMCPTools(r, p, agentID)
+		exposed, e := h.exposedMCPTools(r, p, "", spaceID)
 		if e != nil {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
@@ -923,7 +959,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(json.RawMessage(result), nil)
 	case "resources/list", "resources/templates/list":
-		instances, e := h.accessibleMCPInstances(r, p, agentID)
+		instances, e := h.accessibleMCPInstances(r, p, spaceID)
 		if e != nil {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
@@ -965,7 +1001,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			reply(nil, map[string]any{"code": -32602, "message": err.Error()})
 			return
 		}
-		instance, err := h.accessibleMCPInstance(r, p, agentID, instanceID)
+		instance, err := h.accessibleMCPInstance(r, p, spaceID, instanceID)
 		if err != nil {
 			reply(nil, map[string]any{"code": -32602, "message": "Unknown resource"})
 			return
@@ -977,7 +1013,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(json.RawMessage(result), nil)
 	case "prompts/list":
-		instances, e := h.accessibleMCPInstances(r, p, agentID)
+		instances, e := h.accessibleMCPInstances(r, p, spaceID)
 		if e != nil {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
@@ -1008,7 +1044,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			Arguments map[string]any `json:"arguments"`
 		}
 		_ = json.Unmarshal(raw, &params)
-		instances, _ := h.accessibleMCPInstances(r, p, agentID)
+		instances, _ := h.accessibleMCPInstances(r, p, spaceID)
 		for _, instance := range instances {
 			prefix := "re_" + slugify(instance.Ref) + "__"
 			if strings.HasPrefix(params.Name, prefix) {
@@ -1028,7 +1064,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(raw, &params)
 		ref, _ := params["ref"].(map[string]any)
 		name, _ := ref["name"].(string)
-		instances, _ := h.accessibleMCPInstances(r, p, agentID)
+		instances, _ := h.accessibleMCPInstances(r, p, spaceID)
 		for _, instance := range instances {
 			prefix := "re_" + slugify(instance.Ref) + "__"
 			if strings.HasPrefix(name, prefix) {

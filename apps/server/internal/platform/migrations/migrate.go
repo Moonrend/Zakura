@@ -21,6 +21,9 @@ var runtimeSQL string
 //go:embed sql/0003_compatibility.sql
 var compatibilitySQL string
 
+//go:embed sql/0004_space_mcp.sql
+var spaceMCPSQL string
+
 type migration struct {
 	version   int
 	name, sql string
@@ -30,6 +33,7 @@ var ordered = []migration{
 	{1, "platform", platformSQL},
 	{2, "runtime", runtimeSQL},
 	{3, "compatibility", compatibilitySQL},
+	{4, "space_mcp", spaceMCPSQL},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {
@@ -90,7 +94,7 @@ func ensureAdditiveCompatibility(ctx context.Context, db *sql.DB, dialect string
 		{"memory_providers", "secret_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"}, {"memory_providers", "enabled", "INTEGER NOT NULL DEFAULT 1", "BOOLEAN NOT NULL DEFAULT TRUE"},
 		{"component_instances", "agent_id", "TEXT", "TEXT"}, {"component_instances", "component_type", "TEXT NOT NULL DEFAULT 'mcp'", "TEXT NOT NULL DEFAULT 'mcp'"}, {"component_instances", "component_ref", "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"}, {"component_instances", "config_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"}, {"component_instances", "secret_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
 		{"integration_components", "manifest_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
-		{"mcp_policies", "agent_id", "TEXT", "TEXT"}, {"mcp_policies", "name", "TEXT NOT NULL DEFAULT 'Default'", "TEXT NOT NULL DEFAULT 'Default'"}, {"mcp_policies", "policy_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
+		{"mcp_policies", "agent_id", "TEXT", "TEXT"}, {"mcp_policies", "space_id", "TEXT", "TEXT"}, {"mcp_policies", "name", "TEXT NOT NULL DEFAULT 'Default'", "TEXT NOT NULL DEFAULT 'Default'"}, {"mcp_policies", "policy_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"},
 		{"provider_catalog", "kind", "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"}, {"provider_catalog", "manifest_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"}, {"provider_catalog", "enabled", "INTEGER NOT NULL DEFAULT 1", "BOOLEAN NOT NULL DEFAULT TRUE"},
 		{"tenant_domains", "verification_token", "TEXT", "TEXT"}, {"tenant_invites", "invited_by", "TEXT", "TEXT"},
 		{"user_usage_events", "detail_json", "TEXT NOT NULL DEFAULT '{}'", "TEXT NOT NULL DEFAULT '{}'"}, {"user_usage_events", "occurred_at", "TEXT", "TIMESTAMPTZ"}, {"user_usage_events", "units", "INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1"},
