@@ -88,6 +88,11 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 	if section := renderServerHints(catalog); section != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": section})
 	}
+	if startSeq, ok := s.runStartSeq(ctx, session, runID); ok {
+		if history := s.sessionHistory(ctx, tenant, agent, session, startSeq, sessionHistoryBudget); len(history) > 0 {
+			messages = append(messages, history...)
+		}
+	}
 	messages = append(messages, map[string]any{"role": "user", "content": content})
 	var raw []byte
 	for turn := 0; turn < 8; turn++ {
@@ -157,6 +162,223 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 		return
 	}
 	_ = s.store.FinishRun(context.WithoutCancel(ctx), tenant, agent, session, runID, "completed", nil, map[string]any{"runId": runID})
+}
+
+const (
+	sessionHistoryBudget   = 60000
+	sessionHistoryEventCap = 400
+)
+
+func (s *Service) runStartSeq(ctx context.Context, session, runID string) (int64, bool) {
+	if s.store == nil || s.store.deps == nil || s.store.deps.Gorm == nil {
+		return 0, false
+	}
+	var row struct {
+		Seq *int64 `gorm:"column:seq"`
+	}
+	err := s.store.deps.Gorm.WithContext(ctx).Table("cloud_agent_events").
+		Select("MIN(seq) AS seq").
+		Where("session_id = ? AND run_id = ?", session, runID).
+		Scan(&row).Error
+	if err != nil || row.Seq == nil || *row.Seq <= 0 {
+		return 0, false
+	}
+	return *row.Seq, true
+}
+
+func (s *Service) sessionHistory(ctx context.Context, tenant, agent, session string, startSeq int64, budget int) []map[string]any {
+	if s.store == nil || s.store.deps == nil || s.store.deps.Gorm == nil {
+		return nil
+	}
+	if budget <= 0 {
+		budget = sessionHistoryBudget
+	}
+	var rows []struct {
+		Seq         int64  `gorm:"column:seq"`
+		Type        string `gorm:"column:type"`
+		PayloadJSON string `gorm:"column:payload_json"`
+	}
+	query := s.store.deps.Gorm.WithContext(ctx).Table("cloud_agent_events").
+		Select("seq,type,payload_json").
+		Where("session_id = ?", session)
+	if startSeq > 0 {
+		query = query.Where("seq < ?", startSeq)
+	}
+	if err := query.Order("seq DESC").Limit(sessionHistoryEventCap).Find(&rows).Error; err != nil {
+		return nil
+	}
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	type historyEntry struct {
+		seq int64
+		msg map[string]any
+	}
+	entries := make([]historyEntry, 0, len(rows))
+	questions := map[string]string{}
+	for _, row := range rows {
+		var payload map[string]any
+		if json.Unmarshal([]byte(row.PayloadJSON), &payload) != nil {
+			continue
+		}
+		switch row.Type {
+		case "user_message":
+			if content, _ := payload["content"].(string); content != "" {
+				entries = append(entries, historyEntry{seq: row.Seq, msg: map[string]any{"role": "user", "content": content}})
+			}
+		case "assistant_message":
+			if content, _ := payload["content"].(string); strings.TrimSpace(content) != "" {
+				entries = append(entries, historyEntry{seq: row.Seq, msg: map[string]any{"role": "assistant", "content": content}})
+			}
+		case "ask_user_request":
+			if requestID, _ := payload["requestId"].(string); requestID != "" {
+				questions[requestID] = fmt.Sprint(payload["question"])
+			}
+		case "ask_user_resolved":
+			requestID, _ := payload["requestId"].(string)
+			status, _ := payload["status"].(string)
+			if requestID == "" || status != "answered" {
+				continue
+			}
+			question, ok := questions[requestID]
+			if !ok {
+				continue
+			}
+			id := "au_" + requestID
+			if len(id) > 15 {
+				id = id[:15]
+			}
+			arguments, _ := json.Marshal(map[string]any{"question": question})
+			entries = append(entries,
+				historyEntry{seq: row.Seq, msg: map[string]any{
+					"role":    "assistant",
+					"content": "",
+					"tool_calls": []any{map[string]any{
+						"id":   id,
+						"type": "function",
+						"function": map[string]any{
+							"name":      "ask_user",
+							"arguments": string(arguments),
+						},
+					}},
+				}},
+				historyEntry{seq: row.Seq, msg: map[string]any{"role": "tool", "tool_call_id": id, "content": askAnswerText(payload["answer"])}},
+			)
+		case "session.compacted":
+			through := int64(0)
+			if value, ok := payload["throughSeq"].(float64); ok {
+				through = int64(value)
+			}
+			kept := entries[:0]
+			for _, entry := range entries {
+				if entry.seq > through {
+					kept = append(kept, entry)
+				}
+			}
+			entries = kept
+			content := "[Earlier conversation summary]"
+			if summary := compactSummaryText(payload["summary"]); summary != "" {
+				content += "\n" + summary
+			}
+			entries = append(entries, historyEntry{seq: row.Seq, msg: map[string]any{"role": "user", "content": content}})
+		}
+	}
+	total := 0
+	start := len(entries)
+	for i := len(entries) - 1; i >= 0; i-- {
+		size := historyMessageSize(entries[i].msg)
+		if total+size > budget && start != len(entries) {
+			break
+		}
+		total += size
+		start = i
+	}
+	window := entries[start:]
+	haveCall := map[string]bool{}
+	out := make([]map[string]any, 0, len(window))
+	for _, entry := range window {
+		switch entry.msg["role"] {
+		case "assistant":
+			if calls, ok := entry.msg["tool_calls"].([]any); ok {
+				for _, call := range calls {
+					if cm, ok := call.(map[string]any); ok {
+						haveCall[fmt.Sprint(cm["id"])] = true
+					}
+				}
+			}
+			out = append(out, entry.msg)
+		case "tool":
+			if haveCall[fmt.Sprint(entry.msg["tool_call_id"])] {
+				out = append(out, entry.msg)
+			}
+		default:
+			out = append(out, entry.msg)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func historyMessageSize(msg map[string]any) int {
+	size := 0
+	if content, ok := msg["content"].(string); ok {
+		size += len(content)
+	}
+	if calls, ok := msg["tool_calls"].([]any); ok {
+		for _, call := range calls {
+			cm, _ := call.(map[string]any)
+			size += 16
+			if fn, ok := cm["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					size += len(name)
+				}
+				if arguments, ok := fn["arguments"].(string); ok {
+					size += len(arguments)
+				}
+			}
+		}
+	}
+	return size
+}
+
+func askAnswerText(answer any) string {
+	m, _ := answer.(map[string]any)
+	if m == nil {
+		return "User answered."
+	}
+	if cancelled, _ := m["cancelled"].(bool); cancelled {
+		return "User dismissed the question."
+	}
+	text, _ := m["text"].(string)
+	selected := m["selected"]
+	switch {
+	case strings.TrimSpace(text) != "" && selected != nil:
+		return "User answered: " + text + "; selected: " + joinAnswerValues(selected)
+	case strings.TrimSpace(text) != "":
+		return "User answered: " + text
+	case selected != nil:
+		return "User selected: " + joinAnswerValues(selected)
+	}
+	return "User answered."
+}
+
+func compactSummaryText(summary any) string {
+	switch value := summary.(type) {
+	case string:
+		return value
+	case []any:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			m, _ := item.(map[string]any)
+			if content, _ := m["content"].(string); strings.TrimSpace(content) != "" {
+				parts = append(parts, content)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
 }
 
 func (s *Service) recordToolUsage(ctx context.Context, sess Session, tenant, agent, session, callID, name, status string, duration int64) {
