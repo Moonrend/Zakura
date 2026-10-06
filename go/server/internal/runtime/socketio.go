@@ -374,12 +374,12 @@ func (h *handler) authenticateRealtime(ctx context.Context, raw string) (httpx.P
 			AgentID      string `gorm:"column:agent_id"`
 			APIKeyScopes string `gorm:"column:scopes"`
 		}
-		e := h.deps.Gorm.WithContext(ctx).Table("api_keys AS k").Select("k.id AS api_key_id, k.tenant_id AS tenant_id, k.name AS name, COALESCE(k.agent_id,'') AS agent_id, k.scopes AS scopes").Joins("JOIN tenants t ON t.id=k.tenant_id").Where("k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)", hex.EncodeToString(sum[:]), h.store.now().Format(time.RFC3339Nano)).Take(&rec).Error
+		e := h.deps.Gorm.WithContext(ctx).Table("api_keys AS k").Select("k.id AS api_key_id, k.tenant_id AS tenant_id, k.name AS name, COALESCE(k.agent_id,'') AS agent_id, k.scopes AS scopes").Joins("JOIN tenants t ON t.id=k.tenant_id").Where("k.key_hash=? AND k.revoked_at IS NULL AND t.status='active' AND (k.expires_at IS NULL OR k.expires_at>?)", hex.EncodeToString(sum[:]), runtimeTimeString(h.store.now())).Take(&rec).Error
 		if e != nil {
 			return httpx.Principal{}, e
 		}
 		p.APIKeyID, p.TenantID, p.Email, p.AgentID, p.APIKeyScopes = rec.APIKeyID, rec.TenantID, rec.Name, rec.AgentID, rec.APIKeyScopes
-		_ = h.deps.Gorm.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", p.APIKeyID).Update("last_used_at", h.store.now().Format(time.RFC3339Nano)).Error
+		_ = h.deps.Gorm.WithContext(ctx).Model(&models.APIKey{}).Where("id = ?", p.APIKeyID).Update("last_used_at", runtimeTimeString(h.store.now())).Error
 		return p, nil
 	}
 	if p, e := h.authenticateZakuraBot(ctx, raw); e == nil {
@@ -398,7 +398,7 @@ func (h *handler) authenticateRealtime(ctx context.Context, raw string) (httpx.P
 	str := func(k string) string { v, _ := claims[k].(string); return v }
 	p := httpx.Principal{UserID: str("sub"), TenantID: str("tenantId"), Email: str("email"), Role: str("role"), SessionID: str("sid")}
 	var count int64
-	e = h.deps.Gorm.WithContext(ctx).Model(&models.UserSession{}).Where("id=? AND user_id=? AND tenant_id=? AND revoked_at IS NULL AND expires_at>?", p.SessionID, p.UserID, p.TenantID, h.store.now()).Count(&count).Error
+	e = h.deps.Gorm.WithContext(ctx).Model(&models.UserSession{}).Where("id=? AND user_id=? AND tenant_id=? AND revoked_at IS NULL AND expires_at>?", p.SessionID, p.UserID, p.TenantID, runtimeTimeString(h.store.now())).Count(&count).Error
 	if e != nil || count == 0 {
 		return httpx.Principal{}, errors.New("revoked session")
 	}

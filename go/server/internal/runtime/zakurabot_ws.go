@@ -358,7 +358,7 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 		if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
 			return err
 		}
-		return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": clientMessageID, "frame_json": string(raw), "created_at": h.store.now()}).Error
+		return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": clientMessageID, "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
 	})
 	if err != nil {
 		return err
@@ -449,7 +449,7 @@ func (h *handler) watchZakuraBotRun(socket *zakuraBotSocket, actor httpx.Princip
 							if err := tx.Table("zakurabot_messages").Select("COALESCE(MAX(seq),0)+1 AS next_seq").Where("tenant_id = ? AND device_id = ? AND binding_id = ? AND agent_id = ?", actor.TenantID, actor.UserID, bindingID, agentID).Scan(&seq).Error; err != nil {
 								return err
 							}
-							return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": nil, "frame_json": string(raw), "created_at": h.store.now()}).Error
+							return tx.Table("zakurabot_messages").Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": actor.TenantID, "device_id": actor.UserID, "binding_id": bindingID, "agent_id": agentID, "client_message_id": nil, "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
 						})
 						_ = socket.send(frame)
 					}
@@ -548,7 +548,7 @@ func (h *handler) handleZakuraFrame(ctx context.Context, p httpx.Principal, raw 
 				DoNothing: true,
 			}).
 			Table("zakurabot_messages").
-			Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": p.TenantID, "device_id": frame.DeviceID, "binding_id": frame.BindingID, "agent_id": frame.AgentID, "client_message_id": nullString(frame.ClientMessageID), "frame_json": string(raw), "created_at": h.store.now()}).Error
+			Create(map[string]any{"id": h.store.id(), "seq": seq, "tenant_id": p.TenantID, "device_id": frame.DeviceID, "binding_id": frame.BindingID, "agent_id": frame.AgentID, "client_message_id": nullString(frame.ClientMessageID), "frame_json": string(raw), "created_at": runtimeTimeString(h.store.now())}).Error
 	})
 	if e != nil {
 		return nil, e

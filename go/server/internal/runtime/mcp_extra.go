@@ -31,7 +31,7 @@ func (h *handler) bootstrapMCPPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 	if count == 0 {
 		now := h.store.now()
-		e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "agent_id": nil, "name": "Default", "policy_json": `{"includeBuiltin":true,"toolAllowlist":null,"toolDenylist":[]}`, "created_at": now, "updated_at": now}).Error
+		e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "agent_id": nil, "name": "Default", "policy_json": `{"includeBuiltin":true,"toolAllowlist":null,"toolDenylist":[]}`, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 		if e != nil {
 			statusErr(w, e)
 			return
@@ -160,7 +160,7 @@ func (h *handler) importVSCodeMCP(w http.ResponseWriter, r *http.Request) {
 		if protectErr != nil {
 			continue
 		}
-		e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slugify(name), "name": name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
+		e := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slugify(name), "name": name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 		if e == nil {
 			created = append(created, map[string]any{"id": id, "name": name, "url": u})
 		}
@@ -210,7 +210,7 @@ func (h *handler) syncMCPStore(w http.ResponseWriter, r *http.Request) {
 		}
 		serverRaw, _ := json.Marshal(servers)
 		now := h.store.now()
-		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.McpStoreSource{}).Where("tenant_id=? AND id=?", p.TenantID, s.ID).Updates(map[string]any{"manifest_json": string(raw), "servers_json": string(serverRaw), "fetched_at": now, "updated_at": now}).Error
+		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.McpStoreSource{}).Where("tenant_id=? AND id=?", p.TenantID, s.ID).Updates(map[string]any{"manifest_json": string(raw), "servers_json": string(serverRaw), "fetched_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 		if e != nil {
 			failed[s.ID] = e.Error()
 			continue
@@ -218,7 +218,7 @@ func (h *handler) syncMCPStore(w http.ResponseWriter, r *http.Request) {
 		if object, ok := servers.(map[string]any); ok {
 			for name, meta := range object {
 				metaRaw, _ := json.Marshal(meta)
-				_ = h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "source_id": s.ID, "kind": "mcp", "ref": name, "name": name, "description": "", "meta_json": string(metaRaw), "updated_at": now}).Error
+				_ = h.deps.Gorm.WithContext(r.Context()).Table("store_catalog_entries").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "source_id": s.ID, "kind": "mcp", "ref": name, "name": name, "description": "", "meta_json": string(metaRaw), "updated_at": runtimeTimeString(now)}).Error
 			}
 		}
 		synced++
@@ -356,7 +356,7 @@ func (h *handler) mcpOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		secret, _ := json.Marshal(map[string]any{"enc": enc})
-		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id=? AND id=?", state.TenantID, state.InstanceID).Updates(map[string]any{"secret_json": string(secret), "updated_at": h.store.now()}).Error
+		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id=? AND id=?", state.TenantID, state.InstanceID).Updates(map[string]any{"secret_json": string(secret), "updated_at": runtimeTimeString(h.store.now())}).Error
 		if e != nil {
 			statusErr(w, e)
 			return
@@ -1080,7 +1080,7 @@ func (h *handler) googleProvision(w http.ResponseWriter, r *http.Request) {
 	}
 	cfgRaw, _ := json.Marshal(cfg)
 	secret, _ := json.Marshal(map[string]any{"enc": enc})
-	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": "google-workspace", "name": b.Name, "config_json": string(cfgRaw), "secret_json": string(secret), "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": "google-workspace", "name": b.Name, "config_json": string(cfgRaw), "secret_json": string(secret), "status": "ready", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

@@ -108,7 +108,15 @@ func scheduleFromModel(m models.AgentSchedule) (Schedule, string) {
 	return x, secret
 }
 func parseTime(v string) time.Time {
-	for _, l := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+	// layouts: RFC3339Nano (canonical write format via runtimeTimeString),
+	// "2006-01-02 15:04:05[.frac]±07:00" (legacy mattn/go-sqlite3 time.Time binding),
+	// and plain second precision.
+	for _, l := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	} {
 		if t, e := time.Parse(l, v); e == nil {
 			return t.UTC()
 		}

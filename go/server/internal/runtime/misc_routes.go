@@ -217,7 +217,7 @@ func (h *handler) patchInstanceTool(w http.ResponseWriter, r *http.Request) {
 	tools[chi.URLParam(r, "toolName")] = map[string]any{"enabled": b.Enabled, "approval": b.Approval}
 	cfg["tools"] = tools
 	raw, _ := json.Marshal(cfg)
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id=? AND id=?", p.TenantID, inst.ID).Updates(map[string]any{"config_json": string(raw), "updated_at": h.store.now()}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("tenant_id=? AND id=?", p.TenantID, inst.ID).Updates(map[string]any{"config_json": string(raw), "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -387,7 +387,7 @@ func (h *handler) modelAuthPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfgRaw, _ := json.Marshal(cfg)
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(cfgRaw), "status": "ready", "last_error": nil, "updated_at": h.store.now()}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(cfgRaw), "status": "ready", "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -434,7 +434,7 @@ func (h *handler) modelAuthSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(cfg)
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "ready", "last_error": nil, "updated_at": h.store.now()}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "ready", "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -470,7 +470,7 @@ func (h *handler) modelAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(cfg, "credentialEnc")
 	raw, _ := json.Marshal(cfg)
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "auth_required", "updated_at": h.store.now()}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelUpstream{}).Where("tenant_id=? AND id=?", p.TenantID, id).Updates(map[string]any{"config_json": string(raw), "status": "auth_required", "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

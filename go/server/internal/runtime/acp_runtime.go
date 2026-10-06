@@ -600,7 +600,7 @@ func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
 	origin["acpSessionId"] = rt.acpSessionID
 	origin["acpRuntimeId"] = rt.processID
 	raw, _ := json.Marshal(origin)
-	err = rt.manager.h.deps.Gorm.WithContext(ctx).Model(&models.CloudAgentSession{}).Where("tenant_id=? AND agent_id=? AND id=?", rt.tenantID, rt.agentID, rt.sid).Updates(map[string]any{"origin_json": string(raw), "updated_at": rt.manager.h.store.now()}).Error
+	err = rt.manager.h.deps.Gorm.WithContext(ctx).Model(&models.CloudAgentSession{}).Where("tenant_id=? AND agent_id=? AND id=?", rt.tenantID, rt.agentID, rt.sid).Updates(map[string]any{"origin_json": string(raw), "updated_at": runtimeTimeString(rt.manager.h.store.now())}).Error
 	return err
 }
 

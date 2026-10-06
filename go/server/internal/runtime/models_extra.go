@@ -46,7 +46,7 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
+	args = append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
 	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_upstreams SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)
@@ -113,7 +113,7 @@ func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
+	args = append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
 	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_routes SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)

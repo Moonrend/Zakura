@@ -146,7 +146,7 @@ func (s *Store) CreateSpace(ctx context.Context, tenant string, in Space) (Space
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	err := s.deps.Gorm.WithContext(ctx).Table("spaces").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_computer": in.EnableComputer, "workspace_image": in.WorkspaceImage, "runtime_node_id": in.RuntimeNodeID, "workspace_kind": in.WorkspaceKind, "workspace_status": in.WorkspaceStatus, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "created_at": now, "updated_at": now}).Error
+	err := s.deps.Gorm.WithContext(ctx).Table("spaces").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_computer": in.EnableComputer, "workspace_image": in.WorkspaceImage, "runtime_node_id": in.RuntimeNodeID, "workspace_kind": in.WorkspaceKind, "workspace_status": in.WorkspaceStatus, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if err != nil {
 		return Space{}, err
 	}
@@ -196,7 +196,7 @@ func (s *Store) UpdateSpace(ctx context.Context, tenant, id string, patch map[st
 		return s.GetSpace(ctx, tenant, id)
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, s.now(), tenant, id)
+	args = append(args, runtimeTimeString(s.now()), tenant, id)
 	res := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE spaces SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if res.Error != nil {
 		return Space{}, res.Error
@@ -264,7 +264,7 @@ func (s *Store) CreateAgent(ctx context.Context, tenant string, in Agent) (Agent
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	err := s.deps.Gorm.WithContext(ctx).Table("agents").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "space_id": in.SpaceID, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_memory": in.EnableMemory, "memory_provider_id": in.MemoryProviderID, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "avatar_color": in.AvatarColor, "avatar_shape": in.AvatarShape, "avatar_url": in.AvatarURL, "created_at": now, "updated_at": now}).Error
+	err := s.deps.Gorm.WithContext(ctx).Table("agents").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "space_id": in.SpaceID, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_memory": in.EnableMemory, "memory_provider_id": in.MemoryProviderID, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "avatar_color": in.AvatarColor, "avatar_shape": in.AvatarShape, "avatar_url": in.AvatarURL, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if err != nil {
 		return Agent{}, err
 	}
@@ -312,7 +312,7 @@ func (s *Store) UpdateAgent(ctx context.Context, tenant, id string, patch map[st
 		return s.GetAgent(ctx, tenant, id)
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, s.now(), tenant, id)
+	args = append(args, runtimeTimeString(s.now()), tenant, id)
 	res := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agents SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if res.Error != nil {
 		return Agent{}, res.Error
@@ -372,7 +372,7 @@ func (s *Store) CreateSession(ctx context.Context, tenant, user, agent string, i
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "title": in.Title, "status": in.Status, "kind": in.Kind, "project": in.Project, "origin_json": validJSON(in.Origin, "{}"), "model": in.Model, "model_route_id": in.ModelRouteID, "reasoning": in.Reasoning, "draft_text": in.DraftText, "created_by_user_id": in.CreatedByUserID, "last_seq": 0, "active_run_id": nil, "created_at": now, "updated_at": now}).Error
+	e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "title": in.Title, "status": in.Status, "kind": in.Kind, "project": in.Project, "origin_json": validJSON(in.Origin, "{}"), "model": in.Model, "model_route_id": in.ModelRouteID, "reasoning": in.Reasoning, "draft_text": in.DraftText, "created_by_user_id": in.CreatedByUserID, "last_seq": 0, "active_run_id": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		return Session{}, e
 	}
@@ -438,7 +438,7 @@ func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, pat
 		return s.GetSession(ctx, tenant, agent, id)
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, s.now(), tenant, agent, id)
+	args = append(args, runtimeTimeString(s.now()), tenant, agent, id)
 	res := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_sessions SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND agent_id=? AND id=?`, args...)
 	if res.Error != nil {
 		return Session{}, res.Error
@@ -465,7 +465,7 @@ func (s *Store) appendEventTx(ctx context.Context, tx *gorm.DB, sessionID, typ s
 		return Event{}, e
 	}
 	var seq int64
-	e = tx.Raw(`UPDATE cloud_agent_sessions SET last_seq=last_seq+1, updated_at=? WHERE id=? RETURNING last_seq`, s.now(), sessionID).Row().Scan(&seq)
+	e = tx.Raw(`UPDATE cloud_agent_sessions SET last_seq=last_seq+1, updated_at=? WHERE id=? RETURNING last_seq`, runtimeTimeString(s.now()), sessionID).Row().Scan(&seq)
 	if errors.Is(e, sql.ErrNoRows) {
 		return Event{}, ErrNotFound
 	}
@@ -473,7 +473,7 @@ func (s *Store) appendEventTx(ctx context.Context, tx *gorm.DB, sessionID, typ s
 		return Event{}, e
 	}
 	ev := Event{ID: s.id(), SessionID: sessionID, Seq: seq, Type: typ, RunID: runID, Payload: raw, CreatedAt: s.now()}
-	e = tx.Table("cloud_agent_events").Create(map[string]any{"id": ev.ID, "session_id": sessionID, "seq": seq, "type": typ, "run_id": runID, "payload_json": string(raw), "created_at": ev.CreatedAt}).Error
+	e = tx.Table("cloud_agent_events").Create(map[string]any{"id": ev.ID, "session_id": sessionID, "seq": seq, "type": typ, "run_id": runID, "payload_json": string(raw), "created_at": runtimeTimeString(ev.CreatedAt)}).Error
 	return ev, e
 }
 func (s *Store) AppendEvent(ctx context.Context, tenant, agent, session, typ string, runID *string, payload any) (Event, error) {
@@ -523,14 +523,14 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 	now := s.now()
 	run := Run{ID: s.id(), SessionID: session, Status: "running", StartedAt: &now, CreatedAt: now}
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ? AND active_run_id IS NULL", tenant, agent, session).Updates(map[string]any{"active_run_id": run.ID, "updated_at": now})
+		res := tx.Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ? AND active_run_id IS NULL", tenant, agent, session).Updates(map[string]any{"active_run_id": run.ID, "updated_at": runtimeTimeString(now)})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		if e := tx.Table("cloud_agent_runs").Create(map[string]any{"id": run.ID, "session_id": session, "status": run.Status, "cancel_requested": false, "error": nil, "started_at": now, "completed_at": nil, "created_at": now}).Error; e != nil {
+		if e := tx.Table("cloud_agent_runs").Create(map[string]any{"id": run.ID, "session_id": session, "status": run.Status, "cancel_requested": false, "error": nil, "started_at": runtimeTimeString(now), "completed_at": nil, "created_at": runtimeTimeString(now)}).Error; e != nil {
 			return e
 		}
 		if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, map[string]any{"content": content, "attachments": json.RawMessage(validJSON(attachments, "[]")), "options": json.RawMessage(validJSON(options, "{}"))}); e != nil {
@@ -587,14 +587,14 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 	}
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := s.now()
-		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('running','queued')", runID, session).Updates(map[string]any{"status": status, "error": errText, "completed_at": now})
+		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('running','queued')", runID, session).Updates(map[string]any{"status": status, "error": errText, "completed_at": runtimeTimeString(now)})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		if e := tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, runID).Updates(map[string]any{"active_run_id": nil, "updated_at": now}).Error; e != nil {
+		if e := tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, runID).Updates(map[string]any{"active_run_id": nil, "updated_at": runtimeTimeString(now)}).Error; e != nil {
 			return e
 		}
 		typ := "run_end"
@@ -651,14 +651,14 @@ func (s *Store) CancelRun(ctx context.Context, tenant, agent, session string) (R
 	rid := *sess.ActiveRunID
 	now := s.now()
 	e = s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('queued','running')", rid, session).Updates(map[string]any{"cancel_requested": true, "status": "cancelled", "completed_at": now})
+		res := tx.Table("cloud_agent_runs").Where("id = ? AND session_id = ? AND status IN ('queued','running')", rid, session).Updates(map[string]any{"cancel_requested": true, "status": "cancelled", "completed_at": runtimeTimeString(now)})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
-		res = tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, rid).Updates(map[string]any{"active_run_id": nil, "updated_at": now})
+		res = tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, rid).Updates(map[string]any{"active_run_id": nil, "updated_at": runtimeTimeString(now)})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -687,12 +687,12 @@ func (s *Store) RecoverRuns(ctx context.Context) (int64, error) {
 	items := []recovered{}
 	_ = s.deps.Gorm.WithContext(ctx).Raw(`SELECT cs.tenant_id,cs.agent_id,cs.id,r.id AS run_id FROM cloud_agent_runs r JOIN cloud_agent_sessions cs ON cs.id=r.session_id WHERE r.status='running'`).Scan(&items).Error
 	now := s.now()
-	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_runs").Where("status = 'running'").Updates(map[string]any{"status": "failed", "error": "server restarted", "completed_at": now})
+	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_runs").Where("status = 'running'").Updates(map[string]any{"status": "failed", "error": "server restarted", "completed_at": runtimeTimeString(now)})
 	// phase5: NOT EXISTS subquery — keep Exec (gorm has no chain equivalent)
 	if res.Error != nil {
 		return 0, res.Error
 	}
-	_ = s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE active_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_agent_runs r WHERE r.id=cloud_agent_sessions.active_run_id AND r.status='running')`, now)
+	_ = s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE active_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_agent_runs r WHERE r.id=cloud_agent_sessions.active_run_id AND r.status='running')`, runtimeTimeString(now))
 	for _, item := range items {
 		s.recordRunTerminal(context.WithoutCancel(ctx), item.Tenant, item.Agent, item.Session, item.Run, "failed")
 	}
@@ -881,7 +881,7 @@ func (s *Store) CreateMemory(ctx context.Context, tenant, agent string, in Memor
 	if in.Pinned {
 		pinned = 1
 	}
-	e := s.deps.Gorm.WithContext(ctx).Table("memories").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "provider_id": in.ProviderID, "layer": in.Layer, "content": in.Content, "tags_json": validJSON(in.Tags, "[]"), "pinned": pinned, "importance": in.Importance, "source": in.Source, "metadata_json": validJSON(in.Metadata, "{}"), "created_at": now, "updated_at": now}).Error
+	e := s.deps.Gorm.WithContext(ctx).Table("memories").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "provider_id": in.ProviderID, "layer": in.Layer, "content": in.Content, "tags_json": validJSON(in.Tags, "[]"), "pinned": pinned, "importance": in.Importance, "source": in.Source, "metadata_json": validJSON(in.Metadata, "{}"), "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	return in, e
 }
 func (s *Store) DeleteMemory(ctx context.Context, tenant, agent, id string) error {
@@ -957,7 +957,7 @@ func (s *Store) CreateUpstream(ctx context.Context, tenant string, in Upstream) 
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	e := s.deps.Gorm.WithContext(ctx).Table("model_upstreams").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "protocol": in.Protocol, "config_json": validJSON(in.Config, "{}"), "status": in.Status, "last_error": in.LastError, "created_at": now, "updated_at": now}).Error
+	e := s.deps.Gorm.WithContext(ctx).Table("model_upstreams").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "protocol": in.Protocol, "config_json": validJSON(in.Config, "{}"), "status": in.Status, "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	return in, e
 }
 func (s *Store) GetUpstream(ctx context.Context, tenant, id string) (Upstream, error) {
@@ -1046,7 +1046,7 @@ func (s *Store) CreateRoute(ctx context.Context, tenant string, in ModelRoute) (
 	in.ID = s.id()
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	e := s.deps.Gorm.WithContext(ctx).Table("model_routes").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "capability": in.Capability, "alias": in.Alias, "upstream_id": in.UpstreamID, "model": in.Model, "options_json": validJSON(in.Options, "{}"), "priority": strconv.Itoa(in.Priority), "weight": strconv.Itoa(in.Weight), "is_default": in.IsDefault, "status": in.Status, "last_error": in.LastError, "created_at": now, "updated_at": now}).Error
+	e := s.deps.Gorm.WithContext(ctx).Table("model_routes").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "capability": in.Capability, "alias": in.Alias, "upstream_id": in.UpstreamID, "model": in.Model, "options_json": validJSON(in.Options, "{}"), "priority": strconv.Itoa(in.Priority), "weight": strconv.Itoa(in.Weight), "is_default": in.IsDefault, "status": in.Status, "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	return in, e
 }
 func (s *Store) DeleteRoute(ctx context.Context, tenant, id string) error {

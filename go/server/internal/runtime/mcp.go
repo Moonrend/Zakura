@@ -111,7 +111,7 @@ func (h *handler) migrateLegacyComponentConfigs(ctx context.Context) {
 		if protectErr != nil {
 			continue
 		}
-		_ = h.deps.Gorm.WithContext(ctx).Model(&models.ComponentInstance{}).Where("id=? AND (config_json IS NULL OR config_json='{}')", item.ID).Updates(map[string]any{"config_json": config, "secret_json": secret, "updated_at": h.store.now()}).Error
+		_ = h.deps.Gorm.WithContext(ctx).Model(&models.ComponentInstance{}).Where("id=? AND (config_json IS NULL OR config_json='{}')", item.ID).Updates(map[string]any{"config_json": config, "secret_json": secret, "updated_at": runtimeTimeString(h.store.now())}).Error
 	}
 }
 
@@ -463,7 +463,7 @@ func (h *handler) createMCPPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "created_at": now, "updated_at": now}).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_policies").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -479,7 +479,7 @@ func (h *handler) updateMCPPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "name required")
 		return
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.McpPolicy{}).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.McpPolicy{}).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"name": b.Name, "policy_json": validJSON(b.Policy, "{}"), "updated_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -627,7 +627,7 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	if body.Command != "" {
 		status = "stopped"
 	}
-	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slug, "name": body.Name, "config_json": string(cfgRaw), "secret_json": string(sec), "status": status, "last_error": nil, "created_at": now, "updated_at": now}).Error
+	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": nil, "component_type": "mcp", "component_ref": slug, "name": body.Name, "config_json": string(cfgRaw), "secret_json": string(sec), "status": status, "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -643,7 +643,7 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 					DoUpdates: clause.AssignmentColumns([]string{"agent_id"}),
 				}).
 				Table("agent_bindings").
-				Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": agentRow.SpaceID, "agent_id": agent, "instance_id": id, "created_at": now}).Error
+				Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": agentRow.SpaceID, "agent_id": agent, "instance_id": id, "created_at": runtimeTimeString(now)}).Error
 		}
 	}
 	started := body.Command == ""
@@ -652,7 +652,7 @@ func (h *handler) importMCP(w http.ResponseWriter, r *http.Request) {
 	if body.Command != "" && start {
 		if err = h.provisionStdioMCP(r.Context(), p.TenantID, id, body); err != nil {
 			startError = err.Error()
-			_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("id=?", id).Updates(map[string]any{"status": "error", "last_error": startError, "updated_at": h.store.now()}).Error
+			_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ComponentInstance{}).Where("id=?", id).Updates(map[string]any{"status": "error", "last_error": startError, "updated_at": runtimeTimeString(h.store.now())}).Error
 		} else {
 			started = true
 		}
@@ -849,10 +849,10 @@ func (h *handler) provisionStdioMCP(ctx context.Context, tenant, instanceID stri
 	labels, _ := json.Marshal(map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component"})
 	ports, _ := json.Marshal(running.Ports)
 	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := tx.Exec(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`, string(cfg), now, instanceID, tenant).Error; e != nil {
+		if e := tx.Exec(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`, string(cfg), runtimeTimeString(now), instanceID, tenant).Error; e != nil {
 			return e
 		}
-		return tx.Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": now, "updated_at": now}).Error
+		return tx.Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	})
 	if err != nil {
 		cleanup()
@@ -997,7 +997,7 @@ func (h *handler) auditToolCall(ctx context.Context, p httpx.Principal, inst mcp
 	if isError {
 		result = errText
 	}
-	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nil, "agent_id": inst.AgentID, "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": inst.ID, "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": h.store.now()}).Error
+	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nil, "agent_id": inst.AgentID, "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": inst.ID, "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": runtimeTimeString(h.store.now())}).Error
 }
 
 func (h *handler) listMCPSources(w http.ResponseWriter, r *http.Request) {
@@ -1042,7 +1042,7 @@ func (h *handler) createMCPSource(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_store_sources").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "name": b.Name, "description": b.Description, "source_url": b.SourceURL, "format": b.Format, "manifest_json": validJSON(b.Manifest, "{}"), "servers_json": validJSON(b.Servers, "[]"), "enabled": true, "fetched_at": now, "created_at": now, "updated_at": now}).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("mcp_store_sources").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "name": b.Name, "description": b.Description, "source_url": b.SourceURL, "format": b.Format, "manifest_json": validJSON(b.Manifest, "{}"), "servers_json": validJSON(b.Servers, "[]"), "enabled": true, "fetched_at": runtimeTimeString(now), "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -1141,7 +1141,7 @@ func (h *handler) installMCPStoreEntry(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, protectErr)
 		return
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": entry.Ref, "name": entry.Name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": principal(r).TenantID, "agent_id": b.AgentID, "component_type": "mcp", "component_ref": entry.Ref, "name": entry.Name, "config_json": configStored, "secret_json": secretStored, "status": "ready", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		statusErr(w, e)
 		return

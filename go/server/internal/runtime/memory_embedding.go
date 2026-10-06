@@ -173,7 +173,7 @@ func (h *handler) embedMemoryText(ctx context.Context, tenant string, cfg *memor
 func (h *handler) setMemoryEmbedding(ctx context.Context, tenant, agent, id, content string, vector []float64, model string) error {
 	encoded, _ := json.Marshal(vector)
 	hash := sha256.Sum256([]byte(content))
-	result := h.deps.Gorm.WithContext(ctx).Table("memories").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"embedding": string(encoded), "embedding_model": model, "embedding_dim": len(vector), "content_hash": hex.EncodeToString(hash[:]), "updated_at": h.store.now()})
+	result := h.deps.Gorm.WithContext(ctx).Table("memories").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Updates(map[string]any{"embedding": string(encoded), "embedding_model": model, "embedding_dim": len(vector), "content_hash": hex.EncodeToString(hash[:]), "updated_at": runtimeTimeString(h.store.now())})
 	if result.Error != nil {
 		return result.Error
 	}

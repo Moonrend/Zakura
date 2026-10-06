@@ -254,7 +254,7 @@ func (h *handler) createInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretStored, _ := json.Marshal(map[string]any{"enc": enc, "configured": len(secretValues) > 0})
-	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": body.AgentID, "component_type": body.Type, "component_ref": body.Ref, "name": body.Name, "config_json": configPlain, "secret_json": string(secretStored), "status": "stopped", "last_error": nil, "created_at": now, "updated_at": now}).Error
+	err := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": body.AgentID, "component_type": body.Type, "component_ref": body.Ref, "name": body.Name, "config_json": configPlain, "secret_json": string(secretStored), "status": "stopped", "last_error": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -301,7 +301,7 @@ func (h *handler) patchInstance(w http.ResponseWriter, r *http.Request) {
 		h.getInstanceHTTP(w, r)
 		return
 	}
-	sets, args = append(sets, "updated_at=?"), append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
+	sets, args = append(sets, "updated_at=?"), append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
 	result := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if err := result.Error; err != nil {
 		statusErr(w, err)
@@ -328,7 +328,7 @@ func (h *handler) deleteInstance(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) setInstanceStatus(ctx context.Context, tenant, id, status string, errText *string) error {
-	res := h.deps.Gorm.WithContext(ctx).Table("component_instances").Where("tenant_id = ? AND id = ?", tenant, id).Updates(map[string]any{"status": status, "last_error": errText, "updated_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(ctx).Table("component_instances").Where("tenant_id = ? AND id = ?", tenant, id).Updates(map[string]any{"status": status, "last_error": errText, "updated_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -407,7 +407,7 @@ func (h *handler) stopInstance(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		_ = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("id = ? AND tenant_id = ?", item.id, p.TenantID).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": h.store.now()}).Error
+		_ = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("id = ? AND tenant_id = ?", item.id, p.TenantID).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": runtimeTimeString(h.store.now())}).Error
 	}
 	e := h.setInstanceStatus(r.Context(), p.TenantID, instanceID, "stopped", nil)
 	if e != nil {
@@ -449,7 +449,7 @@ func (h *handler) instanceRuntime(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) reconcileInstances(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Where("tenant_id = ? AND status = 'starting' AND updated_at < ?", p.TenantID, h.store.now().Add(-10*time.Minute)).Updates(map[string]any{"status": "stopped", "updated_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("component_instances").Where("tenant_id = ? AND status = 'starting' AND updated_at < ?", p.TenantID, runtimeTimeString(h.store.now().Add(-10*time.Minute))).Updates(map[string]any{"status": "stopped", "updated_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -508,7 +508,7 @@ func (h *handler) createBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "space_id": spaceRow.SpaceID, "agent_id": agent, "instance_id": b.InstanceID, "created_at": h.store.now()}).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("agent_bindings").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "space_id": spaceRow.SpaceID, "agent_id": agent, "instance_id": b.InstanceID, "created_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -677,7 +677,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "starting", "last_error": nil, "updated_at": h.store.now()}).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "starting", "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error
 	var mkdir struct {
 		Abs string `json:"abs"`
 	}
@@ -737,20 +737,20 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		g := h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Select("id").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Order("created_at DESC").Limit(1)
 		if e := g.Take(&managedRow).Error; e == nil {
-			err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("id = ?", managedRow.ID).Updates(map[string]any{"docker_id": running.DockerID, "name": running.Name, "image": image, "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": space.RuntimeNodeID, "updated_at": now}).Error
+			err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("id = ?", managedRow.ID).Updates(map[string]any{"docker_id": running.DockerID, "name": running.Name, "image": image, "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": space.RuntimeNodeID, "updated_at": runtimeTimeString(now)}).Error
 		} else {
-			err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": space.ID, "agent_id": agent.ID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "workspace", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": space.RuntimeNodeID, "created_at": now, "updated_at": now}).Error
+			err = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "space_id": space.ID, "agent_id": agent.ID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "workspace", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": space.RuntimeNodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 		}
 		if err != nil {
 			statusErr(w, err)
 			return
 		}
 	}
-	if err = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "running", "last_error": nil, "updated_at": h.store.now()}).Error; err != nil {
+	if err = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "running", "last_error": nil, "updated_at": runtimeTimeString(h.store.now())}).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, h.store.now(), p.TenantID, agent.ID).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='running',last_error=NULL,updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, runtimeTimeString(h.store.now()), p.TenantID, agent.ID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	result := h.agentDTO(r.Context(), p.TenantID, agent)
 	result["starting"] = true
@@ -759,7 +759,7 @@ func (h *handler) startAgent(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) failWorkspaceStart(ctx context.Context, tenant, spaceID string, cause error) {
 	message := cause.Error()
-	_ = h.deps.Gorm.WithContext(context.WithoutCancel(ctx)).Table("spaces").Where("tenant_id = ? AND id = ?", tenant, spaceID).Updates(map[string]any{"workspace_status": "error", "last_error": message, "updated_at": h.store.now()}).Error
+	_ = h.deps.Gorm.WithContext(context.WithoutCancel(ctx)).Table("spaces").Where("tenant_id = ? AND id = ?", tenant, spaceID).Updates(map[string]any{"workspace_status": "error", "last_error": message, "updated_at": runtimeTimeString(h.store.now())}).Error
 }
 
 func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
@@ -788,12 +788,12 @@ func (h *handler) stopAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := h.store.now()
-	if err = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "stopped", "updated_at": now}).Error; err != nil {
+	if err = h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id = ? AND id = ?", p.TenantID, space.ID).Updates(map[string]any{"workspace_status": "stopped", "updated_at": runtimeTimeString(now)}).Error; err != nil {
 		statusErr(w, err)
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Updates(map[string]any{"status": "stopped", "updated_at": now}).Error
-	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, now, p.TenantID, agent.ID).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Where("tenant_id = ? AND space_id = ? AND purpose = 'workspace'", p.TenantID, space.ID).Updates(map[string]any{"status": "stopped", "updated_at": runtimeTimeString(now)}).Error
+	_ = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE component_instances SET status='stopped',updated_at=? WHERE tenant_id=? AND id IN (SELECT instance_id FROM agent_bindings WHERE agent_id=?)`, runtimeTimeString(now), p.TenantID, agent.ID).Error
 	agent, _ = h.store.GetAgent(r.Context(), p.TenantID, agent.ID)
 	httpx.JSON(w, http.StatusOK, h.agentDTO(r.Context(), p.TenantID, agent))
 }
@@ -1009,7 +1009,7 @@ func (h *handler) allocateContainer(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.store.now()
 	id := h.store.id()
-	e = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "instance_id": b.InstanceID, "space_id": b.SpaceID, "agent_id": b.AgentID, "docker_id": created.DockerID, "name": b.Name, "image": b.Image, "purpose": b.Purpose, "status": "running", "labels_json": string(labels), "ports_json": string(ports), "env_enc": nil, "allocated_to": nullString(b.AllocatedTo), "runtime_node_id": b.RuntimeNodeID, "created_at": now, "updated_at": now}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Table("managed_containers").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "instance_id": b.InstanceID, "space_id": b.SpaceID, "agent_id": b.AgentID, "docker_id": created.DockerID, "name": b.Name, "image": b.Image, "purpose": b.Purpose, "status": "running", "labels_json": string(labels), "ports_json": string(ports), "env_enc": nil, "allocated_to": nullString(b.AllocatedTo), "runtime_node_id": b.RuntimeNodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
 	if e != nil {
 		_ = runner.call(context.WithoutCancel(r.Context()), "docker.stop", map[string]any{"id": created.DockerID, "remove": true}, nil)
 		statusErr(w, e)
@@ -1050,7 +1050,7 @@ func (h *handler) stopContainer(w http.ResponseWriter, r *http.Request) {
 	if remove {
 		status = "removed"
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET status=?,docker_id=CASE WHEN ? THEN NULL ELSE docker_id END,updated_at=? WHERE tenant_id=? AND id=?`, status, remove, h.store.now(), p.TenantID, chi.URLParam(r, "id")).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE managed_containers SET status=?,docker_id=CASE WHEN ? THEN NULL ELSE docker_id END,updated_at=? WHERE tenant_id=? AND id=?`, status, remove, runtimeTimeString(h.store.now()), p.TenantID, chi.URLParam(r, "id")).Error
 	if e != nil {
 		statusErr(w, e)
 		return

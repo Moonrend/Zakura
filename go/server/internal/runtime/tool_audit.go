@@ -66,13 +66,13 @@ func (h *handler) toolCallWhere(r *http.Request, forcedAgent string) (string, []
 	if since := strings.TrimSpace(r.URL.Query().Get("since")); since != "" {
 		if parsed, err := time.Parse(time.RFC3339, since); err == nil {
 			where += ` AND l.created_at>=?`
-			args = append(args, parsed.UTC())
+			args = append(args, runtimeTimeString(parsed.UTC()))
 		}
 	}
 	if until := strings.TrimSpace(r.URL.Query().Get("until")); until != "" {
 		if parsed, err := time.Parse(time.RFC3339, until); err == nil {
 			where += ` AND l.created_at<=?`
-			args = append(args, parsed.UTC())
+			args = append(args, runtimeTimeString(parsed.UTC()))
 		}
 	}
 	return where, args
@@ -161,7 +161,7 @@ func (h *handler) toolCallStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lastQ := `SELECT COUNT(*) FROM tool_call_logs WHERE tenant_id=? AND created_at>=?`
-	lastArgs := []any{p.TenantID, h.store.now().Add(-24 * time.Hour)}
+	lastArgs := []any{p.TenantID, runtimeTimeString(h.store.now().Add(-24 * time.Hour))}
 	if agent != "" {
 		lastQ += ` AND agent_id=?`
 		lastArgs = append(lastArgs, agent)

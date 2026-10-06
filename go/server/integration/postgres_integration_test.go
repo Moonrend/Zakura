@@ -105,6 +105,82 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 	if migrationsApplied != 3 || users != 1 || tenants != 1 || agentCount != 1 {
 		t.Fatalf("unexpected durable rows: migrations=%d users=%d tenants=%d agents=%d", migrationsApplied, users, tenants, agentCount)
 	}
+
+	// Runtime store flow (converted SQL→GORM surface) end-to-end on PostgreSQL.
+	agentID := agents[0].(map[string]any)["id"].(string)
+	status, created := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/agents/"+agentID+"/cloud/sessions", session, map[string]any{"title": "pg e2e session"})
+	if status != http.StatusCreated || created["id"] == nil {
+		t.Fatalf("create session: %d %#v", status, created)
+	}
+	sessionID := created["id"].(string)
+	status, listed := jsonCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/agents/"+agentID+"/cloud/sessions", session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("list sessions: %d %#v", status, listed)
+	}
+	if sessions, ok := listed["sessions"].([]any); !ok || len(sessions) != 1 {
+		t.Fatalf("list sessions payload: %#v", listed)
+	}
+	status, fetched := jsonCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/agents/"+agentID+"/cloud/sessions/"+sessionID, session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get session: %d %#v", status, fetched)
+	}
+	if sess, ok := fetched["session"].(map[string]any); !ok || sess["title"] != "pg e2e session" || sess["status"] != "active" || sess["createdAt"] == "0001-01-01T00:00:00Z" {
+		t.Fatalf("get session payload: %#v", fetched)
+	}
+	status, patched := jsonCall(t, srv.Client(), http.MethodPatch, srv.URL+"/api/agents/"+agentID+"/cloud/sessions/"+sessionID, session, map[string]any{"title": "pg e2e session v2"})
+	if status != http.StatusOK {
+		t.Fatalf("patch session: %d %#v", status, patched)
+	}
+	if patched["title"] != "pg e2e session v2" {
+		t.Fatalf("patch session payload: %#v", patched)
+	}
+	var storedTitle string
+	if err = conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT title FROM cloud_agent_sessions WHERE id=?`), sessionID).Scan(&storedTitle); err != nil {
+		t.Fatalf("session row: %v", err)
+	}
+	if storedTitle != "pg e2e session v2" {
+		t.Fatalf("session title in PG: %q", storedTitle)
+	}
+
+	status, instance := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/instances", session, map[string]any{"type": "mcp", "name": "pg-e2e-mcp", "providerId": "pg-e2e-mcp"})
+	if status != http.StatusCreated || instance["id"] == nil {
+		t.Fatalf("create instance: %d %#v", status, instance)
+	}
+	instanceID := instance["id"].(string)
+	status, instances := arrayCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/instances", session)
+	if status != http.StatusOK || len(instances) != 1 || instances[0].(map[string]any)["status"] != "stopped" {
+		t.Fatalf("list instances: %d %#v", status, instances)
+	}
+	status, _ = jsonCall(t, srv.Client(), http.MethodPatch, srv.URL+"/api/instances/"+instanceID, session, map[string]any{"name": "pg-e2e-mcp-v2"})
+	if status != http.StatusOK {
+		t.Fatalf("patch instance: %d", status)
+	}
+	status, _ = jsonCall(t, srv.Client(), http.MethodDelete, srv.URL+"/api/instances/"+instanceID, session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete instance: %d", status)
+	}
+
+	status, memory := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/agents/"+agentID+"/memory/items", session, map[string]any{"content": "pg e2e memory item"})
+	if status != http.StatusCreated || memory["id"] == nil {
+		t.Fatalf("create memory: %d %#v", status, memory)
+	}
+	memID := memory["id"].(string)
+	status, memList := jsonCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/agents/"+agentID+"/memory/items", session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("list memory: %d %#v", status, memList)
+	}
+	if items, ok := memList["items"].([]any); !ok || len(items) != 1 {
+		t.Fatalf("list memory payload: %#v", memList)
+	}
+	status, _ = jsonCall(t, srv.Client(), http.MethodDelete, srv.URL+"/api/agents/"+agentID+"/memory/items/"+memID, session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete memory: %d", status)
+	}
+
+	status, _ = jsonCall(t, srv.Client(), http.MethodDelete, srv.URL+"/api/agents/"+agentID+"/cloud/sessions/"+sessionID, session, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete session: %d", status)
+	}
 }
 
 func TestPostgresLegacyCompatibility(t *testing.T) {

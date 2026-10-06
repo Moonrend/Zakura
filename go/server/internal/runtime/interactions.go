@@ -63,9 +63,14 @@ func (s *Store) CreateQuestion(ctx context.Context, tenant, agent, session, runI
 		t := s.now().Add(time.Duration(*in.TimeoutSeconds) * time.Second)
 		expires = &t
 	}
+	var expiresStr *string
+	if expires != nil {
+		v := runtimeTimeString(*expires)
+		expiresStr = &v
+	}
 	id := s.id()
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table("agent_user_questions").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "question": in.Question, "options_json": validJSON(in.Options, "[]"), "allow_multiple": in.AllowMultiple, "secret": in.Secret, "mode": in.Mode, "timeout_seconds": in.TimeoutSeconds, "timeout_action": in.TimeoutAction, "default_option_ids_json": validJSON(in.DefaultOptionIDs, "[]"), "placeholder": in.Placeholder, "status": "pending", "answer_json": "{}", "expires_at": expires, "resolved_at": nil, "created_at": s.now()}).Error; err != nil {
+		if err := tx.Table("agent_user_questions").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "question": in.Question, "options_json": validJSON(in.Options, "[]"), "allow_multiple": in.AllowMultiple, "secret": in.Secret, "mode": in.Mode, "timeout_seconds": in.TimeoutSeconds, "timeout_action": in.TimeoutAction, "default_option_ids_json": validJSON(in.DefaultOptionIDs, "[]"), "placeholder": in.Placeholder, "status": "pending", "answer_json": "{}", "expires_at": expiresStr, "resolved_at": nil, "created_at": runtimeTimeString(s.now())}).Error; err != nil {
 			return err
 		}
 		var options any
@@ -96,9 +101,14 @@ func (s *Store) CreateApproval(ctx context.Context, tenant, agent, session, runI
 		t := s.now().Add(time.Duration(*in.TimeoutSeconds) * time.Second)
 		expires = &t
 	}
+	var expiresStr *string
+	if expires != nil {
+		v := runtimeTimeString(*expires)
+		expiresStr = &v
+	}
 	id := s.id()
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table("agent_tool_approvals").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "tool_name": in.ToolName, "qualified_name": in.QualifiedName, "args_json": validJSON(in.Args, "{}"), "reason": in.Reason, "ai_json": validJSON(in.AI, "{}"), "status": "pending", "decided_by": nil, "always_allow": false, "expires_at": expires, "resolved_at": nil, "created_at": s.now()}).Error; err != nil {
+		if err := tx.Table("agent_tool_approvals").Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agent, "session_id": session, "run_id": nullString(runID), "tool_call_id": nullString(toolCallID), "tool_name": in.ToolName, "qualified_name": in.QualifiedName, "args_json": validJSON(in.Args, "{}"), "reason": in.Reason, "ai_json": validJSON(in.AI, "{}"), "status": "pending", "decided_by": nil, "always_allow": false, "expires_at": expiresStr, "resolved_at": nil, "created_at": runtimeTimeString(s.now())}).Error; err != nil {
 			return err
 		}
 		_, err := s.appendEventTx(ctx, tx, session, "permission_request", optionalString(runID), map[string]any{"requestId": id, "title": in.ToolName, "toolCallId": toolCallID, "options": []map[string]any{{"optionId": "approved", "name": "Allow", "kind": "allow_once"}, {"optionId": "denied", "name": "Deny", "kind": "reject_once"}}})
@@ -135,7 +145,7 @@ func (h *handler) resolveQuestion(w http.ResponseWriter, r *http.Request) {
 	if b.Cancelled {
 		status = "cancelled"
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_user_questions").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, h.store.now()).Updates(map[string]any{"status": status, "answer_json": string(answer), "resolved_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_user_questions").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, runtimeTimeString(h.store.now())).Updates(map[string]any{"status": status, "answer_json": string(answer), "resolved_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -172,7 +182,7 @@ func (h *handler) resolveApproval(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "decision must be approved or denied")
 		return
 	}
-	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_tool_approvals").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, h.store.now()).Updates(map[string]any{"status": b.Decision, "decided_by": "user", "always_allow": b.AlwaysAllow, "resolved_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("agent_tool_approvals").Where("id=? AND tenant_id=? AND agent_id=? AND session_id=? AND status='pending' AND (expires_at IS NULL OR expires_at>?)", b.RequestID, p.TenantID, agent, session, runtimeTimeString(h.store.now())).Updates(map[string]any{"status": b.Decision, "decided_by": "user", "always_allow": b.AlwaysAllow, "resolved_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -192,11 +202,11 @@ func (h *handler) resolveApproval(w http.ResponseWriter, r *http.Request) {
 
 func (s *Store) ExpireInteractions(ctx context.Context) (int64, error) {
 	now := s.now()
-	a := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_user_questions SET status=CASE WHEN timeout_action='default' THEN 'answered' ELSE 'timeout' END,answer_json=CASE WHEN timeout_action='default' THEN default_option_ids_json ELSE '{}' END,resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, now, now)
+	a := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_user_questions SET status=CASE WHEN timeout_action='default' THEN 'answered' ELSE 'timeout' END,answer_json=CASE WHEN timeout_action='default' THEN default_option_ids_json ELSE '{}' END,resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, runtimeTimeString(now), runtimeTimeString(now))
 	if a.Error != nil {
 		return 0, a.Error
 	}
-	b := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_tool_approvals SET status='timeout',decided_by='timeout',resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, now, now)
+	b := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE agent_tool_approvals SET status='timeout',decided_by='timeout',resolved_at=? WHERE status='pending' AND expires_at IS NOT NULL AND expires_at<=?`, runtimeTimeString(now), runtimeTimeString(now))
 	if b.Error != nil {
 		return 0, b.Error
 	}

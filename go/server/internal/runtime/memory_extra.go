@@ -48,7 +48,7 @@ func (h *handler) patchMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "content_hash=NULL", "updated_at=?")
 	p := principal(r)
-	args = append(args, h.store.now(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "memId"))
+	args = append(args, runtimeTimeString(h.store.now()), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "memId"))
 	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE memories SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND agent_id=? AND id=?`, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)
@@ -134,7 +134,7 @@ func (h *handler) createMemoryEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := h.store.id()
-	res := h.deps.Gorm.WithContext(r.Context()).Table("memory_edges").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": agent, "from_memory_id": b.FromMemoryID, "to_memory_id": b.ToMemoryID, "relation": b.Relation, "weight": weight, "created_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("memory_edges").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": agent, "from_memory_id": b.FromMemoryID, "to_memory_id": b.ToMemoryID, "relation": b.Relation, "weight": weight, "created_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return

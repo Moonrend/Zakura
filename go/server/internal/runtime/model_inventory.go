@@ -105,7 +105,7 @@ func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	if x.Status == "" {
 		x.Status = "ready"
 	}
-	now := h.store.now()
+	now := runtimeTimeString(h.store.now())
 	x.ID = h.store.id()
 	e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": x.Weight, "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
 	if e != nil {
@@ -140,7 +140,7 @@ func (h *handler) patchUpstreamModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sets = append(sets, "updated_at=?")
-	args = append(args, h.store.now(), principal(r).TenantID, chi.URLParam(r, "id"))
+	args = append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
 	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE upstream_models SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)
@@ -267,7 +267,7 @@ func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string)
 	if len(result.Data) == 0 {
 		result.Data = result.Models
 	}
-	now := h.store.now()
+	now := runtimeTimeString(h.store.now())
 	count := 0
 	for _, m := range result.Data {
 		if m.ID == "" {
@@ -346,7 +346,7 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 		if m.Weight == "" {
 			m.Weight = "100"
 		}
-		now := h.store.now()
+		now := runtimeTimeString(h.store.now())
 		res := h.deps.Gorm.WithContext(r.Context()).
 			Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},

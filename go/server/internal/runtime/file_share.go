@@ -73,7 +73,7 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 	now := h.store.now()
 	expires := now.Add(time.Duration(b.TTLMinutes) * time.Minute)
 	id := h.store.id()
-	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": chi.URLParam(r, "id"), "token_hash": hash, "path": b.Path, "file_name": b.FileName, "mime_type": nullString(b.MimeType), "size_bytes": info.Size(), "status": "active", "ttl_minutes": b.TTLMinutes, "expires_at": expires, "download_count": 0, "disposition": b.Disposition, "revoked_at": nil, "created_at": now, "updated_at": now})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "agent_id": chi.URLParam(r, "id"), "token_hash": hash, "path": b.Path, "file_name": b.FileName, "mime_type": nullString(b.MimeType), "size_bytes": info.Size(), "status": "active", "ttl_minutes": b.TTLMinutes, "expires_at": runtimeTimeString(expires), "download_count": 0, "disposition": b.Disposition, "revoked_at": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -82,7 +82,7 @@ func (h *handler) createFileShare(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) revokeFileShare(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ? AND tenant_id = ? AND agent_id = ? AND status = 'active'", chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"status": "revoked", "revoked_at": h.store.now(), "updated_at": h.store.now()})
+	res := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ? AND tenant_id = ? AND agent_id = ? AND status = 'active'", chi.URLParam(r, "shareId"), p.TenantID, chi.URLParam(r, "id")).Updates(map[string]any{"status": "revoked", "revoked_at": runtimeTimeString(h.store.now()), "updated_at": runtimeTimeString(h.store.now())})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
@@ -108,7 +108,7 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		Size        int64  `gorm:"column:size_bytes"`
 		Disposition string `gorm:"column:disposition"`
 	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Select("id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream') AS mime_type,size_bytes,disposition").Where("token_hash = ? AND status = 'active' AND revoked_at IS NULL AND expires_at > ?", hash, h.store.now()).Take(&row).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Select("id,tenant_id,agent_id,path,file_name,COALESCE(mime_type,'application/octet-stream') AS mime_type,size_bytes,disposition").Where("token_hash = ? AND status = 'active' AND revoked_at IS NULL AND expires_at > ?", hash, runtimeTimeString(h.store.now())).Take(&row).Error
 	if errors.Is(e, gorm.ErrRecordNotFound) {
 		httpx.Error(w, 404, "Share not found or expired")
 		return
@@ -138,7 +138,7 @@ func (h *handler) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 404, "File no longer exists in workspace")
 		return
 	}
-	_ = h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ?", row.ID).Updates(map[string]any{"download_count": gorm.Expr("download_count+1"), "updated_at": h.store.now()})
+	_ = h.deps.Gorm.WithContext(r.Context()).Table("file_shares").Where("id = ?", row.ID).Updates(map[string]any{"download_count": gorm.Expr("download_count+1"), "updated_at": runtimeTimeString(h.store.now())})
 	safe := strings.NewReplacer("\"", "_", "\r", "_", "\n", "_").Replace(row.Name)
 	w.Header().Set("Content-Type", row.Mime)
 	w.Header().Set("Content-Disposition", row.Disposition+`; filename="`+safe+`"`)

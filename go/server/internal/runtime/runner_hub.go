@@ -123,7 +123,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.close(errors.New("runner disconnected"))
 		h.hub.remove(s)
-		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, h.store.now(), nodeID).Error
+		_ = h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'offline' END,updated_at=? WHERE id=?`, runtimeTimeString(h.store.now()), nodeID).Error
 	}()
 	go s.readLoop()
 	if err := s.writeJSON(runnerFrame{Type: "welcome", ID: nodeID}); err != nil {
@@ -143,7 +143,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.store.now()
-	err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), now, now, nodeID).Error
+	err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), runtimeTimeString(now), runtimeTimeString(now), nodeID).Error
 	if err != nil {
 		return
 	}

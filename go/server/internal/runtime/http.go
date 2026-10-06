@@ -292,7 +292,7 @@ func (h *handler) createAgentAPIKey(ctx context.Context, p httpx.Principal, a Ag
 	if p.APIKey {
 		user = nil
 	}
-	e := h.deps.Gorm.WithContext(ctx).Table("api_keys").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "user_id": user, "agent_id": a.ID, "space_id": a.SpaceID, "name": name, "key_prefix": prefix, "key_hash": hex.EncodeToString(sum[:]), "scopes": `["*"]`, "expires_at": nil, "last_used_at": nil, "revoked_at": nil, "created_at": h.store.now()}).Error
+	e := h.deps.Gorm.WithContext(ctx).Table("api_keys").Create(map[string]any{"id": id, "tenant_id": p.TenantID, "user_id": user, "agent_id": a.ID, "space_id": a.SpaceID, "name": name, "key_prefix": prefix, "key_hash": hex.EncodeToString(sum[:]), "scopes": `["*"]`, "expires_at": nil, "last_used_at": nil, "revoked_at": nil, "created_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
 		return nil, e
 	}
