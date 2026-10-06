@@ -49,6 +49,7 @@ const build = spawnSync("go", ["build", "-o", binPath, "./cmd/zakura-server"], {
   cwd: root,
   env: process.env,
   stdio: "inherit",
+  windowsHide: true,
 });
 if (build.status !== 0) {
   process.exit(build.status ?? 1);
@@ -59,6 +60,7 @@ const server = spawn(binPath, [], {
   cwd: root,
   env: process.env,
   stdio: "inherit",
+  windowsHide: true,
 });
 
 let exiting = false;
