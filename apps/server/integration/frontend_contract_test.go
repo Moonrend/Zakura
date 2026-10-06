@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -137,14 +136,8 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("invalid usage category status=%d", status)
 	}
-	legacyAvatar := []byte{0xff, 0xd8, 0xff, 0xd9}
-	if err = os.MkdirAll(filepath.Join(dataDir, "avatars"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(dataDir, "avatars", user["id"].(string)), legacyAvatar, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = deps.DB.Exec(`UPDATE users SET avatar_updated_at=? WHERE id=?`, deps.Clock().Format(time.RFC3339Nano), user["id"]); err != nil {
+	storedAvatar := []byte{0xff, 0xd8, 0xff, 0xd9}
+	if _, err = deps.DB.Exec(`UPDATE users SET avatar_mime='image/jpeg',avatar_data=?,avatar_updated_at=? WHERE id=?`, storedAvatar, deps.Clock().Format(time.RFC3339Nano), user["id"]); err != nil {
 		t.Fatal(err)
 	}
 	avatarReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/users/"+user["id"].(string)+"/avatar", nil)
@@ -155,8 +148,8 @@ func TestPreservedFrontendCoreContracts(t *testing.T) {
 	}
 	avatarBytes, _ := io.ReadAll(avatarResp.Body)
 	avatarResp.Body.Close()
-	if avatarResp.StatusCode != http.StatusOK || !bytes.Equal(avatarBytes, legacyAvatar) || avatarResp.Header.Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("legacy avatar compatibility: status=%d type=%q body=%x", avatarResp.StatusCode, avatarResp.Header.Get("Content-Type"), avatarBytes)
+	if avatarResp.StatusCode != http.StatusOK || !bytes.Equal(avatarBytes, storedAvatar) || avatarResp.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("stored avatar retrieval: status=%d type=%q body=%x", avatarResp.StatusCode, avatarResp.Header.Get("Content-Type"), avatarBytes)
 	}
 	deleteAvatarReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/me/avatar", nil)
 	deleteAvatarReq.Header.Set("Authorization", "Bearer "+session)

@@ -43,7 +43,7 @@ func Load() (Config, error) {
 	c := Config{
 		ListenAddr:   env("LISTEN_ADDR", ":8787"),
 		DatabaseURL:  env("DATABASE_URL", "file:./data/zakura.db"),
-		DataDir:      env("DATA_DIR", "./data"),
+		DataDir:      env("DATA_DIR", ""),
 		Secret:       os.Getenv("ZAKURA_SECRET"),
 		PublicURL:    strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8787"), "/"),
 		WebURL:       strings.TrimRight(env("WEB_PUBLIC_URL", "http://localhost:3000"), "/"),

@@ -17,8 +17,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -284,22 +282,6 @@ func (h *routes) putAvatar(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "JPEG required")
 		return
 	}
-	if path, ok := h.avatarPath(p.UserID); ok {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			httpx.Error(w, 500, "avatar storage unavailable")
-			return
-		}
-		tmp := path + ".tmp-" + h.d.NewID()
-		if err := os.WriteFile(tmp, data, 0o600); err != nil {
-			httpx.Error(w, 500, "avatar storage unavailable")
-			return
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			_ = os.Remove(tmp)
-			httpx.Error(w, 500, "avatar storage unavailable")
-			return
-		}
-	}
 	now := h.now()
 	err := h.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", p.UserID).Updates(map[string]any{"avatar_mime": "image/jpeg", "avatar_data": data, "avatar_updated_at": now, "updated_at": now}).Error
 	if err != nil {
@@ -313,9 +295,6 @@ func (h *routes) deleteAvatar(w http.ResponseWriter, r *http.Request) {
 	if p.APIKey {
 		httpx.Error(w, 403, "API keys cannot update profile")
 		return
-	}
-	if path, ok := h.avatarPath(p.UserID); ok {
-		_ = os.Remove(path)
 	}
 	if err := h.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", p.UserID).Updates(map[string]any{"avatar_mime": nil, "avatar_data": nil, "avatar_updated_at": nil, "updated_at": h.now()}).Error; err != nil {
 		httpx.Error(w, 500, "update failed")
@@ -334,17 +313,8 @@ func (h *routes) getAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(data) == 0 {
-		path, ok := h.avatarPath(id)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		data, err = os.ReadFile(path)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		mime = sql.NullString{String: "image/jpeg", Valid: true}
+		http.NotFound(w, r)
+		return
 	}
 	contentType := mime.String
 	if contentType == "" {
@@ -353,17 +323,6 @@ func (h *routes) getAvatar(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "private, max-age=120")
 	_, _ = w.Write(data)
-}
-func (h *routes) avatarPath(userID string) (string, bool) {
-	if h.d.DataDir == "" || len(userID) == 0 || len(userID) > 64 {
-		return "", false
-	}
-	for _, r := range userID {
-		if !(r == '-' || r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
-			return "", false
-		}
-	}
-	return filepath.Join(h.d.DataDir, "avatars", userID), true
 }
 func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
