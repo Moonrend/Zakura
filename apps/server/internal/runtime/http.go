@@ -25,13 +25,15 @@ import (
 )
 
 type handler struct {
-	deps        *appdeps.Dependencies
-	store       *Store
-	service     *Service
-	hub         *runnerHub
-	acp         *acpRuntimeManager
-	mcpMu       sync.Mutex
-	mcpSessions map[string]spaceMCPSession
+	deps           *appdeps.Dependencies
+	store          *Store
+	service        *Service
+	hub            *runnerHub
+	acp            *acpRuntimeManager
+	mcpMu          sync.Mutex
+	mcpSessions    map[string]spaceMCPSession
+	agentToolMu    sync.Mutex
+	agentToolCache map[string]cachedCatalog
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
@@ -49,17 +51,11 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	}
 	deps.BeforeTenantDelete = h.beforeTenantDelete
 	deps.AfterMemberRemoved = h.afterMemberRemoved
-	h.service.toolRunner = func(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {
-		parts := strings.SplitN(name, ":", 2)
-		if len(parts) != 2 {
-			return nil, errors.New("qualified tool name must be instanceId:tool")
-		}
-		inst, e := h.getMCPInstance(ctx, tenant, parts[0])
-		if e != nil {
-			return nil, e
-		}
-		return h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": parts[1], "arguments": json.RawMessage(args)})
+	h.service.catalogProvider = func(ctx context.Context, tenant, agent string) (agentCatalog, error) {
+		return h.cachedAgentToolCatalog(ctx, tenant, agent)
 	}
+	h.service.loadedTools = h.sessionLoadedTools
+	h.service.toolRunner = h.dispatchAgentTool
 	_, _ = h.store.RecoverRuns(deps.RunContext())
 	r.Post("/api/routines/{id}/hook", h.routineHook)
 	r.Get("/api/files/shared/{token}", h.downloadSharedFile)

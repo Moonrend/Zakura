@@ -100,7 +100,7 @@ func TestCloudRunToolContinuation(t *testing.T) {
 	}
 	h := &handler{deps: d, store: store}
 	h.service = NewService(store)
-	h.service.toolRunner = func(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {
+	h.service.toolRunner = func(ctx context.Context, tenant, agent, session, name string, args json.RawMessage) (json.RawMessage, error) {
 		parts := strings.SplitN(name, ":", 2)
 		inst, e := h.getMCPInstance(ctx, tenant, parts[0])
 		if e != nil {

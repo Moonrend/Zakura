@@ -7,18 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 )
 
 type Service struct {
-	store      *Store
-	gateway    *Gateway
-	mu         sync.Mutex
-	cancels    map[string]context.CancelFunc
-	toolRunner func(context.Context, string, string, string, json.RawMessage) (json.RawMessage, error)
-	acpRunner  func(context.Context, string, string, string, string, string) error
+	store           *Store
+	gateway         *Gateway
+	mu              sync.Mutex
+	cancels         map[string]context.CancelFunc
+	toolRunner      func(context.Context, string, string, string, string, json.RawMessage) (json.RawMessage, error)
+	acpRunner       func(context.Context, string, string, string, string, string) error
+	catalogProvider func(context.Context, string, string) (agentCatalog, error)
+	loadedTools     func(context.Context, string, string, string) map[string]bool
 }
 
 func NewService(store *Store) *Service {
@@ -70,10 +74,28 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 	if sess.Model != nil {
 		model = *sess.Model
 	}
-	messages := []map[string]any{{"role": "user", "content": content}}
+	var catalog agentCatalog
+	var loaded map[string]bool
+	if s.catalogProvider != nil {
+		if c, err := s.catalogProvider(ctx, tenant, agent); err == nil {
+			catalog = c
+		}
+		if s.loadedTools != nil {
+			loaded = s.loadedTools(ctx, tenant, agent, session)
+		}
+	}
+	messages := []map[string]any{}
+	if section := renderServerHints(catalog); section != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": section})
+	}
+	messages = append(messages, map[string]any{"role": "user", "content": content})
 	var raw []byte
 	for turn := 0; turn < 8; turn++ {
-		payload, _ := json.Marshal(map[string]any{"model": model, "stream": false, "messages": messages})
+		payloadMap := map[string]any{"model": model, "stream": false, "messages": messages}
+		if tools := declaredTools(catalog, loaded); len(tools) > 0 {
+			payloadMap["tools"] = tools
+		}
+		payload, _ := json.Marshal(payloadMap)
 		resp, e := s.gateway.Do(ctx, tenant, "chat", "chat", model, payload)
 		if e != nil {
 			s.fail(context.WithoutCancel(ctx), tenant, agent, session, runID, e)
@@ -107,7 +129,7 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 			_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_start", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name})
 			arguments, _ := json.Marshal(call.Args)
 			_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_args", &runID, map[string]any{"toolCallId": call.ID, "arguments": string(arguments)})
-			result, e := s.toolRunner(ctx, tenant, agent, call.Name, argsRaw)
+			result, e := s.toolRunner(ctx, tenant, agent, session, call.Name, argsRaw)
 			if e != nil {
 				duration := s.store.now().Sub(startedAt).Milliseconds()
 				_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_result", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name, "resultText": e.Error(), "isError": true, "durationMs": duration})
@@ -119,6 +141,9 @@ func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, co
 			_, _ = s.store.AppendEvent(context.WithoutCancel(ctx), tenant, agent, session, "tool_call_result", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name, "resultText": string(result), "isError": false, "durationMs": duration})
 			s.recordToolUsage(context.WithoutCancel(ctx), sess, tenant, agent, session, call.ID, call.Name, "ok", duration)
 			messages = append(messages, map[string]any{"role": "tool", "tool_call_id": call.ID, "content": string(result)})
+		}
+		if s.loadedTools != nil {
+			loaded = s.loadedTools(context.WithoutCancel(ctx), tenant, agent, session)
 		}
 		if turn == 7 {
 			s.fail(context.WithoutCancel(ctx), tenant, agent, session, runID, errors.New("tool continuation limit exceeded"))
@@ -286,4 +311,74 @@ func extractAssistantText(raw []byte) string {
 		return v.Content[0].Text
 	}
 	return string(raw)
+}
+
+func declaredTools(catalog agentCatalog, loaded map[string]bool) []map[string]any {
+	out := []map[string]any{}
+	for _, tool := range catalog.Tools {
+		switch tool.Exposure {
+		case "direct":
+		case "deferred":
+			if loaded == nil || !loaded[tool.Name] {
+				continue
+			}
+		default:
+			continue
+		}
+		schema := tool.InputSchema
+		if schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		out = append(out, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        tool.Name,
+				"description": tool.Description,
+				"parameters":  schema,
+			},
+		})
+	}
+	return out
+}
+
+func renderServerHints(catalog agentCatalog) string {
+	type hintServer struct {
+		ref         string
+		name        string
+		description string
+	}
+	seen := map[string]bool{}
+	servers := []hintServer{}
+	for _, tool := range catalog.Tools {
+		if tool.Kind != "mcp" || tool.Exposure != "deferred" {
+			continue
+		}
+		key := tool.ServerRef + "\x00" + tool.InstanceID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		description := tool.ServerDescription
+		if description == "" {
+			description = tool.ServerName
+		}
+		servers = append(servers, hintServer{ref: tool.ServerRef, name: tool.ServerName, description: description})
+	}
+	if len(servers) == 0 {
+		return ""
+	}
+	sort.SliceStable(servers, func(i, j int) bool { return servers[i].name < servers[j].name })
+	lines := []string{"Tools of the following MCP servers are not listed upfront. Use the tool_search tool with a short query to find and load the tools you need; loaded tools become available on your next turn."}
+	for _, server := range servers {
+		slug := slugify(server.ref)
+		if slug == "" {
+			slug = slugify(server.name)
+		}
+		lines = append(lines, "- mcp__"+slug+": "+server.description)
+	}
+	const maxHintChars = 2000
+	for len(lines) > 1 && len(strings.Join(lines, "\n")) > maxHintChars {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
 }
