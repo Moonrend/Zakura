@@ -17,7 +17,7 @@ func isBuiltinToolName(name string) bool {
 		"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine",
 		"list_automation_runs", "delegate_agent", "apply_patch",
 		"computer_screenshot", "computer_click", "computer_type", "computer_key", "desktop_info",
-		"browser_open", "browser_click", "browser_type":
+		"browser_open", "browser_click", "browser_type", "web_search", "web_fetch":
 		return true
 	}
 	return false
@@ -44,7 +44,11 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 		if e != nil {
 			return nil, e
 		}
-		return h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": parts[1], "arguments": json.RawMessage(args)})
+		result, e := h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": parts[1], "arguments": json.RawMessage(args)})
+		if e != nil {
+			return nil, e
+		}
+		return h.capToolResultJSON(ctx, tenant, agent, result, sanitizeToolName(parts[1])), nil
 	}
 }
 
@@ -218,7 +222,11 @@ func (h *handler) runCatalogMCPTool(ctx context.Context, tenant, agent, name str
 		if err != nil {
 			return nil, err
 		}
-		return h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": tool.LocalName, "arguments": json.RawMessage(args)})
+		result, err := h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": tool.LocalName, "arguments": json.RawMessage(args)})
+		if err != nil {
+			return nil, err
+		}
+		return h.capToolResultJSON(ctx, tenant, agent, result, sanitizeToolName(tool.LocalName)), nil
 	}
 	return nil, fmt.Errorf("unknown tool %q", name)
 }

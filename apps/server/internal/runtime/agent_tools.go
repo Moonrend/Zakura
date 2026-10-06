@@ -297,6 +297,21 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 			}, "text"),
 		)
 	}
+	agentConfig := map[string]any{}
+	_ = json.Unmarshal(agent.Config, &agentConfig)
+	toolProviders, _ := agentConfig["providers"].(map[string]any)
+	if providerToolEnabled(toolProviders, "webSearch") {
+		tools = append(tools, deferredBuiltin("web_search", "Search the web for current information. Returns ranked results with titles, URLs and text snippets.", map[string]any{
+			"query": map[string]any{"type": "string", "description": "Search query."},
+			"limit": map[string]any{"type": "integer", "description": "Max results 1-10. Default 5."},
+		}, "query"))
+	}
+	if providerToolEnabled(toolProviders, "webFetch") {
+		tools = append(tools, deferredBuiltin("web_fetch", "Fetch a web page and return its text content.", map[string]any{
+			"url":       map[string]any{"type": "string", "description": "The http(s) URL to fetch."},
+			"max_bytes": map[string]any{"type": "integer", "description": "Max content bytes. Default 20000, max 100000."},
+		}, "url"))
+	}
 	tools = append(tools,
 		directBuiltin("ask_user", "Ask the user a question and wait for their reply. Use when a decision, confirmation, or missing information blocks progress.", map[string]any{
 			"question": map[string]any{"type": "string", "description": "The question to ask the user."},

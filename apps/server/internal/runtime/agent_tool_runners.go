@@ -74,6 +74,10 @@ func (h *handler) runBuiltinTool(ctx context.Context, tenant, agent, name string
 		return h.runBuiltinToolDesktop(ctx, tenant, agent, name, parsed)
 	case "browser_open", "browser_click", "browser_type":
 		return h.runBuiltinToolBrowser(ctx, tenant, agent, name, args)
+	case "web_search":
+		return h.runWebSearch(ctx, tenant, agent, args)
+	case "web_fetch":
+		return h.runWebFetch(ctx, tenant, agent, args)
 	default:
 		return nil, fmt.Errorf("unknown builtin tool %q", name)
 	}
@@ -269,9 +273,13 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 	} else if err != nil && result["exitCode"] == nil {
 		return nil, err
 	}
+	stdout, _ := result["stdout"].(string)
+	stderr, _ := result["stderr"].(string)
+	stdout, _ = h.truncateToolText(ctx, tenant, agent, stdout, "shell")
+	stderr, _ = h.truncateToolText(ctx, tenant, agent, stderr, "shell")
 	return builtinJSON(map[string]any{
-		"stdout":   result["stdout"],
-		"stderr":   result["stderr"],
+		"stdout":   stdout,
+		"stderr":   stderr,
 		"exitCode": result["exitCode"],
 	})
 }
