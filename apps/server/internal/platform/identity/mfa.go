@@ -30,14 +30,15 @@ import (
 
 func (s *Service) myMFA(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	var totpUser models.User
+	var account models.User
 	var policyTenant models.Tenant
-	_ = s.gdb(r.Context()).Select("totp_enabled_at").Where("id = ?", p.UserID).Take(&totpUser).Error
+	_ = s.gdb(r.Context()).Select("totp_enabled_at,mfa_enabled,email_mfa_enabled_at").Where("id = ?", p.UserID).Take(&account).Error
 	_ = s.gdb(r.Context()).Select("mfa_policy").Where("id = ?", p.TenantID).Take(&policyTenant).Error
-	enabled := totpUser.TotpEnabledAt != nil
+	totpEnabled := account.TotpEnabledAt != nil
+	emailEnabled := account.EmailMfaEnabledAt != nil
 	policy := policyTenant.MfaPolicy
 	methods := []string{}
-	if enabled {
+	if totpEnabled {
 		methods = append(methods, "totp")
 	}
 	var credentials []models.UserWebauthnCredential
@@ -53,7 +54,103 @@ func (s *Service) myMFA(w http.ResponseWriter, r *http.Request) {
 	if len(items) > 0 {
 		methods = append(methods, "webauthn")
 	}
-	httpx.JSON(w, 200, map[string]any{"totp": enabled, "webauthn": len(items) > 0, "methods": methods, "credentials": items, "policy": policy, "required": policy == "all" || (policy == "admins" && (p.Role == "owner" || p.Role == "admin"))})
+	if emailEnabled {
+		methods = append(methods, "email")
+	}
+	var recoveryRemaining int64
+	_ = s.gdb(r.Context()).Model(&models.UserRecoveryCode{}).Where("user_id = ? AND used_at IS NULL", p.UserID).Count(&recoveryRemaining).Error
+	httpx.JSON(w, 200, map[string]any{"totp": totpEnabled, "webauthn": len(items) > 0, "email": emailEnabled, "enabled": account.MfaEnabled, "methods": methods, "credentials": items, "policy": policy, "required": policy == "all" || (policy == "admins" && (p.Role == "owner" || p.Role == "admin")), "totpEnabledAt": account.TotpEnabledAt, "emailMfaEnabledAt": account.EmailMfaEnabledAt, "recoveryRemaining": recoveryRemaining, "recoveryTotal": 10})
+}
+func (s *Service) mfaDecision(ctx context.Context, userID, role string) (methods []string, enabled bool, required bool, err error) {
+	var account models.User
+	if err = s.gdb(ctx).Select("mfa_enabled,email_mfa_enabled_at,totp_enabled_at").Where("id = ?", userID).Take(&account).Error; err != nil {
+		return nil, false, false, err
+	}
+	enabled = account.MfaEnabled
+	methods = []string{}
+	if account.TotpEnabledAt != nil {
+		methods = append(methods, "totp", "recovery")
+	}
+	if account.EmailMfaEnabledAt != nil {
+		methods = append(methods, "email")
+	}
+	var passkeys int64
+	if err = s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", userID).Count(&passkeys).Error; err != nil {
+		return nil, false, false, err
+	}
+	if passkeys > 0 {
+		methods = append(methods, "webauthn")
+	}
+	var requiredCount int64
+	if err = s.gdb(ctx).Table("tenant_memberships AS m").
+		Joins("JOIN tenants t ON t.id = m.tenant_id").
+		Where("m.user_id = ? AND m.status = 'active' AND (t.mfa_policy = 'all' OR (t.mfa_policy = 'admins' AND m.role IN ('owner','admin')))", userID).
+		Count(&requiredCount).Error; err != nil {
+		return nil, false, false, err
+	}
+	return methods, enabled, requiredCount > 0, nil
+}
+func methodsIncludes(methods []string, name string) bool {
+	for _, method := range methods {
+		if method == name {
+			return true
+		}
+	}
+	return false
+}
+func (s *Service) setMFAEnabled(w http.ResponseWriter, r *http.Request) {
+	p, _ := httpx.PrincipalFrom(r.Context())
+	var b struct {
+		Enabled      bool   `json:"enabled"`
+		TOTP         string `json:"totp"`
+		RecoveryCode string `json:"recoveryCode"`
+		EmailCode    string `json:"emailCode"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid request")
+		return
+	}
+	methods, _, required, err := s.mfaDecision(r.Context(), p.UserID, p.Role)
+	if err != nil {
+		httpx.Error(w, 404, "not found")
+		return
+	}
+	if b.Enabled {
+		if len(methods) == 0 {
+			httpx.Error(w, 409, "请先设置至少一种验证方式")
+			return
+		}
+		_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"mfa_enabled": true, "updated_at": s.now()}).Error
+		_ = s.Audit(r.Context(), p.TenantID, "auth.mfa_enabled", p.UserID, "user", p.UserID, nil)
+		httpx.JSON(w, 200, map[string]any{"enabled": true})
+		return
+	}
+	if required {
+		httpx.Error(w, 409, "team policy requires MFA")
+		return
+	}
+	if methodsIncludes(methods, "totp") {
+		if b.TOTP == "" && b.RecoveryCode == "" {
+			httpx.Error(w, 400, "verification required")
+			return
+		}
+		if err := s.verifySecondFactor(r.Context(), p.UserID, b.TOTP, b.RecoveryCode); err != nil {
+			httpx.Error(w, 400, err.Error())
+			return
+		}
+	} else if methodsIncludes(methods, "email") {
+		if b.EmailCode == "" {
+			httpx.Error(w, 400, "verification required")
+			return
+		}
+		if err := s.verifyChallengeEmailCode(r.Context(), p.UserID, b.EmailCode); err != nil {
+			httpx.Error(w, 400, err.Error())
+			return
+		}
+	}
+	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", p.UserID).Updates(map[string]any{"mfa_enabled": false, "updated_at": s.now()}).Error
+	_ = s.Audit(r.Context(), p.TenantID, "auth.mfa_disabled", p.UserID, "user", p.UserID, nil)
+	httpx.JSON(w, 200, map[string]any{"enabled": false})
 }
 func (s *Service) startMyTOTP(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
@@ -232,6 +329,7 @@ func (s *Service) completeMFALogin(w http.ResponseWriter, r *http.Request) {
 		Code         string          `json:"code"`
 		TOTP         string          `json:"totp"`
 		RecoveryCode string          `json:"recoveryCode"`
+		EmailCode    string          `json:"emailCode"`
 		WebAuthn     json.RawMessage `json:"webauthn"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
@@ -247,7 +345,14 @@ func (s *Service) completeMFALogin(w http.ResponseWriter, r *http.Request) {
 	if code == "" {
 		code = b.Code
 	}
-	if len(b.WebAuthn) > 0 {
+	if b.EmailCode != "" {
+		var token models.AuthToken
+		if err = s.gdb(r.Context()).Where("id = ?", t.ID).Take(&token).Error; err != nil {
+			httpx.Error(w, 400, "invalid or expired ticket")
+			return
+		}
+		err = s.verifyEmailCodeMeta(r.Context(), t.ID, decodeObject(token.MetaJSON), "emailCodeHash", "emailCodeExpiresAt", b.EmailCode)
+	} else if len(b.WebAuthn) > 0 {
 		err = s.verifyWebAuthnLogin(r.Context(), t.UserID, b.Ticket, b.WebAuthn)
 	} else {
 		err = s.verifySecondFactor(r.Context(), t.UserID, code, b.RecoveryCode)

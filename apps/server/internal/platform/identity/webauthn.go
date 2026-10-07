@@ -221,11 +221,14 @@ func (s *Service) beginWebAuthnLogin(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, options)
 }
 func (s *Service) verifyWebAuthnLogin(ctx context.Context, userID, ticket string, response json.RawMessage) error {
+	return s.finishWebAuthnLogin(ctx, userID, "webauthn_login", ticket, response)
+}
+func (s *Service) finishWebAuthnLogin(ctx context.Context, userID, kind, parent string, response json.RawMessage) error {
 	user, err := s.loadWebUser(ctx, userID)
 	if err != nil {
 		return err
 	}
-	session, err := s.takeWebSession(ctx, userID, "webauthn_login", ticket)
+	session, err := s.takeWebSession(ctx, userID, kind, parent)
 	if err != nil {
 		return err
 	}
@@ -248,6 +251,111 @@ func (s *Service) verifyWebAuthnLogin(ctx context.Context, userID, ticket string
 	if res.RowsAffected != 1 {
 		return errors.New("credential not found")
 	}
+	return nil
+}
+func (s *Service) beginWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Email string `json:"email"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "email required")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(b.Email))
+	if email == "" {
+		httpx.Error(w, 400, "email required")
+		return
+	}
+	var account models.User
+	if err := s.gdb(r.Context()).Select("id").Where("email = ? AND status = 'active'", email).Take(&account).Error; err != nil {
+		httpx.Error(w, 400, "该邮箱未设置通行密钥")
+		return
+	}
+	user, err := s.loadWebUser(r.Context(), derefString(account.ID))
+	if err != nil || len(user.Credentials) == 0 {
+		httpx.Error(w, 400, "该邮箱未设置通行密钥")
+		return
+	}
+	web, err := s.webAuthn()
+	if err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
+	options, session, err := web.BeginLogin(user)
+	if err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
+	if err = s.saveWebSession(r.Context(), user.ID, "webauthn_passwordless", email, session); err != nil {
+		httpx.Error(w, 500, "challenge persistence failed")
+		return
+	}
+	httpx.JSON(w, 200, options)
+}
+func (s *Service) finishWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Email     string          `json:"email"`
+		Assertion json.RawMessage `json:"assertion"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil || len(b.Assertion) == 0 {
+		httpx.Error(w, 400, "assertion required")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(b.Email))
+	var account models.User
+	if err := s.gdb(r.Context()).Select("id").Where("email = ? AND status = 'active'", email).Take(&account).Error; err != nil {
+		httpx.Error(w, 401, "invalid credentials")
+		return
+	}
+	userID := derefString(account.ID)
+	if err := s.finishWebAuthnLogin(r.Context(), userID, "webauthn_passwordless", email, b.Assertion); err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
+	if err := s.issuePasswordlessSession(w, r, userID); err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
+}
+func (s *Service) resolveActiveTenant(ctx context.Context, userID string) (Tenant, string, error) {
+	var row struct {
+		ID                  string `gorm:"column:id"`
+		Slug                string `gorm:"column:slug"`
+		Name                string `gorm:"column:name"`
+		IsDefault           bool   `gorm:"column:is_default"`
+		OnboardingCompleted bool   `gorm:"column:onboarding_completed"`
+		Role                string `gorm:"column:role"`
+	}
+	err := s.gdb(ctx).Table("tenants AS t").
+		Select("t.id,t.slug,t.name,t.is_default,t.onboarding_completed,m.role").
+		Joins("JOIN tenant_memberships m ON m.tenant_id = t.id").
+		Where("m.user_id = ? AND m.status = 'active' AND t.status = 'active'", userID).
+		Order("t.is_default DESC, m.created_at ASC").Take(&row).Error
+	if err != nil {
+		return Tenant{}, "", errors.New("no active tenant membership")
+	}
+	return Tenant{ID: row.ID, Slug: row.Slug, Name: row.Name, IsDefault: row.IsDefault, OnboardingCompleted: row.OnboardingCompleted}, row.Role, nil
+}
+func (s *Service) issuePasswordlessSession(w http.ResponseWriter, r *http.Request, userID string) error {
+	var dbUser models.User
+	if err := s.gdb(r.Context()).Where("id = ? AND status = 'active'", userID).Take(&dbUser).Error; err != nil {
+		return errors.New("account unavailable")
+	}
+	t, role, err := s.resolveActiveTenant(r.Context(), userID)
+	if err != nil {
+		return err
+	}
+	u := User{ID: derefString(dbUser.ID), Email: dbUser.Email, Name: derefString(dbUser.Name), IsPlatformAdmin: dbUser.IsPlatformAdmin, HasPassword: dbUser.PasswordHash != nil && *dbUser.PasswordHash != ""}
+	u.EmailVerified = dbUser.EmailVerifiedAt != nil
+	token, err := s.issueSession(r.Context(), u, t, role, requestIP(r), r.UserAgent())
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	_ = s.gdb(r.Context()).Model(&models.User{}).Where("id = ?", userID).Updates(map[string]any{"last_login_at": now, "updated_at": now}).Error
+	_ = s.Audit(r.Context(), t.ID, "auth.login", userID, "user", userID, map[string]any{"method": "passkey", "ip": requestIP(r)})
+	s.recordLoginUsage(r.Context(), t.ID, userID, "passkey")
+	httpx.JSON(w, 200, map[string]any{"session": token, "user": u, "tenant": t, "role": role, "multiTenant": s.deps.MultiTenant, "edition": s.deps.Edition})
 	return nil
 }
 func (s *Service) renameWebAuthnCredential(w http.ResponseWriter, r *http.Request) {

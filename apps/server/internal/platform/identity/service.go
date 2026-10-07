@@ -206,25 +206,23 @@ func (s *Service) Login(ctx context.Context, email, password, tenantSlug, ip, ua
 	}
 	t := Tenant{ID: membershipRow.ID, Slug: membershipRow.Slug, Name: membershipRow.Name, IsDefault: membershipRow.IsDefault, OnboardingCompleted: membershipRow.OnboardingCompleted}
 	role := membershipRow.Role
-	var totpUser models.User
-	var policyTenant models.Tenant
-	_ = s.gdb(ctx).Select("totp_enabled_at").Where("id = ?", u.ID).Take(&totpUser).Error
-	_ = s.gdb(ctx).Select("mfa_policy").Where("id = ?", t.ID).Take(&policyTenant).Error
-	totpEnabled := totpUser.TotpEnabledAt
-	policy := policyTenant.MfaPolicy
-	if totpEnabled != nil {
-		ticket, tokenErr := s.issueAuthToken(ctx, "mfa_login", u.ID, map[string]any{"tenantId": t.ID, "role": role})
-		if tokenErr != nil {
-			return LoginResult{}, tokenErr
-		}
-		return LoginResult{}, &MFARequiredError{Ticket: ticket, Methods: []string{"totp", "recovery"}}
+	methods, mfaEnabled, mfaRequired, decisionErr := s.mfaDecision(ctx, u.ID, role)
+	if decisionErr != nil {
+		return LoginResult{}, decisionErr
 	}
-	if policy == "all" || (policy == "admins" && (role == "owner" || role == "admin")) {
+	if mfaRequired && len(methods) == 0 {
 		ticket, tokenErr := s.issueAuthToken(ctx, "mfa_enrollment", u.ID, map[string]any{"tenantId": t.ID, "role": role})
 		if tokenErr != nil {
 			return LoginResult{}, tokenErr
 		}
 		return LoginResult{}, &MFARequiredError{Enrollment: true, Ticket: ticket, Methods: []string{"totp"}}
+	}
+	if (mfaRequired || mfaEnabled) && len(methods) > 0 {
+		ticket, tokenErr := s.issueAuthToken(ctx, "mfa_login", u.ID, map[string]any{"tenantId": t.ID, "role": role})
+		if tokenErr != nil {
+			return LoginResult{}, tokenErr
+		}
+		return LoginResult{}, &MFARequiredError{Ticket: ticket, Methods: methods}
 	}
 	token, err := s.issueSession(ctx, u, t, role, ip, ua)
 	if err != nil {

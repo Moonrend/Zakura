@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
   totp_pending_secret TEXT,
   totp_enabled_at TEXT,
   recovery_codes_json TEXT NOT NULL DEFAULT '[]',
+  mfa_enabled INTEGER NOT NULL DEFAULT 0,
+  email_mfa_enabled_at TEXT,
   is_platform_admin INTEGER NOT NULL DEFAULT 0,
   can_use_local_runner INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'active',

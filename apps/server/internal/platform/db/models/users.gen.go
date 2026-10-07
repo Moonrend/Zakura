@@ -22,6 +22,8 @@ type User struct {
 	TotpPendingSecret *string `gorm:"column:totp_pending_secret;type:TEXT" json:"totp_pending_secret"`
 	TotpEnabledAt     *string `gorm:"column:totp_enabled_at;type:TEXT" json:"totp_enabled_at"`
 	RecoveryCodesJSON string  `gorm:"column:recovery_codes_json;type:TEXT;not null;default:'[]'" json:"recovery_codes_json"`
+	MfaEnabled        bool    `gorm:"column:mfa_enabled;type:INTEGER;not null" json:"mfa_enabled"`
+	EmailMfaEnabledAt *string `gorm:"column:email_mfa_enabled_at;type:TEXT" json:"email_mfa_enabled_at"`
 	IsPlatformAdmin   bool    `gorm:"column:is_platform_admin;type:INTEGER;not null" json:"is_platform_admin"`
 	CanUseLocalRunner bool    `gorm:"column:can_use_local_runner;type:INTEGER;not null" json:"can_use_local_runner"`
 	Status            string  `gorm:"column:status;type:TEXT;not null;default:'active'" json:"status"`

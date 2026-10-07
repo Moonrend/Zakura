@@ -385,35 +385,24 @@ func (s *Service) linkSocialIdentity(ctx context.Context, provider, subject, ema
 	return u, t, role, nil
 }
 func (s *Service) socialAuthResult(ctx context.Context, u User, t Tenant, role, ip, ua string) (map[string]any, error) {
-	var totpUser models.User
-	var policyTenant models.Tenant
-	var passkeys int64
-	_ = s.gdb(ctx).Select("totp_enabled_at").Where("id = ?", u.ID).Take(&totpUser).Error
-	_ = s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", u.ID).Count(&passkeys).Error
-	_ = s.gdb(ctx).Select("mfa_policy").Where("id = ?", t.ID).Take(&policyTenant).Error
-	totpEnabled := totpUser.TotpEnabledAt != nil
-	policy := policyTenant.MfaPolicy
-	methods := []string{}
-	if totpEnabled {
-		methods = append(methods, "totp", "recovery")
+	methods, mfaEnabled, required, err := s.mfaDecision(ctx, u.ID, role)
+	if err != nil {
+		return nil, err
 	}
-	if passkeys > 0 {
-		methods = append(methods, "webauthn")
-	}
-	required := policy == "all" || (policy == "admins" && (role == "owner" || role == "admin"))
+	next := map[bool]string{true: "/dashboard/agents", false: "/onboarding"}[t.OnboardingCompleted]
 	if required && len(methods) == 0 {
 		ticket, e := s.issueAuthToken(ctx, "mfa_enrollment", u.ID, map[string]any{"tenantId": t.ID, "role": role})
 		return map[string]any{"mfaEnrollmentRequired": true, "mfaEnrollmentTicket": ticket, "methods": []string{"totp"}, "code": "mfa_enrollment_required"}, e
 	}
-	if len(methods) > 0 {
+	if (required || mfaEnabled) && len(methods) > 0 {
 		ticket, e := s.issueAuthToken(ctx, "mfa_login", u.ID, map[string]any{"tenantId": t.ID, "role": role})
-		return map[string]any{"mfaRequired": true, "mfaTicket": ticket, "methods": methods, "user": u, "tenant": t, "next": map[bool]string{true: "/dashboard/agents", false: "/onboarding"}[t.OnboardingCompleted]}, e
+		return map[string]any{"mfaRequired": true, "mfaTicket": ticket, "methods": methods, "user": u, "tenant": t, "next": next}, e
 	}
 	token, e := s.issueSession(ctx, u, t, role, ip, ua)
 	if e == nil {
 		s.recordLoginUsage(ctx, t.ID, u.ID, "oauth")
 	}
-	return map[string]any{"session": token, "user": u, "tenant": t, "next": map[bool]string{true: "/dashboard/agents", false: "/onboarding"}[t.OnboardingCompleted]}, e
+	return map[string]any{"session": token, "user": u, "tenant": t, "next": next}, e
 }
 func stringAny(v any) string {
 	switch x := v.(type) {

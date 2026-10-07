@@ -561,6 +561,228 @@ func TestMFAEnrollmentAndLoginChallenge(t *testing.T) {
 	}
 }
 
+func insertPasskey(t *testing.T, deps *appdeps.Dependencies, userID string) {
+	t.Helper()
+	if _, err := deps.DB.Exec(`INSERT INTO user_webauthn_credentials(id,user_id,name,credential_id,public_key,counter,transports_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, "passkey-credential-1", userID, "Test Key", "cred-1", "{}", 0, "[]", "2026-10-03T12:00:00Z"); err != nil {
+		t.Fatalf("insert passkey: %v", err)
+	}
+}
+
+func TestMFADecisionPasskeyDoesNotChallenge(t *testing.T) {
+	deps := testDeps(t)
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	session := setupUser(t, r, "passkey-only@example.com", "Passkey Team")
+	var uid string
+	_ = deps.DB.QueryRow(`SELECT id FROM users WHERE email=?`, "passkey-only@example.com").Scan(&uid)
+	insertPasskey(t, deps, uid)
+
+	var loginBody struct {
+		Session     string `json:"session"`
+		MFARequired bool   `json:"mfaRequired"`
+	}
+	login := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "passkey-only@example.com", "password": "setup-password-123"}, "")
+	if login.Code != 200 {
+		t.Fatalf("login: %d %s", login.Code, login.Body.String())
+	}
+	decode(t, login, &loginBody)
+	if loginBody.MFARequired || loginBody.Session == "" {
+		t.Fatalf("passkey registration alone must not require MFA: %s", login.Body.String())
+	}
+
+	enabled := call(t, r, http.MethodPut, "/api/me/mfa/enabled", map[string]any{"enabled": true}, session)
+	if enabled.Code != 200 {
+		t.Fatalf("enable 2FA with passkey: %d %s", enabled.Code, enabled.Body.String())
+	}
+	login = call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "passkey-only@example.com", "password": "setup-password-123"}, "")
+	decode(t, login, &loginBody)
+	if !loginBody.MFARequired {
+		t.Fatalf("enabling 2FA must challenge: %s", login.Body.String())
+	}
+
+	disabled := call(t, r, http.MethodPut, "/api/me/mfa/enabled", map[string]any{"enabled": false}, session)
+	if disabled.Code != 200 {
+		t.Fatalf("disable 2FA with only a passkey needs no second factor: %d %s", disabled.Code, disabled.Body.String())
+	}
+}
+
+func TestMFADecisionTOTPEnabled(t *testing.T) {
+	deps := testDeps(t)
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	session := setupUser(t, r, "totp-2fa@example.com", "TOTP Team")
+
+	start := call(t, r, http.MethodPost, "/api/me/mfa/totp/start", map[string]any{}, session)
+	if start.Code != 200 {
+		t.Fatalf("totp start: %d %s", start.Code, start.Body.String())
+	}
+	var setup struct {
+		Secret string `json:"secret"`
+	}
+	decode(t, start, &setup)
+	code := testTOTP(setup.Secret, deps.Clock())
+	enabledTOTP := call(t, r, http.MethodPost, "/api/me/mfa/totp/enable", map[string]any{"code": code}, session)
+	if enabledTOTP.Code != 200 {
+		t.Fatalf("totp enable: %d %s", enabledTOTP.Code, enabledTOTP.Body.String())
+	}
+
+	var loginBody struct {
+		Session     string   `json:"session"`
+		MFARequired bool     `json:"mfaRequired"`
+		Methods     []string `json:"methods"`
+	}
+	login := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "totp-2fa@example.com", "password": "setup-password-123"}, "")
+	decode(t, login, &loginBody)
+	if loginBody.MFARequired {
+		t.Fatalf("TOTP with 2FA switched off must not challenge: %s", login.Body.String())
+	}
+
+	on := call(t, r, http.MethodPut, "/api/me/mfa/enabled", map[string]any{"enabled": true}, session)
+	if on.Code != 200 {
+		t.Fatalf("enable 2FA: %d %s", on.Code, on.Body.String())
+	}
+	login = call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "totp-2fa@example.com", "password": "setup-password-123"}, "")
+	decode(t, login, &loginBody)
+	if !loginBody.MFARequired || !slices.Contains(loginBody.Methods, "totp") || !slices.Contains(loginBody.Methods, "recovery") {
+		t.Fatalf("expected totp/recovery methods: %s", login.Body.String())
+	}
+}
+
+func TestMFADecisionRequiredWithoutMethods(t *testing.T) {
+	deps := testDeps(t)
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	admin := setupUser(t, r, "required-mfa@example.com", "Required Team")
+	policy := call(t, r, http.MethodPut, "/api/tenant/identity/mfa", map[string]any{"policy": "all"}, admin)
+	if policy.Code != 200 {
+		t.Fatalf("policy: %d %s", policy.Code, policy.Body.String())
+	}
+	login := call(t, r, http.MethodPost, "/api/auth/login", map[string]any{"email": "required-mfa@example.com", "password": "setup-password-123"}, "")
+	var body struct {
+		EnrollmentRequired bool   `json:"mfaEnrollmentRequired"`
+		EnrollmentTicket   string `json:"mfaEnrollmentTicket"`
+		Methods            []string
+	}
+	decode(t, login, &body)
+	if !body.EnrollmentRequired || body.EnrollmentTicket == "" || !slices.Contains(body.Methods, "totp") {
+		t.Fatalf("expected enrollment challenge: %s", login.Body.String())
+	}
+}
+
+func extractEmailCode(text string) string {
+	for i := 0; i+6 <= len(text); i++ {
+		ok := true
+		for j := 0; j < 6; j++ {
+			if c := text[i+j]; c < '0' || c > '9' {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return text[i : i+6]
+		}
+	}
+	return ""
+}
+
+func wrongEmailCode(code string) string {
+	if code == "000000" {
+		return "111111"
+	}
+	return "000000"
+}
+
+func TestEmailMFAEnrollmentSuccess(t *testing.T) {
+	deps := testDeps(t)
+	var sentText string
+	deps.SendTransactionalEmail = func(_ context.Context, _ string, _ string, _ string, text string) error {
+		sentText = text
+		return nil
+	}
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	session := setupUser(t, r, "email-success@example.com", "Email Team")
+
+	start := call(t, r, http.MethodPost, "/api/me/mfa/email/start", map[string]any{}, session)
+	if start.Code != 200 {
+		t.Fatalf("email start: %d %s", start.Code, start.Body.String())
+	}
+	code := extractEmailCode(sentText)
+	if code == "" {
+		t.Fatalf("verification code missing from email: %q", sentText)
+	}
+	enabled := call(t, r, http.MethodPost, "/api/me/mfa/email/enable", map[string]any{"code": code}, session)
+	if enabled.Code != 200 {
+		t.Fatalf("email enable: %d %s", enabled.Code, enabled.Body.String())
+	}
+	mfa := call(t, r, http.MethodGet, "/api/me/mfa", nil, session)
+	var body struct {
+		Email   bool     `json:"email"`
+		Enabled bool     `json:"enabled"`
+		Methods []string `json:"methods"`
+	}
+	decode(t, mfa, &body)
+	if !body.Email || body.Enabled || !slices.Contains(body.Methods, "email") {
+		t.Fatalf("unexpected mfa state: %s", mfa.Body.String())
+	}
+}
+
+func TestEmailMFACodeInvalidation(t *testing.T) {
+	deps := testDeps(t)
+	var sentText string
+	deps.SendTransactionalEmail = func(_ context.Context, _ string, _ string, _ string, text string) error {
+		sentText = text
+		return nil
+	}
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	session := setupUser(t, r, "email-invalidate@example.com", "Email Team")
+
+	start := call(t, r, http.MethodPost, "/api/me/mfa/email/start", map[string]any{}, session)
+	if start.Code != 200 {
+		t.Fatalf("email start: %d %s", start.Code, start.Body.String())
+	}
+	code := extractEmailCode(sentText)
+	if code == "" {
+		t.Fatalf("verification code missing from email: %q", sentText)
+	}
+	wrong := wrongEmailCode(code)
+	for i := 0; i < 2; i++ {
+		bad := call(t, r, http.MethodPost, "/api/me/mfa/email/enable", map[string]any{"code": wrong}, session)
+		if bad.Code != 400 {
+			t.Fatalf("wrong code attempt %d: %d %s", i, bad.Code, bad.Body.String())
+		}
+	}
+	third := call(t, r, http.MethodPost, "/api/me/mfa/email/enable", map[string]any{"code": wrong}, session)
+	if third.Code != 400 || !strings.Contains(third.Body.String(), "too many") {
+		t.Fatalf("third wrong attempt should exhaust the token: %d %s", third.Code, third.Body.String())
+	}
+	after := call(t, r, http.MethodPost, "/api/me/mfa/email/enable", map[string]any{"code": code}, session)
+	if after.Code != 400 {
+		t.Fatalf("exhausted token must reject the correct code: %d %s", after.Code, after.Body.String())
+	}
+}
+
+func TestWebAuthnPasswordlessOptionsValidation(t *testing.T) {
+	deps := testDeps(t)
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	setupUser(t, r, "passwordless@example.com", "Passwordless Team")
+
+	missing := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{}, "")
+	if missing.Code != 400 {
+		t.Fatalf("missing email: %d %s", missing.Code, missing.Body.String())
+	}
+	unknown := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{"email": "nobody@example.com"}, "")
+	if unknown.Code != 400 {
+		t.Fatalf("unknown email: %d %s", unknown.Code, unknown.Body.String())
+	}
+	withoutPasskey := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{"email": "passwordless@example.com"}, "")
+	if withoutPasskey.Code != 400 {
+		t.Fatalf("account without passkey: %d %s", withoutPasskey.Code, withoutPasskey.Body.String())
+	}
+}
+
 func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 	deps := testDeps(t)
 	deps.Edition = "saas"

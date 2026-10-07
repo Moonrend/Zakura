@@ -439,22 +439,10 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 	}
 	t := Tenant{ID: cfg.TenantID, Slug: cfg.TenantSlug, Name: cfg.TenantName}
 	u := User{ID: uid, Email: email, Name: name, IsPlatformAdmin: admin}
-	var totpUser models.User
-	var policyTenant models.Tenant
-	var passkeys int64
-	_ = s.gdb(ctx).Select("totp_enabled_at").Where("id = ?", uid).Take(&totpUser).Error
-	_ = s.gdb(ctx).Model(&models.UserWebauthnCredential{}).Where("user_id = ?", uid).Count(&passkeys).Error
-	_ = s.gdb(ctx).Select("mfa_policy").Where("id = ?", cfg.TenantID).Take(&policyTenant).Error
-	totpEnabled := totpUser.TotpEnabledAt != nil
-	policy := policyTenant.MfaPolicy
-	methods := []string{}
-	if totpEnabled {
-		methods = append(methods, "totp", "recovery")
+	methods, mfaEnabled, required, decisionErr := s.mfaDecision(ctx, uid, role)
+	if decisionErr != nil {
+		return nil, decisionErr
 	}
-	if passkeys > 0 {
-		methods = append(methods, "webauthn")
-	}
-	required := policy == "all" || (policy == "admins" && (role == "owner" || role == "admin"))
 	if required && len(methods) == 0 {
 		ticket, e := s.issueAuthToken(ctx, "mfa_enrollment", uid, map[string]any{"tenantId": cfg.TenantID, "role": role})
 		if e != nil {
@@ -462,7 +450,7 @@ func (s *Service) ssoLoginResult(ctx context.Context, cfg ssoConfig, email, name
 		}
 		return map[string]any{"mfaEnrollmentRequired": true, "mfaEnrollmentTicket": ticket, "methods": []string{"totp"}, "code": "mfa_enrollment_required", "tenant": t, "_userId": uid}, nil
 	}
-	if len(methods) > 0 {
+	if (required || mfaEnabled) && len(methods) > 0 {
 		ticket, e := s.issueAuthToken(ctx, "mfa_login", uid, map[string]any{"tenantId": cfg.TenantID, "role": role})
 		if e != nil {
 			return nil, e
