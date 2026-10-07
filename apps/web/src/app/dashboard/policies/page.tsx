@@ -18,36 +18,26 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 type Policy = {
   id: string;
-  apiKeyId: string | null;
-  apiKey: { id: string; name: string; keyPrefix: string } | null;
-  instanceIds: string[];
-  toolAllowlist: string[] | null;
-  toolDenylist: string[] | null;
-  includeBuiltin: boolean;
+  name: string;
+  instanceIds?: string[];
+  toolAllowlist?: string[] | null;
+  toolDenylist?: string[] | null;
+  includeBuiltin?: boolean;
 };
 
-type ApiKeyRow = { id: string; name: string; keyPrefix: string };
 type InstanceRow = { id: string; name: string; slug: string };
 
 export default function PoliciesPage() {
   const { confirm } = useConfirmDialog();
   const [rows, setRows] = useState<Policy[]>([]);
-  const [keys, setKeys] = useState<ApiKeyRow[]>([]);
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Policy | null>(null);
-  const [apiKeyId, setApiKeyId] = useState<string>("");
+  const [name, setName] = useState("");
   const [instanceIds, setInstanceIds] = useState<string[]>([]);
   const [allow, setAllow] = useState("");
   const [deny, setDeny] = useState("");
@@ -56,11 +46,9 @@ export default function PoliciesPage() {
   const load = useCallback(async () => {
     const res = await api<{
       policies: Policy[];
-      apiKeys: ApiKeyRow[];
       instances: InstanceRow[];
     }>("/api/mcp/policies/bootstrap");
     setRows(res.policies);
-    setKeys(res.apiKeys);
     setInstances(res.instances);
   }, []);
 
@@ -70,7 +58,7 @@ export default function PoliciesPage() {
 
   function openCreate() {
     setEditing(null);
-    setApiKeyId("");
+    setName("");
     setInstanceIds([]);
     setAllow("");
     setDeny("");
@@ -80,11 +68,11 @@ export default function PoliciesPage() {
 
   function openEdit(row: Policy) {
     setEditing(row);
-    setApiKeyId(row.apiKeyId ?? "");
-    setInstanceIds(row.instanceIds);
+    setName(row.name);
+    setInstanceIds(row.instanceIds ?? []);
     setAllow((row.toolAllowlist ?? []).join(", "));
     setDeny((row.toolDenylist ?? []).join(", "));
-    setIncludeBuiltin(row.includeBuiltin);
+    setIncludeBuiltin(row.includeBuiltin ?? false);
     setOpen(true);
   }
 
@@ -110,7 +98,7 @@ export default function PoliciesPage() {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Key</TableHead>
+            <TableHead>名称</TableHead>
             <TableHead>关联 Agent</TableHead>
             <TableHead>允许</TableHead>
             <TableHead>拒绝</TableHead>
@@ -121,20 +109,11 @@ export default function PoliciesPage() {
         <TableBody>
           {rows.map((row) => (
             <TableRow key={row.id}>
+              <TableCell className="text-xs">{row.name}</TableCell>
               <TableCell className="text-xs">
-                {row.apiKey ? (
-                  <>
-                    {row.apiKey.name}{" "}
-                    <code className="text-muted-foreground">{row.apiKey.keyPrefix}…</code>
-                  </>
-                ) : (
-                  <Badge variant="secondary">默认</Badge>
-                )}
-              </TableCell>
-              <TableCell className="text-xs">
-                {!row.instanceIds.length
+                {!(row.instanceIds ?? []).length
                   ? "全部"
-                  : row.instanceIds
+                  : (row.instanceIds ?? [])
                       .map((id) => instances.find((i) => i.id === id)?.slug ?? id.slice(0, 6))
                       .join(", ")}
               </TableCell>
@@ -192,11 +171,13 @@ export default function PoliciesPage() {
               const allowlist = parseList(allow);
               const denylist = parseList(deny);
               const payload = {
-                apiKeyId: apiKeyId || null,
-                instanceIds,
-                toolAllowlist: allowlist.length ? allowlist : null,
-                toolDenylist: denylist.length ? denylist : null,
-                includeBuiltin,
+                name,
+                policy: {
+                  instanceIds,
+                  toolAllowlist: allowlist.length ? allowlist : null,
+                  toolDenylist: denylist.length ? denylist : null,
+                  includeBuiltin,
+                },
               };
               try {
                 if (editing) {
@@ -216,33 +197,8 @@ export default function PoliciesPage() {
             }}
           >
             <div className="space-y-1.5">
-              <Label>API Key</Label>
-              <Select
-                value={apiKeyId || "__default__"}
-                onValueChange={(v) => {
-                  if (v == null) return;
-                  setApiKeyId(v === "__default__" ? "" : v);
-                }}
-                items={[
-                  { value: "__default__", label: "团队默认" },
-                  ...keys.map((k) => ({
-                    value: k.id,
-                    label: `${k.name} (${k.keyPrefix}…)`,
-                  })),
-                ]}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__default__">团队默认</SelectItem>
-                  {keys.map((k) => (
-                    <SelectItem key={k.id} value={k.id}>
-                      {k.name} ({k.keyPrefix}…)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>名称</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} required placeholder="例如：只读策略" />
             </div>
             <div className="space-y-1.5">
               <Label>关联 Agent（留空=全部）</Label>
