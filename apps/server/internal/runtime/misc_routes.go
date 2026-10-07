@@ -651,7 +651,7 @@ func (h *handler) globalImageUpdates(ctx context.Context, tenant string, pull bo
 		node, e := h.checkNodeImages(ctx, tenant, id, pull)
 		if e != nil {
 			hasErrors = true
-			node = map[string]any{"nodeId": id, "error": e.Error(), "images": []any{}}
+			node = map[string]any{"nodeId": id, "error": e.Error(), "entries": []any{}, "checkedAt": h.store.now().UnixMilli(), "hasUpdates": false, "hasRunningStale": false}
 		}
 		if v, _ := node["hasUpdates"].(bool); v {
 			hasUpdates = true
@@ -711,5 +711,5 @@ func (h *handler) checkNodeImages(ctx context.Context, tenant, nodeID string, pu
 	if shared {
 		access = "shared"
 	}
-	return map[string]any{"nodeId": nodeID, "nodeName": name, "nodeStatus": status, "nodeKind": kind, "access": access, "images": entries, "checkedAt": h.store.now().UnixMilli(), "hasUpdates": updates, "hasRunningStale": stale, "hasErrors": errs}, nil
+	return map[string]any{"nodeId": nodeID, "nodeName": name, "nodeStatus": status, "nodeKind": kind, "access": access, "entries": entries, "checkedAt": h.store.now().UnixMilli(), "hasUpdates": updates, "hasRunningStale": stale, "hasErrors": errs}, nil
 }
