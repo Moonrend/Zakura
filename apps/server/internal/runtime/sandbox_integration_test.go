@@ -93,10 +93,14 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 	if _, e := h.hub.get("node"); e != nil {
 		t.Fatal("real runner failed to connect", e)
 	}
-	call := func(ctx context.Context, script string, timeout int) map[string]any {
+	call := func(t *testing.T, ctx context.Context, script string, timeout int) map[string]any {
 		t.Helper()
 		args, _ := json.Marshal(map[string]any{"command": script, "timeout_ms": timeout})
 		raw, e := h.dispatchAgentTool(ctx, "tenant", agent.ID, "", "fixture-call", "shell_exec", args)
+		if e != nil {
+			logs, _ := os.ReadFile(logFile.Name())
+			t.Logf("fixture runner logs: %s", logs)
+		}
 		return decodeBuiltinResult(t, raw, e)
 	}
 	assertNoOutputWrites := func() {
@@ -110,7 +114,7 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 		}
 	}
 	t.Run("long stdout and stderr never persist", func(t *testing.T) {
-		out := call(context.Background(), `head -c 30000 /dev/zero | tr '\000' x; head -c 30000 /dev/zero | tr '\000' e >&2`, 10000)
+		out := call(t, context.Background(), `head -c 30000 /dev/zero | tr '\000' x; head -c 30000 /dev/zero | tr '\000' e >&2`, 10000)
 		if out["truncated"] != true || out["executionMode"] != "sandbox" {
 			t.Fatalf("incorrect result flags: %v", out["truncated"])
 		}
@@ -122,7 +126,7 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 		assertNoOutputWrites()
 	})
 	t.Run("deadline preserves final output", func(t *testing.T) {
-		out := call(context.Background(), `printf 'before timeout'; printf diagnostic >&2; sleep 30`, 3000)
+		out := call(t, context.Background(), `printf 'before timeout'; printf diagnostic >&2; sleep 30`, 3000)
 		if out["timedOut"] != true || out["stdout"] != "before timeout" || out["stderr"] != "diagnostic" {
 			t.Fatalf("lost timeout result: %+v", out)
 		}
@@ -133,7 +137,7 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 		defer cancel()
 		timer := time.AfterFunc(3*time.Second, cancel)
 		defer timer.Stop()
-		out := call(ctx, `printf 'before cancellation'; sleep 30`, 10000)
+		out := call(t, ctx, `printf 'before cancellation'; sleep 30`, 10000)
 		if out["cancelled"] != true || out["stdout"] != "before cancellation" {
 			t.Fatalf("lost cancellation result: %+v", out)
 		}
@@ -143,7 +147,7 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 		if _, e := store.UpdateAgent(context.Background(), "tenant", agent.ID, map[string]any{"config": map[string]any{}}); e != nil {
 			t.Fatal(e)
 		}
-		out := call(context.Background(), `head -c 30000 /dev/zero | tr '\000' x`, 10000)
+		out := call(t, context.Background(), `head -c 30000 /dev/zero | tr '\000' x`, 10000)
 		if out["executionMode"] != "sandbox" || out["truncated"] != true {
 			t.Fatal("operator enforcement lost")
 		}
@@ -154,7 +158,7 @@ func TestSandboxServerRunnerDockerIntegration(t *testing.T) {
 		defer cancel()
 		timer := time.AfterFunc(3*time.Second, cancel)
 		defer timer.Stop()
-		out := call(ctx, `printf 'operator cancellation'; sleep 30`, 10000)
+		out := call(t, ctx, `printf 'operator cancellation'; sleep 30`, 10000)
 		if out["cancelled"] != true || out["stdout"] != "operator cancellation" {
 			t.Fatalf("lost enforced cancellation: %+v", out)
 		}
