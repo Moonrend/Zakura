@@ -3,6 +3,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +35,8 @@ func (h *handler) registerNetwork(r chi.Router) {
 	r.Delete("/exposures/{id}", h.deleteExposure)
 	r.Get("/settings/network/overview", h.networkOverview)
 	r.Get("/settings/network/mesh", h.networkMesh)
-	r.Get("/settings/network/headscale", h.getHeadscale)
-	r.Put("/settings/network/headscale", h.putHeadscale)
+	r.Get("/settings/network/headscale", h.getPlatformHeadscale)
+	r.Put("/settings/network/headscale", h.putPlatformHeadscale)
 	r.Post("/settings/network/mesh/sync", h.syncMesh)
 	r.Post("/settings/network/mesh/disconnect", h.disconnectMesh)
 	r.Post("/settings/network/mesh/platform/enable", h.enablePlatformMesh)
@@ -628,53 +629,114 @@ func (h *handler) networkMesh(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"integrations": out})
 }
-func (h *handler) getHeadscale(w http.ResponseWriter, r *http.Request) {
-	var row struct {
-		Status   string `gorm:"column:status"`
-		MetaJSON string `gorm:"column:meta_json"`
-	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("status, meta_json").Where("tenant_id = ? AND kind = 'headscale'", principal(r).TenantID).Take(&row).Error
-	if errors.Is(e, gorm.ErrRecordNotFound) {
-		httpx.JSON(w, 200, map[string]any{"status": "disconnected", "config": map[string]any{}})
-		return
-	}
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"status": row.Status, "config": json.RawMessage(row.MetaJSON)})
+type platformHeadscaleStored struct {
+	Enabled        bool   `json:"enabled"`
+	URL            string `json:"url"`
+	APIKeyEnc      string `json:"apiKeyEnc"`
+	PlatformKeyEnc string `json:"platformAuthKeyEnc"`
 }
-func (h *handler) putHeadscale(w http.ResponseWriter, r *http.Request) {
-	var b struct{ URL, Token, DisplayName string }
-	if httpx.DecodeJSON(r, &b) != nil || b.URL == "" {
+
+func (h *handler) loadPlatformHeadscale(ctx context.Context) platformHeadscaleStored {
+	var stored platformHeadscaleStored
+	var row models.Setting
+	e := h.deps.Gorm.WithContext(ctx).Where("owner_key = ? AND key = ?", "platform", "network.headscale").Take(&row).Error
+	if e != nil {
+		return stored
+	}
+	_ = json.Unmarshal([]byte(row.Value), &stored)
+	return stored
+}
+
+func (h *handler) savePlatformHeadscale(ctx context.Context, stored platformHeadscaleStored) error {
+	raw, e := json.Marshal(stored)
+	if e != nil {
+		return e
+	}
+	id := h.deps.NewID()
+	return h.deps.Gorm.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "owner_key"}, {Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value"}),
+		}).
+		Create(&models.Setting{ID: &id, OwnerKey: "platform", Key: "network.headscale", Value: string(raw)}).Error
+}
+
+func (h *handler) publicPlatformHeadscale(stored platformHeadscaleStored) map[string]any {
+	return map[string]any{
+		"enabled":            stored.Enabled,
+		"url":                strings.TrimSpace(stored.URL),
+		"hasApiKey":          stored.APIKeyEnc != "",
+		"hasPlatformAuthKey": stored.PlatformKeyEnc != "",
+		"ready":              stored.Enabled && strings.TrimSpace(stored.URL) != "" && stored.APIKeyEnc != "",
+	}
+}
+
+func (h *handler) getPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
+	if !principal(r).IsPlatformAdmin {
+		httpx.Error(w, 403, "Admin only")
+		return
+	}
+	httpx.JSON(w, 200, h.publicPlatformHeadscale(h.loadPlatformHeadscale(r.Context())))
+}
+func (h *handler) putPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
+	if !principal(r).IsPlatformAdmin {
+		httpx.Error(w, 403, "Admin only")
+		return
+	}
+	var b struct {
+		Enabled         *bool   `json:"enabled"`
+		URL             *string `json:"url"`
+		APIKey          *string `json:"apiKey"`
+		PlatformAuthKey *string `json:"platformAuthKey"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid request")
+		return
+	}
+	stored := h.loadPlatformHeadscale(r.Context())
+	if b.Enabled != nil {
+		stored.Enabled = *b.Enabled
+	}
+	if b.URL != nil {
+		stored.URL = strings.TrimSpace(*b.URL)
+	}
+	if b.URL != nil && stored.URL != "" {
+		if _, e := safeProviderURL(stored.URL, ""); e != nil {
+			statusErr(w, e)
+			return
+		}
+	}
+	if b.APIKey != nil {
+		stored.APIKeyEnc = ""
+		if v := strings.TrimSpace(*b.APIKey); v != "" {
+			enc, e := secretBox(h.deps.Secret, "platform:network:headscale:apikey", []byte(v))
+			if e != nil {
+				httpx.Error(w, 500, "encryption failed")
+				return
+			}
+			stored.APIKeyEnc = enc
+		}
+	}
+	if b.PlatformAuthKey != nil {
+		stored.PlatformKeyEnc = ""
+		if v := strings.TrimSpace(*b.PlatformAuthKey); v != "" {
+			enc, e := secretBox(h.deps.Secret, "platform:network:headscale:platformkey", []byte(v))
+			if e != nil {
+				httpx.Error(w, 500, "encryption failed")
+				return
+			}
+			stored.PlatformKeyEnc = enc
+		}
+	}
+	if stored.Enabled && stored.URL == "" {
 		httpx.Error(w, 400, "url required")
 		return
 	}
-	if _, e := safeProviderURL(b.URL, ""); e != nil {
+	if e := h.savePlatformHeadscale(r.Context(), stored); e != nil {
 		statusErr(w, e)
 		return
 	}
-	p := principal(r)
-	raw, _ := json.Marshal(map[string]any{"url": b.URL, "token": b.Token})
-	enc, e := secretBox(h.deps.Secret, "network:"+p.TenantID+":headscale", raw)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	meta, _ := json.Marshal(map[string]any{"url": b.URL})
-	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "kind"}},
-			DoUpdates: clause.AssignmentColumns([]string{"status", "display_name", "credentials_enc", "meta_json", "updated_at"}),
-		}).
-		Table("network_integrations").
-		Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "kind": "headscale", "status": "connected", "display_name": b.DisplayName, "credentials_enc": enc, "meta_json": string(meta), "last_sync_at": nil, "last_error": nil, "created_at": now, "updated_at": now}).Error
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	h.getHeadscale(w, r)
+	httpx.JSON(w, 200, h.publicPlatformHeadscale(stored))
 }
 func (h *handler) syncMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -702,7 +764,23 @@ func (h *handler) disconnectMesh(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"disconnected": res.RowsAffected})
 }
-func (h *handler) enablePlatformMesh(w http.ResponseWriter, r *http.Request) { h.putHeadscale(w, r) }
+func (h *handler) enablePlatformMesh(w http.ResponseWriter, r *http.Request) {
+	if !principal(r).IsPlatformAdmin {
+		httpx.Error(w, 403, "Admin only")
+		return
+	}
+	stored := h.loadPlatformHeadscale(r.Context())
+	if stored.URL == "" {
+		httpx.Error(w, 400, "configure a Headscale URL first")
+		return
+	}
+	stored.Enabled = true
+	if e := h.savePlatformHeadscale(r.Context(), stored); e != nil {
+		statusErr(w, e)
+		return
+	}
+	httpx.JSON(w, 200, h.publicPlatformHeadscale(stored))
+}
 func (h *handler) meshCredentials(r *http.Request, kind string) (map[string]any, error) {
 	p := principal(r)
 	var row struct {
@@ -784,5 +862,7 @@ func (h *handler) ensureMeshACL(w http.ResponseWriter, r *http.Request) {
 func (h *handler) meshOAuthStart(w http.ResponseWriter, r *http.Request) {
 	httpx.Error(w, 400, "configure a Headscale URL and token, or complete OAuth in the network provider's official client")
 }
-func (h *handler) meshOAuthConnect(w http.ResponseWriter, r *http.Request) { h.putHeadscale(w, r) }
+func (h *handler) meshOAuthConnect(w http.ResponseWriter, r *http.Request) {
+	httpx.Error(w, 400, "configure a Headscale URL and token, or complete OAuth in the network provider's official client")
+}
 func (h *handler) meshOAuthTags(w http.ResponseWriter, r *http.Request)    { h.ensureMeshACL(w, r) }
