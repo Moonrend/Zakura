@@ -21,6 +21,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -357,5 +358,151 @@ func TestRemoteChannelCreateAndApproveContracts(t *testing.T) {
 	code, out = request(t, client, "POST", srv.URL+"/api/remote-channels", token, map[string]any{"agentId": "agent-ta", "platform": "myspace"})
 	if code != 400 {
 		t.Fatalf("unsupported platform should 400: %d %#v", code, out)
+	}
+}
+
+func platformAdminSession(t *testing.T, d *appdeps.Dependencies, tenantID string) string {
+	t.Helper()
+	now := d.Clock().Format(time.RFC3339Nano)
+	userID, email, sessionID := "user-"+tenantID, tenantID+"@example.com", "sess-"+tenantID
+	if _, e := d.DB.Exec(`INSERT INTO users(id,email,name,password_hash,is_platform_admin,status,created_at,updated_at) VALUES(?,?,?,?,1,'active',?,?)`, userID, email, "Admin", nil, now, now); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := d.DB.Exec(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?)`, "m-"+tenantID, tenantID, userID, now, now); e != nil {
+		t.Fatal(e)
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": userID, "tenantId": tenantID, "email": email, "role": "owner", "sid": sessionID, "isPlatformAdmin": true, "iat": d.Clock().Unix(), "exp": d.Clock().Add(time.Hour).Unix()})
+	raw, e := tok.SignedString(d.Secret)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sum := sha256.Sum256([]byte(raw))
+	if _, e = d.DB.Exec(`INSERT INTO user_sessions(id,user_id,tenant_id,email,role,is_platform_admin,token_hash,expires_at,last_seen_at,created_at) VALUES(?,?,?,?,'owner',1,?,?,?,?)`, sessionID, userID, tenantID, email, hex.EncodeToString(sum[:]), d.Clock().Add(time.Hour).Format(time.RFC3339Nano), now, now); e != nil {
+		t.Fatal(e)
+	}
+	return raw
+}
+
+func TestPlatformProfileScopes(t *testing.T) {
+	d, tokA, _ := setup(t)
+	r := chi.NewRouter()
+	RegisterRoutes(r, d)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	client := srv.Client()
+
+	code, out := request(t, client, "GET", srv.URL+"/api/connectors/profiles?scope=platform", tokA, nil)
+	if code != 403 {
+		t.Fatalf("tenant user platform list should 403: %d %#v", code, out)
+	}
+	code, out = request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack?scope=platform", tokA, map[string]any{"label": "Slack", "kind": "oauth2", "config": map[string]any{}})
+	if code != 403 {
+		t.Fatalf("tenant user platform put should 403: %d %#v", code, out)
+	}
+	code, out = request(t, client, "DELETE", srv.URL+"/api/connectors/profiles/slack?scope=platform", tokA, nil)
+	if code != 403 {
+		t.Fatalf("tenant user platform delete should 403: %d %#v", code, out)
+	}
+
+	admin := platformAdminSession(t, d, "ta")
+	code, out = request(t, client, "PUT", srv.URL+"/api/connectors/profiles/slack?scope=platform", admin, map[string]any{"label": "Slack Site", "kind": "oauth2", "enabled": true, "config": map[string]any{"clientId": "platform-id", "clientSecret": "platform-secret"}})
+	if code != 200 {
+		t.Fatalf("platform put: %d %#v", code, out)
+	}
+	putProfile, _ := out["profile"].(map[string]any)
+	if putProfile["key"] != "slack" || putProfile["label"] != "Slack Site" || putProfile["kind"] != "oauth2" || putProfile["custom"] != false {
+		t.Fatalf("platform put profile shape: %#v", out)
+	}
+	putRefs, _ := putProfile["connectorRefs"].([]any)
+	if len(putRefs) != 1 || putRefs[0] != "slack" {
+		t.Fatalf("platform put connectorRefs: %#v", putProfile["connectorRefs"])
+	}
+	putFields, _ := putProfile["fields"].([]any)
+	if len(putFields) != 2 {
+		t.Fatalf("platform put fields: %#v", putProfile["fields"])
+	}
+	putConfigured, _ := putProfile["configuredFields"].([]any)
+	if len(putConfigured) != 2 {
+		t.Fatalf("platform put configuredFields: %#v", putProfile["configuredFields"])
+	}
+
+	code, out = request(t, client, "GET", srv.URL+"/api/connectors/profiles?scope=platform", admin, nil)
+	if code != 200 {
+		t.Fatalf("platform list: %d %#v", code, out)
+	}
+	profiles, _ := out["profiles"].([]any)
+	if len(profiles) != 1 {
+		t.Fatalf("platform list size: %#v", out)
+	}
+	got, _ := profiles[0].(map[string]any)
+	if got["key"] != "slack" || got["docsUrl"] != "https://api.slack.com/apps" {
+		t.Fatalf("platform list shape: %#v", profiles[0])
+	}
+
+	code, out = request(t, client, "GET", srv.URL+"/api/connectors/profiles", tokA, nil)
+	if code != 200 {
+		t.Fatalf("tenant list: %d %#v", code, out)
+	}
+	tprofiles, _ := out["profiles"].([]any)
+	found := false
+	for _, raw := range tprofiles {
+		item, _ := raw.(map[string]any)
+		if item["profileKey"] == "slack" {
+			found = true
+			if _, ok := item["key"]; ok {
+				t.Fatalf("tenant shape should keep profileKey only: %#v", item)
+			}
+			cf, _ := item["configuredFields"].([]any)
+			if len(cf) != 2 {
+				t.Fatalf("tenant view of platform profile configuredFields: %#v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("tenant list missing platform profile: %#v", tprofiles)
+	}
+
+	var scopeKey string
+	if e := d.DB.QueryRow(`SELECT scope_key FROM connector_auth_profiles WHERE profile_key='slack'`).Scan(&scopeKey); e != nil || scopeKey != "platform" {
+		t.Fatalf("platform profile not stored under platform scope: %q err=%v", scopeKey, e)
+	}
+	var enc string
+	if e := d.DB.QueryRow(`SELECT config_enc FROM connector_auth_profiles WHERE scope_key='platform' AND profile_key='slack'`).Scan(&enc); e != nil || strings.Contains(enc, "platform-secret") {
+		t.Fatalf("platform credential not encrypted: err=%v", e)
+	}
+
+	code, out = request(t, client, "DELETE", srv.URL+"/api/connectors/profiles/slack?scope=platform", admin, nil)
+	if code != 200 {
+		t.Fatalf("platform delete: %d %#v", code, out)
+	}
+	var remaining int
+	if e := d.DB.QueryRow(`SELECT COUNT(*) FROM connector_auth_profiles WHERE scope_key='platform' AND profile_key='slack'`).Scan(&remaining); e != nil || remaining != 0 {
+		t.Fatalf("platform profile not deleted: %d err=%v", remaining, e)
+	}
+}
+
+func TestPlatformCustomProfileHasNoRefs(t *testing.T) {
+	d, _, _ := setup(t)
+	r := chi.NewRouter()
+	RegisterRoutes(r, d)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	admin := platformAdminSession(t, d, "ta")
+	code, out := request(t, srv.Client(), "PUT", srv.URL+"/api/connectors/profiles/custom-profile?scope=platform", admin, map[string]any{"label": "Custom", "kind": "token", "config": map[string]any{}})
+	if code != 200 {
+		t.Fatalf("custom put: %d %#v", code, out)
+	}
+	profile, _ := out["profile"].(map[string]any)
+	if profile["custom"] != true {
+		t.Fatalf("custom profile should be custom: %#v", profile)
+	}
+	if refs, _ := profile["connectorRefs"].([]any); refs == nil || len(refs) != 0 {
+		t.Fatalf("custom profile refs should be empty array: %#v", profile["connectorRefs"])
+	}
+	if _, ok := profile["docsUrl"]; ok {
+		t.Fatalf("custom profile should omit docsUrl: %#v", profile)
+	}
+	if fields, _ := profile["fields"].([]any); fields == nil || len(fields) != 0 {
+		t.Fatalf("custom profile fields should be empty array: %#v", profile["fields"])
 	}
 }

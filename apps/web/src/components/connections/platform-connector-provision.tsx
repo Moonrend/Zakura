@@ -55,10 +55,17 @@ export function PlatformConnectorProvisionPanel() {
     setLoading(true);
     try {
       const [profileRes, connectorRes] = await Promise.all([
-        api<{ profiles: Profile[] }>("/api/connectors/profiles?scope=platform"),
+        api<{ profiles?: Array<Profile & { profileKey?: string }> }>(
+          "/api/connectors/profiles?scope=platform",
+        ),
         api<{ redirectUri: string }>("/api/connectors?scope=platform"),
       ]);
-      setProfiles(profileRes.profiles);
+      setProfiles(
+        (profileRes.profiles ?? []).map((p) => ({
+          ...p,
+          key: (p as { profileKey?: string }).profileKey ?? p.key,
+        })),
+      );
       setRedirectUri(connectorRes.redirectUri);
       if (selectKey) setOpenKey(selectKey);
     } catch (err) {
@@ -98,7 +105,7 @@ export function PlatformConnectorProvisionPanel() {
     try {
       await api(`/api/connectors/profiles/${encodeURIComponent(key)}?scope=platform`, {
         method: "PUT",
-        json: { kind: newKind, label: newLabel.trim() || key, enabled: false, values: {} },
+        json: { kind: newKind, label: newLabel.trim() || key, enabled: false, config: {} },
       });
       setNewKey("");
       setNewLabel("");
@@ -115,15 +122,13 @@ export function PlatformConnectorProvisionPanel() {
     if (!selected) return;
     setSaving(true);
     try {
-      const result = await api<{ profile: Profile }>(
+      await api(
         `/api/connectors/profiles/${encodeURIComponent(selected.key)}?scope=platform`,
-        { method: "PUT", json: { enabled, values: draft } },
-      );
-      setProfiles((current) =>
-        current.map((profile) => (profile.key === selected.key ? result.profile : profile)),
+        { method: "PUT", json: { kind: selected.kind, label: selected.label, enabled, config: draft } },
       );
       setDraft({});
       toast.success(`${selected.label} 已保存`);
+      await load(selected.key);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {

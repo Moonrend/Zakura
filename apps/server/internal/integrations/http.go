@@ -186,8 +186,74 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"connectors": items})
 }
+func (h *handler) configuredProfileFields(scopeKey, profileKey, configEnc string) []string {
+	fields := []string{}
+	if raw, e := decrypt(h.deps.Secret, scopeKey+":"+profileKey, configEnc); e == nil {
+		var cfg map[string]any
+		if json.Unmarshal(raw, &cfg) == nil {
+			for k, v := range cfg {
+				if v != nil && v != "" {
+					fields = append(fields, k)
+				}
+			}
+		}
+	}
+	return fields
+}
+func (h *handler) platformProfile(row models.ConnectorAuthProfile) map[string]any {
+	refs := []string{}
+	fields := []AuthField{}
+	fieldSeen := map[string]bool{}
+	docsURL := ""
+	for _, x := range providers {
+		if x.Auth.Profile != row.ProfileKey {
+			continue
+		}
+		refs = append(refs, x.Ref)
+		for _, f := range x.Auth.Fields {
+			if fieldSeen[f.Key] {
+				continue
+			}
+			fieldSeen[f.Key] = true
+			fields = append(fields, f)
+		}
+		if docsURL == "" {
+			docsURL = x.Auth.DocsURL
+		}
+	}
+	item := map[string]any{
+		"key": row.ProfileKey, "label": row.Label, "kind": row.Kind,
+		"enabled": row.Enabled, "custom": len(refs) == 0,
+		"fields": fields, "connectorRefs": refs,
+		"configuredFields": h.configuredProfileFields(row.ScopeKey, row.ProfileKey, row.ConfigEnc),
+	}
+	if docsURL != "" {
+		item["docsUrl"] = docsURL
+	}
+	return item
+}
 func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
+	if r.URL.Query().Get("scope") == "platform" {
+		if !p.IsPlatformAdmin {
+			httpx.Error(w, 403, "platform admin only")
+			return
+		}
+		var rows []models.ConnectorAuthProfile
+		if e := h.deps.Gorm.WithContext(r.Context()).
+			Where("scope_key = ?", "platform").
+			Order("profile_key").
+			Find(&rows).Error; e != nil {
+			writeErr(w, e)
+			return
+		}
+		items := make([]map[string]any, 0)
+		for _, row := range rows {
+			items = append(items, h.platformProfile(row))
+		}
+		httpx.JSON(w, 200, map[string]any{"profiles": items})
+		return
+	}
 	var rows []models.ConnectorAuthProfile
 	if e := h.deps.Gorm.WithContext(r.Context()).
 		Where("scope_key IN ?", []string{p.TenantID, "platform"}).
@@ -198,17 +264,7 @@ func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0)
 	for _, row := range rows {
-		fields := []string{}
-		if raw, e := decrypt(h.deps.Secret, p.TenantID+":"+row.ProfileKey, row.ConfigEnc); e == nil {
-			var cfg map[string]any
-			if json.Unmarshal(raw, &cfg) == nil {
-				for k, v := range cfg {
-					if v != nil && v != "" {
-						fields = append(fields, k)
-					}
-				}
-			}
-		}
+		fields := h.configuredProfileFields(row.ScopeKey, row.ProfileKey, row.ConfigEnc)
 		items = append(items, map[string]any{"id": *row.ID, "profileKey": row.ProfileKey, "label": row.Label, "kind": row.Kind, "enabled": row.Enabled, "configuredFields": fields, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
 	}
 	httpx.JSON(w, 200, map[string]any{"profiles": items})
@@ -216,6 +272,11 @@ func (h *handler) listProfiles(w http.ResponseWriter, r *http.Request) {
 func (h *handler) putProfile(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	key := chi.URLParam(r, "profileKey")
+	scope := r.URL.Query().Get("scope")
+	if scope == "platform" && !p.IsPlatformAdmin {
+		httpx.Error(w, 403, "platform admin only")
+		return
+	}
 	var b struct {
 		Label, Kind string
 		Enabled     *bool           `json:"enabled"`
@@ -232,13 +293,17 @@ func (h *handler) putProfile(w http.ResponseWriter, r *http.Request) {
 	if len(b.Config) == 0 {
 		b.Config = json.RawMessage(`{}`)
 	}
-	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+key, b.Config)
+	scopeKey := p.TenantID
+	if scope == "platform" {
+		scopeKey = "platform"
+	}
+	enc, e := encrypt(h.deps.Secret, scopeKey+":"+key, b.Config)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
 	now := h.now().Format(time.RFC3339Nano)
-	row := models.ConnectorAuthProfile{ID: strPtr(h.id()), ScopeKey: p.TenantID, ProfileKey: key, Label: b.Label, Kind: b.Kind, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
+	row := models.ConnectorAuthProfile{ID: strPtr(h.id()), ScopeKey: scopeKey, ProfileKey: key, Label: b.Label, Kind: b.Kind, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
 	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "scope_key"}, {Name: "profile_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"label", "kind", "enabled", "config_enc", "updated_at"}),
@@ -247,11 +312,24 @@ func (h *handler) putProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
+	if scope == "platform" {
+		httpx.JSON(w, 200, map[string]any{"profile": h.platformProfile(models.ConnectorAuthProfile{ID: row.ID, ScopeKey: scopeKey, ProfileKey: key, Label: b.Label, Kind: b.Kind, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now})})
+		return
+	}
 	httpx.JSON(w, 200, map[string]any{"profile": map[string]any{"profileKey": key, "label": b.Label, "kind": b.Kind, "enabled": enabled}})
 }
 func (h *handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ? AND profile_key = ?", p.TenantID, chi.URLParam(r, "profileKey")).Delete(&models.ConnectorAuthProfile{})
+	scope := r.URL.Query().Get("scope")
+	if scope == "platform" && !p.IsPlatformAdmin {
+		httpx.Error(w, 403, "platform admin only")
+		return
+	}
+	scopeKey := p.TenantID
+	if scope == "platform" {
+		scopeKey = "platform"
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ? AND profile_key = ?", scopeKey, chi.URLParam(r, "profileKey")).Delete(&models.ConnectorAuthProfile{})
 	if res.Error != nil {
 		writeErr(w, res.Error)
 		return
