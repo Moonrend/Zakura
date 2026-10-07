@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
+  ArrowUpCircle,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -195,10 +196,13 @@ export default function PlatformServicesPage() {
     }
   }, [liveLogs, containerLogs]);
 
-  async function runAction(key: string, path: string) {
+  async function runAction(key: string, path: string, body?: unknown) {
     setActionKey(key);
     try {
-      await api(`/api/platform-services/${key}/${path}`, { method: "POST" });
+      await api(`/api/platform-services/${key}/${path}`, {
+        method: "POST",
+        ...(body !== undefined ? { json: body } : {}),
+      });
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -213,7 +217,16 @@ export default function PlatformServicesPage() {
       const res = await api<{ logs: string }>(
         `/api/platform-services/${key}/logs?tail=200`,
       );
-      setContainerLogs((p) => ({ ...p, [key]: res.logs || "(empty)" }));
+      const raw = (res as { logs: unknown }).logs;
+      const text =
+        typeof raw === "string"
+          ? raw
+          : raw && typeof raw === "object"
+            ? Object.entries(raw as Record<string, string>)
+                .map(([k, v]) => `--- ${k} ---\n${v}`)
+                .join("\n")
+            : "";
+      setContainerLogs((p) => ({ ...p, [key]: text || "(empty)" }));
       setShowLog((p) => ({ ...p, [key]: true }));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -334,6 +347,7 @@ export default function PlatformServicesPage() {
                           actions.has("deploy") || actions.has("retry")
                             ? "deploy"
                             : "start",
+                          d.image.trim() ? { image: d.image.trim() } : undefined,
                         )
                       }
                     >
@@ -365,6 +379,17 @@ export default function PlatformServicesPage() {
                       onClick={() => void runAction(s.key, "restart")}
                     >
                       重启
+                    </Button>
+                  )}
+                  {actions.has("upgrade") && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void runAction(s.key, "upgrade")}
+                    >
+                      <ArrowUpCircle className="size-3.5" />
+                      升级
                     </Button>
                   )}
                   {actions.has("health") && (
