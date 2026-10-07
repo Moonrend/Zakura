@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1133,27 +1134,16 @@ func (h *handler) healthUpstream(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	var cfg upstreamConfig
-	if json.Unmarshal(u.Config, &cfg) != nil || cfg.BaseURL == "" {
-		httpx.Error(w, 400, "baseUrl not configured")
-		return
-	}
-	target, e := safeProviderURL(cfg.BaseURL, "/v1/models")
+	list, e := h.fetchUpstreamModelList(r.Context(), principal(r).TenantID, u)
 	if e != nil {
-		statusErr(w, e)
+		httpx.JSON(w, 200, map[string]any{"status": "unhealthy", "message": e.Error()})
 		return
 	}
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
-	if cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	}
-	resp, e := h.service.gateway.client.Do(req)
-	if e != nil {
-		httpx.Error(w, 502, e.Error())
+	if len(list) == 0 {
+		httpx.JSON(w, 200, map[string]any{"status": "empty", "message": "连接正常，但上游没有返回模型"})
 		return
 	}
-	resp.Body.Close()
-	httpx.JSON(w, 200, map[string]any{"ok": resp.StatusCode < 500, "status": resp.StatusCode})
+	httpx.JSON(w, 200, map[string]any{"status": "healthy", "message": fmt.Sprintf("返回 %d 个模型", len(list)), "models": len(list)})
 }
 func (h *handler) listModelRoutes(w http.ResponseWriter, r *http.Request) {
 	x, e := h.store.ListRoutes(r.Context(), principal(r).TenantID, r.URL.Query().Get("capability"))

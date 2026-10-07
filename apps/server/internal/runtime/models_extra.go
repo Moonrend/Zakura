@@ -56,7 +56,31 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, ErrNotFound)
 		return
 	}
-	h.getUpstream(w, r)
+	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	mc := map[string]any{"removed": 0}
+	list, err := h.fetchUpstreamModelList(r.Context(), principal(r).TenantID, u)
+	if err != nil {
+		mc["status"] = "unhealthy"
+		mc["liveModels"] = 0
+		mc["message"] = err.Error()
+	} else if len(list) == 0 {
+		mc["status"] = "empty"
+		mc["liveModels"] = 0
+	} else {
+		mc["status"] = "healthy"
+		mc["liveModels"] = len(list)
+	}
+	var resp map[string]any
+	if e := json.Unmarshal(rawJSON(redactUpstream(u)), &resp); e != nil {
+		statusErr(w, e)
+		return
+	}
+	resp["modelCheck"] = mc
+	httpx.JSON(w, 200, resp)
 }
 func (h *handler) getModelRoute(w http.ResponseWriter, r *http.Request) {
 	var row struct {

@@ -53,6 +53,7 @@ export default function LoginPage() {
   const [resendIn, setResendIn] = useState(0);
   const passkeyTried = useRef(false);
   const emailSentFor = useRef<string | null>(null);
+  const nextPath = useRef<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -61,6 +62,16 @@ export default function LoginPage() {
     }
     const preset = params.get("email")?.trim();
     if (preset) setEmail(preset);
+    const nextParam = params.get("next");
+    if (
+      nextParam &&
+      nextParam !== "/login" &&
+      /^\/(?!\/)/.test(nextParam) &&
+      !nextParam.includes("\n") &&
+      !nextParam.includes("\\")
+    ) {
+      nextPath.current = nextParam;
+    }
     if (params.get("mode") === "register") setMode("register");
     const ticket = params.get("mfa_ticket");
     if (ticket) {
@@ -126,6 +137,10 @@ export default function LoginPage() {
 
   async function finishLogin(session: string) {
     setSession(session);
+    if (nextPath.current) {
+      router.push(nextPath.current);
+      return;
+    }
     const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
     router.push(current.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
   }

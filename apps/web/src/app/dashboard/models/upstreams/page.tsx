@@ -271,9 +271,9 @@ export default function ModelUpstreamsPage() {
         if (modelCheck?.status === "unhealthy") {
           toast.error(`上游检查失败：${modelCheck.message ?? "无法获取模型列表"}`);
         } else if (modelCheck?.status === "empty") {
-          toast.warning("上游当前没有返回可用模型，旧模型已移除");
+          toast.warning("上游连接正常，但没有返回可用模型");
         } else if (modelCheck && modelCheck.removed > 0) {
-          toast.message(modelCheck.message ?? "已移除不再提供的模型");
+          toast.message(modelCheck.message ?? "上游不再提供的模型已保留，可手动删除");
         }
         await load();
         const refreshed = await api<Upstream>(`/api/model-upstreams/${edit.id}`);

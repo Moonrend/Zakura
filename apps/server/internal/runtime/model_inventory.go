@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -34,6 +35,123 @@ type UpstreamModel struct {
 	SyncedAt       *string         `json:"syncedAt"`
 	CreatedAt      string          `json:"createdAt"`
 	UpdatedAt      string          `json:"updatedAt"`
+}
+
+type remoteModel struct {
+	ID         string `json:"id"`
+	Name       string `json:"name,omitempty"`
+	OwnedBy    string `json:"ownedBy,omitempty"`
+	Capability string `json:"capability,omitempty"`
+}
+
+type modelItem struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Model        string `json:"model"`
+	ModelID      string `json:"modelId"`
+	DisplayName  string `json:"display_name"`
+	OwnedBySnake string `json:"owned_by"`
+	OwnedByCamel string `json:"ownedBy"`
+}
+
+func (h *handler) fetchUpstreamModelList(ctx context.Context, tenant string, u Upstream) ([]remoteModel, error) {
+	var cfg upstreamConfig
+	if e := json.Unmarshal(u.Config, &cfg); e != nil {
+		return nil, fmt.Errorf("invalid upstream config: %w", e)
+	}
+	if cfg.CredentialEnc != "" {
+		if raw, e := openSecretBox(h.store.deps.Secret, "model:"+tenant+":"+u.ID, cfg.CredentialEnc); e == nil {
+			var credentials map[string]any
+			if json.Unmarshal(raw, &credentials) == nil {
+				if v, ok := credentials["apiKey"].(string); ok {
+					cfg.APIKey = v
+				}
+				if v, ok := credentials["accessToken"].(string); ok {
+					cfg.AccessToken = v
+				}
+			}
+		}
+	}
+	if cfg.APIKey == "" {
+		cfg.APIKey = cfg.AccessToken
+	}
+	if cfg.BaseURL == "" {
+		return nil, errors.New("baseUrl not configured")
+	}
+	target, e := safeProviderURL(cfg.BaseURL, "/v1/models")
+	if e != nil {
+		return nil, e
+	}
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if e != nil {
+		return nil, e
+	}
+	if cfg.APIKey != "" {
+		if u.Protocol == "anthropic" {
+			req.Header.Set("x-api-key", cfg.APIKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		}
+	}
+	for k, v := range cfg.Headers {
+		if http.CanonicalHeaderKey(k) != "Host" {
+			req.Header.Set(k, v)
+		}
+	}
+	client := h.service.gateway.client
+	if cfg.Timeout > 0 {
+		clone := *client
+		clone.Timeout = time.Duration(cfg.Timeout) * time.Millisecond
+		client = &clone
+	}
+	resp, e := client.Do(req)
+	if e != nil {
+		return nil, e
+	}
+	defer resp.Body.Close()
+	raw, e := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if e != nil {
+		return nil, e
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("model list status %d: %.300s", resp.StatusCode, raw)
+	}
+	var items []modelItem
+	if e := json.Unmarshal(raw, &items); e != nil {
+		var result struct {
+			Data   []modelItem `json:"data"`
+			Models []modelItem `json:"models"`
+		}
+		if e := json.Unmarshal(raw, &result); e != nil {
+			return nil, errors.New("invalid model catalog")
+		}
+		if len(result.Data) > 0 {
+			items = result.Data
+		} else {
+			items = result.Models
+		}
+	}
+	out := make([]remoteModel, 0, len(items))
+	for _, m := range items {
+		id := firstNonEmpty(m.ID, m.Name, m.Model, m.ModelID)
+		if id == "" {
+			continue
+		}
+		rm := remoteModel{ID: id, Capability: "chat"}
+		if m.Name != "" && m.Name != id {
+			rm.Name = m.Name
+		} else if m.DisplayName != "" && m.DisplayName != id {
+			rm.Name = m.DisplayName
+		}
+		if m.OwnedBySnake != "" {
+			rm.OwnedBy = m.OwnedBySnake
+		} else {
+			rm.OwnedBy = m.OwnedByCamel
+		}
+		out = append(out, rm)
+	}
+	return out, nil
 }
 
 func (h *handler) queryUpstreamModels(r *http.Request, upstream string) ([]UpstreamModel, error) {
@@ -76,12 +194,17 @@ func (h *handler) listUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"models": x, "capabilities": []map[string]any{{"id": "chat", "name": "Chat"}, {"id": "embedding", "name": "Embedding"}, {"id": "rerank", "name": "Rerank"}, {"id": "image", "name": "Image"}}})
 }
 func (h *handler) modelsForUpstream(w http.ResponseWriter, r *http.Request) {
-	x, e := h.queryUpstreamModels(r, chi.URLParam(r, "id"))
+	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"models": x})
+	list, e := h.fetchUpstreamModelList(r.Context(), principal(r).TenantID, u)
+	if e != nil {
+		httpx.Error(w, 502, e.Error())
+		return
+	}
+	httpx.JSON(w, 200, map[string]any{"models": list})
 }
 func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	var x UpstreamModel
@@ -217,62 +340,92 @@ func (h *handler) batchDeleteUpstreams(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"deleted": n})
 }
 func (h *handler) syncUpstreamModels(w http.ResponseWriter, r *http.Request) {
-	count, e := h.discoverUpstreamModels(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	var body struct {
+		ModelIDs []string `json:"modelIds"`
+	}
+	_ = httpx.DecodeJSON(r, &body)
+	tenant := principal(r).TenantID
+	id := chi.URLParam(r, "id")
+	u, e := h.store.GetUpstream(r.Context(), tenant, id)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"synced": count})
+	list, e := h.fetchUpstreamModelList(r.Context(), tenant, u)
+	if e != nil {
+		httpx.Error(w, 502, e.Error())
+		return
+	}
+	found := map[string]bool{}
+	for _, m := range list {
+		found[m.ID] = true
+	}
+	targets := list
+	unmatched := []map[string]any{}
+	if body.ModelIDs != nil {
+		want := map[string]bool{}
+		for _, mid := range body.ModelIDs {
+			want[mid] = true
+		}
+		targets = make([]remoteModel, 0, len(body.ModelIDs))
+		for _, m := range list {
+			if want[m.ID] {
+				targets = append(targets, m)
+			}
+		}
+		for _, mid := range body.ModelIDs {
+			if !found[mid] {
+				unmatched = append(unmatched, map[string]any{"nativeModel": mid})
+			}
+		}
+	}
+	existing := []string{}
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Where("tenant_id = ? AND upstream_id = ?", tenant, id).Pluck("native_model", &existing).Error; e != nil {
+		statusErr(w, e)
+		return
+	}
+	known := map[string]bool{}
+	for _, m := range existing {
+		known[m] = true
+	}
+	now := runtimeTimeString(h.store.now())
+	created, updated := 0, 0
+	for _, m := range targets {
+		res := h.deps.Gorm.WithContext(r.Context()).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"display_name": nullString(m.Name), "synced_at": now, "updated_at": now,
+					"status": "ready", "last_error": nil,
+				}),
+			}).
+			Table("upstream_models").
+			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": "chat", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
+		if res.Error != nil {
+			statusErr(w, res.Error)
+			return
+		}
+		if known[m.ID] {
+			updated++
+		} else {
+			created++
+			known[m.ID] = true
+		}
+	}
+	httpx.JSON(w, 200, map[string]any{"synced": len(targets), "created": created, "updated": updated, "unmatchedModels": unmatched})
 }
 func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string) (int, error) {
 	u, e := h.store.GetUpstream(ctx, tenant, id)
 	if e != nil {
 		return 0, e
 	}
-	var cfg upstreamConfig
-	if json.Unmarshal(u.Config, &cfg) != nil || cfg.BaseURL == "" {
-		return 0, errors.New("baseUrl not configured")
-	}
-	target, e := safeProviderURL(cfg.BaseURL, "/v1/models")
+	list, e := h.fetchUpstreamModelList(ctx, tenant, u)
 	if e != nil {
 		return 0, e
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
-	if cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	}
-	resp, e := h.service.gateway.client.Do(req)
-	if e != nil {
-		return 0, e
-	}
-	defer resp.Body.Close()
-	raw, e := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if e != nil {
-		return 0, e
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("model discovery status %d", resp.StatusCode)
-	}
-	type item struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	var result struct {
-		Data   []item `json:"data"`
-		Models []item `json:"models"`
-	}
-	if json.Unmarshal(raw, &result) != nil {
-		return 0, errors.New("invalid model catalog")
-	}
-	if len(result.Data) == 0 {
-		result.Data = result.Models
 	}
 	now := runtimeTimeString(h.store.now())
 	count := 0
-	for _, m := range result.Data {
-		if m.ID == "" {
-			continue
-		}
+	for _, m := range list {
 		res := h.deps.Gorm.WithContext(ctx).
 			Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},

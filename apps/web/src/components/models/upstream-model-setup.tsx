@@ -69,14 +69,9 @@ const CAPABILITY_LABEL = Object.fromEntries(
 
 type SyncResult = {
   synced: number;
-  created: number;
-  updated: number;
-  message?: string;
-  models?: UpstreamModelItem[];
   unmatchedModels?: Array<{
     nativeModel: string;
-    displayName?: string;
-    canonicalModel: string;
+    canonicalModel?: string;
   }>;
 };
 
@@ -240,12 +235,12 @@ export function UpstreamModelSetup({
       });
       const unmatchedText = formatUnmatchedModels(result.unmatchedModels);
       setSyncMessage(
-        `已添加 ${selectedRemoteIds.size} 个模型` + (unmatchedText ? `；${unmatchedText}` : ""),
+        `已添加 ${result.synced} 个模型` + (unmatchedText ? `；${unmatchedText}` : ""),
       );
       setPickerOpen(false);
       await load();
       if (unmatchedText) toast.message(unmatchedText);
-      toast.success(`已添加 ${selectedRemoteIds.size} 个模型`);
+      toast.success(`已添加 ${result.synced} 个模型`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {

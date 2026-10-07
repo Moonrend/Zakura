@@ -87,12 +87,6 @@ type LogicalModel = {
   deployments: Deployment[];
 };
 
-type ModelMatchFailure = {
-  nativeModel: string;
-  displayName?: string;
-  canonicalModel: string;
-};
-
 const CAPABILITY_LABEL: Record<string, string> = {
   chat: "对话",
   embedding: "向量化",
@@ -186,13 +180,6 @@ function readReasoningLevelsFromMetaJson(raw: string): string[] | undefined {
 function normalizeReasoningPreset(value?: string): ReasoningPreset {
   if (value?.trim() && value !== "none") return value.trim() as ReasoningPreset;
   return "default";
-}
-
-function formatUnmatchedModels(models?: ModelMatchFailure[]): string | null {
-  if (!models?.length) return null;
-  return `以下模型仍匹配失败，需要手动选数据：${models
-    .map((model) => model.nativeModel)
-    .join("、")}`;
 }
 
 export default function ModelRoutesPage() {
@@ -316,19 +303,14 @@ function ModelRoutesPageInner() {
     setRefreshingMeta(true);
     try {
       const res = await api<{
-        imported: number;
-        renamed?: number;
-        rematched?: number;
-        unmatchedModels?: ModelMatchFailure[];
-        message?: string;
+        synced: number;
+        failed?: Record<string, string>;
       }>("/api/model-catalog/refresh", { method: "POST", json: {} });
-      toast.success(
-        `元数据已刷新（导入 ${res.imported} 条${
-          res.renamed != null ? `，重命名 ${res.renamed}` : ""
-        }）`,
-      );
-      const unmatchedText = formatUnmatchedModels(res.unmatchedModels);
-      if (unmatchedText) toast.message(unmatchedText);
+      toast.success(`已同步 ${res.synced} 个模型`);
+      const failedCount = res.failed ? Object.keys(res.failed).length : 0;
+      if (failedCount > 0) {
+        toast.warning(`${failedCount} 个上游同步失败，可查看上游连接状态`);
+      }
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
