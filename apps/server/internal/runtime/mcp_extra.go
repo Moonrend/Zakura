@@ -558,11 +558,11 @@ func (h *handler) exposedMCPTools(r *http.Request, p httpx.Principal, agentID, s
 				continue
 			}
 			rawQualified := slugify(summary.Ref) + "__" + local
-			qualified := "re_" + rawQualified
-			if len(allow) > 0 && !listContains(allow, qualified, rawQualified, "re_"+local, local) {
+			qualified := rawQualified
+			if len(allow) > 0 && !listContains(allow, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
 				continue
 			}
-			if listContains(deny, qualified, rawQualified, "re_"+local, local) {
+			if listContains(deny, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
 				continue
 			}
 			out = append(out, exposedMCPTool{Instance: instance, LocalName: local, Name: qualified, Tool: tool})
@@ -942,10 +942,20 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var selected *exposedMCPTool
+		name := pms.Name
 		for i := range exposed {
-			if exposed[i].Name == pms.Name || exposed[i].Instance.ID+":"+exposed[i].LocalName == pms.Name {
+			if exposed[i].Name == name || exposed[i].Instance.ID+":"+exposed[i].LocalName == name {
 				selected = &exposed[i]
 				break
+			}
+		}
+		if selected == nil && strings.HasPrefix(name, "re_") {
+			name = strings.TrimPrefix(name, "re_")
+			for i := range exposed {
+				if exposed[i].Name == name || exposed[i].Instance.ID+":"+exposed[i].LocalName == name {
+					selected = &exposed[i]
+					break
+				}
 			}
 		}
 		if selected == nil {
@@ -1030,7 +1040,7 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			_ = json.Unmarshal(result, &response)
 			for _, item := range response.Prompts {
 				if local, _ := item["name"].(string); local != "" {
-					item["name"] = "re_" + slugify(instance.Ref) + "__" + local
+					item["name"] = slugify(instance.Ref) + "__" + local
 					item["_meta"] = map[string]any{"instanceId": instance.ID, "localName": local}
 					items = append(items, item)
 				}
@@ -1046,9 +1056,13 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(raw, &params)
 		instances, _ := h.accessibleMCPInstances(r, p, spaceID)
 		for _, instance := range instances {
-			prefix := "re_" + slugify(instance.Ref) + "__"
-			if strings.HasPrefix(params.Name, prefix) {
-				result, err := h.mcpRPC(r.Context(), instance, "prompts/get", map[string]any{"name": strings.TrimPrefix(params.Name, prefix), "arguments": params.Arguments})
+			prefix := slugify(instance.Ref) + "__"
+			local, ok := strings.CutPrefix(params.Name, prefix)
+			if !ok {
+				local, ok = strings.CutPrefix(params.Name, "re_"+prefix)
+			}
+			if ok {
+				result, err := h.mcpRPC(r.Context(), instance, "prompts/get", map[string]any{"name": local, "arguments": params.Arguments})
 				if err != nil {
 					reply(nil, map[string]any{"code": -32000, "message": err.Error()})
 					return
@@ -1066,9 +1080,13 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		name, _ := ref["name"].(string)
 		instances, _ := h.accessibleMCPInstances(r, p, spaceID)
 		for _, instance := range instances {
-			prefix := "re_" + slugify(instance.Ref) + "__"
-			if strings.HasPrefix(name, prefix) {
-				ref["name"] = strings.TrimPrefix(name, prefix)
+			prefix := slugify(instance.Ref) + "__"
+			local, ok := strings.CutPrefix(name, prefix)
+			if !ok {
+				local, ok = strings.CutPrefix(name, "re_"+prefix)
+			}
+			if ok {
+				ref["name"] = local
 				result, err := h.mcpRPC(r.Context(), instance, "completion/complete", params)
 				if err != nil {
 					reply(nil, map[string]any{"code": -32000, "message": err.Error()})

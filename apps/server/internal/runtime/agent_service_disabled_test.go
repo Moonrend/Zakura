@@ -50,6 +50,13 @@ func TestToolNameDisabledMatching(t *testing.T) {
 	if toolNameDisabled(qualified, "mcp__other__search") {
 		t.Fatalf("mcp1:echo matched wrong tool")
 	}
+	bare := disabledToolSet(raw(map[string]any{"disabledTools": []string{"echo__echo"}}))
+	if !toolNameDisabled(bare, "mcp__echo__echo") || !toolNameDisabled(bare, "echo__echo") {
+		t.Fatalf("bare echo__echo should disable mcp__echo__echo")
+	}
+	if toolNameDisabled(bare, "mcp__other__echo") {
+		t.Fatalf("bare echo__echo matched wrong tool")
+	}
 }
 
 func TestToolDisabledFromContext(t *testing.T) {

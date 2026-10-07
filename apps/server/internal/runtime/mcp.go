@@ -425,7 +425,7 @@ func (h *handler) listMCPTools(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(result, &listed)
 		for _, tool := range listed.Tools {
 			local, _ := tool["name"].(string)
-			tool["qualifiedName"], tool["localName"], tool["instanceId"], tool["providerId"] = "re_"+slugify(summary.Ref)+"__"+local, local, summary.ID, summary.Ref
+			tool["qualifiedName"], tool["localName"], tool["instanceId"], tool["providerId"] = slugify(summary.Ref)+"__"+local, local, summary.ID, summary.Ref
 			out = append(out, tool)
 		}
 	}

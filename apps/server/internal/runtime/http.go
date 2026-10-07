@@ -507,7 +507,7 @@ func (h *handler) agentMCPInventory(ctx context.Context, tenant, spaceID string)
 		}
 		call("tools/list", &listedTools)
 		for _, tool := range listedTools.Tools {
-			tools = append(tools, map[string]any{"name": "re_" + slugify(item.Ref) + "__" + tool.Name, "qualifiedName": "re_" + slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "spaceScoped": true})
+			tools = append(tools, map[string]any{"name": slugify(item.Ref) + "__" + tool.Name, "qualifiedName": slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "spaceScoped": true})
 		}
 		var listedResources struct {
 			Resources []map[string]any `json:"resources"`
@@ -921,7 +921,7 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 			tools := make([]string, 0, len(manifest.Tools))
 			for _, tool := range manifest.Tools {
 				if tool.Name != "" {
-					tools = append(tools, "re_"+slugify(ref)+"__"+tool.Name)
+					tools = append(tools, slugify(ref)+"__"+tool.Name)
 				}
 			}
 			if len(tools) > 0 {
@@ -960,7 +960,7 @@ func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
 		tools := make([]string, 0, len(listed.Tools))
 		for _, tool := range listed.Tools {
 			if tool.Name != "" {
-				tools = append(tools, "re_"+slugify(ref)+"__"+tool.Name)
+				tools = append(tools, slugify(ref)+"__"+tool.Name)
 			}
 		}
 		if len(tools) > 0 {

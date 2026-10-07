@@ -205,7 +205,7 @@ export function toPublicToolDescriptor(
     | "execution"
   > & { name: string },
   opts?: {
-    /** 对外公开名（如带 re_ 前缀的 qualifiedName） */
+    /** 对外公开名（如 <ref>__<tool> 形式的 qualifiedName） */
     publicName?: string;
     /** 覆盖默认 oauth2 scopes */
     securitySchemes?: McpSecurityScheme[];

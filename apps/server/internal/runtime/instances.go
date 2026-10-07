@@ -156,7 +156,7 @@ func (h *handler) instanceDTO(ctx context.Context, tenant string, instance Insta
 	call("tools/list", &tools)
 	for _, tool := range tools.Tools {
 		name, _ := tool["name"].(string)
-		tool["localName"], tool["qualifiedName"], tool["instanceId"], tool["providerId"] = name, "re_"+slugify(instance.Ref)+"__"+name, instance.ID, instance.Ref
+		tool["localName"], tool["qualifiedName"], tool["instanceId"], tool["providerId"] = name, slugify(instance.Ref)+"__"+name, instance.ID, instance.Ref
 	}
 	out["tools"] = tools.Tools
 	var resources struct {

@@ -96,6 +96,21 @@ func TestMCPSpaceAuthorizationAndScopes(t *testing.T) {
 		if len(tools) != 2 {
 			t.Fatalf("space tool count (%+v): %d %#v", p, code, listed)
 		}
+		names := map[string]bool{}
+		for _, raw := range tools {
+			names[raw.(map[string]any)["name"].(string)] = true
+		}
+		if !names["alpha-tools__echo"] || !names["beta-tools__echo"] {
+			t.Fatalf("tool names not bare-qualified (%+v): %#v", p, tools)
+		}
+		code, legacy := call(p, "/mcp/spaces/"+space.Slug, "tools/call", "re_alpha-tools__echo")
+		if code != http.StatusOK || legacy["error"] != nil {
+			t.Fatalf("legacy re_ tool call (%+v): %d %#v", p, code, legacy)
+		}
+		code, bare := call(p, "/mcp/spaces/"+space.Slug, "tools/call", "alpha-tools__echo")
+		if code != http.StatusOK || bare["error"] != nil {
+			t.Fatalf("bare tool call (%+v): %d %#v", p, code, bare)
+		}
 		code, aliasListed := call(p, "/mcp/agents/"+a.Slug, "tools/list", "")
 		if code != http.StatusOK {
 			t.Fatalf("agent alias tools (%+v): %d %#v", p, code, aliasListed)

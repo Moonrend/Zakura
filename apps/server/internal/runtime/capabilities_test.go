@@ -59,7 +59,7 @@ func TestComposerInventoryAndSessionToolDetails(t *testing.T) {
 		if group["id"] == "connector:github" {
 			foundConnector = true
 			tools := group["tools"].([]any)
-			if len(tools) != 2 || tools[0] != "re_github__list_issues" {
+			if len(tools) != 2 || tools[0] != "github__list_issues" {
 				t.Fatalf("connector tools: %#v", group)
 			}
 		}

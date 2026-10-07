@@ -4,7 +4,7 @@
  * 一个 Skill = 一个含 `SKILL.md` 的目录：YAML frontmatter（name/description 必填）
  * + Markdown 正文 + 可选捆绑资源（scripts/ references/ assets/）。
  * 安装后写入 Agent 工作区 `/skills/<name>/`，既能被模型按需读取，
- * 也能经 MCP（re_list_skills / re_read_skill）被外部客户端调用。
+ * 也能经 MCP（list_skills / read_skill）被外部客户端调用。
  */
 
 /** Agent 工作区内的技能根目录（相对工作区根） */

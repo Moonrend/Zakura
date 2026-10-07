@@ -671,7 +671,7 @@ export type CloudAgentRunOptions = {
    */
   skills?: string[];
   /**
-   * 本回合禁用的工具，取模型可见的限定名（如 re_web_search）。
+   * 本回合禁用的工具，取模型可见的限定名（如 web_search）。
    * 用户在 Composer 的「连接器」面板里关掉的连接器 / MCP / 内置工具会展开成具体工具名。
    */
   disabledTools?: string[];

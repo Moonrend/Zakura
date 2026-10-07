@@ -241,11 +241,11 @@ func (h *handler) agentMCPCatalogTools(ctx context.Context, tenant, agentID, spa
 				continue
 			}
 			rawQualified := slugify(inst.Ref) + "__" + local
-			qualified := "re_" + rawQualified
-			if len(allow) > 0 && !listContains(allow, qualified, rawQualified, "re_"+local, local) {
+			qualified := rawQualified
+			if len(allow) > 0 && !listContains(allow, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
 				continue
 			}
-			if listContains(deny, qualified, rawQualified, "re_"+local, local) {
+			if listContains(deny, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
 				continue
 			}
 			out = append(out, agentTool{
