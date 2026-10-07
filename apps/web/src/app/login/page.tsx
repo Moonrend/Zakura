@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Building2, ChevronLeft, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Building2, ChevronLeft, Eye, EyeOff, Fingerprint, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api, setSession, type PlatformInfo, ApiError } from "@/lib/api";
 import { AuthField, AuthFooter, AuthScreen } from "@/components/auth-screen";
@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 type OauthProvider = { id: string; name: string; enabled: boolean };
 type Mode = "signin" | "register";
 type Step = "email" | "password" | "mfa";
-type MfaMode = "totp" | "webauthn" | "recovery";
+type MfaMode = "totp" | "webauthn" | "recovery" | "email";
 type SsoHint = { protocol: string; tenantSlug?: string };
 type Discover = {
   sso?: boolean;
@@ -47,7 +47,11 @@ export default function LoginPage() {
   const [passwordLoginEnabled, setPasswordLoginEnabled] = useState(true);
   const [highlightedMethod, setHighlightedMethod] = useState("auto");
   const [platformReady, setPlatformReady] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [resendIn, setResendIn] = useState(0);
   const passkeyTried = useRef(false);
+  const emailSentFor = useRef<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -63,9 +67,10 @@ export default function LoginPage() {
       const methods = methodsParam ? methodsParam.split(",") : [];
       setMfaTicket(ticket);
       setMfaMethods(methods);
-      setMfaMode(methods.includes("webauthn") ? "webauthn" : "totp");
+      setMfaMode(pickMfaMode(methods));
       setCode("");
       passkeyTried.current = false;
+      emailSentFor.current = null;
       go("mfa");
       window.history.replaceState(null, "", "/login");
     }
@@ -91,6 +96,12 @@ export default function LoginPage() {
     setDir(back ? "back" : "forward");
     setNotice(null);
     setStep(next);
+  }
+
+  function pickMfaMode(methods: string[]): MfaMode {
+    if (methods.includes("webauthn")) return "webauthn";
+    if (methods.includes("email") && !methods.includes("totp")) return "email";
+    return "totp";
   }
 
   function backToEmail() {
@@ -183,9 +194,10 @@ export default function LoginPage() {
         const methods = res.methods ?? [];
         setMfaTicket(res.mfaTicket);
         setMfaMethods(methods);
-        setMfaMode(methods.includes("webauthn") ? "webauthn" : "totp");
+        setMfaMode(pickMfaMode(methods));
         setCode("");
         passkeyTried.current = false;
+        emailSentFor.current = null;
         go("mfa");
         setLoading(false);
         return;
@@ -237,6 +249,50 @@ export default function LoginPage() {
     }
   }
 
+  async function sendEmailCode() {
+    if (!mfaTicket) return;
+    setSendingCode(true);
+    try {
+      await api("/api/auth/mfa/email/send", { method: "POST", json: { ticket: mfaTicket } });
+      toast.success("验证码已发送");
+      setResendIn(60);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSendingCode(false);
+    }
+  }
+
+  async function startPasskeyLogin() {
+    const addr = email.trim();
+    if (!addr) {
+      toast.error("请先输入邮箱");
+      return;
+    }
+    setPasskeyBusy(true);
+    try {
+      const { startAuthentication } = await import("@simplewebauthn/browser");
+      const options = await api<Record<string, unknown>>("/api/auth/webauthn/login/options", {
+        method: "POST",
+        json: { email: addr },
+      });
+      const json = (options as { publicKey?: Record<string, unknown> }).publicKey ?? options;
+      const assertion = await startAuthentication({ optionsJSON: json } as never);
+      const res = await api<{ session: string; tenant?: { onboardingCompleted?: boolean } }>(
+        "/api/auth/webauthn/login",
+        { method: "POST", json: { email: addr, assertion } },
+      );
+      setSession(res.session);
+      router.push(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
+    } catch (err) {
+      const name = err instanceof Error ? err.name : "";
+      if (name !== "NotAllowedError") {
+        toast.error(err instanceof Error ? err.message : String(err));
+      }
+      setPasskeyBusy(false);
+    }
+  }
+
   async function startPasskey() {
     if (!mfaTicket) return;
     setLoading(true);
@@ -264,6 +320,20 @@ export default function LoginPage() {
     void startPasskey();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, mfaMode]);
+
+  useEffect(() => {
+    if (step !== "mfa" || mfaMode !== "email") return;
+    if (!mfaTicket || emailSentFor.current === mfaTicket) return;
+    emailSentFor.current = mfaTicket;
+    void sendEmailCode();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, mfaMode, mfaTicket]);
+
+  useEffect(() => {
+    if (step !== "mfa" || mfaMode !== "email" || resendIn <= 0) return;
+    const timer = setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [step, mfaMode, resendIn]);
 
   async function startOauth(providerId: string) {
     setOauthLoading(providerId);
@@ -457,6 +527,16 @@ export default function LoginPage() {
                 {loading ? "继续…" : "使用邮箱继续"}
               </Button>
             </form>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-10 w-full"
+              disabled={busy || passkeyBusy}
+              onClick={() => void startPasskeyLogin()}
+            >
+              {passkeyBusy ? <Loader2 className="animate-spin" /> : <Fingerprint className="size-4" />}
+              {passkeyBusy ? "等待设备…" : "使用通行密钥登录"}
+            </Button>
           </>
         ) : null}
 
@@ -554,11 +634,70 @@ export default function LoginPage() {
                       改用验证码
                     </button>
                   ) : null}
+                  {mfaMethods.includes("email") ? (
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("email"); setCode(""); }}>
+                      改用邮箱验证码
+                    </button>
+                  ) : null}
                   <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("recovery"); setCode(""); }}>
                     使用恢复码
                   </button>
                 </div>
               </div>
+            ) : mfaMode === "email" ? (
+              <form
+                className="space-y-4"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void completeMfa({ emailCode: code });
+                }}
+              >
+                <p className="text-sm text-muted-foreground">验证码已发送至你的邮箱</p>
+                <AuthField
+                  label="邮箱验证码"
+                  htmlFor="mfa-code"
+                  action={
+                    <button
+                      type="button"
+                      className="text-sm text-muted-foreground hover:text-foreground disabled:opacity-50"
+                      disabled={sendingCode || resendIn > 0}
+                      onClick={() => void sendEmailCode()}
+                    >
+                      {resendIn > 0 ? `${resendIn}s 后重发` : "发送验证码"}
+                    </button>
+                  }
+                >
+                  <Input
+                    id="mfa-code"
+                    className="h-10 tracking-widest"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    autoFocus
+                    placeholder="6 位数字"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value)}
+                  />
+                </AuthField>
+                <Button type="submit" className="h-10 w-full" disabled={loading || code.trim().length < 6}>
+                  {loading ? <Loader2 className="animate-spin" /> : null}
+                  {loading ? "验证中…" : "验证"}
+                </Button>
+                <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-sm">
+                  {mfaMethods.includes("totp") ? (
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("totp"); setCode(""); }}>
+                      改用验证码
+                    </button>
+                  ) : null}
+                  {mfaMethods.includes("webauthn") ? (
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("webauthn"); passkeyTried.current = false; setCode(""); }}>
+                      改用通行密钥
+                    </button>
+                  ) : null}
+                  <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("recovery"); setCode(""); }}>
+                    使用恢复码
+                  </button>
+                </div>
+              </form>
             ) : (
               <form
                 className="space-y-4"
@@ -593,6 +732,11 @@ export default function LoginPage() {
                   {mfaMethods.includes("webauthn") ? (
                     <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("webauthn"); passkeyTried.current = false; }}>
                       改用通行密钥
+                    </button>
+                  ) : null}
+                  {mfaMethods.includes("email") ? (
+                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => { setMfaMode("email"); setCode(""); }}>
+                      改用邮箱验证码
                     </button>
                   ) : null}
                   {mfaMode !== "recovery" ? (
