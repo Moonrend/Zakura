@@ -398,6 +398,7 @@ func (h *handler) authenticateRealtime(ctx context.Context, raw string) (httpx.P
 	}
 	str := func(k string) string { v, _ := claims[k].(string); return v }
 	p := httpx.Principal{UserID: str("sub"), TenantID: str("tenantId"), Email: str("email"), Role: str("role"), SessionID: str("sid")}
+	p.IsPlatformAdmin, _ = claims["isPlatformAdmin"].(bool)
 	var count int64
 	e = h.deps.Gorm.WithContext(ctx).Model(&models.UserSession{}).Where("id=? AND user_id=? AND tenant_id=? AND revoked_at IS NULL AND expires_at>?", p.SessionID, p.UserID, p.TenantID, runtimeTimeString(h.store.now())).Count(&count).Error
 	if e != nil || count == 0 {
@@ -498,6 +499,19 @@ func broadcastTenant(tenant, event string, payload any, except string) {
 	clients := []*realtimeClient{}
 	for _, c := range realtimeHub.clients {
 		if c.id != except && c.authed && c.principal.TenantID == tenant {
+			clients = append(clients, c)
+		}
+	}
+	realtimeHub.Unlock()
+	for _, c := range clients {
+		_ = c.emit(event, payload)
+	}
+}
+func broadcastPlatform(event string, payload any) {
+	realtimeHub.Lock()
+	clients := []*realtimeClient{}
+	for _, c := range realtimeHub.clients {
+		if c.authed && (c.principal.IsPlatformAdmin || (c.principal.Role == "owner" || c.principal.Role == "admin")) {
 			clients = append(clients, c)
 		}
 	}

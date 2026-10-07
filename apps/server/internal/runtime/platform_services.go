@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -127,7 +126,7 @@ func platformServicePublic(raw map[string]any, cfg map[string]any) map[string]an
 	out["catalogDefaultImage"] = meta["defaultImage"]
 	out["catalogDefaultHostPort"] = meta["defaultHostPort"]
 	out["config"] = map[string]any{"image": cfg["image"], "hostPort": cfg["hostPort"], "hasApiKey": false, "envKeys": []string{}}
-	out["progress"] = map[string]any{"serviceKey": key, "phase": "idle", "percent": 0, "running": false, "done": false, "error": nil, "message": "", "events": []any{}, "updatedAt": time.Now().UnixMilli()}
+	out["progress"] = psProgressSnapshotFor(key)
 	mode, _ := out["mode"].(string)
 	state, label, tone, actions := "off", "Not enabled", "neutral", []string{"deploy"}
 	if mode == "external" {
@@ -338,12 +337,19 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	key := chi.URLParam(r, "key")
+	if force {
+		beginPSProgress(key, "checking", "检查更新…")
+	} else {
+		beginPSProgress(key, "checking", "准备中…")
+	}
 	var b struct {
 		Image string `json:"image"`
 		Force bool   `json:"force"`
 	}
 	if body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)); len(bytes.TrimSpace(body)) > 0 {
 		if json.Unmarshal(body, &b) != nil {
+			logPSProgress(key, "config", "invalid JSON", "error", -1, "")
+			finishPSProgress(key, "invalid JSON", "")
 			httpx.Error(w, 400, "invalid JSON")
 			return
 		}
@@ -360,15 +366,20 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		image, _ = catalogService(key)["defaultImage"].(string)
 	}
 	if image == "" {
+		logPSProgress(key, "config", "service image required", "error", -1, "")
+		finishPSProgress(key, "service image required", "")
 		httpx.Error(w, 400, "service image required")
 		return
 	}
+	logPSProgress(key, "config", "使用镜像 "+image, "info", 6, "")
 	cfg["image"] = image
 	enc := ""
 	if merged, e := json.Marshal(cfg); e == nil {
 		if s, e := secretBox(h.deps.Secret, "platform-service:"+key, merged); e == nil {
 			enc = s
 			if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Update("config_enc", enc).Error; e != nil {
+				logPSProgress(key, "db", e.Error(), "error", -1, "")
+				finishPSProgress(key, e.Error(), "")
 				statusErr(w, e)
 				return
 			}
@@ -379,6 +390,11 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 	}
 	if e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&old).Error; e == nil {
 		for _, id := range platformContainerIDs(old.ContainersJSON) {
+			short := id
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			logPSProgress(key, "cleanup", "移除旧容器 "+short, "info", 10, "")
 			_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/stop?t=10", nil)
 			_, _, _ = dockerCall(r.Context(), http.MethodDelete, "/v1.43/containers/"+id+"?force=true", nil)
 		}
@@ -394,19 +410,31 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if force || b.Force {
+		logPSProgress(key, "pull", "拉取镜像 "+image, "info", 15, "pulling")
 		if e := dockerPull(r.Context(), image); e != nil {
+			logPSProgress(key, "pull", e.Error(), "error", -1, "")
+			finishPSProgress(key, e.Error(), "")
 			httpx.Error(w, 502, e.Error())
 			return
 		}
+		logPSProgress(key, "pull", "镜像拉取完成", "ok", 40, "")
 	} else if _, _, e := dockerCall(r.Context(), http.MethodGet, "/v1.43/images/"+url.PathEscape(image)+"/json", nil); e != nil {
+		logPSProgress(key, "pull", "拉取镜像 "+image, "info", 15, "pulling")
 		if e := dockerPull(r.Context(), image); e != nil {
+			logPSProgress(key, "pull", e.Error(), "error", -1, "")
+			finishPSProgress(key, e.Error(), "")
 			httpx.Error(w, 502, e.Error())
 			return
 		}
+		logPSProgress(key, "pull", "镜像拉取完成", "ok", 40, "")
+	} else {
+		logPSProgress(key, "pull", "镜像已存在本地", "info", 40, "")
 	}
 	name := "zakura-service-" + slugify(key)
 	raw, _, e := dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/create?name="+url.QueryEscape(name), map[string]any{"Image": image, "Env": stringList(cfg["env"]), "Labels": map[string]string{"com.zakura.platform-service": key}})
 	if e != nil {
+		logPSProgress(key, "create", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		httpx.Error(w, 502, e.Error())
 		return
 	}
@@ -414,13 +442,23 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		ID string `json:"Id"`
 	}
 	if json.Unmarshal(raw, &created) != nil || created.ID == "" {
+		logPSProgress(key, "create", "invalid Docker response", "error", -1, "")
+		finishPSProgress(key, "invalid Docker response", "")
 		httpx.Error(w, 502, "invalid Docker response")
 		return
 	}
+	short := created.ID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	logPSProgress(key, "create", "容器已创建 "+short, "ok", 60, "creating")
 	if _, _, e = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+created.ID+"/start", nil); e != nil {
+		logPSProgress(key, "start", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		httpx.Error(w, 502, e.Error())
 		return
 	}
+	logPSProgress(key, "start", "容器已启动", "ok", 80, "starting")
 	containers, _ := json.Marshal([]string{created.ID})
 	now := runtimeTimeString(h.store.now())
 	e = h.deps.Gorm.WithContext(r.Context()).
@@ -431,9 +469,12 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		Table("platform_services").
 		Create(map[string]any{"id": h.store.id(), "service_key": key, "mode": "managed", "desired_state": "running", "status": "running", "health_status": "unknown", "config_enc": enc, "endpoint_url": nil, "containers_json": string(containers), "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
+		logPSProgress(key, "db", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		statusErr(w, e)
 		return
 	}
+	finishPSProgress(key, "", "部署完成 · "+image)
 	h.getPlatformService(w, r)
 }
 func stringList(v any) []string {
@@ -502,31 +543,37 @@ func (h *handler) disablePlatformService(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	key := chi.URLParam(r, "key")
+	beginPSProgress(key, "stopping", "正在停止…")
 	var row struct {
 		ContainersJSON string `gorm:"column:containers_json"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
+		logPSProgress(key, "db", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		statusErr(w, e)
 		return
 	}
 	for _, id := range platformContainerIDs(row.ContainersJSON) {
+		short := id
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		logPSProgress(key, "stop", "停止容器 "+short, "info", 30, "")
 		_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/stop?t=10", nil)
 	}
 	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"mode": "disabled", "desired_state": "stopped", "status": "stopped", "health_status": "unknown", "updated_at": runtimeTimeString(h.store.now())}).Error
 	if e != nil {
+		logPSProgress(key, "db", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		statusErr(w, e)
 		return
 	}
+	finishPSProgress(key, "", "已停止")
 	h.getPlatformService(w, r)
 }
 func (h *handler) platformServiceProgress(w http.ResponseWriter, r *http.Request) {
-	x, e := h.getPlatformServiceRow(r, chi.URLParam(r, "key"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"progress": map[string]any{"status": x["status"], "desiredState": x["desiredState"], "healthStatus": x["healthStatus"], "error": x["lastError"]}})
+	httpx.JSON(w, 200, map[string]any{"progress": psProgressSnapshotFor(chi.URLParam(r, "key"))})
 }
 func (h *handler) platformServiceLogs(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
@@ -597,19 +644,33 @@ func (h *handler) platformServiceStart(w http.ResponseWriter, r *http.Request) {
 	h.connectPlatformService(w, r)
 }
 func (h *handler) platformServiceRestart(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if !p.IsPlatformAdmin && !(!h.deps.MultiTenant && (p.Role == "owner" || p.Role == "admin")) {
+		httpx.Error(w, 403, "platform admin required")
+		return
+	}
 	key := chi.URLParam(r, "key")
+	beginPSProgress(key, "restarting", "正在重启…")
 	var row struct {
 		ContainersJSON string `gorm:"column:containers_json"`
 	}
 	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
+		logPSProgress(key, "db", e.Error(), "error", -1, "")
+		finishPSProgress(key, e.Error(), "")
 		statusErr(w, e)
 		return
 	}
 	for _, id := range platformContainerIDs(row.ContainersJSON) {
+		short := id
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		logPSProgress(key, "restart", "重启容器 "+short, "info", 40, "")
 		_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/restart?t=10", nil)
 	}
 	h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"status": "running", "desired_state": "running", "updated_at": runtimeTimeString(h.store.now())})
+	finishPSProgress(key, "", "已重启")
 	h.getPlatformService(w, r)
 }
 func (h *handler) platformServiceHealth(w http.ResponseWriter, r *http.Request) {
