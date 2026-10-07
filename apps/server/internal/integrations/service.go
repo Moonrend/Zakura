@@ -159,7 +159,7 @@ func (h *handler) callProvider(ctx context.Context, tenant, agent, ref, action s
 		if base == "" {
 			base = "https://open.feishu.cn/open-apis"
 		}
-	case "email":
+	case "email", "email-smtp", "email-mailgun", "email-resendapi", "email-amail", "email-bettermail":
 		return 0, nil, errors.New("email delivery requires the SMTP channel service")
 	}
 	if explicit, _ := cfg["actionPath"].(map[string]any); explicit != nil {
@@ -412,7 +412,21 @@ func (h *handler) searchConnections(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"items": items, "total": len(items)})
 }
 func (h *handler) connectionSources(w http.ResponseWriter, r *http.Request) {
-	httpx.JSON(w, 200, map[string]any{"sources": []map[string]any{{"id": "platform", "name": "Zakura integrations", "description": "Built-in verified connectors", "kind": "builtin", "format": "auto"}}})
+	p := principal(r)
+	sources := []map[string]any{{"id": "platform", "name": "Zakura integrations", "description": "Built-in verified connectors", "kind": "builtin", "format": "auto"}}
+	var rows []models.McpStoreSource
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("created_at").Find(&rows).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	for _, row := range rows {
+		description := row.Description
+		if description == "" {
+			description = "Custom source"
+		}
+		sources = append(sources, map[string]any{"id": *row.ID, "name": row.Name, "description": description, "kind": "custom", "format": row.Format, "url": row.SourceURL})
+	}
+	httpx.JSON(w, 200, map[string]any{"sources": sources})
 }
 func (h *handler) listPackages(w http.ResponseWriter, r *http.Request) {
 	term := "%" + r.URL.Query().Get("q") + "%"

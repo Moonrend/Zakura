@@ -49,6 +49,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		h.routes(api)
 	})
 	h.startDeliverer(deps.RunContext())
+	h.seedEmailPackages(deps.RunContext())
 }
 func (h *handler) routes(r chi.Router) {
 	r.Get("/api/connectors", h.listConnectors)
@@ -146,9 +147,34 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 			profiles[row.ProfileKey] = profileState{scope: row.ScopeKey, label: row.Label, fields: fields, enabled: row.Enabled}
 		}
 	}
+	settingsByRef := map[string][]string{}
+	var srows []models.ConnectorSetting
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ?", p.TenantID).Find(&srows).Error; e == nil {
+		for _, row := range srows {
+			if raw, de := decrypt(h.deps.Secret, p.TenantID+":"+row.ConnectorRef, row.ConfigEnc); de == nil {
+				var cfg map[string]any
+				if json.Unmarshal(raw, &cfg) == nil {
+					keys := []string{}
+					for k, v := range cfg {
+						if strings.HasPrefix(k, "oauth") || v == nil {
+							continue
+						}
+						if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+							continue
+						}
+						keys = append(keys, k)
+					}
+					settingsByRef[row.ConnectorRef] = keys
+				}
+			}
+		}
+	}
 	items := make([]map[string]any, 0, len(providers))
 	for _, x := range providers {
 		st, ok := profiles[x.Auth.Profile]
+		if !ok && strings.HasPrefix(x.Auth.Profile, "email-") {
+			st, ok = profiles["email"]
+		}
 		fields := []string{}
 		profileLabel := x.Auth.ProfileLabel
 		if profileLabel == "" {
@@ -171,16 +197,49 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 		if ready {
 			status = "ready"
 		}
+		authSettings := x.Auth.Settings
+		if authSettings == nil {
+			authSettings = []AuthField{}
+		}
+		configuredSettings := settingsByRef[x.Ref]
+		if configuredSettings == nil && strings.HasPrefix(x.Ref, "email-") {
+			configuredSettings = settingsByRef["email"]
+		}
+		if configuredSettings == nil {
+			configuredSettings = []string{}
+		}
+		auth := map[string]any{
+			"kind": x.Auth.Kind, "profile": x.Auth.Profile, "profileLabel": x.Auth.ProfileLabel,
+			"docsUrl": x.Auth.DocsURL, "fields": x.Auth.Fields, "settings": authSettings,
+		}
+		if x.Auth.AuthorizationEndpoint != "" {
+			auth["authorizationEndpoint"] = x.Auth.AuthorizationEndpoint
+		}
+		if x.Auth.TokenEndpoint != "" {
+			auth["tokenEndpoint"] = x.Auth.TokenEndpoint
+		}
+		if len(x.Auth.AuthorizeParams) > 0 {
+			auth["authorizeParams"] = x.Auth.AuthorizeParams
+		}
+		if x.Auth.TokenField != "" {
+			auth["tokenField"] = x.Auth.TokenField
+		}
+		if x.Auth.TokenHeader != "" {
+			auth["tokenHeader"] = x.Auth.TokenHeader
+		}
+		if x.Auth.TokenScheme != "" {
+			auth["tokenScheme"] = x.Auth.TokenScheme
+		}
 		items = append(items, map[string]any{
 			"id": x.Ref, "ref": x.Ref, "name": x.Name, "description": x.Description,
 			"package": map[string]any{"slug": x.Package.Slug, "name": x.Package.Name, "icon": x.Package.Icon, "accent": x.Package.Accent, "homepage": x.Package.Homepage},
-			"auth":    map[string]any{"kind": x.Auth.Kind, "profile": x.Auth.Profile, "profileLabel": x.Auth.ProfileLabel, "docsUrl": x.Auth.DocsURL, "fields": x.Auth.Fields},
+			"auth":    auth,
 			"status":  status, "ready": ready, "enabled": ready,
 			"lockedByPlatform":   false,
 			"profile":            map[string]any{"key": x.Auth.Profile, "label": profileLabel, "shared": false, "connectorRefs": []string{x.Ref}, "configuredFields": fields, "enabled": profileEnabled},
 			"credentialSource":   credentialSource,
 			"configuredFields":   fields,
-			"configuredSettings": []any{},
+			"configuredSettings": configuredSettings,
 			"authorized":         false, "installations": []any{},
 			"docsUrl": x.Auth.DocsURL, "hasTools": false, "capabilities": []any{},
 			"authKind": x.AuthKind, "installedAgents": installed[x.Ref],

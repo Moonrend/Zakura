@@ -506,11 +506,22 @@ func (h *handler) deleteEmailConnector(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
+func emailProductForRef(ref string) (string, bool) {
+	p, ok := provider(ref)
+	if !ok || !strings.HasPrefix(p.Ref, "email-") {
+		return "", false
+	}
+	return strings.TrimPrefix(p.Ref, "email-"), true
+}
 func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 	tenant, id := chi.URLParam(r, "tenantId"), chi.URLParam(r, "connectorId")
 	q := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND enabled = true", tenant)
 	if id != "" {
-		q = q.Where("id = ?", id)
+		if product, ok := emailProductForRef(id); ok {
+			q = q.Where("product = ?", product)
+		} else {
+			q = q.Where("id = ?", id)
+		}
 	}
 	var connector models.EmailConnectorInstance
 	e := q.Order("created_at").First(&connector).Error
@@ -535,7 +546,10 @@ func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	var cfg map[string]any
 	_ = json.Unmarshal(cfgRaw, &cfg)
-	secret, _ := cfg["webhookSecret"].(string)
+	secret, _ := cfg["inboundSecret"].(string)
+	if secret == "" {
+		secret, _ = cfg["webhookSecret"].(string)
+	}
 	sig := strings.TrimPrefix(r.Header.Get("X-Zakura-Signature"), "sha256=")
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(raw)
@@ -548,7 +562,10 @@ func (h *handler) emailInbound(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	agent, _ := cfg["agentId"].(string)
+	agent, _ := cfg["inboundAgentId"].(string)
+	if agent == "" {
+		agent, _ = cfg["agentId"].(string)
+	}
 	if agent == "" {
 		httpx.Error(w, 400, "email connector has no agentId")
 		return

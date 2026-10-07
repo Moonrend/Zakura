@@ -149,6 +149,12 @@ func (h *handler) createConnectionSource(w http.ResponseWriter, r *http.Request)
 	if b.Format == "" {
 		b.Format = "auto"
 	}
+	switch b.Format {
+	case "auto", "codex", "claude", "mcp", "skill":
+	default:
+		httpx.Error(w, 400, "invalid format")
+		return
+	}
 	now := h.now().Format(time.RFC3339Nano)
 	id := h.id()
 	row := models.McpStoreSource{ID: strPtr(id), TenantID: p.TenantID, Name: b.Name, Description: b.Description, SourceURL: b.Repository, Format: b.Format, ManifestJSON: "{}", ServersJSON: "[]", Enabled: true, CreatedAt: now, UpdatedAt: now}
@@ -156,7 +162,11 @@ func (h *handler) createConnectionSource(w http.ResponseWriter, r *http.Request)
 		writeErr(w, e)
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"source": map[string]any{"id": id, "name": b.Name, "sourceUrl": b.Repository, "format": b.Format}})
+	description := b.Description
+	if description == "" {
+		description = "Custom source"
+	}
+	httpx.JSON(w, 201, map[string]any{"source": map[string]any{"id": id, "name": b.Name, "description": description, "kind": "custom", "format": b.Format, "url": b.Repository}})
 }
 func (h *handler) deleteConnectionSource(w http.ResponseWriter, r *http.Request) {
 	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.McpStoreSource{})
