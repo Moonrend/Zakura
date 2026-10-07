@@ -20,6 +20,20 @@ jobs:
   sandbox:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: zakura_test
+          POSTGRES_PASSWORD: zakura_test
+          POSTGRES_DB: zakura_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zakura_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -35,13 +49,30 @@ jobs:
           go vet ./...
       - name: Prepare sandbox test image
         run: |
-          docker pull alpine:3.23
-          echo "ZAKURA_SANDBOX_IMAGE=$(docker image inspect alpine:3.23 --format '{{index .RepoDigests 0}}')" >> "$GITHUB_ENV"
+          docker build -t zakura-sandbox-ci:local - <<'DOCKERFILE'
+          FROM alpine:3.23
+          RUN apk add --no-cache bash
+          DOCKERFILE
+          echo "ZAKURA_SANDBOX_IMAGE=$(docker image inspect zakura-sandbox-ci:local --format '{{.Id}}')" >> "$GITHUB_ENV"
       - name: Real container isolation and lifecycle checks
         working-directory: apps/agent
         env:
           ZAKURA_SANDBOX_INTEGRATION: '1'
         run: go test -count=1 -v ./internal/sandbox
+      - name: Build runner for server integration
+        working-directory: apps/agent
+        run: go build -o "$RUNNER_TEMP/zakura-sandbox-agent" ./cmd/zakura-agent
+      - name: Real server to runner sandbox integration
+        working-directory: apps/server
+        env:
+          ZAKURA_SERVER_SANDBOX_INTEGRATION: '1'
+          CGO_ENABLED: '1'
+        run: ZAKURA_SANDBOX_AGENT_BINARY="$RUNNER_TEMP/zakura-sandbox-agent" go test -count=1 -v ./internal/runtime -run '^TestSandboxServerRunnerDockerIntegration$' -timeout 3m
+      - name: PostgreSQL config compare-and-swap integration
+        working-directory: apps/server
+        env:
+          ZAKURA_TEST_POSTGRES_DSN: postgres://zakura_test:zakura_test@127.0.0.1:5432/zakura_test?sslmode=disable
+        run: go test -count=1 -v ./internal/platform/agentconfig -run Postgres
       - name: Server regression tests
         working-directory: apps/server
         env:

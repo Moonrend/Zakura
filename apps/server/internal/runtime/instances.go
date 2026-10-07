@@ -699,31 +699,26 @@ func (h *handler) putAgentProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	agent, err := h.store.GetAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if err != nil {
-		statusErr(w, err)
-		return
-	}
-	cfg := map[string]any{}
-	_ = json.Unmarshal(agent.Config, &cfg)
-	providers, _ := cfg["providers"].(map[string]any)
-	if providers == nil {
-		providers = map[string]any{}
-	}
-	for _, key := range []string{"webSearch", "webFetch"} {
-		if value, ok := patch[key]; ok {
-			providers[key] = value
-		}
-	}
-	cfg["providers"] = providers
-	agentPatch := map[string]any{"config": cfg}
+	columns := map[string]any{}
 	if value, ok := patch["enableMemory"]; ok {
-		agentPatch["enableMemory"] = value
+		columns["enable_memory"] = value
 	}
 	if value, ok := patch["memoryProviderId"]; ok {
-		agentPatch["memoryProviderId"] = value
+		columns["memory_provider_id"] = value
 	}
-	agent, err = h.store.UpdateAgent(r.Context(), p.TenantID, agent.ID, agentPatch)
+	agent, err := h.store.updateAgentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"), columns, func(cfg map[string]any) error {
+		providers, _ := cfg["providers"].(map[string]any)
+		if providers == nil {
+			providers = map[string]any{}
+		}
+		for _, key := range []string{"webSearch", "webFetch"} {
+			if value, ok := patch[key]; ok {
+				providers[key] = value
+			}
+		}
+		cfg["providers"] = providers
+		return nil
+	})
 	if err != nil {
 		statusErr(w, err)
 		return

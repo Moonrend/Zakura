@@ -53,18 +53,18 @@ type runnerReply struct {
 }
 
 type runnerSession struct {
-	hub      *runnerHub
-	nodeID   string
-	conn     net.Conn
-	rw       *bufio.ReadWriter
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[string]chan runnerReply
-	streams  map[string]func(string, []byte)
-	done     chan struct{}
-	closeOne sync.Once
-	ready    atomic.Bool
-	lastSeen atomic.Int64
+	hub       *runnerHub
+	nodeID    string
+	conn      net.Conn
+	rw        *bufio.ReadWriter
+	writeGate chan struct{}
+	mu        sync.Mutex
+	pending   map[string]chan runnerReply
+	streams   map[string]func(string, []byte)
+	done      chan struct{}
+	closeOne  sync.Once
+	ready     atomic.Bool
+	lastSeen  atomic.Int64
 }
 
 func newRunnerHub(deps *appdeps.Dependencies) *runnerHub {
@@ -117,7 +117,7 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	s := &runnerSession{hub: h.hub, nodeID: nodeID, conn: conn, rw: rw, pending: map[string]chan runnerReply{}, streams: map[string]func(string, []byte){}, done: make(chan struct{})}
+	s := &runnerSession{writeGate: make(chan struct{}, 1), hub: h.hub, nodeID: nodeID, conn: conn, rw: rw, pending: map[string]chan runnerReply{}, streams: map[string]func(string, []byte){}, done: make(chan struct{})}
 	s.lastSeen.Store(time.Now().UnixMilli())
 	h.hub.install(s)
 	defer func() {
@@ -212,13 +212,54 @@ func (s *runnerSession) close(reason error) {
 }
 
 func (s *runnerSession) writeJSON(frame runnerFrame) error {
+	return s.writeJSONContext(context.Background(), frame)
+}
+
+func (s *runnerSession) writeJSONContext(ctx context.Context, frame runnerFrame) error {
 	raw, err := json.Marshal(frame)
 	if err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return writeWSFrame(s.rw.Writer, 0x1, raw)
+	return s.writeFrameContext(ctx, 0x1, raw)
+}
+
+// Bound both waiting for the writer and the socket write itself. An RPC budget
+// cannot be enforced by selecting ctx.Done only after an unbounded write.
+func (s *runnerSession) writeFrameContext(ctx context.Context, opcode byte, raw []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	select {
+	case s.writeGate <- struct{}{}:
+		defer func() { <-s.writeGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return errors.New("runtime node agent is offline")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, _ := ctx.Deadline()
+	if err := s.conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.SetWriteDeadline(time.Now()); close(interrupted) })
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+		_ = s.conn.SetWriteDeadline(time.Time{})
+	}()
+	err := writeWSFrame(s.rw.Writer, opcode, raw)
+	if err != nil {
+		// A partially written frame cannot safely be reused by another RPC.
+		s.close(err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 func (s *runnerSession) readLoop() {
@@ -232,9 +273,9 @@ func (s *runnerSession) readLoop() {
 			return
 		}
 		if opcode == 0x9 {
-			s.writeMu.Lock()
-			_ = writeWSFrame(s.rw.Writer, 0xA, payload)
-			s.writeMu.Unlock()
+			if err := s.writeFrameContext(context.Background(), 0xA, payload); err != nil {
+				return
+			}
 			continue
 		}
 		if opcode != 0x1 && opcode != 0x2 {
@@ -291,7 +332,7 @@ func (s *runnerSession) call(ctx context.Context, method string, params any, out
 	}
 	s.pending[id] = pending
 	s.mu.Unlock()
-	if err := s.writeJSON(runnerFrame{Type: "req", ID: id, Method: method, Params: raw}); err != nil {
+	if err := s.writeJSONContext(ctx, runnerFrame{Type: "req", ID: id, Method: method, Params: raw}); err != nil {
 		s.mu.Lock()
 		delete(s.pending, id)
 		s.mu.Unlock()

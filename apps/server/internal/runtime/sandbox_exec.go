@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+const (
+	sandboxStartBudget = 10 * time.Second
+	// Runner cleanup may use 10 seconds plus a 2-second subprocess wait.
+	sandboxCleanupBudget  = 15 * time.Second
+	sandboxTransportGrace = sandboxStartBudget + sandboxCleanupBudget + 5*time.Second
+)
+
 // Use the runner's scoped job lifecycle so cancelling an agent run also cancels
 // its container. Cleanup has a separate deadline and never falls back to host.
 func runSandboxCommand(ctx context.Context, runner *runnerSession, params map[string]any) (result map[string]any, err error) {
@@ -15,7 +22,7 @@ func runSandboxCommand(ctx context.Context, runner *runnerSession, params map[st
 		return nil, ctx.Err()
 	}
 	result = map[string]any{}
-	startCtx, stopStart := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	startCtx, stopStart := context.WithTimeout(context.WithoutCancel(ctx), sandboxStartBudget)
 	err = runner.call(startCtx, "host.exec.start", params, &result)
 	stopStart()
 	if err != nil {
@@ -31,11 +38,23 @@ func runSandboxCommand(ctx context.Context, runner *runnerSession, params map[st
 		if !running {
 			return
 		}
-		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanup, cancel := context.WithTimeout(context.Background(), sandboxCleanupBudget)
 		defer cancel()
-		if cleanupErr := cancelSandboxJob(cleanup, runner, scoped); cleanupErr != nil {
+		terminal, cleanupErr := cancelSandboxJob(cleanup, runner, scoped)
+		if cleanupErr != nil {
 			result = nil
 			err = errors.Join(err, errors.New("sandbox cancellation could not be confirmed; the job remains bounded by its timeout"))
+			return
+		}
+		// Retain bounded output only after verified terminal cleanup.
+		if ctx.Err() != nil && terminal["exitCode"] != nil {
+			result = terminal
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				result["timedOut"] = true
+			}
+			if errors.Is(ctx.Err(), context.Canceled) && result["timedOut"] != true {
+				result["cancelled"] = true
+			}
 		}
 	}()
 	for {
@@ -70,31 +89,31 @@ func runSandboxCommand(ctx context.Context, runner *runnerSession, params map[st
 	}
 }
 
-func cancelSandboxJob(ctx context.Context, runner *runnerSession, scoped map[string]any) error {
+func cancelSandboxJob(ctx context.Context, runner *runnerSession, scoped map[string]any) (map[string]any, error) {
 	method := "host.exec.kill"
 	for {
 		var state map[string]any
 		if err := runner.call(ctx, method, scoped, &state); err != nil {
-			return err
+			return nil, err
 		}
 		if state["executionMode"] != "sandbox" || state["isolated"] != true {
-			return errors.New("unconfirmed sandbox cancellation")
+			return nil, errors.New("unconfirmed sandbox cancellation")
 		}
 		running, ok := state["running"].(bool)
 		if !ok {
-			return errors.New("invalid sandbox cancellation status")
+			return nil, errors.New("invalid sandbox cancellation status")
 		}
 		if !running {
 			if failure, _ := state["error"].(string); failure != "" {
-				return errors.New("sandbox cleanup was not confirmed")
+				return nil, errors.New("sandbox cleanup was not confirmed")
 			}
-			return nil
+			return state, nil
 		}
 		timer := time.NewTimer(100 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-timer.C:
 		}
 		method = "host.exec.get"

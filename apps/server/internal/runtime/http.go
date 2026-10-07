@@ -834,26 +834,22 @@ func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	a, e := h.store.GetAgent(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	cfg := map[string]any{}
-	_ = json.Unmarshal(a.Config, &cfg)
-	cloud, _ := cfg["cloud"].(map[string]any)
-	if cloud == nil {
-		cloud = map[string]any{}
-	}
-	for k, v := range patch {
-		if v == nil || v == "" {
-			delete(cloud, k)
-		} else {
-			cloud[k] = v
+	var cloud map[string]any
+	_, e := h.store.updateAgentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"), nil, func(cfg map[string]any) error {
+		cloud, _ = cfg["cloud"].(map[string]any)
+		if cloud == nil {
+			cloud = map[string]any{}
 		}
-	}
-	cfg["cloud"] = cloud
-	a, e = h.store.UpdateAgent(r.Context(), p.TenantID, a.ID, map[string]any{"config": cfg})
+		for k, v := range patch {
+			if v == nil || v == "" {
+				delete(cloud, k)
+			} else {
+				cloud[k] = v
+			}
+		}
+		cfg["cloud"] = cloud
+		return nil
+	})
 	if e != nil {
 		statusErr(w, e)
 		return

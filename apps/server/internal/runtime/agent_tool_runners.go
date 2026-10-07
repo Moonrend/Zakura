@@ -270,9 +270,9 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 	if timeoutMS > agentShellMaxMS {
 		timeoutMS = agentShellMaxMS
 	}
-	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond+sandboxTransportGrace)
 	defer cancel()
-	result, err := h.runtimeExecWithMode(callCtx, tenant, agent, builtinStringArg(args, "execution_mode"), "bash", "-lc", command)
+	result, err := h.runtimeExecWithModeTimeout(callCtx, tenant, agent, builtinStringArg(args, "execution_mode"), int64(timeoutMS), "bash", "-lc", command)
 	if result == nil {
 		if err != nil {
 			return nil, err
@@ -283,8 +283,17 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 	}
 	stdout, _ := result["stdout"].(string)
 	stderr, _ := result["stderr"].(string)
-	stdout, _ = h.truncateToolText(ctx, tenant, agent, stdout, "shell")
-	stderr, _ = h.truncateToolText(ctx, tenant, agent, stderr, "shell")
+	serverTruncated := len(stdout) > toolOutputMaxBytes || len(stderr) > toolOutputMaxBytes
+	if result["executionMode"] == "sandbox" {
+		// Decide from the actual result, including operator-enforced sandboxing.
+		// This path must never spill output through host filesystem RPCs.
+		stdout = boundedToolTextPreview(stdout)
+		stderr = boundedToolTextPreview(stderr)
+	} else {
+		stdout, _ = h.truncateToolText(ctx, tenant, agent, stdout, "shell")
+		stderr, _ = h.truncateToolText(ctx, tenant, agent, stderr, "shell")
+	}
+	runnerTruncated, _ := result["truncated"].(bool)
 	return builtinJSON(map[string]any{
 		"stdout":                  stdout,
 		"stderr":                  stderr,
@@ -294,6 +303,6 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 		"restrictedPolicyApplied": result["restrictedPolicyApplied"],
 		"timedOut":                result["timedOut"],
 		"cancelled":               result["cancelled"],
-		"truncated":               result["truncated"],
+		"truncated":               runnerTruncated || serverTruncated,
 	})
 }

@@ -69,8 +69,7 @@ func (h *handler) agentConfig(ctx context.Context, tenant, agent string) (Agent,
 	return a, cfg, nil
 }
 func (h *handler) saveAgentConfig(ctx context.Context, tenant string, a Agent, cfg map[string]any) error {
-	_, e := h.store.UpdateAgent(ctx, tenant, a.ID, map[string]any{"config": cfg})
-	return e
+	return h.store.saveAgentConfigChanges(ctx, tenant, a, cfg)
 }
 func acpMap(cfg map[string]any) map[string]any {
 	v, ok := cfg["acp"].(map[string]any)
@@ -116,6 +115,11 @@ func (h *handler) runtimeExec(ctx context.Context, tenant, agent, command string
 }
 
 func (h *handler) runtimeExecWithMode(ctx context.Context, tenant, agent, mode, command string, args ...string) (map[string]any, error) {
+	return h.runtimeExecWithModeTimeout(ctx, tenant, agent, mode, 0, command, args...)
+}
+
+// Execution budget is independent of RPC observation and container cleanup.
+func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent, mode string, executionTimeoutMS int64, command string, args ...string) (map[string]any, error) {
 	if mode != "" && mode != "host" && mode != "sandbox" {
 		return nil, errors.New("execution_mode must be host or sandbox")
 	}
@@ -137,24 +141,49 @@ func (h *handler) runtimeExecWithMode(ctx context.Context, tenant, agent, mode, 
 	if err != nil {
 		return nil, err
 	}
-	if mode == "sandbox" {
+	if mode == "sandbox" || (workspaceKind == "host" && executionTimeoutMS > 0) {
+		requested := mode == "sandbox"
 		var policy struct {
-			Sandbox struct {
+			Enforced bool `json:"enforced"`
+			Sandbox  struct {
 				Enabled bool `json:"enabled"`
 			} `json:"sandbox"`
 		}
-		if err := session.call(ctx, "sandbox.policy", map[string]any{}, &policy); err != nil || !policy.Sandbox.Enabled {
-			return nil, errors.New("runner does not support sandbox execution; upgrade or configure the runner")
+		policyErr := session.call(ctx, "sandbox.policy", map[string]any{}, &policy)
+		if policyErr != nil {
+			// Pre-policy runners explicitly reject the unknown method. A timeout,
+			// disconnect or other error is not evidence that enforcement is off.
+			legacyUnsupported := strings.Contains(policyErr.Error(), "未知方法: sandbox.policy") || strings.Contains(policyErr.Error(), "unknown method: sandbox.policy")
+			if requested || !legacyUnsupported {
+				return nil, errors.New("runner execution policy could not be confirmed")
+			}
+		} else if requested || policy.Enforced {
+			if !policy.Sandbox.Enabled {
+				return nil, errors.New("runner does not support sandbox execution; upgrade or configure the runner")
+			}
+			mode = "sandbox"
 		}
 	}
 	argv := append([]string{command}, args...)
-	timeoutMS := int64(30_000)
+	timeoutMS := executionTimeoutMS
+	if timeoutMS <= 0 {
+		timeoutMS = 30_000
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline).Milliseconds(); remaining > 0 {
-			timeoutMS = remaining
+			if executionTimeoutMS <= 0 || remaining < timeoutMS {
+				timeoutMS = remaining
+			}
 		} else {
 			return nil, context.DeadlineExceeded
 		}
+	}
+	if mode != "sandbox" && executionTimeoutMS > 0 {
+		// Preserve legacy RPC deadline behavior; only verified restricted jobs
+		// receive additional observation time for bounded terminal cleanup.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+		defer cancel()
 	}
 	result := map[string]any{}
 	if workspaceKind == "host" {
@@ -182,9 +211,10 @@ func (h *handler) runtimeExecWithMode(ctx context.Context, tenant, agent, mode, 
 			err = session.call(ctx, "docker.exec", map[string]any{"id": dockerID, "command": argv, "workingDir": "/workspace"}, &result)
 		}
 	}
-	if err != nil {
+	if err != nil && result == nil {
 		return nil, err
 	}
+	executionErr := err
 	// Describe the transport that actually ran the command. A normal workspace
 	// container provides container isolation but does not apply the restricted
 	// sandbox policy (network, read-only mount, resource limits, and cleanup).
@@ -206,6 +236,9 @@ func (h *handler) runtimeExecWithMode(ctx context.Context, tenant, agent, mode, 
 		result["executionMode"] = "host"
 		result["isolated"] = false
 		result["restrictedPolicyApplied"] = false
+	}
+	if executionErr != nil {
+		return result, executionErr
 	}
 	if code, ok := result["exitCode"].(float64); ok && code != 0 {
 		return result, fmt.Errorf("command exited %d: %v", int(code), result["stderr"])
