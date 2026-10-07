@@ -150,7 +150,8 @@ export default function AccountSettingsPage() {
       const options = await api<Record<string, unknown>>("/api/me/mfa/webauthn/register/options", {
         method: "POST",
       });
-      const response = await startRegistration({ optionsJSON: options } as never);
+      const json = (options as { publicKey?: Record<string, unknown> }).publicKey ?? options;
+      const response = await startRegistration({ optionsJSON: json } as never);
       await api("/api/me/mfa/webauthn/register", { method: "POST", json: { response, name: label } });
       setPasskeyOpen(false);
       await load();

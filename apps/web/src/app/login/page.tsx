@@ -246,7 +246,8 @@ export default function LoginPage() {
         method: "POST",
         json: { ticket: mfaTicket },
       });
-      const assertion = await startAuthentication({ optionsJSON: options } as never);
+      const json = (options as { publicKey?: Record<string, unknown> }).publicKey ?? options;
+      const assertion = await startAuthentication({ optionsJSON: json } as never);
       await completeMfa({ webauthn: assertion });
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
