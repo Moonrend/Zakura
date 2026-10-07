@@ -12,8 +12,7 @@
 #
 # 健康检查：server 暴露 /livez（liveness）与 /readyz（readiness）。
 # 迁移：默认 AUTO_MIGRATE=true（首启建表）；生产多副本请设 AUTO_MIGRATE=false，
-#       并先用一次 release 任务应用迁移，详见 deploy/README.md。
-# 旧全栈镜像（回滚参考）：deploy/legacy-fullstack-compose.yml
+#       并先用一次 release 任务应用迁移。
 
 services:
   server:
@@ -26,18 +25,12 @@ services:
       # 默认 SQLite；改用 Postgres：postgresql://zakura:zakura@postgres:5432/zakura
       DATABASE_URL: ${DATABASE_URL:-file:/data/zakura.db}
       DATA_DIR: /data
-      ZAKURA_DATA_DIR: /data
       # 必填（>=32 字节）；quickstart 用占位默认值，部署时务必覆盖
       ZAKURA_SECRET: ${ZAKURA_SECRET:-zakura-local-dev-secret-change-me-0123456789abcdef}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8787}
       WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-http://localhost:3001}
       ZAKURA_EDITION: ${ZAKURA_EDITION:-oss}
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
-      # 本机运行工作区容器时 bind 源必须是宿主机路径（详见 docs/deployment.md）
-      ZAKURA_HOST_DATA_DIR: ${ZAKURA_HOST_DATA_DIR:-}
-      # 工作区 / Runner 镜像直通（部署时按需覆盖）
-      ZAKURA_WORKSPACE_IMAGE: ${ZAKURA_WORKSPACE_IMAGE:-sunwuyuan/zakura-workspace-dev:latest}
-      ZAKURA_RUNNER_IMAGE: ${ZAKURA_RUNNER_IMAGE:-sunwuyuan/zakura-runner-dev:latest}
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     volumes:
