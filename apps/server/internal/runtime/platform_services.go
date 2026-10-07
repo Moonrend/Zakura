@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
@@ -125,8 +126,22 @@ func platformServicePublic(raw map[string]any, cfg map[string]any) map[string]an
 	}
 	out["catalogDefaultImage"] = meta["defaultImage"]
 	out["catalogDefaultHostPort"] = meta["defaultHostPort"]
-	out["config"] = map[string]any{"image": cfg["image"], "hostPort": cfg["hostPort"], "hasApiKey": false, "envKeys": []string{}}
-	out["progress"] = psProgressSnapshotFor(key)
+	apiKey, _ := cfg["apiKey"].(string)
+	env := stringList(cfg["env"])
+	envKeys := make([]string, 0, len(env))
+	for _, entry := range env {
+		name := entry
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if name = strings.TrimSpace(name); name != "" {
+			envKeys = append(envKeys, name)
+		}
+	}
+	slices.Sort(envKeys)
+	out["config"] = map[string]any{"image": cfg["image"], "hostPort": cfg["hostPort"], "hasApiKey": strings.TrimSpace(apiKey) != "", "envKeys": envKeys}
+	progress := psProgressSnapshotFor(key)
+	out["progress"] = progress
 	mode, _ := out["mode"].(string)
 	state, label, tone, actions := "off", "Not enabled", "neutral", []string{"deploy"}
 	if mode == "external" {
@@ -140,7 +155,7 @@ func platformServicePublic(raw map[string]any, cfg map[string]any) map[string]an
 			actions = append(actions, "upgrade")
 		}
 	}
-	out["lifecycle"] = map[string]any{"state": state, "label": label, "detail": out["endpointUrl"], "tone": tone, "busy": false, "actions": actions}
+	out["lifecycle"] = map[string]any{"state": state, "label": label, "detail": out["endpointUrl"], "tone": tone, "busy": progress.Running, "actions": actions}
 	return out
 }
 func (h *handler) listPlatformServices(w http.ResponseWriter, r *http.Request) {

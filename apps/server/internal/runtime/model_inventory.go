@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ type UpstreamModel struct {
 	CanonicalModel string          `json:"canonicalModel"`
 	DisplayName    *string         `json:"displayName"`
 	Capability     string          `json:"capability"`
-	Weight         string          `json:"weight"`
+	Weight         float64         `json:"weight"`
 	IsDefault      bool            `json:"isDefault"`
 	Options        json.RawMessage `json:"options"`
 	Meta           json.RawMessage `json:"meta"`
@@ -181,7 +182,8 @@ func (h *handler) queryUpstreamModels(r *http.Request, upstream string) ([]Upstr
 	}
 	out := make([]UpstreamModel, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, UpstreamModel{ID: row.ID, UpstreamID: row.UpstreamID, NativeModel: row.NativeModel, CanonicalModel: row.CanonicalModel, DisplayName: row.DisplayName, Capability: row.Capability, Weight: row.Weight, IsDefault: row.IsDefault, Options: json.RawMessage(row.OptionsJSON), Meta: json.RawMessage(row.MetaJSON), Status: row.Status, LastError: row.LastError, SyncedAt: row.SyncedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
+		weight, _ := strconv.ParseFloat(row.Weight, 64)
+		out = append(out, UpstreamModel{ID: row.ID, UpstreamID: row.UpstreamID, NativeModel: row.NativeModel, CanonicalModel: row.CanonicalModel, DisplayName: row.DisplayName, Capability: row.Capability, Weight: weight, IsDefault: row.IsDefault, Options: json.RawMessage(row.OptionsJSON), Meta: json.RawMessage(row.MetaJSON), Status: row.Status, LastError: row.LastError, SyncedAt: row.SyncedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt})
 	}
 	return out, nil
 }
@@ -222,15 +224,15 @@ func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	if x.Capability == "" {
 		x.Capability = "chat"
 	}
-	if x.Weight == "" {
-		x.Weight = "100"
+	if x.Weight == 0 {
+		x.Weight = 100
 	}
 	if x.Status == "" {
 		x.Status = "ready"
 	}
 	now := runtimeTimeString(h.store.now())
 	x.ID = h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": x.Weight, "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": strconv.FormatFloat(x.Weight, 'f', -1, 64), "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -496,8 +498,8 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 		if m.Capability == "" {
 			m.Capability = "chat"
 		}
-		if m.Weight == "" {
-			m.Weight = "100"
+		if m.Weight == 0 {
+			m.Weight = 100
 		}
 		now := runtimeTimeString(h.store.now())
 		res := h.deps.Gorm.WithContext(r.Context()).
@@ -509,7 +511,7 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 				}),
 			}).
 			Table("upstream_models").
-			Create(map[string]any{"id": h.store.id(), "tenant_id": principal(r).TenantID, "upstream_id": m.UpstreamID, "native_model": m.NativeModel, "canonical_model": m.CanonicalModel, "display_name": m.DisplayName, "capability": m.Capability, "weight": m.Weight, "is_default": m.IsDefault, "options_json": validJSON(m.Options, "{}"), "meta_json": validJSON(m.Meta, "{}"), "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
+			Create(map[string]any{"id": h.store.id(), "tenant_id": principal(r).TenantID, "upstream_id": m.UpstreamID, "native_model": m.NativeModel, "canonical_model": m.CanonicalModel, "display_name": m.DisplayName, "capability": m.Capability, "weight": strconv.FormatFloat(m.Weight, 'f', -1, 64), "is_default": m.IsDefault, "options_json": validJSON(m.Options, "{}"), "meta_json": validJSON(m.Meta, "{}"), "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error == nil {
 			count++
 		}
