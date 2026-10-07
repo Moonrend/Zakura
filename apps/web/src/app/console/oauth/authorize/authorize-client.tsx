@@ -3,10 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { api, setSession } from "@/lib/api";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
 type AuthorizeInfo = {
@@ -34,8 +32,6 @@ export default function OauthAuthorizePage() {
   const [info, setInfo] = useState<AuthorizeInfo | null>(null);
   const [infoError, setInfoError] = useState<string | null>(null);
   const [me, setMe] = useState<Me | null>(null);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   const query = useMemo(
@@ -69,26 +65,12 @@ export default function OauthAuthorizePage() {
       try {
         setMe(await api<Me>("/api/me"));
       } catch {
-        setMe(null);
+        router.replace(
+          `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`,
+        );
       }
     })();
   }, [query]);
-
-  async function login() {
-    setBusy(true);
-    try {
-      const res = await api<{ session: string }>("/api/auth/login", {
-        method: "POST",
-        json: { email, password },
-      });
-      setSession(res.session);
-      setMe(await api<Me>("/api/me"));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function approve() {
     setBusy(true);
@@ -183,44 +165,7 @@ export default function OauthAuthorizePage() {
             </div>
           </div>
         ) : (
-          <form
-            className="space-y-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void login();
-            }}
-          >
-            <div className="space-y-1.5">
-              <Label htmlFor="email">邮箱</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="username"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password">密码</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-            <div className="flex gap-2">
-              <Button type="submit" className="flex-1" disabled={busy || !info}>
-                {busy ? "…" : "登录"}
-              </Button>
-              <Button type="button" variant="outline" disabled={busy} onClick={deny}>
-                取消
-              </Button>
-            </div>
-          </form>
+          <div className="text-xs text-muted-foreground">检查登录状态…</div>
         )}
       </div>
     </div>
