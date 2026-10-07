@@ -57,6 +57,18 @@ export default function LoginPage() {
     const preset = params.get("email")?.trim();
     if (preset) setEmail(preset);
     if (params.get("mode") === "register") setMode("register");
+    const ticket = params.get("mfa_ticket");
+    if (ticket) {
+      const methodsParam = params.get("mfa_methods");
+      const methods = methodsParam ? methodsParam.split(",") : [];
+      setMfaTicket(ticket);
+      setMfaMethods(methods);
+      setMfaMode(methods.includes("webauthn") ? "webauthn" : "totp");
+      setCode("");
+      passkeyTried.current = false;
+      go("mfa");
+      window.history.replaceState(null, "", "/login");
+    }
   }, []);
 
   useEffect(() => {

@@ -28,13 +28,30 @@ function CallbackInner() {
       }
       try {
         const res = await api<{
-          session: string;
+          session?: string;
           next?: string;
           tenant?: { onboardingCompleted?: boolean };
+          mfaRequired?: boolean;
+          mfaTicket?: string;
+          methods?: string[];
+          mfaEnrollmentRequired?: boolean;
         }>(`/api/auth/oauth/${encodeURIComponent(provider)}/callback`, {
           method: "POST",
           json: { code, state },
         });
+        if (res.mfaRequired && res.mfaTicket) {
+          router.replace(
+            `/login?mfa_ticket=${encodeURIComponent(res.mfaTicket)}&mfa_methods=${encodeURIComponent(res.methods?.join(",") ?? "")}`,
+          );
+          return;
+        } else if (res.mfaEnrollmentRequired) {
+          setError("该账号需要先完成双因素认证初始化，请用已配置的登录方式在设置中启用。");
+          return;
+        }
+        if (!res.session) {
+          setError("登录失败");
+          return;
+        }
         setSession(res.session);
         const next =
           res.next ??
