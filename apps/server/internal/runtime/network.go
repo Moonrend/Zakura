@@ -143,18 +143,54 @@ func (h *handler) networkAudit(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"items": out})
 }
 func (h *handler) listExposureProviders(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
 	var ms []models.TunnelProviderSetting
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", principal(r).TenantID).Order("provider").Find(&ms).Error; e != nil {
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Find(&ms).Error; e != nil {
 		statusErr(w, e)
 		return
 	}
-	out := []map[string]any{}
+	byProvider := map[string]models.TunnelProviderSetting{}
 	for _, m := range ms {
-		id := ""
-		if m.ID != nil {
-			id = *m.ID
+		byProvider[m.Provider] = m
+	}
+	out := []map[string]any{}
+	for _, spec := range exposureProviderRegistry {
+		item := map[string]any{
+			"id":        spec.Provider,
+			"tenantId":  p.TenantID,
+			"provider":  spec.Provider,
+			"enabled":   false,
+			"isDefault": false,
+			"config":    map[string]any{},
+			"hasConfig": false,
+			"meta": map[string]any{
+				"name":           spec.Name,
+				"description":    spec.Description,
+				"requiresConfig": spec.RequiresConfig,
+				"publicExposure": spec.PublicExposure,
+			},
+			"lastTestAt": nil,
+			"lastTestOk": nil,
+			"lastError":  nil,
+			"createdAt":  "",
+			"updatedAt":  "",
 		}
-		out = append(out, map[string]any{"id": id, "provider": m.Provider, "enabled": m.Enabled, "isDefault": m.IsDefault, "lastTestAt": m.LastTestAt, "lastTestOk": m.LastTestOk, "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
+		if m, ok := byProvider[spec.Provider]; ok {
+			if m.ID != nil {
+				item["id"] = *m.ID
+			}
+			item["enabled"] = m.Enabled
+			item["isDefault"] = m.IsDefault
+			cfg := h.tunnelProviderConfig(p.TenantID, spec.Provider, m.ConfigEnc)
+			item["config"] = redactConfig(cfg)
+			item["hasConfig"] = len(cfg) > 0
+			item["lastTestAt"] = m.LastTestAt
+			item["lastTestOk"] = m.LastTestOk
+			item["lastError"] = m.LastError
+			item["createdAt"] = m.CreatedAt
+			item["updatedAt"] = m.UpdatedAt
+		}
+		out = append(out, item)
 	}
 	httpx.JSON(w, 200, map[string]any{"providers": out})
 }
@@ -162,28 +198,63 @@ func (h *handler) patchExposureProvider(w http.ResponseWriter, r *http.Request) 
 	p := principal(r)
 	provider := chi.URLParam(r, "id")
 	var b struct {
-		Enabled, IsDefault bool
-		Config             json.RawMessage
+		Enabled   *bool
+		IsDefault *bool
+		Config    json.RawMessage
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	enc, e := secretBox(h.deps.Secret, "tunnel:"+p.TenantID+":"+provider, b.Config)
-	if e != nil {
-		statusErr(w, e)
-		return
+	var existing struct {
+		ConfigEnc string `gorm:"column:config_enc"`
+		Enabled   bool   `gorm:"column:enabled"`
+		IsDefault bool   `gorm:"column:is_default"`
+	}
+	existingEnc := ""
+	existingEnabled := false
+	existingIsDefault := false
+	if e := h.deps.Gorm.WithContext(r.Context()).Table("tunnel_provider_settings").Select("config_enc, enabled, is_default").Where("tenant_id = ? AND provider = ?", p.TenantID, provider).Take(&existing).Error; e == nil {
+		existingEnc = existing.ConfigEnc
+		existingEnabled = existing.Enabled
+		existingIsDefault = existing.IsDefault
+	}
+	enabled := existingEnabled
+	if b.Enabled != nil {
+		enabled = *b.Enabled
+	}
+	isDefault := existingIsDefault
+	if b.IsDefault != nil {
+		isDefault = *b.IsDefault
+	}
+	enc := existingEnc
+	if b.Config != nil || existingEnc == "" {
+		merged := h.tunnelProviderConfig(p.TenantID, provider, existingEnc)
+		if b.Config != nil {
+			var incoming map[string]any
+			_ = json.Unmarshal(b.Config, &incoming)
+			for k, v := range incoming {
+				merged[k] = v
+			}
+		}
+		raw, _ := json.Marshal(merged)
+		v, e := secretBox(h.deps.Secret, "tunnel:"+p.TenantID+":"+provider, raw)
+		if e != nil {
+			statusErr(w, e)
+			return
+		}
+		enc = v
 	}
 	now := runtimeTimeString(h.store.now())
-	if b.IsDefault {
+	if isDefault {
 		h.deps.Gorm.WithContext(r.Context()).Model(&models.TunnelProviderSetting{}).Where("tenant_id = ?", p.TenantID).Updates(map[string]any{"is_default": false, "updated_at": now})
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO tunnel_provider_settings(id,tenant_id,provider,enabled,is_default,config_enc,last_test_at,last_test_ok,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(tenant_id,provider) DO UPDATE SET enabled=?,is_default=?,config_enc=?,updated_at=?`, h.store.id(), p.TenantID, provider, b.Enabled, b.IsDefault, enc, now, now, b.Enabled, b.IsDefault, enc, now).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO tunnel_provider_settings(id,tenant_id,provider,enabled,is_default,config_enc,last_test_at,last_test_ok,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(tenant_id,provider) DO UPDATE SET enabled=?,is_default=?,config_enc=?,updated_at=?`, h.store.id(), p.TenantID, provider, enabled, isDefault, enc, now, now, enabled, isDefault, enc, now).Error
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	h.auditNetwork(r, "provider.update", "tunnel_provider", provider, map[string]any{"enabled": b.Enabled, "isDefault": b.IsDefault})
+	h.auditNetwork(r, "provider.update", "tunnel_provider", provider, map[string]any{"enabled": enabled, "isDefault": isDefault})
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) providerConfig(r *http.Request, provider string) (map[string]any, error) {
@@ -195,13 +266,7 @@ func (h *handler) providerConfig(r *http.Request, provider string) (map[string]a
 	if e != nil {
 		return nil, e
 	}
-	raw, e := openSecretBox(h.deps.Secret, "tunnel:"+p.TenantID+":"+provider, row.ConfigEnc)
-	if e != nil {
-		return nil, e
-	}
-	var cfg map[string]any
-	e = json.Unmarshal(raw, &cfg)
-	return cfg, e
+	return h.tunnelProviderConfig(p.TenantID, provider, row.ConfigEnc), nil
 }
 func (h *handler) testExposureProvider(w http.ResponseWriter, r *http.Request) {
 	provider := chi.URLParam(r, "id")
@@ -214,34 +279,41 @@ func (h *handler) testExposureProvider(w http.ResponseWriter, r *http.Request) {
 	if endpoint == "" {
 		endpoint, _ = cfg["controlUrl"].(string)
 	}
-	if endpoint == "" {
-		httpx.Error(w, 400, "provider testUrl required")
-		return
-	}
-	u, e := safeProviderURL(endpoint, "")
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
-	if token, _ := cfg["token"].(string); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, e := h.service.gateway.client.Do(req)
-	ok := e == nil && resp.StatusCode >= 200 && resp.StatusCode < 400
-	var errText any
-	if e != nil {
-		errText = e.Error()
-	} else {
-		resp.Body.Close()
-		if !ok {
-			errText = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	var ok bool
+	var message string
+	if endpoint != "" {
+		u, e := safeProviderURL(endpoint, "")
+		if e != nil {
+			statusErr(w, e)
+			return
 		}
+		req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+		if token, _ := cfg["token"].(string); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, e := h.service.gateway.client.Do(req)
+		ok = e == nil && resp.StatusCode >= 200 && resp.StatusCode < 400
+		if e != nil {
+			message = e.Error()
+		} else {
+			resp.Body.Close()
+			if ok {
+				message = "测试通过"
+			} else {
+				message = fmt.Sprintf("HTTP %d", resp.StatusCode)
+			}
+		}
+	} else {
+		ok, message = h.testProviderFallback(r, provider, cfg)
 	}
 	p := principal(r)
 	now := runtimeTimeString(h.store.now())
+	var errText any
+	if !ok {
+		errText = message
+	}
 	h.deps.Gorm.WithContext(r.Context()).Model(&models.TunnelProviderSetting{}).Where("tenant_id = ? AND provider = ?", p.TenantID, provider).Updates(map[string]any{"last_test_at": now, "last_test_ok": ok, "last_error": errText, "updated_at": now})
-	httpx.JSON(w, 200, map[string]any{"ok": ok, "error": errText})
+	httpx.JSON(w, 200, map[string]any{"ok": ok, "message": message})
 }
 func (h *handler) createCloudflareTunnel(w http.ResponseWriter, r *http.Request) {
 	cfg, e := h.providerConfig(r, "cloudflare-named")
@@ -250,7 +322,10 @@ func (h *handler) createCloudflareTunnel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	account, _ := cfg["accountId"].(string)
-	token, _ := cfg["token"].(string)
+	token, _ := cfg["apiToken"].(string)
+	if token == "" {
+		token, _ = cfg["token"].(string)
+	}
 	var b struct {
 		Name string `json:"name"`
 	}
@@ -274,9 +349,34 @@ func (h *handler) createCloudflareTunnel(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, 502, string(raw))
 		return
 	}
-	var result any
+	var result struct {
+		Result struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Token string `json:"token"`
+		} `json:"result"`
+	}
 	_ = json.Unmarshal(raw, &result)
-	httpx.JSON(w, 201, map[string]any{"tunnel": result})
+	if result.Result.ID != "" {
+		p := principal(r)
+		cfg["tunnelId"] = result.Result.ID
+		cfg["tunnelName"] = result.Result.Name
+		if result.Result.Token != "" {
+			cfg["tunnelToken"] = result.Result.Token
+		}
+		rawMerged, _ := json.Marshal(cfg)
+		enc, e := secretBox(h.deps.Secret, "tunnel:"+p.TenantID+":cloudflare-named", rawMerged)
+		if e != nil {
+			statusErr(w, e)
+			return
+		}
+		now := runtimeTimeString(h.store.now())
+		if e := h.deps.Gorm.WithContext(r.Context()).Exec(`INSERT INTO tunnel_provider_settings(id,tenant_id,provider,enabled,is_default,config_enc,last_test_at,last_test_ok,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?,?) ON CONFLICT(tenant_id,provider) DO UPDATE SET config_enc=?,updated_at=?`, h.store.id(), p.TenantID, "cloudflare-named", true, false, enc, now, now, enc, now).Error; e != nil {
+			statusErr(w, e)
+			return
+		}
+	}
+	httpx.JSON(w, 201, map[string]any{"tunnelId": result.Result.ID, "tunnelName": result.Result.Name, "hasToken": result.Result.Token != ""})
 }
 func (h *handler) queryExposures(w http.ResponseWriter, r *http.Request, agent string) {
 	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.PortExposure{}).Where("tenant_id = ? AND status NOT IN ('stopped','expired')", principal(r).TenantID)

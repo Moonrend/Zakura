@@ -138,7 +138,7 @@ function ProviderCard({
               <Input
                 className="w-56 font-mono text-xs"
                 type="password"
-                placeholder={provider.config.apiToken ? "••••••••" : ""}
+                placeholder={provider.config.apiTokenConfigured ? "••••••••" : ""}
                 value={cfApiToken}
                 onChange={(e) => setCfApiToken(e.target.value)}
               />
@@ -202,7 +202,7 @@ function ProviderCard({
             <p className="text-xs text-muted-foreground">
               当前隧道：{String(provider.config.tunnelName ?? "")}{" "}
               <span className="font-mono">{String(provider.config.tunnelId ?? "")}</span>
-              {provider.config.tunnelToken ? " · Token 已保存" : ""}
+              {provider.config.tunnelTokenConfigured ? " · Token 已保存" : ""}
             </p>
           ) : null}
           <div className="flex flex-wrap items-end gap-2">
@@ -210,7 +210,7 @@ function ProviderCard({
               <Label>Tunnel Token（或手动粘贴）</Label>
               <Input
                 className="w-64 font-mono text-xs"
-                placeholder={provider.config.tunnelToken ? "••••••••" : "eyJ..."}
+                placeholder={provider.config.tunnelTokenConfigured ? "••••••••" : "eyJ..."}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
               />
