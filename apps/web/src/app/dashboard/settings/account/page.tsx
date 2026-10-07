@@ -6,6 +6,8 @@ import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { describeUserAgent, formatWhen } from "@/lib/device-from-ua";
+import { EmailMfaDisableDialog, EmailMfaEnrollDialog, MfaDisableConfirmDialog } from "@/components/account/mfa-email-dialogs";
+import { PasskeyManagerDialog } from "@/components/account/passkey-manager";
 import { RecoveryRotateDialog, TotpDisableDialog, TotpSetupDialog } from "@/components/account/totp-dialogs";
 import { SettingsHeader, SettingsRow, SettingsSection } from "@/components/settings-shell";
 import { UserAvatar, compressAvatarFile } from "@/components/user-avatar";
@@ -23,6 +25,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageLoading } from "@/components/ui/progress-linear";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
 type Me = {
@@ -41,11 +44,17 @@ type Me = {
 
 type Mfa = {
   totp: boolean;
-  totpEnabledAt: string | null;
   webauthn: boolean;
+  email: boolean;
+  enabled: boolean;
+  methods: string[];
+  credentials: Array<{ id: string; name: string | null; createdAt: string }>;
+  policy: string;
+  required: boolean;
+  totpEnabledAt: string | null;
+  emailMfaEnabledAt: string | null;
   recoveryRemaining: number;
   recoveryTotal: number;
-  credentials: Array<{ id: string; name: string | null; createdAt: string }>;
 };
 
 type SessionRow = {
@@ -75,9 +84,10 @@ export default function AccountSettingsPage() {
   const [totpDisable, setTotpDisable] = useState(false);
   const [recoveryRotate, setRecoveryRotate] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
-  const [passkeyOpen, setPasskeyOpen] = useState(false);
-  const [passkeyName, setPasskeyName] = useState("");
-  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeyManagerOpen, setPasskeyManagerOpen] = useState(false);
+  const [emailEnrollOpen, setEmailEnrollOpen] = useState(false);
+  const [emailDisableOpen, setEmailDisableOpen] = useState(false);
+  const [mfaDisableOpen, setMfaDisableOpen] = useState(false);
   const [verifyBusy, setVerifyBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -102,7 +112,16 @@ export default function AccountSettingsPage() {
 
   const dirty =
     name !== (me.user.name ?? "") || title !== (me.user.title ?? "") || bio !== (me.user.bio ?? "");
-  const protectedLogin = mfa.totp || mfa.webauthn;
+
+  async function enableMfa() {
+    try {
+      await api("/api/me/mfa/enabled", { method: "PUT", json: { enabled: true } });
+      await load();
+      toast.success("两步验证已开启");
+    } catch (err) {
+      toast.error(errMessage(err));
+    }
+  }
 
   async function saveProfile() {
     setSavingProfile(true);
@@ -139,27 +158,6 @@ export default function AccountSettingsPage() {
       toast.error(errMessage(err));
     } finally {
       setAvatarBusy(false);
-    }
-  }
-
-  async function addPasskey() {
-    const label = passkeyName.trim() || describeUserAgent(navigator.userAgent).label;
-    setPasskeyBusy(true);
-    try {
-      const { startRegistration } = await import("@simplewebauthn/browser");
-      const options = await api<Record<string, unknown>>("/api/me/mfa/webauthn/register/options", {
-        method: "POST",
-      });
-      const json = (options as { publicKey?: Record<string, unknown> }).publicKey ?? options;
-      const response = await startRegistration({ optionsJSON: json } as never);
-      await api("/api/me/mfa/webauthn/register", { method: "POST", json: { response, name: label } });
-      setPasskeyOpen(false);
-      await load();
-      toast.success("已添加通行密钥");
-    } catch (err) {
-      toast.error(errMessage(err));
-    } finally {
-      setPasskeyBusy(false);
     }
   }
 
@@ -300,91 +298,87 @@ export default function AccountSettingsPage() {
 
       <SettingsSection
         title="两步验证"
-        description={protectedLogin ? "登录需要验证器或通行密钥。" : "现在只靠密码。丢了密码就很难找回。"}
+        description={mfa.enabled ? "登录时需要再验证一次。" : "开启后，登录除密码外还需要额外验证一次。"}
       >
         <SettingsRow
-          label="验证器"
-          description={
-            mfa.totp
-              ? `已启用${mfa.totpEnabledAt ? ` · ${formatWhen(mfa.totpEnabledAt)}` : ""}`
-              : "用验证器 App 生成 6 位数字。"
-          }
+          label="两步验证"
+          description={mfa.enabled ? "已开启，登录需要二次验证。" : "已关闭，目前只靠密码登录。"}
         >
-          {mfa.totp ? (
-            <Button size="sm" variant="outline" onClick={() => setTotpDisable(true)}>
-              关闭
-            </Button>
-          ) : (
-            <Button size="sm" onClick={() => setTotpSetup(true)}>
-              绑定验证器
-            </Button>
-          )}
+          <Switch
+            checked={mfa.enabled}
+            onCheckedChange={(next) => {
+              if (next) void enableMfa();
+              else setMfaDisableOpen(true);
+            }}
+          />
         </SettingsRow>
 
-        {mfa.totp ? (
+        <div className="divide-y">
           <SettingsRow
-            label="恢复码"
-            description={
-              mfa.recoveryRemaining <= 2
-                ? `还剩 ${mfa.recoveryRemaining} 个未使用。快用完时请重新生成。`
-                : `还剩 ${mfa.recoveryRemaining} / ${mfa.recoveryTotal || 8} 个未使用。`
-            }
+            label="Authenticator App"
+            description={mfa.totp
+              ? `已启用${mfa.totpEnabledAt ? ` · ${formatWhen(mfa.totpEnabledAt)}` : ""}`
+              : "未启用"}
           >
-            <Button size="sm" variant="outline" onClick={() => setRecoveryRotate(true)}>
-              重新生成
+            {mfa.totp ? (
+              <div className="flex items-center gap-1">
+                <Button size="sm" variant="outline" onClick={() => setTotpSetup(true)}>
+                  更换
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setTotpDisable(true)}>
+                  禁用
+                </Button>
+              </div>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => setTotpSetup(true)}>
+                设置
+              </Button>
+            )}
+          </SettingsRow>
+
+          <SettingsRow label="邮箱验证码" description={mfa.email ? "已启用" : "未启用"}>
+            {mfa.email ? (
+              <Button size="sm" variant="ghost" onClick={() => setEmailDisableOpen(true)}>
+                禁用
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => setEmailEnrollOpen(true)}>
+                启用
+              </Button>
+            )}
+          </SettingsRow>
+
+          <SettingsRow
+            label="通行密钥"
+            description={`已注册 ${mfa.credentials.length} 个 · 免密登录与两步验证通用`}
+          >
+            <Button size="sm" variant="outline" onClick={() => setPasskeyManagerOpen(true)}>
+              管理
             </Button>
           </SettingsRow>
-        ) : null}
 
-        <div className="space-y-2 border-t pt-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 space-y-0.5">
-              <div className="text-sm font-medium">通行密钥</div>
-              <p className="text-xs text-muted-foreground">本机指纹、面容或硬件密钥。登录时可代替验证码。</p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setPasskeyName(describeUserAgent(navigator.userAgent).label);
-                setPasskeyOpen(true);
-              }}
+          {mfa.enabled ? (
+            <SettingsRow
+              label="恢复码"
+              description={`剩余 ${mfa.recoveryRemaining} / 共 ${mfa.recoveryTotal || 8}`}
             >
-              添加
-            </Button>
-          </div>
-          {mfa.credentials.length === 0 ? (
-            <p className="text-sm text-muted-foreground">还没有通行密钥。</p>
-          ) : (
-            <div className="divide-y">
-              {mfa.credentials.map((cred) => (
-                <div key={cred.id} className="flex items-center justify-between gap-3 py-2 first:pt-0 last:pb-0">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm">{cred.name || "通行密钥"}</div>
-                    <div className="text-xs text-muted-foreground">{formatWhen(cred.createdAt)}</div>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={async () => {
-                      const ok = await confirm({
-                        title: "删除这把通行密钥？",
-                        description: "删除后，这台设备不能再用它登录。",
-                        confirmLabel: "删除",
-                      });
-                      if (!ok) return;
-                      await api(`/api/me/mfa/webauthn/${cred.id}`, { method: "DELETE" });
-                      await load();
-                      toast.success("已删除通行密钥");
-                    }}
-                  >
-                    删除
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
+              <Button size="sm" variant="outline" onClick={() => setRecoveryRotate(true)}>
+                更换
+              </Button>
+            </SettingsRow>
+          ) : null}
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="通行密钥"
+        description={`设置一次即可用于免密登录；开启两步验证后也可作为验证方式。${mfa.credentials.length > 0 ? `已注册 ${mfa.credentials.length} 个` : ""}`}
+      >
+        <SettingsRow label="通行密钥">
+          <Button size="sm" variant="outline" onClick={() => setPasskeyManagerOpen(true)}>
+            管理通行密钥
+          </Button>
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection
@@ -446,27 +440,26 @@ export default function AccountSettingsPage() {
       <TotpSetupDialog open={totpSetup} onOpenChange={setTotpSetup} onDone={() => void load()} />
       <TotpDisableDialog open={totpDisable} onOpenChange={setTotpDisable} onDone={() => void load()} />
       <RecoveryRotateDialog open={recoveryRotate} onOpenChange={setRecoveryRotate} onDone={() => void load()} />
+      <EmailMfaEnrollDialog open={emailEnrollOpen} onOpenChange={setEmailEnrollOpen} onDone={() => void load()} />
+      <EmailMfaDisableDialog
+        open={emailDisableOpen}
+        onOpenChange={setEmailDisableOpen}
+        onDone={() => void load()}
+        hasTotp={mfa.totp}
+      />
+      <MfaDisableConfirmDialog
+        open={mfaDisableOpen}
+        onOpenChange={setMfaDisableOpen}
+        onDone={() => void load()}
+        hasTotp={mfa.totp}
+        hasEmail={mfa.email}
+      />
+      <PasskeyManagerDialog
+        open={passkeyManagerOpen}
+        onOpenChange={setPasskeyManagerOpen}
+        onChanged={() => void load()}
+      />
       <PasswordDialog open={passwordOpen} onOpenChange={setPasswordOpen} />
-
-      <Dialog open={passkeyOpen} onOpenChange={setPasskeyOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>添加通行密钥</DialogTitle>
-            <DialogDescription>浏览器会弹出系统对话框。名称只用来在列表里区分设备。</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="passkey-name">名称</Label>
-            <Input id="passkey-name" value={passkeyName} onChange={(e) => setPasskeyName(e.target.value)} />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPasskeyOpen(false)}>取消</Button>
-            <Button disabled={passkeyBusy} onClick={() => void addPasskey()}>
-              {passkeyBusy ? <Loader2 className="animate-spin" /> : null}
-              继续
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
