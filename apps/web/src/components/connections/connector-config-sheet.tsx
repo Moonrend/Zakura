@@ -355,7 +355,14 @@ export function ConnectorConfigSheet({
     try {
       const result = await api<{ authorizeUrl: string }>(
         `/api/connectors/${encodeURIComponent(connector.ref)}/oauth/start`,
-        { method: "POST", json: { agentId } },
+        {
+          method: "POST",
+          json: {
+            agentId,
+            profileKey: connector.auth.profile,
+            redirectURI: window.location.origin + "/console/connectors/oauth/callback",
+          },
+        },
       );
       window.location.assign(result.authorizeUrl);
     } catch (err) {

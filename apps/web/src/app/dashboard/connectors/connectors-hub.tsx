@@ -69,18 +69,19 @@ export default function ConnectorsHub() {
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [view, setView] = useState<ViewMode>("all");
-  const [redirectUri, setRedirectUri] = useState("");
+  const [redirectUri] = useState(() =>
+    typeof window === "undefined" ? "" : window.location.origin + "/console/connectors/oauth/callback",
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [pkgs, creds] = await Promise.all([
         api<{ packages: IntegrationPackage[] }>("/api/integrations/packages"),
-        api<{ connectors: ConnectorRow[]; redirectUri?: string }>("/api/connectors?scope=tenant"),
+        api<{ connectors: ConnectorRow[] }>("/api/connectors?scope=tenant"),
       ]);
       setPackages(pkgs.packages);
       setConnectors(creds.connectors);
-      setRedirectUri(creds.redirectUri ?? "");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
