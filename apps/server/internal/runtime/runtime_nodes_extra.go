@@ -108,6 +108,10 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"node": node})
 }
 func (h *handler) runtimeMeshStatus(w http.ResponseWriter, r *http.Request) {
+	if h.loadPlatformHeadscaleResolved(r.Context()).Enabled {
+		httpx.JSON(w, http.StatusOK, map[string]any{"meshConnected": true, "hasAuthKey": true, "tags": []any{}, "hostJoinsTailscale": true, "meshProvider": "headscale-platform"})
+		return
+	}
 	cfg, err := h.getSetting(r.Context(), "tenant:"+principal(r).TenantID, "network:mesh")
 	if err != nil {
 		cfg = map[string]any{}
@@ -161,8 +165,17 @@ func (h *handler) runtimeInstallInfo(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "registration token is no longer available; recreate the node")
 		return
 	}
-	install := h.runnerInstallPackage(node, token.(string))
-	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "install": install, "installTailscale": nil, "meshConnected": false, "hostJoinsTailscale": false, "meshProvider": nil, "tokenHint": "rnr_…"})
+	loginServer, tsAvailable := h.runnerTailscaleMeta(r.Context(), principal(r).TenantID)
+	install := h.runnerInstallPackage(node, token.(string), "")
+	installTailscale := any(nil)
+	if tsAvailable {
+		installTailscale = h.runnerInstallPackage(node, token.(string), loginServer)
+	}
+	var meshProvider any
+	if tsAvailable {
+		meshProvider = "headscale-platform"
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "install": install, "installTailscale": installTailscale, "meshConnected": tsAvailable, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider, "tokenHint": "rnr_…"})
 }
 
 func (h *handler) runtimeNodeDetail(w http.ResponseWriter, r *http.Request) {
@@ -176,14 +189,22 @@ func (h *handler) runtimeNodeDetail(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	var install any
+	loginServer, tsAvailable := h.runnerTailscaleMeta(r.Context(), principal(r).TenantID)
+	var install, installTailscale any
 	if token, ok := runnerTokenCache.Load(chi.URLParam(r, "id")); ok {
-		install = h.runnerInstallPackage(node, token.(string))
+		install = h.runnerInstallPackage(node, token.(string), "")
+		if tsAvailable {
+			installTailscale = h.runnerInstallPackage(node, token.(string), loginServer)
+		}
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "containers": containers, "install": install, "installTailscale": nil, "meshConnected": false, "hostJoinsTailscale": false, "meshProvider": nil, "tailscaleError": nil, "tokenHint": nil})
+	var meshProvider any
+	if tsAvailable {
+		meshProvider = "headscale-platform"
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"node": node, "containers": containers, "install": install, "installTailscale": installTailscale, "meshConnected": tsAvailable, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider, "tailscaleError": nil, "tokenHint": nil})
 }
 
-func (h *handler) runnerInstallPackage(node map[string]any, token string) map[string]any {
+func (h *handler) runnerInstallPackage(node map[string]any, token string, tailscaleLoginServer string) map[string]any {
 	id, _ := node["id"].(string)
 	slug, _ := node["slug"].(string)
 	kind, _ := node["kind"].(string)
@@ -191,9 +212,72 @@ func (h *handler) runnerInstallPackage(node map[string]any, token string) map[st
 		kind = "computer"
 	}
 	base := strings.TrimRight(h.deps.PublicURL, "/")
-	bootstrap := base + "/api/runtime-nodes/" + url.PathEscape(id) + "/bootstrap.sh?token=" + url.QueryEscape(token) + "&kind=" + kind
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\nOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", base, token, kind, id)
-	return map[string]any{"compose": "", "filename": "install.sh", "script": script, "dockerRun": "", "enableTailscale": false, "tsHostname": nil, "slug": slug, "hasAuthKey": false, "meshConnected": false, "bootstrapUrl": bootstrap, "installCurl": "curl -fsSL " + shellQuote(bootstrap) + " | sudo sh", "installShUrl": bootstrap, "installPs1Url": base + "/api/runtime-nodes/" + url.PathEscape(id) + "/install.ps1?token=" + url.QueryEscape(token) + "&kind=" + kind, "needsReinstall": false}
+	query := "?token=" + url.QueryEscape(token) + "&kind=" + kind
+	enableTailscale := tailscaleLoginServer != ""
+	var tsHostname any
+	tailscaleSetup := ""
+	if enableTailscale {
+		tsHostname = runnerTailscaleHostname(slug)
+		query += "&tailscale=1"
+	}
+	bootstrap := base + "/api/runtime-nodes/" + url.PathEscape(id) + "/bootstrap.sh" + query
+	script := fmt.Sprintf("#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\n%sOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", base, token, kind, tailscaleSetup, id)
+	return map[string]any{"compose": "", "filename": "install.sh", "script": script, "dockerRun": "", "enableTailscale": enableTailscale, "tsHostname": tsHostname, "slug": slug, "hasAuthKey": enableTailscale, "meshConnected": enableTailscale, "bootstrapUrl": bootstrap, "installCurl": "curl -fsSL " + shellQuote(bootstrap) + " | sudo sh", "installShUrl": bootstrap, "installPs1Url": base + "/api/runtime-nodes/" + url.PathEscape(id) + "/install.ps1?token=" + url.QueryEscape(token) + "&kind=" + kind, "needsReinstall": false}
+}
+
+func (h *handler) runnerTailscaleMeta(ctx context.Context, tenantID string) (string, bool) {
+	resolved := h.loadPlatformHeadscaleResolved(ctx)
+	if !resolved.Enabled {
+		return "", false
+	}
+	integration := h.loadPlatformIntegration(ctx, tenantID)
+	if integration == nil || integration.Status != "connected" {
+		return "", false
+	}
+	return resolved.URL, true
+}
+
+func runnerTailscaleHostname(slug string) string {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	var b strings.Builder
+	for _, r := range slug {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	safe := strings.Trim(b.String(), "-")
+	if len(safe) > 48 {
+		safe = safe[:48]
+	}
+	if safe == "" {
+		safe = "runner"
+	}
+	return "zakura-" + safe
+}
+
+func (h *handler) runnerTailscalePrelude(ctx context.Context, nodeID string) string {
+	var row struct {
+		TenantID string `gorm:"column:tenant_id"`
+		Slug     string `gorm:"column:slug"`
+	}
+	if e := h.deps.Gorm.WithContext(ctx).Raw(`SELECT tenant_id, slug FROM runtime_nodes WHERE id = ?`, nodeID).Scan(&row); e != nil || row.TenantID == "" {
+		return ""
+	}
+	resolved := h.loadPlatformHeadscaleResolved(ctx)
+	client := h.headscaleClientFor(resolved)
+	if client == nil {
+		return ""
+	}
+	if integration := h.loadPlatformIntegration(ctx, row.TenantID); integration == nil || integration.Status != "connected" {
+		return ""
+	}
+	created, e := client.createTenantPreAuthKey(ctx, row.TenantID, false, false, 0)
+	if e != nil {
+		return ""
+	}
+	return fmt.Sprintf("if ! command -v tailscale >/dev/null 2>&1; then\n  curl -fsSL https://tailscale.com/install.sh | sh\nfi\ntailscale up --login-server=%q --authkey=%q --hostname=%q --accept-routes || true\n", resolved.URL, created.Key, runnerTailscaleHostname(row.Slug))
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
@@ -213,8 +297,12 @@ func (h *handler) runtimeInstallSh(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("kind") == "server" {
 		kind = "server"
 	}
+	tailscalePrelude := ""
+	if r.URL.Query().Get("tailscale") == "1" {
+		tailscalePrelude = h.runnerTailscalePrelude(r.Context(), chi.URLParam(r, "id"))
+	}
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	fmt.Fprintf(w, "#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\nOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", strings.TrimRight(h.deps.PublicURL, "/"), token, kind, chi.URLParam(r, "id"))
+	fmt.Fprintf(w, "#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\n%sOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", strings.TrimRight(h.deps.PublicURL, "/"), token, kind, tailscalePrelude, chi.URLParam(r, "id"))
 }
 func (h *handler) runtimeInstallPS(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), true) {

@@ -1353,6 +1353,7 @@ func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		Name, Slug, Kind, Endpoint, StorageRoot string
 		Capabilities, Labels                    json.RawMessage
 		IsShared                                bool `json:"isShared"`
+		EnableTailscale                         bool `json:"enableTailscale"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil || b.Name == "" {
 		httpx.Error(w, 400, "name required")
@@ -1399,7 +1400,17 @@ func (h *handler) createRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node := runtimeNodeFromModel(loaded)
-	httpx.JSON(w, http.StatusCreated, map[string]any{"node": node, "token": token, "install": h.runnerInstallPackage(node, token), "installTailscale": nil, "hostJoinsTailscale": false})
+	loginServer, tsAvailable := h.runnerTailscaleMeta(r.Context(), p.TenantID)
+	install := h.runnerInstallPackage(node, token, "")
+	var installTailscale any
+	if tsAvailable {
+		installTailscale = h.runnerInstallPackage(node, token, loginServer)
+	}
+	var meshProvider any
+	if tsAvailable {
+		meshProvider = "headscale-platform"
+	}
+	httpx.JSON(w, http.StatusCreated, map[string]any{"node": node, "token": token, "install": install, "installTailscale": installTailscale, "hostJoinsTailscale": tsAvailable, "meshProvider": meshProvider})
 }
 func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	m, e := decodeMap(r)
