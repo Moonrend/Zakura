@@ -1,0 +1,51 @@
+name: sandbox-validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/agent/**'
+      - 'apps/server/**'
+      - '.github/workflows/sandbox-validation.yml'
+  push:
+    paths:
+      - 'apps/agent/**'
+      - 'apps/server/**'
+      - '.github/workflows/sandbox-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache-dependency-path: |
+            apps/agent/go.sum
+            apps/server/go.sum
+      - name: Agent tests and race detector
+        working-directory: apps/agent
+        run: |
+          go test -race ./...
+          go vet ./...
+      - name: Prepare sandbox test image
+        run: |
+          docker pull alpine:3.23
+          echo "ZAKURA_SANDBOX_IMAGE=$(docker image inspect alpine:3.23 --format '{{index .RepoDigests 0}}')" >> "$GITHUB_ENV"
+      - name: Real container isolation and lifecycle checks
+        working-directory: apps/agent
+        env:
+          ZAKURA_SANDBOX_INTEGRATION: '1'
+        run: go test -count=1 -v ./internal/sandbox
+      - name: Server regression tests
+        working-directory: apps/server
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go test ./...
+          go vet ./...

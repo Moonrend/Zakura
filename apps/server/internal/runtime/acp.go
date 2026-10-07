@@ -112,6 +112,13 @@ func findAdapter(id string) (acpAdapter, bool) {
 	return acpAdapter{}, false
 }
 func (h *handler) runtimeExec(ctx context.Context, tenant, agent, command string, args ...string) (map[string]any, error) {
+	return h.runtimeExecWithMode(ctx, tenant, agent, "", command, args...)
+}
+
+func (h *handler) runtimeExecWithMode(ctx context.Context, tenant, agent, mode, command string, args ...string) (map[string]any, error) {
+	if mode != "" && mode != "host" && mode != "sandbox" {
+		return nil, errors.New("execution_mode must be host or sandbox")
+	}
 	var nodeID, spaceID, workspaceKind string
 	var rec struct {
 		NodeID        string `gorm:"column:node_id"`
@@ -123,20 +130,40 @@ func (h *handler) runtimeExec(ctx context.Context, tenant, agent, command string
 		return nil, errors.New("agent runtime node is not online")
 	}
 	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
+	if mode == "sandbox" && workspaceKind != "host" {
+		return nil, errors.New("sandbox execution requires a host workspace; this workspace mode is unsupported")
+	}
 	session, err := h.hub.get(nodeID)
 	if err != nil {
 		return nil, err
 	}
+	if mode == "sandbox" {
+		var policy struct {
+			Sandbox struct {
+				Enabled bool `json:"enabled"`
+			} `json:"sandbox"`
+		}
+		if err := session.call(ctx, "sandbox.policy", map[string]any{}, &policy); err != nil || !policy.Sandbox.Enabled {
+			return nil, errors.New("runner does not support sandbox execution; upgrade or configure the runner")
+		}
+	}
 	argv := append([]string{command}, args...)
 	timeoutMS := int64(30_000)
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline).Milliseconds(); remaining > timeoutMS {
+		if remaining := time.Until(deadline).Milliseconds(); remaining > 0 {
 			timeoutMS = remaining
+		} else {
+			return nil, context.DeadlineExceeded
 		}
 	}
 	result := map[string]any{}
 	if workspaceKind == "host" {
-		err = session.call(ctx, "host.exec", map[string]any{"spaceId": spaceID, "command": argv, "workingDir": "/workspace", "timeoutMs": timeoutMS}, &result)
+		params := map[string]any{"spaceId": spaceID, "command": argv, "workingDir": "/workspace", "timeoutMs": timeoutMS, "executionMode": mode}
+		if mode == "sandbox" {
+			result, err = runSandboxCommand(ctx, session, params)
+		} else {
+			err = session.call(ctx, "host.exec", params, &result)
+		}
 	} else {
 		var containers []struct {
 			DockerID string            `json:"dockerId"`
@@ -157,6 +184,28 @@ func (h *handler) runtimeExec(ctx context.Context, tenant, agent, command string
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Describe the transport that actually ran the command. A normal workspace
+	// container provides container isolation but does not apply the restricted
+	// sandbox policy (network, read-only mount, resource limits, and cleanup).
+	if mode == "sandbox" && (result["executionMode"] != "sandbox" || result["isolated"] != true) {
+		return nil, errors.New("runner did not confirm sandbox execution")
+	}
+	switch {
+	case workspaceKind != "host":
+		result["executionMode"] = "workspace-container"
+		result["isolated"] = true
+		result["restrictedPolicyApplied"] = false
+	case result["executionMode"] == "sandbox":
+		// Operator enforcement may select sandbox even for a legacy host call.
+		if result["isolated"] != true {
+			return nil, errors.New("runner did not confirm sandbox execution")
+		}
+		result["restrictedPolicyApplied"] = true
+	default:
+		result["executionMode"] = "host"
+		result["isolated"] = false
+		result["restrictedPolicyApplied"] = false
 	}
 	if code, ok := result["exitCode"].(float64); ok && code != 0 {
 		return result, fmt.Errorf("command exited %d: %v", int(code), result["stderr"])

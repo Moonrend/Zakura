@@ -89,6 +89,13 @@ func (m *acpRuntimeManager) closeAll() {
 }
 
 func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid string) (*acpLiveRuntime, error) {
+	required, policyErr := m.h.agentSandboxRequired(ctx, tenantID, agentID)
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	if required {
+		return nil, errors.New("ACP adapters are unavailable for sandbox agents")
+	}
 	key := tenantID + "\x00" + sid
 	m.mu.Lock()
 	if current := m.runtimes[key]; current != nil {

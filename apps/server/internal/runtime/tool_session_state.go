@@ -25,6 +25,11 @@ func isBuiltinToolName(name string) bool {
 }
 
 func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session, toolCallID, name string, args json.RawMessage) (json.RawMessage, error) {
+	var policyErr error
+	args, policyErr = h.sandboxToolPolicy(ctx, tenant, agent, name, args)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	if toolDisabled(ctx, name) {
 		return nil, fmt.Errorf("tool %s is disabled for this run", name)
 	}

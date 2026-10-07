@@ -253,6 +253,12 @@ func (h *handler) runFSWrite(ctx context.Context, tenant, agent string, args map
 }
 
 func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
+	if value, exists := args["execution_mode"]; exists {
+		mode, ok := value.(string)
+		if !ok || (mode != "host" && mode != "sandbox") {
+			return nil, errors.New("execution_mode must be host or sandbox")
+		}
+	}
 	command := builtinStringArg(args, "command")
 	if strings.TrimSpace(command) == "" {
 		return nil, errors.New("command is required")
@@ -266,7 +272,7 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 	}
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
-	result, err := h.runtimeExec(callCtx, tenant, agent, "bash", "-lc", command)
+	result, err := h.runtimeExecWithMode(callCtx, tenant, agent, builtinStringArg(args, "execution_mode"), "bash", "-lc", command)
 	if result == nil {
 		if err != nil {
 			return nil, err
@@ -280,8 +286,14 @@ func (h *handler) runShellExec(ctx context.Context, tenant, agent string, args m
 	stdout, _ = h.truncateToolText(ctx, tenant, agent, stdout, "shell")
 	stderr, _ = h.truncateToolText(ctx, tenant, agent, stderr, "shell")
 	return builtinJSON(map[string]any{
-		"stdout":   stdout,
-		"stderr":   stderr,
-		"exitCode": result["exitCode"],
+		"stdout":                  stdout,
+		"stderr":                  stderr,
+		"exitCode":                result["exitCode"],
+		"executionMode":           result["executionMode"],
+		"isolated":                result["isolated"],
+		"restrictedPolicyApplied": result["restrictedPolicyApplied"],
+		"timedOut":                result["timedOut"],
+		"cancelled":               result["cancelled"],
+		"truncated":               result["truncated"],
 	})
 }
