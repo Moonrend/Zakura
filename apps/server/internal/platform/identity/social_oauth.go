@@ -23,7 +23,7 @@ import (
 
 type loginProviderDef struct{ Name, AuthorizeURL, TokenURL, UserinfoURL, Scope string }
 
-var loginProviders = map[string]loginProviderDef{"google": {"Google", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/v1/userinfo", "openid email profile"}, "github": {"GitHub", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", "read:user user:email"}, "microsoft": {"Microsoft", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "https://graph.microsoft.com/v1.0/me", "openid profile email User.Read"}, "zerocat": {"ZeroCat", "https://api.zerocat.dev/oauth/authorize", "https://api.zerocat.dev/oauth/token", "https://api.zerocat.dev/oauth/userinfo", "user:read"}}
+var loginProviders = map[string]loginProviderDef{"google": {"Google", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/userinfo", "openid email profile"}, "github": {"GitHub", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", "read:user user:email"}, "microsoft": {"Microsoft", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "https://graph.microsoft.com/v1.0/me", "openid profile email User.Read"}, "zerocat": {"ZeroCat", "https://api.zcservice.houlang.cloud/oauth/authorize", "https://api.zcservice.houlang.cloud/oauth/token", "https://api.zcservice.houlang.cloud/oauth/userinfo", "user:read"}}
 
 type loginProviderConfig struct {
 	Enabled           bool   `json:"enabled"`
@@ -240,7 +240,7 @@ func normalizeSocialProfile(provider string, profile map[string]any) (subject, e
 			email = safe + "@zerocat.oauth"
 		}
 		verified, _ = profile["email_verified"].(bool)
-		verified = verified && !strings.HasSuffix(email, "@zerocat.oauth")
+		verified = verified && !isSyntheticEmail(email)
 		name = firstText(stringAny(profile["nickname"]), username, strings.Split(email, "@")[0], "ZeroCat User")
 	case "google":
 		subject = strings.TrimSpace(stringAny(profile["sub"]))
@@ -318,7 +318,7 @@ func (s *Service) linkSocialIdentity(ctx context.Context, provider, subject, ema
 	var identity models.OauthIdentity
 	err := s.gdb(ctx).Select("user_id").Where("provider = ? AND provider_user_id = ?", provider, subject).Take(&identity).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if verified {
+		if !isSyntheticEmail(email) {
 			var existing models.User
 			if s.gdb(ctx).Select("id").Where("email = ?", email).Take(&existing).Error == nil {
 				uid = derefString(existing.ID)
@@ -422,4 +422,7 @@ func firstText(values ...string) string {
 		}
 	}
 	return ""
+}
+func isSyntheticEmail(email string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), ".oauth")
 }

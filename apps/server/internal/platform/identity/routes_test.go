@@ -967,6 +967,23 @@ func TestOIDCSSOWithDeterministicFakeIdP(t *testing.T) {
 	if autoJoinedLogin.Code != http.StatusOK || autoJoined != 1 {
 		t.Fatalf("verified-domain auto join: status=%d memberships=%d body=%s", autoJoinedLogin.Code, autoJoined, autoJoinedLogin.Body.String())
 	}
+	joinedRegister := call(t, r, http.MethodPost, "/api/auth/register", map[string]any{"email": "joiner@corp.example", "password": "joiner-user-secret", "tenantName": "Joiner"}, "")
+	if joinedRegister.Code != http.StatusCreated {
+		t.Fatalf("auto-join registration: %d %s", joinedRegister.Code, joinedRegister.Body.String())
+	}
+	var joinedResult struct {
+		Tenant struct {
+			ID string `json:"id"`
+		} `json:"tenant"`
+	}
+	decode(t, joinedRegister, &joinedResult)
+	var expectedTenant string
+	_ = deps.DB.QueryRow(`SELECT tenant_id FROM tenant_domains WHERE id=?`, d.Domain.ID).Scan(&expectedTenant)
+	var joinedMemberships int
+	_ = deps.DB.QueryRow(`SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id=? AND user_id=(SELECT id FROM users WHERE email='joiner@corp.example') AND role='member'`, expectedTenant).Scan(&joinedMemberships)
+	if joinedResult.Tenant.ID != expectedTenant || joinedMemberships != 1 {
+		t.Fatalf("auto-join registration: tenant=%q expected=%q memberships=%d body=%s", joinedResult.Tenant.ID, expectedTenant, joinedMemberships, joinedRegister.Body.String())
+	}
 	requireSSO := call(t, r, http.MethodPatch, "/api/tenant/identity/domains/"+d.Domain.ID, map[string]any{"joinMode": "sso_required"}, admin)
 	if requireSSO.Code != http.StatusOK {
 		t.Fatalf("require SSO domain policy: %d %s", requireSSO.Code, requireSSO.Body.String())

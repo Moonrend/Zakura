@@ -94,26 +94,26 @@ func (s *Service) Setup(ctx context.Context, email, password, name, tenantName, 
 	if name == "" {
 		name = strings.Split(email, "@")[0]
 	}
-	return s.createAccount(ctx, email, password, name, tenantName, true, true, ip, ua)
+	return s.createAccount(ctx, email, password, name, tenantName, true, true, ip, ua, nil)
 }
 
-func (s *Service) Register(ctx context.Context, email, password, name, tenantName, ip, ua string) (LoginResult, error) {
+func (s *Service) Register(ctx context.Context, email, password, name, tenantName, ip, ua string, join *registrationJoin) (LoginResult, error) {
 	if s.deps.Edition != "saas" {
 		return LoginResult{}, errors.New("registration disabled")
 	}
 	if tenantName == "" {
 		tenantName = "My Workspace"
 	}
-	return s.createAccount(ctx, email, password, name, tenantName, false, false, ip, ua)
+	return s.createAccount(ctx, email, password, name, tenantName, false, false, ip, ua, join)
 }
 
-func (s *Service) createAccount(ctx context.Context, email, password, name, tenantName string, platformAdmin, isDefault bool, ip, ua string) (LoginResult, error) {
+func (s *Service) createAccount(ctx context.Context, email, password, name, tenantName string, platformAdmin, isDefault bool, ip, ua string, join *registrationJoin) (LoginResult, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !validEmail(email) {
 		return LoginResult{}, errors.New("invalid email")
 	}
-	if len(password) < 10 {
-		return LoginResult{}, errors.New("password must contain at least 10 characters")
+	if len(password) < 8 {
+		return LoginResult{}, errors.New("password must contain at least 8 characters")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), passwordBcryptCost)
 	if err != nil {
@@ -121,6 +121,17 @@ func (s *Service) createAccount(ctx context.Context, email, password, name, tena
 	}
 	now := s.now()
 	uid, tid, mid := s.deps.NewID(), s.deps.NewID(), s.deps.NewID()
+	role := "owner"
+	var joined models.Tenant
+	if join != nil {
+		role = join.role
+		if role == "" {
+			role = "member"
+		}
+		if err := s.gdb(ctx).Where("id = ? AND status = 'active'", join.tenantID).Take(&joined).Error; err != nil {
+			return LoginResult{}, errors.New("join tenant not found")
+		}
+	}
 	slug := slugify(tenantName)
 	if slug == "" {
 		slug = "workspace"
@@ -143,24 +154,39 @@ func (s *Service) createAccount(ctx context.Context, email, password, name, tena
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO users(id,email,password_hash,name,is_platform_admin,status,created_at,updated_at) VALUES(?,?,?,?,?,'active',?,?)`), uid, email, string(hash), strings.TrimSpace(name), boolInt(platformAdmin), now, now); err != nil {
 			return classifyUnique(err, "email already registered")
 		}
-		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO tenants(id,slug,name,is_default,onboarding_completed,onboarding_steps,created_at,updated_at) VALUES(?,?,?,?,FALSE,'{}',?,?)`), tid, slug, tenantName, boolInt(isDefault), now, now); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?)`), mid, tid, uid, now, now); err != nil {
-			return err
+		if join != nil {
+			tid = derefString(joined.ID)
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,?,'active',?,?) ON CONFLICT(tenant_id,user_id) DO NOTHING`), mid, tid, uid, role, now, now); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO tenants(id,slug,name,is_default,onboarding_completed,onboarding_steps,created_at,updated_at) VALUES(?,?,?,?,FALSE,'{}',?,?)`), tid, slug, tenantName, boolInt(isDefault), now, now); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO tenant_memberships(id,tenant_id,user_id,role,status,created_at,updated_at) VALUES(?,?,?,'owner','active',?,?)`), mid, tid, uid, now, now); err != nil {
+				return err
+			}
 		}
 		return s.appendAuditTx(ctx, tx, tid, "auth.register", uid, "user", uid, map[string]any{"email": email})
 	})
 	if err != nil {
 		return LoginResult{}, err
 	}
+	if join == nil && s.deps.OnTenantCreated != nil {
+		s.deps.OnTenantCreated(ctx, tid)
+	}
 	u := User{ID: uid, Email: email, Name: name, IsPlatformAdmin: platformAdmin, HasPassword: true}
-	t := Tenant{ID: tid, Slug: slug, Name: tenantName, IsDefault: isDefault, OnboardingSteps: map[string]any{}}
-	token, err := s.issueSession(ctx, u, t, "owner", ip, ua)
+	var t Tenant
+	if join != nil {
+		t = Tenant{ID: tid, Slug: joined.Slug, Name: joined.Name, IsDefault: joined.IsDefault, OnboardingCompleted: joined.OnboardingCompleted, OnboardingSteps: decodeObject(joined.OnboardingSteps)}
+	} else {
+		t = Tenant{ID: tid, Slug: slug, Name: tenantName, IsDefault: isDefault, OnboardingSteps: map[string]any{}}
+	}
+	token, err := s.issueSession(ctx, u, t, role, ip, ua)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	return LoginResult{Session: token, User: u, Tenant: t, Role: "owner"}, nil
+	return LoginResult{Session: token, User: u, Tenant: t, Role: role}, nil
 }
 
 func (s *Service) Login(ctx context.Context, email, password, tenantSlug, ip, ua string) (LoginResult, error) {
@@ -396,17 +422,40 @@ func (s *Service) passwordLoginBlockedBySSO(ctx context.Context, email string) b
 	return err == nil && required
 }
 
-func (s *Service) registrationBlockedBySSO(ctx context.Context, email string) bool {
+type registrationJoin struct {
+	action   string
+	tenantID string
+	role     string
+}
+
+func (s *Service) resolveRegistrationJoin(ctx context.Context, email string) (registrationJoin, error) {
 	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(email)), "@", 2)
 	if len(parts) != 2 {
-		return false
+		return registrationJoin{action: "create_tenant"}, nil
 	}
-	var count int64
+	var row struct {
+		TenantID string `gorm:"column:tenant_id"`
+		JoinMode string `gorm:"column:join_mode"`
+	}
 	err := s.gdb(ctx).Table("tenant_domains AS d").
+		Select("d.tenant_id AS tenant_id, d.join_mode AS join_mode").
 		Joins("JOIN tenants t ON t.id = d.tenant_id").
-		Where("d.domain = ? AND d.verified_at IS NOT NULL AND d.join_mode = 'sso_required' AND t.status = 'active'", parts[1]).
-		Count(&count).Error
-	return err == nil && count > 0
+		Where("d.domain = ? AND d.verified_at IS NOT NULL AND t.status = 'active'", parts[1]).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return registrationJoin{action: "create_tenant"}, nil
+	}
+	if err != nil {
+		return registrationJoin{}, err
+	}
+	switch row.JoinMode {
+	case "sso_required":
+		return registrationJoin{action: "sso_required"}, nil
+	case "auto_join":
+		return registrationJoin{action: "auto_join", tenantID: row.TenantID, role: "member"}, nil
+	default:
+		return registrationJoin{action: "create_tenant"}, nil
+	}
 }
 
 func (s *Service) recordLoginFailure(ctx context.Context, email, ip string) bool {

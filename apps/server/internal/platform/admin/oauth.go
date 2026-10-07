@@ -21,10 +21,10 @@ import (
 type providerDef struct{ Name, AuthorizeURL, TokenURL, UserinfoURL, Scope string }
 
 var providerDefs = map[string]providerDef{
-	"google":    {"Google", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/v1/userinfo", "openid email profile"},
+	"google":    {"Google", "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://openidconnect.googleapis.com/userinfo", "openid email profile"},
 	"github":    {"GitHub", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", "read:user user:email"},
-	"microsoft": {"Microsoft", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "https://graph.microsoft.com/oidc/userinfo", "openid email profile"},
-	"zerocat":   {"ZeroCat", "https://id.zerocat.dev/oauth/authorize", "https://id.zerocat.dev/oauth/token", "https://id.zerocat.dev/oauth/userinfo", "openid email profile"},
+	"microsoft": {"Microsoft", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize", "https://login.microsoftonline.com/common/oauth2/v2.0/token", "https://graph.microsoft.com/v1.0/me", "openid profile email User.Read"},
+	"zerocat":   {"ZeroCat", "https://api.zcservice.houlang.cloud/oauth/authorize", "https://api.zcservice.houlang.cloud/oauth/token", "https://api.zcservice.houlang.cloud/oauth/userinfo", "user:read"},
 }
 
 type providerStored struct {

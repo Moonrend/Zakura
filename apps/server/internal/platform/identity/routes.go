@@ -230,11 +230,20 @@ func registerHandler(s *Service, deps *appdeps.Dependencies) http.HandlerFunc {
 			httpx.Error(w, 400, "email and password required")
 			return
 		}
-		if s.registrationBlockedBySSO(r.Context(), b.Email) {
+		join, err := s.resolveRegistrationJoin(r.Context(), b.Email)
+		if err != nil {
+			httpx.Error(w, 500, "registration failed")
+			return
+		}
+		if join.action == "sso_required" {
 			httpx.JSON(w, 403, map[string]any{"error": "This email must use company SSO", "code": "sso_required"})
 			return
 		}
-		res, err := s.Register(r.Context(), b.Email, b.Password, b.Name, b.TenantName, requestIP(r), r.UserAgent())
+		var joinTarget *registrationJoin
+		if join.action == "auto_join" {
+			joinTarget = &join
+		}
+		res, err := s.Register(r.Context(), b.Email, b.Password, b.Name, b.TenantName, requestIP(r), r.UserAgent(), joinTarget)
 		if err != nil {
 			status := 400
 			if strings.Contains(err.Error(), "registered") {
@@ -335,8 +344,8 @@ func changePasswordHandler(s *Service) http.HandlerFunc {
 			Current string `json:"currentPassword"`
 			New     string `json:"newPassword"`
 		}
-		if httpx.DecodeJSON(r, &b) != nil || len(b.New) < 10 {
-			httpx.Error(w, 400, "new password must contain at least 10 characters")
+		if httpx.DecodeJSON(r, &b) != nil || len(b.New) < 8 {
+			httpx.Error(w, 400, "new password must contain at least 8 characters")
 			return
 		}
 		var dbUser models.User
@@ -469,6 +478,9 @@ func createTenantHandler(s *Service) http.HandlerFunc {
 		if err != nil {
 			httpx.Error(w, 400, err.Error())
 			return
+		}
+		if s.deps.OnTenantCreated != nil {
+			s.deps.OnTenantCreated(r.Context(), res.Tenant.ID)
 		}
 		httpx.JSON(w, 201, map[string]any{"tenant": res.Tenant, "session": res.Session})
 	}
@@ -916,19 +928,30 @@ func inspectInviteHandler(s *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		h := sha256.Sum256([]byte(httpx.Param(r, "token")))
 		var row struct {
-			Email      string `gorm:"column:email"`
-			Role       string `gorm:"column:role"`
-			TenantName string `gorm:"column:tenant_name"`
-			TenantSlug string `gorm:"column:tenant_slug"`
-			ExpiresAt  string `gorm:"column:expires_at"`
+			Email      string  `gorm:"column:email"`
+			Role       string  `gorm:"column:role"`
+			TenantName string  `gorm:"column:tenant_name"`
+			TenantSlug string  `gorm:"column:tenant_slug"`
+			ExpiresAt  string  `gorm:"column:expires_at"`
+			AcceptedAt *string `gorm:"column:accepted_at"`
 		}
 		err := s.gdb(r.Context()).Table("tenant_invites AS i").
-			Select("i.email,i.role,t.name AS tenant_name,t.slug AS tenant_slug,i.expires_at").
+			Select("i.email,i.role,t.name AS tenant_name,t.slug AS tenant_slug,i.expires_at,i.accepted_at").
 			Joins("JOIN tenants t ON t.id = i.tenant_id").
-			Where("i.token_hash = ? AND i.accepted_at IS NULL AND i.expires_at > ?", hex.EncodeToString(h[:]), s.now()).
+			Where("i.token_hash = ?", hex.EncodeToString(h[:])).
 			Take(&row).Error
 		if err != nil {
-			httpx.Error(w, 404, "invite not found or expired")
+			httpx.Error(w, 404, "invalid invite")
+			return
+		}
+		if row.AcceptedAt != nil {
+			httpx.Error(w, 400, "invite already used")
+			return
+		}
+		expires, expiresErr := time.Parse(time.RFC3339Nano, row.ExpiresAt)
+		now, nowErr := time.Parse(time.RFC3339Nano, s.now())
+		if expiresErr != nil || nowErr != nil || !expires.After(now) {
+			httpx.Error(w, 400, "invite expired")
 			return
 		}
 		httpx.JSON(w, 200, map[string]any{"email": row.Email, "role": row.Role, "expiresAt": row.ExpiresAt, "tenant": map[string]any{"name": row.TenantName, "slug": row.TenantSlug}})
