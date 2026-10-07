@@ -115,10 +115,11 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request) {
 	if search["engines"] == nil {
 		search["engines"] = map[string]any{}
 	}
+	platformDefaults := h.platformWebToolDefaults(r.Context())
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"webSearch":        map[string]any{"instance": capabilityInstance("web-search"), "engines": webSearchEngineMeta(), "config": redactConfig(search)},
 		"webFetch":         map[string]any{"instance": capabilityInstance("web-fetch"), "backends": webFetchBackendMeta(), "config": redactConfig(fetch)},
-		"platformServices": platformServiceCatalog, "platformDefaults": map[string]any{"autoManagedServices": []any{}, "multiTenant": h.deps.MultiTenant},
+		"platformServices": platformServiceCatalog, "platformDefaults": map[string]any{"autoManagedServices": platformDefaults.autoManagedServices, "multiTenant": h.deps.MultiTenant},
 	})
 }
 

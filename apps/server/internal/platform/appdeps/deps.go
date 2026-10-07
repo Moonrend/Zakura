@@ -43,6 +43,7 @@ type Dependencies struct {
 	ResolveIPs             func(context.Context, string) ([]net.IP, error)
 	BeforeTenantDelete     func(context.Context, string) error
 	AfterMemberRemoved     func(context.Context, string, string) error
+	OnTenantCreated        func(context.Context, string)
 	SendTransactionalEmail func(context.Context, string, string, string, string) error
 	RecordUsage            func(context.Context, UsageRecord) error
 	Redis                  RedisCache

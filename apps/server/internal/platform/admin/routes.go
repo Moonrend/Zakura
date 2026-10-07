@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm/clause"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/agentconfig"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
@@ -181,8 +180,8 @@ func (a *routes) createUser(w http.ResponseWriter, r *http.Request) {
 		IsPlatformAdmin   bool   `json:"isPlatformAdmin"`
 		CanUseLocalRunner bool   `json:"canUseLocalRunner"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.Email == "" || len(b.Password) < 10 {
-		httpx.Error(w, 400, "email and password (10+ characters) required")
+	if httpx.DecodeJSON(r, &b) != nil || b.Email == "" || len(b.Password) < 8 {
+		httpx.Error(w, 400, "email and password (8+ characters) required")
 		return
 	}
 	hash, _ := bcrypt.GenerateFromPassword([]byte(b.Password), 12)
@@ -211,7 +210,10 @@ func (a *routes) createUser(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 409, "email already registered")
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"user": map[string]any{"id": id, "email": email, "name": name, "isPlatformAdmin": b.IsPlatformAdmin}, "tenant": map[string]any{"id": tenantID, "slug": slug, "name": tenantName}})
+	if a.d.OnTenantCreated != nil {
+		a.d.OnTenantCreated(r.Context(), tenantID)
+	}
+	httpx.JSON(w, 201, map[string]any{"user": map[string]any{"id": id, "email": email, "name": name, "isPlatformAdmin": b.IsPlatformAdmin}, "tenant": map[string]any{"id": tenantID, "slug": slug, "name": tenantName, "onboardingCompleted": false}})
 }
 func (a *routes) user(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -268,11 +270,11 @@ func (a *routes) user(w http.ResponseWriter, r *http.Request) {
 func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var b struct {
-		Name              *string `json:"name"`
-		Email             *string `json:"email"`
-		Password          *string `json:"password"`
-		IsPlatformAdmin   *bool   `json:"isPlatformAdmin"`
-		CanUseLocalRunner *bool   `json:"canUseLocalRunner"`
+		Name              json.RawMessage `json:"name"`
+		Email             *string         `json:"email"`
+		Password          *string         `json:"password"`
+		IsPlatformAdmin   *bool           `json:"isPlatformAdmin"`
+		CanUseLocalRunner *bool           `json:"canUseLocalRunner"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
 		httpx.Error(w, 400, "invalid request")
@@ -293,13 +295,30 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 		password = *current.PasswordHash
 	}
 	if b.Name != nil {
-		name = strings.TrimSpace(*b.Name)
+		if string(b.Name) == "null" {
+			name = ""
+		} else {
+			var parsed string
+			if json.Unmarshal(b.Name, &parsed) != nil {
+				httpx.Error(w, 400, "invalid name")
+				return
+			}
+			name = strings.TrimSpace(parsed)
+		}
 	}
 	if b.Email != nil {
 		email = strings.ToLower(strings.TrimSpace(*b.Email))
 		if !strings.Contains(email, "@") {
 			httpx.Error(w, 400, "invalid email")
 			return
+		}
+		if email != current.Email {
+			var taken int64
+			_ = a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("email=? AND id<>?", email, id).Count(&taken)
+			if taken > 0 {
+				httpx.Error(w, 409, "email already in use")
+				return
+			}
 		}
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
@@ -338,7 +357,7 @@ func (a *routes) patchUser(w http.ResponseWriter, r *http.Request) {
 		password = string(hash)
 		passwordChanged = true
 	}
-	err := a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", id).Updates(map[string]any{"name": name, "email": email, "password_hash": password, "is_platform_admin": admin, "can_use_local_runner": runner, "updated_at": a.now()}).Error
+	err := a.d.Gorm.WithContext(r.Context()).Model(&models.User{}).Where("id=?", id).Updates(map[string]any{"name": nullIfBlank(name), "email": email, "password_hash": password, "is_platform_admin": admin, "can_use_local_runner": runner, "updated_at": a.now()}).Error
 	if err != nil {
 		httpx.Error(w, 409, "update conflict")
 		return
@@ -614,6 +633,9 @@ func (a *routes) createTenant(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 409, "tenant conflict")
 		return
 	}
+	if a.d.OnTenantCreated != nil {
+		a.d.OnTenantCreated(r.Context(), tid)
+	}
 	httpx.JSON(w, 201, map[string]any{"tenant": map[string]any{"id": tid, "slug": slug, "name": strings.TrimSpace(b.Name), "isDefault": false, "onboardingCompleted": false}})
 }
 func (a *routes) tenant(w http.ResponseWriter, r *http.Request) {
@@ -682,7 +704,7 @@ func (a *routes) patchTenant(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 409, "update conflict")
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
+	httpx.JSON(w, 200, map[string]any{"tenant": map[string]any{"id": id, "name": name, "slug": slug}})
 }
 func (a *routes) suspendTenant(w http.ResponseWriter, r *http.Request) {
 	a.setTenantStatus(w, r, "suspended")
@@ -1112,7 +1134,12 @@ func (a *routes) patchPlatform(w http.ResponseWriter, r *http.Request) {
 	httpx.Error(w, 400, "Deployment mode is set by environment (ZAKURA_EDITION)")
 }
 func (a *routes) agentDefaults(w http.ResponseWriter, r *http.Request) {
-	a.setting(w, r, "agent_defaults", nil)
+	value, err := a.loadAgentWebDefaults(r.Context())
+	if err != nil {
+		httpx.Error(w, 500, "load failed")
+		return
+	}
+	httpx.JSON(w, 200, value)
 }
 func (a *routes) putAgentDefaults(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
@@ -1120,26 +1147,16 @@ func (a *routes) putAgentDefaults(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid request")
 		return
 	}
-	a.setting(w, r, "agent_defaults", body)
-}
-func (a *routes) setting(w http.ResponseWriter, r *http.Request, key string, value map[string]any) {
-	if value != nil {
-		raw, _ := json.Marshal(value)
-		id := a.d.NewID()
-		err := a.d.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "owner_key"}, {Name: "key"}}, DoUpdates: clause.AssignmentColumns([]string{"value"})}).Create(&models.Setting{ID: &id, OwnerKey: "platform", Key: key, Value: string(raw)}).Error
-		if err != nil {
-			httpx.Error(w, 500, "update failed")
-			return
-		}
+	value, err := a.saveAgentWebDefaults(r.Context(), body)
+	if err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
 	}
-	var row models.Setting
-	raw := "{}"
-	if a.d.Gorm.WithContext(r.Context()).Where("owner_key='platform' AND key=?", key).Take(&row).Error == nil {
-		raw = row.Value
+	if err := a.syncManagedAgentWebDefaults(r.Context(), value); err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
 	}
-	var out map[string]any
-	_ = json.Unmarshal([]byte(raw), &out)
-	httpx.JSON(w, 200, out)
+	httpx.JSON(w, 200, value)
 }
 func (a *routes) oauthClients(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())

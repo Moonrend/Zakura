@@ -58,12 +58,12 @@ type webFetchBackend struct {
 	AllowPrivateHosts bool
 }
 
-func providerToolEnabled(providers map[string]any, key string) bool {
+func providerToolEnabled(providers map[string]any, key string, fallback bool) bool {
 	cfg, _ := providers[key].(map[string]any)
 	if enabled, ok := cfg["enabled"].(bool); ok {
 		return enabled
 	}
-	return true
+	return fallback
 }
 
 func nestedMap(root map[string]any, keys ...string) map[string]any {
@@ -146,7 +146,12 @@ func (h *handler) webSearchConfig(ctx context.Context, tenant, agent string) (we
 		return webSearchEngine{}, err
 	}
 	agentSearch := agentProviderConfig(record, "webSearch")
-	if enabled, ok := agentSearch["enabled"].(bool); ok && !enabled {
+	platform := h.platformWebToolDefaults(ctx)
+	searchEnabled := platform.webSearchEnabled
+	if enabled, ok := agentSearch["enabled"].(bool); ok {
+		searchEnabled = enabled
+	}
+	if !searchEnabled {
 		return webSearchEngine{}, errors.New("web search is disabled for this agent")
 	}
 	settings := map[string]any{}
@@ -170,7 +175,7 @@ func (h *handler) webSearchConfig(ctx context.Context, tenant, agent string) (we
 		}
 		return webSearchEngineFromEntry(h, ctx, id, entry)
 	}
-	defaultEngine := firstNonEmpty(mapStringValue(agentSearch["defaultEngine"]), mapStringValue(settings["defaultEngine"]))
+	defaultEngine := firstNonEmpty(mapStringValue(agentSearch["defaultEngine"]), platform.searchEngine, mapStringValue(settings["defaultEngine"]))
 	if defaultEngine != "" {
 		if engine, ok := pick(defaultEngine); ok {
 			return engine, nil
@@ -190,7 +195,12 @@ func (h *handler) webFetchConfig(ctx context.Context, tenant, agent string) (web
 		return webFetchBackend{}, err
 	}
 	agentFetch := agentProviderConfig(record, "webFetch")
-	if enabled, ok := agentFetch["enabled"].(bool); ok && !enabled {
+	platform := h.platformWebToolDefaults(ctx)
+	fetchEnabled := platform.webFetchEnabled
+	if enabled, ok := agentFetch["enabled"].(bool); ok {
+		fetchEnabled = enabled
+	}
+	if !fetchEnabled {
 		return webFetchBackend{}, errors.New("web fetch is disabled for this agent")
 	}
 	settings := map[string]any{}
@@ -207,7 +217,7 @@ func (h *handler) webFetchConfig(ctx context.Context, tenant, agent string) (web
 			}
 		}
 	}
-	backendID := firstNonEmpty(mapStringValue(agentFetch["defaultBackend"]), mapStringValue(settings["defaultBackend"]))
+	backendID := firstNonEmpty(mapStringValue(agentFetch["defaultBackend"]), platform.fetchBackend, mapStringValue(settings["defaultBackend"]))
 	if backendID == "" {
 		backendID = "native"
 	}

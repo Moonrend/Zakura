@@ -655,8 +655,23 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 	}
 	webSearchCfg, _ := providers["webSearch"].(map[string]any)
 	webFetchCfg, _ := providers["webFetch"].(map[string]any)
-	webSearchEnabled, _ := webSearchCfg["enabled"].(bool)
-	webFetchEnabled, _ := webFetchCfg["enabled"].(bool)
+	platformWebDefaults := h.platformWebToolDefaults(ctx)
+	webSearchEnabled := platformWebDefaults.webSearchEnabled
+	if enabled, ok := webSearchCfg["enabled"].(bool); ok {
+		webSearchEnabled = enabled
+	}
+	webFetchEnabled := platformWebDefaults.webFetchEnabled
+	if enabled, ok := webFetchCfg["enabled"].(bool); ok {
+		webFetchEnabled = enabled
+	}
+	webSearchEngine := valueOrNil(webSearchCfg, "defaultEngine")
+	if webSearchEngine == nil && platformWebDefaults.searchEngine != "" {
+		webSearchEngine = platformWebDefaults.searchEngine
+	}
+	webFetchBackend := valueOrNil(webFetchCfg, "defaultBackend")
+	if webFetchBackend == nil && platformWebDefaults.fetchBackend != "" {
+		webFetchBackend = platformWebDefaults.fetchBackend
+	}
 	return map[string]any{
 		"providers": providers,
 		"webSearch": map[string]any{
@@ -666,7 +681,7 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 				{"id": "auto", "name": "Zakura Auto", "description": "Automatic engine selection"},
 				{"id": "searxng", "name": "SearXNG", "description": "Self-hosted metasearch"},
 			},
-			"agent": map[string]any{"enabled": webSearchEnabled, "defaultEngine": valueOrNil(webSearchCfg, "defaultEngine")},
+			"agent": map[string]any{"enabled": webSearchEnabled, "defaultEngine": webSearchEngine},
 		},
 		"webFetch": map[string]any{
 			"instanceId": "builtin:web-fetch", "status": "ready",
@@ -675,7 +690,7 @@ func (h *handler) buildAgentProviders(ctx context.Context, tenant, agentID strin
 				{"id": "auto", "name": "Zakura Auto", "description": "Automatic backend selection"},
 				{"id": "jina-reader", "name": "Jina Reader", "description": "URL to Markdown"},
 			},
-			"agent": map[string]any{"enabled": webFetchEnabled, "defaultBackend": valueOrNil(webFetchCfg, "defaultBackend")},
+			"agent": map[string]any{"enabled": webFetchEnabled, "defaultBackend": webFetchBackend},
 		},
 		"mcp": map[string]any{"mode": mode, "exposeWorkspaceFs": exposeWorkspaceFS, "instances": instances},
 		"memory": map[string]any{
