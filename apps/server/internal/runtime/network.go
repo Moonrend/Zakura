@@ -40,8 +40,8 @@ func (h *handler) registerNetwork(r chi.Router) {
 	r.Post("/settings/network/mesh/sync", h.syncMesh)
 	r.Post("/settings/network/mesh/disconnect", h.disconnectMesh)
 	r.Post("/settings/network/mesh/platform/enable", h.enablePlatformMesh)
-	r.Post("/settings/network/mesh/auth-key", h.createMeshAuthKey)
-	r.Post("/settings/network/mesh/auth-key/generate", h.createMeshAuthKey)
+	r.Post("/settings/network/mesh/auth-key", h.saveMeshAuthKey)
+	r.Post("/settings/network/mesh/auth-key/generate", h.generateMeshAuthKey)
 	r.Post("/settings/network/mesh/acl/ensure-tags", h.ensureMeshACL)
 	r.Post("/settings/network/mesh/oauth/start", h.meshOAuthStart)
 	r.Post("/settings/network/mesh/oauth/connect", h.meshOAuthConnect)
@@ -556,23 +556,34 @@ func (h *handler) stopAllExposures(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var meshKind, meshStatus string
+	resolved := h.loadPlatformHeadscaleResolved(r.Context())
+	platformEnabled := resolved.Enabled
+	platform := h.loadPlatformIntegration(r.Context(), p.TenantID)
+	meshStatus := "disconnected"
 	var display *string
-	var mesh struct {
-		Kind        string  `gorm:"column:kind"`
-		Status      string  `gorm:"column:status"`
-		DisplayName *string `gorm:"column:display_name"`
-	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("kind, status, display_name").Where("tenant_id = ?", p.TenantID).Order("CASE WHEN status = 'connected' THEN 0 ELSE 1 END").Take(&mesh).Error
-	if errors.Is(e, gorm.ErrRecordNotFound) {
-		meshStatus = "disconnected"
-		e = nil
-	} else if e == nil {
-		meshKind, meshStatus, display = mesh.Kind, mesh.Status, mesh.DisplayName
-	}
-	if e != nil {
-		statusErr(w, e)
-		return
+	if platformEnabled {
+		meshStatus = "connected"
+		if platform != nil && platform.DisplayName != nil {
+			display = platform.DisplayName
+		} else {
+			name := "平台托管网络"
+			display = &name
+		}
+	} else {
+		var mesh struct {
+			Kind        string  `gorm:"column:kind"`
+			Status      string  `gorm:"column:status"`
+			DisplayName *string `gorm:"column:display_name"`
+		}
+		e := h.deps.Gorm.WithContext(r.Context()).Table("network_integrations").Select("kind, status, display_name").Where("tenant_id = ?", p.TenantID).Order("CASE WHEN status = 'connected' THEN 0 ELSE 1 END").Take(&mesh).Error
+		if errors.Is(e, gorm.ErrRecordNotFound) {
+			meshStatus = "disconnected"
+		} else if e == nil {
+			meshStatus, display = mesh.Status, mesh.DisplayName
+		} else {
+			statusErr(w, e)
+			return
+		}
 	}
 	var defaultProvider *string
 	var dp struct {
@@ -607,28 +618,24 @@ func (h *handler) networkOverview(w http.ResponseWriter, r *http.Request) {
 	exposure, _ := policy["exposureEnabled"].(bool)
 	connected := meshStatus == "connected"
 	var provider any
-	if meshKind != "" {
-		provider = meshKind
+	if mp := h.resolveMeshProvider(r.Context(), p.TenantID); mp != "" {
+		provider = mp
 	}
-	httpx.JSON(w, 200, map[string]any{"mesh": map[string]any{"connected": connected, "displayName": display, "status": meshStatus}, "meshProvider": provider, "defaultProvider": defaultProvider, "exposureEnabled": enabled && exposure, "runners": map[string]any{"online": online, "total": total}, "activeExposures": active, "exposuresToday": today, "auditEventsToday": audit, "hostJoinsTailscale": connected || !h.deps.MultiTenant})
+	hostJoins := connected || !h.deps.MultiTenant
+	if platformEnabled {
+		hostJoins = true
+	}
+	httpx.JSON(w, 200, map[string]any{"mesh": map[string]any{"connected": connected, "displayName": display, "status": meshStatus}, "meshProvider": provider, "defaultProvider": defaultProvider, "exposureEnabled": enabled && exposure, "runners": map[string]any{"online": online, "total": total}, "activeExposures": active, "exposuresToday": today, "auditEventsToday": audit, "hostJoinsTailscale": hostJoins})
 }
 func (h *handler) networkMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var ms []models.NetworkIntegration
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Order("kind").Find(&ms).Error; e != nil {
-		statusErr(w, e)
-		return
+	resolved := h.loadPlatformHeadscaleResolved(r.Context())
+	if resolved.Enabled {
+		_ = h.enablePlatformMeshFor(r.Context(), p.TenantID, false)
 	}
-	out := []map[string]any{}
-	for _, m := range ms {
-		id := ""
-		if m.ID != nil {
-			id = *m.ID
-		}
-		out = append(out, map[string]any{"id": id, "kind": m.Kind, "status": m.Status, "displayName": m.DisplayName, "meta": json.RawMessage(m.MetaJSON), "lastSyncAt": m.LastSyncAt, "lastError": m.LastError, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
-	}
-	httpx.JSON(w, 200, map[string]any{"integrations": out})
+	httpx.JSON(w, 200, h.buildMeshPayload(r.Context(), p.TenantID, resolved))
 }
+
 type platformHeadscaleStored struct {
 	Enabled        bool   `json:"enabled"`
 	URL            string `json:"url"`
@@ -662,13 +669,56 @@ func (h *handler) savePlatformHeadscale(ctx context.Context, stored platformHead
 }
 
 func (h *handler) publicPlatformHeadscale(stored platformHeadscaleStored) map[string]any {
+	url := strings.TrimRight(strings.TrimSpace(stored.URL), "/")
 	return map[string]any{
 		"enabled":            stored.Enabled,
-		"url":                strings.TrimSpace(stored.URL),
+		"url":                url,
 		"hasApiKey":          stored.APIKeyEnc != "",
 		"hasPlatformAuthKey": stored.PlatformKeyEnc != "",
-		"ready":              stored.Enabled && strings.TrimSpace(stored.URL) != "" && stored.APIKeyEnc != "",
+		"ready":              stored.Enabled && url != "" && stored.APIKeyEnc != "",
 	}
+}
+
+type platformHeadscaleResolved struct {
+	Enabled         bool
+	URL             string
+	APIKey          string
+	PlatformAuthKey string
+}
+
+func (h *handler) loadPlatformHeadscaleResolved(ctx context.Context) platformHeadscaleResolved {
+	stored := h.loadPlatformHeadscale(ctx)
+	url := strings.TrimRight(strings.TrimSpace(stored.URL), "/")
+	apiKey := ""
+	if stored.APIKeyEnc != "" {
+		if raw, e := openSecretBox(h.deps.Secret, "platform:network:headscale:apikey", stored.APIKeyEnc); e == nil {
+			apiKey = strings.TrimSpace(string(raw))
+		}
+	}
+	platformKey := ""
+	if stored.PlatformKeyEnc != "" {
+		if raw, e := openSecretBox(h.deps.Secret, "platform:network:headscale:platformkey", stored.PlatformKeyEnc); e == nil {
+			platformKey = strings.TrimSpace(string(raw))
+		}
+	}
+	return platformHeadscaleResolved{Enabled: stored.Enabled && url != "" && apiKey != "", URL: url, APIKey: apiKey, PlatformAuthKey: platformKey}
+}
+
+func (h *handler) persistPlatformAuthKey(ctx context.Context, key string) error {
+	stored := h.loadPlatformHeadscale(ctx)
+	enc, e := secretBox(h.deps.Secret, "platform:network:headscale:platformkey", []byte(key))
+	if e != nil {
+		return e
+	}
+	stored.PlatformKeyEnc = enc
+	return h.savePlatformHeadscale(ctx, stored)
+}
+
+func (h *handler) headscaleClientFor(resolved platformHeadscaleResolved) *headscaleAdminClient {
+	if !resolved.Enabled {
+		return nil
+	}
+	return newHeadscaleAdminClient(resolved.URL, resolved.APIKey)
 }
 
 func (h *handler) getPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
@@ -698,7 +748,7 @@ func (h *handler) putPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
 		stored.Enabled = *b.Enabled
 	}
 	if b.URL != nil {
-		stored.URL = strings.TrimSpace(*b.URL)
+		stored.URL = strings.TrimRight(strings.TrimSpace(*b.URL), "/")
 	}
 	if b.URL != nil && stored.URL != "" {
 		if _, e := safeProviderURL(stored.URL, ""); e != nil {
@@ -738,17 +788,295 @@ func (h *handler) putPlatformHeadscale(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, h.publicPlatformHeadscale(stored))
 }
+func (h *handler) loadPlatformIntegration(ctx context.Context, tenantID string) *models.NetworkIntegration {
+	var row models.NetworkIntegration
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND kind = ?", tenantID, "headscale-platform").Take(&row).Error; e != nil {
+		return nil
+	}
+	return &row
+}
+
+func (h *handler) saveManualAuthKey(ctx context.Context, tenantID, key string) error {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return errors.New("authKey is required")
+	}
+	creds, _ := json.Marshal(map[string]any{"authKey": trimmed})
+	enc, e := secretBox(h.deps.Secret, "network:"+tenantID+":tailscale-authkey", creds)
+	if e != nil {
+		return e
+	}
+	now := runtimeTimeString(h.store.now())
+	id := h.store.id()
+	displayName := "Manual Auth Key"
+	return h.deps.Gorm.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "kind"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "credentials_enc", "display_name", "updated_at"}),
+	}).Create(&models.NetworkIntegration{ID: &id, TenantID: tenantID, Kind: "tailscale-authkey", Status: "connected", DisplayName: &displayName, CredentialsEnc: enc, MetaJSON: "{}", CreatedAt: now, UpdatedAt: now}).Error
+}
+
+func (h *handler) meshDevices(ctx context.Context, tenantID string) []map[string]any {
+	var rows []struct {
+		ID           string  `gorm:"column:id"`
+		Name         string  `gorm:"column:name"`
+		Slug         string  `gorm:"column:slug"`
+		Kind         string  `gorm:"column:kind"`
+		Status       string  `gorm:"column:status"`
+		Endpoint     *string `gorm:"column:endpoint"`
+		HostInfoJSON string  `gorm:"column:host_info_json"`
+	}
+	if e := h.deps.Gorm.WithContext(ctx).Table("runtime_nodes").Select("id,name,slug,kind,status,endpoint,host_info_json").Where("tenant_id = ?", tenantID).Order("created_at").Find(&rows).Error; e != nil {
+		return []map[string]any{}
+	}
+	out := []map[string]any{}
+	for _, n := range rows {
+		var host map[string]any
+		_ = json.Unmarshal([]byte(n.HostInfoJSON), &host)
+		var tailscale any
+		if ts, ok := host["tailscale"].(map[string]any); ok {
+			tailscale = map[string]any{"connected": mapBoolValue(ts["connected"]), "ip": nullString(mapStringValue(ts["ip"])), "magicDnsName": nullString(mapStringValue(ts["magicDnsName"])), "hostname": nullString(mapStringValue(ts["hostname"])), "tags": stringSlice(ts["tags"])}
+		}
+		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "slug": n.Slug, "kind": n.Kind, "status": n.Status, "endpoint": n.Endpoint, "tailscale": tailscale})
+	}
+	return out
+}
+
+func headscaleNodesToDevices(nodes []headscaleNode) []map[string]any {
+	out := []map[string]any{}
+	for _, n := range nodes {
+		out = append(out, map[string]any{"id": n.ID, "name": n.Name, "hostname": n.Hostname, "addresses": n.Addresses, "tags": n.Tags, "online": n.Online, "user": n.User, "os": n.OS, "lastSeen": n.LastSeen})
+	}
+	return out
+}
+
+func meshMapInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	}
+	return 0
+}
+
+func (h *handler) resolveMeshProvider(ctx context.Context, tenantID string) string {
+	if h.loadPlatformHeadscaleResolved(ctx).Enabled {
+		return "headscale-platform"
+	}
+	var row models.NetworkIntegration
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND kind = ? AND status = 'connected'", tenantID, "tailscale-oauth").Take(&row).Error; e == nil {
+		return "tailscale-cloud"
+	}
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND kind = ? AND status = 'connected'", tenantID, "tailscale-authkey").Take(&row).Error; e == nil {
+		return "tailscale-cloud"
+	}
+	return ""
+}
+
+func (h *handler) buildMeshPayload(ctx context.Context, tenantID string, resolved platformHeadscaleResolved) map[string]any {
+	var oauth, authkey *models.NetworkIntegration
+	var oauthRow, authkeyRow models.NetworkIntegration
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND kind = ?", tenantID, "tailscale-oauth").Take(&oauthRow).Error; e == nil {
+		oauth = &oauthRow
+	}
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND kind = ?", tenantID, "tailscale-authkey").Take(&authkeyRow).Error; e == nil {
+		authkey = &authkeyRow
+	}
+	platform := h.loadPlatformIntegration(ctx, tenantID)
+	platformMode := resolved.Enabled
+
+	metaJSON := ""
+	if platformMode {
+		if platform != nil {
+			metaJSON = platform.MetaJSON
+		}
+	} else if oauth != nil && oauth.Status == "connected" {
+		metaJSON = oauth.MetaJSON
+	} else if platform != nil {
+		metaJSON = platform.MetaJSON
+	} else if oauth != nil {
+		metaJSON = oauth.MetaJSON
+	}
+	meta := map[string]any{}
+	_ = json.Unmarshal([]byte(metaJSON), &meta)
+
+	devices := h.meshDevices(ctx, tenantID)
+	tailnetDevices := []any{}
+	if value, ok := meta["devices"].([]any); ok {
+		tailnetDevices = value
+	}
+
+	provider := h.resolveMeshProvider(ctx, tenantID)
+	platformConnected := platformMode && platform != nil && platform.Status == "connected"
+	cloudConnected := !platformMode && ((oauth != nil && oauth.Status == "connected") || (authkey != nil && authkey.Status == "connected"))
+	connected := platformConnected || cloudConnected
+
+	headscaleUser := ""
+	if platformMode {
+		if value, ok := meta["headscaleUser"].(string); ok && value != "" {
+			headscaleUser = value
+		} else {
+			headscaleUser = headscaleTenantUserName(tenantID)
+		}
+	}
+	deviceCount := len(tailnetDevices)
+	if _, ok := meta["deviceCount"]; ok {
+		deviceCount = meshMapInt(meta["deviceCount"])
+	}
+
+	var meshProvider any
+	if platformMode {
+		meshProvider = "headscale-platform"
+	} else if provider != "" {
+		meshProvider = provider
+	}
+	var loginServer any
+	var headscaleUserValue any
+	if platformMode {
+		loginServer = resolved.URL
+		headscaleUserValue = headscaleUser
+	}
+
+	createClientURL := "https://login.tailscale.com/admin/settings/oauth"
+	var oauthPayload any
+	if platformMode {
+		oauthPayload = nil
+	} else if oauth != nil {
+		oauthPayload = map[string]any{"status": oauth.Status, "displayName": oauth.DisplayName, "lastSyncAt": oauth.LastSyncAt, "lastError": oauth.LastError, "tags": stringSlice(meta["tags"]), "deviceCount": deviceCount, "createClientUrl": createClientURL}
+	} else {
+		oauthPayload = map[string]any{"status": "disconnected", "displayName": nil, "lastSyncAt": nil, "lastError": nil, "tags": []string{}, "deviceCount": 0, "createClientUrl": createClientURL}
+	}
+
+	var platformPayload any
+	if platformMode {
+		status := "error"
+		displayName := "Headscale"
+		var lastSyncAt, lastError any
+		if platform != nil {
+			if platform.Status != "" {
+				status = platform.Status
+			}
+			if platform.DisplayName != nil {
+				displayName = *platform.DisplayName
+			}
+			lastSyncAt = platform.LastSyncAt
+			lastError = platform.LastError
+		}
+		platformPayload = map[string]any{"status": status, "displayName": displayName, "lastSyncAt": lastSyncAt, "lastError": lastError, "deviceCount": deviceCount, "headscaleUser": headscaleUser}
+	}
+
+	hostJoins := !h.deps.MultiTenant
+	note := "Tailscale 云组网：使用 OAuth Client Credentials；Runner 通过 sidecar 入网。"
+	if platformMode {
+		hostJoins = true
+		note = "平台托管网络：主节点已入网，本租户设备仅能互访。注册 Runner 时自动加入。"
+	}
+	return map[string]any{
+		"connected":          connected,
+		"meshProvider":       meshProvider,
+		"loginServer":        loginServer,
+		"headscaleUser":      headscaleUserValue,
+		"oauth":              oauthPayload,
+		"platform":           platformPayload,
+		"hasAuthKey":         authkey != nil && authkey.Status != "disconnected",
+		"devices":            devices,
+		"tailnetDevices":     tailnetDevices,
+		"hostJoinsTailscale": hostJoins,
+		"note":               note,
+	}
+}
+
+func (h *handler) enablePlatformMeshFor(ctx context.Context, tenantID string, refreshDevices bool) error {
+	resolved := h.loadPlatformHeadscaleResolved(ctx)
+	if !resolved.Enabled {
+		return errors.New("platform Headscale is not configured")
+	}
+	client := h.headscaleClientFor(resolved)
+	if client == nil {
+		return errors.New("platform Headscale is not configured")
+	}
+	now := runtimeTimeString(h.store.now())
+	_ = h.deps.Gorm.WithContext(ctx).Model(&models.NetworkIntegration{}).Where("tenant_id = ? AND kind IN ('tailscale-oauth','tailscale-authkey') AND status != 'disconnected'", tenantID).Updates(map[string]any{"status": "disconnected", "last_error": nil, "updated_at": now}).Error
+
+	existing := h.loadPlatformIntegration(ctx, tenantID)
+	if existing != nil && existing.Status == "connected" {
+		if refreshDevices {
+			user, e := client.ensureTenantUser(ctx, tenantID)
+			if e == nil {
+				nodes, _ := client.listTenantNodes(ctx, tenantID)
+				devices := headscaleNodesToDevices(nodes)
+				prev := map[string]any{}
+				_ = json.Unmarshal([]byte(existing.MetaJSON), &prev)
+				prev["headscaleUser"] = user.Name
+				prev["headscaleUserId"] = user.ID
+				prev["deviceCount"] = len(devices)
+				prev["devices"] = devices
+				prev["loginServer"] = resolved.URL
+				raw, _ := json.Marshal(prev)
+				syncAt := runtimeTimeString(h.store.now())
+				_ = h.deps.Gorm.WithContext(ctx).Model(&models.NetworkIntegration{}).Where("id = ?", existing.ID).Updates(map[string]any{"meta_json": string(raw), "last_sync_at": syncAt, "last_error": nil, "updated_at": syncAt}).Error
+			}
+		}
+		return nil
+	}
+
+	user, e := client.ensureTenantUser(ctx, tenantID)
+	if e != nil {
+		return e
+	}
+	_, _ = client.ensurePlatformUser(ctx)
+	if resolved.PlatformAuthKey == "" {
+		if minted, mintErr := client.createPlatformPreAuthKey(ctx, true, 0); mintErr == nil {
+			_ = h.persistPlatformAuthKey(ctx, minted.Key)
+		}
+	}
+	nodes, e := client.listTenantNodes(ctx, tenantID)
+	if e != nil {
+		nodes = nil
+	}
+	devices := headscaleNodesToDevices(nodes)
+	credsRaw, _ := json.Marshal(map[string]any{"headscaleUser": user.Name, "headscaleUserId": user.ID})
+	credentialsEnc, e := secretBox(h.deps.Secret, "network:"+tenantID+":headscale-platform", credsRaw)
+	if e != nil {
+		return e
+	}
+	metaRaw, _ := json.Marshal(map[string]any{"headscaleUser": user.Name, "headscaleUserId": user.ID, "deviceCount": len(devices), "devices": devices, "loginServer": resolved.URL})
+	syncAt := runtimeTimeString(h.store.now())
+	id := h.store.id()
+	displayName := "Headscale · " + user.Name
+	return h.deps.Gorm.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "kind"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "display_name", "credentials_enc", "meta_json", "last_sync_at", "last_error", "updated_at"}),
+	}).Create(&models.NetworkIntegration{ID: &id, TenantID: tenantID, Kind: "headscale-platform", Status: "connected", DisplayName: &displayName, CredentialsEnc: credentialsEnc, MetaJSON: string(metaRaw), LastSyncAt: &syncAt, CreatedAt: syncAt, UpdatedAt: syncAt}).Error
+}
+
 func (h *handler) syncMesh(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
+	resolved := h.loadPlatformHeadscaleResolved(r.Context())
+	if resolved.Enabled {
+		_ = h.enablePlatformMeshFor(r.Context(), p.TenantID, true)
+		httpx.JSON(w, 200, h.buildMeshPayload(r.Context(), p.TenantID, resolved))
+		return
+	}
 	now := runtimeTimeString(h.store.now())
 	res := h.deps.Gorm.WithContext(r.Context()).Model(&models.NetworkIntegration{}).Where("tenant_id = ? AND status = 'connected'", p.TenantID).Updates(map[string]any{"last_sync_at": now, "updated_at": now})
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"synced": res.RowsAffected})
+	payload := h.buildMeshPayload(r.Context(), p.TenantID, resolved)
+	payload["synced"] = res.RowsAffected
+	httpx.JSON(w, 200, payload)
 }
 func (h *handler) disconnectMesh(w http.ResponseWriter, r *http.Request) {
+	if h.loadPlatformHeadscaleResolved(r.Context()).Enabled {
+		httpx.Error(w, 400, "平台托管网络由部署配置决定，不能在控制台断开")
+		return
+	}
 	p := principal(r)
 	var b struct {
 		Kind string `json:"kind"`
@@ -765,21 +1093,89 @@ func (h *handler) disconnectMesh(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"disconnected": res.RowsAffected})
 }
 func (h *handler) enablePlatformMesh(w http.ResponseWriter, r *http.Request) {
-	if !principal(r).IsPlatformAdmin {
+	p := principal(r)
+	if !p.IsPlatformAdmin && p.Role != "owner" && p.Role != "admin" {
 		httpx.Error(w, 403, "Admin only")
 		return
 	}
-	stored := h.loadPlatformHeadscale(r.Context())
-	if stored.URL == "" {
-		httpx.Error(w, 400, "configure a Headscale URL first")
+	resolved := h.loadPlatformHeadscaleResolved(r.Context())
+	if e := h.enablePlatformMeshFor(r.Context(), p.TenantID, true); e != nil {
+		httpx.Error(w, 400, e.Error())
 		return
 	}
-	stored.Enabled = true
-	if e := h.savePlatformHeadscale(r.Context(), stored); e != nil {
+	detail := map[string]any{"kind": "headscale-platform"}
+	if platform := h.loadPlatformIntegration(r.Context(), p.TenantID); platform != nil {
+		var meta map[string]any
+		_ = json.Unmarshal([]byte(platform.MetaJSON), &meta)
+		if u := mapStringValue(meta["headscaleUser"]); u != "" {
+			detail["headscaleUser"] = u
+		}
+	}
+	h.auditNetwork(r, "mesh.platform.enable", "network_integration", "headscale-platform", detail)
+	httpx.JSON(w, 200, h.buildMeshPayload(r.Context(), p.TenantID, resolved))
+}
+func (h *handler) saveMeshAuthKey(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if !p.IsPlatformAdmin && p.Role != "owner" && p.Role != "admin" {
+		httpx.Error(w, 403, "Admin only")
+		return
+	}
+	var b struct {
+		AuthKey string `json:"authKey"`
+	}
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(b.AuthKey) == "" {
+		httpx.Error(w, 400, "authKey is required")
+		return
+	}
+	if e := h.saveManualAuthKey(r.Context(), p.TenantID, b.AuthKey); e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, h.publicPlatformHeadscale(stored))
+	httpx.JSON(w, 200, h.buildMeshPayload(r.Context(), p.TenantID, h.loadPlatformHeadscaleResolved(r.Context())))
+}
+func (h *handler) generateMeshAuthKey(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if !p.IsPlatformAdmin && p.Role != "owner" && p.Role != "admin" {
+		httpx.Error(w, 403, "Admin only")
+		return
+	}
+	var b struct {
+		Tags          []string `json:"tags"`
+		ExpirySeconds int      `json:"expirySeconds"`
+		Description   string   `json:"description"`
+	}
+	_ = httpx.DecodeJSON(r, &b)
+	resolved := h.loadPlatformHeadscaleResolved(r.Context())
+	if !resolved.Enabled {
+		httpx.Error(w, 400, "当前未启用平台托管组网")
+		return
+	}
+	client := h.headscaleClientFor(resolved)
+	platform := h.loadPlatformIntegration(r.Context(), p.TenantID)
+	if client == nil || platform == nil || platform.Status != "connected" {
+		httpx.Error(w, 400, "请先启用平台托管组网")
+		return
+	}
+	created, e := client.createTenantPreAuthKey(r.Context(), p.TenantID, true, false, b.ExpirySeconds)
+	if e != nil {
+		httpx.Error(w, 400, e.Error())
+		return
+	}
+	_ = h.saveManualAuthKey(r.Context(), p.TenantID, created.Key)
+	payload := h.buildMeshPayload(r.Context(), p.TenantID, resolved)
+	payload["generatedKey"] = created.Key
+	payload["generatedKeyId"] = created.ID
+	if created.Expiration != "" {
+		payload["generatedKeyExpires"] = created.Expiration
+	} else {
+		payload["generatedKeyExpires"] = nil
+	}
+	payload["generatedKeyTags"] = []string{}
+	httpx.JSON(w, 200, payload)
 }
 func (h *handler) meshCredentials(r *http.Request, kind string) (map[string]any, error) {
 	p := principal(r)
@@ -797,37 +1193,6 @@ func (h *handler) meshCredentials(r *http.Request, kind string) (map[string]any,
 	var cfg map[string]any
 	e = json.Unmarshal(raw, &cfg)
 	return cfg, e
-}
-func (h *handler) createMeshAuthKey(w http.ResponseWriter, r *http.Request) {
-	cfg, e := h.meshCredentials(r, "headscale")
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	base, _ := cfg["url"].(string)
-	token, _ := cfg["token"].(string)
-	u, e := safeProviderURL(strings.TrimRight(base, "/")+"/api/v1/preauthkey", "")
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, u.String(), bytes.NewReader([]byte(`{"reusable":false,"ephemeral":true}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := h.service.gateway.client.Do(req)
-	if e != nil {
-		httpx.Error(w, 502, e.Error())
-		return
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpx.Error(w, 502, string(raw))
-		return
-	}
-	var result any
-	_ = json.Unmarshal(raw, &result)
-	httpx.JSON(w, 200, map[string]any{"authKey": result})
 }
 func (h *handler) ensureMeshACL(w http.ResponseWriter, r *http.Request) {
 	cfg, e := h.meshCredentials(r, "headscale")
@@ -865,4 +1230,4 @@ func (h *handler) meshOAuthStart(w http.ResponseWriter, r *http.Request) {
 func (h *handler) meshOAuthConnect(w http.ResponseWriter, r *http.Request) {
 	httpx.Error(w, 400, "configure a Headscale URL and token, or complete OAuth in the network provider's official client")
 }
-func (h *handler) meshOAuthTags(w http.ResponseWriter, r *http.Request)    { h.ensureMeshACL(w, r) }
+func (h *handler) meshOAuthTags(w http.ResponseWriter, r *http.Request) { h.ensureMeshACL(w, r) }
