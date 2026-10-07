@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -41,6 +42,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Handle("/api/remote-channels/{tenantId}/{bindingId}/webhook", http.HandlerFunc(h.remoteWebhook))
 	r.Post("/api/email/inbound/{tenantId}", h.emailInbound)
 	r.Post("/api/email/inbound/{tenantId}/{connectorId}", h.emailInbound)
+	r.Post("/api/connectors/oauth/complete", h.oauthComplete)
 	r.Group(func(api chi.Router) {
 		api.Use(httpx.Auth(deps))
 		api.Use(internalruntime.RequireAPIScope)
@@ -392,7 +394,7 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "OAuth profile is incomplete")
 		return
 	}
-	statePayload, _ := json.Marshal(map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": b.AgentID, "ref": ref, "profileKey": b.ProfileKey, "exp": h.now().Add(10 * time.Minute).Unix()})
+	statePayload, _ := json.Marshal(map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": b.AgentID, "ref": ref, "profileKey": b.ProfileKey, "redirectUri": b.RedirectURI, "exp": h.now().Add(10 * time.Minute).Unix()})
 	sig := hmac.New(sha256.New, h.deps.Secret)
 	sig.Write(statePayload)
 	state := base64.RawURLEncoding.EncodeToString(statePayload) + "." + base64.RawURLEncoding.EncodeToString(sig.Sum(nil))
@@ -417,6 +419,127 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 	}
 	u.RawQuery = q.Encode()
 	httpx.JSON(w, 200, map[string]any{"authorizeUrl": u.String(), "state": state, "expiresAt": h.now().Add(10 * time.Minute)})
+}
+func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
+	var b struct{ Code, State string }
+	if httpx.DecodeJSON(r, &b) != nil || b.Code == "" || b.State == "" {
+		httpx.Error(w, 400, "code and state required")
+		return
+	}
+	parts := strings.Split(b.State, ".")
+	if len(parts) != 2 {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	payload, e := base64.RawURLEncoding.DecodeString(parts[0])
+	if e != nil {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	sig, e := base64.RawURLEncoding.DecodeString(parts[1])
+	if e != nil {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	mac := hmac.New(sha256.New, h.deps.Secret)
+	mac.Write(payload)
+	if !hmac.Equal(sig, mac.Sum(nil)) {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	var sp struct {
+		TenantID    string `json:"tenantId"`
+		UserID      string `json:"userId"`
+		AgentID     string `json:"agentId"`
+		Ref         string `json:"ref"`
+		ProfileKey  string `json:"profileKey"`
+		RedirectURI string `json:"redirectUri"`
+		Exp         int64  `json:"exp"`
+	}
+	if e = json.Unmarshal(payload, &sp); e != nil {
+		httpx.Error(w, 400, "invalid state")
+		return
+	}
+	if sp.Exp < h.now().Unix() {
+		httpx.Error(w, 400, "state expired")
+		return
+	}
+	cfg, e := h.profileConfig(r.Context(), sp.TenantID, sp.ProfileKey)
+	if e != nil {
+		httpx.Error(w, 400, "profile unavailable")
+		return
+	}
+	tokenURL, _ := cfg["tokenUrl"].(string)
+	clientID, _ := cfg["clientId"].(string)
+	clientSecret, _ := cfg["clientSecret"].(string)
+	if tokenURL == "" || clientID == "" || clientSecret == "" {
+		httpx.Error(w, 400, "OAuth profile is incomplete")
+		return
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", b.Code)
+	form.Set("redirect_uri", sp.RedirectURI)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	req, e := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if e != nil {
+		httpx.Error(w, 400, "token exchange failed")
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	client := h.deps.HTTPClient
+	if client == nil {
+		client = h.client
+	}
+	resp, e := client.Do(req)
+	if e != nil {
+		httpx.Error(w, 400, "token exchange failed")
+		return
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var tr map[string]any
+	_ = json.Unmarshal(raw, &tr)
+	accessToken, _ := tr["access_token"].(string)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || accessToken == "" {
+		msg := "token exchange failed"
+		if desc, _ := tr["error_description"].(string); desc != "" {
+			if len(desc) > 200 {
+				desc = desc[:200]
+			}
+			msg = msg + ": " + desc
+		}
+		httpx.Error(w, 400, msg)
+		return
+	}
+	var row models.ConnectorAuthProfile
+	e = h.deps.Gorm.WithContext(r.Context()).
+		Where("scope_key IN ? AND profile_key = ? AND enabled = true", []string{sp.TenantID, "platform"}, sp.ProfileKey).
+		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN scope_key = ? THEN 0 ELSE 1 END", Vars: []any{sp.TenantID}}}).
+		First(&row).Error
+	if e != nil {
+		httpx.Error(w, 400, "profile unavailable")
+		return
+	}
+	cfg["accessToken"] = accessToken
+	if refreshToken, _ := tr["refresh_token"].(string); refreshToken != "" {
+		cfg["refreshToken"] = refreshToken
+	}
+	merged, _ := json.Marshal(cfg)
+	enc, e := encrypt(h.deps.Secret, row.ScopeKey+":"+row.ProfileKey, merged)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.deps.Gorm.WithContext(r.Context()).Model(&models.ConnectorAuthProfile{}).
+		Where("scope_key = ? AND profile_key = ?", row.ScopeKey, row.ProfileKey).
+		Updates(map[string]any{"config_enc": enc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	httpx.JSON(w, 200, map[string]any{"ok": true, "ref": sp.Ref, "profileKey": sp.ProfileKey, "agentId": sp.AgentID})
 }
 func (h *handler) install(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
