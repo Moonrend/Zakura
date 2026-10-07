@@ -28,6 +28,7 @@ func (h *handler) registerSkills(r chi.Router) {
 	r.Get("/skills/stores", h.skillStores)
 	r.Get("/skills/repos", h.listSkillRepos)
 	r.Post("/skills/repos/{owner}/{repo}/sync", h.syncSkillRepo)
+	r.Post("/skills/repos/*", h.syncSkillRepoBySlug)
 	r.Get("/skills/cache", h.skillCacheStatus)
 	r.Get("/skills/auto-update", h.skillAutoUpdateStatus)
 	r.Put("/skills/auto-update", h.putSkillAutoUpdate)
@@ -59,7 +60,7 @@ func (h *handler) registerSkills(r chi.Router) {
 func runtimeTimeString(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func skillFromModel(m models.Skill) Skill {
-	x := Skill{Name: m.Name, Title: m.Title, Description: m.Description, Version: m.Version, Builtin: m.Builtin, Homepage: m.Homepage, License: m.License, FileCount: int(m.FileCount), SizeBytes: int64(m.SizeBytes), AutoUpdate: m.AutoUpdate}
+	x := Skill{Name: m.Name, Title: m.Title, Description: m.Description, Version: m.Version, Builtin: m.Builtin, Homepage: m.Homepage, License: m.License, FileCount: int(m.FileCount), SizeBytes: int64(m.SizeBytes), RepoKey: m.RepoKey, AutoUpdate: m.AutoUpdate}
 	if m.ID != nil {
 		x.ID = *m.ID
 	}
@@ -81,7 +82,9 @@ func (h *handler) skillByID(r *http.Request, id string) (Skill, error) {
 	if e != nil {
 		return Skill{}, e
 	}
-	return skillFromModel(m), nil
+	out := []Skill{skillFromModel(m)}
+	h.enrichSkillRepoState(r.Context(), out)
+	return out[0], nil
 }
 func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -101,6 +104,7 @@ func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
 		x.Files = nil
 		out = append(out, x)
 	}
+	h.enrichSkillRepoState(r.Context(), out)
 	httpx.JSON(w, 200, map[string]any{"skills": out, "items": out})
 }
 func validateSkillFiles(files []skillFile) (int64, error) {
@@ -171,7 +175,11 @@ func (h *handler) installSkill(w http.ResponseWriter, r *http.Request) {
 	files, _ := json.Marshal(b.Files)
 	now := h.store.now()
 	id := h.store.id()
-	m := models.Skill{ID: &id, TenantID: principal(r).TenantID, Name: b.Name, Title: b.Title, Description: b.Description, Version: b.Version, SourceJSON: validJSON(b.Source, "{}"), Homepage: b.Homepage, License: b.License, FilesJSON: string(files), FileCount: int32(len(b.Files)), SizeBytes: int32(size), AutoUpdate: auto, CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
+	var repoKey *string
+	if rk := repoKeyOfSource(skillSourceFromJSON(b.Source)); rk != "" {
+		repoKey = &rk
+	}
+	m := models.Skill{ID: &id, TenantID: principal(r).TenantID, Name: b.Name, Title: b.Title, Description: b.Description, Version: b.Version, SourceJSON: validJSON(b.Source, "{}"), Homepage: b.Homepage, License: b.License, FilesJSON: string(files), FileCount: int32(len(b.Files)), SizeBytes: int32(size), RepoKey: repoKey, AutoUpdate: auto, CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
 	if e = h.deps.Gorm.WithContext(r.Context()).Create(&m).Error; e != nil {
 		statusErr(w, e)
 		return
@@ -201,6 +209,7 @@ func (h *handler) installExistingSkills(w http.ResponseWriter, r *http.Request, 
 	for _, m := range ms {
 		skills = append(skills, skillFromModel(m))
 	}
+	h.enrichSkillRepoState(r.Context(), skills)
 	if len(skills) == 0 {
 		statusErr(w, ErrNotFound)
 		return

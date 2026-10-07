@@ -106,21 +106,24 @@ type Memory struct {
 }
 
 type Skill struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Version     *string         `json:"version"`
-	Builtin     bool            `json:"builtin"`
-	Source      json.RawMessage `json:"source"`
-	Homepage    *string         `json:"homepage"`
-	License     *string         `json:"license"`
-	Files       json.RawMessage `json:"files"`
-	FileCount   int             `json:"fileCount"`
-	SizeBytes   int64           `json:"sizeBytes"`
-	AutoUpdate  bool            `json:"autoUpdate"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	UpdatedAt   time.Time       `json:"updatedAt"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Title           string          `json:"title"`
+	Description     string          `json:"description"`
+	Version         *string         `json:"version"`
+	Builtin         bool            `json:"builtin"`
+	Source          json.RawMessage `json:"source"`
+	Homepage        *string         `json:"homepage"`
+	License         *string         `json:"license"`
+	Files           json.RawMessage `json:"files"`
+	FileCount       int             `json:"fileCount"`
+	SizeBytes       int64           `json:"sizeBytes"`
+	RepoKey         *string         `json:"repoKey"`
+	UpdateAvailable bool            `json:"updateAvailable"`
+	UpstreamVersion *string         `json:"upstreamVersion"`
+	AutoUpdate      bool            `json:"autoUpdate"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
 }
 
 type Upstream struct {

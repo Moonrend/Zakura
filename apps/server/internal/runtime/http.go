@@ -26,19 +26,19 @@ import (
 )
 
 type handler struct {
-	deps           *appdeps.Dependencies
-	store          *Store
-	service        *Service
-	hub            *runnerHub
-	acp            *acpRuntimeManager
-	mcpMu          sync.Mutex
-	mcpSessions    map[string]spaceMCPSession
-	agentToolMu    sync.Mutex
-	agentToolCache map[string]cachedCatalog
+	deps            *appdeps.Dependencies
+	store           *Store
+	service         *Service
+	hub             *runnerHub
+	acp             *acpRuntimeManager
+	mcpMu           sync.Mutex
+	mcpSessions     map[string]spaceMCPSession
+	agentToolMu     sync.Mutex
+	agentToolCache  map[string]cachedCatalog
 	loadedToolMu    sync.Mutex
 	loadedToolCache map[string]cachedLoaded
-	trigramMu      sync.Mutex
-	trigramStates  map[string]string
+	trigramMu       sync.Mutex
+	trigramStates   map[string]string
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
@@ -93,6 +93,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		h.registerWorkspace(api)
 	})
 	h.startScheduler(deps.RunContext())
+	h.startSkillRefresh(deps.RunContext())
 	r.Group(func(g chi.Router) {
 		g.Use(httpx.Auth(deps))
 		g.Get("/v1/models", h.listGatewayModels)
