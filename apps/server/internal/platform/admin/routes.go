@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm/clause"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/agentconfig"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -988,35 +989,38 @@ func (a *routes) applyAgentDefaults(w http.ResponseWriter, r *http.Request) {
 	updated := 0
 	for _, tenantID := range tenants {
 		var agents []models.Agent
-		if e := a.d.Gorm.WithContext(ctx).Select("id,config_json").Where("tenant_id=?", tenantID).Find(&agents).Error; e != nil {
+		if e := a.d.Gorm.WithContext(ctx).Select("id").Where("tenant_id=?", tenantID).Find(&agents).Error; e != nil {
 			httpx.Error(w, 400, e.Error())
 			return
 		}
 		for _, agent := range agents {
-			bag := map[string]any{}
-			_ = json.Unmarshal([]byte(agent.ConfigJSON), &bag)
-			providers, _ := bag["providers"].(map[string]any)
-			if providers == nil {
-				providers = map[string]any{}
-			}
-			for _, key := range []string{"webSearch", "webFetch"} {
-				value, _ := providers[key].(map[string]any)
-				if value == nil {
-					value = map[string]any{}
+			changed, err := agentconfig.Update(ctx, a.d.Gorm, tenantID, deref(agent.ID), a.now(), nil, func(bag map[string]any) error {
+				providers, _ := bag["providers"].(map[string]any)
+				if providers == nil {
+					providers = map[string]any{}
 				}
-				value["enabled"] = true
-				providers[key] = value
-			}
-			bag["providers"] = providers
-			next, _ := json.Marshal(bag)
-			if string(next) == agent.ConfigJSON {
-				continue
-			}
-			if e := a.d.Gorm.WithContext(ctx).Model(&models.Agent{}).Where("id=? AND tenant_id=?", deref(agent.ID), tenantID).Updates(map[string]any{"config_json": string(next), "updated_at": a.now()}).Error; e != nil {
-				httpx.Error(w, 400, e.Error())
+				for _, key := range []string{"webSearch", "webFetch"} {
+					value, _ := providers[key].(map[string]any)
+					if value == nil {
+						value = map[string]any{}
+					}
+					value["enabled"] = true
+					providers[key] = value
+				}
+				bag["providers"] = providers
+				return nil
+			})
+			if err != nil {
+				status := http.StatusBadRequest
+				if errors.Is(err, agentconfig.ErrConflict) {
+					status = http.StatusConflict
+				}
+				httpx.Error(w, status, err.Error())
 				return
 			}
-			updated++
+			if changed {
+				updated++
+			}
 		}
 	}
 	httpx.JSON(w, 200, map[string]any{"updated": updated, "tenants": len(tenants)})

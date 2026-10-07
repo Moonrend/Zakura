@@ -83,3 +83,12 @@ func (h *handler) capToolResultJSON(ctx context.Context, tenant, agent string, r
 	}
 	return out
 }
+
+// boundedToolTextPreview never writes an artifact. Sandbox results use this
+// instead of the ordinary workspace spillover mechanism.
+func boundedToolTextPreview(text string) string {
+	if len(text) <= toolOutputMaxBytes {
+		return text
+	}
+	return text[:toolOutputFallbackHead] + "\n…[output truncated; not persisted by sandbox policy]…\n" + text[len(text)-toolOutputFallbackTail:]
+}

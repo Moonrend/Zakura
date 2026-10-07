@@ -6,28 +6,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 
 	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
 	"github.com/Moonrend/Zakura/apps/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/sandbox"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 type Handler struct {
-	Kind        string
-	StorageRoot string
-	jobs        *host.Registry
-	ptys        map[string]*host.LiveStream
-	mu          sync.Mutex
+	Kind            string
+	StorageRoot     string
+	jobs            *host.Registry
+	sandboxJobs     *sandbox.Registry
+	sandboxEnforced bool
+	ptys            map[string]*host.LiveStream
+	mu              sync.Mutex
 }
 
 func New(kind, storageRoot string) *Handler {
 	return &Handler{
-		Kind:        kind,
-		StorageRoot: storageRoot,
-		jobs:        host.NewRegistry(),
-		ptys:        map[string]*host.LiveStream{},
+		Kind:            kind,
+		StorageRoot:     storageRoot,
+		jobs:            host.NewRegistry(),
+		sandboxJobs:     sandbox.NewRegistry(),
+		sandboxEnforced: sandboxEnforcement(os.Getenv("ZAKURA_SANDBOX_ENABLED")),
+		ptys:            map[string]*host.LiveStream{},
 	}
 }
 
@@ -38,7 +44,24 @@ func (h *Handler) workspace(spaceID string) string {
 func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	var err error
 	var result any
+
+	// Do not let an explicit isolation request silently use an unsupported
+	// execution transport. Docker management is not the sandbox backend API.
 	switch msg.Method {
+	case "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate":
+		requested, policyErr := h.sandboxRequested(msg.Params)
+		if policyErr != nil {
+			send(Err(msg.ID, policyErr.Error()))
+			return
+		}
+		if requested {
+			send(Err(msg.ID, "this execution method is unavailable in sandbox mode; use host.exec or host.exec.start"))
+			return
+		}
+	}
+	switch msg.Method {
+	case "sandbox.policy":
+		result = map[string]any{"enforced": h.sandboxEnforced, "defaultExecutionMode": map[bool]string{true: "sandbox", false: "host"}[h.sandboxEnforced], "hostModeIsolated": false, "sandbox": sandbox.Policy()}
 	case "sys.info":
 		var p struct {
 			Light bool `json:"light"`
@@ -77,15 +100,24 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	case "host.fs.rename":
 		result, err = h.fsRename(msg.Params)
 	case "host.exec":
-		result, err = h.hostExec(msg.Params)
+		result, err = h.execWithPolicy(ctx, msg.Params, false)
 	case "host.exec.start":
-		result, err = h.hostExecStart(msg.Params)
+		result, err = h.execWithPolicy(ctx, msg.Params, true)
 	case "host.exec.get":
-		result, err = h.hostExecGet(msg.Params)
+		result, err = h.jobWithPolicy(msg.Params, false)
 	case "host.exec.kill":
-		result, err = h.hostExecKill(msg.Params)
+		result, err = h.jobWithPolicy(msg.Params, true)
 	case "host.pty.start":
-		result, err = h.ptyStart(msg.Params, send)
+		if enabled, policyErr := h.sandboxRequested(msg.Params); policyErr != nil {
+			err = policyErr
+		} else if enabled {
+			err = fmt.Errorf("interactive execution is unavailable in sandbox mode; use non-interactive sandbox execution")
+		} else {
+			result, err = h.ptyStart(msg.Params, send)
+			if err == nil {
+				result, err = executionResult(result, "host")
+			}
+		}
 	case "host.pty.write":
 		err = h.ptyWrite(msg.Params)
 		result = map[string]bool{"ok": err == nil}
@@ -190,6 +222,9 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			var p spacePath
 			_ = json.Unmarshal(msg.Params, &p)
 			message = host.ScrubHostPathsInMessage(h.rootOf(p), message)
+		}
+		if strings.HasPrefix(msg.Method, "host.exec") {
+			message = host.ScrubHostPathsInMessage(h.StorageRoot, message)
 		}
 		send(Err(msg.ID, message))
 		return
