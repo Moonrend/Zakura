@@ -24,6 +24,9 @@ var compatibilitySQL string
 //go:embed sql/0004_space_mcp.sql
 var spaceMCPSQL string
 
+//go:embed sql/0005_computers.sql
+var computersSQL string
+
 type migration struct {
 	version   int
 	name, sql string
@@ -34,6 +37,7 @@ var ordered = []migration{
 	{2, "runtime", runtimeSQL},
 	{3, "compatibility", compatibilitySQL},
 	{4, "space_mcp", spaceMCPSQL},
+	{5, "computers", computersSQL},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {

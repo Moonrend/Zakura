@@ -32,11 +32,21 @@ func merge(dst map[string]any, src map[string]any) {
 }
 func (h *handler) installationConfig(ctx context.Context, tenant, agent, ref string) (map[string]any, error) {
 	var install models.AgentConnectorInstallation
-	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ? AND enabled = true", tenant, agent, ref).First(&install).Error
-	if e != nil {
-		return nil, e
+	found := false
+	for _, candidate := range legacyEmailRef(ref) {
+		e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ? AND enabled = true", tenant, agent, candidate).Order("created_at").First(&install).Error
+		if e == nil {
+			found = true
+			break
+		}
+		if !errors.Is(e, gorm.ErrRecordNotFound) {
+			return nil, e
+		}
 	}
-	raw, e := decrypt(h.deps.Secret, tenant+":"+agent+":"+ref, install.ConfigEnc)
+	if !found {
+		return nil, gorm.ErrRecordNotFound
+	}
+	raw, e := decrypt(h.deps.Secret, tenant+":"+agent+":"+install.ConnectorRef, install.ConfigEnc)
 	if e != nil {
 		return nil, e
 	}
@@ -57,13 +67,21 @@ func (h *handler) installationConfig(ctx context.Context, tenant, agent, ref str
 	}
 	merge(out, installCfg.Config)
 	var setting models.ConnectorSetting
-	if e := h.deps.Gorm.WithContext(ctx).Where("scope_key = ? AND connector_ref = ?", tenant, ref).First(&setting).Error; e == nil {
-		if raw, e := decrypt(h.deps.Secret, tenant+":"+ref, setting.ConfigEnc); e == nil {
+	for _, candidate := range legacyEmailRef(ref) {
+		e := h.deps.Gorm.WithContext(ctx).Where("scope_key = ? AND connector_ref = ?", tenant, candidate).First(&setting).Error
+		if e != nil {
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				continue
+			}
+			break
+		}
+		if raw, e := decrypt(h.deps.Secret, tenant+":"+setting.ConnectorRef, setting.ConfigEnc); e == nil {
 			var cfg map[string]any
 			if json.Unmarshal(raw, &cfg) == nil {
 				merge(out, cfg)
 			}
 		}
+		break
 	}
 	return out, nil
 }
@@ -245,7 +263,7 @@ func (h *handler) webhook(w http.ResponseWriter, r *http.Request) {
 		cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
 	} else {
 		var install models.AgentConnectorInstallation
-		e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND connector_ref = ? AND enabled = true", tenant, ref).Order("created_at").First(&install).Error
+		e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND connector_ref IN ? AND enabled = true", tenant, legacyEmailRef(ref)).Order("created_at").First(&install).Error
 		if e == nil {
 			agent = install.AgentID
 			cfg, e = h.installationConfig(r.Context(), tenant, agent, ref)
@@ -385,13 +403,24 @@ func (h *handler) listConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0)
+	index := map[string]int{}
 	for _, row := range rows {
-		meta, _ := provider(row.ConnectorRef)
+		ref := canonicalRef(row.ConnectorRef)
+		key := row.AgentID + ":" + ref
+		meta, _ := provider(ref)
 		status := "disabled"
 		if row.Enabled {
 			status = "installed"
 		}
-		items = append(items, map[string]any{"id": "connector:" + *row.ID, "installationId": *row.ID, "name": meta.Name, "kind": "platform", "status": status, "providerId": row.ConnectorRef, "slug": row.ConnectorRef, "agentIds": []string{row.AgentID}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
+		item := map[string]any{"id": "connector:" + *row.ID, "installationId": *row.ID, "name": meta.Name, "kind": "platform", "status": status, "providerId": ref, "slug": ref, "agentIds": []string{row.AgentID}, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt}
+		if i, ok := index[key]; ok {
+			if current, _ := items[i]["createdAt"].(string); row.CreatedAt < current {
+				items[i] = item
+			}
+			continue
+		}
+		index[key] = len(items)
+		items = append(items, item)
 	}
 	httpx.JSON(w, 200, map[string]any{"items": items})
 }

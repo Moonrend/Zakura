@@ -170,7 +170,7 @@ func TestACPPersistentRuntimeNegotiatesUpdatesDecisionsAndRecovery(t *testing.T)
 	}
 	node := "node"
 	store := NewStore(d)
-	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", RuntimeNodeID: &node, WorkspaceKind: "host"})
+	space, _ := store.CreateSpace(context.Background(), "tenant", Space{Name: "S", EnableComputer: true, RuntimeNodeID: &node, WorkspaceKind: "host"})
 	agent, _ := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
 	router := chi.NewRouter()
 	RegisterRoutes(router, d)
@@ -309,4 +309,46 @@ promptDone:
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("ACP session was not recovered with session/load: %d %#v", code, out)
+}
+
+func TestACPRuntimeCacheRequiresSessionOwnership(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	h := &handler{deps: d, store: NewStore(d)}
+	ctx := context.Background()
+	space, err := h.store.CreateSpace(ctx, "tenant", Space{Name: "S", WorkspaceKind: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := h.store.CreateAgent(ctx, "tenant", Agent{Name: "Owner", SpaceID: space.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := h.store.CreateAgent(ctx, "tenant", Agent{Name: "Other", SpaceID: space.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := h.store.CreateSession(ctx, "tenant", "", owner.ID, Session{Kind: "acp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "tenant\x00" + chat.ID
+	rt := &acpLiveRuntime{done: make(chan struct{})}
+	for _, pending := range []bool{false, true} {
+		m := &acpRuntimeManager{h: h, runtimes: map[string]*acpLiveRuntime{}, starting: map[string]*acpRuntimeStart{}}
+		if pending {
+			done := make(chan struct{})
+			close(done)
+			m.starting[key] = &acpRuntimeStart{done: done, rt: rt}
+		} else {
+			m.runtimes[key] = rt
+		}
+		if _, err := m.ensure(ctx, "tenant", other.ID, chat.ID); err == nil {
+			t.Fatal("cached ACP session exposed to another agent")
+		}
+		got, err := m.ensure(ctx, "tenant", owner.ID, chat.ID)
+		if err != nil || got != rt {
+			t.Fatalf("owner cache access: %v", err)
+		}
+	}
 }

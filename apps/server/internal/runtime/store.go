@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"gorm.io/gorm"
 )
@@ -146,7 +147,12 @@ func (s *Store) CreateSpace(ctx context.Context, tenant string, in Space) (Space
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	err := s.deps.Gorm.WithContext(ctx).Table("spaces").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_computer": in.EnableComputer, "workspace_image": in.WorkspaceImage, "runtime_node_id": in.RuntimeNodeID, "workspace_kind": in.WorkspaceKind, "workspace_status": in.WorkspaceStatus, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	err := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("spaces").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_computer": in.EnableComputer, "workspace_image": in.WorkspaceImage, "runtime_node_id": in.RuntimeNodeID, "workspace_kind": in.WorkspaceKind, "workspace_status": in.WorkspaceStatus, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error; err != nil {
+			return err
+		}
+		return adoptLegacyComputer(tx, tenant, in.ID)
+	})
 	if err != nil {
 		return Space{}, err
 	}
@@ -197,12 +203,18 @@ func (s *Store) UpdateSpace(ctx context.Context, tenant, id string, patch map[st
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, runtimeTimeString(s.now()), tenant, id)
-	res := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE spaces SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
-	if res.Error != nil {
-		return Space{}, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return Space{}, ErrNotFound
+	err := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Exec(`UPDATE spaces SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return adoptLegacyComputer(tx, tenant, id)
+	})
+	if err != nil {
+		return Space{}, err
 	}
 	return s.GetSpace(ctx, tenant, id)
 }
@@ -372,7 +384,12 @@ func (s *Store) CreateSession(ctx context.Context, tenant, user, agent string, i
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "title": in.Title, "status": in.Status, "kind": in.Kind, "project": in.Project, "origin_json": validJSON(in.Origin, "{}"), "model": in.Model, "model_route_id": in.ModelRouteID, "reasoning": in.Reasoning, "draft_text": in.DraftText, "created_by_user_id": in.CreatedByUserID, "last_seq": 0, "active_run_id": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Table("cloud_agent_sessions").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "agent_id": agent, "title": in.Title, "status": in.Status, "kind": in.Kind, "project": in.Project, "origin_json": validJSON(in.Origin, "{}"), "model": in.Model, "model_route_id": in.ModelRouteID, "reasoning": in.Reasoning, "draft_text": in.DraftText, "created_by_user_id": in.CreatedByUserID, "last_seq": 0, "active_run_id": nil, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error; e != nil {
+			return e
+		}
+		return tx.Exec(computers.InitializeSessionDefaultSQL, in.ID, tenant).Error
+	})
 	if e != nil {
 		return Session{}, e
 	}
@@ -531,6 +548,9 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 			return ErrConflict
 		}
 		if e := tx.Table("cloud_agent_runs").Create(map[string]any{"id": run.ID, "session_id": session, "status": run.Status, "cancel_requested": false, "error": nil, "started_at": runtimeTimeString(now), "completed_at": nil, "created_at": runtimeTimeString(now)}).Error; e != nil {
+			return e
+		}
+		if e := tx.Exec(computers.SnapshotRunTargetSQL, run.ID, tenant).Error; e != nil {
 			return e
 		}
 		if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, map[string]any{"content": content, "attachments": json.RawMessage(validJSON(attachments, "[]")), "options": json.RawMessage(validJSON(options, "{}"))}); e != nil {

@@ -12,7 +12,7 @@ import (
 
 func isBuiltinToolName(name string) bool {
 	switch name {
-	case "memory_search", "memory_remember", "fs_list", "fs_read", "fs_write", "shell_exec",
+	case "list_computers", "memory_search", "memory_remember", "fs_list", "fs_read", "fs_write", "shell_exec",
 		"list_sessions", "search_sessions", "get_messages", "import_session",
 		"list_routines", "create_routine", "update_routine", "pause_routine", "delete_routine", "run_routine",
 		"list_automation_runs", "delegate_agent", "apply_patch",
@@ -33,7 +33,14 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 	if toolDisabled(ctx, name) {
 		return nil, fmt.Errorf("tool %s is disabled for this run", name)
 	}
+	if computerBoundTool(name) {
+		if err := h.guardLegacyComputer(ctx, tenant, agent, session, args); err != nil {
+			return nil, err
+		}
+	}
 	switch {
+	case name == "list_computers":
+		return h.runListComputers(ctx, tenant, agent, session)
 	case name == "tool_search":
 		return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
 	case name == "codemode":

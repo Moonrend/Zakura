@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 
@@ -48,10 +49,10 @@ func platformServiceFromModel(m models.PlatformService) map[string]any {
 }
 
 var platformServiceCatalog = []map[string]any{
-	{"key": "searxng", "name": "SearXNG", "description": "Self-hosted metasearch engine", "mapsTo": map[string]any{"kind": "search-engine", "id": "searxng"}, "defaultImage": "searxng/searxng:latest", "defaultHostPort": 18080},
-	{"key": "jina-reader", "name": "Jina Reader", "description": "Self-hosted URL-to-Markdown reader", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "jina-reader"}, "defaultImage": "ghcr.io/jina-ai/reader:oss", "defaultHostPort": 18081},
-	{"key": "crawl4ai", "name": "Crawl4AI", "description": "Self-hosted Crawl4AI API", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "crawl4ai"}, "defaultImage": "unclecode/crawl4ai:latest", "defaultHostPort": 11235},
-	{"key": "firecrawl", "name": "Firecrawl", "description": "Self-hosted Firecrawl stack", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "firecrawl"}, "defaultImage": "ghcr.io/firecrawl/firecrawl:latest", "defaultHostPort": 13002},
+	{"key": "searxng", "name": "SearXNG", "description": "Self-hosted metasearch engine", "mapsTo": map[string]any{"kind": "search-engine", "id": "searxng"}, "defaultImage": "searxng/searxng:latest", "defaultHostPort": 18080, "containerPort": 8080},
+	{"key": "jina-reader", "name": "Jina Reader", "description": "Self-hosted URL-to-Markdown reader", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "jina-reader"}, "defaultImage": "ghcr.io/jina-ai/reader:oss", "defaultHostPort": 18081, "containerPort": 8081},
+	{"key": "crawl4ai", "name": "Crawl4AI", "description": "Self-hosted Crawl4AI API", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "crawl4ai"}, "defaultImage": "unclecode/crawl4ai:latest", "defaultHostPort": 11235, "containerPort": 11235},
+	{"key": "firecrawl", "name": "Firecrawl", "description": "Self-hosted Firecrawl stack", "mapsTo": map[string]any{"kind": "fetch-backend", "id": "firecrawl"}, "defaultImage": "ghcr.io/firecrawl/firecrawl:latest", "defaultHostPort": 13002, "containerPort": 3002},
 }
 
 func catalogService(key string) map[string]any {
@@ -61,6 +62,113 @@ func catalogService(key string) map[string]any {
 		}
 	}
 	return map[string]any{"key": key, "name": key, "description": "", "mapsTo": map[string]any{"kind": "search-engine", "id": "searxng"}}
+}
+
+func catalogContainerPort(key string) int {
+	if v, ok := catalogService(key)["containerPort"].(int); ok {
+		return v
+	}
+	return 0
+}
+
+func containerRuntimeDetected(exists func(string) bool) bool {
+	for _, path := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if exists(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func platformServiceInContainer() bool {
+	return containerRuntimeDetected(func(path string) bool {
+		_, e := os.Stat(path)
+		return e == nil
+	})
+}
+
+func endpointModeFor(inContainer bool) string {
+	if inContainer {
+		return "network"
+	}
+	return "published"
+}
+
+func platformServiceEndpointMode() string {
+	return endpointModeFor(platformServiceInContainer())
+}
+
+func platformServiceNetworkName() string {
+	if v := strings.TrimSpace(os.Getenv("ZAKURA_DOCKER_NETWORK")); v != "" {
+		return v
+	}
+	return "zakura"
+}
+
+func platformServiceHostPort(cfg, meta map[string]any) int {
+	switch v := cfg["hostPort"].(type) {
+	case float64:
+		if v > 0 {
+			return int(v)
+		}
+	case int:
+		if v > 0 {
+			return v
+		}
+	case int64:
+		if v > 0 {
+			return int(v)
+		}
+	case json.Number:
+		if n, e := v.Int64(); e == nil && n > 0 {
+			return int(n)
+		}
+	}
+	if v, ok := meta["defaultHostPort"].(int); ok {
+		return v
+	}
+	return 0
+}
+
+func managedServiceEndpoint(mode, containerName string, containerPort, hostPort int) string {
+	if mode == "network" {
+		if containerPort <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("http://%s:%d", containerName, containerPort)
+	}
+	if hostPort <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", hostPort)
+}
+
+func platformServiceContainerBody(image string, env []string, key, mode, network string, containerPort, hostPort int) map[string]any {
+	body := map[string]any{"Image": image, "Env": env, "Labels": map[string]string{"com.zakura.platform-service": key}}
+	if containerPort <= 0 {
+		return body
+	}
+	portKey := fmt.Sprintf("%d/tcp", containerPort)
+	body["ExposedPorts"] = map[string]any{portKey: map[string]any{}}
+	if mode == "network" {
+		body["NetworkingConfig"] = map[string]any{"EndpointsConfig": map[string]any{network: map[string]any{}}}
+		return body
+	}
+	if hostPort > 0 {
+		body["HostConfig"] = map[string]any{"PortBindings": map[string]any{portKey: []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprintf("%d", hostPort)}}}}
+	}
+	return body
+}
+
+func ensureDockerNetwork(ctx context.Context, name string) error {
+	_, _, e := dockerCall(ctx, http.MethodPost, "/v1.43/networks/create", map[string]any{"Name": name, "CheckDuplicate": true, "Driver": "bridge", "Labels": map[string]string{"zakura.managed": "true"}})
+	if e == nil {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(e.Error()), "already exists") {
+		return nil
+	}
+	return e
 }
 func platformContainerIDs(raw string) []string {
 	var ids []string
@@ -446,7 +554,22 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 		logPSProgress(key, "pull", "镜像已存在本地", "info", 40, "")
 	}
 	name := "zakura-service-" + slugify(key)
-	raw, _, e := dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/create?name="+url.QueryEscape(name), map[string]any{"Image": image, "Env": stringList(cfg["env"]), "Labels": map[string]string{"com.zakura.platform-service": key}})
+	meta := catalogService(key)
+	containerPort := catalogContainerPort(key)
+	hostPort := platformServiceHostPort(cfg, meta)
+	mode := platformServiceEndpointMode()
+	network := platformServiceNetworkName()
+	if mode == "network" {
+		logPSProgress(key, "network", "确保网络 "+network, "info", 45, "")
+		if e := ensureDockerNetwork(r.Context(), network); e != nil {
+			logPSProgress(key, "network", e.Error(), "error", -1, "")
+			finishPSProgress(key, e.Error(), "")
+			httpx.Error(w, 502, e.Error())
+			return
+		}
+	}
+	body := platformServiceContainerBody(image, stringList(cfg["env"]), key, mode, network, containerPort, hostPort)
+	raw, _, e := dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/create?name="+url.QueryEscape(name), body)
 	if e != nil {
 		logPSProgress(key, "create", e.Error(), "error", -1, "")
 		finishPSProgress(key, e.Error(), "")
@@ -475,14 +598,19 @@ func (h *handler) deployPlatformServiceBody(w http.ResponseWriter, r *http.Reque
 	}
 	logPSProgress(key, "start", "容器已启动", "ok", 80, "starting")
 	containers, _ := json.Marshal([]string{created.ID})
+	endpoint := managedServiceEndpoint(mode, name, containerPort, hostPort)
+	var endpointVal any
+	if endpoint != "" {
+		endpointVal = endpoint
+	}
 	now := runtimeTimeString(h.store.now())
 	e = h.deps.Gorm.WithContext(r.Context()).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "service_key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"desired_state", "status", "health_status", "containers_json", "last_error", "updated_at", "config_enc"}),
+			DoUpdates: clause.AssignmentColumns([]string{"desired_state", "status", "health_status", "containers_json", "last_error", "updated_at", "config_enc", "endpoint_url"}),
 		}).
 		Table("platform_services").
-		Create(map[string]any{"id": h.store.id(), "service_key": key, "mode": "managed", "desired_state": "running", "status": "running", "health_status": "unknown", "config_enc": enc, "endpoint_url": nil, "containers_json": string(containers), "last_error": nil, "created_at": now, "updated_at": now}).Error
+		Create(map[string]any{"id": h.store.id(), "service_key": key, "mode": "managed", "desired_state": "running", "status": "running", "health_status": "unknown", "config_enc": enc, "endpoint_url": endpointVal, "containers_json": string(containers), "last_error": nil, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		logPSProgress(key, "db", e.Error(), "error", -1, "")
 		finishPSProgress(key, e.Error(), "")
@@ -561,8 +689,9 @@ func (h *handler) disablePlatformService(w http.ResponseWriter, r *http.Request)
 	beginPSProgress(key, "stopping", "正在停止…")
 	var row struct {
 		ContainersJSON string `gorm:"column:containers_json"`
+		Mode           string `gorm:"column:mode"`
 	}
-	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json").Where("service_key = ?", key).Take(&row).Error
+	e := h.deps.Gorm.WithContext(r.Context()).Table("platform_services").Select("containers_json, mode").Where("service_key = ?", key).Take(&row).Error
 	if e != nil {
 		logPSProgress(key, "db", e.Error(), "error", -1, "")
 		finishPSProgress(key, e.Error(), "")
@@ -577,7 +706,11 @@ func (h *handler) disablePlatformService(w http.ResponseWriter, r *http.Request)
 		logPSProgress(key, "stop", "停止容器 "+short, "info", 30, "")
 		_, _, _ = dockerCall(r.Context(), http.MethodPost, "/v1.43/containers/"+id+"/stop?t=10", nil)
 	}
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(map[string]any{"mode": "disabled", "desired_state": "stopped", "status": "stopped", "health_status": "unknown", "updated_at": runtimeTimeString(h.store.now())}).Error
+	updates := map[string]any{"mode": "disabled", "desired_state": "stopped", "status": "stopped", "health_status": "unknown", "updated_at": runtimeTimeString(h.store.now())}
+	if row.Mode != "external" {
+		updates["endpoint_url"] = nil
+	}
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.PlatformService{}).Where("service_key = ?", key).Updates(updates).Error
 	if e != nil {
 		logPSProgress(key, "db", e.Error(), "error", -1, "")
 		finishPSProgress(key, e.Error(), "")

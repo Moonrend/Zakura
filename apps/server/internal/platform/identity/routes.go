@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
 
@@ -904,10 +904,10 @@ func createInviteHandler(s *Service) http.HandlerFunc {
 		}
 		emailed := false
 		if s.deps.SendTransactionalEmail != nil {
-			safeTeam, safeURL := html.EscapeString(tenantName), html.EscapeString(acceptURL)
-			htmlBody := `<p>You were invited to join ` + safeTeam + ` in Zakura.</p><p><a href="` + safeURL + `">Accept invitation</a></p>`
-			textBody := "You were invited to join " + tenantName + " in Zakura.\n\n" + acceptURL
-			emailed = s.deps.SendTransactionalEmail(r.Context(), strings.ToLower(strings.TrimSpace(b.Email)), "邀请加入 "+tenantName, htmlBody, textBody) == nil
+			htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.Invite, emailtmpl.InviteData{TenantName: tenantName, AcceptURL: acceptURL, Role: b.Role})
+			if renderErr == nil {
+				emailed = s.deps.SendTransactionalEmail(r.Context(), strings.ToLower(strings.TrimSpace(b.Email)), "邀请加入 "+tenantName, htmlBody, textBody) == nil
+			}
 		}
 		httpx.JSON(w, 201, map[string]any{"invite": map[string]any{"id": id, "email": b.Email, "role": b.Role, "expiresAt": expires}, "token": token, "acceptUrl": acceptURL, "emailed": emailed})
 	}
@@ -1190,15 +1190,15 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 			_ = s.gdb(r.Context()).Create(&models.AuthToken{ID: &tokenID, UserID: &userID, Kind: "password_reset", TokenHash: hex.EncodeToString(h[:]), ExpiresAt: s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 			if s.deps.SendTransactionalEmail != nil {
 				resetURL := s.deps.WebURL + "/reset-password?token=" + url.QueryEscape(token)
-				subject := "重置 Zakura 密码"
-				htmlBody := `<p>Reset your Zakura password:</p><p><a href="` + html.EscapeString(resetURL) + `">Reset password</a></p>`
-				textBody := "Reset your Zakura password:\n\n" + resetURL
-				if derefString(dbUser.PasswordHash) == "" {
-					subject = "设置 Zakura 密码"
-					htmlBody = `<p>为你的 Zakura 账号设置密码：</p><p><a href="` + html.EscapeString(resetURL) + `">设置密码</a></p>`
-					textBody = "为你的 Zakura 账号设置密码：\n\n" + resetURL
+				setPassword := derefString(dbUser.PasswordHash) == ""
+				htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.ResetPassword, emailtmpl.ResetPasswordData{ResetURL: resetURL, SetPassword: setPassword})
+				if renderErr == nil {
+					subject := "重置 Zakura 密码"
+					if setPassword {
+						subject = "设置 Zakura 密码"
+					}
+					_ = s.deps.SendTransactionalEmail(r.Context(), email, subject, htmlBody, textBody)
 				}
-				_ = s.deps.SendTransactionalEmail(r.Context(), email, subject, htmlBody, textBody)
 			}
 		}
 		httpx.JSON(w, 200, map[string]any{"sent": true})
@@ -1227,8 +1227,11 @@ func (s *Service) sendVerificationEmail(ctx context.Context, userID, email strin
 		return false, err
 	}
 	verifyURL := s.deps.WebURL + "/verify-email?token=" + url.QueryEscape(token)
-	htmlBody := `<p>Verify your Zakura email:</p><p><a href="` + html.EscapeString(verifyURL) + `">Verify email</a></p>`
-	if err = s.deps.SendTransactionalEmail(ctx, email, "验证你的 Zakura 邮箱", htmlBody, "Verify your Zakura email:\n\n"+verifyURL); err != nil {
+	htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.VerifyEmail, emailtmpl.VerifyEmailData{VerifyURL: verifyURL})
+	if renderErr != nil {
+		return false, renderErr
+	}
+	if err = s.deps.SendTransactionalEmail(ctx, email, "验证你的 Zakura 邮箱", htmlBody, textBody); err != nil {
 		return false, err
 	}
 	return true, nil

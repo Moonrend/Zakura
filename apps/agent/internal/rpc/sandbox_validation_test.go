@@ -53,7 +53,7 @@ func TestSandboxRPCPolicyAndEnforcement(t *testing.T) {
 func TestSandboxRPCRejectsUnsupportedTransports(t *testing.T) {
 	t.Setenv("ZAKURA_SANDBOX_ENABLED", "")
 	h := New("computer", t.TempDir())
-	for _, method := range []string{"host.pty.start", "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate"} {
+	for _, method := range []string{"host.pty.start", "docker.create", "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate"} {
 		t.Run(method, func(t *testing.T) {
 			result := sandboxCall(t, h, method, map[string]any{"executionMode": "sandbox", "spaceId": "space-a"})
 			if result.Error == "" || !strings.Contains(result.Error, "sandbox") {
@@ -109,5 +109,17 @@ func TestSandboxRPCRejectsSymlinkWorkspaceRoot(t *testing.T) {
 	h := New("computer", storage)
 	if _, err := h.sandboxRoot("space-a"); err == nil {
 		t.Fatal("symlink workspace accepted")
+	}
+}
+
+func TestDockerCreateRejectsMalformedConfiguration(t *testing.T) {
+	t.Setenv("ZAKURA_SANDBOX_ENABLED", "")
+	h := New("server", t.TempDir())
+	for _, raw := range []string{`{"name":"test","image":"workspace:1","unknown":true}`, `{"name":"test","image":"workspace:1"} {}`, `null`, `[]`, `{`, `{"image":"workspace:1"}`} {
+		var response Msg
+		h.Dispatch(context.Background(), Msg{ID: "create-invalid", Method: "docker.create", Params: json.RawMessage(raw)}, func(msg Msg) { response = msg })
+		if response.Error == "" {
+			t.Fatalf("invalid configuration accepted: %s", raw)
+		}
 	}
 }

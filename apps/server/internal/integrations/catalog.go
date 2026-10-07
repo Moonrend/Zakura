@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package integrations
 
+import "strings"
+
 type PackageInfo struct {
 	Slug     string `json:"slug"`
 	Name     string `json:"name"`
@@ -143,4 +145,21 @@ func provider(ref string) (Provider, bool) {
 		}
 	}
 	return Provider{}, false
+}
+
+func legacyEmailRef(ref string) []string {
+	if strings.HasPrefix(ref, "email-") {
+		return []string{ref, "email"}
+	}
+	if ref == "email" {
+		return []string{"email", "email-smtp"}
+	}
+	return []string{ref}
+}
+
+func canonicalRef(ref string) string {
+	if p, ok := provider(ref); ok {
+		return p.Ref
+	}
+	return ref
 }

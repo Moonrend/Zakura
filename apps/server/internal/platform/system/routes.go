@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
@@ -367,8 +367,10 @@ func (h *routes) requestVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	sent := false
 	if h.d.SendTransactionalEmail != nil {
 		verifyURL := h.d.WebURL + "/verify-email?token=" + url.QueryEscape(raw)
-		htmlBody := `<p>Verify your Zakura email:</p><p><a href="` + html.EscapeString(verifyURL) + `">Verify email</a></p>`
-		sent = h.d.SendTransactionalEmail(r.Context(), user.Email, "验证你的 Zakura 邮箱", htmlBody, "Verify your Zakura email:\n\n"+verifyURL) == nil
+		htmlBody, textBody, renderErr := emailtmpl.Render(emailtmpl.VerifyEmail, emailtmpl.VerifyEmailData{VerifyURL: verifyURL})
+		if renderErr == nil {
+			sent = h.d.SendTransactionalEmail(r.Context(), user.Email, "验证你的 Zakura 邮箱", htmlBody, textBody) == nil
+		}
 	}
 	httpx.JSON(w, 200, map[string]any{"sent": sent})
 }

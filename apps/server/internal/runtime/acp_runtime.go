@@ -96,6 +96,15 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 	if required {
 		return nil, errors.New("ACP adapters are unavailable for sandbox agents")
 	}
+	// Check ownership before consulting either the live or in-flight cache.
+	// A cached process must never make a session usable by another agent.
+	sess, err := m.h.store.GetSession(ctx, tenantID, agentID, sid)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Kind != "acp" {
+		return nil, errors.New("not an ACP session")
+	}
 	key := tenantID + "\x00" + sid
 	m.mu.Lock()
 	if current := m.runtimes[key]; current != nil {
@@ -120,13 +129,6 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 	m.starting[key] = inFlight
 	m.mu.Unlock()
 
-	sess, err := m.h.store.GetSession(ctx, tenantID, agentID, sid)
-	if err != nil {
-		return m.finishStart(key, inFlight, nil, err)
-	}
-	if sess.Kind != "acp" {
-		return m.finishStart(key, inFlight, nil, errors.New("not an ACP session"))
-	}
 	var origin struct {
 		ProfileID    string `json:"acpProfileId"`
 		ACPSessionID string `json:"acpSessionId"`

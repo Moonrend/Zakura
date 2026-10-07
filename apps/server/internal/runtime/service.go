@@ -47,6 +47,7 @@ func (s *Service) StartTurn(ctx context.Context, tenant, agent, session, content
 }
 
 func (s *Service) execute(ctx context.Context, tenant, agent, session, runID, content string, options json.RawMessage) {
+	ctx = context.WithValue(ctx, computerRunKey{}, runID)
 	disabled := disabledToolSet(options)
 	if len(disabled) > 0 {
 		ctx = context.WithValue(ctx, disabledToolsKey{}, disabled)

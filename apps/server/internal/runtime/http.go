@@ -48,6 +48,9 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	h.acp = newACPRuntimeManager(h)
 	h.migrateLegacyComponentConfigs(deps.RunContext())
 	h.service.acpRunner = func(ctx context.Context, tenant, agent, session, runID, content string) error {
+		if err := h.guardLegacyComputer(ctx, tenant, agent, session, nil); err != nil {
+			return err
+		}
 		runtime, err := h.acp.ensure(ctx, tenant, agent, session)
 		if err != nil {
 			return err
@@ -85,6 +88,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		api.Use(httpx.Auth(deps))
 		api.Use(RequireAPIScope)
 		h.registerCore(api)
+		h.registerComputers(api)
 		h.registerAutomation(api)
 		h.registerInteractions(api)
 		h.registerZakuraBotApp(api)
@@ -428,6 +432,7 @@ func (h *handler) createAgent(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	h.installRecommendedSkills(r.Context(), p.TenantID, x.ID)
 	withKey := true
 	if b.CreateAPIKey != nil {
 		withKey = *b.CreateAPIKey

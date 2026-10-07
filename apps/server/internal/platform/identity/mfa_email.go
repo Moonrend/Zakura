@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
 
@@ -62,8 +63,10 @@ func (s *Service) sendEmailCode(ctx context.Context, email, code string) error {
 		return errors.New("email delivery is not configured")
 	}
 	subject := "Zakura 登录验证码"
-	htmlBody := `<p>你的 Zakura 验证码是 <strong>` + code + `</strong>。</p><p>该验证码 10 分钟内有效，请勿泄露给他人。</p>`
-	textBody := "你的 Zakura 验证码是 " + code + "。\n该验证码 10 分钟内有效，请勿泄露给他人。"
+	htmlBody, textBody, err := emailtmpl.Render(emailtmpl.EmailCode, emailtmpl.EmailCodeData{Code: code})
+	if err != nil {
+		return err
+	}
 	return s.deps.SendTransactionalEmail(ctx, email, subject, htmlBody, textBody)
 }
 

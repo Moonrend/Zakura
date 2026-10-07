@@ -288,7 +288,7 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 			break
 		}
 	}
-	tools := []agentTool{}
+	tools := []agentTool{directBuiltin("list_computers", "List this chat's Space computers and the immutable default selected for this run. No credentials are returned and no computer is provisioned. Use computerId on supported workspace tools to override this run default for that call only; overrides never change defaults.", map[string]any{})}
 	if agent.EnableMemory {
 		tools = append(tools,
 			directBuiltin("memory_search", "Search the agent's long-term memory for relevant notes.", map[string]any{
@@ -472,6 +472,16 @@ func (h *handler) agentToolCatalog(ctx context.Context, tenant, agentID string) 
 				"uri":    map[string]any{"type": "string", "description": "Resource URI to read. Must be one of the URIs returned by list_mcp_resources."},
 			}, "server", "uri"),
 		)
+	}
+	// Only built-in workspace tools own this argument. Do not modify external
+	// MCP schemas: a server may already define computerId with other semantics.
+	for i := range tools {
+		if computerBoundTool(tools[i].Name) {
+			props, ok := tools[i].InputSchema["properties"].(map[string]any)
+			if ok {
+				props["computerId"] = map[string]any{"type": "string", "minLength": 1, "description": "Computer ID returned by list_computers. Omit to use the immutable run default. Does not change chat or Space defaults. Unconnected computers fail rather than fall back."}
+			}
+		}
 	}
 	tools = append(tools, mcpTools...)
 	return agentCatalog{Tools: tools}, nil

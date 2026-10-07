@@ -23,6 +23,7 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/runtime/builtins"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/scrypt"
 	"gorm.io/gorm"
@@ -106,7 +107,146 @@ func openEarlyGoSecretBox(key []byte, scope, value string) ([]byte, error) {
 	return g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], []byte(scope))
 }
 func (h *handler) skillStores(w http.ResponseWriter, r *http.Request) {
-	httpx.JSON(w, 200, map[string]any{"stores": []map[string]any{{"id": "github", "name": "GitHub", "supportsSearch": true}, {"id": "gitlab", "name": "GitLab", "supportsSearch": true}}, "builtin": []any{}})
+	catalog := make([]map[string]any, 0, len(builtins.All()))
+	for _, d := range builtins.All() {
+		requires := d.Requires
+		if requires == nil {
+			requires = []string{}
+		}
+		tags := d.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		catalog = append(catalog, map[string]any{"name": d.Name, "title": d.Title, "description": d.Description, "recommended": d.Recommended, "requires": requires, "tags": tags})
+	}
+	httpx.JSON(w, 200, map[string]any{"stores": []map[string]any{{"id": "github", "name": "GitHub", "supportsSearch": true}, {"id": "gitlab", "name": "GitLab", "supportsSearch": true}}, "builtin": catalog})
+}
+
+type builtinSkillFile struct {
+	Path     string `json:"path"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+	Size     int    `json:"size"`
+}
+
+func builtinSourceRef(raw json.RawMessage) (bool, string) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return false, ""
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return false, ""
+		}
+		s = strings.TrimSpace(s)
+		if strings.HasPrefix(strings.ToLower(s), "builtin:") {
+			return true, strings.TrimSpace(s[len("builtin:"):])
+		}
+		return false, ""
+	}
+	var obj struct {
+		Kind      string `json:"kind"`
+		BuiltinID string `json:"builtinId"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return false, ""
+	}
+	if strings.EqualFold(obj.Kind, "builtin") || obj.BuiltinID != "" {
+		return true, obj.BuiltinID
+	}
+	return false, ""
+}
+
+func (h *handler) upsertBuiltinSkill(ctx context.Context, tenant string, def builtins.Definition, version, now string) error {
+	manifest := def.Manifest()
+	files, _ := json.Marshal([]builtinSkillFile{{Path: "SKILL.md", Content: manifest, Encoding: "utf8", Size: len(manifest)}})
+	source, _ := json.Marshal(map[string]any{"kind": "builtin", "builtinId": def.Name, "store": "builtin", "raw": "builtin:" + def.Name})
+	id := h.store.id()
+	return h.deps.Gorm.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "name"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"title":       def.Title,
+				"description": def.Description,
+				"version":     version,
+				"builtin":     true,
+				"source_json": string(source),
+				"files_json":  string(files),
+				"file_count":  1,
+				"size_bytes":  len(manifest),
+				"repo_key":    nil,
+				"updated_at":  now,
+			}),
+		}).
+		Table("skills").
+		Create(map[string]any{"id": id, "tenant_id": tenant, "name": def.Name, "title": def.Title, "description": def.Description, "version": version, "builtin": true, "source_json": string(source), "files_json": string(files), "file_count": 1, "size_bytes": len(manifest), "repo_key": nil, "auto_update": false, "created_at": now, "updated_at": now}).Error
+}
+
+func (h *handler) syncBuiltinSkills(ctx context.Context, tenant string) int {
+	if tenant == "" {
+		return 0
+	}
+	var rows []models.Skill
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND builtin = true", tenant).Find(&rows).Error; e != nil {
+		return 0
+	}
+	existing := make(map[string]string, len(rows))
+	for _, row := range rows {
+		v := ""
+		if row.Version != nil {
+			v = *row.Version
+		}
+		existing[row.Name] = v
+	}
+	changed := 0
+	now := runtimeTimeString(h.store.now())
+	for _, def := range builtins.All() {
+		version := def.Version()
+		if current, ok := existing[def.Name]; ok && current == version {
+			continue
+		}
+		if h.upsertBuiltinSkill(ctx, tenant, def, version, now) == nil {
+			changed++
+		}
+	}
+	return changed
+}
+
+func (h *handler) installRecommendedSkills(ctx context.Context, tenant, agentID string) {
+	if tenant == "" || agentID == "" {
+		return
+	}
+	h.syncBuiltinSkills(ctx, tenant)
+	recommended := builtins.Recommended()
+	names := make([]string, 0, len(recommended))
+	for _, def := range recommended {
+		names = append(names, def.Name)
+	}
+	if len(names) == 0 {
+		return
+	}
+	var ms []models.Skill
+	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND builtin = true AND name IN ?", tenant, names).Find(&ms).Error; e != nil {
+		return
+	}
+	now := runtimeTimeString(h.store.now())
+	for _, m := range ms {
+		if m.ID == nil {
+			continue
+		}
+		id := h.store.id()
+		_ = h.deps.Gorm.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "agent_id"}, {Name: "name"}},
+				DoUpdates: clause.Assignments(map[string]any{
+					"skill_id": gorm.Expr("excluded.skill_id"), "enabled": true, "version": gorm.Expr("excluded.version"),
+					"status": "installed", "error": nil, "updated_at": now,
+				}),
+			}).
+			Table("agent_skills").
+			Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agentID, "skill_id": *m.ID, "name": m.Name, "enabled": true, "path": "/skills/" + m.Name, "version": m.Version, "status": "installed", "error": nil, "created_at": now, "updated_at": now}).Error
+	}
 }
 
 const (
@@ -1014,6 +1154,7 @@ func (h *handler) autoUpdateTenant(ctx context.Context, tenant string) skillUpda
 			summary.Updated = append(summary.Updated, row.Name)
 		}
 	}
+	summary.BuiltinSynced = h.syncBuiltinSkills(ctx, tenant)
 	h.recordSkillAutoRun(ctx, tenant, summary)
 	return summary
 }

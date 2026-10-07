@@ -49,6 +49,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		h.routes(api)
 	})
 	h.startDeliverer(deps.RunContext())
+	h.startEmailPoller(deps.RunContext())
 	h.seedEmailPackages(deps.RunContext())
 }
 func (h *handler) routes(r chi.Router) {
@@ -114,7 +115,7 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 	installed := map[string]int{}
 	for _, row := range installs {
 		if row.Enabled {
-			installed[row.ConnectorRef]++
+			installed[canonicalRef(row.ConnectorRef)]++
 		}
 	}
 	type profileState struct {
@@ -666,9 +667,19 @@ func (h *handler) listAgentConnectors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]any, 0)
+	index := map[string]int{}
 	for _, row := range rows {
-		pr, _ := provider(row.ConnectorRef)
-		items = append(items, map[string]any{"id": *row.ID, "ref": row.ConnectorRef, "name": pr.Name, "enabled": row.Enabled, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt})
+		ref := canonicalRef(row.ConnectorRef)
+		pr, _ := provider(ref)
+		item := map[string]any{"id": *row.ID, "ref": ref, "name": pr.Name, "enabled": row.Enabled, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt}
+		if i, ok := index[ref]; ok {
+			if current, _ := items[i]["createdAt"].(string); row.CreatedAt < current {
+				items[i] = item
+			}
+			continue
+		}
+		index[ref] = len(items)
+		items = append(items, item)
 	}
 	httpx.JSON(w, 200, map[string]any{"connectors": items})
 }

@@ -1,0 +1,5 @@
+你被邀请以「{{roleLabel .Role}}」加入 {{.TenantName}}。
+
+接受邀请：{{.AcceptURL}}
+
+链接 72 小时内有效。

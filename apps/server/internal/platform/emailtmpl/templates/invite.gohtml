@@ -1,0 +1,5 @@
+{{define "content"}}
+<p style="font-size:15px;line-height:1.7;color:#222222;margin:0 0 16px;">你被邀请以「{{roleLabel .Role}}」加入 {{.TenantName}}。</p>
+<p style="font-size:15px;line-height:1.7;color:#222222;margin:0 0 16px;"><a href="{{safeURL .AcceptURL}}" style="color:#0b57d0;text-decoration:underline;">接受邀请</a></p>
+<p style="font-size:15px;line-height:1.7;color:#222222;margin:0 0 16px;">链接 72 小时内有效。</p>
+{{end}}

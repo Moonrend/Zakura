@@ -88,6 +88,7 @@ func (h *handler) skillByID(r *http.Request, id string) (Skill, error) {
 }
 func (h *handler) listSkills(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
+	h.syncBuiltinSkills(r.Context(), p.TenantID)
 	q := h.deps.Gorm.WithContext(r.Context()).Model(&models.Skill{}).Where("tenant_id = ?", p.TenantID)
 	if term := strings.TrimSpace(r.URL.Query().Get("q")); term != "" {
 		x := "%" + strings.ToLower(term) + "%"
@@ -143,6 +144,16 @@ func (h *handler) installSkill(w http.ResponseWriter, r *http.Request) {
 	if httpx.DecodeJSON(r, &b) != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
+	}
+	if isBuiltin, builtinID := builtinSourceRef(b.Source); isBuiltin {
+		if builtinID == "" {
+			httpx.Error(w, 400, "builtinId required")
+			return
+		}
+		h.syncBuiltinSkills(r.Context(), principal(r).TenantID)
+		if b.SkillID == "" && len(b.Names) == 0 {
+			b.Names = []string{builtinID}
+		}
 	}
 	if b.SkillID != "" || len(b.Names) > 0 {
 		h.installExistingSkills(w, r, b.SkillID, b.Names, b.AgentIDs, b.All)

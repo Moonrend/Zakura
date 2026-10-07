@@ -31,6 +31,7 @@ import {
   type RuntimeNode,
 } from "@/lib/runners";
 // kindLabel 用于电脑/服务器区分
+import { ComputerCatalog } from "@/components/computer-catalog";
 import { useAgentDetail } from "@/components/agent-detail-context";
 import { AgentFileManager } from "@/components/agent-files/file-manager";
 import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
@@ -365,7 +366,7 @@ export default function AgentComputerPage() {
   if (!hasComputer) {
     return (
       <div className="space-y-5">
-        <SettingsHeader title="电脑" />
+        {agent.spaceId && <ComputerCatalog spaceId={agent.spaceId} />}
         {agent.lastError ? (
           <Alert variant="destructive">
             <AlertDescription>{agent.lastError}</AlertDescription>
@@ -373,10 +374,10 @@ export default function AgentComputerPage() {
         ) : null}
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-16">
           <Monitor className="size-8 text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">尚未创建电脑</p>
+          <p className="text-sm text-muted-foreground">尚未创建旧版工作区</p>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Monitor />
-            创建电脑
+            创建旧版工作区
           </Button>
         </div>
 

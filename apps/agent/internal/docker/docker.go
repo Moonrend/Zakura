@@ -116,13 +116,30 @@ func Pull(ctx context.Context, image string) error {
 }
 
 func Run(ctx context.Context, spec RunSpec) (ContainerInfo, error) {
+	return run(ctx, spec, true)
+}
+
+// Create starts a new named container without replacing an existing container.
+// A conflict or uncertain response must be reconciled by identity, never retried
+// through Run, which retains legacy destructive replacement behavior.
+func Create(ctx context.Context, spec RunSpec) (ContainerInfo, error) {
+	if strings.TrimSpace(spec.Name) == "" {
+		return ContainerInfo{}, fmt.Errorf("container name is required")
+	}
+	if strings.TrimSpace(spec.Image) == "" {
+		return ContainerInfo{}, fmt.Errorf("image is required")
+	}
+	return run(ctx, spec, false)
+}
+
+func run(ctx context.Context, spec RunSpec, replace bool) (ContainerInfo, error) {
 	if err := Require(); err != nil {
 		return ContainerInfo{}, err
 	}
 	if spec.Image == "" {
 		return ContainerInfo{}, fmt.Errorf("image 不能为空")
 	}
-	if spec.Name != "" {
+	if replace && spec.Name != "" {
 		_ = exec.CommandContext(ctx, dockerBin(), "rm", "-f", spec.Name).Run()
 	}
 	args := []string{"run", "-d"}
@@ -206,9 +223,9 @@ func Inspect(ctx context.Context, idOrName string) (ContainerInfo, error) {
 		return ContainerInfo{}, fmt.Errorf("docker inspect: %s", strings.TrimSpace(string(out)))
 	}
 	var raw []struct {
-		Id     string `json:"Id"`
-		Name   string `json:"Name"`
-		State  struct {
+		Id    string `json:"Id"`
+		Name  string `json:"Name"`
+		State struct {
 			Status string `json:"Status"`
 		} `json:"State"`
 		Config struct {

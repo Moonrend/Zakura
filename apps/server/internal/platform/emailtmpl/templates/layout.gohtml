@@ -1,0 +1,18 @@
+{{define "account_layout"}}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+</head>
+<body style="background-color:#f6f6f6;font-family:-apple-system,BlinkMacSystemFont,&quot;Segoe UI&quot;,&quot;PingFang SC&quot;,&quot;Hiragino Sans GB&quot;,&quot;Microsoft YaHei&quot;,sans-serif;margin:0;padding:0;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{.Preview}}</div>
+<div style="background-color:#ffffff;margin:40px auto;padding:32px 28px;max-width:560px;border-radius:8px;">
+<h1 style="font-size:20px;font-weight:600;color:#111111;margin:0 0 24px;">{{.Title}}</h1>
+<div style="margin:0;">{{block "content" .Data}}{{end}}</div>
+<hr style="border:none;border-top:1px solid #eaeaea;margin:28px 0 16px;">
+<p style="font-size:12px;color:#888888;margin:0;line-height:1.5;">此邮件由系统自动发送，请勿直接回复。</p>
+</div>
+</body>
+</html>
+{{end}}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { ComputerSelector } from "@/components/computer-selector";
 import { useRouter } from "next/navigation";
 import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
 import { toast } from "sonner";
@@ -2799,6 +2800,11 @@ export function ChatApp() {
               <ArrowDown className="size-3.5" />
               回到底部
             </Button>
+          )}
+          {agentId && sessionId && !isNewSession && (
+            <div className="mx-auto mb-2 max-w-3xl">
+              <ComputerSelector key={`${agentId}:${sessionId}`} selectionUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computer`} catalogUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computers`} label="对话执行电脑" hint="切换仅影响后续运行，不会移动文件或改变当前运行的电脑。" />
+            </div>
           )}
           <Composer
             value={input}

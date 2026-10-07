@@ -48,7 +48,7 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	// Do not let an explicit isolation request silently use an unsupported
 	// execution transport. Docker management is not the sandbox backend API.
 	switch msg.Method {
-	case "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate":
+	case "docker.create", "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate":
 		requested, policyErr := h.sandboxRequested(msg.Params)
 		if policyErr != nil {
 			send(Err(msg.ID, policyErr.Error()))
@@ -144,6 +144,18 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		}
 		err = docker.PullWithProgress(ctx, p.Image, progress)
 		result = map[string]string{"image": p.Image}
+	case "docker.create":
+		var spec docker.RunSpec
+		decoder := json.NewDecoder(strings.NewReader(string(msg.Params)))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&spec); err == nil {
+			var trailing any
+			if trailingErr := decoder.Decode(&trailing); trailingErr != io.EOF {
+				err = fmt.Errorf("docker.create requires exactly one JSON object")
+			} else {
+				result, err = docker.Create(ctx, spec)
+			}
+		}
 	case "docker.run":
 		var spec docker.RunSpec
 		_ = json.Unmarshal(msg.Params, &spec)

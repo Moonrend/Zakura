@@ -460,6 +460,15 @@ func TestAgentToolCatalogMemoryWorkspaceAndDirect(t *testing.T) {
 			t.Fatalf("%s wrong: %+v", name, tool)
 		}
 	}
+	if tool, ok := byName["list_computers"]; !ok || tool.Exposure != "direct" || tool.Kind != "builtin" {
+		t.Fatalf("list_computers missing or not direct: %+v", tool)
+	}
+	for _, name := range []string{"fs_list", "fs_read", "fs_write", "shell_exec"} {
+		properties, ok := byName[name].InputSchema["properties"].(map[string]any)
+		if !ok || properties["computerId"] == nil {
+			t.Fatalf("%s missing explicit computer selector", name)
+		}
+	}
 	direct, ok := byName["mcp__gh__search_issues"]
 	if !ok || direct.Exposure != "direct" || direct.ServerDescription != "GitHub tools" {
 		t.Fatalf("direct mcp tool wrong: %+v", direct)
