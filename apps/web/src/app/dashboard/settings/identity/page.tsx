@@ -19,6 +19,12 @@ type Domain = {
   txtToken: string;
 };
 
+const JOIN_MODE_LABELS: Record<string, string> = {
+  auto_join: "自动加入",
+  sso_required: "需要 SSO",
+  invite_only: "仅邀请",
+};
+
 type Sso = {
   enabled: boolean;
   protocol: "oidc" | "saml";
@@ -81,7 +87,7 @@ export default function IdentitySettingsPage() {
             <div key={row.id} className="space-y-1 rounded-lg border p-3 text-sm">
               <div className="flex items-center justify-between">
                 <span className="font-medium">{row.domain}</span>
-                <span className="text-xs text-muted-foreground">{row.verified ? "已验证" : "未验证"} · {row.joinMode}</span>
+                <span className="text-xs text-muted-foreground">{row.verified ? "已验证" : "未验证"} · {JOIN_MODE_LABELS[row.joinMode] ?? row.joinMode}</span>
               </div>
               <p className="text-xs text-muted-foreground">TXT {row.txtHost} = {row.txtToken}</p>
               <div className="flex flex-wrap gap-2">
@@ -94,14 +100,28 @@ export default function IdentitySettingsPage() {
                     toast.error(err instanceof Error ? err.message : String(err));
                   }
                 }}>验证 DNS</Button>
-                <Button size="sm" variant="outline" onClick={async () => {
-                  const next = row.joinMode === "auto_join" ? "sso_required" : row.joinMode === "sso_required" ? "invite_only" : "auto_join";
-                  await api(`/api/tenant/identity/domains/${row.id}`, { method: "PATCH", json: { joinMode: next } });
-                  await load();
-                }}>加入方式：{row.joinMode}</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!row.verified}
+                  title={row.verified ? undefined : "验证域名后可切换加入方式"}
+                  onClick={async () => {
+                    const next = row.joinMode === "auto_join" ? "sso_required" : row.joinMode === "sso_required" ? "invite_only" : "auto_join";
+                    try {
+                      await api(`/api/tenant/identity/domains/${row.id}`, { method: "PATCH", json: { joinMode: next } });
+                      await load();
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                >加入方式：{JOIN_MODE_LABELS[row.joinMode] ?? row.joinMode}</Button>
                 <Button size="sm" variant="ghost" onClick={async () => {
-                  await api(`/api/tenant/identity/domains/${row.id}`, { method: "DELETE" });
-                  await load();
+                  try {
+                    await api(`/api/tenant/identity/domains/${row.id}`, { method: "DELETE" });
+                    await load();
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : String(err));
+                  }
                 }}>删除</Button>
               </div>
             </div>

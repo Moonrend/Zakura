@@ -57,17 +57,25 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Post("/api/auth/sso/ticket", s.exchangeSSOTicket)
 	r.Post("/api/auth/mfa/complete", s.completeMFALogin)
 	r.Post("/api/auth/mfa/webauthn/options", s.beginWebAuthnLogin)
+	r.Post("/api/auth/mfa/email/send", s.sendLoginEmailCode)
+	r.Post("/api/auth/webauthn/login/options", s.beginWebAuthnPasswordlessLogin)
+	r.Post("/api/auth/webauthn/login", s.finishWebAuthnPasswordlessLogin)
 	r.Post("/api/auth/mfa/enrollment/totp/start", s.startTicketTOTP)
 	r.Post("/api/auth/mfa/enrollment/totp/complete", s.completeTicketTOTP)
 	r.Group(func(pr chi.Router) {
 		pr.Use(httpx.Auth(deps))
 		pr.Get("/api/me", currentHandler(s, deps))
 		pr.Get("/api/me/mfa", s.myMFA)
+		pr.Put("/api/me/mfa/enabled", s.setMFAEnabled)
 		pr.Post("/api/me/mfa/totp/start", s.startMyTOTP)
 		pr.Post("/api/me/mfa/totp/cancel", s.cancelMyTOTP)
 		pr.Post("/api/me/mfa/totp/enable", s.enableMyTOTP)
 		pr.Post("/api/me/mfa/totp/disable", s.disableMyTOTP)
 		pr.Post("/api/me/mfa/totp/recovery", s.rotateRecoveryCodes)
+		pr.Post("/api/me/mfa/email/start", s.startMyEmailMFA)
+		pr.Post("/api/me/mfa/email/enable", s.enableMyEmailMFA)
+		pr.Post("/api/me/mfa/email/disable", s.disableMyEmailMFA)
+		pr.Post("/api/me/mfa/email/challenge", s.challengeMyEmailMFA)
 		pr.Post("/api/me/mfa/webauthn/register/options", s.beginWebAuthnRegistration)
 		pr.Post("/api/me/mfa/webauthn/register", s.finishWebAuthnRegistration)
 		pr.Patch("/api/me/mfa/webauthn/{id}", s.renameWebAuthnCredential)
@@ -368,7 +376,7 @@ func listSessionsHandler(s *Service) http.HandlerFunc {
 			ExpiresAt  string `gorm:"column:expires_at"`
 		}
 		if err := s.gdb(r.Context()).Table("user_sessions").
-			Select("id,COALESCE(ip,'') AS ip,COALESCE(user_agent,'') AS user_agent,COALESCE(last_seen_at,created_at) AS last_seen_at,created_at,expires_at").
+			Select("id,COALESCE(ip,'') AS ip,COALESCE(user_agent,'') AS user_agent,COALESCE(CAST(last_seen_at AS TEXT),CAST(created_at AS TEXT)) AS last_seen_at,CAST(created_at AS TEXT) AS created_at,CAST(expires_at AS TEXT) AS expires_at").
 			Where("user_id = ? AND revoked_at IS NULL", p.UserID).
 			Order("created_at DESC").Find(&sessions).Error; err != nil {
 			httpx.Error(w, 500, "query failed")
