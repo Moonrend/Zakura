@@ -143,6 +143,18 @@ func (s *Service) discoverSSO(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]any{"sso": false})
 		return
 	}
+	email := strings.ToLower(strings.TrimSpace(b.Email))
+	var account struct {
+		PasswordHash *string `gorm:"column:password_hash"`
+	}
+	hasAccount := s.gdb(r.Context()).Table("users").Select("password_hash").Where("email = ? AND status = 'active'", email).Take(&account).Error == nil
+	hasPassword := hasAccount && account.PasswordHash != nil && *account.PasswordHash != ""
+	withPassword := func(body map[string]any) map[string]any {
+		if hasAccount {
+			body["hasPassword"] = hasPassword
+		}
+		return body
+	}
 	domain := strings.ToLower(strings.TrimSpace(strings.SplitN(b.Email, "@", 2)[1]))
 	var row struct {
 		Slug     string `gorm:"column:slug"`
@@ -156,10 +168,10 @@ func (s *Service) discoverSSO(w http.ResponseWriter, r *http.Request) {
 		Where("d.domain = ? AND d.verified_at IS NOT NULL AND c.enabled = ? AND t.status = ?", domain, true, "active").
 		Take(&row).Error
 	if err != nil {
-		httpx.JSON(w, 200, map[string]any{"sso": false})
+		httpx.JSON(w, 200, withPassword(map[string]any{"sso": false}))
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"sso": true, "required": row.Required, "protocol": row.Protocol, "tenantSlug": row.Slug})
+	httpx.JSON(w, 200, withPassword(map[string]any{"sso": true, "required": row.Required, "protocol": row.Protocol, "tenantSlug": row.Slug}))
 }
 func (s *Service) startSSO(w http.ResponseWriter, r *http.Request) {
 	protocol := httpx.Param(r, "protocol")

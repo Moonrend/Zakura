@@ -20,7 +20,7 @@ function ResetInner() {
   return (
     <AuthScreen
       title={done ? "密码已更新" : "设置新密码"}
-      description={done ? "请用新密码重新登录。" : "至少 8 位。改完后其他设备会退出。"}
+      description={done ? "请用新密码重新登录。" : "至少 10 位。改完后其他设备会退出。"}
       footer={
         <AuthFooter>
           <Link href="/login" className="text-foreground underline-offset-4 hover:underline">
@@ -54,7 +54,7 @@ function ResetInner() {
               id="password"
               className="h-9"
               type="password"
-              minLength={8}
+              minLength={10}
               autoComplete="new-password"
               autoFocus
               required

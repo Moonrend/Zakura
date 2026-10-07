@@ -770,8 +770,8 @@ func TestWebAuthnPasswordlessOptionsValidation(t *testing.T) {
 	setupUser(t, r, "passwordless@example.com", "Passwordless Team")
 
 	missing := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{}, "")
-	if missing.Code != 400 {
-		t.Fatalf("missing email: %d %s", missing.Code, missing.Body.String())
+	if missing.Code != 200 || !strings.Contains(missing.Body.String(), "challenge") {
+		t.Fatalf("discoverable options: %d %s", missing.Code, missing.Body.String())
 	}
 	unknown := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{"email": "nobody@example.com"}, "")
 	if unknown.Code != 400 {
@@ -780,6 +780,91 @@ func TestWebAuthnPasswordlessOptionsValidation(t *testing.T) {
 	withoutPasskey := call(t, r, http.MethodPost, "/api/auth/webauthn/login/options", map[string]any{"email": "passwordless@example.com"}, "")
 	if withoutPasskey.Code != 400 {
 		t.Fatalf("account without passkey: %d %s", withoutPasskey.Code, withoutPasskey.Body.String())
+	}
+}
+
+func TestDiscoverSSOHasPassword(t *testing.T) {
+	deps := testDeps(t)
+	deps.Edition = "saas"
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	setupUser(t, r, "with-pass@example.com", "With Password")
+	registered := call(t, r, http.MethodPost, "/api/auth/register", map[string]any{"email": "without-pass@example.com", "password": "register-password-123", "tenantName": "Without Password"}, "")
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", registered.Code, registered.Body.String())
+	}
+	if _, err := deps.DB.Exec(`UPDATE users SET password_hash=NULL WHERE email='without-pass@example.com'`); err != nil {
+		t.Fatal(err)
+	}
+	type discoverBody struct {
+		HasPassword *bool `json:"hasPassword"`
+	}
+	withPassword := call(t, r, http.MethodPost, "/api/auth/sso/discover", map[string]any{"email": "with-pass@example.com"}, "")
+	var withBody discoverBody
+	decode(t, withPassword, &withBody)
+	if withBody.HasPassword == nil || !*withBody.HasPassword {
+		t.Fatalf("account with password: %s", withPassword.Body.String())
+	}
+	withoutPassword := call(t, r, http.MethodPost, "/api/auth/sso/discover", map[string]any{"email": "without-pass@example.com"}, "")
+	var withoutBody discoverBody
+	decode(t, withoutPassword, &withoutBody)
+	if withoutBody.HasPassword == nil || *withoutBody.HasPassword {
+		t.Fatalf("account without password: %s", withoutPassword.Body.String())
+	}
+	unknown := call(t, r, http.MethodPost, "/api/auth/sso/discover", map[string]any{"email": "ghost@example.com"}, "")
+	var unknownBody discoverBody
+	decode(t, unknown, &unknownBody)
+	if unknownBody.HasPassword != nil {
+		t.Fatalf("unknown account leaked hasPassword: %s", unknown.Body.String())
+	}
+}
+
+func TestForgotPasswordForPasswordlessAccount(t *testing.T) {
+	deps := testDeps(t)
+	deps.Edition = "saas"
+	var subject string
+	deps.SendTransactionalEmail = func(_ context.Context, _ string, subj string, _ string, _ string) error {
+		subject = subj
+		return nil
+	}
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	setupUser(t, r, "owner@example.com", "Owner Team")
+	registered := call(t, r, http.MethodPost, "/api/auth/register", map[string]any{"email": "no-pass@example.com", "password": "register-password-123", "tenantName": "No Password"}, "")
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register: %d %s", registered.Code, registered.Body.String())
+	}
+	if _, err := deps.DB.Exec(`UPDATE users SET password_hash=NULL WHERE email='no-pass@example.com'`); err != nil {
+		t.Fatal(err)
+	}
+	forgot := call(t, r, http.MethodPost, "/api/auth/forgot-password", map[string]any{"email": "no-pass@example.com"}, "")
+	if forgot.Code != http.StatusOK || !strings.Contains(forgot.Body.String(), `"sent":true`) {
+		t.Fatalf("forgot password: %d %s", forgot.Code, forgot.Body.String())
+	}
+	var tokens int
+	if err := deps.DB.QueryRow(`SELECT COUNT(*) FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.kind='password_reset' AND u.email='no-pass@example.com'`).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 1 || subject != "设置 Zakura 密码" {
+		t.Fatalf("passwordless reset token/subject: tokens=%d subject=%q", tokens, subject)
+	}
+}
+
+func TestResetPasswordMessages(t *testing.T) {
+	deps := testDeps(t)
+	r := chi.NewRouter()
+	identity.RegisterRoutes(r, deps)
+	short := call(t, r, http.MethodPost, "/api/auth/reset-password", map[string]any{"token": "some-token", "password": "123456789"}, "")
+	if short.Code != http.StatusBadRequest || !strings.Contains(short.Body.String(), "password must contain at least 10 characters") {
+		t.Fatalf("short password: %d %s", short.Code, short.Body.String())
+	}
+	missingToken := call(t, r, http.MethodPost, "/api/auth/reset-password", map[string]any{"token": "", "password": "a-valid-long-password"}, "")
+	if missingToken.Code != http.StatusBadRequest || !strings.Contains(missingToken.Body.String(), "invalid or expired token") {
+		t.Fatalf("missing token: %d %s", missingToken.Code, missingToken.Body.String())
+	}
+	unknownToken := call(t, r, http.MethodPost, "/api/auth/reset-password", map[string]any{"token": "unknown-reset-token", "password": "a-valid-long-password"}, "")
+	if unknownToken.Code != http.StatusBadRequest || !strings.Contains(unknownToken.Body.String(), "invalid or expired token") {
+		t.Fatalf("unknown token: %d %s", unknownToken.Code, unknownToken.Body.String())
 	}
 }
 

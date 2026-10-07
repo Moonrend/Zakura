@@ -21,6 +21,7 @@ type Discover = {
   required?: boolean;
   protocol?: string;
   tenantSlug?: string;
+  hasPassword?: boolean;
 };
 
 export default function LoginPage() {
@@ -174,6 +175,10 @@ export default function LoginPage() {
         setNotice(oauthProviders.length ? "请使用上方方式登录。" : "当前没有可用的登录方式，请联系管理员。");
         return;
       }
+      if (found.hasPassword === false) {
+        router.push(`/forgot-password?email=${encodeURIComponent(trimmed)}&set=1`);
+        return;
+      }
       go("password");
     } catch {
       if (passwordLoginEnabled) go("password");
@@ -265,10 +270,6 @@ export default function LoginPage() {
 
   async function startPasskeyLogin() {
     const addr = email.trim();
-    if (!addr) {
-      toast.error("请先输入邮箱");
-      return;
-    }
     setPasskeyBusy(true);
     try {
       const { startAuthentication } = await import("@simplewebauthn/browser");
@@ -356,7 +357,9 @@ export default function LoginPage() {
     return [hit, ...oauthProviders.filter((p) => p.id !== hit.id)];
   }, [oauthProviders, highlightedMethod]);
 
-  const oauthRow = orderedOauth.length > 0 ? (
+  const showPasskey = mode === "signin";
+
+  const oauthRow = orderedOauth.length > 0 || showPasskey ? (
     <div className="flex gap-2">
       {orderedOauth.map((p) => (
         <Button
@@ -372,6 +375,19 @@ export default function LoginPage() {
           {oauthLoading === p.id ? <Loader2 className="animate-spin" /> : <OauthProviderIcon id={p.id} />}
         </Button>
       ))}
+      {showPasskey ? (
+        <Button
+          type="button"
+          variant="secondary"
+          className="h-11 flex-1"
+          disabled={!!oauthLoading || loading || passkeyBusy}
+          aria-label="使用通行密钥登录"
+          title="使用通行密钥登录"
+          onClick={() => void startPasskeyLogin()}
+        >
+          {passkeyBusy ? <Loader2 className="animate-spin" /> : <Fingerprint className="size-4" />}
+        </Button>
+      ) : null}
     </div>
   ) : null;
 
@@ -457,7 +473,7 @@ export default function LoginPage() {
                     id="password"
                     className="h-10 pr-9"
                     type={showPassword ? "text" : "password"}
-                    minLength={8}
+                    minLength={10}
                     autoComplete="new-password"
                     required
                     value={password}
@@ -527,16 +543,6 @@ export default function LoginPage() {
                 {loading ? "继续…" : "使用邮箱继续"}
               </Button>
             </form>
-            <Button
-              type="button"
-              variant="secondary"
-              className="h-10 w-full"
-              disabled={busy || passkeyBusy}
-              onClick={() => void startPasskeyLogin()}
-            >
-              {passkeyBusy ? <Loader2 className="animate-spin" /> : <Fingerprint className="size-4" />}
-              {passkeyBusy ? "等待设备…" : "使用通行密钥登录"}
-            </Button>
           </>
         ) : null}
 

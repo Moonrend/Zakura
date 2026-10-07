@@ -1156,7 +1156,7 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 			return
 		}
 		var dbUser models.User
-		if s.gdb(r.Context()).Where("email = ? AND status = 'active'", strings.ToLower(strings.TrimSpace(b.Email))).Take(&dbUser).Error == nil && derefString(dbUser.PasswordHash) != "" {
+		if s.gdb(r.Context()).Where("email = ? AND status = 'active'", strings.ToLower(strings.TrimSpace(b.Email))).Take(&dbUser).Error == nil {
 			userID, email := derefString(dbUser.ID), dbUser.Email
 			token, _ := randomToken(32)
 			h := sha256.Sum256([]byte(token))
@@ -1164,8 +1164,15 @@ func forgotPasswordHandler(s *Service) http.HandlerFunc {
 			_ = s.gdb(r.Context()).Create(&models.AuthToken{ID: &tokenID, UserID: &userID, Kind: "password_reset", TokenHash: hex.EncodeToString(h[:]), ExpiresAt: s.deps.Clock().UTC().Add(time.Hour).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 			if s.deps.SendTransactionalEmail != nil {
 				resetURL := s.deps.WebURL + "/reset-password?token=" + url.QueryEscape(token)
+				subject := "重置 Zakura 密码"
 				htmlBody := `<p>Reset your Zakura password:</p><p><a href="` + html.EscapeString(resetURL) + `">Reset password</a></p>`
-				_ = s.deps.SendTransactionalEmail(r.Context(), email, "重置 Zakura 密码", htmlBody, "Reset your Zakura password:\n\n"+resetURL)
+				textBody := "Reset your Zakura password:\n\n" + resetURL
+				if derefString(dbUser.PasswordHash) == "" {
+					subject = "设置 Zakura 密码"
+					htmlBody = `<p>为你的 Zakura 账号设置密码：</p><p><a href="` + html.EscapeString(resetURL) + `">设置密码</a></p>`
+					textBody = "为你的 Zakura 账号设置密码：\n\n" + resetURL
+				}
+				_ = s.deps.SendTransactionalEmail(r.Context(), email, subject, htmlBody, textBody)
 			}
 		}
 		httpx.JSON(w, 200, map[string]any{"sent": true})
@@ -1206,8 +1213,12 @@ func resetPasswordHandler(s *Service) http.HandlerFunc {
 			Token    string `json:"token"`
 			Password string `json:"password"`
 		}
-		if httpx.DecodeJSON(r, &b) != nil || len(b.Password) < 10 {
-			httpx.Error(w, 400, "invalid token or password")
+		if httpx.DecodeJSON(r, &b) != nil || b.Token == "" {
+			httpx.Error(w, 400, "invalid or expired token")
+			return
+		}
+		if len(b.Password) < 10 {
+			httpx.Error(w, 400, "password must contain at least 10 characters")
 			return
 		}
 		h := sha256.Sum256([]byte(b.Token))

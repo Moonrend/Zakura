@@ -78,12 +78,49 @@ func (s *Service) saveWebSession(ctx context.Context, userID, kind, parent strin
 	token := "wac_" + mustToken(24)
 	h := sha256.Sum256([]byte(token))
 	tokenID := s.deps.NewID()
-	uid := userID
-	return s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: &uid, Kind: kind, TokenHash: hex.EncodeToString(h[:]), MetaJSON: string(meta), ExpiresAt: s.deps.Clock().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
+	var uid *string
+	if userID != "" {
+		value := userID
+		uid = &value
+	}
+	return s.gdb(ctx).Create(&models.AuthToken{ID: &tokenID, UserID: uid, Kind: kind, TokenHash: hex.EncodeToString(h[:]), MetaJSON: string(meta), ExpiresAt: s.deps.Clock().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano), CreatedAt: s.now()}).Error
 }
 func (s *Service) takeWebSession(ctx context.Context, userID, kind, parent string) (wa.SessionData, error) {
 	var tokens []models.AuthToken
 	if err := s.gdb(ctx).Select("id,meta_json").Where("user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?", userID, kind, s.now()).Order("created_at DESC").Find(&tokens).Error; err != nil {
+		return wa.SessionData{}, err
+	}
+	parentHash := ""
+	if parent != "" {
+		h := sha256.Sum256([]byte(parent))
+		parentHash = hex.EncodeToString(h[:])
+	}
+	for _, stored := range tokens {
+		var meta struct {
+			Session    json.RawMessage `json:"session"`
+			ParentHash string          `json:"parentHash"`
+		}
+		if json.Unmarshal([]byte(stored.MetaJSON), &meta) != nil || meta.ParentHash != parentHash {
+			continue
+		}
+		var session wa.SessionData
+		if json.Unmarshal(meta.Session, &session) != nil {
+			continue
+		}
+		res := s.gdb(ctx).Model(&models.AuthToken{}).Where("id = ? AND consumed_at IS NULL", derefString(stored.ID)).Update("consumed_at", s.now())
+		if res.Error != nil {
+			return wa.SessionData{}, res.Error
+		}
+		if res.RowsAffected == 1 {
+			return session, nil
+		}
+	}
+	return wa.SessionData{}, errors.New("WebAuthn challenge expired")
+}
+
+func (s *Service) takeWebSessionAny(ctx context.Context, kind, parent string) (wa.SessionData, error) {
+	var tokens []models.AuthToken
+	if err := s.gdb(ctx).Select("id,meta_json").Where("kind = ? AND consumed_at IS NULL AND expires_at > ?", kind, s.now()).Order("created_at DESC").Find(&tokens).Error; err != nil {
 		return wa.SessionData{}, err
 	}
 	parentHash := ""
@@ -258,12 +295,26 @@ func (s *Service) beginWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http.
 		Email string `json:"email"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
-		httpx.Error(w, 400, "email required")
+		httpx.Error(w, 400, "invalid request")
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(b.Email))
+	web, err := s.webAuthn()
+	if err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
 	if email == "" {
-		httpx.Error(w, 400, "email required")
+		options, session, err := web.BeginDiscoverableLogin()
+		if err != nil {
+			httpx.Error(w, 400, err.Error())
+			return
+		}
+		if err = s.saveWebSession(r.Context(), "", "webauthn_passwordless", "", session); err != nil {
+			httpx.Error(w, 500, "challenge persistence failed")
+			return
+		}
+		httpx.JSON(w, 200, options)
 		return
 	}
 	var account models.User
@@ -274,11 +325,6 @@ func (s *Service) beginWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http.
 	user, err := s.loadWebUser(r.Context(), derefString(account.ID))
 	if err != nil || len(user.Credentials) == 0 {
 		httpx.Error(w, 400, "该邮箱未设置通行密钥")
-		return
-	}
-	web, err := s.webAuthn()
-	if err != nil {
-		httpx.Error(w, 500, err.Error())
 		return
 	}
 	options, session, err := web.BeginLogin(user)
@@ -302,6 +348,10 @@ func (s *Service) finishWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(b.Email))
+	if email == "" {
+		s.finishWebAuthnDiscoverableLogin(w, r, b.Assertion)
+		return
+	}
 	var account models.User
 	if err := s.gdb(r.Context()).Select("id").Where("email = ? AND status = 'active'", email).Take(&account).Error; err != nil {
 		httpx.Error(w, 401, "invalid credentials")
@@ -310,6 +360,76 @@ func (s *Service) finishWebAuthnPasswordlessLogin(w http.ResponseWriter, r *http
 	userID := derefString(account.ID)
 	if err := s.finishWebAuthnLogin(r.Context(), userID, "webauthn_passwordless", email, b.Assertion); err != nil {
 		httpx.Error(w, 400, err.Error())
+		return
+	}
+	if err := s.issuePasswordlessSession(w, r, userID); err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
+}
+
+func (s *Service) finishWebAuthnDiscoverableLogin(w http.ResponseWriter, r *http.Request, assertion json.RawMessage) {
+	var payload struct {
+		Response struct {
+			UserHandle string `json:"userHandle"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(assertion, &payload) != nil || payload.Response.UserHandle == "" {
+		httpx.Error(w, 401, "invalid credentials")
+		return
+	}
+	userHandle, err := base64.RawURLEncoding.DecodeString(payload.Response.UserHandle)
+	if err != nil {
+		userHandle, err = base64.StdEncoding.DecodeString(payload.Response.UserHandle)
+	}
+	if err != nil || len(userHandle) == 0 {
+		httpx.Error(w, 401, "invalid credentials")
+		return
+	}
+	userID := string(userHandle)
+	var account models.User
+	if err = s.gdb(r.Context()).Select("id").Where("id = ? AND status = 'active'", userID).Take(&account).Error; err != nil {
+		httpx.Error(w, 401, "invalid credentials")
+		return
+	}
+	user, err := s.loadWebUser(r.Context(), userID)
+	if err != nil || len(user.Credentials) == 0 {
+		httpx.Error(w, 401, "invalid credentials")
+		return
+	}
+	session, err := s.takeWebSessionAny(r.Context(), "webauthn_passwordless", "")
+	if err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
+	web, err := s.webAuthn()
+	if err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "/webauthn", bytes.NewReader(assertion))
+	req.Header.Set("Content-Type", "application/json")
+	loader := func(rawID, handle []byte) (wa.User, error) {
+		found, err := s.loadWebUser(r.Context(), string(handle))
+		if err != nil {
+			return nil, err
+		}
+		return found, nil
+	}
+	credential, err := web.FinishDiscoverableLogin(loader, session, req)
+	if err != nil {
+		httpx.Error(w, 400, err.Error())
+		return
+	}
+	stored, _ := json.Marshal(credential)
+	transports, _ := json.Marshal(credential.Transport)
+	res := s.gdb(r.Context()).Model(&models.UserWebauthnCredential{}).Where("user_id = ? AND credential_id = ?", userID, base64.RawURLEncoding.EncodeToString(credential.ID)).Updates(map[string]any{"public_key": string(stored), "counter": int32(credential.Authenticator.SignCount), "transports_json": string(transports)})
+	if res.Error != nil {
+		httpx.Error(w, 400, res.Error.Error())
+		return
+	}
+	if res.RowsAffected != 1 {
+		httpx.Error(w, 400, "credential not found")
 		return
 	}
 	if err := s.issuePasswordlessSession(w, r, userID); err != nil {

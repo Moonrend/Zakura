@@ -13,6 +13,7 @@ import { PageLoading } from "@/components/ui/progress-linear";
 
 function ForgotInner() {
   const preset = useSearchParams().get("email") ?? "";
+  const setPassword = useSearchParams().get("set") === "1";
   const [email, setEmail] = useState(preset);
   const [sent, setSent] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -50,6 +51,11 @@ function ForgotInner() {
             }
           }}
         >
+          {setPassword ? (
+            <div className="mb-4 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground">
+              该账号通过第三方登录创建，尚未设置密码。提交后将发送设置密码邮件，通过邮件里的链接设置密码。
+            </div>
+          ) : null}
           <AuthField label="邮箱" htmlFor="email">
             <Input
               id="email"
