@@ -2,6 +2,7 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -25,7 +26,8 @@ type Gateway struct {
 
 func NewGateway(store *Store) *Gateway {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = 16
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 64
 	transport.ResponseHeaderTimeout = 90 * time.Second
 	return &Gateway{store: store, client: &http.Client{Transport: transport}}
 }
@@ -95,7 +97,6 @@ func (g *Gateway) Do(ctx context.Context, tenant, capability, operation, model s
 			return resp, nil
 		}
 		if resp != nil {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			errs = append(errs, fmt.Sprintf("%s: HTTP %d", candidate.Upstream.Name, resp.Status))
 		} else if callErr != nil {
@@ -109,7 +110,6 @@ func (g *Gateway) Do(ctx context.Context, tenant, capability, operation, model s
 }
 
 func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, originalPayload []byte, route ModelRoute, upstream Upstream) (*ProviderResponse, error) {
-	payload := append([]byte(nil), originalPayload...)
 	var cfg upstreamConfig
 	if err := json.Unmarshal(upstream.Config, &cfg); err != nil {
 		return nil, fmt.Errorf("invalid upstream config: %w", err)
@@ -137,14 +137,10 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 	if err != nil {
 		return nil, err
 	}
-	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return nil, errors.New("invalid JSON body")
+	payload, streaming, err := prepareProviderPayload(upstream.Protocol, operation, route.Model, originalPayload)
+	if err != nil {
+		return nil, err
 	}
-	body["model"] = route.Model
-	body = normalizeProviderRequest(upstream.Protocol, operation, body)
-	payload, _ = json.Marshal(body)
-	streaming, _ := body["stream"].(bool)
 	client := g.client
 	if cfg.Timeout > 0 {
 		clone := *client
@@ -178,27 +174,29 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+			if attempt < 2 {
+				if err := waitGatewayRetry(ctx, time.Duration(attempt+1)*50*time.Millisecond); err != nil {
+					return nil, err
+				}
+			}
 			continue
 		}
 		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && attempt < 2 {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
+			if err := waitGatewayRetry(ctx, time.Duration(attempt+1)*100*time.Millisecond); err != nil {
+				return nil, err
 			}
 			continue
 		}
 		if streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-			prefix, e := readStreamCommit(resp.Body)
+			reader := bufio.NewReaderSize(resp.Body, 4096)
+			prefix, e := readStreamCommit(reader)
 			if e != nil {
 				resp.Body.Close()
 				lastErr = e
 				continue
 			}
-			resp.Body = structReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), resp.Body), Closer: resp.Body}
+			resp.Body = structReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), reader), Closer: resp.Body}
 		}
 		return &ProviderResponse{Status: resp.StatusCode, Header: resp.Header.Clone(), Body: resp.Body, Protocol: upstream.Protocol, Operation: operation}, nil
 	}
@@ -210,23 +208,17 @@ type structReadCloser struct {
 	io.Closer
 }
 
-func readStreamCommit(body io.Reader) ([]byte, error) {
-	var out bytes.Buffer
-	one := make([]byte, 1)
-	for out.Len() < 64<<10 {
-		n, e := body.Read(one)
-		if n > 0 {
-			out.WriteByte(one[0])
-			if bytes.HasSuffix(out.Bytes(), []byte("\n\n")) {
-				return out.Bytes(), nil
-			}
-		}
-		if e != nil {
-			return nil, fmt.Errorf("stream failed before first complete event: %w", e)
-		}
+func waitGatewayRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	return nil, errors.New("first stream event exceeds 64 KiB")
 }
+
 func normalizeProviderRequest(protocol, operation string, body map[string]any) map[string]any {
 	if protocol == "anthropic" {
 		if _, ok := body["max_tokens"]; !ok {
@@ -321,15 +313,24 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 		if e != nil {
 			return e
 		}
+		if len(raw) > maxProviderResponse {
+			return errors.New("provider response exceeds 64 MiB")
+		}
 		raw = normalizeProviderResponse(resp.Protocol, resp.Operation, raw)
 		w.WriteHeader(resp.Status)
 		_, e = w.Write(raw)
 		return e
 	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(resp.Status)
+		return copyProviderStream(w, resp.Body)
+	}
 	w.WriteHeader(resp.Status)
-	_, err := io.Copy(w, io.LimitReader(resp.Body, maxProviderResponse+1))
+	_, err := io.Copy(w, io.LimitReader(resp.Body, maxProviderResponse))
 	return err
 }
+
 func normalizeProviderResponse(protocol, operation string, raw []byte) []byte {
 	if protocol == "anthropic" && (operation == "chat" || operation == "responses") {
 		var a struct {

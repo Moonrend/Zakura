@@ -28,7 +28,7 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-func testDeps(t *testing.T) *appdeps.Dependencies {
+func testDeps(t testing.TB) *appdeps.Dependencies {
 	t.Helper()
 	db, e := sql.Open("sqlite3", "file:"+t.Name()+"?mode=memory&cache=shared")
 	if e != nil {
@@ -49,7 +49,7 @@ func testDeps(t *testing.T) *appdeps.Dependencies {
 	}
 	return &appdeps.Dependencies{DB: db, Gorm: gdb, Dialect: "sqlite", Rebind: appdeps.IdentityRebind, Clock: func() time.Time { return time.Now().UTC() }, NewID: func() string { return fmt.Sprintf("id-%06d", n.Add(1)) }, Secret: bytes.Repeat([]byte("s"), 32), PublicURL: "http://example.test"}
 }
-func seedTenant(t *testing.T, d *appdeps.Dependencies, id string) string {
+func seedTenant(t testing.TB, d *appdeps.Dependencies, id string) string {
 	t.Helper()
 	now := d.Clock().Format(time.RFC3339Nano)
 	if _, e := d.DB.Exec(`INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES(?,?,?,?,?)`, id, id, id, now, now); e != nil {
