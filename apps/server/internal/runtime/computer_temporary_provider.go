@@ -88,7 +88,12 @@ func (p temporaryComputerProvider) Create(ctx context.Context, r computers.Runti
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
-	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
+	createCtx, releaseImage, err := ensureComputerImage(ctx, runner, serverComputerImage)
+	if err != nil {
+		return computers.CreationResult{}, err
+	}
+	defer releaseImage()
+	root, err := computerRoot(createCtx, runner, storageRoot, r.ID)
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
@@ -97,7 +102,7 @@ func (p temporaryComputerProvider) Create(ctx context.Context, r computers.Runti
 	// Independent bind-mounted storage, no Docker socket, published ports, or
 	// privileged mode. restart=no keeps a temporary instance down until it is
 	// reclaimed rather than resurrecting it after an unclean stop.
-	err = runner.call(ctx, "docker.create", map[string]any{
+	err = runner.call(createCtx, "docker.create", map[string]any{
 		"name": name, "image": serverComputerImage, "labels": labels,
 		"volumes":    []map[string]any{{"hostPath": root, "containerPath": "/workspace"}},
 		"workingDir": "/workspace", "restart": "no",

@@ -40,6 +40,8 @@ func TestTemporaryComputerProvisioning(t *testing.T) {
 				switch method {
 				case "sys.info":
 					return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+				case "docker.images":
+					return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 				case "host.fs.mkdir":
 					mu.Lock()
 					defer mu.Unlock()
@@ -167,6 +169,113 @@ func TestTemporaryComputerProvisioning(t *testing.T) {
 	}
 }
 
+// TestTemporaryComputerProvisioningEnsuresImage covers the shared pre-create
+// image probe on the temporary provider: an absent image pulls exactly once
+// before create, and a failed pull leaves the runtime in Unknown.
+func TestTemporaryComputerProvisioningEnsuresImage(t *testing.T) {
+	for _, mode := range []string{"absent", "pull-error"} {
+		t.Run(mode, func(t *testing.T) {
+			d := testDeps(t)
+			seedTenant(t, d, "tenant")
+			ctx := context.Background()
+			store := NewStore(d)
+			space, err := store.CreateSpace(ctx, "tenant", Space{Name: "temporary"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var rpcs []string
+			creates := 0
+			var instance computerContainer
+			h := builtinToolHarness(t, d, "rnr_temp_image_"+mode, func(method string, params map[string]any) (any, error) {
+				switch method {
+				case "sys.info":
+					return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+				case "docker.images":
+					mu.Lock()
+					rpcs = append(rpcs, "docker.images")
+					mu.Unlock()
+					return []computerImageStatus{{Image: serverComputerImage, Error: "no such image"}}, nil
+				case "docker.pull":
+					mu.Lock()
+					rpcs = append(rpcs, "docker.pull")
+					mu.Unlock()
+					if mode == "pull-error" {
+						return nil, errors.New("registry unavailable")
+					}
+					return map[string]string{"image": fmt.Sprint(params["image"])}, nil
+				case "host.fs.mkdir":
+					mu.Lock()
+					rpcs = append(rpcs, "host.fs.mkdir")
+					mu.Unlock()
+					return map[string]any{"abs": fmt.Sprintf("/srv/zakura/%s", fmt.Sprint(params["path"]))}, nil
+				case "docker.create":
+					mu.Lock()
+					defer mu.Unlock()
+					rpcs = append(rpcs, "docker.create")
+					creates++
+					raw, _ := json.Marshal(params["labels"])
+					var labels map[string]string
+					_ = json.Unmarshal(raw, &labels)
+					instance = computerContainer{DockerID: "container", Name: "/" + fmt.Sprint(params["name"]), Image: serverComputerImage, Status: "running", Labels: labels}
+					return instance, nil
+				default:
+					return nil, fmt.Errorf("unexpected RPC %s", method)
+				}
+			})
+			if err = d.Gorm.Exec(`UPDATE runtime_nodes SET kind='server' WHERE id='node'`).Error; err != nil {
+				t.Fatal(err)
+			}
+			cs := h.computerStore()
+			c := computers.Computer{ID: "temp", TenantID: "tenant", SpaceID: space.ID, Name: "Temporary", Provider: computers.Temporary, RuntimeNodeID: "node", IdleSeconds: 900, MaxLifetimeSeconds: 3600}
+			sealed, err := computers.SealCredentials(d.Secret, c.TenantID, c.SpaceID, c.ID, []byte(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = cs.Create(ctx, c, sealed); err != nil {
+				t.Fatal(err)
+			}
+			r, err := cs.ReserveRuntime(ctx, "tenant", space.ID, c.ID, chat.ID, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
+			adapter := temporaryComputerProvider{h: h}
+			p := computers.Provisioner{Store: cs, Providers: map[computers.Provider]computers.CreationProvider{computers.Temporary: adapter}}
+			result, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
+			mu.Lock()
+			defer mu.Unlock()
+			if mode == "pull-error" {
+				if !errors.Is(err, computers.ErrCreationUncertain) || creates != 0 {
+					t.Fatalf("pull error: err=%v creates=%d", err, creates)
+				}
+				if len(rpcs) != 2 || rpcs[1] != "docker.pull" {
+					t.Fatalf("pull-error RPCs = %v", rpcs)
+				}
+				stored, readErr := cs.GetRuntime(context.Background(), target)
+				if readErr != nil || stored.State != computers.Unknown {
+					t.Fatalf("state after pull error: %+v %v", stored, readErr)
+				}
+				return
+			}
+			if err != nil || result.State != computers.Ready || result.ExternalID != "container" {
+				t.Fatalf("pull create: %+v %v", result, err)
+			}
+			if len(rpcs) != 4 || rpcs[0] != "docker.images" || rpcs[1] != "docker.pull" || rpcs[2] != "host.fs.mkdir" || rpcs[3] != "docker.create" {
+				t.Fatalf("absent RPCs = %v", rpcs)
+			}
+		})
+	}
+}
+
 func TestTemporaryComputerDestroy(t *testing.T) {
 	d := testDeps(t)
 	seedTenant(t, d, "tenant")
@@ -194,6 +303,8 @@ func TestTemporaryComputerDestroy(t *testing.T) {
 		switch method {
 		case "sys.info":
 			return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+		case "docker.images":
+			return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 		case "host.fs.mkdir":
 			mu.Lock()
 			defer mu.Unlock()

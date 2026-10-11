@@ -8,6 +8,7 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
@@ -90,6 +91,45 @@ func computerRoot(ctx context.Context, runner *runnerSession, storageRoot, runti
 	return created.Abs, nil
 }
 
+// computerImageStatus is the subset of the runner's docker.images response the
+// image-ensure step needs. A present image carries a non-empty ID and no error;
+// an absent or unreadable image has an empty ID or an error.
+type computerImageStatus struct {
+	Image string `json:"image"`
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// computerImagePullTimeout bounds a detached image pull. It comfortably outlives
+// the approve HTTP request that triggers provisioning while still capping a
+// wedged registry.
+const computerImagePullTimeout = 15 * time.Minute
+
+// ensureComputerImage verifies the node already has the image, pulling it with a
+// detached, long-running context when it does not. It returns the context the
+// subsequent docker.create must run under: the caller's ordinary request context
+// when the image was already present, or the detached pull context when a pull
+// ran, so a completed pull still materializes the container even after the
+// approve request has ended. Only a failed pull is returned as an error. The
+// docker.images probe stays on the fast request context.
+func ensureComputerImage(ctx context.Context, runner *runnerSession, image string) (context.Context, context.CancelFunc, error) {
+	var statuses []computerImageStatus
+	if err := runner.call(ctx, "docker.images", map[string]any{"images": []string{image}}, &statuses); err != nil {
+		return ctx, func() {}, err
+	}
+	for _, status := range statuses {
+		if strings.TrimSpace(status.Image) == image && strings.TrimSpace(status.ID) != "" && strings.TrimSpace(status.Error) == "" {
+			return ctx, func() {}, nil
+		}
+	}
+	pullCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), computerImagePullTimeout)
+	if err := runner.call(pullCtx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
+		cancel()
+		return ctx, func() {}, err
+	}
+	return pullCtx, cancel, nil
+}
+
 func validateComputerContainer(c computerContainer, r computers.Runtime) error {
 	name, labels := computerContainerIdentity(r)
 	if c.DockerID == "" || strings.TrimPrefix(c.Name, "/") != name || c.Image != serverComputerImage || c.Status != "running" {
@@ -108,7 +148,12 @@ func (p serverComputerProvider) Create(ctx context.Context, r computers.Runtime)
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
-	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
+	createCtx, releaseImage, err := ensureComputerImage(ctx, runner, serverComputerImage)
+	if err != nil {
+		return computers.CreationResult{}, err
+	}
+	defer releaseImage()
+	root, err := computerRoot(createCtx, runner, storageRoot, r.ID)
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
@@ -116,7 +161,7 @@ func (p serverComputerProvider) Create(ctx context.Context, r computers.Runtime)
 	var result computerContainer
 	// Independent bind-mounted storage, no Docker socket, published ports, or
 	// privileged mode. Names include the incarnation and operation.
-	err = runner.call(ctx, "docker.create", map[string]any{
+	err = runner.call(createCtx, "docker.create", map[string]any{
 		"name": name, "image": serverComputerImage, "labels": labels,
 		"volumes":    []map[string]any{{"hostPath": root, "containerPath": "/workspace"}},
 		"workingDir": "/workspace", "restart": "unless-stopped",

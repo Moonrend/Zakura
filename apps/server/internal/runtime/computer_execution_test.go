@@ -306,6 +306,8 @@ func TestTemporaryComputerAutoProvisionsOnExecution(t *testing.T) {
 		switch method {
 		case "sys.info":
 			return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+		case "docker.images":
+			return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 		case "host.fs.mkdir":
 			root := fmt.Sprint(params["root"])
 			rel := fmt.Sprint(params["path"])
@@ -438,6 +440,8 @@ func TestTemporaryComputerAutoProvisionFailureIsUncertain(t *testing.T) {
 		switch method {
 		case "sys.info":
 			return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+		case "docker.images":
+			return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 		case "host.fs.mkdir":
 			return map[string]any{"abs": fmt.Sprintf("/srv/zakura/%s", fmt.Sprint(params["path"]))}, nil
 		case "docker.create":
