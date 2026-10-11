@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
@@ -48,6 +49,9 @@ func runnerWorkspacePath(value string) (string, error) {
 
 func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*remoteWorkspace, bool, error) {
 	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
+		if !exec.computer.Has(computers.Files) || strings.TrimSpace(exec.hostRoot) == "" {
+			return nil, true, errors.New("files are not available on this computer")
+		}
 		runner, err := h.hub.get(exec.nodeID)
 		if err != nil {
 			return nil, true, err
@@ -261,7 +265,10 @@ func (r *remoteWorkspace) archive(ctx context.Context, paths []string) ([]byte, 
 			return nil
 		}
 		seen[key] = true
-		params := map[string]any{"spaceId": r.spaceID, "path": safe}
+		params, err := r.pathParams(safe)
+		if err != nil {
+			return err
+		}
 		var stat runnerFSEntry
 		if err = r.runner.call(ctx, "host.fs.stat", params, &stat); err != nil {
 			return err
