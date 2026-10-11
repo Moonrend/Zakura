@@ -23,6 +23,7 @@ func (h *handler) registerComputers(r chi.Router) {
 	r.Get("/spaces/{id}/computers/{cid}/runtimes/{rid}", h.getComputerRuntime)
 	r.Post("/spaces/{id}/computers/{cid}/runtimes/{rid}/approve", h.approveComputerRuntime)
 	r.Post("/spaces/{id}/computers/{cid}/runtimes/{rid}/reconcile", h.reconcileComputerRuntime)
+	r.Post("/spaces/{id}/computers/{cid}/runtimes/{rid}/replace", h.replaceComputerRuntime)
 	r.Get("/spaces/{id}/computer-default", h.getSpaceComputer)
 	r.Put("/spaces/{id}/computer-default", h.setSpaceComputer)
 	r.Get("/agents/{id}/cloud/sessions/{sid}/computers", h.listSessionComputers)

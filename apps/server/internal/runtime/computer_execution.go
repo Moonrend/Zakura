@@ -118,6 +118,22 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 		}
 		active = reserved
 	}
+	// A temporary create whose outcome is unknown is recovered inline: verify
+	// whether the container actually exists and, only when it is provably gone,
+	// reserve a replacement and approve it in the pending branch below. Server
+	// and cloud computers keep the unknown slot for explicit operator action.
+	if active.State == computers.Unknown && c.Provider == computers.Temporary {
+		replacement, rErr := h.computerProvisioner().PrepareReplacement(ctx, computers.Target{TenantID: tenant, SpaceID: a.SpaceID, ComputerID: c.ID, RuntimeID: active.ID, Incarnation: active.Incarnation}, "system")
+		if rErr != nil {
+			return nil, fmt.Errorf("computer %s replacement failed: %w", c.ID, rErr)
+		}
+		active = replacement
+		reloaded, reloadErr := h.computerStore().ResolveRunComputer(ctx, tenant, a.SpaceID, run, c.ID)
+		if reloadErr != nil {
+			return nil, reloadErr
+		}
+		c = reloaded
+	}
 	// A pending slot is either the one just reserved or a previous reservation.
 	// Only a free, self-hosted temporary container is approved and created inline
 	// so the chat can execute immediately; every provider that spends external

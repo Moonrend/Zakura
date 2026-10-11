@@ -62,7 +62,7 @@ export function ComputerRuntimeControls({ base, name, provider = "server" }: { b
     setUncertain(false);
     return result;
   }
-  async function act(action: "reserve" | "refresh" | "approve" | "reconcile") {
+  async function act(action: "reserve" | "refresh" | "approve" | "reconcile" | "replace") {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
@@ -78,14 +78,14 @@ export function ComputerRuntimeControls({ base, name, provider = "server" }: { b
           // If the response is lost, disable approval until a read succeeds.
           setUncertain(true);
           setRuntime(await api<Runtime>(`${path(runtime)}/${action}`, {
-            method: "POST", json: { incarnation: runtime.incarnation, createOperationId: runtime.createOperationId, confirm: action === "approve" },
+            method: "POST", json: { incarnation: runtime.incarnation, createOperationId: runtime.createOperationId, confirm: action === "approve" || action === "replace" },
           }));
           setUncertain(false);
         }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "运行环境操作失败");
-      if (runtime && (action === "approve" || action === "reconcile")) {
+      if (runtime && (action === "approve" || action === "reconcile" || action === "replace")) {
         // Read-only recovery; never silently resend a creation request.
         try { await read(runtime); } catch { setUncertain(true); }
       }
@@ -107,6 +107,7 @@ export function ComputerRuntimeControls({ base, name, provider = "server" }: { b
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("refresh")}>刷新状态</Button>
         {runtime.state === "pending_approval" && !uncertain && <Button size="sm" disabled={busy} onClick={() => setConfirm(true)}>创建运行环境</Button>}
         {["unknown", "creating"].includes(runtime.state) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("reconcile")}>核实创建结果</Button>}
+        {runtime.state === "unknown" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("replace")}>重建运行环境</Button>}
         {terminal && <Button size="sm" variant="outline" onClick={() => setTerminalOpen(true)}><Terminal className="size-4" />终端</Button>}
       </>}
     </div>

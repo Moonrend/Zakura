@@ -433,10 +433,11 @@ func TestE2BComputerReservesApprovalOnExecution(t *testing.T) {
 	}
 }
 
-func TestTemporaryComputerAutoProvisionFailureIsUncertain(t *testing.T) {
+func TestTemporaryComputerUnknownRecoversOnExecution(t *testing.T) {
 	var mu sync.Mutex
 	creates := 0
-	h, _, agentID, chatID, runCtx := temporaryExecutionRig(t, "rnr_temp_autoprovision_fail", func(method string, params map[string]any) (any, error) {
+	execTarget := ""
+	h, _, agentID, chatID, runCtx := temporaryExecutionRig(t, "rnr_temp_autoprovision_recover", func(method string, params map[string]any) (any, error) {
 		switch method {
 		case "sys.info":
 			return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
@@ -444,11 +445,24 @@ func TestTemporaryComputerAutoProvisionFailureIsUncertain(t *testing.T) {
 			return []computerImageStatus{{Image: serverComputerImage, ID: "sha256:present"}}, nil
 		case "host.fs.mkdir":
 			return map[string]any{"abs": fmt.Sprintf("/srv/zakura/%s", fmt.Sprint(params["path"]))}, nil
+		case "docker.list":
+			return []computerContainer{}, nil
 		case "docker.create":
 			mu.Lock()
 			defer mu.Unlock()
 			creates++
-			return nil, fmt.Errorf("provider leaked detail: secret-token")
+			if creates == 1 {
+				return nil, fmt.Errorf("provider leaked detail: secret-token")
+			}
+			raw, _ := json.Marshal(params["labels"])
+			var labels map[string]string
+			_ = json.Unmarshal(raw, &labels)
+			return computerContainer{DockerID: "container", Name: "/" + fmt.Sprint(params["name"]), Image: serverComputerImage, Status: "running", Labels: labels}, nil
+		case "docker.exec":
+			mu.Lock()
+			defer mu.Unlock()
+			execTarget = fmt.Sprint(params["id"])
+			return map[string]any{"exitCode": 0, "stdout": "ok", "stderr": ""}, nil
 		default:
 			return nil, fmt.Errorf("unexpected RPC %s", method)
 		}
@@ -460,22 +474,41 @@ func TestTemporaryComputerAutoProvisionFailureIsUncertain(t *testing.T) {
 	if strings.Contains(dispatchErr.Error(), "secret-token") {
 		t.Fatalf("provider error detail leaked to the caller: %v", dispatchErr)
 	}
-	var state string
-	if err := h.deps.DB.QueryRowContext(runCtx, `SELECT state FROM computer_runtimes WHERE computer_id='temp'`).Scan(&state); err != nil {
+	var oldID, oldState string
+	if err := h.deps.DB.QueryRowContext(runCtx, `SELECT id,state FROM computer_runtimes WHERE computer_id='temp'`).Scan(&oldID, &oldState); err != nil {
 		t.Fatal(err)
 	}
-	if state != "unknown" {
-		t.Fatalf("failed provisioning runtime state: %q", state)
+	if oldState != "unknown" {
+		t.Fatalf("failed provisioning runtime state: %q", oldState)
 	}
-	// The ambiguous slot is retained, so a retry is refused rather than creating
-	// a second container.
-	if _, err := h.dispatchAgentTool(runCtx, "tenant", agentID, chatID, "call", "shell_exec", json.RawMessage(`{"command":"echo hi"}`)); err == nil || !strings.Contains(err.Error(), "unknown") {
-		t.Fatalf("uncertain runtime was retried: %v", err)
+	// The next dispatch verifies the container is gone, parks the ambiguous slot
+	// as failed and provisions a fresh replacement inline.
+	raw, err := h.dispatchAgentTool(runCtx, "tenant", agentID, chatID, "call", "shell_exec", json.RawMessage(`{"command":"echo again"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shell map[string]any
+	if err := json.Unmarshal(raw, &shell); err != nil {
+		t.Fatal(err)
+	}
+	if shell["stdout"] != "ok" {
+		t.Fatalf("recovered shell result: %s", raw)
+	}
+	var prior string
+	if err := h.deps.DB.QueryRowContext(runCtx, `SELECT state FROM computer_runtimes WHERE id=?`, oldID).Scan(&prior); err != nil || prior != "failed" {
+		t.Fatalf("ambiguous runtime was not parked as failed: %q %v", prior, err)
+	}
+	var failed, ready int
+	if err := h.deps.DB.QueryRowContext(runCtx, `SELECT SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END), SUM(CASE WHEN state='ready' THEN 1 ELSE 0 END) FROM computer_runtimes WHERE computer_id='temp'`).Scan(&failed, &ready); err != nil {
+		t.Fatal(err)
+	}
+	if failed != 1 || ready != 1 {
+		t.Fatalf("replacement runtimes: failed=%d ready=%d", failed, ready)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if creates != 1 {
-		t.Fatalf("uncertain provisioning was retried: creates=%d", creates)
+	if creates != 2 || execTarget != "container" {
+		t.Fatalf("recovery creates=%d execTarget=%q", creates, execTarget)
 	}
 }
 

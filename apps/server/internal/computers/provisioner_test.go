@@ -157,3 +157,78 @@ func TestProvisionerReconcilesCrashAfterApproval(t *testing.T) {
 		t.Fatalf("restart: %+v %v", current, err)
 	}
 }
+
+func replacementFixture(t *testing.T, provider Provider, stub *creationStub, state State) (Provisioner, Store, Runtime, Target) {
+	t.Helper()
+	store := testStore(t)
+	now := time.Now().UTC()
+	scope := ""
+	if (Computer{Provider: provider}).SessionScoped() {
+		scope = "chat-space"
+	}
+	execTest(t, store, `INSERT INTO computers(id,tenant_id,space_id,name,provider,runtime_node_id,idle_seconds,max_lifetime_seconds,created_at,updated_at) VALUES('rc','tenant','space','RC',?,'node',900,3600,'now','now')`, string(provider))
+	execTest(t, store, `INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at) VALUES('rt','tenant','space','rc',?,'inc','op',?,'now','now')`, scope, string(state))
+	execTest(t, store, `INSERT INTO computer_creation_approvals(runtime_id,create_operation_id,approved_by,approved_at) VALUES('rt','op','admin',?)`, now.Format(time.RFC3339Nano))
+	r := Runtime{ID: "rt", TenantID: "tenant", SpaceID: "space", ComputerID: "rc", SessionScope: scope, Incarnation: "inc", CreateOperationID: "op", State: state}
+	target := Target{TenantID: "tenant", SpaceID: "space", ComputerID: "rc", RuntimeID: "rt", Incarnation: "inc"}
+	p := Provisioner{Store: store, Providers: map[Provider]CreationProvider{provider: stub}, Now: func() time.Time { return now }}
+	return p, store, r, target
+}
+
+func TestPrepareReplacementRejectsActiveRuntime(t *testing.T) {
+	stub := &creationStub{}
+	p, _, _, target := replacementFixture(t, Server, stub, Ready)
+	if _, err := p.PrepareReplacement(context.Background(), target, "admin"); !errors.Is(err, ErrTransitionConflict) {
+		t.Fatalf("ready replacement: %v", err)
+	}
+	if stub.finds.Load() != 0 || stub.creates.Load() != 0 {
+		t.Fatal("provider was called for a non-terminal runtime")
+	}
+}
+
+func TestPrepareReplacementCompletesExistingInstance(t *testing.T) {
+	stub := &creationStub{find: func(context.Context, Runtime) (CreationResult, error) {
+		return CreationResult{ExternalID: "live-vm"}, nil
+	}}
+	p, store, r, target := replacementFixture(t, Server, stub, Unknown)
+	current, err := p.PrepareReplacement(context.Background(), target, "admin")
+	if err != nil || current.State != Ready || current.ExternalID != "live-vm" || stub.creates.Load() != 0 || current.ID != r.ID {
+		t.Fatalf("existing instance: %+v %v", current, err)
+	}
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM computer_runtimes WHERE computer_id='rc'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("existing instance was replaced: %d %v", count, err)
+	}
+}
+
+func TestPrepareReplacementReservesWhenAbsent(t *testing.T) {
+	stub := &creationStub{find: func(context.Context, Runtime) (CreationResult, error) {
+		return CreationResult{}, nil
+	}}
+	p, store, r, target := replacementFixture(t, Temporary, stub, Unknown)
+	current, err := p.PrepareReplacement(context.Background(), target, "admin")
+	if err != nil || current.State != PendingApproval || current.ID == r.ID || stub.creates.Load() != 0 {
+		t.Fatalf("absent replacement: %+v %v", current, err)
+	}
+	var prior string
+	if err := store.DB.QueryRow(`SELECT state FROM computer_runtimes WHERE id='rt'`).Scan(&prior); err != nil || prior != string(Failed) {
+		t.Fatalf("old runtime not failed: %q %v", prior, err)
+	}
+}
+
+func TestPrepareReplacementCloudIsManual(t *testing.T) {
+	stub := &creationStub{find: func(context.Context, Runtime) (CreationResult, error) {
+		return CreationResult{ExternalID: "never-dialed"}, nil
+	}}
+	p, store, _, target := replacementFixture(t, E2B, stub, Unknown)
+	if _, err := p.PrepareReplacement(context.Background(), target, "admin"); !errors.Is(err, ErrReplaceUnavailable) {
+		t.Fatalf("cloud replacement: %v", err)
+	}
+	if stub.finds.Load() != 0 {
+		t.Fatal("cloud Find was dialed")
+	}
+	var state string
+	if err := store.DB.QueryRow(`SELECT state FROM computer_runtimes WHERE id='rt'`).Scan(&state); err != nil || state != string(Unknown) {
+		t.Fatalf("cloud runtime was touched: %q %v", state, err)
+	}
+}

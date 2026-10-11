@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -77,8 +78,27 @@ func manifestStringField(obj map[string]any, candidates ...string) string {
 	return ""
 }
 
-func publicComputerRuntime(c computers.Computer, r computers.Runtime) computerRuntimeResponse {
-	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State, ExecutionAvailable: c.Has(computers.Commands), Manifest: publicManifest(r.ManifestJSON)}
+// publicComputerRuntime loads the computer's granted capabilities so
+// executionAvailable reflects the channels actually wired rather than the
+// selection-time snapshot, which is stale once provisioning grants them. It is
+// only available once the runtime is ready and the commands channel is granted.
+func (h *handler) publicComputerRuntime(ctx context.Context, r computers.Runtime) computerRuntimeResponse {
+	executionAvailable := false
+	if r.State == computers.Ready {
+		var raw string
+		if err := h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT capabilities_json FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), r.TenantID, r.SpaceID, r.ComputerID).Scan(&raw); err == nil {
+			var granted []computers.Capability
+			if json.Unmarshal([]byte(raw), &granted) == nil {
+				for _, cap := range granted {
+					if cap == computers.Commands {
+						executionAvailable = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State, ExecutionAvailable: executionAvailable, Manifest: publicManifest(r.ManifestJSON)}
 }
 func (h *handler) computerProvisioner() computers.Provisioner {
 	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{
@@ -128,7 +148,7 @@ func computerLifecycleError(w http.ResponseWriter, err error) {
 		httpx.Error(w, 503, "computer provider unavailable")
 	case errors.Is(err, computers.ErrCreationUncertain):
 		httpx.Error(w, 409, "computer creation outcome uncertain; reconcile the same runtime before any further action")
-	case errors.Is(err, computers.ErrTransitionConflict), errors.Is(err, computers.ErrApprovalRequired), errors.Is(err, computers.ErrRuntimeEnded):
+	case errors.Is(err, computers.ErrTransitionConflict), errors.Is(err, computers.ErrApprovalRequired), errors.Is(err, computers.ErrRuntimeEnded), errors.Is(err, computers.ErrReplaceUnavailable):
 		httpx.Error(w, 409, err.Error())
 	case errors.Is(err, sql.ErrNoRows):
 		httpx.Error(w, 404, "computer runtime not found")
@@ -154,14 +174,13 @@ func (h *handler) reserveComputerRuntime(w http.ResponseWriter, r *http.Request)
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(c, result))
+	httpx.JSON(w, 200, h.publicComputerRuntime(r.Context(), result))
 }
 func (h *handler) computerRuntimeTarget(r *http.Request, incarnation string) computers.Target {
 	return computers.Target{TenantID: principal(r).TenantID, SpaceID: chi.URLParam(r, "id"), ComputerID: chi.URLParam(r, "cid"), RuntimeID: chi.URLParam(r, "rid"), Incarnation: incarnation}
 }
 func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
-	c, ok := h.computerLifecycleScope(w, r)
-	if !ok {
+	if _, ok := h.computerLifecycleScope(w, r); !ok {
 		return
 	}
 	if r.URL.Query().Get("incarnation") == "" {
@@ -173,11 +192,10 @@ func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(c, result))
+	httpx.JSON(w, 200, h.publicComputerRuntime(r.Context(), result))
 }
 func (h *handler) mutateComputerRuntime(w http.ResponseWriter, r *http.Request, approve bool) {
-	c, ok := h.computerLifecycleScope(w, r)
-	if !ok {
+	if _, ok := h.computerLifecycleScope(w, r); !ok {
 		return
 	}
 	var in struct {
@@ -218,11 +236,55 @@ func (h *handler) mutateComputerRuntime(w http.ResponseWriter, r *http.Request, 
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(c, result))
+	httpx.JSON(w, 200, h.publicComputerRuntime(r.Context(), result))
 }
 func (h *handler) approveComputerRuntime(w http.ResponseWriter, r *http.Request) {
 	h.mutateComputerRuntime(w, r, true)
 }
 func (h *handler) reconcileComputerRuntime(w http.ResponseWriter, r *http.Request) {
 	h.mutateComputerRuntime(w, r, false)
+}
+
+// replaceComputerRuntime is the explicit way out of a terminal creation outcome:
+// it resolves the pinned runtime, verifies the instance really is gone (for
+// providers whose Find can prove absence) and reserves a fresh pending runtime.
+// It never creates anything and never retries the original operation.
+func (h *handler) replaceComputerRuntime(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.computerLifecycleScope(w, r)
+	if !ok {
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if _, err := c.Scope(session); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "a session is required for this computer provider")
+		return
+	}
+	var in struct {
+		Incarnation string `json:"incarnation"`
+		Operation   string `json:"createOperationId"`
+		Confirm     bool   `json:"confirm"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if dec.Decode(&in) != nil || dec.Decode(new(any)) != io.EOF || in.Incarnation == "" || in.Operation == "" || !in.Confirm {
+		httpx.Error(w, 400, "exact incarnation and creation operation are required; replacement also requires confirm=true")
+		return
+	}
+	target := h.computerRuntimeTarget(r, in.Incarnation)
+	stored, err := h.computerStore().GetRuntime(r.Context(), target)
+	if err != nil {
+		computerLifecycleError(w, err)
+		return
+	}
+	if stored.CreateOperationID != in.Operation {
+		computerLifecycleError(w, computers.ErrTransitionConflict)
+		return
+	}
+	result, err := h.computerProvisioner().PrepareReplacement(r.Context(), target, principal(r).UserID)
+	if err != nil {
+		computerLifecycleError(w, err)
+		return
+	}
+	httpx.JSON(w, 200, h.publicComputerRuntime(r.Context(), result))
 }

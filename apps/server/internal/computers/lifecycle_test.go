@@ -83,3 +83,45 @@ func TestRuntimeReservationScope(t *testing.T) {
 		t.Fatal("sessions share temporary instance")
 	}
 }
+
+func TestReserveReplacementRuntime(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	seed := func(state State) Runtime {
+		execTest(t, s, `DELETE FROM computer_runtimes WHERE computer_id='computer-space'`)
+		execTest(t, s, `INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at) VALUES('rt','tenant','space','computer-space','chat-space','inc','op',?,'now','now')`, string(state))
+		return Runtime{ID: "rt", TenantID: "tenant", SpaceID: "space", ComputerID: "computer-space", SessionScope: "chat-space", Incarnation: "inc", CreateOperationID: "op", State: state}
+	}
+	for _, state := range []State{PendingApproval, Creating, Ready, Disconnected, Stopping} {
+		seed(state)
+		if _, err := s.ReserveReplacementRuntime(ctx, "tenant", "space", "computer-space", "chat-space", now); !errors.Is(err, ErrTransitionConflict) {
+			t.Fatalf("%s was replaceable: %v", state, err)
+		}
+	}
+	for _, state := range []State{Failed, Unknown} {
+		old := seed(state)
+		fresh, err := s.ReserveReplacementRuntime(ctx, "tenant", "space", "computer-space", "chat-space", now)
+		if err != nil || fresh.State != PendingApproval || fresh.ID == old.ID || fresh.Incarnation == old.Incarnation || fresh.CreateOperationID == old.CreateOperationID {
+			t.Fatalf("%s replacement: %+v %v", state, fresh, err)
+		}
+		var prior string
+		if err := s.DB.QueryRow(`SELECT state FROM computer_runtimes WHERE id='rt'`).Scan(&prior); err != nil || prior != string(Failed) {
+			t.Fatalf("%s was not parked as failed: %q %v", state, prior, err)
+		}
+		var active int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM computer_runtimes WHERE computer_id='computer-space' AND state='pending_approval'`).Scan(&active); err != nil || active != 1 {
+			t.Fatalf("%s active slots: %d %v", state, active, err)
+		}
+	}
+	seed(Unknown)
+	if _, err := s.ReserveReplacementRuntime(ctx, "tenant", "space", "computer-space", "", now); err == nil {
+		t.Fatal("missing session accepted for a session-scoped computer")
+	}
+	if _, err := s.ReserveReplacementRuntime(ctx, "tenant", "space", "computer-space", "chat-foreign", now); err == nil {
+		t.Fatal("foreign session accepted")
+	}
+	if _, err := s.ReserveReplacementRuntime(ctx, "other", "space", "computer-space", "chat-space", now); err == nil {
+		t.Fatal("cross tenant replacement accepted")
+	}
+}

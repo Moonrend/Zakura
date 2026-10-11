@@ -57,6 +57,52 @@ func (s Store) ReserveRuntime(ctx context.Context, tenant, space, computer, sess
 	return r, nil
 }
 
+// ReserveReplacementRuntime records intent for a fresh instance only after the
+// active-slot runtime for the same computer and session scope is terminal: a
+// failed outcome may be replaced, while an unknown outcome is parked as failed
+// first so it releases the active-slot index. A pending/creating/ready/
+// disconnected/stopping slot is never replaced and yields ErrTransitionConflict.
+// It never contacts a provider; the new runtime still requires explicit approval.
+func (s Store) ReserveReplacementRuntime(ctx context.Context, tenant, space, computer, session string, now time.Time) (Runtime, error) {
+	var c Computer
+	c.ID, c.TenantID, c.SpaceID = computer, tenant, space
+	if err := s.DB.QueryRowContext(ctx, s.query(`SELECT provider FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), tenant, space, computer).Scan(&c.Provider); err != nil {
+		return Runtime{}, err
+	}
+	scope, err := c.Scope(session)
+	if err != nil {
+		return Runtime{}, err
+	}
+	if session != "" {
+		var valid int
+		err = s.DB.QueryRowContext(ctx, s.query(`SELECT 1 FROM cloud_agent_sessions cs JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id WHERE cs.id=? AND cs.tenant_id=? AND a.space_id=?`), session, tenant, space).Scan(&valid)
+		if err != nil {
+			return Runtime{}, err
+		}
+	}
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	current, err := scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
+	if err != nil {
+		return Runtime{}, err
+	}
+	switch current.State {
+	case Failed:
+	case Unknown:
+		target := Target{TenantID: current.TenantID, SpaceID: current.SpaceID, ComputerID: current.ComputerID, RuntimeID: current.ID, Incarnation: current.Incarnation}
+		if err = s.Transition(ctx, target, Unknown, Failed, stamp); err != nil {
+			return Runtime{}, err
+		}
+	default:
+		return Runtime{}, ErrTransitionConflict
+	}
+	replacementID := runtimeID()
+	_, err = s.DB.ExecContext(ctx, s.query(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'pending_approval',?,?)`), replacementID, tenant, space, computer, scope, runtimeID(), runtimeID(), stamp, stamp)
+	if err != nil {
+		return Runtime{}, err
+	}
+	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=?`), tenant, space, computer, replacementID))
+}
+
 type runtimeScanner interface{ Scan(...any) error }
 
 func scanRuntime(row runtimeScanner) (Runtime, error) {

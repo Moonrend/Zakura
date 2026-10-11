@@ -11,6 +11,7 @@ import (
 
 var ErrProviderUnavailable = errors.New("computer provider adapter is unavailable")
 var ErrCreationUncertain = errors.New("computer creation outcome is uncertain; reconciliation is required")
+var ErrReplaceUnavailable = errors.New("this provider cannot verify the instance is gone; replacement is manual")
 
 // CreationResult carries the observed provider instance identity plus optional
 // provider-issued access material. AccessTokenEnc is a sealed computer-v1
@@ -141,4 +142,52 @@ func (p Provisioner) ReconcileCreation(ctx context.Context, t Target) (Runtime, 
 		return r, err
 	}
 	return p.Store.GetRuntime(persist, t)
+}
+
+// PrepareReplacement resolves a terminal (unknown or failed) runtime and, only
+// for providers whose Find can definitively report the instance is gone, reserves
+// a fresh pending runtime so the active slot is freed. An instance Find still
+// observes is completed in place instead, so a live container is never
+// duplicated. Cloud providers cannot verify absence without dialing the remote
+// side and return ErrReplaceUnavailable with the runtime untouched. It never
+// calls Create; the returned runtime still requires the normal approve flow.
+func (p Provisioner) PrepareReplacement(ctx context.Context, t Target, actor string) (Runtime, error) {
+	r, adapter, err := p.adapter(ctx, t)
+	if err != nil {
+		return r, err
+	}
+	if r.State != Unknown && r.State != Failed {
+		return r, ErrTransitionConflict
+	}
+	var provider Provider
+	err = p.Store.DB.QueryRowContext(ctx, p.Store.query(`SELECT provider FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), r.TenantID, r.SpaceID, r.ComputerID).Scan(&provider)
+	if err != nil {
+		return r, err
+	}
+	if provider != Server && provider != Temporary {
+		return r, ErrReplaceUnavailable
+	}
+	result, findErr := adapter.Find(ctx, r)
+	if findErr != nil {
+		return r, ErrCreationUncertain
+	}
+	if strings.TrimSpace(result.ExternalID) != "" {
+		persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err = p.Store.CompleteCreation(persist, t, r.CreateOperationID, result, p.now()); err != nil {
+			if errors.Is(err, ErrTransitionConflict) {
+				current, readErr := p.Store.GetRuntime(persist, t)
+				if readErr == nil && current.State == Ready && current.ExternalID == result.ExternalID {
+					return current, nil
+				}
+			}
+			return r, err
+		}
+		return p.Store.GetRuntime(persist, t)
+	}
+	replacement, err := p.Store.ReserveReplacementRuntime(ctx, r.TenantID, r.SpaceID, r.ComputerID, r.SessionScope, p.now())
+	if err != nil {
+		return r, err
+	}
+	return replacement, nil
 }
