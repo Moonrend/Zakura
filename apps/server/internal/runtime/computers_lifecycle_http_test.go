@@ -20,8 +20,16 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	agent, err := h.store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := h.store.CreateSession(context.Background(), "tenant", "", agent.ID, Session{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// No live runner: approval must become uncertain, not retry implicitly.
-	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"legacy:" + space.ID, "server"}} {
+	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"temporary", "temporary"}, {"legacy:" + space.ID, "server"}} {
 		if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,'tenant',?,'Computer',?,'now','now')`, entry.id, space.ID, entry.provider).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -56,6 +64,19 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 		if w := call("POST", "/spaces/"+space.ID+"/computers/"+id+"/runtimes", "", owner); w.Code != want {
 			t.Fatalf("unsupported: %d %s", w.Code, w.Body)
 		}
+	}
+	// Temporary computers are now provisioned through the same lifecycle; their
+	// reservation is session-scoped and must recover the persisted operation.
+	tw := call("POST", "/spaces/"+space.ID+"/computers/temporary/runtimes?session="+chat.ID, "", owner)
+	if tw.Code != 200 {
+		t.Fatalf("temporary reserve: %d %s", tw.Code, tw.Body)
+	}
+	var tempReserved computerRuntimeResponse
+	if err = json.Unmarshal(tw.Body.Bytes(), &tempReserved); err != nil {
+		t.Fatal(err)
+	}
+	if tempReserved.State != computers.PendingApproval || tempReserved.RuntimeID == "" {
+		t.Fatalf("temporary reservation: %+v", tempReserved)
 	}
 	w := call("POST", base, "", owner)
 	if w.Code != 200 {

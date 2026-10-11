@@ -30,7 +30,18 @@ func publicComputerRuntime(r computers.Runtime) computerRuntimeResponse {
 	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State}
 }
 func (h *handler) computerProvisioner() computers.Provisioner {
-	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{computers.Server: serverComputerProvider{h: h}}}
+	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{
+		computers.Server:    serverComputerProvider{h: h},
+		computers.Temporary: temporaryComputerProvider{h: h},
+	}}
+}
+
+// computerDestroyers is the adapter set handed to deadline reclamation. Providers
+// without a destructive adapter are expired in place rather than force-removed.
+func (h *handler) computerDestroyers() map[computers.Provider]computers.DestructionProvider {
+	return map[computers.Provider]computers.DestructionProvider{
+		computers.Temporary: temporaryComputerProvider{h: h},
+	}
 }
 func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request) bool {
 	if !h.manageComputerScope(w, r) {
@@ -45,9 +56,9 @@ func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request)
 		if c.ID != chi.URLParam(r, "cid") {
 			continue
 		}
-		// Legacy volumes remain under the legacy lifecycle. Temporary providers must
-		// not be provisioned before their mandatory cleanup worker is implemented.
-		if c.Provider != computers.Server || strings.HasPrefix(c.ID, "legacy:") {
+		// Legacy volumes remain under the legacy lifecycle, and adapters without a
+		// registered provider stay unavailable rather than failing at dispatch.
+		if (c.Provider != computers.Server && c.Provider != computers.Temporary) || strings.HasPrefix(c.ID, "legacy:") {
 			httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
 			return false
 		}
@@ -75,7 +86,9 @@ func (h *handler) reserveComputerRuntime(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// Reservation records intent only. No RPC, credentials, or paid creation.
-	result, err := h.computerStore().ReserveRuntime(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"), "", time.Now())
+	// Session-scoped providers (temporary) require the owning chat; other providers
+	// ignore the value.
+	result, err := h.computerStore().ReserveRuntime(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"), strings.TrimSpace(r.URL.Query().Get("session")), time.Now())
 	if err != nil {
 		computerLifecycleError(w, err)
 		return

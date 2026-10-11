@@ -98,6 +98,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	})
 	h.startScheduler(deps.RunContext())
 	h.startSkillRefresh(deps.RunContext())
+	h.startComputerCleanup(deps.RunContext())
 	r.Group(func(g chi.Router) {
 		g.Use(httpx.Auth(deps))
 		g.Get("/v1/models", h.listGatewayModels)

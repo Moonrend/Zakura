@@ -22,17 +22,18 @@ func (s Store) ActiveRuntime(ctx context.Context, tenant, space, computer, sessi
 	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? AND state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, session))
 }
 
-// serverComputerCapabilities are granted when the server provider has verified a
-// created container. PTY/desktop/browser stay ungranted until their transports
-// are wired for per-computer containers.
+// serverComputerCapabilities are granted when a server-hosted provider has
+// verified a created container. PTY/desktop/browser stay ungranted until their
+// transports are wired for per-computer containers.
 var serverComputerCapabilities = []Capability{Commands, Files}
 
 // CompleteCreation records an observed provider instance, never provisions one.
 // A reconciler may complete an ambiguous create with the SAME operation ID.
 // Exactly one completion wins. Replays cannot replace the instance or renew its
 // lifetime. Temporary lifetime starts at approval, not at delayed reconciliation.
-// rootPath persists the computer's node workspace directory; only the server
-// provider returns one, and it also grants the verified base capabilities.
+// rootPath persists the computer's node workspace directory; only the server and
+// temporary providers return one, and they also grant the verified base
+// capabilities.
 func (s Store) CompleteCreation(ctx context.Context, t Target, operation, externalID, rootPath string, now time.Time) error {
 	if strings.TrimSpace(externalID) == "" || operation == "" {
 		return errors.New("provider instance and creation operation are required")
@@ -79,7 +80,7 @@ func (s Store) CompleteCreation(ctx context.Context, t Target, operation, extern
 	if err != nil {
 		return err
 	}
-	if provider == Server && rootPath != "" {
+	if (provider == Server || provider == Temporary) && rootPath != "" {
 		if _, err = tx.ExecContext(ctx, s.query(`UPDATE computers SET capabilities_json=? WHERE tenant_id=? AND space_id=? AND id=?`), mustCapabilities(serverComputerCapabilities), t.TenantID, t.SpaceID, t.ComputerID); err != nil {
 			return err
 		}

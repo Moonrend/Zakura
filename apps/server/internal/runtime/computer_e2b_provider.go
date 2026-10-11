@@ -1,0 +1,255 @@
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
+)
+
+// e2bComputerProvider is a control-plane adapter that talks to the E2B cloud
+// API directly; it never touches the runner hub. E2B is session-scoped, so a
+// runtime here always carries a session ID. The provider only creates, observes
+// and destroys sandboxes: lifetime renewal lives in computers.CompleteCreation.
+type e2bComputerProvider struct {
+	h          *handler
+	apiBase    string
+	httpClient *http.Client
+}
+
+var _ computers.CreationProvider = e2bComputerProvider{}
+var _ computers.DestructionProvider = e2bComputerProvider{}
+
+const defaultE2BAPIBase = "https://api.e2b.dev"
+
+type e2bCredentials struct {
+	APIKey   string `json:"apiKey"`
+	Template string `json:"template"`
+}
+
+type e2bConfiguration struct {
+	APIKey      string
+	Template    string
+	MaxLifetime int
+}
+
+func (p e2bComputerProvider) base() string {
+	if strings.TrimSpace(p.apiBase) != "" {
+		return strings.TrimRight(p.apiBase, "/")
+	}
+	return defaultE2BAPIBase
+}
+
+func (p e2bComputerProvider) client() *http.Client {
+	if p.httpClient != nil {
+		return p.httpClient
+	}
+	return &http.Client{Timeout: 60 * time.Second}
+}
+
+// e2bMetadata is the durable ownership tag attached to every sandbox. Find uses
+// it both as a server-side filter and as proof that a returned instance belongs
+// to this exact runtime: different accounts can hand back the same sandbox ID.
+func e2bMetadata(r computers.Runtime) map[string]string {
+	return map[string]string{
+		"zakura.operation":   r.CreateOperationID,
+		"zakura.runtime":     r.ID,
+		"zakura.incarnation": r.Incarnation,
+		"zakura.computer":    r.ComputerID,
+		"zakura.tenant":      r.TenantID,
+		"zakura.space":       r.SpaceID,
+	}
+}
+
+func e2bMetadataMatches(metadata map[string]string, r computers.Runtime) bool {
+	for key, want := range e2bMetadata(r) {
+		if metadata[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
+// pinnedRuntime re-reads identity from storage so a caller can never point the
+// provider at another tenant's or another incarnation's runtime.
+func (p e2bComputerProvider) pinnedRuntime(ctx context.Context, r computers.Runtime) (computers.Runtime, error) {
+	target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
+	return p.h.computerStore().GetRuntime(ctx, target)
+}
+
+// configuration decrypts the computer's own E2B envelope. Secrets never reach a
+// log, error or response surface: every failure returns a generic message.
+func (p e2bComputerProvider) configuration(ctx context.Context, r computers.Runtime) (e2bConfiguration, error) {
+	var envelope string
+	var maxLifetime int
+	err := p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT COALESCE(secret_ref,''), max_lifetime_seconds FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), r.TenantID, r.SpaceID, r.ComputerID).Scan(&envelope, &maxLifetime)
+	if err != nil {
+		return e2bConfiguration{}, err
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return e2bConfiguration{}, errors.New("computer has no E2B configuration")
+	}
+	plain, err := computers.OpenCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, envelope)
+	if err != nil {
+		return e2bConfiguration{}, errors.New("computer E2B configuration could not be opened")
+	}
+	var creds e2bCredentials
+	if err := json.Unmarshal(plain, &creds); err != nil {
+		return e2bConfiguration{}, errors.New("computer E2B configuration is invalid")
+	}
+	if strings.TrimSpace(creds.APIKey) == "" || strings.TrimSpace(creds.Template) == "" {
+		return e2bConfiguration{}, errors.New("computer E2B configuration is incomplete")
+	}
+	if maxLifetime <= 0 {
+		maxLifetime = 3600
+	}
+	return e2bConfiguration{APIKey: creds.APIKey, Template: creds.Template, MaxLifetime: maxLifetime}, nil
+}
+
+// authorize enforces the Provisioner contract before any paid call: the runtime
+// must still be the pinned, unbound record this call was dispatched for and its
+// creation must be durably approved.
+func (p e2bComputerProvider) authorize(ctx context.Context, r computers.Runtime, create bool) (e2bConfiguration, error) {
+	if strings.TrimSpace(r.SessionScope) == "" {
+		return e2bConfiguration{}, computers.ErrTransitionConflict
+	}
+	actual, err := p.pinnedRuntime(ctx, r)
+	if err != nil {
+		return e2bConfiguration{}, err
+	}
+	if r.CreateOperationID == "" || actual.CreateOperationID != r.CreateOperationID || actual.SessionScope != r.SessionScope || actual.ExternalID != "" ||
+		(actual.State != computers.Creating && (create || actual.State != computers.Unknown)) {
+		return e2bConfiguration{}, computers.ErrTransitionConflict
+	}
+	var approved int
+	err = p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT 1 FROM computer_creation_approvals WHERE runtime_id=? AND create_operation_id=?`), r.ID, r.CreateOperationID).Scan(&approved)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e2bConfiguration{}, computers.ErrTransitionConflict
+	}
+	if err != nil {
+		return e2bConfiguration{}, err
+	}
+	return p.configuration(ctx, r)
+}
+
+func (p e2bComputerProvider) Create(ctx context.Context, r computers.Runtime) (string, string, error) {
+	cfg, err := p.authorize(ctx, r, true)
+	if err != nil {
+		return "", "", err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"templateID": cfg.Template,
+		"metadata":   e2bMetadata(r),
+		"timeout":    cfg.MaxLifetime,
+	})
+	if err != nil {
+		return "", "", errors.New("E2B create request could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base()+"/sandboxes", bytes.NewReader(payload))
+	if err != nil {
+		return "", "", errors.New("E2B create request could not be built")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", cfg.APIKey)
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return "", "", errors.New("E2B create request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Never echo the response body: it can carry credentials or signed URLs.
+		return "", "", fmt.Errorf("E2B create request rejected with status %d", resp.StatusCode)
+	}
+	var created struct {
+		SandboxID string `json:"sandboxID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return "", "", errors.New("E2B create response could not be read")
+	}
+	if strings.TrimSpace(created.SandboxID) == "" {
+		return "", "", errors.New("E2B create response contained no sandbox ID")
+	}
+	return created.SandboxID, "", nil
+}
+
+func (p e2bComputerProvider) Find(ctx context.Context, r computers.Runtime) (string, string, error) {
+	cfg, err := p.authorize(ctx, r, false)
+	if err != nil {
+		return "", "", err
+	}
+	query := url.Values{}
+	query.Set("metadata", "zakura.operation="+r.CreateOperationID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base()+"/sandboxes?"+query.Encode(), nil)
+	if err != nil {
+		return "", "", errors.New("E2B lookup request could not be built")
+	}
+	req.Header.Set("X-API-Key", cfg.APIKey)
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return "", "", errors.New("E2B lookup request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("E2B lookup request rejected with status %d", resp.StatusCode)
+	}
+	var listed []struct {
+		SandboxID string            `json:"sandboxID"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		return "", "", errors.New("E2B lookup response could not be read")
+	}
+	if len(listed) == 0 {
+		// Not yet observed is not permission to create a replacement.
+		return "", "", nil
+	}
+	if len(listed) != 1 {
+		return "", "", errors.New("ambiguous E2B creation operation")
+	}
+	if !e2bMetadataMatches(listed[0].Metadata, r) {
+		return "", "", errors.New("E2B sandbox ownership could not be verified")
+	}
+	return listed[0].SandboxID, "", nil
+}
+
+// Destroy is the control-plane teardown used by the cleanup worker, whose
+// request context may already be cancelled, so the call runs detached.
+func (p e2bComputerProvider) Destroy(ctx context.Context, r computers.Runtime) error {
+	if strings.TrimSpace(r.ExternalID) == "" {
+		return errors.New("E2B runtime has no sandbox to destroy")
+	}
+	detached, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := p.pinnedRuntime(detached, r); err != nil {
+		return err
+	}
+	cfg, err := p.configuration(detached, r)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(detached, http.MethodDelete, p.base()+"/sandboxes/"+url.PathEscape(r.ExternalID), nil)
+	if err != nil {
+		return errors.New("E2B destroy request could not be built")
+	}
+	req.Header.Set("X-API-Key", cfg.APIKey)
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return errors.New("E2B destroy request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("E2B destroy request rejected with status %d", resp.StatusCode)
+	}
+	return nil
+}
