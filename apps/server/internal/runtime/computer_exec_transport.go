@@ -20,6 +20,9 @@ func (h *handler) computerContainerExec(ctx context.Context, exec *resolvedExecu
 	if exec.computer.Provider == computers.E2B {
 		return h.e2bComputerExec(ctx, exec, executionTimeoutMS, command, args...)
 	}
+	if exec.computer.Provider == computers.SSH || exec.computer.Provider == computers.Railway {
+		return h.computerSSHExec(ctx, exec, executionTimeoutMS, command, args...)
+	}
 	if exec.containerID == "" || exec.nodeID == "" {
 		return nil, errors.New("computer runtime has no verified container")
 	}

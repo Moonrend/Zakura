@@ -71,12 +71,16 @@ func TestCompleteCreationPinsInstanceAndLifetime(t *testing.T) {
 			if err = s.DB.QueryRow(s.query(`SELECT capabilities_json FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), r.TenantID, r.SpaceID, r.ComputerID).Scan(&capabilities); err != nil {
 				t.Fatal(err)
 			}
-			if provider == Server {
-				if capabilities != `["commands","files","docker"]` {
-					t.Fatalf("server capabilities not granted: %q", capabilities)
-				}
-			} else if capabilities != `[]` {
-				t.Fatalf("capabilities changed: %q", capabilities)
+			want := map[Provider]string{
+				Server:      `["commands","files","docker"]`,
+				Temporary:   `["commands","files"]`,
+				E2B:         `["commands"]`,
+				Railway:     `["commands"]`,
+				SSH:         `["commands"]`,
+				RemoteAgent: `[]`,
+			}[provider]
+			if capabilities != want {
+				t.Fatalf("capabilities %q, want %q", capabilities, want)
 			}
 			if (Computer{Provider: provider}).SessionScoped() {
 				if !got.ExpiresAt.Equal(now.Add(time.Hour)) || !got.IdleDeadline.Equal(got.ExpiresAt) {

@@ -34,6 +34,17 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The ssh computer carries the commands capability, so its DTO must report
+	// execution as available. Credentials are sealed but never dialed: reservation
+	// records intent only.
+	_, sshKey, sshFingerprint := sshTestHostIdentity(t)
+	sshSealed, err := computers.SealCredentials(d.Secret, "tenant", space.ID, "ssh", []byte(sshCredsJSON(t, sshKey, sshFingerprint, "127.0.0.1", "22")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,secret_ref,capabilities_json,created_at,updated_at) VALUES('ssh','tenant',?,'Computer','ssh',?,?,'now','now')`, space.ID, sshSealed, `["commands"]`).Error; err != nil {
+		t.Fatal(err)
+	}
 	router := chi.NewRouter()
 	h.registerComputers(router)
 	call := func(method, path, body string, p httpx.Principal) *httptest.ResponseRecorder {
@@ -115,6 +126,23 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	}
 	if next := call("POST", railwayBase, "", owner); next.Body.String() != rw.Body.String() {
 		t.Fatal("railway reservation retry changed identity")
+	}
+	// SSH computers are not session-scoped either; reservation records intent only
+	// and never dials. The commands capability makes executionAvailable true.
+	sshBase := "/spaces/" + space.ID + "/computers/ssh/runtimes"
+	sw := call("POST", sshBase, "", owner)
+	if sw.Code != 200 {
+		t.Fatalf("ssh reserve: %d %s", sw.Code, sw.Body)
+	}
+	var sshReserved computerRuntimeResponse
+	if err = json.Unmarshal(sw.Body.Bytes(), &sshReserved); err != nil {
+		t.Fatal(err)
+	}
+	if sshReserved.State != computers.PendingApproval || sshReserved.RuntimeID == "" || !sshReserved.ExecutionAvailable {
+		t.Fatalf("ssh reservation: %+v", sshReserved)
+	}
+	if next := call("POST", sshBase, "", owner); next.Body.String() != sw.Body.String() {
+		t.Fatal("ssh reservation retry changed identity")
 	}
 	w := call("POST", base, "", owner)
 	if w.Code != 200 {

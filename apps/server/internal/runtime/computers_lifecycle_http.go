@@ -26,8 +26,8 @@ type computerRuntimeResponse struct {
 	ExecutionAvailable bool            `json:"executionAvailable"`
 }
 
-func publicComputerRuntime(r computers.Runtime) computerRuntimeResponse {
-	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State}
+func publicComputerRuntime(c computers.Computer, r computers.Runtime) computerRuntimeResponse {
+	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State, ExecutionAvailable: c.Has(computers.Commands)}
 }
 func (h *handler) computerProvisioner() computers.Provisioner {
 	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{
@@ -35,6 +35,7 @@ func (h *handler) computerProvisioner() computers.Provisioner {
 		computers.Temporary: temporaryComputerProvider{h: h},
 		computers.E2B:       e2bComputerProvider{h: h},
 		computers.Railway:   railwayComputerProvider{h: h},
+		computers.SSH:       sshComputerProvider{h: h},
 	}}
 }
 
@@ -61,7 +62,7 @@ func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request)
 		}
 		// Legacy volumes remain under the legacy lifecycle, and adapters without a
 		// registered provider stay unavailable rather than failing at dispatch.
-		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B && c.Provider != computers.Railway) || strings.HasPrefix(c.ID, "legacy:") {
+		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B && c.Provider != computers.Railway && c.Provider != computers.SSH) || strings.HasPrefix(c.ID, "legacy:") {
 			httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
 			return computers.Computer{}, false
 		}
@@ -102,13 +103,14 @@ func (h *handler) reserveComputerRuntime(w http.ResponseWriter, r *http.Request)
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(result))
+	httpx.JSON(w, 200, publicComputerRuntime(c, result))
 }
 func (h *handler) computerRuntimeTarget(r *http.Request, incarnation string) computers.Target {
 	return computers.Target{TenantID: principal(r).TenantID, SpaceID: chi.URLParam(r, "id"), ComputerID: chi.URLParam(r, "cid"), RuntimeID: chi.URLParam(r, "rid"), Incarnation: incarnation}
 }
 func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.computerLifecycleScope(w, r); !ok {
+	c, ok := h.computerLifecycleScope(w, r)
+	if !ok {
 		return
 	}
 	if r.URL.Query().Get("incarnation") == "" {
@@ -120,10 +122,11 @@ func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(result))
+	httpx.JSON(w, 200, publicComputerRuntime(c, result))
 }
 func (h *handler) mutateComputerRuntime(w http.ResponseWriter, r *http.Request, approve bool) {
-	if _, ok := h.computerLifecycleScope(w, r); !ok {
+	c, ok := h.computerLifecycleScope(w, r)
+	if !ok {
 		return
 	}
 	var in struct {
@@ -164,7 +167,7 @@ func (h *handler) mutateComputerRuntime(w http.ResponseWriter, r *http.Request, 
 		computerLifecycleError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, publicComputerRuntime(result))
+	httpx.JSON(w, 200, publicComputerRuntime(c, result))
 }
 func (h *handler) approveComputerRuntime(w http.ResponseWriter, r *http.Request) {
 	h.mutateComputerRuntime(w, r, true)

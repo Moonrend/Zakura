@@ -22,24 +22,36 @@ func (s Store) ActiveRuntime(ctx context.Context, tenant, space, computer, sessi
 	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? AND state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, session))
 }
 
-// serverComputerCapabilities are granted when a server-hosted provider has
-// verified a created container. Docker is required because the ACP sidecar runs
-// in a sibling container on the same node. PTY/desktop/browser stay ungranted
-// until their transports are wired for per-computer containers.
-var serverComputerCapabilities = []Capability{Commands, Files, Docker}
-
-// temporaryComputerCapabilities are granted for a session-scoped container.
-// Docker is withheld: a temporary computer never hosts the ACP sidecar.
-var temporaryComputerCapabilities = []Capability{Commands, Files}
+// computerCapabilities maps each provider to the execution channels it has
+// actually implemented and verified. CompleteCreation grants exactly this set
+// once a provider instance is observed; any channel not listed here stays
+// ungranted, so CheckTarget honestly refuses execution on it.
+//
+// Server hosts the ACP sidecar in a sibling container on the same node and so
+// also grants Docker. Temporary withholds Docker because it never hosts the
+// sidecar. PTY/desktop/browser stay ungranted for every provider until their
+// transports are wired per-computer. E2B, Railway and SSH grant Commands only:
+// their file and PTY channels are not implemented yet, so those requests must
+// be rejected rather than silently attempted. Providers absent from this map
+// (RemoteAgent has no control-plane provider and never reaches completion)
+// grant nothing.
+var computerCapabilities = map[Provider][]Capability{
+	Server:    {Commands, Files, Docker},
+	Temporary: {Commands, Files},
+	E2B:       {Commands},
+	Railway:   {Commands},
+	SSH:       {Commands},
+}
 
 // CompleteCreation records an observed provider instance, never provisions one.
 // A reconciler may complete an ambiguous create with the SAME operation ID.
 // Exactly one completion wins. Replays cannot replace the instance or renew its
 // lifetime. Temporary lifetime starts at approval, not at delayed reconciliation.
 // rootPath persists the computer's node workspace directory; only the server and
-// temporary providers return one, and they also grant the verified base
-// capabilities. AccessTokenEnc, when set, is already a sealed envelope and is
-// persisted verbatim.
+// temporary providers return one. Capabilities are granted per provider from
+// computerCapabilities, so a channel a provider has not implemented stays
+// ungranted and CheckTarget honestly refuses it. AccessTokenEnc, when set, is
+// already a sealed envelope and is persisted verbatim.
 func (s Store) CompleteCreation(ctx context.Context, t Target, operation string, result CreationResult, now time.Time) error {
 	if strings.TrimSpace(result.ExternalID) == "" || operation == "" {
 		return errors.New("provider instance and creation operation are required")
@@ -89,11 +101,7 @@ func (s Store) CompleteCreation(ctx context.Context, t Target, operation string,
 	if err != nil {
 		return err
 	}
-	if (provider == Server || provider == Temporary) && result.RootPath != "" {
-		granted := temporaryComputerCapabilities
-		if provider == Server {
-			granted = serverComputerCapabilities
-		}
+	if granted, ok := computerCapabilities[provider]; ok {
 		if _, err = tx.ExecContext(ctx, s.query(`UPDATE computers SET capabilities_json=? WHERE tenant_id=? AND space_id=? AND id=?`), mustCapabilities(granted), t.TenantID, t.SpaceID, t.ComputerID); err != nil {
 			return err
 		}
