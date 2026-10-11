@@ -65,8 +65,8 @@ export function ComputerRuntimeControls({ base, name }: { base: string; name: st
       }
     } finally { lock.current = false; setBusy(false); }
   }
-  return <div className="mt-4 space-y-3 border-t pt-3">
-    {runtime && <p role="status" className="text-xs text-muted-foreground">{uncertain ? "状态未确认，请刷新" : states[runtime.state] ?? runtime.state}{!runtime.executionAvailable && " · 执行通道尚未接通"}</p>}
+  return <div className="mt-3 space-y-3 border-t pt-3">
+    {runtime && <p role="status" className="text-xs text-muted-foreground"><span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">{uncertain ? "状态未确认，请刷新" : states[runtime.state] ?? runtime.state}</span>{!runtime.executionAvailable && <span className="ml-2">执行通道尚未接通</span>}</p>}
     {error && <p role="alert" className="break-words text-xs text-destructive">{error}</p>}
     <div className="flex flex-wrap gap-2">
       {!runtime ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("reserve")}>{busy ? "读取中…" : "准备 / 查看运行环境"}</Button> : <>
