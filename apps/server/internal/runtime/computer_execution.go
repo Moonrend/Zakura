@@ -34,6 +34,11 @@ func pinnedExecution(ctx context.Context) *resolvedExecution {
 // resolveExecutionGuard resolves the pinned run computer into an execution
 // target and never falls back: legacy computers must still match the Space
 // configuration, and new computers must have an active, non-expired runtime.
+// When no active slot exists yet it records intent without contacting any
+// provider. A free, self-hosted temporary container is then approved and created
+// inline so a chat can execute immediately; every other provider (E2B, Railway,
+// SSH) only reserves and reports that creation approval is still required. An
+// ambiguous temporary create leaves the runtime in Unknown and is never retried.
 func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, session string, args []byte) (*resolvedExecution, error) {
 	var selection struct {
 		ComputerID *string `json:"computerId"`
@@ -98,15 +103,44 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 	if err != nil {
 		return nil, err
 	}
+	now := h.store.now()
 	active, err := h.computerStore().ActiveRuntime(ctx, tenant, a.SpaceID, c.ID, scope)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("computer %s has no active runtime; approve and reconcile its creation before executing; refusing legacy workspace fallback", c.ID)
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
 		}
-		return nil, err
+		// No active slot yet. ReserveRuntime records intent only (idempotent, no
+		// provider call, no cost); a terminal session is surfaced as-is and is
+		// never silently recreated.
+		reserved, rErr := h.computerStore().ReserveRuntime(ctx, tenant, a.SpaceID, c.ID, scope, now)
+		if rErr != nil {
+			return nil, rErr
+		}
+		active = reserved
+	}
+	// A pending slot is either the one just reserved or a previous reservation.
+	// Only a free, self-hosted temporary container is approved and created inline
+	// so the chat can execute immediately; every provider that spends external
+	// resources or needs an operator stays pending. An ambiguous temporary create
+	// leaves the slot in Unknown and is never retried here.
+	if active.State == computers.PendingApproval {
+		if c.Provider != computers.Temporary {
+			return nil, fmt.Errorf("computer %s is awaiting creation approval; approve it in the computer settings before executing; refusing legacy workspace fallback", c.ID)
+		}
+		provisioned, pErr := h.computerProvisioner().ApproveAndCreate(ctx, computers.Target{TenantID: tenant, SpaceID: a.SpaceID, ComputerID: c.ID, RuntimeID: active.ID, Incarnation: active.Incarnation}, active.CreateOperationID, "system")
+		if pErr != nil {
+			return nil, fmt.Errorf("computer %s automatic provisioning failed: %w", c.ID, pErr)
+		}
+		active = provisioned
+		// Provisioning grants exactly the provider's verified capability set;
+		// re-read the computer so CheckTarget authorizes the channels now available.
+		refreshed, reloadErr := h.computerStore().ResolveRunComputer(ctx, tenant, a.SpaceID, run, c.ID)
+		if reloadErr != nil {
+			return nil, reloadErr
+		}
+		c = refreshed
 	}
 	target := computers.Target{TenantID: tenant, SpaceID: a.SpaceID, ComputerID: c.ID, RuntimeID: active.ID, Incarnation: active.Incarnation}
-	now := h.store.now()
 	if err = computers.CheckTarget(target, c, active, scope, computers.Commands, false, now); err != nil {
 		return nil, err
 	}
