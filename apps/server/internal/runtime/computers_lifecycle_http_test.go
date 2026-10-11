@@ -56,7 +56,7 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	if count != 0 {
 		t.Fatal("denied request reserved a runtime")
 	}
-	for _, id := range []string{"cloud", "legacy:" + space.ID, "missing"} {
+	for _, id := range []string{"legacy:" + space.ID, "missing"} {
 		want := 501
 		if id == "missing" {
 			want = 404
@@ -77,6 +77,26 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	}
 	if tempReserved.State != computers.PendingApproval || tempReserved.RuntimeID == "" {
 		t.Fatalf("temporary reservation: %+v", tempReserved)
+	}
+	// E2B is session-scoped like temporary. Reservation records intent only and
+	// never calls the provider, so it is safe to exercise without network access.
+	e2bBase := "/spaces/" + space.ID + "/computers/cloud/runtimes"
+	if w := call("POST", e2bBase, "", owner); w.Code != 400 {
+		t.Fatalf("e2b reserve without session: %d %s", w.Code, w.Body)
+	}
+	ew := call("POST", e2bBase+"?session="+chat.ID, "", owner)
+	if ew.Code != 200 {
+		t.Fatalf("e2b reserve: %d %s", ew.Code, ew.Body)
+	}
+	var e2bReserved computerRuntimeResponse
+	if err = json.Unmarshal(ew.Body.Bytes(), &e2bReserved); err != nil {
+		t.Fatal(err)
+	}
+	if e2bReserved.State != computers.PendingApproval || e2bReserved.RuntimeID == "" || e2bReserved.ExecutionAvailable || e2bReserved.RuntimeID == tempReserved.RuntimeID {
+		t.Fatalf("e2b reservation: %+v", e2bReserved)
+	}
+	if next := call("POST", e2bBase+"?session="+chat.ID, "", owner); next.Body.String() != ew.Body.String() {
+		t.Fatal("e2b reservation retry changed identity")
 	}
 	w := call("POST", base, "", owner)
 	if w.Code != 200 {

@@ -33,6 +33,7 @@ func (h *handler) computerProvisioner() computers.Provisioner {
 	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{
 		computers.Server:    serverComputerProvider{h: h},
 		computers.Temporary: temporaryComputerProvider{h: h},
+		computers.E2B:       e2bComputerProvider{h: h},
 	}}
 }
 
@@ -41,16 +42,17 @@ func (h *handler) computerProvisioner() computers.Provisioner {
 func (h *handler) computerDestroyers() map[computers.Provider]computers.DestructionProvider {
 	return map[computers.Provider]computers.DestructionProvider{
 		computers.Temporary: temporaryComputerProvider{h: h},
+		computers.E2B:       e2bComputerProvider{h: h},
 	}
 }
-func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request) bool {
+func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request) (computers.Computer, bool) {
 	if !h.manageComputerScope(w, r) {
-		return false
+		return computers.Computer{}, false
 	}
 	items, err := h.computerStore().List(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
 	if err != nil {
 		computerStatusError(w, err)
-		return false
+		return computers.Computer{}, false
 	}
 	for _, c := range items {
 		if c.ID != chi.URLParam(r, "cid") {
@@ -58,14 +60,14 @@ func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request)
 		}
 		// Legacy volumes remain under the legacy lifecycle, and adapters without a
 		// registered provider stay unavailable rather than failing at dispatch.
-		if (c.Provider != computers.Server && c.Provider != computers.Temporary) || strings.HasPrefix(c.ID, "legacy:") {
+		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B) || strings.HasPrefix(c.ID, "legacy:") {
 			httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
-			return false
+			return computers.Computer{}, false
 		}
-		return true
+		return c, true
 	}
 	computerStatusError(w, sql.ErrNoRows)
-	return false
+	return computers.Computer{}, false
 }
 func computerLifecycleError(w http.ResponseWriter, err error) {
 	switch {
@@ -82,13 +84,19 @@ func computerLifecycleError(w http.ResponseWriter, err error) {
 	}
 }
 func (h *handler) reserveComputerRuntime(w http.ResponseWriter, r *http.Request) {
-	if !h.computerLifecycleScope(w, r) {
+	c, ok := h.computerLifecycleScope(w, r)
+	if !ok {
 		return
 	}
 	// Reservation records intent only. No RPC, credentials, or paid creation.
-	// Session-scoped providers (temporary) require the owning chat; other providers
-	// ignore the value.
-	result, err := h.computerStore().ReserveRuntime(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"), strings.TrimSpace(r.URL.Query().Get("session")), time.Now())
+	// Session-scoped providers (temporary, e2b) require the owning chat; a missing
+	// session is a client error, never a server fault. Other providers ignore it.
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if _, err := c.Scope(session); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "a session is required for this computer provider")
+		return
+	}
+	result, err := h.computerStore().ReserveRuntime(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"), session, time.Now())
 	if err != nil {
 		computerLifecycleError(w, err)
 		return
@@ -99,7 +107,7 @@ func (h *handler) computerRuntimeTarget(r *http.Request, incarnation string) com
 	return computers.Target{TenantID: principal(r).TenantID, SpaceID: chi.URLParam(r, "id"), ComputerID: chi.URLParam(r, "cid"), RuntimeID: chi.URLParam(r, "rid"), Incarnation: incarnation}
 }
 func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
-	if !h.computerLifecycleScope(w, r) {
+	if _, ok := h.computerLifecycleScope(w, r); !ok {
 		return
 	}
 	if r.URL.Query().Get("incarnation") == "" {
@@ -114,7 +122,7 @@ func (h *handler) getComputerRuntime(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, publicComputerRuntime(result))
 }
 func (h *handler) mutateComputerRuntime(w http.ResponseWriter, r *http.Request, approve bool) {
-	if !h.computerLifecycleScope(w, r) {
+	if _, ok := h.computerLifecycleScope(w, r); !ok {
 		return
 	}
 	var in struct {
