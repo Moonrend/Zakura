@@ -12,12 +12,26 @@ type Runtime = {
   createOperationId: string;
   state: string;
   executionAvailable: boolean;
+  manifest?: { id?: string; preview?: string; claim?: string; deadline?: string };
 };
 const states: Record<string, string> = {
   pending_approval: "等待创建确认", creating: "创建中", ready: "环境已创建",
   unknown: "创建结果待核实", disconnected: "已断开", stopping: "停止中",
   expired: "已过期", destroyed: "已销毁", failed: "失败",
 };
+
+// Remaining lease from the provider's deadline string. A missing or unparseable
+// value is hidden rather than guessed at.
+function remainingLabel(deadline: string): string {
+  const at = Date.parse(deadline);
+  if (Number.isNaN(at)) return "";
+  const minutes = Math.round((at - Date.now()) / 60000);
+  if (minutes <= 0) return "已到期";
+  if (minutes < 60) return `剩余 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0 ? `剩余 ${hours} 小时 ${rest} 分钟` : `剩余 ${hours} 小时`;
+}
 
 // Mounted with the full space/computer key. Never transfer an operation or
 // incarnation to another card; mutations are only triggered by explicit clicks.
@@ -65,8 +79,15 @@ export function ComputerRuntimeControls({ base, name }: { base: string; name: st
       }
     } finally { lock.current = false; setBusy(false); }
   }
+  const manifest = runtime?.manifest;
+  const deadline = manifest?.deadline ? remainingLabel(manifest.deadline) : "";
   return <div className="mt-3 space-y-3 border-t pt-3">
     {runtime && <p role="status" className="text-xs text-muted-foreground"><span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">{uncertain ? "状态未确认，请刷新" : states[runtime.state] ?? runtime.state}</span>{!runtime.executionAvailable && <span className="ml-2">执行通道尚未接通</span>}</p>}
+    {manifest && (manifest.preview || manifest.claim || deadline) && <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      {manifest.preview && <a href={manifest.preview} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-2 hover:text-foreground">预览：{manifest.preview}</a>}
+      {manifest.claim && <a href={manifest.claim} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-2 hover:text-foreground">认领：{manifest.claim}</a>}
+      {deadline && <span>{deadline}</span>}
+    </p>}
     {error && <p role="alert" className="break-words text-xs text-destructive">{error}</p>}
     <div className="flex flex-wrap gap-2">
       {!runtime ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("reserve")}>{busy ? "读取中…" : "准备 / 查看运行环境"}</Button> : <>

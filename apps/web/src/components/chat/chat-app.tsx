@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ComputerSelector } from "@/components/computer-selector";
+import { ComputerSessionApproval } from "@/components/computer-session-approval";
 import { useRouter } from "next/navigation";
 import { chatSessionHref, shouldLetBrowserHandleClick } from "@/lib/nav";
 import { toast } from "sonner";
@@ -2804,6 +2805,7 @@ export function ChatApp() {
           {agentId && sessionId && !isNewSession && (
             <div className="mx-auto mb-2 max-w-3xl">
               <ComputerSelector key={`${agentId}:${sessionId}`} selectionUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computer`} catalogUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computers`} label="对话执行电脑" hint="切换仅影响后续运行，不会移动文件或改变当前运行的电脑。" />
+              {agent?.spaceId && <ComputerSessionApproval agentId={agentId} sessionId={sessionId} spaceId={agent.spaceId} />}
             </div>
           )}
           <Composer
