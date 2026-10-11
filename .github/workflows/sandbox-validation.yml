@@ -130,6 +130,7 @@ jobs:
       - name: Validate project clients and application build
         working-directory: apps/web
         run: |
+          corepack pnpm --filter @zakura/shared build
           corepack pnpm typecheck
           node --import tsx --test src/components/project-execution/*test.ts
           corepack pnpm build
