@@ -395,6 +395,7 @@ func (h *handler) hydrateReview(ctx context.Context, tx *sql.Tx, r *http.Request
 		item.Action = "验收任务产物"
 		item.Summary = "检查冻结的验收证据，针对当前不可变产物决定接受或拒绝。"
 	case "operation":
+		item.ArgumentFields = nil
 		query := `SELECT SUBSTR(` + h.reviewJSONText("operation_json", "call", "name") + `,1,160),SUBSTR(` + h.reviewJSONText("operation_json", "call", "effect") + `,1,32),SUBSTR(` + h.reviewJSONText("operation_json", "error") + `,1,2048),` + h.reviewArgumentKeysSQL("operation_json") + ` FROM execution_operations WHERE tenant_id=? AND project_id=? AND run_id=? AND id=?`
 		var keys string
 		if err := tx.QueryRowContext(ctx, h.deps.Rebind(query), tenant, item.ProjectID, item.RunID, item.ID).Scan(&item.ToolName, &item.Effect, &rawError, &keys); err != nil {
