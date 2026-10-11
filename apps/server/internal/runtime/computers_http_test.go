@@ -154,7 +154,7 @@ func TestComputerManagementAcceptsComputerNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("node-token"))
-	for _, node := range []struct{ id, kind string }{{"cnode", "computer"}, {"rnode", "runner"}} {
+	for _, node := range []struct{ id, kind string }{{"cnode", "computer"}, {"lnode", "local"}, {"rnode", "runner"}} {
 		if _, err := d.DB.Exec(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,token_hash,capabilities_json,host_info_json,storage_root,labels_json,is_shared,created_at,updated_at) VALUES(?,?,?,?,?,'offline',?,'{}','{}','/srv/zakura','{}',false,'now','now')`, node.id, "tenant", node.id, node.id, node.kind, hex.EncodeToString(sum[:])); err != nil {
 			t.Fatal(err)
 		}
@@ -171,6 +171,9 @@ func TestComputerManagementAcceptsComputerNode(t *testing.T) {
 	}
 	if w := call(`{"name":"Local","provider":"server","runtimeNodeId":"cnode","config":{}}`); w.Code != 201 {
 		t.Fatalf("computer node rejected: %d %s", w.Code, w.Body)
+	}
+	if w := call(`{"name":"LocalRunner","provider":"server","runtimeNodeId":"lnode","config":{}}`); w.Code != 201 {
+		t.Fatalf("local node rejected: %d %s", w.Code, w.Body)
 	}
 	if w := call(`{"name":"Bad","provider":"server","runtimeNodeId":"rnode","config":{}}`); w.Code != 400 {
 		t.Fatalf("unrelated node kind accepted: %d %s", w.Code, w.Body)

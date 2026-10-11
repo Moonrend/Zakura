@@ -71,7 +71,7 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 400, "runtime node is unavailable")
 			return
 		}
-		if (c.Provider == computers.Server || c.Provider == computers.Temporary) && node.Kind != "server" && node.Kind != "computer" {
+		if (c.Provider == computers.Server || c.Provider == computers.Temporary) && node.Kind != "server" && node.Kind != "computer" && node.Kind != "local" {
 			httpx.Error(w, 400, "a server or computer node is required")
 			return
 		}

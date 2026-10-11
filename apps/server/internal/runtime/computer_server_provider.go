@@ -57,7 +57,7 @@ func (p serverComputerProvider) runner(ctx context.Context, r computers.Runtime,
 	err = p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT n.id, n.storage_root FROM computers c
  JOIN runtime_nodes n ON n.id=c.runtime_node_id AND (n.tenant_id=c.tenant_id OR n.is_shared=TRUE)
  JOIN computer_creation_approvals a ON a.runtime_id=? AND a.create_operation_id=?
- WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='server' AND n.kind IN ('server','computer')`), r.ID, r.CreateOperationID, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
+ WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='server' AND n.kind IN ('server','computer','local')`), r.ID, r.CreateOperationID, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
 	if err != nil {
 		return nil, "", err
 	}
