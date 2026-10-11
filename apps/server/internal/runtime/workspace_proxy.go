@@ -21,12 +21,17 @@ import (
 )
 
 type workspaceConnectionTicket struct {
-	TenantID string `json:"tenantId"`
-	UserID   string `json:"userId,omitempty"`
-	AgentID  string `json:"agentId"`
-	Kind     string `json:"kind"`
-	Adapter  string `json:"adapterId,omitempty"`
-	Expires  int64  `json:"exp"`
+	TenantID    string `json:"tenantId"`
+	UserID      string `json:"userId,omitempty"`
+	AgentID     string `json:"agentId"`
+	Kind        string `json:"kind"`
+	Adapter     string `json:"adapterId,omitempty"`
+	Expires     int64  `json:"exp"`
+	SpaceID     string `json:"spaceId,omitempty"`
+	ComputerID  string `json:"computerId,omitempty"`
+	SessionID   string `json:"sessionId,omitempty"`
+	RuntimeID   string `json:"runtimeId,omitempty"`
+	Incarnation string `json:"incarnation,omitempty"`
 }
 
 type workspaceBridge struct {

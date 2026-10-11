@@ -29,14 +29,16 @@ function runtimeSocketUrl(url: string): string {
 }
 
 export function WorkspaceTerminalDialog({
-  agentId,
+  agentId = "",
   open,
   request,
+  ticketPath,
   onOpenChange,
 }: {
-  agentId: string;
+  agentId?: string;
   open: boolean;
   request?: WorkspaceTerminalRequest;
+  ticketPath?: string;
   onOpenChange: (open: boolean) => void;
 }) {
   const { ref, write, focus } = useTerminal();
@@ -79,11 +81,14 @@ export function WorkspaceTerminalDialog({
       // An ACP login must land *inside that adapter's container*: the CLI and
       // the credential volume live there, and the workspace container has
       // neither. Passing the profile id routes the bridge to a docker exec in
-      // the adapter; omitting it keeps the plain workspace shell.
-      const ticketPath = request?.profileId
-        ? `/api/agents/${agentId}/terminal-ticket?adapterId=${encodeURIComponent(request.profileId)}`
-        : `/api/agents/${agentId}/terminal-ticket`;
-      const ticket = await api<Ticket>(ticketPath, { method: "POST" });
+      // the adapter; omitting it keeps the plain workspace shell. A dedicated
+      // computer supplies its own ticket endpoint instead.
+      const path = ticketPath
+        ? ticketPath
+        : request?.profileId
+          ? `/api/agents/${agentId}/terminal-ticket?adapterId=${encodeURIComponent(request.profileId)}`
+          : `/api/agents/${agentId}/terminal-ticket`;
+      const ticket = await api<Ticket>(path, { method: "POST" });
       if (generation !== generationRef.current) return;
       const socket = new WebSocket(runtimeSocketUrl(ticket.url));
       socketRef.current = socket;
@@ -141,7 +146,7 @@ export function WorkspaceTerminalDialog({
       setState("error");
       setDetail(error instanceof Error ? error.message : String(error));
     }
-  }, [agentId, disconnect, focus, sendInput, write]);
+  }, [agentId, disconnect, focus, sendInput, ticketPath, write]);
 
   useEffect(() => {
     if (open) void connect();

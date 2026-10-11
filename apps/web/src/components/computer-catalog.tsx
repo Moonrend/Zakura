@@ -166,7 +166,9 @@ function ComputerCard({
       ? `按对话隔离 · 空闲 ${Math.round(c.idleSeconds / 60)} 分钟 · 最长 ${Math.round(c.maxLifetimeSeconds / 60)} 分钟；到期文件不保留。`
       : c.provider === "server"
         ? "绑定服务器节点，按需创建独立运行环境。"
-        : "已配置 · 执行适配尚未接通";
+        : c.provider === "ssh"
+          ? "通过 SSH 密钥连接；主机指纹在首次连接时锁定。"
+          : "自动生成的 SSH 密钥即身份；预览与认领链接见运行环境状态。";
   return (
     <article className="flex flex-col rounded-xl bg-card p-4 shadow-surface-2">
       <div className="flex items-start gap-2.5">
@@ -181,11 +183,12 @@ function ComputerCard({
         </div>
       </div>
       <p className="mt-3 text-xs text-muted-foreground">{note}</p>
-      {c.provider === "server" && !legacy && (
+      {!legacy && (c.provider === "server" || c.provider === "ssh" || c.provider === "railway") && (
         <ComputerRuntimeControls
           key={`${spaceId}:${c.id}`}
           base={`${base}/${encodeURIComponent(c.id)}`}
           name={c.name}
+          provider={c.provider}
         />
       )}
     </article>

@@ -18,6 +18,7 @@ func (h *handler) registerComputers(r chi.Router) {
 	r.Get("/spaces/{id}/computers", h.listComputers)
 	r.Post("/spaces/{id}/computers", h.createComputer)
 	r.Patch("/spaces/{id}/computers/{cid}", h.renameComputer)
+	r.Post("/spaces/{id}/computers/{cid}/terminal-ticket", h.computerTerminalTicket)
 	r.Post("/spaces/{id}/computers/{cid}/runtimes", h.reserveComputerRuntime)
 	r.Get("/spaces/{id}/computers/{cid}/runtimes/{rid}", h.getComputerRuntime)
 	r.Post("/spaces/{id}/computers/{cid}/runtimes/{rid}/approve", h.approveComputerRuntime)

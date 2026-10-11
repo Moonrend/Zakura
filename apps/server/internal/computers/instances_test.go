@@ -72,11 +72,11 @@ func TestCompleteCreationPinsInstanceAndLifetime(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[Provider]string{
-				Server:      `["commands","files","docker"]`,
-				Temporary:   `["commands","files"]`,
+				Server:      `["commands","files","docker","pty"]`,
+				Temporary:   `["commands","files","pty"]`,
 				E2B:         `["commands","files"]`,
-				Railway:     `["commands","files"]`,
-				SSH:         `["commands","files"]`,
+				Railway:     `["commands","files","pty"]`,
+				SSH:         `["commands","files","pty"]`,
 				RemoteAgent: `[]`,
 			}[provider]
 			if capabilities != want {

@@ -29,19 +29,20 @@ func (s Store) ActiveRuntime(ctx context.Context, tenant, space, computer, sessi
 //
 // Server hosts the ACP sidecar in a sibling container on the same node and so
 // also grants Docker. Temporary withholds Docker because it never hosts the
-// sidecar. PTY/desktop/browser stay ungranted for every provider until their
-// transports are wired per-computer. E2B, Railway and SSH grant Commands and
-// Files: commands run over their own transports and files over envd/SFTP;
-// their PTY channels are not implemented yet, so those requests must be
-// rejected rather than silently attempted. Providers absent from this map
-// (RemoteAgent has no control-plane provider and never reaches completion)
-// grant nothing.
+// sidecar. PTY is granted to the transports that attach a real interactive
+// shell: server and temporary over the runner's docker exec stream, and SSH and
+// Railway over an SSH session. E2B grants Commands and Files only: envd's
+// process start is a one-shot server-streaming RPC with no bidirectional input
+// channel, so an interactive shell cannot be wired without speculating about an
+// unimplemented protocol and is left ungranted. Desktop and browser stay
+// ungranted for every provider. Providers absent from this map (RemoteAgent has
+// no control-plane provider and never reaches completion) grant nothing.
 var computerCapabilities = map[Provider][]Capability{
-	Server:    {Commands, Files, Docker},
-	Temporary: {Commands, Files},
+	Server:    {Commands, Files, Docker, PTY},
+	Temporary: {Commands, Files, PTY},
 	E2B:       {Commands, Files},
-	Railway:   {Commands, Files},
-	SSH:       {Commands, Files},
+	Railway:   {Commands, Files, PTY},
+	SSH:       {Commands, Files, PTY},
 }
 
 // CompleteCreation records an observed provider instance, never provisions one.

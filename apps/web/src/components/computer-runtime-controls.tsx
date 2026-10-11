@@ -1,9 +1,20 @@
 "use client";
 
 import { useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { Terminal } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
+
+// Providers whose transport actually attaches an interactive shell, mirroring
+// the backend capability grants.
+const TERMINAL_PROVIDERS = new Set(["server", "temporary", "ssh", "railway"]);
 
 type Runtime = {
   runtimeId: string;
@@ -35,10 +46,11 @@ function remainingLabel(deadline: string): string {
 
 // Mounted with the full space/computer key. Never transfer an operation or
 // incarnation to another card; mutations are only triggered by explicit clicks.
-export function ComputerRuntimeControls({ base, name }: { base: string; name: string }) {
+export function ComputerRuntimeControls({ base, name, provider = "server" }: { base: string; name: string; provider?: string }) {
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [error, setError] = useState("");
   const [uncertain, setUncertain] = useState(false);
   const lock = useRef(false);
@@ -81,6 +93,7 @@ export function ComputerRuntimeControls({ base, name }: { base: string; name: st
   }
   const manifest = runtime?.manifest;
   const deadline = manifest?.deadline ? remainingLabel(manifest.deadline) : "";
+  const terminal = runtime?.state === "ready" && TERMINAL_PROVIDERS.has(provider);
   return <div className="mt-3 space-y-3 border-t pt-3">
     {runtime && <p role="status" className="text-xs text-muted-foreground"><span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">{uncertain ? "状态未确认，请刷新" : states[runtime.state] ?? runtime.state}</span>{!runtime.executionAvailable && <span className="ml-2">执行通道尚未接通</span>}</p>}
     {manifest && (manifest.preview || manifest.claim || deadline) && <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
@@ -94,6 +107,7 @@ export function ComputerRuntimeControls({ base, name }: { base: string; name: st
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("refresh")}>刷新状态</Button>
         {runtime.state === "pending_approval" && !uncertain && <Button size="sm" disabled={busy} onClick={() => setConfirm(true)}>创建运行环境</Button>}
         {["unknown", "creating"].includes(runtime.state) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("reconcile")}>核实创建结果</Button>}
+        {terminal && <Button size="sm" variant="outline" onClick={() => setTerminalOpen(true)}><Terminal className="size-4" />终端</Button>}
       </>}
     </div>
     {runtime && ["unknown", "creating"].includes(runtime.state) && <p className="text-xs text-muted-foreground">核实只查找本次创建的环境，不会创建第二个容器。</p>}
@@ -102,5 +116,10 @@ export function ComputerRuntimeControls({ base, name }: { base: string; name: st
         <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setConfirm(false)}>取消</Button><Button disabled={busy || uncertain || runtime?.state !== "pending_approval"} onClick={() => void act("approve")}>确认创建</Button></div>
       </DialogContent>
     </Dialog>
+    <WorkspaceTerminalDialog
+      open={terminalOpen}
+      ticketPath={`${base}/terminal-ticket`}
+      onOpenChange={setTerminalOpen}
+    />
   </div>;
 }

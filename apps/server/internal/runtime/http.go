@@ -79,6 +79,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Get("/api/zakurabot/ws", h.zakuraBotWS)
 	r.Get("/api/agents/{id}/desktop-proxy", h.desktopProxy)
 	r.Get("/api/agents/{id}/terminal-proxy", h.terminalProxy)
+	r.Get("/api/spaces/{id}/computers/{cid}/terminal-proxy", h.computerTerminalProxy)
 	r.Get("/api/runtime-nodes/agent-binaries/{os}/{arch}", h.runtimeAgentBinary)
 	r.Handle("/api/socket.io", http.HandlerFunc(h.socketIO))
 	r.Handle("/api/socket.io/", http.HandlerFunc(h.socketIO))
