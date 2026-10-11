@@ -159,41 +159,41 @@ func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCrede
 
 // Create observes the box reachable with the computer's key and returns its
 // identity. rootPath is always empty: Railway mounts no node-local directory.
-func (p railwayComputerProvider) Create(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p railwayComputerProvider) Create(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	creds, err := p.authorize(ctx, r, true)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	manifest, err := p.observe(ctx, creds)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	id := railwayBoxIdentity(manifest)
 	if id == "" {
-		return "", "", errors.New("railway connection did not return a manifest; reconciliation is required")
+		return computers.CreationResult{}, errors.New("railway connection did not return a manifest; reconciliation is required")
 	}
-	return id, "", nil
+	return computers.CreationResult{ExternalID: id}, nil
 }
 
 // Find reconnects and reconciles. A manifest naming a different box than the one
 // this runtime was pinned to is a hard error, never a silent replacement.
-func (p railwayComputerProvider) Find(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p railwayComputerProvider) Find(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	creds, err := p.authorize(ctx, r, false)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	manifest, err := p.observe(ctx, creds)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	id := railwayBoxIdentity(manifest)
 	if id == "" {
-		return "", "", errors.New("railway connection did not return a manifest; reconciliation is required")
+		return computers.CreationResult{}, errors.New("railway connection did not return a manifest; reconciliation is required")
 	}
 	if r.ExternalID != "" && r.ExternalID != id {
-		return "", "", errors.New("reconnected to a different railway box")
+		return computers.CreationResult{}, errors.New("reconnected to a different railway box")
 	}
-	return id, "", nil
+	return computers.CreationResult{ExternalID: id}, nil
 }
 
 // railwayOutput is a bounded, concurrency-safe io.Writer for a session's combined

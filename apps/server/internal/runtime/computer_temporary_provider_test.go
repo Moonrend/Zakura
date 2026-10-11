@@ -113,10 +113,10 @@ func TestTemporaryComputerProvisioning(t *testing.T) {
 			}
 			target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
 			adapter := temporaryComputerProvider{h: h}
-			if _, _, err = adapter.Create(ctx, r); err == nil {
+			if _, err = adapter.Create(ctx, r); err == nil {
 				t.Fatal("creation without approval")
 			}
-			if _, _, err = adapter.Find(ctx, r); err == nil {
+			if _, err = adapter.Find(ctx, r); err == nil {
 				t.Fatal("reconciliation without approval")
 			}
 			p := computers.Provisioner{Store: cs, Providers: map[computers.Provider]computers.CreationProvider{computers.Temporary: adapter}}
@@ -143,12 +143,12 @@ func TestTemporaryComputerProvisioning(t *testing.T) {
 			}
 			foreign := r
 			foreign.TenantID = "other"
-			if _, _, err = adapter.Find(ctx, foreign); err == nil {
+			if _, err = adapter.Find(ctx, foreign); err == nil {
 				t.Fatal("cross tenant lookup")
 			}
 			otherScope := r
 			otherScope.SessionScope = "another-chat"
-			if _, _, err = adapter.Find(ctx, otherScope); err == nil {
+			if _, err = adapter.Find(ctx, otherScope); err == nil {
 				t.Fatal("cross session lookup")
 			}
 			mu.Lock()

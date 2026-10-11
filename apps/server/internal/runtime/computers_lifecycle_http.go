@@ -34,6 +34,7 @@ func (h *handler) computerProvisioner() computers.Provisioner {
 		computers.Server:    serverComputerProvider{h: h},
 		computers.Temporary: temporaryComputerProvider{h: h},
 		computers.E2B:       e2bComputerProvider{h: h},
+		computers.Railway:   railwayComputerProvider{h: h},
 	}}
 }
 
@@ -60,7 +61,7 @@ func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request)
 		}
 		// Legacy volumes remain under the legacy lifecycle, and adapters without a
 		// registered provider stay unavailable rather than failing at dispatch.
-		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B) || strings.HasPrefix(c.ID, "legacy:") {
+		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B && c.Provider != computers.Railway) || strings.HasPrefix(c.ID, "legacy:") {
 			httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
 			return computers.Computer{}, false
 		}

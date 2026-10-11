@@ -177,32 +177,32 @@ func (e *railwayEnv) reseal(t *testing.T, privateKey, fingerprint string) {
 
 func TestRailwayCreateReturnsBox(t *testing.T) {
 	env := railwaySetup(t)
-	id, root, err := env.adapter().Create(context.Background(), env.r)
-	if err != nil || id != "zippy-laughter" || root != "" {
-		t.Fatalf("create: %q %q %v", id, root, err)
+	result, err := env.adapter().Create(context.Background(), env.r)
+	if err != nil || result.ExternalID != "zippy-laughter" || result.RootPath != "" {
+		t.Fatalf("create: %+v %v", result, err)
 	}
 }
 
 func TestRailwayFindReconnectIsIdempotent(t *testing.T) {
 	env := railwaySetup(t)
-	id, _, err := env.adapter().Create(context.Background(), env.r)
-	if err != nil || id != "zippy-laughter" {
-		t.Fatalf("create: %q %v", id, err)
+	result, err := env.adapter().Create(context.Background(), env.r)
+	if err != nil || result.ExternalID != "zippy-laughter" {
+		t.Fatalf("create: %+v %v", result, err)
 	}
 	r := env.r
-	if got, _, err := env.adapter().Find(context.Background(), r); err != nil || got != "zippy-laughter" {
-		t.Fatalf("find empty: %q %v", got, err)
+	if got, err := env.adapter().Find(context.Background(), r); err != nil || got.ExternalID != "zippy-laughter" {
+		t.Fatalf("find empty: %+v %v", got, err)
 	}
 	r.ExternalID = "zippy-laughter"
-	if got, _, err := env.adapter().Find(context.Background(), r); err != nil || got != "zippy-laughter" {
-		t.Fatalf("find same: %q %v", got, err)
+	if got, err := env.adapter().Find(context.Background(), r); err != nil || got.ExternalID != "zippy-laughter" {
+		t.Fatalf("find same: %+v %v", got, err)
 	}
 }
 
 func TestRailwayNoManifestIsError(t *testing.T) {
 	env := railwaySetup(t)
 	env.output.Store("welcome to your railway box\nno manifest here\n")
-	if _, _, err := env.adapter().Create(context.Background(), env.r); err == nil {
+	if _, err := env.adapter().Create(context.Background(), env.r); err == nil {
 		t.Fatal("expected create error without a manifest")
 	}
 }
@@ -212,7 +212,7 @@ func TestRailwayDifferentBoxRejected(t *testing.T) {
 	env.output.Store(`{"box":"other-box","preview":"https://y.up.railway.app"}`)
 	r := env.r
 	r.ExternalID = "zippy-laughter"
-	_, _, err := env.adapter().Find(context.Background(), r)
+	_, err := env.adapter().Find(context.Background(), r)
 	if err == nil || !strings.Contains(err.Error(), "different railway box") {
 		t.Fatalf("expected different box error, got %v", err)
 	}
@@ -223,10 +223,10 @@ func TestRailwayApprovalRequired(t *testing.T) {
 	if _, err := env.h.deps.DB.Exec(`DELETE FROM computer_creation_approvals WHERE runtime_id='runtime'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := env.adapter().Create(context.Background(), env.r); !errors.Is(err, computers.ErrTransitionConflict) {
+	if _, err := env.adapter().Create(context.Background(), env.r); !errors.Is(err, computers.ErrTransitionConflict) {
 		t.Fatalf("create without approval: %v", err)
 	}
-	if _, _, err := env.adapter().Find(context.Background(), env.r); !errors.Is(err, computers.ErrTransitionConflict) {
+	if _, err := env.adapter().Find(context.Background(), env.r); !errors.Is(err, computers.ErrTransitionConflict) {
 		t.Fatalf("find without approval: %v", err)
 	}
 	if atomic.LoadInt32(env.conns) != 0 {
@@ -238,10 +238,10 @@ func TestRailwayCrossTenantRejected(t *testing.T) {
 	env := railwaySetup(t)
 	foreign := env.r
 	foreign.TenantID = "other"
-	if _, _, err := env.adapter().Create(context.Background(), foreign); err == nil {
+	if _, err := env.adapter().Create(context.Background(), foreign); err == nil {
 		t.Fatal("cross-tenant create was accepted")
 	}
-	if _, _, err := env.adapter().Find(context.Background(), foreign); err == nil {
+	if _, err := env.adapter().Find(context.Background(), foreign); err == nil {
 		t.Fatal("cross-tenant find was accepted")
 	}
 	if atomic.LoadInt32(env.conns) != 0 {
@@ -252,7 +252,7 @@ func TestRailwayCrossTenantRejected(t *testing.T) {
 func TestRailwayFingerprintMismatchIsError(t *testing.T) {
 	env := railwaySetup(t)
 	env.reseal(t, env.clientKey, "SHA256:"+strings.Repeat("A", 43))
-	if _, _, err := env.adapter().Create(context.Background(), env.r); err == nil {
+	if _, err := env.adapter().Create(context.Background(), env.r); err == nil {
 		t.Fatal("expected handshake failure on fingerprint mismatch")
 	}
 }

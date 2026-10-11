@@ -75,10 +75,10 @@ func TestE2BApprovalRequired(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
-	if _, _, err := adapter.Create(context.Background(), r); !errors.Is(err, computers.ErrTransitionConflict) {
+	if _, err := adapter.Create(context.Background(), r); !errors.Is(err, computers.ErrTransitionConflict) {
 		t.Fatalf("create without approval: %v", err)
 	}
-	if _, _, err := adapter.Find(context.Background(), r); !errors.Is(err, computers.ErrTransitionConflict) {
+	if _, err := adapter.Find(context.Background(), r); !errors.Is(err, computers.ErrTransitionConflict) {
 		t.Fatalf("find without approval: %v", err)
 	}
 	mu.Lock()
@@ -104,13 +104,23 @@ func TestE2BCreate(t *testing.T) {
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"sandboxID":"sbx-1"}`))
+		_, _ = w.Write([]byte(`{"sandboxID":"sbx-1","envdAccessToken":"tok-1"}`))
 	}))
 	defer server.Close()
 	adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
-	id, root, err := adapter.Create(context.Background(), r)
-	if err != nil || id != "sbx-1" || root != "" {
-		t.Fatalf("create: %q %q %v", id, root, err)
+	result, err := adapter.Create(context.Background(), r)
+	if err != nil || result.ExternalID != "sbx-1" || result.RootPath != "" {
+		t.Fatalf("create: %+v %v", result, err)
+	}
+	plain, err := computers.OpenCredentials(h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, result.AccessTokenEnc)
+	if err != nil {
+		t.Fatalf("sealed access token could not be opened: %v", err)
+	}
+	var token struct {
+		EnvdAccessToken string `json:"envdAccessToken"`
+	}
+	if err := json.Unmarshal(plain, &token); err != nil || token.EnvdAccessToken != "tok-1" {
+		t.Fatalf("access token = %q %v", string(plain), err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -131,6 +141,24 @@ func TestE2BCreate(t *testing.T) {
 		if metadata[key] != want {
 			t.Fatalf("metadata[%s] = %v want %v", key, metadata[key], want)
 		}
+	}
+}
+
+func TestE2BCreateWithoutAccessToken(t *testing.T) {
+	h, r := e2bTestSetup(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"sandboxID":"sbx-1"}`))
+	}))
+	defer server.Close()
+	adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
+	result, err := adapter.Create(context.Background(), r)
+	if err != nil || result.ExternalID != "sbx-1" {
+		t.Fatalf("create: %+v %v", result, err)
+	}
+	if result.AccessTokenEnc != "" {
+		t.Fatalf("token without a provider-issued value: %q", result.AccessTokenEnc)
 	}
 }
 
@@ -164,7 +192,8 @@ func TestE2BFind(t *testing.T) {
 			}))
 			defer server.Close()
 			adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
-			id, _, err := adapter.Find(context.Background(), r)
+			result, err := adapter.Find(context.Background(), r)
+			id := result.ExternalID
 			switch mode {
 			case "missing":
 				if err != nil || id != "" {
@@ -200,7 +229,7 @@ func TestE2BCreateHidesResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
-	_, _, err := adapter.Create(context.Background(), r)
+	_, err := adapter.Create(context.Background(), r)
 	if err == nil {
 		t.Fatal("expected create error")
 	}
@@ -281,10 +310,10 @@ func TestE2BCrossTenantRejected(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := e2bComputerProvider{h: h, apiBase: server.URL, httpClient: server.Client()}
-	if _, _, err := adapter.Create(context.Background(), foreign); err == nil {
+	if _, err := adapter.Create(context.Background(), foreign); err == nil {
 		t.Fatal("cross-tenant create was accepted")
 	}
-	if _, _, err := adapter.Find(context.Background(), foreign); err == nil {
+	if _, err := adapter.Find(context.Background(), foreign); err == nil {
 		t.Fatal("cross-tenant find was accepted")
 	}
 	if err := adapter.Destroy(context.Background(), foreign); err == nil {

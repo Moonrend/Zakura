@@ -30,6 +30,9 @@ var computersSQL string
 //go:embed sql/0006_computer_roots.sql
 var computerRootsSQL string
 
+//go:embed sql/0007_computer_tokens.sql
+var computerTokensSQL string
+
 type migration struct {
 	version   int
 	name, sql string
@@ -42,6 +45,7 @@ var ordered = []migration{
 	{4, "space_mcp", spaceMCPSQL},
 	{5, "computers", computersSQL},
 	{6, "computer_roots", computerRootsSQL},
+	{7, "computer_tokens", computerTokensSQL},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {

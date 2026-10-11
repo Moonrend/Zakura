@@ -140,10 +140,10 @@ func (p e2bComputerProvider) authorize(ctx context.Context, r computers.Runtime,
 	return p.configuration(ctx, r)
 }
 
-func (p e2bComputerProvider) Create(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p e2bComputerProvider) Create(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	cfg, err := p.authorize(ctx, r, true)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	payload, err := json.Marshal(map[string]any{
 		"templateID": cfg.Template,
@@ -151,73 +151,86 @@ func (p e2bComputerProvider) Create(ctx context.Context, r computers.Runtime) (s
 		"timeout":    cfg.MaxLifetime,
 	})
 	if err != nil {
-		return "", "", errors.New("E2B create request could not be encoded")
+		return computers.CreationResult{}, errors.New("E2B create request could not be encoded")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base()+"/sandboxes", bytes.NewReader(payload))
 	if err != nil {
-		return "", "", errors.New("E2B create request could not be built")
+		return computers.CreationResult{}, errors.New("E2B create request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	resp, err := p.client().Do(req)
 	if err != nil {
-		return "", "", errors.New("E2B create request failed")
+		return computers.CreationResult{}, errors.New("E2B create request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Never echo the response body: it can carry credentials or signed URLs.
-		return "", "", fmt.Errorf("E2B create request rejected with status %d", resp.StatusCode)
+		return computers.CreationResult{}, fmt.Errorf("E2B create request rejected with status %d", resp.StatusCode)
 	}
 	var created struct {
-		SandboxID string `json:"sandboxID"`
+		SandboxID       string `json:"sandboxID"`
+		EnvdAccessToken string `json:"envdAccessToken"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		return "", "", errors.New("E2B create response could not be read")
+		return computers.CreationResult{}, errors.New("E2B create response could not be read")
 	}
 	if strings.TrimSpace(created.SandboxID) == "" {
-		return "", "", errors.New("E2B create response contained no sandbox ID")
+		return computers.CreationResult{}, errors.New("E2B create response contained no sandbox ID")
 	}
-	return created.SandboxID, "", nil
+	// envd rejects unauthenticated execution, so the sandbox-issued token is
+	// sealed under the computer identity before it ever leaves this function.
+	var tokenEnc string
+	if token := strings.TrimSpace(created.EnvdAccessToken); token != "" {
+		tokenEnc, err = computers.SealCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, []byte(fmt.Sprintf(`{"envdAccessToken":%q}`, token)))
+		if err != nil {
+			return computers.CreationResult{}, errors.New("E2B access token could not be sealed")
+		}
+	}
+	return computers.CreationResult{ExternalID: created.SandboxID, AccessTokenEnc: tokenEnc}, nil
 }
 
-func (p e2bComputerProvider) Find(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p e2bComputerProvider) Find(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	cfg, err := p.authorize(ctx, r, false)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	query := url.Values{}
 	query.Set("metadata", "zakura.operation="+r.CreateOperationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base()+"/sandboxes?"+query.Encode(), nil)
 	if err != nil {
-		return "", "", errors.New("E2B lookup request could not be built")
+		return computers.CreationResult{}, errors.New("E2B lookup request could not be built")
 	}
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	resp, err := p.client().Do(req)
 	if err != nil {
-		return "", "", errors.New("E2B lookup request failed")
+		return computers.CreationResult{}, errors.New("E2B lookup request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("E2B lookup request rejected with status %d", resp.StatusCode)
+		return computers.CreationResult{}, fmt.Errorf("E2B lookup request rejected with status %d", resp.StatusCode)
 	}
 	var listed []struct {
 		SandboxID string            `json:"sandboxID"`
 		Metadata  map[string]string `json:"metadata"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
-		return "", "", errors.New("E2B lookup response could not be read")
+		return computers.CreationResult{}, errors.New("E2B lookup response could not be read")
 	}
 	if len(listed) == 0 {
 		// Not yet observed is not permission to create a replacement.
-		return "", "", nil
+		return computers.CreationResult{}, nil
 	}
 	if len(listed) != 1 {
-		return "", "", errors.New("ambiguous E2B creation operation")
+		return computers.CreationResult{}, errors.New("ambiguous E2B creation operation")
 	}
 	if !e2bMetadataMatches(listed[0].Metadata, r) {
-		return "", "", errors.New("E2B sandbox ownership could not be verified")
+		return computers.CreationResult{}, errors.New("E2B sandbox ownership could not be verified")
 	}
-	return listed[0].SandboxID, "", nil
+	// The list endpoint never returns the envd access token, so a sandbox
+	// recovered here has no token and its envd execution fails until it is
+	// destroyed and recreated. That is an accepted recovery limitation.
+	return computers.CreationResult{ExternalID: listed[0].SandboxID}, nil
 }
 
 // Destroy is the control-plane teardown used by the cleanup worker, whose

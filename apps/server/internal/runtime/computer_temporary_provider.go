@@ -83,14 +83,14 @@ func (p temporaryComputerProvider) nodeRunner(ctx context.Context, r computers.R
 	return session, storageRoot, err
 }
 
-func (p temporaryComputerProvider) Create(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p temporaryComputerProvider) Create(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	runner, storageRoot, err := p.runner(ctx, r, true)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	name, labels := computerContainerIdentity(r)
 	var result computerContainer
@@ -103,37 +103,37 @@ func (p temporaryComputerProvider) Create(ctx context.Context, r computers.Runti
 		"workingDir": "/workspace", "restart": "no",
 	}, &result)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	if err = validateComputerContainer(result, r); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
-	return result.DockerID, root, nil
+	return computers.CreationResult{ExternalID: result.DockerID, RootPath: root}, nil
 }
 
-func (p temporaryComputerProvider) Find(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p temporaryComputerProvider) Find(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	runner, storageRoot, err := p.runner(ctx, r, false)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	var results []computerContainer
 	if err = runner.call(ctx, "docker.list", map[string]any{"label": "zakura.operation=" + r.CreateOperationID}, &results); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	if len(results) == 0 {
-		return "", "", nil
+		return computers.CreationResult{}, nil
 	}
 	if len(results) != 1 {
-		return "", "", errors.New("ambiguous computer creation operation")
+		return computers.CreationResult{}, errors.New("ambiguous computer creation operation")
 	}
 	if err = validateComputerContainer(results[0], r); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
-	return results[0].DockerID, root, nil
+	return computers.CreationResult{ExternalID: results[0].DockerID, RootPath: root}, nil
 }
 
 // Destroy stops and removes the container, then deletes the node directory that

@@ -23,7 +23,7 @@ func (s Store) CollectExpiredRuntimes(ctx context.Context, now time.Time, limit 
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,expires_at,idle_deadline FROM computer_runtimes WHERE state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') AND (expires_at IS NOT NULL OR idle_deadline IS NOT NULL)`))
+	rows, err := s.DB.QueryContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,expires_at,idle_deadline FROM computer_runtimes WHERE state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') AND (expires_at IS NOT NULL OR idle_deadline IS NOT NULL)`))
 	if err != nil {
 		return nil, err
 	}

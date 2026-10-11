@@ -25,7 +25,7 @@ func TestActivityCannotReviveOrReplaceRuntime(t *testing.T) {
 			if err = s.ApproveCreation(ctx, target, r.CreateOperationID, "admin", now); err != nil {
 				t.Fatal(err)
 			}
-			if err = s.CompleteCreation(ctx, target, r.CreateOperationID, "vm1", "", now); err != nil {
+			if err = s.CompleteCreation(ctx, target, r.CreateOperationID, CreationResult{ExternalID: "vm1"}, now); err != nil {
 				t.Fatal(err)
 			}
 			if provider == Server {
@@ -107,7 +107,7 @@ func TestActivityIdleExpiryBoundary(t *testing.T) {
 	if err = s.ApproveCreation(ctx, target, r.CreateOperationID, "admin", now); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CompleteCreation(ctx, target, r.CreateOperationID, "vm1", "", now); err != nil {
+	if err = s.CompleteCreation(ctx, target, r.CreateOperationID, CreationResult{ExternalID: "vm1"}, now); err != nil {
 		t.Fatal(err)
 	}
 	r, err = s.GetRuntime(ctx, target)

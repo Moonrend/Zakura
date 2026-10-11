@@ -49,6 +49,7 @@ type acpLiveRuntime struct {
 	profileID, acpSessionID  string
 	runner                   *runnerSession
 	processID                string
+	computerID               string
 	writeMethod, closeMethod string
 	detach                   func()
 	seq                      atomic.Uint64
@@ -206,46 +207,79 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	}
 	argv := append([]string{command}, stringSlice(profile["args"])...)
 	env := stringMap(profile["env"])
-	var nodeID, spaceID, workspaceKind string
-	var rec struct {
-		NodeID        string `gorm:"column:node_id"`
-		SpaceID       string `gorm:"column:space_id"`
-		WorkspaceKind string `gorm:"column:workspace_kind"`
-	}
-	err := m.h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenantID, agentID).Take(&rec).Error
-	if err != nil {
-		return nil, errors.New("agent runtime node is not online")
-	}
-	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
-	runner, err := m.h.hub.get(nodeID)
-	if err != nil {
-		return nil, err
-	}
 	workingDir := "/workspace"
 	if sess.Project != nil && *sess.Project != "" && !strings.Contains(*sess.Project, "..") && !strings.HasPrefix(*sess.Project, "/") {
 		workingDir += "/" + strings.Trim(*sess.Project, "/")
 	}
-	startMethod, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
-	params := map[string]any{"spaceId": spaceID, "command": argv, "workingDir": workingDir, "env": env, "cols": 120, "rows": 40}
-	if workspaceKind != "host" {
-		var containers []struct {
-			DockerID string            `json:"dockerId"`
-			Labels   map[string]string `json:"labels"`
+	exec, acpErr := resolveACPHost(ctx, m.h, tenantID, agentID, sid)
+	if acpErr != nil {
+		return nil, acpErr
+	}
+	var pinnedHost string
+	if len(sess.Origin) > 0 {
+		var origin struct {
+			ACPComputerID string `json:"acpComputerId"`
 		}
-		if err := runner.call(ctx, "docker.list", map[string]any{"label": "zakura.space=" + spaceID}, &containers); err != nil {
+		_ = json.Unmarshal(sess.Origin, &origin)
+		pinnedHost = origin.ACPComputerID
+	}
+	resolvedHost := ""
+	if exec != nil {
+		resolvedHost = exec.computer.ID
+	}
+	if pinnedHost != "" && pinnedHost != resolvedHost {
+		return nil, errors.New("ACP session host computer changed; start a new session")
+	}
+	var runner *runnerSession
+	var params map[string]any
+	var err error
+	startMethod, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
+	if exec != nil {
+		if runner, err = m.h.hub.get(exec.nodeID); err != nil {
 			return nil, err
 		}
-		dockerID := ""
-		for _, container := range containers {
-			if container.Labels["zakura.purpose"] == "workspace" || dockerID == "" {
-				dockerID = container.DockerID
-			}
-		}
-		if dockerID == "" {
-			return nil, errors.New("workspace container is not running")
+		sidecarID, sidecarErr := m.h.ensureACPSidecar(ctx, exec)
+		if sidecarErr != nil {
+			return nil, sidecarErr
 		}
 		startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
-		params = map[string]any{"id": dockerID, "command": argv, "workingDir": workingDir, "env": env}
+		params = map[string]any{"id": sidecarID, "command": argv, "workingDir": workingDir, "env": env}
+	} else {
+		var nodeID, spaceID, workspaceKind string
+		var rec struct {
+			NodeID        string `gorm:"column:node_id"`
+			SpaceID       string `gorm:"column:space_id"`
+			WorkspaceKind string `gorm:"column:workspace_kind"`
+		}
+		err = m.h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenantID, agentID).Take(&rec).Error
+		if err != nil {
+			return nil, errors.New("agent runtime node is not online")
+		}
+		nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
+		if runner, err = m.h.hub.get(nodeID); err != nil {
+			return nil, err
+		}
+		params = map[string]any{"spaceId": spaceID, "command": argv, "workingDir": workingDir, "env": env, "cols": 120, "rows": 40}
+		if workspaceKind != "host" {
+			var containers []struct {
+				DockerID string            `json:"dockerId"`
+				Labels   map[string]string `json:"labels"`
+			}
+			if err := runner.call(ctx, "docker.list", map[string]any{"label": "zakura.space=" + spaceID}, &containers); err != nil {
+				return nil, err
+			}
+			dockerID := ""
+			for _, container := range containers {
+				if container.Labels["zakura.purpose"] == "workspace" || dockerID == "" {
+					dockerID = container.DockerID
+				}
+			}
+			if dockerID == "" {
+				return nil, errors.New("workspace container is not running")
+			}
+			startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
+			params = map[string]any{"id": dockerID, "command": argv, "workingDir": workingDir, "env": env}
+		}
 	}
 	var started struct {
 		ID string `json:"id"`
@@ -260,7 +294,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	if sess.CreatedByUserID != nil {
 		userID = *sess.CreatedByUserID
 	}
-	rt := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: profileID, runner: runner, processID: started.ID, writeMethod: writeMethod, closeMethod: closeMethod, pending: map[string]chan acpRPCReply{}, inbound: map[string]acpInbound{}, done: make(chan struct{}), state: map[string]any{"runtimeId": started.ID, "sessionId": sid, "profileId": profileID, "state": "starting"}, userID: userID, toolStarted: map[string]time.Time{}, toolRecorded: map[string]bool{}}
+	rt := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: profileID, runner: runner, processID: started.ID, computerID: resolvedHost, writeMethod: writeMethod, closeMethod: closeMethod, pending: map[string]chan acpRPCReply{}, inbound: map[string]acpInbound{}, done: make(chan struct{}), state: map[string]any{"runtimeId": started.ID, "sessionId": sid, "profileId": profileID, "state": "starting"}, userID: userID, toolStarted: map[string]time.Time{}, toolRecorded: map[string]bool{}}
 	lines := make(chan []byte, 128)
 	rt.detach = runner.onStream(started.ID, func(channel string, data []byte) {
 		if channel == "exit" {
@@ -608,6 +642,9 @@ func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
 	origin["acpProfileId"] = rt.profileID
 	origin["acpSessionId"] = rt.acpSessionID
 	origin["acpRuntimeId"] = rt.processID
+	if rt.computerID != "" {
+		origin["acpComputerId"] = rt.computerID
+	}
 	raw, _ := json.Marshal(origin)
 	err = rt.manager.h.deps.Gorm.WithContext(ctx).Model(&models.CloudAgentSession{}).Where("tenant_id=? AND agent_id=? AND id=?", rt.tenantID, rt.agentID, rt.sid).Updates(map[string]any{"origin_json": string(raw), "updated_at": runtimeTimeString(rt.manager.h.store.now())}).Error
 	return err

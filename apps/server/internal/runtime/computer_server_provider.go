@@ -103,14 +103,14 @@ func validateComputerContainer(c computerContainer, r computers.Runtime) error {
 	return nil
 }
 
-func (p serverComputerProvider) Create(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p serverComputerProvider) Create(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	runner, storageRoot, err := p.runner(ctx, r, true)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	name, labels := computerContainerIdentity(r)
 	var result computerContainer
@@ -122,36 +122,36 @@ func (p serverComputerProvider) Create(ctx context.Context, r computers.Runtime)
 		"workingDir": "/workspace", "restart": "unless-stopped",
 	}, &result)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	if err = validateComputerContainer(result, r); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
-	return result.DockerID, root, nil
+	return computers.CreationResult{ExternalID: result.DockerID, RootPath: root}, nil
 }
 
-func (p serverComputerProvider) Find(ctx context.Context, r computers.Runtime) (string, string, error) {
+func (p serverComputerProvider) Find(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
 	runner, storageRoot, err := p.runner(ctx, r, false)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	root, err := computerRoot(ctx, runner, storageRoot, r.ID)
 	if err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	var results []computerContainer
 	if err = runner.call(ctx, "docker.list", map[string]any{"label": "zakura.operation=" + r.CreateOperationID}, &results); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
 	// A duplicate or mismatched label is not permission to pick the first result.
 	if len(results) == 0 {
-		return "", "", nil
+		return computers.CreationResult{}, nil
 	}
 	if len(results) != 1 {
-		return "", "", errors.New("ambiguous computer creation operation")
+		return computers.CreationResult{}, errors.New("ambiguous computer creation operation")
 	}
 	if err = validateComputerContainer(results[0], r); err != nil {
-		return "", "", err
+		return computers.CreationResult{}, err
 	}
-	return results[0].DockerID, root, nil
+	return computers.CreationResult{ExternalID: results[0].DockerID, RootPath: root}, nil
 }

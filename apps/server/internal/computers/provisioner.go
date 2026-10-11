@@ -12,14 +12,24 @@ import (
 var ErrProviderUnavailable = errors.New("computer provider adapter is unavailable")
 var ErrCreationUncertain = errors.New("computer creation outcome is uncertain; reconciliation is required")
 
+// CreationResult carries the observed provider instance identity plus optional
+// provider-issued access material. AccessTokenEnc is a sealed computer-v1
+// envelope bound to the computer identity as AAD; CompleteCreation persists it
+// verbatim and never sees plaintext. Empty when the provider issues none.
+type CreationResult struct {
+	ExternalID     string
+	RootPath       string
+	AccessTokenEnc string
+}
+
 // CreationProvider is a control-plane interface, never exposed to execution tools.
 // Create must tag the instance with CreateOperationID. Find must only observe
 // that operation in the exact computer/account scope; it MUST NOT create, retry,
 // or search another account. Empty ID means not yet observed, not safe to retry.
 // Implementations load credentials using r's persisted tenant/computer identity.
 type CreationProvider interface {
-	Create(context.Context, Runtime) (externalID, rootPath string, err error)
-	Find(context.Context, Runtime) (externalID, rootPath string, err error)
+	Create(context.Context, Runtime) (CreationResult, error)
+	Find(context.Context, Runtime) (CreationResult, error)
 }
 
 // Provisioner coordinates durable approval with provider effects. Only the CAS
@@ -70,12 +80,12 @@ func (p Provisioner) ApproveAndCreate(ctx context.Context, t Target, operation, 
 		return r, err
 	}
 	r.State = Creating
-	id, root, createErr := adapter.Create(ctx, r)
+	result, createErr := adapter.Create(ctx, r)
 	// A disconnected client must not prevent persisting an observed instance.
 	// Bound this detached DB-only work; no extra provider calls are made here.
 	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if createErr != nil || strings.TrimSpace(id) == "" {
+	if createErr != nil || strings.TrimSpace(result.ExternalID) == "" {
 		err = p.Store.Transition(persist, t, Creating, Unknown, p.now().UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return r, errors.Join(ErrCreationUncertain, err)
@@ -84,7 +94,7 @@ func (p Provisioner) ApproveAndCreate(ctx context.Context, t Target, operation, 
 		// Provider errors may contain credentials or signed URLs. Never surface them.
 		return r, ErrCreationUncertain
 	}
-	if err = p.Store.CompleteCreation(persist, t, operation, id, root, p.now()); err != nil {
+	if err = p.Store.CompleteCreation(persist, t, operation, result, p.now()); err != nil {
 		return r, fmt.Errorf("record provider instance (reconcile before retry): %w", err)
 	}
 	return p.Store.GetRuntime(persist, t)
@@ -112,18 +122,18 @@ func (p Provisioner) ReconcileCreation(ctx context.Context, t Target) (Runtime, 
 	if err != nil {
 		return r, ErrApprovalRequired
 	}
-	id, root, err := adapter.Find(ctx, r)
-	if err != nil || strings.TrimSpace(id) == "" {
+	result, err := adapter.Find(ctx, r)
+	if err != nil || strings.TrimSpace(result.ExternalID) == "" {
 		return r, ErrCreationUncertain
 	}
 	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	err = p.Store.CompleteCreation(persist, t, r.CreateOperationID, id, root, p.now())
+	err = p.Store.CompleteCreation(persist, t, r.CreateOperationID, result, p.now())
 	if errors.Is(err, ErrTransitionConflict) {
 		// Another reconciler may have completed the same observation. Accept only
 		// that exact instance; never treat a different provider ID as success.
 		current, readErr := p.Store.GetRuntime(persist, t)
-		if readErr == nil && current.State == Ready && current.ExternalID == id {
+		if readErr == nil && current.State == Ready && current.ExternalID == result.ExternalID {
 			return current, nil
 		}
 	}

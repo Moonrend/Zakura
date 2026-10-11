@@ -130,10 +130,14 @@ type Runtime struct {
 	ExternalID        string
 	// RootPath is the computer's workspace root on its runtime node (server
 	// provider only). Empty for providers without a node-hosted directory.
-	RootPath     string
-	State        State
-	ExpiresAt    time.Time
-	IdleDeadline time.Time
+	RootPath string
+	// AccessTokenEnc is provider-issued access material (E2B envd token) as a
+	// sealed computer-v1 envelope bound to the computer identity as AAD. Empty
+	// when the provider issues none; it is an internal field, never JSON-exposed.
+	AccessTokenEnc string
+	State          State
+	ExpiresAt      time.Time
+	IdleDeadline   time.Time
 }
 
 type Target struct {

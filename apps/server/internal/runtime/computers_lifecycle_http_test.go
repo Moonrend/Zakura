@@ -29,7 +29,7 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No live runner: approval must become uncertain, not retry implicitly.
-	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"temporary", "temporary"}, {"legacy:" + space.ID, "server"}} {
+	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"temporary", "temporary"}, {"railway", "railway"}, {"legacy:" + space.ID, "server"}} {
 		if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,'tenant',?,'Computer',?,'now','now')`, entry.id, space.ID, entry.provider).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -97,6 +97,24 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	}
 	if next := call("POST", e2bBase+"?session="+chat.ID, "", owner); next.Body.String() != ew.Body.String() {
 		t.Fatal("e2b reservation retry changed identity")
+	}
+	// Railway is not session-scoped: reservation needs no session and, like every
+	// other provider, records intent only, so it is safe to exercise offline. Its
+	// approve/reconcile paths dial SSH and are covered by the provider unit tests.
+	railwayBase := "/spaces/" + space.ID + "/computers/railway/runtimes"
+	rw := call("POST", railwayBase, "", owner)
+	if rw.Code != 200 {
+		t.Fatalf("railway reserve: %d %s", rw.Code, rw.Body)
+	}
+	var railwayReserved computerRuntimeResponse
+	if err = json.Unmarshal(rw.Body.Bytes(), &railwayReserved); err != nil {
+		t.Fatal(err)
+	}
+	if railwayReserved.State != computers.PendingApproval || railwayReserved.RuntimeID == "" || railwayReserved.ExecutionAvailable {
+		t.Fatalf("railway reservation: %+v", railwayReserved)
+	}
+	if next := call("POST", railwayBase, "", owner); next.Body.String() != rw.Body.String() {
+		t.Fatal("railway reservation retry changed identity")
 	}
 	w := call("POST", base, "", owner)
 	if w.Code != 200 {

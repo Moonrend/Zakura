@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
 // computerContainerExec routes commands into the pinned computer's own
@@ -14,6 +16,9 @@ import (
 func (h *handler) computerContainerExec(ctx context.Context, exec *resolvedExecution, mode string, executionTimeoutMS int64, command string, args ...string) (map[string]any, error) {
 	if mode == "sandbox" {
 		return nil, errors.New("restricted execution is unavailable on this computer; refusing downgrade")
+	}
+	if exec.computer.Provider == computers.E2B {
+		return h.e2bComputerExec(ctx, exec, executionTimeoutMS, command, args...)
 	}
 	if exec.containerID == "" || exec.nodeID == "" {
 		return nil, errors.New("computer runtime has no verified container")

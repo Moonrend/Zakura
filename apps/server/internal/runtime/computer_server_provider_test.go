@@ -104,10 +104,10 @@ func TestServerComputerProvisioning(t *testing.T) {
 			}
 			target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
 			adapter := serverComputerProvider{h: h}
-			if _, _, err = adapter.Create(ctx, r); err == nil {
+			if _, err = adapter.Create(ctx, r); err == nil {
 				t.Fatal("creation without approval")
 			}
-			if _, _, err = adapter.Find(ctx, r); err == nil {
+			if _, err = adapter.Find(ctx, r); err == nil {
 				t.Fatal("reconciliation without approval")
 			}
 			mu.Lock()
@@ -142,7 +142,7 @@ func TestServerComputerProvisioning(t *testing.T) {
 			}
 			foreign := r
 			foreign.TenantID = "other"
-			if _, _, err = adapter.Find(ctx, foreign); err == nil {
+			if _, err = adapter.Find(ctx, foreign); err == nil {
 				t.Fatal("cross tenant lookup")
 			}
 			mu.Lock()
