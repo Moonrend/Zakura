@@ -34,8 +34,12 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 		return nil, fmt.Errorf("tool %s is disabled for this run", name)
 	}
 	if computerBoundTool(name) {
-		if err := h.guardLegacyComputer(ctx, tenant, agent, session, args); err != nil {
+		exec, err := h.resolveExecutionGuard(ctx, tenant, agent, session, args)
+		if err != nil {
 			return nil, err
+		}
+		if exec != nil {
+			ctx = context.WithValue(ctx, computerExecKey{}, exec)
 		}
 	}
 	switch {

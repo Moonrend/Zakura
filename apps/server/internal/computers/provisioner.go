@@ -18,8 +18,8 @@ var ErrCreationUncertain = errors.New("computer creation outcome is uncertain; r
 // or search another account. Empty ID means not yet observed, not safe to retry.
 // Implementations load credentials using r's persisted tenant/computer identity.
 type CreationProvider interface {
-	Create(context.Context, Runtime) (string, error)
-	Find(context.Context, Runtime) (string, error)
+	Create(context.Context, Runtime) (externalID, rootPath string, err error)
+	Find(context.Context, Runtime) (externalID, rootPath string, err error)
 }
 
 // Provisioner coordinates durable approval with provider effects. Only the CAS
@@ -70,7 +70,7 @@ func (p Provisioner) ApproveAndCreate(ctx context.Context, t Target, operation, 
 		return r, err
 	}
 	r.State = Creating
-	id, createErr := adapter.Create(ctx, r)
+	id, root, createErr := adapter.Create(ctx, r)
 	// A disconnected client must not prevent persisting an observed instance.
 	// Bound this detached DB-only work; no extra provider calls are made here.
 	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -84,7 +84,7 @@ func (p Provisioner) ApproveAndCreate(ctx context.Context, t Target, operation, 
 		// Provider errors may contain credentials or signed URLs. Never surface them.
 		return r, ErrCreationUncertain
 	}
-	if err = p.Store.CompleteCreation(persist, t, operation, id, p.now()); err != nil {
+	if err = p.Store.CompleteCreation(persist, t, operation, id, root, p.now()); err != nil {
 		return r, fmt.Errorf("record provider instance (reconcile before retry): %w", err)
 	}
 	return p.Store.GetRuntime(persist, t)
@@ -112,13 +112,13 @@ func (p Provisioner) ReconcileCreation(ctx context.Context, t Target) (Runtime, 
 	if err != nil {
 		return r, ErrApprovalRequired
 	}
-	id, err := adapter.Find(ctx, r)
+	id, root, err := adapter.Find(ctx, r)
 	if err != nil || strings.TrimSpace(id) == "" {
 		return r, ErrCreationUncertain
 	}
 	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	err = p.Store.CompleteCreation(persist, t, r.CreateOperationID, id, p.now())
+	err = p.Store.CompleteCreation(persist, t, r.CreateOperationID, id, root, p.now())
 	if errors.Is(err, ErrTransitionConflict) {
 		// Another reconciler may have completed the same observation. Accept only
 		// that exact instance; never treat a different provider ID as success.

@@ -128,9 +128,12 @@ type Runtime struct {
 	Incarnation       string
 	CreateOperationID string
 	ExternalID        string
-	State             State
-	ExpiresAt         time.Time
-	IdleDeadline      time.Time
+	// RootPath is the computer's workspace root on its runtime node (server
+	// provider only). Empty for providers without a node-hosted directory.
+	RootPath     string
+	State        State
+	ExpiresAt    time.Time
+	IdleDeadline time.Time
 }
 
 type Target struct {

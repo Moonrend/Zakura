@@ -47,6 +47,9 @@ func browserStderrFirstLine(result map[string]any) string {
 }
 
 func (h *handler) runBuiltinToolBrowser(ctx context.Context, tenant, agent, name string, args json.RawMessage) (json.RawMessage, error) {
+	if err := refuseNonLegacyExecution(ctx, "browser control"); err != nil {
+		return nil, err
+	}
 	parsed := map[string]any{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &parsed); err != nil {

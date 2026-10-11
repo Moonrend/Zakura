@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,12 +24,24 @@ func TestServerComputerProvisioning(t *testing.T) {
 				t.Fatal(err)
 			}
 			var mu sync.Mutex
-			creates, finds := 0, 0
+			creates, finds, mkdirs := 0, 0, 0
+			mkdirAbs := ""
 			var instance computerContainer
 			h := builtinToolHarness(t, d, "rnr_computer_"+mode, func(method string, params map[string]any) (any, error) {
 				switch method {
 				case "sys.info":
 					return map[string]any{"version": "test", "kind": "server", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"docker": true}}, nil
+				case "host.fs.mkdir":
+					mu.Lock()
+					defer mu.Unlock()
+					root := fmt.Sprint(params["root"])
+					rel := fmt.Sprint(params["path"])
+					if root != "/srv/zakura" || !strings.HasPrefix(rel, "computers/") || !strings.HasSuffix(rel, "/workspace") {
+						return nil, errors.New("unscoped computer root")
+					}
+					mkdirs++
+					mkdirAbs = fmt.Sprintf("/srv/zakura/%s", rel)
+					return map[string]any{"abs": mkdirAbs}, nil
 				case "docker.create":
 					mu.Lock()
 					defer mu.Unlock()
@@ -41,8 +54,11 @@ func TestServerComputerProvisioning(t *testing.T) {
 					_ = json.Unmarshal(raw, &labels)
 					name := fmt.Sprint(params["name"])
 					volume := params["volumes"].([]any)[0].(map[string]any)
-					if volume["volumeName"] != name+"-data" || volume["containerPath"] != "/workspace" || volume["hostPath"] != nil || params["privileged"] != nil || params["ports"] != nil {
+					if volume["hostPath"] != mkdirAbs || volume["containerPath"] != "/workspace" || params["privileged"] != nil || params["ports"] != nil {
 						return nil, errors.New("unsafe creation spec")
+					}
+					if _, hasVolume := volume["volumeName"]; hasVolume {
+						return nil, errors.New("legacy volume name present")
 					}
 					instance = computerContainer{DockerID: "container", Name: "/" + name, Image: serverComputerImage, Status: "running", Labels: labels}
 					if mode == "wrong-owner" {
@@ -88,12 +104,18 @@ func TestServerComputerProvisioning(t *testing.T) {
 			}
 			target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
 			adapter := serverComputerProvider{h: h}
-			if _, err = adapter.Create(ctx, r); err == nil {
+			if _, _, err = adapter.Create(ctx, r); err == nil {
 				t.Fatal("creation without approval")
 			}
-			if _, err = adapter.Find(ctx, r); err == nil {
+			if _, _, err = adapter.Find(ctx, r); err == nil {
 				t.Fatal("reconciliation without approval")
 			}
+			mu.Lock()
+			if mkdirs != 0 {
+				mu.Unlock()
+				t.Fatal("host filesystem touched before approval")
+			}
+			mu.Unlock()
 			p := computers.Provisioner{Store: store, Providers: map[computers.Provider]computers.CreationProvider{computers.Server: adapter}}
 			result, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
 			if mode == "success" {
@@ -120,13 +142,20 @@ func TestServerComputerProvisioning(t *testing.T) {
 			}
 			foreign := r
 			foreign.TenantID = "other"
-			if _, err = adapter.Find(ctx, foreign); err == nil {
+			if _, _, err = adapter.Find(ctx, foreign); err == nil {
 				t.Fatal("cross tenant lookup")
 			}
 			mu.Lock()
 			defer mu.Unlock()
 			if creates != 1 {
 				t.Fatalf("creates=%d", creates)
+			}
+			expectedMkdirs := 2
+			if mode == "success" || mode == "unsupported" {
+				expectedMkdirs = 1
+			}
+			if mkdirs != expectedMkdirs {
+				t.Fatalf("mkdirs=%d", mkdirs)
 			}
 			if mode == "success" || mode == "unsupported" {
 				if finds != 0 {

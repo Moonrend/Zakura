@@ -12,15 +12,15 @@ import (
 type creationStub struct {
 	creates atomic.Int32
 	finds   atomic.Int32
-	create  func(context.Context, Runtime) (string, error)
-	find    func(context.Context, Runtime) (string, error)
+	create  func(context.Context, Runtime) (string, string, error)
+	find    func(context.Context, Runtime) (string, string, error)
 }
 
-func (s *creationStub) Create(ctx context.Context, r Runtime) (string, error) {
+func (s *creationStub) Create(ctx context.Context, r Runtime) (string, string, error) {
 	s.creates.Add(1)
 	return s.create(ctx, r)
 }
-func (s *creationStub) Find(ctx context.Context, r Runtime) (string, error) {
+func (s *creationStub) Find(ctx context.Context, r Runtime) (string, string, error) {
 	s.finds.Add(1)
 	return s.find(ctx, r)
 }
@@ -38,13 +38,13 @@ func provisionFixture(t *testing.T, stub *creationStub) (Provisioner, Runtime, T
 
 func TestProvisionerApprovalAndSingleCreate(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	stub := &creationStub{create: func(ctx context.Context, r Runtime) (string, error) {
+	stub := &creationStub{create: func(ctx context.Context, r Runtime) (string, string, error) {
 		if r.State != Creating || r.CreateOperationID == "" || r.TenantID != "tenant" {
-			return "", errors.New("identity missing")
+			return "", "", errors.New("identity missing")
 		}
 		close(entered)
 		<-release
-		return "vm1", nil
+		return "vm1", "", nil
 	}}
 	p, r, target := provisionFixture(t, stub)
 	ctx := context.Background()
@@ -85,12 +85,12 @@ func TestProvisionerApprovalAndSingleCreate(t *testing.T) {
 func TestProvisionerUncertainCreationNeverRetries(t *testing.T) {
 	for _, emptyResult := range []bool{false, true} {
 		t.Run(map[bool]string{false: "network-error", true: "empty-instance"}[emptyResult], func(t *testing.T) {
-			stub := &creationStub{create: func(context.Context, Runtime) (string, error) {
+			stub := &creationStub{create: func(context.Context, Runtime) (string, string, error) {
 				if emptyResult {
-					return "", nil
+					return "", "", nil
 				}
-				return "", errors.New("secret-api-key-in-provider-response")
-			}, find: func(context.Context, Runtime) (string, error) { return "", nil }}
+				return "", "", errors.New("secret-api-key-in-provider-response")
+			}, find: func(context.Context, Runtime) (string, string, error) { return "", "", nil }}
 			p, r, target := provisionFixture(t, stub)
 			ctx := context.Background()
 			current, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
@@ -103,11 +103,11 @@ func TestProvisionerUncertainCreationNeverRetries(t *testing.T) {
 			if _, err = p.ReconcileCreation(ctx, target); !errors.Is(err, ErrCreationUncertain) {
 				t.Fatalf("not found: %v", err)
 			}
-			stub.find = func(_ context.Context, observed Runtime) (string, error) {
+			stub.find = func(_ context.Context, observed Runtime) (string, string, error) {
 				if observed.CreateOperationID != r.CreateOperationID || observed.Incarnation != r.Incarnation {
 					t.Fatal("reconciliation identity changed")
 				}
-				return "recovered-vm", nil
+				return "recovered-vm", "", nil
 			}
 			current, err = p.ReconcileCreation(ctx, target)
 			if err != nil || current.State != Ready || current.ExternalID != "recovered-vm" || stub.creates.Load() != 1 {
@@ -120,7 +120,10 @@ func TestProvisionerUncertainCreationNeverRetries(t *testing.T) {
 func TestProvisionerPersistsAfterClientCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stub := &creationStub{create: func(context.Context, Runtime) (string, error) { cancel(); return "vm-after-disconnect", nil }}
+	stub := &creationStub{create: func(context.Context, Runtime) (string, string, error) {
+		cancel()
+		return "vm-after-disconnect", "", nil
+	}}
 	p, r, target := provisionFixture(t, stub)
 	current, err := p.ApproveAndCreate(ctx, target, r.CreateOperationID, "admin")
 	if err != nil || current.ExternalID != "vm-after-disconnect" || current.State != Ready {
@@ -141,7 +144,7 @@ func TestProvisionerUnavailableDoesNotConsumeApproval(t *testing.T) {
 }
 
 func TestProvisionerReconcilesCrashAfterApproval(t *testing.T) {
-	stub := &creationStub{find: func(context.Context, Runtime) (string, error) { return "observed-vm", nil }}
+	stub := &creationStub{find: func(context.Context, Runtime) (string, string, error) { return "observed-vm", "", nil }}
 	p, r, target := provisionFixture(t, stub)
 	ctx := context.Background()
 	if err := p.Store.ApproveCreation(ctx, target, r.CreateOperationID, "admin", p.now()); err != nil {

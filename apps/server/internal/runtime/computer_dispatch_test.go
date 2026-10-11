@@ -41,13 +41,13 @@ func TestComputerDispatchNeverFallsBack(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	if err = h.guardLegacyComputer(ctx, "tenant", agent.ID, "wrong", nil); err == nil {
+	if _, err := h.resolveExecutionGuard(ctx, "tenant", agent.ID, "wrong", nil); err == nil {
 		t.Fatal("cross-session execution allowed")
 	}
-	if err = h.guardLegacyComputer(ctx, "tenant", agent.ID, chat.ID, []byte(`{"computerId":""}`)); err == nil {
+	if _, err := h.resolveExecutionGuard(ctx, "tenant", agent.ID, chat.ID, []byte(`{"computerId":""}`)); err == nil {
 		t.Fatal("empty override accepted")
 	}
-	if err = h.guardLegacyComputer(context.Background(), "tenant", agent.ID, chat.ID, nil); err == nil {
+	if _, err := h.resolveExecutionGuard(context.Background(), "tenant", agent.ID, chat.ID, nil); err == nil {
 		t.Fatal("missing run accepted")
 	}
 }

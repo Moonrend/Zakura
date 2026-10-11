@@ -25,6 +25,9 @@ import (
 type remoteWorkspace struct {
 	runner  *runnerSession
 	spaceID string
+	// root, when set, scopes host.fs.* RPCs to a computer's own workspace
+	// directory instead of the legacy Space workspace.
+	root string
 }
 
 func runnerWorkspacePath(value string) (string, error) {
@@ -44,6 +47,13 @@ func runnerWorkspacePath(value string) (string, error) {
 }
 
 func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*remoteWorkspace, bool, error) {
+	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
+		runner, err := h.hub.get(exec.nodeID)
+		if err != nil {
+			return nil, true, err
+		}
+		return &remoteWorkspace{runner: runner, spaceID: exec.spaceID, root: exec.hostRoot}, true, nil
+	}
 	var spaceID, nodeID string
 	var rec struct {
 		SpaceID string `gorm:"column:space_id"`
@@ -148,6 +158,19 @@ func remotePathParams(spaceID, raw string) (map[string]any, error) {
 	return map[string]any{"spaceId": spaceID, "path": safe}, nil
 }
 
+// pathParams adds the computer workspace root when this workspace is scoped to
+// a pinned computer rather than the legacy Space directory.
+func (r *remoteWorkspace) pathParams(raw string) (map[string]any, error) {
+	params, err := remotePathParams(r.spaceID, raw)
+	if err != nil {
+		return nil, err
+	}
+	if r.root != "" {
+		params["root"] = r.root
+	}
+	return params, nil
+}
+
 func writeRemoteError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrNotFound) {
 		httpx.Error(w, 404, "Not found")
@@ -170,7 +193,7 @@ type runnerFSEntry struct {
 }
 
 func (r *remoteWorkspace) list(ctx context.Context, target string) (string, []runnerFSEntry, error) {
-	params, err := remotePathParams(r.spaceID, target)
+	params, err := r.pathParams(target)
 	if err != nil {
 		return "", nil, err
 	}
@@ -183,7 +206,7 @@ func (r *remoteWorkspace) list(ctx context.Context, target string) (string, []ru
 }
 
 func (r *remoteWorkspace) read(ctx context.Context, target string, max int64) ([]byte, map[string]any, error) {
-	params, err := remotePathParams(r.spaceID, target)
+	params, err := r.pathParams(target)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -208,7 +231,7 @@ func (r *remoteWorkspace) read(ctx context.Context, target string, max int64) ([
 }
 
 func (r *remoteWorkspace) write(ctx context.Context, target string, data []byte) (map[string]any, error) {
-	params, err := remotePathParams(r.spaceID, target)
+	params, err := r.pathParams(target)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +332,7 @@ func (r *remoteWorkspace) extract(ctx context.Context, archivePath, destination 
 		}
 		target := path.Join(destination, clean)
 		if dir {
-			params, err := remotePathParams(r.spaceID, target)
+			params, err := r.pathParams(target)
 			if err != nil {
 				return err
 			}

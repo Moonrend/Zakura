@@ -48,7 +48,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	h.acp = newACPRuntimeManager(h)
 	h.migrateLegacyComponentConfigs(deps.RunContext())
 	h.service.acpRunner = func(ctx context.Context, tenant, agent, session, runID, content string) error {
-		if err := h.guardLegacyComputer(ctx, tenant, agent, session, nil); err != nil {
+		if _, err := h.resolveExecutionGuard(ctx, tenant, agent, session, nil); err != nil {
 			return err
 		}
 		runtime, err := h.acp.ensure(ctx, tenant, agent, session)

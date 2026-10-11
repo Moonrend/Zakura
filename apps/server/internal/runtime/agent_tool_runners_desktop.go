@@ -18,6 +18,11 @@ const (
 )
 
 func (h *handler) runBuiltinToolDesktop(ctx context.Context, tenant, agent, name string, args map[string]any) (json.RawMessage, error) {
+	// Desktop control needs a display server; dedicated computer containers do
+	// not provide one, so the refusal is explicit instead of failing deeper.
+	if err := refuseNonLegacyExecution(ctx, "desktop control"); err != nil {
+		return nil, err
+	}
 	switch name {
 	case "computer_screenshot":
 		return h.runComputerScreenshot(ctx, tenant, agent, args)

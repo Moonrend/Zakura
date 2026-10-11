@@ -123,6 +123,9 @@ func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent,
 	if mode != "" && mode != "host" && mode != "sandbox" {
 		return nil, errors.New("execution_mode must be host or sandbox")
 	}
+	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
+		return h.computerContainerExec(ctx, exec, mode, executionTimeoutMS, command, args...)
+	}
 	var nodeID, spaceID, workspaceKind string
 	var rec struct {
 		NodeID        string `gorm:"column:node_id"`

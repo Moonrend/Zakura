@@ -46,7 +46,7 @@ func (s Store) ReserveRuntime(ctx context.Context, tenant, space, computer, sess
 	if err != nil {
 		return Runtime{}, err
 	}
-	r, err := scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
+	r, err := scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, scope))
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -61,12 +61,13 @@ type runtimeScanner interface{ Scan(...any) error }
 
 func scanRuntime(row runtimeScanner) (Runtime, error) {
 	var r Runtime
-	var external, expires, idle sql.NullString
-	err := row.Scan(&r.ID, &r.TenantID, &r.SpaceID, &r.ComputerID, &r.SessionScope, &r.Incarnation, &r.CreateOperationID, &r.State, &external, &expires, &idle)
+	var external, root, expires, idle sql.NullString
+	err := row.Scan(&r.ID, &r.TenantID, &r.SpaceID, &r.ComputerID, &r.SessionScope, &r.Incarnation, &r.CreateOperationID, &r.State, &external, &root, &expires, &idle)
 	if err != nil {
 		return r, err
 	}
 	r.ExternalID = external.String
+	r.RootPath = root.String
 	if expires.Valid {
 		r.ExpiresAt, err = time.Parse(time.RFC3339Nano, expires.String)
 		if err != nil {

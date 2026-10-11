@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 )
 
@@ -21,71 +20,6 @@ func computerBoundTool(name string) bool {
 	// Until MCP transports carry a pinned runtime, fail closed for both catalog
 	// and qualified calls. A provider must not escape selection through MCP.
 	return strings.HasPrefix(name, "mcp__") || strings.Contains(name, ":")
-}
-
-// guardLegacyComputer prevents the transitional Space-based executors from
-// silently executing on a different computer. New adapters must replace this
-// guard with runtime/incarnation resolution, never bypass it on lookup errors.
-func (h *handler) guardLegacyComputer(ctx context.Context, tenant, agent, session string, args json.RawMessage) error {
-	var selection struct {
-		ComputerID *string `json:"computerId"`
-	}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &selection); err != nil {
-			return fmt.Errorf("invalid computer selection: %w", err)
-		}
-	}
-	run, _ := ctx.Value(computerRunKey{}).(string)
-	if run == "" {
-		if session != "" || selection.ComputerID != nil {
-			return errors.New("computer execution requires an immutable run target")
-		}
-		return nil // non-session legacy API; no selection was offered
-	}
-	a, err := h.store.GetAgent(ctx, tenant, agent)
-	if err != nil {
-		return err
-	}
-	// Bind the context to this exact chat as well as tenant/Space.
-	var valid int
-	err = h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT 1 FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE r.id=? AND s.id=? AND s.tenant_id=? AND s.agent_id=?`), run, session, tenant, agent).Scan(&valid)
-	if err != nil {
-		return err
-	}
-	explicit := ""
-	if selection.ComputerID != nil {
-		explicit = strings.TrimSpace(*selection.ComputerID)
-		if explicit == "" {
-			return errors.New("computerId must not be empty")
-		}
-	}
-	c, err := h.computerStore().ResolveRunComputer(ctx, tenant, a.SpaceID, run, explicit)
-	if err != nil {
-		return err
-	}
-	var scope, kind, node, image sql.NullString
-	err = h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT legacy_workspace_scope,legacy_workspace_kind,runtime_node_id,workspace_image FROM computers WHERE id=? AND tenant_id=? AND space_id=?`), c.ID, tenant, a.SpaceID).Scan(&scope, &kind, &node, &image)
-	if err != nil {
-		return err
-	}
-	if !scope.Valid || scope.String != a.SpaceID {
-		return fmt.Errorf("computer %s has no connected execution adapter; refusing legacy workspace fallback", c.ID)
-	}
-	space, err := h.store.GetSpace(ctx, tenant, a.SpaceID)
-	if err != nil {
-		return err
-	}
-	currentNode, currentImage := "", ""
-	if space.RuntimeNodeID != nil {
-		currentNode = *space.RuntimeNodeID
-	}
-	if space.WorkspaceImage != nil {
-		currentImage = *space.WorkspaceImage
-	}
-	if !space.EnableComputer || node.String != currentNode || kind.String != space.WorkspaceKind || image.String != currentImage {
-		return errors.New("legacy computer configuration changed; refusing execution on an unbound workspace")
-	}
-	return nil
 }
 
 // runListComputers exposes only public configuration and this Run's snapshot.
