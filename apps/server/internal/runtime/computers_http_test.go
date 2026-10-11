@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestComputerSelectionHTTP(t *testing.T) {
@@ -138,5 +142,77 @@ func TestComputerManagementHTTP(t *testing.T) {
 	}
 	if w := call("POST", path, `{"name":"bad","provider":"e2b","config":{}}`, p); w.Code != 400 {
 		t.Fatalf("missing credential: %d", w.Code)
+	}
+}
+
+func TestComputerManagementAcceptsComputerNode(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	h := &handler{deps: d, store: NewStore(d)}
+	space, err := h.store.CreateSpace(context.Background(), "tenant", Space{Name: "S"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("node-token"))
+	for _, node := range []struct{ id, kind string }{{"cnode", "computer"}, {"rnode", "runner"}} {
+		if _, err := d.DB.Exec(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,token_hash,capabilities_json,host_info_json,storage_root,labels_json,is_shared,created_at,updated_at) VALUES(?,?,?,?,?,'offline',?,'{}','{}','/srv/zakura','{}',false,'now','now')`, node.id, "tenant", node.id, node.id, node.kind, hex.EncodeToString(sum[:])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	router := chi.NewRouter()
+	h.registerComputers(router)
+	path := "/spaces/" + space.ID + "/computers"
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant", Role: "owner"}))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	if w := call(`{"name":"Local","provider":"server","runtimeNodeId":"cnode","config":{}}`); w.Code != 201 {
+		t.Fatalf("computer node rejected: %d %s", w.Code, w.Body)
+	}
+	if w := call(`{"name":"Bad","provider":"server","runtimeNodeId":"rnode","config":{}}`); w.Code != 400 {
+		t.Fatalf("unrelated node kind accepted: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestComputerManagementRailwayAutoKey(t *testing.T) {
+	d := testDeps(t)
+	seedTenant(t, d, "tenant")
+	h := &handler{deps: d, store: NewStore(d)}
+	space, err := h.store.CreateSpace(context.Background(), "tenant", Space{Name: "S"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	h.registerComputers(router)
+	req := httptest.NewRequest("POST", "/spaces/"+space.ID+"/computers", strings.NewReader(`{"name":"Railway","provider":"railway","config":{}}`))
+	req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant", Role: "owner"}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 201 {
+		t.Fatalf("railway create: %d %s", w.Code, w.Body)
+	}
+	var secret, computerID string
+	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=?`, space.ID).Scan(&secret, &computerID); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := computers.OpenCredentials(d.Secret, "tenant", space.ID, computerID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(plain, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(stored["privateKey"]) == "" {
+		t.Fatal("railway private key was not generated")
+	}
+	if _, ok := stored["hostKeyFingerprint"]; ok {
+		t.Fatalf("unexpected host key fingerprint: %q", stored["hostKeyFingerprint"])
+	}
+	if _, err := ssh.ParsePrivateKey([]byte(stored["privateKey"])); err != nil {
+		t.Fatalf("generated key does not parse: %v", err)
 	}
 }

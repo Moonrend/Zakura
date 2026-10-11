@@ -66,3 +66,42 @@ func DialSSH(ctx context.Context, cfg SSHDialConfig) (*ssh.Client, error) {
 	}
 	return ssh.NewClient(sshConn, chans, reqs), nil
 }
+
+// DialSSHFirstUse is DialSSH with trust-on-first-use for providers whose host key
+// cannot be known before the first connection (for example railway.new). An empty
+// HostKeyFingerprint accepts the offered key exactly once and returns its
+// fingerprint so the caller can persist it; a non-empty fingerprint pins and
+// aborts on mismatch, identical to DialSSH. Keys and fingerprints are secrets.
+func DialSSHFirstUse(ctx context.Context, cfg SSHDialConfig) (*ssh.Client, string, error) {
+	signer, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
+	if err != nil {
+		return nil, "", errors.New("ssh private key could not be parsed")
+	}
+	want := strings.TrimSpace(cfg.HostKeyFingerprint)
+	observed := ""
+	hostKeyCallback := func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		observed = SSHFingerprint(key)
+		if want != "" && observed != want {
+			return errors.New("host key fingerprint mismatch")
+		}
+		return nil
+	}
+	config := &ssh.ClientConfig{
+		User:            cfg.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         15 * time.Second,
+	}
+	address := net.JoinHostPort(cfg.Host, cfg.Port)
+	dialer := net.Dialer{Timeout: 15 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		return nil, "", errors.New("ssh connection failed")
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, config)
+	if err != nil {
+		_ = conn.Close()
+		return nil, "", err
+	}
+	return ssh.NewClient(sshConn, chans, reqs), observed, nil
+}

@@ -54,3 +54,26 @@ func TestConfigurationIsolation(t *testing.T) {
 		t.Fatalf("clear %v %v", id, err)
 	}
 }
+
+func TestUpdateCredentialsIsScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.UpdateCredentials(ctx, "tenant", "space", "computer-space", "sealed-one"); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.DB.QueryRow(`SELECT secret_ref FROM computers WHERE id='computer-space'`).Scan(&got); err != nil || got != "sealed-one" {
+		t.Fatalf("update: %q %v", got, err)
+	}
+	for _, scope := range [][2]string{{"other", "space"}, {"tenant", "foreign"}, {"other", "foreign"}} {
+		if err := s.UpdateCredentials(ctx, scope[0], scope[1], "computer-space", "sealed-two"); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("cross-tenant update %v: %v", scope, err)
+		}
+	}
+	if err := s.UpdateCredentials(ctx, "tenant", "space", "missing", "sealed-three"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing computer: %v", err)
+	}
+	if err := s.DB.QueryRow(`SELECT secret_ref FROM computers WHERE id='computer-space'`).Scan(&got); err != nil || got != "sealed-one" {
+		t.Fatalf("scoped update changed row: %q %v", got, err)
+	}
+}

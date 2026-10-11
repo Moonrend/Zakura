@@ -63,14 +63,16 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.Provider == computers.Server || c.Provider == computers.RemoteAgent || c.Provider == computers.Temporary {
-		var node struct{ Kind string }
+		var node struct {
+			Kind string `gorm:"column:kind"`
+		}
 		err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("kind").Where("(tenant_id=? OR is_shared=TRUE) AND id=?", p.TenantID, c.RuntimeNodeID).Take(&node).Error
 		if err != nil {
 			httpx.Error(w, 400, "runtime node is unavailable")
 			return
 		}
-		if (c.Provider == computers.Server || c.Provider == computers.Temporary) && node.Kind != "server" {
-			httpx.Error(w, 400, "a server node is required")
+		if (c.Provider == computers.Server || c.Provider == computers.Temporary) && node.Kind != "server" && node.Kind != "computer" {
+			httpx.Error(w, 400, "a server or computer node is required")
 			return
 		}
 	} else if c.RuntimeNodeID != "" {
@@ -82,6 +84,17 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 	if err := computers.ValidateConfiguration(c.Provider, in.Config); err != nil {
 		httpx.Error(w, 400, err.Error())
 		return
+	}
+	if c.Provider == computers.Railway && strings.TrimSpace(in.Config["privateKey"]) == "" {
+		generated, err := computers.GenerateSSHPrivateKey()
+		if err != nil {
+			httpx.Error(w, 500, "computer configuration could not be generated")
+			return
+		}
+		if in.Config == nil {
+			in.Config = map[string]string{}
+		}
+		in.Config["privateKey"] = generated
 	}
 	raw, err := json.Marshal(in.Config)
 	if err != nil {

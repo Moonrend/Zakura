@@ -262,3 +262,41 @@ func TestRailwayProviderHasNoDestroyer(t *testing.T) {
 		t.Fatal("railway provider must not implement Destroy")
 	}
 }
+
+func TestRailwayTrustOnFirstUsePinsFingerprint(t *testing.T) {
+	env := railwaySetup(t)
+	env.reseal(t, env.clientKey, "")
+	if _, err := env.adapter().Create(context.Background(), env.r); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var envelope string
+	if err := env.h.deps.DB.QueryRow(`SELECT secret_ref FROM computers WHERE tenant_id='tenant' AND space_id=? AND id='computer'`, env.spaceID).Scan(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := computers.OpenCredentials(env.h.deps.Secret, "tenant", env.spaceID, "computer", envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(plain, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored["hostKeyFingerprint"] != env.fingerprint {
+		t.Fatalf("fingerprint not pinned: %q want %q", stored["hostKeyFingerprint"], env.fingerprint)
+	}
+	_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSigner, err := ssh.NewSignerFromKey(otherPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := new(atomic.Value)
+	out.Store(railwayTestManifest)
+	host, port := startFakeRailway(t, otherSigner, func() string { return out.Load().(string) }, nil)
+	adapter := railwayComputerProvider{h: env.h, host: host, port: port}
+	if _, err := adapter.Create(context.Background(), env.r); err == nil || !strings.Contains(err.Error(), "host key fingerprint mismatch") {
+		t.Fatalf("expected fingerprint mismatch, got %v", err)
+	}
+}

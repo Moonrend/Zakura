@@ -45,7 +45,7 @@ func (p temporaryComputerProvider) runner(ctx context.Context, r computers.Runti
  JOIN runtime_nodes n ON n.id=c.runtime_node_id AND (n.tenant_id=c.tenant_id OR n.is_shared=TRUE)
  JOIN computer_creation_approvals a ON a.runtime_id=? AND a.create_operation_id=?
  JOIN computer_runtimes rt ON rt.id=? AND rt.session_scope=? AND rt.computer_id=c.id AND rt.tenant_id=c.tenant_id AND rt.space_id=c.space_id
- WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='temporary' AND n.kind='server'`), r.ID, r.CreateOperationID, r.ID, r.SessionScope, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
+ WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='temporary' AND n.kind IN ('server','computer')`), r.ID, r.CreateOperationID, r.ID, r.SessionScope, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
 	if err != nil {
 		return nil, "", err
 	}
@@ -69,7 +69,7 @@ func (p temporaryComputerProvider) nodeRunner(ctx context.Context, r computers.R
 	err := p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT n.id, n.storage_root FROM computers c
  JOIN runtime_nodes n ON n.id=c.runtime_node_id AND (n.tenant_id=c.tenant_id OR n.is_shared=TRUE)
  JOIN computer_runtimes rt ON rt.id=? AND rt.session_scope=? AND rt.computer_id=c.id AND rt.tenant_id=c.tenant_id AND rt.space_id=c.space_id
- WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='temporary' AND n.kind='server'`), r.ID, r.SessionScope, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
+ WHERE c.tenant_id=? AND c.space_id=? AND c.id=? AND c.provider='temporary' AND n.kind IN ('server','computer')`), r.ID, r.SessionScope, r.TenantID, r.SpaceID, r.ComputerID).Scan(&node, &storageRoot)
 	if err != nil {
 		return nil, "", err
 	}

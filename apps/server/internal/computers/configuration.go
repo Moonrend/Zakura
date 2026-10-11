@@ -43,6 +43,14 @@ func (s Store) Rename(ctx context.Context, tenant, space, id, name string) error
 	result, err := s.DB.ExecContext(ctx, s.query(`UPDATE computers SET name=?,updated_at=? WHERE tenant_id=? AND space_id=? AND id=?`), name, time.Now().UTC().Format(time.RFC3339Nano), tenant, space, id)
 	return requireRow(result, err)
 }
+
+// UpdateCredentials replaces only the sealed envelope of one computer, leaving its
+// policy and capabilities untouched. It is tenant/space scoped and is the write
+// path for trust-on-first-use host key persistence; a missing row is sql.ErrNoRows.
+func (s Store) UpdateCredentials(ctx context.Context, tenant, space, computerID, sealed string) error {
+	result, err := s.DB.ExecContext(ctx, s.query(`UPDATE computers SET secret_ref=?,updated_at=? WHERE tenant_id=? AND space_id=? AND id=?`), sealed, time.Now().UTC().Format(time.RFC3339Nano), tenant, space, computerID)
+	return requireRow(result, err)
+}
 func (s Store) SpaceDefault(ctx context.Context, tenant, space string) (*string, error) {
 	var id sql.NullString
 	err := s.DB.QueryRowContext(ctx, s.query(`SELECT d.computer_id FROM spaces s LEFT JOIN space_computer_defaults d ON d.space_id=s.id AND d.tenant_id=s.tenant_id WHERE s.tenant_id=? AND s.id=?`), tenant, space).Scan(&id)

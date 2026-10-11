@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
@@ -99,7 +100,7 @@ func (p railwayComputerProvider) configuration(ctx context.Context, r computers.
 	if err := json.Unmarshal(plain, &creds); err != nil {
 		return railwayCredentials{}, errors.New("computer Railway configuration is invalid")
 	}
-	if strings.TrimSpace(creds.PrivateKey) == "" || strings.TrimSpace(creds.HostKeyFingerprint) == "" {
+	if strings.TrimSpace(creds.PrivateKey) == "" {
 		return railwayCredentials{}, errors.New("computer Railway configuration is incomplete")
 	}
 	return creds, nil
@@ -130,20 +131,22 @@ func (p railwayComputerProvider) authorize(ctx context.Context, r computers.Runt
 }
 
 // observe dials the box, runs a harmless probe and parses the manifest Railway
-// prints. The connection is always closed; SSH output can be arbitrarily large,
-// so only the first 64KB are retained.
-func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCredentials) (map[string]any, error) {
-	client, err := computers.DialSSH(ctx, computers.SSHDialConfig{
+// prints. Railway carries no pre-known host key, so the first connection uses
+// trust-on-first-use and returns the observed fingerprint for the caller to pin.
+// The connection is always closed; SSH output can be arbitrarily large, so only
+// the first 64KB are retained.
+func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCredentials) (map[string]any, string, error) {
+	client, fingerprint, err := computers.DialSSHFirstUse(ctx, computers.SSHDialConfig{
 		Host: p.dialHost(), Port: p.dialPort(), User: p.dialUser(),
 		PrivateKey: creds.PrivateKey, HostKeyFingerprint: creds.HostKeyFingerprint,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, errors.New("railway ssh session could not be opened")
+		return nil, "", errors.New("railway ssh session could not be opened")
 	}
 	defer session.Close()
 	out := &railwayOutput{limit: railwayOutputLimit}
@@ -152,9 +155,30 @@ func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCrede
 	_ = session.Run(railwayProbeCommand)
 	manifest, ok := parseRailwayManifest(out.String())
 	if !ok {
-		return nil, errors.New("railway connection did not return a manifest; reconciliation is required")
+		return nil, "", errors.New("railway connection did not return a manifest; reconciliation is required")
 	}
-	return manifest, nil
+	return manifest, fingerprint, nil
+}
+
+// pinFirstUseFingerprint persists the host key learned by a trust-on-first-use
+// dial so later connections pin it. It runs detached from client cancellation,
+// mirroring the provisioner's post-create persistence, and never logs key
+// material. A computer that already carries a fingerprint is left unchanged.
+func (p railwayComputerProvider) pinFirstUseFingerprint(ctx context.Context, r computers.Runtime, creds railwayCredentials, fingerprint string) error {
+	if strings.TrimSpace(creds.HostKeyFingerprint) != "" || strings.TrimSpace(fingerprint) == "" {
+		return nil
+	}
+	updated, err := json.Marshal(railwayCredentials{PrivateKey: creds.PrivateKey, HostKeyFingerprint: fingerprint})
+	if err != nil {
+		return err
+	}
+	sealed, err := computers.SealCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, updated)
+	if err != nil {
+		return err
+	}
+	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return p.h.computerStore().UpdateCredentials(persist, r.TenantID, r.SpaceID, r.ComputerID, sealed)
 }
 
 // Create observes the box reachable with the computer's key and returns its
@@ -164,13 +188,16 @@ func (p railwayComputerProvider) Create(ctx context.Context, r computers.Runtime
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
-	manifest, err := p.observe(ctx, creds)
+	manifest, fingerprint, err := p.observe(ctx, creds)
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
 	id := railwayBoxIdentity(manifest)
 	if id == "" {
 		return computers.CreationResult{}, errors.New("railway connection did not return a manifest; reconciliation is required")
+	}
+	if err := p.pinFirstUseFingerprint(ctx, r, creds, fingerprint); err != nil {
+		return computers.CreationResult{}, err
 	}
 	return computers.CreationResult{ExternalID: id}, nil
 }
@@ -182,7 +209,7 @@ func (p railwayComputerProvider) Find(ctx context.Context, r computers.Runtime) 
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
-	manifest, err := p.observe(ctx, creds)
+	manifest, fingerprint, err := p.observe(ctx, creds)
 	if err != nil {
 		return computers.CreationResult{}, err
 	}
@@ -192,6 +219,9 @@ func (p railwayComputerProvider) Find(ctx context.Context, r computers.Runtime) 
 	}
 	if r.ExternalID != "" && r.ExternalID != id {
 		return computers.CreationResult{}, errors.New("reconnected to a different railway box")
+	}
+	if err := p.pinFirstUseFingerprint(ctx, r, creds, fingerprint); err != nil {
+		return computers.CreationResult{}, err
 	}
 	return computers.CreationResult{ExternalID: id}, nil
 }

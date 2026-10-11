@@ -58,4 +58,23 @@ func TestProviderConfiguration(t *testing.T) {
 	if err := ValidateConfiguration(Railway, map[string]string{"privateKey": private, "hostKeyFingerprint": valid["hostKeyFingerprint"]}); err != nil {
 		t.Fatal(err)
 	}
+	// Railway has no required fields: the key is generated on demand and the host
+	// key is trusted on first use, so an empty configuration is valid.
+	if err := ValidateConfiguration(Railway, nil); err != nil {
+		t.Fatalf("empty railway config: %v", err)
+	}
+	if err := ValidateConfiguration(Railway, map[string]string{"privateKey": private}); err != nil {
+		t.Fatalf("railway key without fingerprint: %v", err)
+	}
+	if err := ValidateConfiguration(Railway, map[string]string{"privateKey": "secret-invalid"}); err == nil {
+		t.Fatal("railway accepted an invalid private key")
+	} else if strings.Contains(err.Error(), "secret-invalid") {
+		t.Fatal("leaked credential")
+	}
+	if err := ValidateConfiguration(Railway, map[string]string{"hostKeyFingerprint": "SHA256:bad"}); err == nil {
+		t.Fatal("railway accepted an invalid fingerprint")
+	}
+	if err := ValidateConfiguration(Railway, map[string]string{"unexpected": "secret"}); err == nil {
+		t.Fatal("railway accepted an unsupported field")
+	}
 }
