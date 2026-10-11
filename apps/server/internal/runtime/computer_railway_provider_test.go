@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -260,6 +263,36 @@ func TestRailwayFingerprintMismatchIsError(t *testing.T) {
 func TestRailwayProviderHasNoDestroyer(t *testing.T) {
 	if _, ok := any(railwayComputerProvider{}).(computers.DestructionProvider); ok {
 		t.Fatal("railway provider must not implement Destroy")
+	}
+}
+
+func TestRailwayManifestPersistedAndSurfaced(t *testing.T) {
+	env := railwaySetup(t)
+	if _, err := env.adapter().Create(context.Background(), env.r); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var raw string
+	if err := env.h.deps.DB.QueryRow(`SELECT manifest_json FROM computer_runtimes WHERE id='runtime'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "zippy-laughter") || !strings.Contains(raw, "https://x.up.railway.app") {
+		t.Fatalf("manifest not persisted: %s", raw)
+	}
+	router := chi.NewRouter()
+	env.h.registerComputers(router)
+	req := httptest.NewRequest("GET", "/spaces/"+env.spaceID+"/computers/computer/runtimes/runtime?incarnation=incarnation", nil)
+	req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant", Role: "owner", UserID: "user"}))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("get runtime: %d %s", w.Code, w.Body)
+	}
+	var got computerRuntimeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Manifest == nil || got.Manifest.ID != "zippy-laughter" || got.Manifest.Preview != "https://x.up.railway.app" || got.Manifest.Claim != "https://railway.new/claim" || got.Manifest.Deadline != "2026-01-01T00:00:00Z" {
+		t.Fatalf("manifest not surfaced: %+v", got.Manifest)
 	}
 }
 

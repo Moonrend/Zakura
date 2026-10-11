@@ -9,6 +9,50 @@ import (
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 )
 
+func TestComputerManifestMigrationAppliesTwice(t *testing.T) {
+	ctx := context.Background()
+	conn, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "manifest.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.DB.Close()
+	for i := 0; i < 2; i++ {
+		if err := Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var applied int
+	if err := conn.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=8 AND name='computer_manifest'`).Scan(&applied); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 {
+		t.Fatalf("manifest migration recorded %d times", applied)
+	}
+	rows, err := conn.DB.QueryContext(ctx, `PRAGMA table_info(computer_runtimes)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "manifest_json" {
+			found = true
+			if notnull != 1 {
+				t.Fatalf("manifest_json must be NOT NULL")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("manifest_json column missing after migration")
+	}
+}
+
 func TestComputersAdoptLegacyWorkspaceWithoutProvisioning(t *testing.T) {
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "adoption.db"))

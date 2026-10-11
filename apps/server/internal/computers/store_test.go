@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
@@ -44,6 +46,41 @@ func execTest(t *testing.T, s Store, q string, args ...any) {
 		t.Fatal(err)
 	}
 }
+func TestUpdateManifestIsScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	execTest(t, s, `INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,created_at,updated_at) VALUES('runtime','tenant','space','computer-space','chat-space','inc1','op1','unknown','now','now')`)
+	target := Target{TenantID: "tenant", SpaceID: "space", ComputerID: "computer-space", RuntimeID: "runtime", Incarnation: "inc1"}
+	if err := s.UpdateManifest(ctx, target, map[string]any{"box": "zippy"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := s.DB.QueryRow(`SELECT manifest_json FROM computer_runtimes WHERE id='runtime'`).Scan(&raw); err != nil || !strings.Contains(raw, "zippy") {
+		t.Fatalf("manifest not persisted: %q %v", raw, err)
+	}
+	stale := target
+	stale.Incarnation = "inc2"
+	if err := s.UpdateManifest(ctx, stale, map[string]any{"box": "other"}, time.Now()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale incarnation: %v", err)
+	}
+	foreign := target
+	foreign.TenantID = "other"
+	if err := s.UpdateManifest(ctx, foreign, map[string]any{"box": "other"}, time.Now()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cross tenant: %v", err)
+	}
+	unknown := target
+	unknown.RuntimeID = "missing"
+	if err := s.UpdateManifest(ctx, unknown, map[string]any{"box": "other"}, time.Now()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing runtime: %v", err)
+	}
+	if err := s.UpdateManifest(ctx, target, map[string]any{"box": strings.Repeat("x", maxManifestBytes+1)}, time.Now()); err == nil {
+		t.Fatal("oversized manifest accepted")
+	}
+	if err := s.DB.QueryRow(`SELECT manifest_json FROM computer_runtimes WHERE id='runtime'`).Scan(&raw); err != nil || !strings.Contains(raw, "zippy") {
+		t.Fatalf("failed updates changed the row: %q %v", raw, err)
+	}
+}
+
 func TestDefaultsSnapshotAndIsolation(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

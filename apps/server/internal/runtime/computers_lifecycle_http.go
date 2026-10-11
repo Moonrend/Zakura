@@ -18,16 +18,67 @@ import (
 // Keep the transport response separate from Runtime so account and provider IDs
 // cannot accidentally become public when additional providers are registered.
 type computerRuntimeResponse struct {
-	RuntimeID          string          `json:"runtimeId"`
-	ComputerID         string          `json:"computerId"`
-	Incarnation        string          `json:"incarnation"`
-	CreateOperationID  string          `json:"createOperationId"`
-	State              computers.State `json:"state"`
-	ExecutionAvailable bool            `json:"executionAvailable"`
+	RuntimeID          string            `json:"runtimeId"`
+	ComputerID         string            `json:"computerId"`
+	Incarnation        string            `json:"incarnation"`
+	CreateOperationID  string            `json:"createOperationId"`
+	State              computers.State   `json:"state"`
+	ExecutionAvailable bool              `json:"executionAvailable"`
+	Manifest           *computerManifest `json:"manifest,omitempty"`
+}
+
+// computerManifest is the only shape a provider manifest is exposed in. Unknown
+// keys are dropped: the raw manifest is provider-controlled text and must never
+// reach a client verbatim.
+type computerManifest struct {
+	ID       string `json:"id,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+	Claim    string `json:"claim,omitempty"`
+	Deadline string `json:"deadline,omitempty"`
+}
+
+// publicManifest decodes a stored manifest and returns only the known-safe string
+// fields, matched case-insensitively the way railwayBoxIdentity matches keys. An
+// empty, unparseable or field-less manifest yields nil so the key is omitted.
+func publicManifest(raw string) *computerManifest {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return nil
+	}
+	m := computerManifest{
+		ID:       manifestStringField(obj, "id", "box", "boxid", "vm", "hostname", "name"),
+		Preview:  manifestStringField(obj, "preview"),
+		Claim:    manifestStringField(obj, "claim"),
+		Deadline: manifestStringField(obj, "deadline"),
+	}
+	if m == (computerManifest{}) {
+		return nil
+	}
+	return &m
+}
+
+// manifestStringField returns the first non-empty string value whose key
+// normalises to one of the candidates, mirroring railwayBoxIdentity's matching.
+func manifestStringField(obj map[string]any, candidates ...string) string {
+	for _, candidate := range candidates {
+		for key, value := range obj {
+			if normaliseRailwayKey(key) != candidate {
+				continue
+			}
+			if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
 
 func publicComputerRuntime(c computers.Computer, r computers.Runtime) computerRuntimeResponse {
-	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State, ExecutionAvailable: c.Has(computers.Commands)}
+	return computerRuntimeResponse{RuntimeID: r.ID, ComputerID: r.ComputerID, Incarnation: r.Incarnation, CreateOperationID: r.CreateOperationID, State: r.State, ExecutionAvailable: c.Has(computers.Commands), Manifest: publicManifest(r.ManifestJSON)}
 }
 func (h *handler) computerProvisioner() computers.Provisioner {
 	return computers.Provisioner{Store: h.computerStore(), Providers: map[computers.Provider]computers.CreationProvider{

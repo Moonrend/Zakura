@@ -12,14 +12,14 @@ import (
 // GetRuntime uses the entire pinned identity. Never look up an instance by a
 // provider ID alone: different accounts can return identical provider IDs.
 func (s Store) GetRuntime(ctx context.Context, t Target) (Runtime, error) {
-	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=?`), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation))
+	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND id=? AND incarnation=?`), t.TenantID, t.SpaceID, t.ComputerID, t.RuntimeID, t.Incarnation))
 }
 
 // ActiveRuntime reads the active-slot runtime for a computer and session scope
 // without recording intent. Unlike ReserveRuntime it never inserts anything, so
 // execution resolution cannot create pending operations or consume slots.
 func (s Store) ActiveRuntime(ctx context.Context, tenant, space, computer, session string) (Runtime, error) {
-	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? AND state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, session))
+	return scanRuntime(s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,root_path,access_token_enc,manifest_json,expires_at,idle_deadline FROM computer_runtimes WHERE tenant_id=? AND space_id=? AND computer_id=? AND session_scope=? AND state IN ('pending_approval','creating','ready','disconnected','stopping','unknown') ORDER BY created_at DESC,id DESC LIMIT 1`), tenant, space, computer, session))
 }
 
 // computerCapabilities maps each provider to the execution channels it has

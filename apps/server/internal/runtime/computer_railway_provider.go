@@ -29,8 +29,8 @@ import (
 //     it. We send "railway" and accept that this may need adjustment.
 //
 // Each connection parses the JSON manifest Railway prints (box identity, preview
-// URL, claim link, deadline). Persisting that manifest for display is a follow-up
-// UI task: Runtime has no column for it, and this adapter must not add one.
+// URL, claim link, deadline). The manifest is persisted on the runtime as
+// manifest_json for display; only known-safe string fields are ever surfaced.
 type railwayComputerProvider struct {
 	h    *handler
 	host string
@@ -181,6 +181,20 @@ func (p railwayComputerProvider) pinFirstUseFingerprint(ctx context.Context, r c
 	return p.h.computerStore().UpdateCredentials(persist, r.TenantID, r.SpaceID, r.ComputerID, sealed)
 }
 
+// persistManifest stores the parsed manifest for display. Like the TOFU
+// fingerprint it runs detached from client cancellation. It is best-effort: a
+// manifest is a display artifact, so a failed write must never invalidate an
+// otherwise-verified creation, and the caller ignores the returned error.
+func (p railwayComputerProvider) persistManifest(ctx context.Context, r computers.Runtime, manifest map[string]any) error {
+	if len(manifest) == 0 {
+		return nil
+	}
+	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	target := computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation}
+	return p.h.computerStore().UpdateManifest(persist, target, manifest, p.h.deps.Clock())
+}
+
 // Create observes the box reachable with the computer's key and returns its
 // identity. rootPath is always empty: Railway mounts no node-local directory.
 func (p railwayComputerProvider) Create(ctx context.Context, r computers.Runtime) (computers.CreationResult, error) {
@@ -199,6 +213,7 @@ func (p railwayComputerProvider) Create(ctx context.Context, r computers.Runtime
 	if err := p.pinFirstUseFingerprint(ctx, r, creds, fingerprint); err != nil {
 		return computers.CreationResult{}, err
 	}
+	_ = p.persistManifest(ctx, r, manifest)
 	return computers.CreationResult{ExternalID: id}, nil
 }
 
@@ -223,6 +238,7 @@ func (p railwayComputerProvider) Find(ctx context.Context, r computers.Runtime) 
 	if err := p.pinFirstUseFingerprint(ctx, r, creds, fingerprint); err != nil {
 		return computers.CreationResult{}, err
 	}
+	_ = p.persistManifest(ctx, r, manifest)
 	return computers.CreationResult{ExternalID: id}, nil
 }
 

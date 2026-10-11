@@ -135,9 +135,13 @@ type Runtime struct {
 	// sealed computer-v1 envelope bound to the computer identity as AAD. Empty
 	// when the provider issues none; it is an internal field, never JSON-exposed.
 	AccessTokenEnc string
-	State          State
-	ExpiresAt      time.Time
-	IdleDeadline   time.Time
+	// ManifestJSON is the provider-issued manifest (Railway box identity, preview
+	// URL, claim link, deadline) kept verbatim for display. Empty or "{}" when the
+	// provider issued none. It never drives execution.
+	ManifestJSON string
+	State        State
+	ExpiresAt    time.Time
+	IdleDeadline time.Time
 }
 
 type Target struct {
