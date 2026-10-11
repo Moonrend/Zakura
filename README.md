@@ -2,6 +2,10 @@
 
 协同提升 Agent 的智能。
 
+## SDK
+
+[Go、TypeScript、Python 和 Rust REST SDK](./sdks/README.md)：调用服务器 API、生成端点实现及运行契约验证。
+
 ## License
 
 [GNU Affero General Public License v3.0](./LICENSE)
