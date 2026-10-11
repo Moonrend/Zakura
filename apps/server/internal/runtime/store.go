@@ -1159,13 +1159,52 @@ func (s *Store) ResolveCandidates(ctx context.Context, tenant, capability, model
 		copy(candidates[1:chosen+1], candidates[0:chosen])
 		candidates[0] = picked
 	}
+	// Deduplicate upstreams before loading. A single upstream is the common
+	// case; keep its indexed lookup cheap even when several routes share it.
+	ids := make([]string, 0, len(candidates))
+	upstreams := make(map[string]Upstream, len(candidates))
+	for _, route := range candidates {
+		if _, seen := upstreams[route.UpstreamID]; !seen {
+			ids = append(ids, route.UpstreamID)
+			upstreams[route.UpstreamID] = Upstream{}
+		}
+	}
+	clear(upstreams)
+	if len(ids) == 1 {
+		up, err := s.GetUpstream(ctx, tenant, ids[0])
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if err == nil && up.Status == "ready" {
+			upstreams[up.ID] = up
+		}
+	} else {
+		query := s.deps.Gorm.WithContext(ctx).Table("model_upstreams").
+			Select("id,name,slug,protocol,config_json,status,last_error,created_at,updated_at").
+			Where("tenant_id = ? AND status = ?", tenant, "ready")
+		if len(ids) <= 500 {
+			query = query.Where("id IN ?", ids)
+		} else {
+			// Avoid database bind-parameter limits for very large catalogs.
+			routeIDs := s.deps.Gorm.Table("model_routes").Select("upstream_id").Where("tenant_id = ? AND status = ?", tenant, "ready")
+			if capability != "" {
+				routeIDs = routeIDs.Where("capability = ?", capability)
+			}
+			query = query.Where("id IN (?)", routeIDs)
+		}
+		var rows []upstreamColumns
+		if err := query.Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			upstreams[row.ID] = row.upstream()
+		}
+	}
 	out := make([]ModelCandidate, 0, len(candidates))
 	for _, route := range candidates {
-		up, e := s.GetUpstream(ctx, tenant, route.UpstreamID)
-		if e != nil || up.Status != "ready" {
-			continue
+		if up, ok := upstreams[route.UpstreamID]; ok {
+			out = append(out, ModelCandidate{Route: route, Upstream: up})
 		}
-		out = append(out, ModelCandidate{Route: route, Upstream: up})
 	}
 	if len(out) == 0 {
 		return nil, ErrNotFound

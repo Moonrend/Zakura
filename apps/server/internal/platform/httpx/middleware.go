@@ -13,6 +13,11 @@ func Recoverer(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if v := recover(); v != nil {
+					if v == http.ErrAbortHandler {
+						// Let net/http abort a partially written response; appending
+						// an error document would corrupt SSE/proxy output.
+						panic(v)
+					}
 					log.Error("request panic", "panic", v, "stack", string(debug.Stack()))
 					Error(w, 500, "internal server error")
 				}

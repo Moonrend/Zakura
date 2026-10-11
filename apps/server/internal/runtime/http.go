@@ -2,6 +2,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1182,21 +1184,28 @@ func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 			httpx.JSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{"message": "API key is not bound to an agent or lacks Gateway permission", "type": "permission_error", "param": nil, "code": "insufficient_scope"}})
 			return
 		}
-		var body []byte
-		var v map[string]any
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&v) == nil {
-			body, _ = json.Marshal(v)
-		} else {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
+		var envelope struct {
+			Model string `json:"model"`
+		}
+		if err != nil || json.Unmarshal(body, &envelope) != nil || bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 			httpx.Error(w, 400, "invalid JSON")
 			return
 		}
-		model, _ := v["model"].(string)
+		model := envelope.Model
 		resp, e := h.service.gateway.Do(r.Context(), principal(r).TenantID, capability, operation, model, body)
 		if e != nil {
 			statusErr(w, e)
 			return
 		}
-		_ = copyProviderResponse(w, resp)
+		tracked := &gatewayResponseWriter{ResponseWriter: w}
+		if err := copyProviderResponse(tracked, resp); err != nil {
+			if tracked.committed {
+				// A partial stream must not look like a successful clean EOF.
+				panic(http.ErrAbortHandler)
+			}
+			httpx.Error(w, http.StatusBadGateway, "could not read upstream response")
+		}
 	}
 }
 func (h *handler) listGatewayModels(w http.ResponseWriter, r *http.Request) {
