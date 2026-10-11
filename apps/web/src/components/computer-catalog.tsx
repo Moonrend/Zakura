@@ -245,7 +245,7 @@ function AddComputerDialog({
   const available = nodes.filter((n) =>
     provider === "remote_agent"
       ? true
-      : n.kind === "server" || n.kind === "computer",
+      : n.kind === "server" || n.kind === "computer" || n.kind === "local",
   );
 
   function handleOpenChange(next: boolean) {
