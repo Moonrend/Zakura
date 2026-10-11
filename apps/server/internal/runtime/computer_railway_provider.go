@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
+	"golang.org/x/crypto/ssh"
 )
 
 // railwayComputerProvider is the control-plane adapter for railway.new free SSH
@@ -41,11 +43,20 @@ type railwayComputerProvider struct {
 var _ computers.CreationProvider = railwayComputerProvider{}
 
 const (
-	defaultRailwayHost  = "railway.new"
-	defaultRailwayPort  = "22"
-	defaultRailwayUser  = "railway"
-	railwayProbeCommand = "true"
-	railwayOutputLimit  = 64 * 1024
+	defaultRailwayHost = "railway.new"
+	defaultRailwayPort = "22"
+	defaultRailwayUser = "railway"
+	railwayOutputLimit = 64 * 1024
+)
+
+// railwayManifestWaitCap bounds how long observe waits for the box manifest to
+// stream over the PTY once the connection is accepted. Railway may take tens of
+// seconds to provision a box (and a reattach can start slower still), so the cap
+// is generous; the caller's context deadline, when sooner, wins. Both are
+// package vars so tests can shorten them.
+var (
+	railwayManifestWaitCap      = 90 * time.Second
+	railwayManifestPollInterval = 500 * time.Millisecond
 )
 
 // railwayCredentials is the decrypted computer configuration. ValidateConfiguration
@@ -130,11 +141,13 @@ func (p railwayComputerProvider) authorize(ctx context.Context, r computers.Runt
 	return p.configuration(ctx, r)
 }
 
-// observe dials the box, runs a harmless probe and parses the manifest Railway
-// prints. Railway carries no pre-known host key, so the first connection uses
-// trust-on-first-use and returns the observed fingerprint for the caller to pin.
-// The connection is always closed; SSH output can be arbitrarily large, so only
-// the first 64KB are retained.
+// observe dials the box over a PTY and parses the manifest Railway streams. A
+// non-PTY exec channel is refused for anonymous trials, so no command is run:
+// the terminal session alone is opened and the manifest arrives on it once the
+// box is provisioned. Railway carries no pre-known host key, so the first
+// connection uses trust-on-first-use and returns the observed fingerprint for
+// the caller to pin. The connection is always closed; SSH output can be
+// arbitrarily large, so only the first 64KB are retained.
 func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCredentials) (map[string]any, string, error) {
 	client, fingerprint, err := computers.DialSSHFirstUse(ctx, computers.SSHDialConfig{
 		Host: p.dialHost(), Port: p.dialPort(), User: p.dialUser(),
@@ -152,12 +165,68 @@ func (p railwayComputerProvider) observe(ctx context.Context, creds railwayCrede
 	out := &railwayOutput{limit: railwayOutputLimit}
 	session.Stdout = out
 	session.Stderr = out
-	_ = session.Run(railwayProbeCommand)
-	manifest, ok := parseRailwayManifest(out.String())
-	if !ok {
-		return nil, "", errors.New("railway connection did not return a manifest; reconciliation is required")
+	if err := session.RequestPty("xterm", 120, 40, ssh.TerminalModes{
+		ssh.ECHO:          0,
+		ssh.TTY_OP_ISPEED: 115200,
+		ssh.TTY_OP_OSPEED: 115200,
+	}); err != nil {
+		return nil, "", errors.New("railway ssh session could not request a pty")
 	}
-	return manifest, fingerprint, nil
+	if err := session.Shell(); err != nil {
+		return nil, "", errors.New("railway ssh shell could not be started")
+	}
+
+	deadline := time.Now().Add(railwayManifestWaitCap)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+
+	manifestObjectSeen := false
+	for {
+		text := out.String()
+		if railwayRefused(text) {
+			return nil, "", errors.New("railway refused this connection (anonymous trials require a PTY and available capacity); reconciliation is required")
+		}
+		if railwayTrialsDisabled(text) {
+			return nil, "", errors.New("railway is at capacity and not accepting new anonymous trials; reconciliation is required")
+		}
+		if manifest, ok := parseRailwayManifest(text); ok {
+			if id := railwayBoxIdentity(manifest); id != "" {
+				return manifest, fingerprint, nil
+			}
+			manifestObjectSeen = true
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", fmt.Errorf("railway connection did not return a manifest in time; reconciliation is required: %w", ctx.Err())
+		case <-time.After(railwayManifestPollInterval):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", fmt.Errorf("railway connection did not return a manifest in time; reconciliation is required: %w", err)
+	}
+	if manifestObjectSeen {
+		return nil, "", errors.New("railway manifest did not include a box identity; reconciliation is required")
+	}
+	return nil, "", errors.New("railway connection did not return a manifest in time; reconciliation is required")
+}
+
+// railwayRefused detects Railway's anonymous-trial refusal object. It is matched
+// case-insensitively and tolerates whitespace between JSON tokens; the per-
+// connection signup/poll URLs are never echoed back to the caller.
+func railwayRefused(text string) bool {
+	lower := strings.ToLower(text)
+	compact := strings.Join(strings.Fields(lower), "")
+	return strings.Contains(compact, `"status":"refused"`) && strings.Contains(lower, "human_signup_url")
+}
+
+// railwayTrialsDisabled detects the capacity/rate-limit notice Railway prints
+// when anonymous trials are paused, so the caller can surface it distinctly.
+func railwayTrialsDisabled(text string) bool {
+	return strings.Contains(strings.ToLower(text), "anonymous trials are temporarily disabled")
 }
 
 // pinFirstUseFingerprint persists the host key learned by a trust-on-first-use

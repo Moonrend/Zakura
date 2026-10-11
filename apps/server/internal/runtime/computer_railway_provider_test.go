@@ -25,9 +25,10 @@ import (
 const railwayTestManifest = `{"box":"zippy-laughter","preview":"https://x.up.railway.app","claim":"https://railway.new/claim","deadline":"2026-01-01T00:00:00Z"}`
 
 // serveFakeRailway implements just enough of an SSH server: it accepts any client
-// public key, and on an "exec" request writes the injected manifest to stdout and
-// reports exit status 0.
-func serveFakeRailway(conn net.Conn, cfg *ssh.ServerConfig, output func() string) {
+// public key, answers a "pty-req" and then, on "shell" (or "exec"), hands the
+// channel to stream and reports exit status 0. Railway refuses non-PTY exec, so
+// the provider opens a shell; both request types are accepted here.
+func serveFakeRailway(conn net.Conn, cfg *ssh.ServerConfig, stream func(ch ssh.Channel)) {
 	server, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		_ = conn.Close()
@@ -47,22 +48,25 @@ func serveFakeRailway(conn net.Conn, cfg *ssh.ServerConfig, output func() string
 		go func() {
 			defer ch.Close()
 			for req := range chReqs {
-				if req.Type != "exec" {
+				switch req.Type {
+				case "pty-req":
+					_ = req.Reply(true, nil)
+				case "shell", "exec":
+					_ = req.Reply(true, nil)
+					if stream != nil {
+						stream(ch)
+					}
+					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+					return
+				default:
 					_ = req.Reply(false, nil)
-					continue
 				}
-				_ = req.Reply(true, nil)
-				if data := output(); data != "" {
-					_, _ = ch.Write([]byte(data))
-				}
-				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
-				return
 			}
 		}()
 	}
 }
 
-func startFakeRailway(t *testing.T, signer ssh.Signer, output func() string, conns *int32) (host, port string) {
+func startFakeRailway(t *testing.T, signer ssh.Signer, stream func(ch ssh.Channel), conns *int32) (host, port string) {
 	t.Helper()
 	cfg := &ssh.ServerConfig{
 		PublicKeyCallback: func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
@@ -84,11 +88,35 @@ func startFakeRailway(t *testing.T, signer ssh.Signer, output func() string, con
 			if conns != nil {
 				atomic.AddInt32(conns, 1)
 			}
-			go serveFakeRailway(conn, cfg, output)
+			go serveFakeRailway(conn, cfg, stream)
 		}
 	}()
 	addr := ln.Addr().(*net.TCPAddr)
 	return "127.0.0.1", strconv.Itoa(addr.Port)
+}
+
+// stringStream writes the current atomic string to the channel, ignoring errors
+// once the client has gone away.
+func stringStream(out *atomic.Value) func(ch ssh.Channel) {
+	return func(ch ssh.Channel) {
+		if data, _ := out.Load().(string); data != "" {
+			_, _ = ch.Write([]byte(data))
+		}
+	}
+}
+
+// shortRailwayWait shrinks the manifest wait cap and poll interval so tests that
+// exercise the timeout/refusal paths finish in a few seconds.
+func shortRailwayWait(t *testing.T) {
+	t.Helper()
+	prevCap := railwayManifestWaitCap
+	prevPoll := railwayManifestPollInterval
+	railwayManifestWaitCap = 3 * time.Second
+	railwayManifestPollInterval = 25 * time.Millisecond
+	t.Cleanup(func() {
+		railwayManifestWaitCap = prevCap
+		railwayManifestPollInterval = prevPoll
+	})
 }
 
 func sealedRailwayCredentials(t *testing.T, secret []byte, spaceID, privateKey, fingerprint string) string {
@@ -114,6 +142,17 @@ type railwayEnv struct {
 	fingerprint string
 	conns       *int32
 	output      *atomic.Value
+	stream      func(ch ssh.Channel)
+}
+
+// streamFor serves the progressive stream override when set, else the current
+// atomic output string. Railway's SSH server writes the manifest to the PTY.
+func (e *railwayEnv) streamFor(ch ssh.Channel) {
+	if e.stream != nil {
+		e.stream(ch)
+		return
+	}
+	stringStream(e.output)(ch)
 }
 
 func (e *railwayEnv) adapter() railwayComputerProvider {
@@ -165,9 +204,12 @@ func railwaySetup(t *testing.T) *railwayEnv {
 	var conns int32
 	out := new(atomic.Value)
 	out.Store(railwayTestManifest)
-	host, port := startFakeRailway(t, hostSigner, func() string { return out.Load().(string) }, &conns)
 	r := computers.Runtime{ID: "runtime", ComputerID: "computer", TenantID: "tenant", SpaceID: space.ID, Incarnation: "incarnation", CreateOperationID: "op1", State: computers.Creating}
-	return &railwayEnv{h: h, r: r, spaceID: space.ID, host: host, port: port, clientKey: clientKey, fingerprint: fingerprint, conns: &conns, output: out}
+	env := &railwayEnv{h: h, r: r, spaceID: space.ID, clientKey: clientKey, fingerprint: fingerprint, conns: &conns, output: out}
+	host, port := startFakeRailway(t, hostSigner, env.streamFor, &conns)
+	env.host = host
+	env.port = port
+	return env
 }
 
 func (e *railwayEnv) reseal(t *testing.T, privateKey, fingerprint string) {
@@ -204,9 +246,58 @@ func TestRailwayFindReconnectIsIdempotent(t *testing.T) {
 
 func TestRailwayNoManifestIsError(t *testing.T) {
 	env := railwaySetup(t)
+	shortRailwayWait(t)
 	env.output.Store("welcome to your railway box\nno manifest here\n")
-	if _, err := env.adapter().Create(context.Background(), env.r); err == nil {
-		t.Fatal("expected create error without a manifest")
+	_, err := env.adapter().Create(context.Background(), env.r)
+	if err == nil || !strings.Contains(err.Error(), "did not return a manifest in time") {
+		t.Fatalf("expected manifest timeout error, got %v", err)
+	}
+}
+
+func TestRailwayPTYRefusalIsError(t *testing.T) {
+	env := railwaySetup(t)
+	shortRailwayWait(t)
+	env.output.Store(`{"status":"refused","human_signup_url":"https://railway.com/ssh-signup?code=abc","poll_url":"https://backboard.railway.com/ssh-signup/poll?code=abc","description":"Headless terminals are not allowed for anonymous trials. Sign up to script against Railway."}`)
+	_, err := env.adapter().Create(context.Background(), env.r)
+	if err == nil || !strings.Contains(err.Error(), "railway refused this connection") {
+		t.Fatalf("expected refusal error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "ssh-signup") || strings.Contains(err.Error(), "code=") {
+		t.Fatalf("refusal error leaked per-connection signup codes: %v", err)
+	}
+}
+
+func TestRailwayPTYCapacityMessageIsError(t *testing.T) {
+	env := railwaySetup(t)
+	shortRailwayWait(t)
+	env.output.Store("Anonymous trials are temporarily disabled while we scale capacity.\n")
+	_, err := env.adapter().Create(context.Background(), env.r)
+	if err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("expected capacity error, got %v", err)
+	}
+}
+
+func TestRailwayPTYManifestStreamedAfterBanner(t *testing.T) {
+	env := railwaySetup(t)
+	shortRailwayWait(t)
+	env.stream = func(ch ssh.Channel) {
+		_, _ = ch.Write([]byte("⏳ Opening your box...\n"))
+		time.Sleep(1200 * time.Millisecond)
+		_, _ = ch.Write([]byte(railwayTestManifest))
+	}
+	result, err := env.adapter().Create(context.Background(), env.r)
+	if err != nil || result.ExternalID != "zippy-laughter" {
+		t.Fatalf("create: %+v %v", result, err)
+	}
+}
+
+func TestRailwayPTYManifestWithoutIdentityTimesOut(t *testing.T) {
+	env := railwaySetup(t)
+	shortRailwayWait(t)
+	env.output.Store(`{"preview":"https://x.up.railway.app","claim":"https://railway.new/claim"}`)
+	_, err := env.adapter().Create(context.Background(), env.r)
+	if err == nil || !strings.Contains(err.Error(), "did not include a box identity") {
+		t.Fatalf("expected missing-identity error, got %v", err)
 	}
 }
 
@@ -327,7 +418,7 @@ func TestRailwayTrustOnFirstUsePinsFingerprint(t *testing.T) {
 	}
 	out := new(atomic.Value)
 	out.Store(railwayTestManifest)
-	host, port := startFakeRailway(t, otherSigner, func() string { return out.Load().(string) }, nil)
+	host, port := startFakeRailway(t, otherSigner, stringStream(out), nil)
 	adapter := railwayComputerProvider{h: env.h, host: host, port: port}
 	if _, err := adapter.Create(context.Background(), env.r); err == nil || !strings.Contains(err.Error(), "host key fingerprint mismatch") {
 		t.Fatalf("expected fingerprint mismatch, got %v", err)
