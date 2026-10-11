@@ -27,6 +27,36 @@ var spaceMCPSQL string
 //go:embed sql/0005_computers.sql
 var computersSQL string
 
+//go:embed sql/0006_project_execution.sql
+var projectExecutionSQL string
+
+//go:embed sql/0007_project_merge_reviews.sql
+var projectMergeReviewsSQL string
+
+//go:embed sql/0008_project_templates.sql
+var projectTemplatesSQL string
+
+//go:embed sql/0009_project_knowledge.sql
+var projectKnowledgeSQL string
+
+//go:embed sql/0010_project_portfolio.sql
+var projectPortfolioSQL string
+
+//go:embed sql/0011_project_deliveries.sql
+var projectDeliveriesSQL string
+
+//go:embed sql/0012_project_campaigns.sql
+var projectCampaignsSQL string
+
+//go:embed sql/0013_project_requirements.sql
+var projectRequirementsSQL string
+
+//go:embed sql/0014_project_review_indexes.sql
+var projectReviewIndexesSQL string
+
+//go:embed sql/0015_project_signoffs.sql
+var projectSignoffsSQL string
+
 type migration struct {
 	version   int
 	name, sql string
@@ -38,6 +68,16 @@ var ordered = []migration{
 	{3, "compatibility", compatibilitySQL},
 	{4, "space_mcp", spaceMCPSQL},
 	{5, "computers", computersSQL},
+	{6, "project_execution", projectExecutionSQL},
+	{7, "project_merge_reviews", projectMergeReviewsSQL},
+	{8, "project_templates", projectTemplatesSQL},
+	{9, "project_knowledge", projectKnowledgeSQL},
+	{10, "project_portfolio", projectPortfolioSQL},
+	{11, "project_deliveries", projectDeliveriesSQL},
+	{12, "project_campaigns", projectCampaignsSQL},
+	{13, "project_requirements", projectRequirementsSQL},
+	{14, "project_review_indexes", projectReviewIndexesSQL},
+	{15, "project_signoffs", projectSignoffsSQL},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {

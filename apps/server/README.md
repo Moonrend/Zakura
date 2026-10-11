@@ -44,6 +44,10 @@ compatible with the pinned Zakura contract.
 
 ## Validate
 
+The dashboard's [durable project executor](docs/PROJECT_EXECUTION.md) adds isolated
+task branches, dependency artifacts, checkpoint recovery, acceptance evidence and
+reviewed publication. Its shared Go module is in `packages/projectkit`.
+
 ```sh
 make test
 make race

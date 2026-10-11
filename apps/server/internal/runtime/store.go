@@ -442,6 +442,13 @@ func (s *Store) SearchSessions(ctx context.Context, tenant, q string, limit int)
 	return out, nil
 }
 func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, patch map[string]any) (Session, error) {
+	sess, err := s.GetSession(ctx, tenant, agent, id)
+	if err != nil {
+		return Session{}, err
+	}
+	if sess.Kind == "project" {
+		return Session{}, fmt.Errorf("%w: session is managed by project execution", ErrConflict)
+	}
 	allowed := map[string]string{"title": "title", "status": "status", "project": "project", "model": "model", "modelRouteId": "model_route_id", "reasoning": "reasoning", "draftText": "draft_text"}
 	sets := []string{}
 	args := []any{}
@@ -466,6 +473,13 @@ func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, pat
 	return s.GetSession(ctx, tenant, agent, id)
 }
 func (s *Store) DeleteSession(ctx context.Context, tenant, agent, id string) error {
+	sess, err := s.GetSession(ctx, tenant, agent, id)
+	if err != nil {
+		return err
+	}
+	if sess.Kind == "project" {
+		return fmt.Errorf("%w: session is managed by project execution", ErrConflict)
+	}
 	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Delete(nil)
 	if res.Error != nil {
 		return res.Error
@@ -534,8 +548,10 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 	if strings.TrimSpace(content) == "" && len(attachments) == 0 {
 		return Run{}, errors.New("content or attachments required")
 	}
-	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
+	if sess, e := s.GetSession(ctx, tenant, agent, session); e != nil {
 		return Run{}, e
+	} else if sess.Kind == "project" {
+		return Run{}, fmt.Errorf("%w: session is managed by project execution", ErrConflict)
 	}
 	now := s.now()
 	run := Run{ID: s.id(), SessionID: session, Status: "running", StartedAt: &now, CreatedAt: now}
@@ -720,8 +736,10 @@ func (s *Store) RecoverRuns(ctx context.Context) (int64, error) {
 }
 
 func (s *Store) Enqueue(ctx context.Context, tenant, agent, session string, msg QueueMessage) (QueueMessage, error) {
-	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
+	if sess, e := s.GetSession(ctx, tenant, agent, session); e != nil {
 		return QueueMessage{}, e
+	} else if sess.Kind == "project" {
+		return QueueMessage{}, fmt.Errorf("%w: session is managed by project execution", ErrConflict)
 	}
 	msg.Content = strings.TrimSpace(msg.Content)
 	if msg.Content == "" && len(msg.Attachments) == 0 {

@@ -22,23 +22,34 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/projectexec"
+	"github.com/Moonrend/Zakura/apps/server/internal/projectknowledge"
+	"github.com/Moonrend/Zakura/apps/server/internal/projectrequirements"
+	"github.com/Moonrend/Zakura/apps/server/internal/projectsignoff"
 	"github.com/go-chi/chi/v5"
 )
 
 type handler struct {
-	deps            *appdeps.Dependencies
-	store           *Store
-	service         *Service
-	hub             *runnerHub
-	acp             *acpRuntimeManager
-	mcpMu           sync.Mutex
-	mcpSessions     map[string]spaceMCPSession
-	agentToolMu     sync.Mutex
-	agentToolCache  map[string]cachedCatalog
-	loadedToolMu    sync.Mutex
-	loadedToolCache map[string]cachedLoaded
-	trigramMu       sync.Mutex
-	trigramStates   map[string]string
+	deps                *appdeps.Dependencies
+	store               *Store
+	service             *Service
+	hub                 *runnerHub
+	acp                 *acpRuntimeManager
+	mcpMu               sync.Mutex
+	mcpSessions         map[string]spaceMCPSession
+	agentToolMu         sync.Mutex
+	agentToolCache      map[string]cachedCatalog
+	loadedToolMu        sync.Mutex
+	loadedToolCache     map[string]cachedLoaded
+	trigramMu           sync.Mutex
+	trigramStates       map[string]string
+	projects            *projectexec.Store
+	projectEngine       *projectexec.Engine
+	projectBridge       *projectBridge
+	projectStartErr     error
+	projectKnowledge    *projectknowledge.Store
+	projectRequirements *projectrequirements.Store
+	projectSignoffs     *projectsignoff.Store
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
@@ -64,6 +75,10 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	}
 	h.service.loadedTools = h.sessionLoadedTools
 	h.service.toolRunner = h.dispatchAgentTool
+	h.initializeProjectKnowledge()
+	h.initializeProjectRequirements()
+	h.initializeProjectSignoffs()
+	h.initializeProjectExecutions()
 	_, _ = h.store.RecoverRuns(deps.RunContext())
 	r.Post("/api/routines/{id}/hook", h.routineHook)
 	r.Get("/api/files/shared/{token}", h.downloadSharedFile)
@@ -87,6 +102,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Route("/api", func(api chi.Router) {
 		api.Use(httpx.Auth(deps))
 		api.Use(RequireAPIScope)
+		api.Use(h.guardProjectManagedSession)
 		h.registerCore(api)
 		h.registerComputers(api)
 		h.registerAutomation(api)
@@ -95,6 +111,11 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		h.registerSkills(api)
 		h.registerMCP(api)
 		h.registerWorkspace(api)
+		h.registerProjectExecutions(api)
+		h.registerProjectTemplates(api)
+		h.registerProjectPortfolio(api)
+		h.registerProjectReviewInbox(api)
+		h.registerProjectCampaigns(api)
 	})
 	h.startScheduler(deps.RunContext())
 	h.startSkillRefresh(deps.RunContext())

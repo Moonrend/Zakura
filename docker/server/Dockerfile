@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
 FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS agent
-WORKDIR /src
+WORKDIR /src/apps/agent
 ARG ZAKURA_AGENT_VERSION=dev
 ENV ZAKURA_AGENT_VERSION=$ZAKURA_AGENT_VERSION
+COPY packages/projectkit/ /src/packages/projectkit/
 COPY apps/agent/ ./
 RUN bash scripts/pack.sh
 
 FROM golang:1.26-bookworm AS build
-WORKDIR /src
+WORKDIR /src/apps/server
+COPY packages/projectkit/ /src/packages/projectkit/
 COPY apps/server/go.mod apps/server/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY apps/server/ ./
@@ -22,7 +24,7 @@ RUN useradd --system --uid 10001 --create-home zakura && mkdir -p /data /app && 
 COPY --from=build /out/zakura-server /usr/local/bin/zakura-server
 COPY --from=build /out/zakura-db /usr/local/bin/zakura-db
 COPY --from=build /out/zakura-stdio-bridge /usr/local/bin/zakura-stdio-bridge
-COPY --from=agent /src/dist /app/apps/agent/dist
+COPY --from=agent /src/apps/agent/dist /app/apps/agent/dist
 USER zakura
 WORKDIR /data
 ENV LISTEN_ADDR=:8787 \

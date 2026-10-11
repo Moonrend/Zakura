@@ -4,11 +4,12 @@ ARG GO_VERSION=1.26
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS bridge-build
 ARG TARGETOS
 ARG TARGETARCH
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/apps/server
+COPY packages/projectkit/ /src/packages/projectkit/
+COPY apps/server/go.mod apps/server/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY cmd/zakura-stdio-bridge ./cmd/zakura-stdio-bridge
-COPY internal ./internal
+COPY apps/server/cmd/zakura-stdio-bridge ./cmd/zakura-stdio-bridge
+COPY apps/server/internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-stdio-bridge ./cmd/zakura-stdio-bridge

@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.26-bookworm AS build
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/apps/server
+COPY packages/projectkit/ /src/packages/projectkit/
+COPY apps/server/go.mod apps/server/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY . .
+COPY apps/server/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-server ./cmd/zakura-server && \
     CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-db ./cmd/zakura-db && \
     CGO_ENABLED=1 go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/zakura-stdio-bridge ./cmd/zakura-stdio-bridge

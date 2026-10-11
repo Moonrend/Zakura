@@ -85,6 +85,30 @@ func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
 }
 
 func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
+	if h.projectEngine != nil {
+		if err := h.projectEngine.CancelTenant(ctx, tenant); err != nil {
+			return err
+		}
+		var unresolved int
+		if err := h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT COUNT(*) FROM execution_operations WHERE tenant_id=? AND status IN ('running','unknown','pending_approval')`), tenant).Scan(&unresolved); err != nil {
+			return err
+		}
+		if unresolved > 0 {
+			return errors.New("tenant has unresolved project tool effects; inspect and resolve them before deleting execution audit records")
+		}
+		if err := h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT COUNT(*) FROM execution_merge_previews WHERE tenant_id=? AND status IN ('applying','unknown')`), tenant).Scan(&unresolved); err != nil {
+			return err
+		}
+		if unresolved > 0 {
+			return errors.New("tenant has unresolved project publications; reconcile them before deleting merge audit records")
+		}
+		if err := h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT COUNT(*) FROM execution_source_attestations WHERE tenant_id=? AND status IN ('pending','unknown')`), tenant).Scan(&unresolved); err != nil {
+			return err
+		}
+		if unresolved > 0 {
+			return errors.New("tenant has unresolved source writer attestations; inspect them before deleting their audit records")
+		}
+	}
 	h.closeLiveAccess(tenant, "")
 	h.acp.closeTenant(tenant)
 	if err := h.cancelTenantRuns(ctx, tenant); err != nil {

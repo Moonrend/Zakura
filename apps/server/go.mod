@@ -21,6 +21,7 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/Moonrend/Zakura/packages/projectkit v0.0.0
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
@@ -49,3 +50,5 @@ require (
 	gorm.io/hints v1.1.0 // indirect
 	gorm.io/plugin/dbresolver v1.5.3 // indirect
 )
+
+replace github.com/Moonrend/Zakura/packages/projectkit => ../../packages/projectkit
