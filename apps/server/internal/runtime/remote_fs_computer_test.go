@@ -185,17 +185,18 @@ func TestComputerFilesystemRefusesMissingRoot(t *testing.T) {
 }
 
 func TestComputerFilesystemRefusesProviderWithoutFiles(t *testing.T) {
-	var record []recordedFSCall
-	var mu sync.Mutex
-	h, _, agentID, chatID, runCtx := computerExecRig(t, "rnr_fs_e2b", computers.E2B, "", &record, &mu)
-
-	_, err := h.dispatchAgentTool(runCtx, "tenant", agentID, chatID, "call", "fs_list", json.RawMessage(`{"path":"."}`))
-	if err == nil || err.Error() != "files are not available on this computer" {
-		t.Fatalf("e2b fs_list: %v", err)
+	// A pinned computer that has not been granted the Files channel must be
+	// refused before any transport is contacted; it never falls back to the
+	// runner or a provider file API.
+	exec := &resolvedExecution{
+		spaceID:     "space",
+		containerID: "container-1",
+		computer:    computers.Computer{ID: "pc", TenantID: "tenant", SpaceID: "space", Provider: computers.E2B, Capabilities: []computers.Capability{computers.Commands}},
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(record) != 0 {
-		t.Fatalf("fs RPCs reached the runner on a provider without files: %#v", record)
+	h := &handler{}
+	ctx := context.WithValue(context.Background(), computerExecKey{}, exec)
+	_, err := h.runBuiltinTool(ctx, "tenant", "agent", "fs_list", json.RawMessage(`{"path":"."}`))
+	if err == nil || err.Error() != "files are not available on this computer" {
+		t.Fatalf("fs_list without the files capability: %v", err)
 	}
 }

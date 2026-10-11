@@ -74,9 +74,9 @@ func TestCompleteCreationPinsInstanceAndLifetime(t *testing.T) {
 			want := map[Provider]string{
 				Server:      `["commands","files","docker"]`,
 				Temporary:   `["commands","files"]`,
-				E2B:         `["commands"]`,
-				Railway:     `["commands"]`,
-				SSH:         `["commands"]`,
+				E2B:         `["commands","files"]`,
+				Railway:     `["commands","files"]`,
+				SSH:         `["commands","files"]`,
 				RemoteAgent: `[]`,
 			}[provider]
 			if capabilities != want {

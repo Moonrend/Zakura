@@ -454,19 +454,12 @@ func (h *handler) runApplyPatch(ctx context.Context, tenant, agent string, args 
 	if strings.TrimSpace(patch) == "" {
 		return nil, errors.New("patch is required")
 	}
-	remote, selected, err := h.remoteWorkspace(ctx, tenant, agent)
-	if err != nil {
-		return nil, err
-	}
-	if !selected {
-		return nil, errors.New("no runtime node bound to this space")
-	}
 	nonce := make([]byte, 4)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
 	rel := ".zakura/patches/" + hex.EncodeToString(nonce) + ".patch"
-	if _, err := remote.write(ctx, "/"+rel, []byte(patch)); err != nil {
+	if _, err := h.writeWorkspaceFile(ctx, tenant, agent, "/"+rel, []byte(patch)); err != nil {
 		return nil, err
 	}
 	result, applyErr := h.runtimeExec(ctx, tenant, agent, "bash", "-lc", "git apply --whitespace=nowarn "+rel)

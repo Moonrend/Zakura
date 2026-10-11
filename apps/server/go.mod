@@ -9,6 +9,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.12.3
 	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/pkg/sftp v1.13.11
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/reearth/ygo v1.50.0
 	golang.org/x/crypto v0.57.0
@@ -34,6 +35,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.1 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

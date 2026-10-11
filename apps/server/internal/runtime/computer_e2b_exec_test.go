@@ -29,6 +29,9 @@ type e2bEnvdRecorder struct {
 	cmd         string
 	args        []string
 	cwd         string
+	fileMethod  string
+	filePath    string
+	fileBody    []byte
 }
 
 type e2bEnvdResult struct {
@@ -37,6 +40,14 @@ type e2bEnvdResult struct {
 	exitCode int
 	errorMsg string
 	delay    time.Duration
+
+	fileContent []byte
+	fileStatus  int
+	listBody    string
+	listStatus  int
+	writeBody   string
+	writeStatus int
+	errorBody   string
 }
 
 func e2bFrame(flags byte, payload string) []byte {
@@ -61,7 +72,53 @@ func newE2BEnvdServer(t *testing.T, result e2bEnvdResult) (*httptest.Server, *e2
 		rec.sandboxID = r.Header.Get("E2b-Sandbox-Id")
 		rec.sandboxPort = r.Header.Get("E2b-Sandbox-Port")
 		rec.mu.Unlock()
-		if r.URL.Path != e2bExecPath {
+		switch r.URL.Path {
+		case e2bFilesListPath:
+			rec.mu.Lock()
+			rec.fileMethod = "list"
+			var listReq struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(body, &listReq)
+			rec.filePath = listReq.Path
+			rec.fileBody = body
+			rec.mu.Unlock()
+			if result.listStatus != 0 {
+				w.WriteHeader(result.listStatus)
+				_, _ = w.Write([]byte(result.errorBody))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(result.listBody))
+			return
+		case e2bFilesHTTPPath:
+			rec.mu.Lock()
+			rec.fileMethod = strings.ToUpper(r.Method)
+			rec.filePath = r.URL.Query().Get("path")
+			rec.fileBody = body
+			rec.mu.Unlock()
+			if r.Method == http.MethodGet {
+				if result.fileStatus != 0 {
+					w.WriteHeader(result.fileStatus)
+					_, _ = w.Write([]byte(result.errorBody))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(result.fileContent)
+				return
+			}
+			if result.writeStatus != 0 {
+				w.WriteHeader(result.writeStatus)
+				_, _ = w.Write([]byte(result.errorBody))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(result.writeBody))
+			return
+		case e2bExecPath:
+		default:
 			http.Error(w, "unexpected path", http.StatusNotFound)
 			return
 		}
