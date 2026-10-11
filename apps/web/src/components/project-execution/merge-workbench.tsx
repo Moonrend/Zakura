@@ -31,11 +31,13 @@ export function MergeWorkbench({
   run,
   tasks,
   onArtifact,
+  initialPreviewId,
 }: {
   projectId: string;
   run: Run;
   tasks: Task[];
   onArtifact: (snapshotId: string, path?: string) => void;
+  initialPreviewId?: string;
 }) {
   const [items, setItems] = useState<MergePreview[]>([]);
   const [selected, setSelected] = useState<MergePreview | null>(null);
@@ -63,6 +65,28 @@ export function MergeWorkbench({
       alive = false;
     };
   }, [projectId, run.id]);
+  useEffect(() => {
+    if (!initialPreviewId) return;
+    let active = true;
+    setSelected(null);
+    void getMerge(projectId, run.id, initialPreviewId)
+      .then((data) => {
+        if (active) {
+          setSelected(data.preview);
+          setAudit(data.audit);
+          setConfirmation(false);
+          setComment("");
+        }
+      })
+      .catch(
+        (e) =>
+          active &&
+          setError(`合并审核目标已删除或不可访问：${friendlyError(e)}`),
+      );
+    return () => {
+      active = false;
+    };
+  }, [projectId, run.id, initialPreviewId]);
   const open = async (preview: MergePreview) => {
     setSelected(preview);
     setConfirmation(false);

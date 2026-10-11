@@ -408,6 +408,9 @@ func projectTestServer(t *testing.T, d *appdeps.Dependencies) (*handler, *httpte
 	h.service.loadedTools = h.sessionLoadedTools
 	h.service.toolRunner = h.dispatchAgentTool
 	h.projects = projectexec.NewStore(d.DB, d.Dialect, d.Rebind)
+	h.initializeProjectKnowledge()
+	h.initializeProjectRequirements()
+	h.initializeProjectSignoffs()
 	h.projectBridge = &projectBridge{h: h}
 	h.projectEngine = projectexec.NewEngine(h.projects, h.projectBridge, h.projectBridge, projectexec.EngineConfig{WorkerID: d.NewID(), Workers: 2, Lease: 500 * time.Millisecond, HeartbeatInterval: 100 * time.Millisecond, PollInterval: 20 * time.Millisecond, MaxDecisionTokens: 8192})
 	router := chi.NewRouter()

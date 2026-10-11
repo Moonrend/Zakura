@@ -59,6 +59,14 @@ func (h *handler) registerProjectExecutions(r chi.Router) {
 		p.Get("/", h.projectList)
 		p.Post("/", h.projectCreate)
 		p.Route("/{pid}", func(p chi.Router) {
+			h.registerProjectKnowledge(p)
+			h.registerProjectSemantics(p)
+			h.registerProjectInsights(p)
+			h.registerProjectDeliveries(p)
+			h.registerProjectRequirements(p)
+			h.registerProjectRefactors(p)
+			h.registerProjectSignoffs(p)
+			h.registerProjectContexts(p)
 			p.Get("/", h.projectGet)
 			p.Patch("/", h.projectUpdate)
 			p.Delete("/", h.projectDelete)
@@ -236,6 +244,9 @@ func (h *handler) projectGet(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"project": p, "analysis": analysis})
 }
 func (h *handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	old, err := h.requestProject(r)
 	if err != nil {
 		projectHTTPError(w, err)
@@ -267,6 +278,9 @@ func (h *handler) projectUpdate(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, p)
 }
 func (h *handler) projectDelete(w http.ResponseWriter, r *http.Request) {
+	if h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) || h.rejectCampaignSourceDeletion(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	var body struct {
 		ExpectedRevision int64 `json:"expectedRevision"`
 	}
@@ -398,6 +412,9 @@ func (h *handler) projectRuns(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"items": items})
 }
 func (h *handler) projectStartRun(w http.ResponseWriter, r *http.Request) {
+	if h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	p, err := h.requestProject(r)
 	if err != nil {
 		projectHTTPError(w, err)
@@ -463,6 +480,9 @@ func (h *handler) projectRunGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) projectRunFork(w http.ResponseWriter, r *http.Request) {
+	if h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	var body struct {
 		ExpectedProjectRevision int64 `json:"expectedProjectRevision"`
 	}
@@ -478,6 +498,9 @@ func (h *handler) projectRunFork(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 201, run)
 }
 func (h *handler) projectRunControl(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/resume") && h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	var body struct {
 		ExpectedRevision int64 `json:"expectedRevision"`
 	}
@@ -563,6 +586,9 @@ func (h *handler) projectTaskGet(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"task": task, "checkpoint": cp, "operations": ops, "verifications": verifications, "reviews": reviews})
 }
 func (h *handler) projectTaskRetry(w http.ResponseWriter, r *http.Request) {
+	if h.rejectCampaignManagedProject(w, r, chi.URLParam(r, "pid")) {
+		return
+	}
 	var body struct {
 		ExpectedRevision int64 `json:"expectedRevision"`
 	}

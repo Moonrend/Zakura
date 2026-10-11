@@ -135,6 +135,8 @@ export type Task = {
   revision: number;
   sessionId: string;
   branchId: string;
+  baseSnapshot?: string;
+  forkSnapshotId?: string;
   snapshotId: string;
   checkpointId: string;
   leaseOwner?: string;

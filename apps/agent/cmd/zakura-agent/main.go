@@ -12,11 +12,15 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/agent/internal/dial"
 	"github.com/Moonrend/Zakura/apps/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/projectrunner"
 	"github.com/Moonrend/Zakura/apps/agent/internal/rpc"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
 
 func main() {
+	if projectrunner.HandleRefactorWorker(os.Args) {
+		return
+	}
 	server := flag.String("server", env("ZAKURA_AGENT_SERVER", ""), "控制面 URL，如 https://zakura.example")
 	token := flag.String("token", env("ZAKURA_AGENT_TOKEN", ""), "rnr_ 节点令牌")
 	kind := flag.String("kind", env("ZAKURA_AGENT_KIND", "computer"), "computer 或 server")

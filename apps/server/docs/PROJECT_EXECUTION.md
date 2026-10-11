@@ -4,6 +4,10 @@ Open **长期项目** in the dashboard to define a delivery goal, dependency tas
 writable paths and acceptance checks. Each execution freezes its plan and budget;
 editing a project cannot change a running execution's rules.
 
+The [project workbench guide](PROJECT_WORKBENCH.md) covers versioned blueprints,
+project references, portfolio scheduling, code analysis, reviewed delivery bundles,
+requirements traceability and controlled Agent/model comparison campaigns.
+
 ## Runtime setup
 
 Assign an online Zakura runtime node to the project's space. File tasks work

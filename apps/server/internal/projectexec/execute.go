@@ -42,7 +42,12 @@ func (e *Engine) process(ctx context.Context, ref FenceRequest, a mission.Assign
 			if modelDecisionCount(cp) >= e.config.MaxTurns {
 				return errors.New("task model decision limit reached")
 			}
-			allowance, err := e.store.ReserveDecisionBudget(ctx, ref, e.config.MaxDecisionTokens)
+			var allowance int64
+			err := e.waitDispatchResource(ctx, func() error {
+				var err error
+				allowance, err = e.store.ReserveDecisionBudget(ctx, ref, e.config.MaxDecisionTokens)
+				return err
+			})
 			if err != nil {
 				return fmt.Errorf("reserve model decision budget: %w", err)
 			}
@@ -165,7 +170,12 @@ func (e *Engine) executeOperation(ctx context.Context, ref FenceRequest, a missi
 		if err := e.store.RenewLease(ctx, ref, e.config.Lease); err != nil {
 			return operation, err
 		}
-		started, err := e.store.StartOperation(ctx, ref, operation.ID, operation.Revision)
+		var started mission.Operation
+		err := e.waitDispatchResource(ctx, func() error {
+			var err error
+			started, err = e.store.StartOperation(ctx, ref, operation.ID, operation.Revision)
+			return err
+		})
 		if err != nil {
 			return operation, fmt.Errorf("persist tool dispatch: %w", err)
 		}
@@ -210,6 +220,9 @@ func (e *Engine) recoverOperation(ctx context.Context, ref FenceRequest, a missi
 		// Reads have no external mutation. Reissuing uses the same operation ID;
 		// the result is still persisted before the next model decision.
 		if err := e.store.RenewLease(ctx, ref, e.config.Lease); err != nil {
+			return operation, err
+		}
+		if err := e.waitDispatchResource(ctx, func() error { return e.store.AcquireToolResource(ctx, ref) }); err != nil {
 			return operation, err
 		}
 		result, err := e.executor.Perform(ctx, a, operation)
@@ -292,4 +305,22 @@ func (e *Engine) verifyAndFinish(ctx context.Context, ref FenceRequest, a missio
 		return fmt.Errorf("complete verified task: %w", err)
 	}
 	return nil
+}
+
+// Busy dispatch slots are waiting, not task failures. The assignment heartbeat
+// remains active while SQL admissions retry; pause/cancel cancels this wait.
+func (e *Engine) waitDispatchResource(ctx context.Context, attempt func() error) error {
+	for {
+		err := attempt()
+		if !errors.Is(err, ErrResourceBusy) {
+			return err
+		}
+		timer := time.NewTimer(e.config.PollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

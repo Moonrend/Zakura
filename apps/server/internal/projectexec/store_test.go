@@ -40,6 +40,15 @@ func testStore(t *testing.T) *Store {
 			t.Fatal(e)
 		}
 	}
+	portfolio, e := os.ReadFile("../platform/migrations/sql/0010_project_portfolio.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, q := range strings.Split(string(portfolio), "-- statement-breakpoint") {
+		if _, e = db.Exec(q); e != nil {
+			t.Fatal(e)
+		}
+	}
 	return NewStore(db, "sqlite", nil)
 }
 func projectFixture() mission.Project {

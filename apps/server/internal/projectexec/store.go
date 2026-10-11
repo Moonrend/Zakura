@@ -17,7 +17,8 @@ import (
 )
 
 // Store uses transactions and portable SQL rather than ORM hooks. Every
-// mutation first locks the project row, so events, budgets and lease changes
+// mutation locks the tenant row before the project row, so shared resource
+// admissions, events, budgets and lease changes
 // commit together even when multiple schedulers use the same database.
 type Store struct {
 	db      *sql.DB
@@ -59,6 +60,11 @@ func (s *Store) tx(ctx context.Context, tenant, pid string, fn func(*sql.Tx) err
 		return err
 	}
 	defer tx.Rollback()
+	// The tenant lock precedes every project lock. Tenant shutdown uses the
+	// same order; shared dispatch counters cannot race across projects.
+	if err = s.lockTenant(ctx, tx, tenant); err != nil {
+		return err
+	}
 	// UPDATE is a portable row lock: PostgreSQL locks this project, while SQLite
 	// acquires its writer lock before any read-modify-write decisions.
 	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE execution_projects SET event_sequence=event_sequence WHERE tenant_id=? AND id=?`), tenant, pid)
@@ -167,6 +173,9 @@ func scopeOf(p mission.Project) mission.Scope {
 func validateProject(p mission.Project) error {
 	if p.TenantID == "" || p.SpaceID == "" || strings.TrimSpace(p.Name) == "" || strings.TrimSpace(p.Goal) == "" {
 		return fmt.Errorf("%w: project identity, name and goal are required", ErrInvalidState)
+	}
+	if e := p.Config.Scheduling.Validate(); e != nil {
+		return errors.Join(ErrInvalidState, e)
 	}
 	if e := plan.ValidatePlan(p.Plan, p.Config); e != nil {
 		return errors.Join(ErrInvalidState, e)
@@ -330,7 +339,79 @@ func (s *Store) CreateRun(ctx context.Context, tenant, pid, baseSnapshot string,
 	return run, err
 }
 
-func (s *Store) createRunTx(ctx context.Context, tx *sql.Tx, p mission.Project, baseSnapshot string) (mission.Run, error) {
+// CreateRunOnce accepts a caller-reserved identity after the caller has durably
+// recorded its intent. A lost response can be recovered from the same run; it
+// can never create a second run or bind this identity to a different definition.
+func (s *Store) CreateRunOnce(ctx context.Context, tenant, pid, baseSnapshot string, expectedProjectRevision int64, runID string) (mission.Run, error) {
+	if len(runID) != 32 || expectedProjectRevision < 1 {
+		return mission.Run{}, ErrInvalidState
+	}
+	if _, err := hex.DecodeString(runID); err != nil || strings.ToLower(runID) != runID {
+		return mission.Run{}, ErrInvalidState
+	}
+	var result mission.Run
+	err := s.tx(ctx, tenant, pid, func(tx *sql.Tx) error {
+		if err := s.RequireTenantActive(ctx, tx, tenant); err != nil {
+			return err
+		}
+		// A campaign control and its child start serialize on the campaign row.
+		// Controls never acquire a project lock while holding this row lock.
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE project_campaigns SET revision=revision WHERE tenant_id=? AND id IN (SELECT campaign_id FROM project_campaign_variants WHERE tenant_id=? AND project_id=?)`), tenant, tenant, pid); err != nil {
+			return err
+		}
+		existing, err := s.run(ctx, tx, tenant, pid, runID)
+		if err == nil {
+			frozen, e := s.frozenProject(ctx, tx, tenant, pid, runID)
+			if e != nil {
+				return e
+			}
+			if existing.BaseSnapshot != baseSnapshot || frozen.Revision != expectedProjectRevision || frozen.ID != pid || frozen.TenantID != tenant {
+				return ErrConflict
+			}
+			result = existing
+			return nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		// A globally reserved identity cannot be borrowed by a different project.
+		var count int
+		if err = tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM execution_runs WHERE id=?`), runID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return ErrConflict
+		}
+		var reservationState, reservedID, campaignRaw string
+		err = tx.QueryRowContext(ctx, s.rebind(`SELECT v.state,COALESCE(v.run_id,''),c.campaign_json FROM project_campaign_variants v JOIN project_campaigns c ON c.tenant_id=v.tenant_id AND c.id=v.campaign_id WHERE v.tenant_id=? AND v.project_id=?`), tenant, pid).Scan(&reservationState, &reservedID, &campaignRaw)
+		if err == nil {
+			var grant struct {
+				Status       string `json:"status"`
+				BaseSnapshot string `json:"baseSnapshot"`
+			}
+			if err = json.Unmarshal([]byte(campaignRaw), &grant); err != nil {
+				return err
+			}
+			if reservedID != runID || reservationState != "starting" && reservationState != "start_unknown" || grant.Status != "active" || grant.BaseSnapshot != baseSnapshot {
+				return ErrConflict
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		p, err := s.project(ctx, tx, tenant, pid)
+		if err != nil {
+			return err
+		}
+		if p.Revision != expectedProjectRevision {
+			return ErrConflict
+		}
+		result, err = s.createRunTx(ctx, tx, p, baseSnapshot, runID)
+		return err
+	})
+	return result, err
+}
+
+func (s *Store) createRunTx(ctx context.Context, tx *sql.Tx, p mission.Project, baseSnapshot string, reservedRunID ...string) (mission.Run, error) {
 	var run mission.Run
 	tenant, pid := p.TenantID, p.ID
 	var e error
@@ -343,9 +424,14 @@ func (s *Store) createRunTx(ctx context.Context, tx *sql.Tx, p mission.Project, 
 	if baseSnapshot == "" {
 		return run, fmt.Errorf("%w: base snapshot required", ErrInvalidState)
 	}
-	id, e := newID()
-	if e != nil {
-		return run, e
+	id := ""
+	if len(reservedRunID) > 0 {
+		id = reservedRunID[0]
+	} else {
+		id, e = newID()
+		if e != nil {
+			return run, e
+		}
 	}
 	now := s.now()
 	run = mission.Run{ID: id, ProjectID: pid, Status: "pending", Revision: 1, PlanVersion: p.Plan.Version, BaseSnapshot: baseSnapshot, CreatedAt: now, UpdatedAt: now}

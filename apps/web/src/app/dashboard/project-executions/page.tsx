@@ -56,13 +56,27 @@ export default function ProjectsPage() {
             持续执行，保留检查点与独立产物，成员审核后再合并到原工作区。
           </p>
         </div>
-        <Link
-          href="/dashboard/project-executions/new"
-          className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-sm text-primary-foreground"
-        >
-          <Plus className="size-4" />
-          创建项目
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/dashboard/project-templates"
+            className="inline-flex h-9 items-center rounded-lg border px-3 text-sm hover:bg-muted"
+          >
+            蓝图库
+          </Link>
+          <Link
+            href="/dashboard/project-portfolio"
+            className="inline-flex h-9 items-center rounded-lg border px-3 text-sm hover:bg-muted"
+          >
+            组合调度
+          </Link>
+          <Link
+            href="/dashboard/project-executions/new"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3 text-sm text-primary-foreground"
+          >
+            <Plus className="size-4" />
+            创建项目
+          </Link>
+        </div>
       </header>
       <ErrorNotice message={error} />
       <Panel

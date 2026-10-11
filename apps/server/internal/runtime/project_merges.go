@@ -35,6 +35,7 @@ type projectMergePreview struct {
 	ReviewID          string                 `json:"reviewId,omitempty"`
 	ReviewedBy        string                 `json:"reviewedBy,omitempty"`
 	ReviewComment     string                 `json:"reviewComment,omitempty"`
+	ReviewEvidence    json.RawMessage        `json:"reviewEvidence,omitempty"`
 	OperationID       string                 `json:"operationId,omitempty"`
 	Result            json.RawMessage        `json:"result,omitempty"`
 	Error             string                 `json:"error,omitempty"`
@@ -94,11 +95,25 @@ func (h *handler) saveMerge(ctx context.Context, p mission.Project, preview proj
 }
 
 func (h *handler) lockProjectMutation(ctx context.Context, tx *sql.Tx, p mission.Project) error {
-	result, err := tx.ExecContext(ctx, h.deps.Rebind(`UPDATE execution_projects SET event_sequence=event_sequence WHERE tenant_id=? AND id=?`), p.TenantID, p.ID)
+	// Match the durable executor's tenant-before-project order. Activity checks
+	// remain with callers so receipt settlement and recovery can finish during
+	// tenant shutdown.
+	result, err := tx.ExecContext(ctx, h.deps.Rebind(`UPDATE tenants SET id=id WHERE id=?`), p.TenantID)
 	if err != nil {
 		return err
 	}
 	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return projectexec.ErrNotFound
+	}
+	result, err = tx.ExecContext(ctx, h.deps.Rebind(`UPDATE execution_projects SET event_sequence=event_sequence WHERE tenant_id=? AND id=?`), p.TenantID, p.ID)
+	if err != nil {
+		return err
+	}
+	n, err = result.RowsAffected()
 	if err != nil {
 		return err
 	}
@@ -450,14 +465,15 @@ func (h *handler) projectMergeReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview, err := h.mutateMerge(r.Context(), p, chi.URLParam(r, "rid"), chi.URLParam(r, "mid"), body.ExpectedRevision, principal(r).UserID, "review."+body.Decision, body.Comment, func(tx *sql.Tx, preview *projectMergePreview) error {
-		if preview.Status != "ready" || preview.Plan.Result.ID != body.SnapshotID || len(preview.Plan.Conflicts) > 0 {
+		if (preview.Status != "ready" && preview.Status != "approved") || preview.Plan.Result.ID != body.SnapshotID || len(preview.Plan.Conflicts) > 0 {
 			return projectexec.ErrConflict
 		}
-		preview.Status = body.Decision
-		preview.ReviewID = h.store.id()
-		preview.ReviewedBy = principal(r).UserID
-		preview.ReviewComment = body.Comment
-		return nil
+		if body.Decision == "approved" {
+			if err := h.requireProjectRequirementsArtifactTx(r.Context(), tx, projectScope(p), preview.RunID, preview.TaskSnapshots, preview.Verifications, preview.Plan.Result.ID); err != nil {
+				return err
+			}
+		}
+		return h.recordProjectMergeSignoffTx(r.Context(), tx, p, preview, principal(r).UserID, principal(r).Role, body.Decision, body.Comment)
 	})
 	if err != nil {
 		projectHTTPError(w, err)
@@ -536,6 +552,12 @@ func (h *handler) projectMergeApply(w http.ResponseWriter, r *http.Request) {
 			return projectexec.ErrInvalidState
 		}
 		if err := h.validateMergeFrozenState(r.Context(), tx, p, preview); err != nil {
+			return err
+		}
+		if err := h.requireProjectRequirementsArtifactTx(r.Context(), tx, projectScope(p), preview.RunID, preview.TaskSnapshots, preview.Verifications, preview.Plan.Result.ID); err != nil {
+			return err
+		}
+		if err := h.requireProjectSignoffTx(r.Context(), tx, p, preview); err != nil {
 			return err
 		}
 		var active int

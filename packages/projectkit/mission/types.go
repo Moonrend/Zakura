@@ -22,10 +22,11 @@ type Budget struct {
 }
 
 type Config struct {
-	Budget          Budget `json:"budget"`
-	RequireReview   bool   `json:"requireReview"`
-	ExternalEffects string `json:"externalEffects"`
-	MaxTasks        int    `json:"maxTasks"`
+	Budget          Budget     `json:"budget"`
+	RequireReview   bool       `json:"requireReview"`
+	ExternalEffects string     `json:"externalEffects"`
+	MaxTasks        int        `json:"maxTasks"`
+	Scheduling      Scheduling `json:"scheduling"`
 }
 
 type CheckSpec struct {

@@ -1,7 +1,7 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   Play,
   Pause,
@@ -18,6 +18,15 @@ import { TaskInspector } from "@/components/project-execution/task-inspector";
 import { MergeWorkbench } from "@/components/project-execution/merge-workbench";
 import { ArtifactExplorer } from "@/components/project-execution/artifact-explorer";
 import { SourceActivityPanel } from "@/components/project-execution/source-activity-panel";
+import { KnowledgePanel } from "@/components/project-execution/knowledge-panel";
+import { SemanticPanel } from "@/components/project-execution/semantic-panel";
+import { InsightsPanel } from "@/components/project-execution/insights-panel";
+import { DeliveryPanel } from "@/components/project-execution/delivery-panel";
+import { RequirementsPanel } from "@/components/project-execution/requirements-panel";
+import { RefactorPanel } from "@/components/project-execution/refactor-panel";
+import { CampaignPanel } from "@/components/project-execution/campaign-panel";
+import { SignoffPanel } from "@/components/project-execution/signoff-panel";
+import { ContextPanel } from "@/components/project-execution/context-panel";
 import { useProjectEvents } from "@/components/project-execution/use-events";
 import {
   Panel,
@@ -53,11 +62,44 @@ import {
 import { fetchSpaces, type SpaceItem } from "@/lib/spaces";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
 
-type Tab = "execution" | "plan" | "artifacts" | "merge" | "events";
-export default function ProjectWorkbench() {
+type Tab =
+  | "execution"
+  | "plan"
+  | "artifacts"
+  | "semantic"
+  | "knowledge"
+  | "insights"
+  | "delivery"
+  | "requirements"
+  | "refactor"
+  | "campaign"
+  | "signoff"
+  | "context"
+  | "merge"
+  | "events";
+export default function ProjectWorkbenchPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="p-8 text-sm text-muted-foreground">
+          正在读取项目工作台…
+        </div>
+      }
+    >
+      <ProjectWorkbench />
+    </Suspense>
+  );
+}
+function ProjectWorkbench() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const targetRun = searchParams.get("runId") ?? "";
+  const targetTask = searchParams.get("taskId") ?? "";
+  const targetReview = searchParams.get("reviewId") ?? "";
+  const targetKind = searchParams.get("reviewKind") ?? "";
+  const targetTab = searchParams.get("tab") ?? "";
   const [project, setProject] = useState<Project | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -80,9 +122,54 @@ export default function ProjectWorkbench() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+  useEffect(() => setCancelConfirm(false), [run?.id, run?.revision]);
   const activeRun = useRef(runId);
   activeRun.current = runId;
   const pollBusy = useRef<string | null>(null);
+  const appliedTarget = useRef("");
+  useEffect(() => {
+    if (targetTab) {
+      if (
+        [
+          "execution",
+          "plan",
+          "artifacts",
+          "semantic",
+          "knowledge",
+          "insights",
+          "delivery",
+          "requirements",
+          "refactor",
+          "campaign",
+          "signoff",
+          "context",
+          "merge",
+          "events",
+        ].includes(targetTab)
+      )
+        setTab(targetTab as Tab);
+      else setError("链接中的工作台页面不存在，请从导航选择当前页面。");
+    }
+  }, [targetTab]);
+  useEffect(() => {
+    if (
+      !targetTask ||
+      !run ||
+      (targetRun && run.id !== targetRun) ||
+      !tasks.length
+    )
+      return;
+    const key = `${run.id}:${targetTask}`;
+    if (appliedTarget.current === key) return;
+    appliedTarget.current = key;
+    const found = tasks.find((task) => task.id === targetTask);
+    if (found) setSelectedTask(found.id);
+    else
+      setError(
+        "审批链接中的任务已删除或当前不可访问，请重新选择任务并核对当前状态。",
+      );
+  }, [targetTask, targetRun, run, tasks]);
   const reloadProject = useCallback(async () => {
     const [data, list] = await Promise.all([
       getProject(projectId),
@@ -125,7 +212,16 @@ export default function ProjectWorkbench() {
         setProject(data.project);
         setAnalysis(data.analysis);
         setRuns(runs.items ?? []);
-        setRunId(runs.items?.[0]?.id ?? "");
+        if (targetRun) {
+          if (runs.items?.some((run) => run.id === targetRun))
+            setRunId(targetRun);
+          else {
+            setRunId("");
+            setError(
+              "审批链接中的执行轮次已删除或当前无权访问，请从轮次列表重新选择。",
+            );
+          }
+        } else setRunId(runs.items?.[0]?.id ?? "");
         setSpaces(spaces);
         setAgents(agents);
       })
@@ -135,7 +231,7 @@ export default function ProjectWorkbench() {
     return () => {
       alive = false;
     };
-  }, [projectId]);
+  }, [projectId, targetRun]);
   useEffect(() => {
     setRun(null);
     setTasks([]);
@@ -246,6 +342,12 @@ export default function ProjectWorkbench() {
         </div>
       </header>
       <ErrorNotice message={error} />
+      {targetReview && (
+        <p className="break-all rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground">
+          来自审核收件箱：{targetKind || "审核条目"} · {targetReview}
+          。以下显示服务端当前状态；已处理、过期或不可访问的目标需要重新核对。
+        </p>
+      )}
       <SourceActivityPanel projectId={projectId} />
       <div className="flex justify-end">
         <Button
@@ -272,6 +374,15 @@ export default function ProjectWorkbench() {
             ["execution", "持续执行"],
             ["plan", "计划与影响"],
             ["artifacts", "产物比较"],
+            ["semantic", "代码语义与影响"],
+            ["knowledge", "知识与决策"],
+            ["insights", "观测与调度实验"],
+            ["delivery", "交付包与渠道"],
+            ["requirements", "需求与验收追溯"],
+            ["refactor", "符号重构"],
+            ["campaign", "Agent 对照实验"],
+            ["signoff", "独立审核签审"],
+            ["context", "任务代码上下文"],
             ["merge", "审核合并"],
             ["events", "事件与恢复"],
           ] as const
@@ -286,7 +397,7 @@ export default function ProjectWorkbench() {
           </Button>
         ))}
       </nav>
-      {tab !== "plan" && (
+      {tab !== "plan" && tab !== "knowledge" && (
         <Panel
           title="执行轮次"
           description="每轮固定计划和工作区基线；编辑项目不会修改正在执行的冻结计划。"
@@ -365,19 +476,29 @@ export default function ProjectWorkbench() {
                   </Button>
                 )}
                 {!["completed", "cancelled"].includes(run.status) && (
-                  <Button
-                    variant="destructive"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(async () => {
-                        setRun(await controlRun(projectId, run, "cancel"));
-                        await reloadRun();
-                      })
-                    }
-                  >
-                    <Square />
-                    取消此轮
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={cancelConfirm}
+                        onChange={(e) => setCancelConfirm(e.target.checked)}
+                      />
+                      确认取消 r{run.revision}
+                    </label>
+                    <Button
+                      variant="destructive"
+                      disabled={busy || !cancelConfirm}
+                      onClick={() =>
+                        void act(async () => {
+                          setRun(await controlRun(projectId, run, "cancel"));
+                          await reloadRun();
+                        })
+                      }
+                    >
+                      <Square />
+                      取消此轮
+                    </Button>
+                  </div>
                 )}
               </div>
             )}
@@ -494,6 +615,9 @@ export default function ProjectWorkbench() {
               projectId={projectId}
               runId={run.id}
               taskId={selectedTask}
+              initialOperationId={
+                targetKind === "operation" ? targetReview : undefined
+              }
               refreshToken={tasks.find((t) => t.id === selectedTask)?.revision}
               onChanged={() => void reloadRun()}
               onArtifact={openArtifact}
@@ -521,6 +645,54 @@ export default function ProjectWorkbench() {
             </Panel>
           )}
         </div>
+      )}
+      {tab === "knowledge" && (
+        <KnowledgePanel
+          projectId={projectId}
+          runs={runs}
+          tasks={tasks}
+          onArtifact={openArtifact}
+          initialEntryId={
+            ["decision", "question"].includes(targetKind)
+              ? targetReview
+              : undefined
+          }
+        />
+      )}
+      {tab === "delivery" && <DeliveryPanel project={project} />}
+      {tab === "requirements" && (
+        <RequirementsPanel
+          key={projectId}
+          project={project}
+          initialId={targetKind === "baseline" ? targetReview : undefined}
+        />
+      )}
+      {tab === "refactor" && (
+        <RefactorPanel key={projectId} project={project} />
+      )}
+      {tab === "campaign" && (
+        <CampaignPanel key={projectId} project={project} />
+      )}
+      {tab === "signoff" && <SignoffPanel key={projectId} project={project} />}
+      {tab === "context" && <ContextPanel key={projectId} project={project} />}
+      {tab === "semantic" && (
+        <SemanticPanel
+          key={runId}
+          projectId={projectId}
+          tasks={tasks}
+          baseSnapshot={run?.baseSnapshot}
+          initialSnapshot={artifact.snapshotId}
+        />
+      )}
+      {tab === "insights" && (
+        <InsightsPanel
+          key={runId}
+          projectId={projectId}
+          runId={runId}
+          runs={runs}
+          tasks={tasks}
+          maxConcurrent={project.config.budget.maxConcurrent}
+        />
       )}
       {tab === "plan" && (
         <div className="space-y-4">
@@ -714,6 +886,7 @@ export default function ProjectWorkbench() {
             run={run}
             tasks={tasks}
             onArtifact={openArtifact}
+            initialPreviewId={targetKind === "merge" ? targetReview : undefined}
           />
         ) : (
           <Panel title="审核合并">

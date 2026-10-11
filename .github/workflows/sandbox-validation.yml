@@ -7,12 +7,14 @@ on:
       - 'apps/agent/**'
       - 'apps/server/**'
       - 'packages/projectkit/**'
+      - 'apps/web/src/**'
       - '.github/workflows/sandbox-validation.yml'
   push:
     paths:
       - 'apps/agent/**'
       - 'apps/server/**'
       - 'packages/projectkit/**'
+      - 'apps/web/src/**'
       - '.github/workflows/sandbox-validation.yml'
 
 permissions:
@@ -102,3 +104,32 @@ jobs:
         run: |
           go test ./...
           go vet ./...
+      - name: PostgreSQL project knowledge revisions and search consistency
+        working-directory: apps/server
+        env:
+          ZAKURA_TEST_POSTGRES_DSN: postgres://zakura_test:zakura_test@127.0.0.1:5432/zakura_test?sslmode=disable
+        run: go test -race -count=1 -v ./internal/projectknowledge -run Postgres
+      - name: PostgreSQL immutable project diagnostic snapshots
+        working-directory: apps/server
+        env:
+          ZAKURA_TEST_POSTGRES_DSN: postgres://zakura_test:zakura_test@127.0.0.1:5432/zakura_test?sslmode=disable
+        run: go test -race -count=1 -v ./internal/runtime -run Postgres
+
+  project-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install workspace dependencies
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+      - name: Validate project clients and application build
+        working-directory: apps/web
+        run: |
+          corepack pnpm typecheck
+          node --import tsx --test src/components/project-execution/*test.ts
+          corepack pnpm build

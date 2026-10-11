@@ -51,6 +51,13 @@ func newEngineFixture(t *testing.T, tasks []mission.TaskSpec, config mission.Con
 	if _, err = db.Exec(string(schema)); err != nil {
 		t.Fatal(err)
 	}
+	portfolio, err := os.ReadFile("../platform/migrations/sql/0010_project_portfolio.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(string(portfolio)); err != nil {
+		t.Fatal(err)
+	}
 	f := &engineFixture{store: NewStore(db, "sqlite", nil), workspaces: newMemoryWorkspaces()}
 	f.clock.Store(time.Now().UTC().UnixNano())
 	f.store.now = func() time.Time { return time.Unix(0, f.clock.Load()).UTC() }

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,6 +31,7 @@ export function TaskInspector({
   refreshToken,
   onChanged,
   onArtifact,
+  initialOperationId,
 }: {
   projectId: string;
   runId: string;
@@ -38,6 +39,7 @@ export function TaskInspector({
   refreshToken?: number;
   onChanged: () => void;
   onArtifact: (snapshotId: string, path?: string) => void;
+  initialOperationId?: string;
 }) {
   const [data, setData] = useState<TaskDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +48,26 @@ export function TaskInspector({
   const [selectedOperation, setSelectedOperation] = useState<Operation | null>(
     null,
   );
+  const appliedTarget = useRef("");
+  useEffect(() => {
+    if (
+      !initialOperationId ||
+      !data ||
+      appliedTarget.current === initialOperationId
+    )
+      return;
+    appliedTarget.current = initialOperationId;
+    const operation = (data.operations ?? []).find(
+      (item) => item.id === initialOperationId,
+    );
+    if (!operation) setError("审批链接中的工具操作已删除或当前不可访问。");
+    else if (["pending_approval", "unknown"].includes(operation.status))
+      setSelectedOperation(operation);
+    else
+      setError(
+        `此工具操作已处理，当前状态：${operation.status}。请核对操作记录。`,
+      );
+  }, [data, initialOperationId]);
   const reload = useCallback(async () => {
     try {
       const next = await getTask(projectId, runId, taskId);

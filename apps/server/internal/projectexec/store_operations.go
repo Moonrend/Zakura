@@ -155,7 +155,7 @@ func (s *Store) BeginOperation(ctx context.Context, ref FenceRequest, checkpoint
 func (s *Store) StartOperation(ctx context.Context, ref FenceRequest, oid string, revision int64) (mission.Operation, error) {
 	var out mission.Operation
 	e := s.tx(ctx, ref.Scope.TenantID, ref.Scope.ProjectID, func(tx *sql.Tx) error {
-		_, r, p, e := s.fenced(ctx, tx, ref)
+		task, r, p, e := s.fenced(ctx, tx, ref)
 		if e != nil {
 			return e
 		}
@@ -174,6 +174,9 @@ func (s *Store) StartOperation(ctx context.Context, ref FenceRequest, oid string
 		}
 		if o.Status != "prepared" && o.Status != "approved" {
 			return ErrInvalidState
+		}
+		if e = s.acquireResource(ctx, tx, ref, task, "tool"); e != nil {
+			return e
 		}
 		o.Status = "running"
 		o.Revision++
@@ -214,6 +217,9 @@ func (s *Store) CompleteOperation(ctx context.Context, ref FenceRequest, oid str
 		o.Revision++
 		o.UpdatedAt = s.now()
 		if e = s.putOperation(ctx, tx, o); e != nil {
+			return e
+		}
+		if e = s.releaseResource(ctx, tx, ref, "tool"); e != nil {
 			return e
 		}
 		return s.event(ctx, tx, ref.Scope, ref.RunID, ref.TaskID, "operation.completed", map[string]any{"operationId": oid, "status": o.Status})

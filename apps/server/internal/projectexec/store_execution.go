@@ -74,6 +74,7 @@ func (s *Store) ClaimTask(ctx context.Context, owner string, lease time.Duration
 	}
 	var cursor *candidate
 	saturatedRuns := map[string]bool{}
+	fairDeferredProjects := map[string]bool{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -107,10 +108,11 @@ func (s *Store) ClaimTask(ctx context.Context, owner string, lease time.Duration
 			return nil, e
 		}
 		for _, c := range candidates {
-			if saturatedRuns[c.rid] {
+			if saturatedRuns[c.rid] || fairDeferredProjects[c.scope.TenantID+"\x00"+c.scope.ProjectID] {
 				continue
 			}
 			saturated := false
+			fairDeferred := false
 			var assignment *mission.Assignment
 			e = s.tx(ctx, c.scope.TenantID, c.scope.ProjectID, func(tx *sql.Tx) error {
 				if err := s.RequireTenantActive(ctx, tx, c.scope.TenantID); err != nil {
@@ -181,6 +183,14 @@ func (s *Store) ClaimTask(ctx context.Context, owner string, lease time.Duration
 					}
 					return s.event(ctx, tx, c.scope, r.ID, t.ID, "run.budget_exhausted", map[string]any{"kind": "wall"})
 				}
+				allowed, err := s.portfolioClaimAllowed(ctx, tx, c.scope.TenantID, c.scope.ProjectID)
+				if err != nil {
+					return err
+				}
+				if !allowed {
+					fairDeferred = true
+					return nil
+				}
 				if !expired && t.Attempt == 0 {
 					max := t.Spec.MaxAttempts
 					if max <= 0 {
@@ -223,6 +233,9 @@ func (s *Store) ClaimTask(ctx context.Context, owner string, lease time.Duration
 				if err != nil {
 					return err
 				}
+				if err = s.recordPortfolioClaim(ctx, tx, c.scope.TenantID, c.scope.ProjectID); err != nil {
+					return err
+				}
 				assignment = &mission.Assignment{Scope: c.scope, Run: r, Task: t, Project: p, Checkpoint: cp, DependencyResults: depResults}
 				return s.event(ctx, tx, c.scope, r.ID, t.ID, "task.claimed", map[string]any{"owner": owner, "fence": t.Fence, "recovered": expired})
 			})
@@ -231,6 +244,9 @@ func (s *Store) ClaimTask(ctx context.Context, owner string, lease time.Duration
 					continue
 				}
 				return nil, e
+			}
+			if fairDeferred {
+				fairDeferredProjects[c.scope.TenantID+"\x00"+c.scope.ProjectID] = true
 			}
 			if saturated {
 				saturatedRuns[c.rid] = true
@@ -428,7 +444,7 @@ func (s *Store) ReserveDecisionBudget(ctx context.Context, ref FenceRequest, max
 	}
 	var allowance int64
 	e := s.tx(ctx, ref.Scope.TenantID, ref.Scope.ProjectID, func(tx *sql.Tx) error {
-		_, r, p, e := s.fenced(ctx, tx, ref)
+		task, r, p, e := s.fenced(ctx, tx, ref)
 		if e != nil {
 			return e
 		}
@@ -445,6 +461,9 @@ func (s *Store) ReserveDecisionBudget(ctx context.Context, ref FenceRequest, max
 		}
 		if reserved != 0 {
 			return ErrConflict
+		}
+		if e = s.acquireResource(ctx, tx, ref, task, "model"); e != nil {
+			return e
 		}
 		allowance = maxTokens
 		if p.Config.Budget.MaxTokens > 0 && allowance > p.Config.Budget.MaxTokens-r.Tokens {
@@ -530,6 +549,9 @@ func (s *Store) RecordModelDecision(ctx context.Context, ref FenceRequest, seque
 			return e
 		}
 		if _, e = tx.ExecContext(ctx, s.rebind(`UPDATE execution_tasks SET model_allowance=0,model_reserved=0 WHERE tenant_id=? AND project_id=? AND run_id=? AND id=?`), ref.Scope.TenantID, ref.Scope.ProjectID, ref.RunID, ref.TaskID); e != nil {
+			return e
+		}
+		if e = s.releaseResource(ctx, tx, ref, "model"); e != nil {
 			return e
 		}
 		return s.event(ctx, tx, ref.Scope, ref.RunID, ref.TaskID, "model.decision", map[string]any{"tokens": decision.Tokens, "allowance": allowance, "budgetExceeded": overBudget})

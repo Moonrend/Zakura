@@ -130,8 +130,26 @@ func newID(prefix string) (string, error) {
 // Dispatch serializes mutation, file access, and command execution per project.
 // The authenticated server supplies scope; model tools can never pick host roots.
 func (m *Manager) Dispatch(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+	if strings.HasPrefix(method, "project.context.") {
+		return m.ContextDispatch(ctx, method, raw)
+	}
+	if strings.HasPrefix(method, "project.refactor.") {
+		return m.RefactorDispatch(ctx, method, raw)
+	}
+	if strings.HasPrefix(method, "project.semantic.") {
+		return m.SemanticDispatch(ctx, method, raw)
+	}
+	if strings.HasPrefix(method, "project.delivery.") {
+		return m.DeliveryDispatch(ctx, method, raw)
+	}
+	if method == "project.snapshot.copy" {
+		return m.SnapshotCopyDispatch(ctx, raw)
+	}
 	req, err := decodeRequest(method, raw)
 	if err != nil {
+		return nil, err
+	}
+	if err := protectImportPin(method, req); err != nil {
 		return nil, err
 	}
 	if method == "project.operation.inspect" {

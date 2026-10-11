@@ -967,6 +967,24 @@ function PlatformSidebar({
         icon: FolderKanban,
       },
       {
+        id: "project-templates",
+        href: "/dashboard/project-templates",
+        label: "项目蓝图",
+        icon: Network,
+      },
+      {
+        id: "project-portfolio",
+        href: "/dashboard/project-portfolio",
+        label: "组合调度",
+        icon: Activity,
+      },
+      {
+        id: "project-reviews",
+        href: "/dashboard/project-reviews",
+        label: "项目审核",
+        icon: FolderKanban,
+      },
+      {
         id: "chat",
         href: "/chat",
         label: "聊天",
