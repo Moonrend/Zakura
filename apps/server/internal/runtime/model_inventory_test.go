@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -169,5 +170,145 @@ func TestPatchUpstreamModelCheckNoDelete(t *testing.T) {
 	code, models := doJSON(t, client, "GET", server.URL+"/api/upstream-models?upstreamId="+up, tok, nil)
 	if code != 200 || len(models["models"].([]any)) != 1 {
 		t.Fatalf("local model deleted: %d %#v", code, models)
+	}
+}
+
+func TestPatchUpstreamCredentialMerge(t *testing.T) {
+	d := testDeps(t)
+	tok := seedTenant(t, d, "tenant-a")
+	var mu sync.Mutex
+	lastAuth := ""
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lastAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "A"}}})
+	}))
+	defer provider.Close()
+	router := chi.NewRouter()
+	RegisterRoutes(router, d)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	client := server.Client()
+	code, out := doJSON(t, client, "POST", server.URL+"/api/model-upstreams", tok, map[string]any{"name": "fake", "protocol": "openai", "config": map[string]any{"baseUrl": provider.URL, "apiKey": "old-key"}})
+	if code != 201 {
+		t.Fatalf("create: %d %#v", code, out)
+	}
+	up := out["id"].(string)
+	probeAuth := func() string {
+		code, models := doJSON(t, client, "GET", server.URL+"/api/model-upstreams/"+up+"/models", tok, nil)
+		if code != 200 {
+			t.Fatalf("models: %d %#v", code, models)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return lastAuth
+	}
+	if got := probeAuth(); got != "Bearer old-key" {
+		t.Fatalf("initial credential: %q", got)
+	}
+	// Patch without any secret key must keep the stored envelope.
+	code, out = doJSON(t, client, "PATCH", server.URL+"/api/model-upstreams/"+up, tok, map[string]any{"name": "renamed", "config": map[string]any{"baseUrl": provider.URL}})
+	if code != 200 {
+		t.Fatalf("patch no key: %d %#v", code, out)
+	}
+	if got := probeAuth(); got != "Bearer old-key" {
+		t.Fatalf("credential lost after no-key patch: %q", got)
+	}
+	// Patch with an empty apiKey must keep the stored envelope.
+	code, out = doJSON(t, client, "PATCH", server.URL+"/api/model-upstreams/"+up, tok, map[string]any{"config": map[string]any{"baseUrl": provider.URL, "apiKey": ""}})
+	if code != 200 {
+		t.Fatalf("patch empty key: %d %#v", code, out)
+	}
+	if got := probeAuth(); got != "Bearer old-key" {
+		t.Fatalf("credential wiped by empty key patch: %q", got)
+	}
+	// Patch with a new apiKey overrides the stored envelope.
+	code, out = doJSON(t, client, "PATCH", server.URL+"/api/model-upstreams/"+up, tok, map[string]any{"config": map[string]any{"baseUrl": provider.URL, "apiKey": "new-key"}})
+	if code != 200 {
+		t.Fatalf("patch new key: %d %#v", code, out)
+	}
+	if got := probeAuth(); got != "Bearer new-key" {
+		t.Fatalf("credential not overridden: %q", got)
+	}
+}
+
+func TestGroupUpstreamModels(t *testing.T) {
+	dn := func(s string) *string { return &s }
+	rows := []UpstreamModel{
+		{ID: "1", CanonicalModel: "gpt-4", Capability: "chat"},
+		{ID: "2", CanonicalModel: "gpt-4", DisplayName: dn("GPT-4"), Capability: "chat", IsDefault: true},
+		{ID: "3", CanonicalModel: "gpt-4", DisplayName: dn("Later"), Capability: "chat"},
+		{ID: "4", CanonicalModel: "gpt-4", Capability: "embedding"},
+		{ID: "5", CanonicalModel: "claude", DisplayName: dn("Claude"), Capability: "chat"},
+		{ID: "6", CanonicalModel: "claude", Capability: "chat", IsDefault: true},
+	}
+	groups := groupUpstreamModels(rows)
+	if len(groups) != 3 {
+		t.Fatalf("groups = %d %#v", len(groups), groups)
+	}
+	if groups[0].CanonicalModel != "gpt-4" || groups[0].Capability != "chat" || groups[0].DisplayName != "GPT-4" || !groups[0].IsDefault || len(groups[0].Deployments) != 3 {
+		t.Fatalf("g0 %#v", groups[0])
+	}
+	if groups[1].CanonicalModel != "gpt-4" || groups[1].Capability != "embedding" || groups[1].DisplayName != "gpt-4" || groups[1].IsDefault || len(groups[1].Deployments) != 1 {
+		t.Fatalf("g1 %#v", groups[1])
+	}
+	if groups[2].CanonicalModel != "claude" || groups[2].Capability != "chat" || groups[2].DisplayName != "Claude" || !groups[2].IsDefault || len(groups[2].Deployments) != 2 {
+		t.Fatalf("g2 %#v", groups[2])
+	}
+	if groups[0].Deployments[0].ID != "1" || groups[0].Deployments[2].ID != "3" {
+		t.Fatalf("deployment order changed: %#v", groups[0].Deployments)
+	}
+}
+
+func TestListUpstreamModelsGroupedShape(t *testing.T) {
+	d := testDeps(t)
+	tok := seedTenant(t, d, "tenant-a")
+	router := chi.NewRouter()
+	RegisterRoutes(router, d)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	client := server.Client()
+	code, out := doJSON(t, client, "POST", server.URL+"/api/model-upstreams", tok, map[string]any{"name": "fake", "protocol": "openai", "config": map[string]any{"baseUrl": "https://api.example.com/v1"}})
+	if code != 201 {
+		t.Fatalf("create upstream: %d %#v", code, out)
+	}
+	up := out["id"].(string)
+	if code, out = doJSON(t, client, "POST", server.URL+"/api/upstream-models", tok, map[string]any{"upstreamId": up, "nativeModel": "A", "capability": "chat"}); code != 201 {
+		t.Fatalf("model A: %d %#v", code, out)
+	}
+	if code, out = doJSON(t, client, "POST", server.URL+"/api/upstream-models", tok, map[string]any{"upstreamId": up, "nativeModel": "B", "canonicalModel": "bee", "displayName": "Bee", "capability": "embedding"}); code != 201 {
+		t.Fatalf("model B: %d %#v", code, out)
+	}
+	code, flat := doJSON(t, client, "GET", server.URL+"/api/upstream-models", tok, nil)
+	if code != 200 {
+		t.Fatalf("flat list: %d %#v", code, flat)
+	}
+	flatModels := flat["models"].([]any)
+	if len(flatModels) != 2 {
+		t.Fatalf("flat models = %#v", flatModels)
+	}
+	if _, grouped := flatModels[0].(map[string]any)["deployments"]; grouped {
+		t.Fatalf("flat shape must not contain deployments: %#v", flatModels[0])
+	}
+	code, grouped := doJSON(t, client, "GET", server.URL+"/api/upstream-models?grouped=1", tok, nil)
+	if code != 200 {
+		t.Fatalf("grouped list: %d %#v", code, grouped)
+	}
+	groups := grouped["models"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("grouped models = %#v", groups)
+	}
+	first := groups[0].(map[string]any)
+	if first["canonicalModel"] != "A" || first["capability"] != "chat" || first["displayName"] != "A" {
+		t.Fatalf("group0 = %#v", first)
+	}
+	if len(first["deployments"].([]any)) != 1 {
+		t.Fatalf("group0 deployments = %#v", first["deployments"])
+	}
+	second := groups[1].(map[string]any)
+	if second["canonicalModel"] != "bee" || second["capability"] != "embedding" || second["displayName"] != "Bee" {
+		t.Fatalf("group1 = %#v", second)
 	}
 }

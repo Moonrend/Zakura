@@ -227,20 +227,49 @@ func (h *handler) patchInstanceTool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) protectUpstreamCredential(tenant, id string, cfg map[string]any) error {
-	return protectModelConfig(h.deps.Secret, tenant, id, cfg)
+	oldEnvelope, _ := cfg["credentialEnc"].(string)
+	delete(cfg, "credentialEnc")
+	return protectModelConfig(h.deps.Secret, tenant, id, cfg, oldEnvelope)
 }
-func protectModelConfig(secret []byte, tenant, id string, cfg map[string]any) error {
-	credentials := map[string]any{}
-	for _, key := range []string{"apiKey", "accessToken", "refreshToken", "clientSecret"} {
-		if v, ok := cfg[key]; ok {
-			credentials[key] = v
-			delete(cfg, key)
+func protectModelConfig(secret []byte, tenant, id string, cfg map[string]any, oldEnvelope string) error {
+	delete(cfg, "credentialEnc")
+	merged := map[string]any{}
+	if oldEnvelope != "" {
+		if raw, e := openSecretBox(secret, "model:"+tenant+":"+id, oldEnvelope); e == nil {
+			_ = json.Unmarshal(raw, &merged)
 		}
 	}
-	if len(credentials) == 0 {
+	incoming := false
+	for _, key := range []string{"apiKey", "accessToken", "refreshToken", "clientSecret"} {
+		v, ok := cfg[key]
+		delete(cfg, key)
+		if !ok {
+			continue
+		}
+		if s, isString := v.(string); isString {
+			if strings.TrimSpace(s) == "" {
+				continue
+			}
+			merged[key] = s
+			incoming = true
+			continue
+		}
+		merged[key] = v
+		incoming = true
+	}
+	if !incoming {
+		if oldEnvelope != "" {
+			cfg["credentialEnc"] = oldEnvelope
+		}
 		return nil
 	}
-	raw, _ := json.Marshal(credentials)
+	if len(merged) == 0 {
+		if oldEnvelope != "" {
+			cfg["credentialEnc"] = oldEnvelope
+		}
+		return nil
+	}
+	raw, _ := json.Marshal(merged)
 	enc, e := secretBox(secret, "model:"+tenant+":"+id, raw)
 	if e != nil {
 		return e

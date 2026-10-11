@@ -241,7 +241,7 @@ function ModelRoutesPageInner() {
   const rows = useMemo<FlatRow[]>(
     () =>
       groups.flatMap((g) =>
-        g.deployments.map((d) => ({
+        (g.deployments ?? []).map((d) => ({
           ...d,
           groupDisplayName: g.displayName || g.canonicalModel,
         })),

@@ -59,7 +59,11 @@ func safeProviderURL(baseURL, endpoint string) (*url.URL, error) {
 	if ip := net.ParseIP(host); ip != nil && (ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
 		return nil, errors.New("unsafe upstream address")
 	}
-	u.Path = path.Join(strings.TrimSuffix(u.Path, "/"), endpoint)
+	basePath := strings.TrimSuffix(u.Path, "/")
+	if strings.HasPrefix(endpoint, "/v1/") && strings.HasSuffix(basePath, "/v1") {
+		endpoint = strings.TrimPrefix(endpoint, "/v1")
+	}
+	u.Path = path.Join(basePath, endpoint)
 	return u, nil
 }
 

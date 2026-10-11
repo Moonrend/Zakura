@@ -38,6 +38,14 @@ type UpstreamModel struct {
 	UpdatedAt      string          `json:"updatedAt"`
 }
 
+type LogicalModel struct {
+	CanonicalModel string          `json:"canonicalModel"`
+	DisplayName    string          `json:"displayName"`
+	Capability     string          `json:"capability"`
+	IsDefault      bool            `json:"isDefault"`
+	Deployments    []UpstreamModel `json:"deployments"`
+}
+
 type remoteModel struct {
 	ID         string `json:"id"`
 	Name       string `json:"name,omitempty"`
@@ -187,13 +195,43 @@ func (h *handler) queryUpstreamModels(r *http.Request, upstream string) ([]Upstr
 	}
 	return out, nil
 }
+func groupUpstreamModels(rows []UpstreamModel) []LogicalModel {
+	groups := make([]LogicalModel, 0)
+	index := map[string]int{}
+	for _, row := range rows {
+		key := row.CanonicalModel + "\x00" + row.Capability
+		i, ok := index[key]
+		if !ok {
+			groups = append(groups, LogicalModel{CanonicalModel: row.CanonicalModel, Capability: row.Capability, Deployments: []UpstreamModel{}})
+			i = len(groups) - 1
+			index[key] = i
+		}
+		if groups[i].DisplayName == "" && row.DisplayName != nil && strings.TrimSpace(*row.DisplayName) != "" {
+			groups[i].DisplayName = *row.DisplayName
+		}
+		if row.IsDefault {
+			groups[i].IsDefault = true
+		}
+		groups[i].Deployments = append(groups[i].Deployments, row)
+	}
+	for i := range groups {
+		if groups[i].DisplayName == "" {
+			groups[i].DisplayName = groups[i].CanonicalModel
+		}
+	}
+	return groups
+}
 func (h *handler) listUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	x, e := h.queryUpstreamModels(r, r.URL.Query().Get("upstreamId"))
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"models": x, "capabilities": []map[string]any{{"id": "chat", "name": "Chat"}, {"id": "embedding", "name": "Embedding"}, {"id": "rerank", "name": "Rerank"}, {"id": "image", "name": "Image"}}})
+	models := any(x)
+	if r.URL.Query().Get("grouped") == "1" {
+		models = groupUpstreamModels(x)
+	}
+	httpx.JSON(w, 200, map[string]any{"models": models, "capabilities": []map[string]any{{"id": "chat", "name": "Chat"}, {"id": "embedding", "name": "Embedding"}, {"id": "rerank", "name": "Rerank"}, {"id": "image", "name": "Image"}}})
 }
 func (h *handler) modelsForUpstream(w http.ResponseWriter, r *http.Request) {
 	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))

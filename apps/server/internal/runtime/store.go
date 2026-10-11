@@ -970,7 +970,7 @@ func (s *Store) CreateUpstream(ctx context.Context, tenant string, in Upstream) 
 	in.ID = s.id()
 	var protected map[string]any
 	if json.Unmarshal(in.Config, &protected) == nil {
-		if e := protectModelConfig(s.deps.Secret, tenant, in.ID, protected); e != nil {
+		if e := protectModelConfig(s.deps.Secret, tenant, in.ID, protected, ""); e != nil {
 			return Upstream{}, e
 		}
 		in.Config, _ = json.Marshal(protected)

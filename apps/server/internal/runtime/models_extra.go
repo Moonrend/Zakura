@@ -33,7 +33,14 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 400, "config must be an object")
 			return
 		}
-		if e := protectModelConfig(h.deps.Secret, principal(r).TenantID, chi.URLParam(r, "id"), cfg); e != nil {
+		oldEnvelope := ""
+		if cur, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id")); e == nil {
+			var curCfg map[string]any
+			if json.Unmarshal(cur.Config, &curCfg) == nil {
+				oldEnvelope, _ = curCfg["credentialEnc"].(string)
+			}
+		}
+		if e := protectModelConfig(h.deps.Secret, principal(r).TenantID, chi.URLParam(r, "id"), cfg, oldEnvelope); e != nil {
 			statusErr(w, e)
 			return
 		}
