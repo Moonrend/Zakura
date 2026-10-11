@@ -10,14 +10,12 @@ import (
 
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 )
 
 func testPostgresStore(t *testing.T) Store {
 	t.Helper()
-	url := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if url == "" {
-		t.Skip("set ZAKURA_TEST_POSTGRES_URL to run")
-	}
+	url := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "computers")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, url)
 	if err != nil {

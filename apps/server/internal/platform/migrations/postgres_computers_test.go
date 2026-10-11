@@ -8,13 +8,11 @@ import (
 
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 )
 
 func TestPostgresComputersSchema(t *testing.T) {
-	url := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if url == "" {
-		t.Skip("set ZAKURA_TEST_POSTGRES_URL to run")
-	}
+	url := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "migrations")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, url)
 	if err != nil {

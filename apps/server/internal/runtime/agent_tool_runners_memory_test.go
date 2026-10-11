@@ -13,6 +13,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -144,10 +145,7 @@ func TestMemorySearchTrigramSkipsNonPostgres(t *testing.T) {
 
 func testPostgresDeps(t *testing.T) *appdeps.Dependencies {
 	t.Helper()
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if dsn == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
-	}
+	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "runtime")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, dsn)
 	if err != nil {

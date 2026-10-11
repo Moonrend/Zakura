@@ -20,6 +20,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/config"
 	platformdb "github.com/Moonrend/Zakura/apps/server/internal/platform/db"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/migrations"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 	platformserver "github.com/Moonrend/Zakura/apps/server/internal/platform/server"
 )
 
@@ -27,10 +28,7 @@ import (
 // Its database must be disposable: the test resets the public schema so every
 // run exercises the complete PostgreSQL migration path through lib/pq.
 func TestPostgresCoreWorkflow(t *testing.T) {
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if dsn == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
-	}
+	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "integration_core")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	conn, err := platformdb.Open(ctx, dsn)
@@ -102,7 +100,7 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if migrationsApplied != 4 || users != 1 || tenants != 1 || agentCount != 1 {
+	if migrationsApplied != 8 || users != 1 || tenants != 1 || agentCount != 1 {
 		t.Fatalf("unexpected durable rows: migrations=%d users=%d tenants=%d agents=%d", migrationsApplied, users, tenants, agentCount)
 	}
 
@@ -184,10 +182,7 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 }
 
 func TestPostgresLegacyCompatibility(t *testing.T) {
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
-	if dsn == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
-	}
+	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "integration_legacy")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	conn, err := platformdb.Open(ctx, dsn)
@@ -241,11 +236,12 @@ func TestPostgresLegacyCompatibility(t *testing.T) {
 // prove. CI sets ZAKURA_REFERENCE_DRIZZLE_DIR to the preserved frontend/server
 // checkout; local runs skip when that immutable reference is unavailable.
 func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
+	dsnEnv := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
 	drizzleDir := os.Getenv("ZAKURA_REFERENCE_DRIZZLE_DIR")
-	if dsn == "" || drizzleDir == "" {
+	if dsnEnv == "" || drizzleDir == "" {
 		t.Skip("PostgreSQL URL or pinned Drizzle directory is not set")
 	}
+	dsn := pgtest.FreshURL(t, dsnEnv, "integration_drizzle")
 	files, err := filepath.Glob(filepath.Join(drizzleDir, "*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("pinned Drizzle migrations unavailable at %q: %v", drizzleDir, err)
@@ -310,3 +306,4 @@ func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
 // Keep imports used even if this test is compiled in isolation by tooling that
 // prunes sibling test files containing jsonCall.
 var _ = json.NewDecoder
+
