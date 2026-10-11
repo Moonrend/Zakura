@@ -981,3 +981,21 @@ export type {
 } from "./presence.js";
 
 export { textDiff, shiftIndex } from "./text-diff.js";
+
+export {
+  parseWorkflowRequest,
+  workflowDuration,
+  workflowTimeline,
+} from "./workflow.js";
+export type {
+  WorkflowNode,
+  WorkflowDefinition,
+  WorkflowOptions,
+  WorkflowRequest,
+  WorkflowDiagnostic,
+  WorkflowValidation,
+  WorkflowNodeAnalysis,
+  WorkflowSlot,
+  WorkflowResult,
+  WorkflowTemplate,
+} from "./workflow.js";

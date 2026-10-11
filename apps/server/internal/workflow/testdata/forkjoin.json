@@ -1,0 +1,5874 @@
+[
+  {
+    "name": "forkjoin-nominal-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 254,
+        "resourceLowerBoundsMs": {
+          "cpu": 126,
+          "model": 46
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 79,
+          "endMs": 127,
+          "waitMs": 65,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 127,
+          "endMs": 158,
+          "waitMs": 113,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 158,
+          "endMs": 190,
+          "waitMs": 31,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 190,
+          "endMs": 205,
+          "waitMs": 32,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 205,
+          "endMs": 254,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 254,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 127,
+        "resourceLowerBoundsMs": {
+          "cpu": 126,
+          "model": 23
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 62,
+          "endMs": 93,
+          "waitMs": 48,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 79,
+          "endMs": 111,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 93,
+          "endMs": 108,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 111,
+          "endMs": 160,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 160,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 85,
+        "resourceLowerBoundsMs": {
+          "cpu": 63,
+          "model": 46
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 62,
+          "endMs": 77,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 79,
+          "endMs": 111,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 111,
+          "endMs": 160,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 160,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 43,
+        "resourceLowerBoundsMs": {
+          "cpu": 32,
+          "model": 16
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 62,
+          "endMs": 77,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 79,
+          "endMs": 111,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 111,
+          "endMs": 160,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 160,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 254,
+        "resourceLowerBoundsMs": {
+          "cpu": 126,
+          "model": 46
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 45,
+          "endMs": 93,
+          "waitMs": 31,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 93,
+          "endMs": 158,
+          "waitMs": 79,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 158,
+          "endMs": 173,
+          "waitMs": 65,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 173,
+          "endMs": 205,
+          "waitMs": 15,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 205,
+          "endMs": 254,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 254,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 127,
+        "resourceLowerBoundsMs": {
+          "cpu": 126,
+          "model": 23
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 45,
+          "endMs": 110,
+          "waitMs": 31,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 62,
+          "endMs": 77,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 110,
+          "endMs": 142,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 142,
+          "endMs": 191,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 191,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "forkjoin-nominal-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 85,
+        "resourceLowerBoundsMs": {
+          "cpu": 63,
+          "model": 46
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 62,
+          "endMs": 77,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 79,
+          "endMs": 111,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 111,
+          "endMs": 160,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 160,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-nominal-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 14,
+            "retryBoundMs": 80,
+            "costMicros": 1582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 14,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 160,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 31,
+            "retryBoundMs": 184,
+            "costMicros": 1883,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 45,
+            "latestStartMs": 65,
+            "slackMs": 51,
+            "tailMs": 95,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 62,
+            "latestStartMs": 31,
+            "slackMs": 17,
+            "tailMs": 129,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 65,
+            "retryBoundMs": 147,
+            "costMicros": 2485,
+            "earliestStartMs": 14,
+            "earliestFinishMs": 79,
+            "latestStartMs": 14,
+            "slackMs": 0,
+            "tailMs": 146,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 15,
+            "retryBoundMs": 85,
+            "costMicros": 2786,
+            "earliestStartMs": 62,
+            "earliestFinishMs": 77,
+            "latestStartMs": 96,
+            "slackMs": 34,
+            "tailMs": 64,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 32,
+            "retryBoundMs": 178,
+            "costMicros": 3087,
+            "earliestStartMs": 79,
+            "earliestFinishMs": 111,
+            "latestStartMs": 79,
+            "slackMs": 0,
+            "tailMs": 81,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 111,
+            "earliestFinishMs": 160,
+            "latestStartMs": 111,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 160,
+        "totalWorkMs": 254,
+        "totalCostMicros": 17395,
+        "parallelLowerBoundMs": 43,
+        "resourceLowerBoundsMs": {
+          "cpu": 32,
+          "model": 16
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 14,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 14,
+          "endMs": 45,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 14,
+          "endMs": 62,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 14,
+          "endMs": 79,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 62,
+          "endMs": 77,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 79,
+          "endMs": 111,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 111,
+          "endMs": 160,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 160,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 771,
+        "resourceLowerBoundsMs": {
+          "cpu": 262,
+          "model": 269
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 227,
+          "endMs": 411,
+          "waitMs": 147,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 411,
+          "endMs": 459,
+          "waitMs": 331,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 459,
+          "endMs": 637,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 637,
+          "endMs": 722,
+          "waitMs": 178,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 722,
+          "endMs": 771,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 771,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 386,
+        "resourceLowerBoundsMs": {
+          "cpu": 262,
+          "model": 135
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 227,
+          "endMs": 275,
+          "waitMs": 147,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 275,
+          "endMs": 453,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 275,
+          "endMs": 360,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 453,
+          "endMs": 502,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 502,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 257,
+        "resourceLowerBoundsMs": {
+          "cpu": 131,
+          "model": 269
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 128,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 227,
+          "endMs": 405,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 264,
+          "endMs": 349,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 405,
+          "endMs": 454,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 454,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 129,
+        "resourceLowerBoundsMs": {
+          "cpu": 66,
+          "model": 90
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 128,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 227,
+          "endMs": 405,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 264,
+          "endMs": 349,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 405,
+          "endMs": 454,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 454,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 771,
+        "resourceLowerBoundsMs": {
+          "cpu": 262,
+          "model": 269
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 264,
+          "endMs": 312,
+          "waitMs": 184,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 312,
+          "endMs": 459,
+          "waitMs": 232,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 459,
+          "endMs": 544,
+          "waitMs": 147,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 544,
+          "endMs": 722,
+          "waitMs": 85,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 722,
+          "endMs": 771,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 771,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 386,
+        "resourceLowerBoundsMs": {
+          "cpu": 262,
+          "model": 135
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 128,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 128,
+          "endMs": 275,
+          "waitMs": 48,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 264,
+          "endMs": 349,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 275,
+          "endMs": 453,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 453,
+          "endMs": 502,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 502,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n1",
+              "n2"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n2",
+              "n3"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n4",
+              "n5"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 257,
+        "resourceLowerBoundsMs": {
+          "cpu": 131,
+          "model": 269
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 128,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 227,
+          "endMs": 405,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 264,
+          "endMs": 349,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 405,
+          "endMs": 454,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 454,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "forkjoin-retryBound-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "forkjoin 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "forkjoin task 6",
+            "kind": "agent",
+            "dependsOn": [
+              "n5",
+              "n4"
+            ],
+            "durationMs": 49,
+            "costMicros": 3388,
+            "maxAttempts": 1,
+            "backoffMs": 2,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 62,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "forkjoin task 5",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n3",
+              "n2"
+            ],
+            "durationMs": 32,
+            "costMicros": 3087,
+            "maxAttempts": 4,
+            "backoffMs": 10,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "forkjoin task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n2",
+              "n1"
+            ],
+            "durationMs": 15,
+            "costMicros": 2786,
+            "maxAttempts": 3,
+            "backoffMs": 7,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 28
+          },
+          {
+            "id": "n3",
+            "name": "forkjoin task 3",
+            "kind": "agent",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 65,
+            "costMicros": 2485,
+            "maxAttempts": 2,
+            "backoffMs": 4,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 78,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "forkjoin task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 48,
+            "costMicros": 2184,
+            "maxAttempts": 1,
+            "backoffMs": 1,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "forkjoin task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 31,
+            "costMicros": 1883,
+            "maxAttempts": 4,
+            "backoffMs": 9,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 44
+          },
+          {
+            "id": "n0",
+            "name": "forkjoin task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 14,
+            "costMicros": 1582,
+            "maxAttempts": 3,
+            "backoffMs": 6,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 27,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "n5",
+        "n6"
+      ],
+      "layers": [
+        [
+          "n0"
+        ],
+        [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        [
+          "n4",
+          "n5"
+        ],
+        [
+          "n6"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 80,
+            "retryBoundMs": 80,
+            "costMicros": 4746,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 80,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 454,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 184,
+            "retryBoundMs": 184,
+            "costMicros": 7532,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 264,
+            "latestStartMs": 136,
+            "slackMs": 56,
+            "tailMs": 318,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n2",
+            "durationMs": 48,
+            "retryBoundMs": 48,
+            "costMicros": 2184,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 128,
+            "latestStartMs": 179,
+            "slackMs": 99,
+            "tailMs": 275,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n3",
+            "durationMs": 147,
+            "retryBoundMs": 147,
+            "costMicros": 4970,
+            "earliestStartMs": 80,
+            "earliestFinishMs": 227,
+            "latestStartMs": 80,
+            "slackMs": 0,
+            "tailMs": 374,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n4",
+            "durationMs": 85,
+            "retryBoundMs": 85,
+            "costMicros": 8358,
+            "earliestStartMs": 264,
+            "earliestFinishMs": 349,
+            "latestStartMs": 320,
+            "slackMs": 56,
+            "tailMs": 134,
+            "level": 2,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 178,
+            "retryBoundMs": 178,
+            "costMicros": 12348,
+            "earliestStartMs": 227,
+            "earliestFinishMs": 405,
+            "latestStartMs": 227,
+            "slackMs": 0,
+            "tailMs": 227,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n6",
+            "durationMs": 49,
+            "retryBoundMs": 49,
+            "costMicros": 3388,
+            "earliestStartMs": 405,
+            "earliestFinishMs": 454,
+            "latestStartMs": 405,
+            "slackMs": 0,
+            "tailMs": 49,
+            "level": 3,
+            "critical": true
+          }
+        ],
+        "roots": [
+          "n0"
+        ],
+        "sinks": [
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "criticalPathMs": 454,
+        "totalWorkMs": 771,
+        "totalCostMicros": 43526,
+        "parallelLowerBoundMs": 129,
+        "resourceLowerBoundsMs": {
+          "cpu": 66,
+          "model": 90
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 80,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 80,
+          "endMs": 264,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 80,
+          "endMs": 128,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 80,
+          "endMs": 227,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 227,
+          "endMs": 405,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 264,
+          "endMs": 349,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 405,
+          "endMs": 454,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 454,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  }
+]
