@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"runtime"
@@ -37,6 +38,7 @@ func Run(root string, p ExecParams) (ExecResult, error) {
 	if err != nil {
 		return ExecResult{}, err
 	}
+	prepareSourceProcess(cmd)
 	var outB, errB bytes.Buffer
 	cmd.Stdout = &outB
 	cmd.Stderr = &errB
@@ -44,6 +46,9 @@ func Run(root string, p ExecParams) (ExecResult, error) {
 		cmd.Stdin = bytes.NewBufferString(p.Stdin)
 	}
 	runErr := cmd.Run()
+	if groupErr := WaitSourceProcessGroup(ctx, cmd); groupErr != nil {
+		return ExecResult{Stdout: outB.String(), Stderr: errB.String(), ExitCode: 1}, errors.Join(ErrSourceGroupUnknown, groupErr)
+	}
 	code := 0
 	if runErr != nil {
 		if ee, ok := runErr.(*exec.ExitError); ok {
@@ -99,19 +104,21 @@ func windowsCmd(ctx context.Context, command []string) *exec.Cmd {
 type Job struct {
 	ID       string
 	mu       sync.Mutex
-	stdout   bytes.Buffer
-	stderr   bytes.Buffer
+	stdout   synchronizedBuffer
+	stderr   synchronizedBuffer
 	exitCode *int
 	cmd      *exec.Cmd
 	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 type JobSnap struct {
-	ID       string `json:"id"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode *int   `json:"exitCode"`
-	Running  bool   `json:"running"`
+	ID           string `json:"id"`
+	Stdout       string `json:"stdout"`
+	Stderr       string `json:"stderr"`
+	ExitCode     *int   `json:"exitCode"`
+	Running      bool   `json:"running"`
+	SourceActive bool   `json:"sourceActive"`
 }
 
 type Registry struct {
@@ -133,7 +140,8 @@ func (r *Registry) Start(root string, p ExecParams) (*JobSnap, error) {
 		cancel()
 		return nil, err
 	}
-	j := &Job{ID: newID(), cmd: cmd, cancel: cancel}
+	prepareSourceProcess(cmd)
+	j := &Job{ID: newID(), cmd: cmd, cancel: cancel, done: make(chan struct{})}
 	cmd.Stdout = &j.stdout
 	cmd.Stderr = &j.stderr
 	if p.Stdin != "" {
@@ -159,6 +167,9 @@ func (r *Registry) Start(root string, p ExecParams) (*JobSnap, error) {
 		j.mu.Lock()
 		j.exitCode = &code
 		j.mu.Unlock()
+		if groupErr := WaitSourceProcessGroup(ctx, cmd); groupErr == nil {
+			close(j.done)
+		}
 		cancel()
 	}()
 	return j.Snapshot(), nil
@@ -182,8 +193,8 @@ func (r *Registry) Kill(id string) *JobSnap {
 		return nil
 	}
 	j.cancel()
-	if j.cmd.Process != nil {
-		_ = j.cmd.Process.Kill()
+	if j.cmd.Cancel != nil {
+		_ = j.cmd.Cancel()
 	}
 	return j.Snapshot()
 }
@@ -191,12 +202,19 @@ func (r *Registry) Kill(id string) *JobSnap {
 func (j *Job) Snapshot() *JobSnap {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	settled := false
+	select {
+	case <-j.done:
+		settled = true
+	default:
+	}
 	return &JobSnap{
-		ID:       j.ID,
-		Stdout:   j.stdout.String(),
-		Stderr:   j.stderr.String(),
-		ExitCode: j.exitCode,
-		Running:  j.exitCode == nil,
+		SourceActive: !settled,
+		ID:           j.ID,
+		Stdout:       j.stdout.String(),
+		Stderr:       j.stderr.String(),
+		ExitCode:     j.exitCode,
+		Running:      j.exitCode == nil,
 	}
 }
 

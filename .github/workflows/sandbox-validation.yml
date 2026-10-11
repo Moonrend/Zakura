@@ -6,11 +6,13 @@ on:
     paths:
       - 'apps/agent/**'
       - 'apps/server/**'
+      - 'packages/projectkit/**'
       - '.github/workflows/sandbox-validation.yml'
   push:
     paths:
       - 'apps/agent/**'
       - 'apps/server/**'
+      - 'packages/projectkit/**'
       - '.github/workflows/sandbox-validation.yml'
 
 permissions:
@@ -47,6 +49,11 @@ jobs:
         run: |
           go test -race ./...
           go vet ./...
+      - name: Project workspace, planning and artifact verification
+        working-directory: packages/projectkit
+        run: |
+          go test -race ./...
+          go vet ./...
       - name: Prepare sandbox test image
         run: |
           docker build -t zakura-sandbox-ci:local - <<'DOCKERFILE'
@@ -59,6 +66,16 @@ jobs:
         env:
           ZAKURA_SANDBOX_INTEGRATION: '1'
         run: go test -count=1 -v ./internal/sandbox
+      - name: Writable project branch isolation
+        working-directory: apps/agent
+        env:
+          ZAKURA_PROJECT_DOCKER_TEST: '1'
+        run: ZAKURA_PROJECT_IMAGE="$ZAKURA_SANDBOX_IMAGE" go test -count=1 -v ./internal/sandbox -run '^TestProjectDockerIntegration$'
+      - name: Durable project execution concurrency
+        working-directory: apps/server
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race ./internal/projectexec
       - name: Build runner for server integration
         working-directory: apps/agent
         run: go build -o "$RUNNER_TEMP/zakura-sandbox-agent" ./cmd/zakura-agent
@@ -73,6 +90,11 @@ jobs:
         env:
           ZAKURA_TEST_POSTGRES_DSN: postgres://zakura_test:zakura_test@127.0.0.1:5432/zakura_test?sslmode=disable
         run: go test -count=1 -v ./internal/platform/agentconfig -run Postgres
+      - name: PostgreSQL durable execution concurrency
+        working-directory: apps/server
+        env:
+          ZAKURA_TEST_POSTGRES_DSN: postgres://zakura_test:zakura_test@127.0.0.1:5432/zakura_test?sslmode=disable
+        run: go test -race -count=1 -v ./internal/projectexec -run Postgres
       - name: Server regression tests
         working-directory: apps/server
         env:

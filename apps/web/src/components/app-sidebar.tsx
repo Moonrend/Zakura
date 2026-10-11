@@ -961,6 +961,12 @@ function PlatformSidebar({
           path === "/dashboard/spaces" || path.startsWith("/dashboard/spaces/"),
       },
       {
+        id: "project-executions",
+        href: "/dashboard/project-executions",
+        label: "长期项目",
+        icon: FolderKanban,
+      },
+      {
         id: "chat",
         href: "/chat",
         label: "聊天",

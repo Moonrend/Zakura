@@ -12,6 +12,7 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
 	"github.com/Moonrend/Zakura/apps/agent/internal/host"
+	"github.com/Moonrend/Zakura/apps/agent/internal/projectrunner"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sandbox"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
 )
@@ -20,6 +21,7 @@ type Handler struct {
 	Kind            string
 	StorageRoot     string
 	jobs            *host.Registry
+	projects        *projectrunner.Manager
 	sandboxJobs     *sandbox.Registry
 	sandboxEnforced bool
 	ptys            map[string]*host.LiveStream
@@ -31,6 +33,7 @@ func New(kind, storageRoot string) *Handler {
 		Kind:            kind,
 		StorageRoot:     storageRoot,
 		jobs:            host.NewRegistry(),
+		projects:        projectrunner.New(storageRoot),
 		sandboxJobs:     sandbox.NewRegistry(),
 		sandboxEnforced: sandboxEnforcement(os.Getenv("ZAKURA_SANDBOX_ENABLED")),
 		ptys:            map[string]*host.LiveStream{},
@@ -44,6 +47,28 @@ func (h *Handler) workspace(spaceID string) string {
 func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	var err error
 	var result any
+	unlock, lockErr := h.lockFilesystemRPC(msg.Method, msg.Params)
+	if lockErr != nil {
+		send(Err(msg.ID, lockErr.Error()))
+		return
+	}
+	defer unlock()
+	if strings.HasPrefix(msg.Method, "project.") {
+		result, err = h.projectDispatch(ctx, msg.Method, msg.Params)
+		if err != nil {
+			send(Err(msg.ID, host.ScrubHostPathsInMessage(h.StorageRoot, err.Error())))
+			return
+		}
+		send(Ok(msg.ID, result))
+		return
+	}
+
+	lease, activityErr := h.beginSourceProcess(msg)
+	if activityErr != nil {
+		send(Err(msg.ID, activityErr.Error()))
+		return
+	}
+	defer func() { lease.complete(result, err) }()
 
 	// Do not let an explicit isolation request silently use an unsupported
 	// execution transport. Docker management is not the sandbox backend API.

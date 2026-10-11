@@ -2,10 +2,11 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-docker build --file "$root/Dockerfile.stdio" --target npm --tag zakura/stdio-bridge-node:local "$root"
-docker build --file "$root/Dockerfile.stdio" --target pypi --tag zakura/stdio-bridge-python:local "$root"
-docker build --file "$root/Dockerfile.stdio" --target oci --tag zakura/stdio-bridge-oci:local "$root"
-docker build --file "$root/Dockerfile.stdio" --target binary --tag zakura/stdio-bridge-binary:local "$root"
+repository_root=$(CDPATH= cd -- "$root/../.." && pwd)
+docker build --file "$root/Dockerfile.stdio" --target npm --tag zakura/stdio-bridge-node:local "$repository_root"
+docker build --file "$root/Dockerfile.stdio" --target pypi --tag zakura/stdio-bridge-python:local "$repository_root"
+docker build --file "$root/Dockerfile.stdio" --target oci --tag zakura/stdio-bridge-oci:local "$repository_root"
+docker build --file "$root/Dockerfile.stdio" --target binary --tag zakura/stdio-bridge-binary:local "$repository_root"
 
 cat <<'EOF'
 Built native stdio bridge images. Configure the backend with:
