@@ -992,14 +992,19 @@ func (s *Store) GetUpstream(ctx context.Context, tenant, id string) (Upstream, e
 	return c.upstream(), nil
 }
 func (s *Store) DeleteUpstream(ctx context.Context, tenant, id string) error {
-	res := s.deps.Gorm.WithContext(ctx).Table("model_upstreams").Where("tenant_id = ? AND id = ?", tenant, id).Delete(nil)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := tx.Table("model_routes").Where("tenant_id = ? AND upstream_id = ?", tenant, id).Delete(nil).Error; e != nil {
+			return e
+		}
+		res := tx.Table("model_upstreams").Where("tenant_id = ? AND id = ?", tenant, id).Delete(nil)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 func (s *Store) ListRoutes(ctx context.Context, tenant, capability string) ([]ModelRoute, error) {
 	query := s.deps.Gorm.WithContext(ctx).Table("model_routes").Select("id,name,slug,capability,alias,upstream_id,model,options_json,priority,weight,is_default,status,last_error,created_at,updated_at").Where("tenant_id = ?", tenant)

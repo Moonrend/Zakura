@@ -174,6 +174,7 @@ func (h *handler) registerCore(r chi.Router) {
 	r.Post("/model-catalog/import", h.importModelCatalog)
 	r.Get("/model-routes", h.listModelRoutes)
 	r.Post("/model-routes", h.createModelRoute)
+	r.Put("/model-routes/default", h.setDefaultModelRoute)
 	r.Get("/model-routes/{id}", h.getModelRoute)
 	r.Patch("/model-routes/{id}", h.patchModelRoute)
 	r.Delete("/model-routes/{id}", h.deleteModelRoute)

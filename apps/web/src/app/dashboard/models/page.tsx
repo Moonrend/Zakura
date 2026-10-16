@@ -470,18 +470,16 @@ function ModelRoutesPageInner() {
       toast.error("未找到该模型");
       return;
     }
-    const targetId =
-      routeId ||
-      item.providers[0]?.id ||
-      null;
-    if (!targetId) {
-      toast.error("该模型没有可用部署");
-      return;
-    }
+    const effectiveRouteId =
+      routeId || item.defaultRouteId || item.providers[0]?.id || null;
     try {
-      await api(`/api/upstream-models/${targetId}`, {
-        method: "PATCH",
-        json: { isDefault: true },
+      await api(`/api/model-routes/default`, {
+        method: "PUT",
+        json: {
+          capability,
+          modelId: alias,
+          ...(effectiveRouteId ? { routeId: effectiveRouteId } : {}),
+        },
       });
       toast.success(`已将 ${item.name} 设为${CAPABILITY_LABEL[capability] ?? capability}默认`);
       await load();

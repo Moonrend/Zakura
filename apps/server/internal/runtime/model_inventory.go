@@ -17,6 +17,7 @@ import (
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -327,13 +328,21 @@ func (h *handler) patchUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	statusErr(w, ErrNotFound)
 }
 func (h *handler) deleteUpstreamModel(w http.ResponseWriter, r *http.Request) {
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.UpstreamModel{})
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
+	tenant := principal(r).TenantID
+	id := chi.URLParam(r, "id")
+	e := h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		upstreamID, native, canonical, e := lookupUpstreamModelTx(tx, tenant, id)
+		if e != nil {
+			return e
+		}
+		if e := deleteRoutesForModelTx(tx, tenant, upstreamID, native, canonical); e != nil {
+			return e
+		}
+		res := tx.Where("tenant_id=? AND id=?", tenant, id).Delete(&models.UpstreamModel{})
+		return res.Error
+	})
+	if e != nil {
+		statusErr(w, e)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
@@ -351,14 +360,31 @@ func (h *handler) batchDeleteUpstreamModels(w http.ResponseWriter, r *http.Reque
 		httpx.Error(w, 400, "ids required")
 		return
 	}
+	tenant := principal(r).TenantID
 	n := int64(0)
-	for _, id := range ids {
-		res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, id).Delete(&models.UpstreamModel{})
-		if res.Error != nil {
-			statusErr(w, res.Error)
-			return
+	e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			upstreamID, native, canonical, e := lookupUpstreamModelTx(tx, tenant, id)
+			if errors.Is(e, gorm.ErrRecordNotFound) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if e := deleteRoutesForModelTx(tx, tenant, upstreamID, native, canonical); e != nil {
+				return e
+			}
+			res := tx.Where("tenant_id=? AND id=?", tenant, id).Delete(&models.UpstreamModel{})
+			if res.Error != nil {
+				return res.Error
+			}
+			n += res.RowsAffected
 		}
-		n += res.RowsAffected
+		return nil
+	})
+	if e != nil {
+		statusErr(w, e)
+		return
 	}
 	httpx.JSON(w, 200, map[string]any{"deleted": n})
 }
@@ -368,14 +394,24 @@ func (h *handler) batchDeleteUpstreams(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "ids required")
 		return
 	}
+	tenant := principal(r).TenantID
 	n := int64(0)
-	for _, id := range ids {
-		res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND id=?", principal(r).TenantID, id).Delete(&models.ModelUpstream{})
-		if res.Error != nil {
-			statusErr(w, res.Error)
-			return
+	e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			if e := tx.Table("model_routes").Where("tenant_id=? AND upstream_id=?", tenant, id).Delete(nil).Error; e != nil {
+				return e
+			}
+			res := tx.Where("tenant_id=? AND id=?", tenant, id).Delete(&models.ModelUpstream{})
+			if res.Error != nil {
+				return res.Error
+			}
+			n += res.RowsAffected
 		}
-		n += res.RowsAffected
+		return nil
+	})
+	if e != nil {
+		statusErr(w, e)
+		return
 	}
 	httpx.JSON(w, 200, map[string]any{"deleted": n})
 }
@@ -445,6 +481,10 @@ func (h *handler) syncUpstreamModels(w http.ResponseWriter, r *http.Request) {
 			statusErr(w, res.Error)
 			return
 		}
+		if e := h.ensureAutoRoute(r.Context(), tenant, id, m.ID, m.Name); e != nil {
+			statusErr(w, e)
+			return
+		}
 		if known[m.ID] {
 			updated++
 		} else {
@@ -478,6 +518,9 @@ func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string)
 			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": "chat", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error != nil {
 			return count, res.Error
+		}
+		if e := h.ensureAutoRoute(ctx, tenant, id, m.ID, m.Name); e != nil {
+			return count, e
 		}
 		count++
 	}
@@ -555,6 +598,50 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.JSON(w, 201, map[string]any{"imported": count})
+}
+
+func (h *handler) ensureAutoRoute(ctx context.Context, tenant, upstreamID, modelID, displayName string) error {
+	var existing int64
+	if e := h.deps.Gorm.WithContext(ctx).Table("model_routes").Where("tenant_id=? AND capability='chat' AND (alias=? OR model=?)", tenant, modelID, modelID).Count(&existing).Error; e != nil {
+		return e
+	}
+	if existing > 0 {
+		return nil
+	}
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		name = modelID
+	}
+	slug := slugify(modelID + "-chat")
+	if slug == "" {
+		slug = "model"
+	}
+	now := runtimeTimeString(h.store.now())
+	return h.deps.Gorm.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "slug"}}, DoNothing: true}).Table("model_routes").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "name": name, "slug": slug, "capability": "chat", "alias": modelID, "upstream_id": upstreamID, "model": modelID, "options_json": "{}", "priority": "100", "weight": "100", "is_default": false, "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
+}
+
+func lookupUpstreamModelTx(tx *gorm.DB, tenant, id string) (string, string, string, error) {
+	var row struct {
+		UpstreamID     string `gorm:"column:upstream_id"`
+		NativeModel    string `gorm:"column:native_model"`
+		CanonicalModel string `gorm:"column:canonical_model"`
+	}
+	e := tx.Table("upstream_models").Select("upstream_id,native_model,canonical_model").Where("tenant_id=? AND id=?", tenant, id).Take(&row).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
+		return "", "", "", ErrNotFound
+	}
+	if e != nil {
+		return "", "", "", e
+	}
+	return row.UpstreamID, row.NativeModel, row.CanonicalModel, nil
+}
+
+func deleteRoutesForModelTx(tx *gorm.DB, tenant, upstreamID, nativeModel, canonicalModel string) error {
+	aliases := []string{nativeModel}
+	if canonicalModel != "" && canonicalModel != nativeModel {
+		aliases = append(aliases, canonicalModel)
+	}
+	return tx.Table("model_routes").Where("tenant_id=? AND upstream_id=? AND (alias IN ? OR model IN ?)", tenant, upstreamID, aliases, aliases).Delete(nil).Error
 }
 
 var _ = sql.ErrNoRows
