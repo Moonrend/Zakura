@@ -47,6 +47,7 @@ export type UpstreamModelItem = {
 
 type Props = {
   upstreamId: string;
+  protocol?: string;
   /** 首次挂载后立即尝试从上游解析模型。 */
   autoSync?: boolean;
   /** 连接信息保存后递增此值，以重新解析模型。 */
@@ -57,6 +58,7 @@ type Props = {
 };
 
 const CAPABILITY_ITEMS = [
+  { value: "evaluation", label: "评估" },
   { value: "chat", label: "对话" },
   { value: "embedding", label: "向量化" },
   { value: "rerank", label: "重排序" },
@@ -97,11 +99,14 @@ function formatUnmatchedModels(models?: SyncResult["unmatchedModels"]): string |
 
 export function UpstreamModelSetup({
   upstreamId,
+  protocol,
   autoSync = false,
   syncKey = 0,
   variant = "manage",
   onReady,
 }: Props) {
+  const evaluationOnly = protocol === "typesafe";
+  const capabilityItems = evaluationOnly ? CAPABILITY_ITEMS.filter(item => item.value === "evaluation") : CAPABILITY_ITEMS;
   const lastAutoSyncKey = useRef<string | null>(null);
   const modelRequestId = useRef(0);
   const modelsRef = useRef<UpstreamModelItem[]>([]);
@@ -253,13 +258,13 @@ export function UpstreamModelSetup({
     setSyncMessage(null);
     setManualOpen(false);
     const requestKey = `${upstreamId}:${syncKey}`;
-    if (autoSync && lastAutoSyncKey.current !== requestKey) {
+    if (autoSync && !evaluationOnly && lastAutoSyncKey.current !== requestKey) {
       lastAutoSyncKey.current = requestKey;
       void fetchRemoteModels();
       return;
     }
     void load();
-  }, [autoSync, fetchRemoteModels, load, syncKey, upstreamId]);
+  }, [autoSync, evaluationOnly, fetchRemoteModels, load, syncKey, upstreamId]);
 
   async function addManualModel() {
     if (!nativeModel.trim()) {
@@ -274,7 +279,7 @@ export function UpstreamModelSetup({
           upstreamId,
           nativeModel: nativeModel.trim(),
           canonicalModel: canonicalModel.trim() || undefined,
-          capability,
+          capability: evaluationOnly ? "evaluation" : capability,
         },
       });
       setNativeModel("");
@@ -331,16 +336,16 @@ export function UpstreamModelSetup({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium">
-            {variant === "onboarding" ? "选择对话模型" : "模型"}
+            {evaluationOnly ? "评估模型" : variant === "onboarding" ? "选择对话模型" : "模型"}
           </p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            {variant === "onboarding"
+            {evaluationOnly ? "Jev 用于工具审批，不用于对话。" : variant === "onboarding"
               ? "已自动读取提供商中的可用模型。选择一个作为默认模型。"
               : "从上游自动解析模型；不支持模型列表的服务也可手动添加。"}
           </p>
         </div>
         <div className="flex gap-2">
-          <Button
+          {!evaluationOnly ? <Button
             size="sm"
             variant="outline"
             disabled={syncing || loading}
@@ -348,7 +353,7 @@ export function UpstreamModelSetup({
           >
             <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
             {syncing ? "正在解析" : "重新解析"}
-          </Button>
+          </Button> : null}
           <Button size="sm" variant="outline" onClick={() => setManualOpen((open) => !open)}>
             <Plus className="size-3.5" />
             手动添加
@@ -390,10 +395,10 @@ export function UpstreamModelSetup({
               </div>
               <div className="space-y-1.5">
                 <Label>能力</Label>
-                <Select value={capability} onValueChange={(value) => value && setCapability(value)} items={CAPABILITY_ITEMS}>
+                <Select value={evaluationOnly ? "evaluation" : capability} onValueChange={(value) => value && setCapability(value)} items={capabilityItems}>
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {CAPABILITY_ITEMS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+                    {capabilityItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>

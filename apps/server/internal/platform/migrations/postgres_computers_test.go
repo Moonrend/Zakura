@@ -2,7 +2,7 @@ package migrations_test
 
 import (
 	"context"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,7 +12,7 @@ import (
 )
 
 func TestPostgresComputersSchema(t *testing.T) {
-	url := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "migrations")
+	url := pgtest.FreshURL(t, pgtest.URL(t), "migrations")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, url)
 	if err != nil {
@@ -21,9 +21,6 @@ func TestPostgresComputersSchema(t *testing.T) {
 	defer conn.DB.Close()
 	if conn.Dialect != "postgres" {
 		t.Fatalf("expected postgres dialect, got %q", conn.Dialect)
-	}
-	if _, err := conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatalf("reset disposable PostgreSQL database: %v", err)
 	}
 	if err := migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("apply migrations: %v", err)
@@ -37,6 +34,9 @@ func TestPostgresComputersSchema(t *testing.T) {
 		"computer_execution_targets",
 		"computer_project_workspaces",
 		"space_computer_defaults",
+		"agent_tool_approvals",
+		"workspace_create_operations",
+		"workspace_connections",
 	} {
 		var n int
 		if err := conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=?`), table).Scan(&n); err != nil {
@@ -53,9 +53,19 @@ func TestPostgresComputersSchema(t *testing.T) {
 	if dataType != "boolean" {
 		t.Errorf("spaces.enable_computer is %q, want boolean", dataType)
 	}
+	reference, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "migration-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reference.DB.Close()
+	if err := migrations.Apply(ctx, reference.DB, reference.Dialect, reference.Rebind); err != nil {
+		t.Fatal(err)
+	}
+	pgtest.AssertMigrationLedger(t, ctx, conn.DB, reference.DB)
 	if err := migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
+	pgtest.AssertMigrationLedger(t, ctx, conn.DB, reference.DB)
 	var indexDef string
 	if err := conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_computer_runtime_active'`)).Scan(&indexDef); err != nil {
 		t.Fatalf("idx_computer_runtime_active: %v", err)

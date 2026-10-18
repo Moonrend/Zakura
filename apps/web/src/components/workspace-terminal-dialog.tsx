@@ -33,18 +33,26 @@ export function WorkspaceTerminalDialog({
   open,
   request,
   ticketPath,
+  ticketBody,
+  onExit,
   onOpenChange,
 }: {
   agentId?: string;
   open: boolean;
   request?: WorkspaceTerminalRequest;
   ticketPath?: string;
+  ticketBody?: { methodId: string };
+  onExit?: (code: number | null) => void;
   onOpenChange: (open: boolean) => void;
 }) {
   const { ref, write, focus } = useTerminal();
   const socketRef = useRef<WebSocket | null>(null);
   const sizeRef = useRef({ cols: 80, rows: 24 });
   const generationRef = useRef(0);
+  const bootTimerRef = useRef<number | null>(null);
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  const ticketMethodId = ticketBody?.methodId;
   const [state, setState] = useState<State>("idle");
   const [detail, setDetail] = useState("等待建立动态会话");
   // Which boot script applies depends on where the shell lands. A profile id
@@ -65,6 +73,8 @@ export function WorkspaceTerminalDialog({
 
   const disconnect = useCallback((next: State = "closed") => {
     generationRef.current += 1;
+    if (bootTimerRef.current !== null) window.clearTimeout(bootTimerRef.current);
+    bootTimerRef.current = null;
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
@@ -88,16 +98,22 @@ export function WorkspaceTerminalDialog({
         : request?.profileId
           ? `/api/agents/${agentId}/terminal-ticket?adapterId=${encodeURIComponent(request.profileId)}`
           : `/api/agents/${agentId}/terminal-ticket`;
-      const ticket = await api<Ticket>(path, { method: "POST" });
+      const ticket = await api<Ticket>(path, {
+        method: "POST",
+        ...(ticketMethodId ? { json: { methodId: ticketMethodId } } : {}),
+      });
       if (generation !== generationRef.current) return;
       const socket = new WebSocket(runtimeSocketUrl(ticket.url));
       socketRef.current = socket;
+      let reportedExit = false;
       socket.onopen = () => {
+        if (generation !== generationRef.current || socketRef.current !== socket) return;
         setDetail("凭据已验证，正在启动容器 PTY…");
         socket.send(JSON.stringify({ type: "resize", ...sizeRef.current }));
       };
       socket.onmessage = (event) => {
-        let message: { type?: string; data?: string; message?: string; command?: string; code?: number | null };
+        if (generation !== generationRef.current || socketRef.current !== socket) return;
+        let message: { type?: string; data?: string; message?: string; command?: string; code?: number | null; autoBoot?: boolean };
         try {
           message = JSON.parse(String(event.data));
         } catch {
@@ -106,7 +122,7 @@ export function WorkspaceTerminalDialog({
         }
         if (message.type === "ready") {
           setState("connected");
-          const boot = bootRef.current;
+          const boot = ticketMethodId || message.autoBoot === false ? undefined : bootRef.current;
           setDetail(boot ? `登录命令：${boot.display}` : message.command || "bash -l");
           socket.send(JSON.stringify({ type: "resize", ...sizeRef.current }));
           focus();
@@ -115,7 +131,10 @@ export function WorkspaceTerminalDialog({
           if (boot) {
             sendInput(`${boot.commandLine}\n`);
             if (boot.initialInput) {
-              window.setTimeout(() => sendInput(boot.initialInput!), 1500);
+              bootTimerRef.current = window.setTimeout(() => {
+                if (generation === generationRef.current && socketRef.current === socket) sendInput(boot.initialInput!);
+                bootTimerRef.current = null;
+              }, 1500);
             }
           }
         } else if (message.type === "output" && message.data) {
@@ -127,12 +146,16 @@ export function WorkspaceTerminalDialog({
         } else if (message.type === "error") {
           setState("error");
           setDetail(message.message || "终端连接失败");
-        } else if (message.type === "exit") {
+        } else if (message.type === "exit" && !reportedExit) {
+          reportedExit = true;
+          const code = typeof message.code === "number" && Number.isInteger(message.code) ? message.code : null;
           setState("closed");
-          setDetail(`PTY 已退出${message.code == null ? "" : ` · code ${message.code}`}`);
+          setDetail(code === null ? "PTY 已退出 · 未收到退出状态" : `PTY 已退出 · code ${code}`);
+          onExitRef.current?.(code);
         }
       };
       socket.onerror = () => {
+        if (generation !== generationRef.current || socketRef.current !== socket) return;
         setState("error");
         setDetail("WebSocket 无法连接到 reCloud Server");
       };
@@ -141,12 +164,17 @@ export function WorkspaceTerminalDialog({
         socketRef.current = null;
         setState((current) => (current === "error" ? current : "closed"));
         if (event.reason) setDetail(event.reason);
+        if (!reportedExit) {
+          reportedExit = true;
+          onExitRef.current?.(null);
+        }
       };
     } catch (error) {
+      if (generation !== generationRef.current) return;
       setState("error");
       setDetail(error instanceof Error ? error.message : String(error));
     }
-  }, [agentId, disconnect, focus, sendInput, ticketPath, write]);
+  }, [agentId, disconnect, focus, request?.profileId, sendInput, ticketMethodId, ticketPath, write]);
 
   useEffect(() => {
     if (open) void connect();

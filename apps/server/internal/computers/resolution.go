@@ -3,15 +3,17 @@ package computers
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 )
-
-var ErrNoComputerSelected = errors.New("no computer selected for this run")
 
 // ResolveRunComputer selects configuration only. It must not create or restart a
 // runtime. Dispatch must separately authorize use and check the pinned runtime.
-// A blank explicitID uses only the immutable Run snapshot, never live defaults.
+// Resolution order, all scoped to the Run's own tenant and Space:
+//  1. explicitID, a tool call naming its target for that call only;
+//  2. the Run's immutable snapshot of the chat's choice;
+//  3. the Space server computer.
+//
+// The server computer is unique per Space and never reassigned, so the fallback
+// is as stable as the snapshot; it is never a mutable chat or Space default.
 func (s Store) ResolveRunComputer(ctx context.Context, tenant, space, run, explicitID string) (Computer, error) {
 	var selected sql.NullString
 	err := s.DB.QueryRowContext(ctx, s.query(`SELECT t.computer_id FROM run_computer_targets t
@@ -22,26 +24,12 @@ func (s Store) ResolveRunComputer(ctx context.Context, tenant, space, run, expli
 	if err != nil {
 		return Computer{}, err
 	}
-	id := explicitID
-	if id == "" {
-		if !selected.Valid {
-			return Computer{}, ErrNoComputerSelected
-		}
-		id = selected.String
+	switch {
+	case explicitID != "":
+		return s.Get(ctx, tenant, space, explicitID)
+	case selected.Valid && selected.String != "":
+		return s.Get(ctx, tenant, space, selected.String)
+	default:
+		return s.ServerComputer(ctx, tenant, space)
 	}
-	var c Computer
-	var node sql.NullString
-	var capabilities string
-	// Do not retrieve settings or credentials on the execution selection path.
-	err = s.DB.QueryRowContext(ctx, s.query(`SELECT id,tenant_id,space_id,name,provider,runtime_node_id,capabilities_json,idle_seconds,max_lifetime_seconds
- FROM computers WHERE id=? AND tenant_id=? AND space_id=?`), id, tenant, space).Scan(
-		&c.ID, &c.TenantID, &c.SpaceID, &c.Name, &c.Provider, &node, &capabilities, &c.IdleSeconds, &c.MaxLifetimeSeconds)
-	if err != nil {
-		return Computer{}, err
-	}
-	c.RuntimeNodeID = node.String
-	if err = json.Unmarshal([]byte(capabilities), &c.Capabilities); err != nil {
-		return Computer{}, err
-	}
-	return c, nil
 }

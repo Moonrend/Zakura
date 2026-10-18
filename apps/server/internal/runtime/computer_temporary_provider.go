@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path"
 	"strings"
@@ -177,6 +178,157 @@ func (p temporaryComputerProvider) Destroy(ctx context.Context, r computers.Runt
 	return nil
 }
 
+type temporaryCleanupSnapshot struct {
+	Runtime     computers.Runtime `json:"runtime"`
+	NodeID      string            `json:"nodeId"`
+	StorageRoot string            `json:"storageRoot"`
+}
+
+var _ computers.CleanupSnapshotProvider = temporaryComputerProvider{}
+
+func cleanupRuntimeIdentityMatches(a, b computers.Runtime) bool {
+	return a.ID == b.ID && a.TenantID == b.TenantID && a.SpaceID == b.SpaceID && a.ComputerID == b.ComputerID && a.Incarnation == b.Incarnation && a.CreateOperationID == b.CreateOperationID && a.SessionScope == b.SessionScope && a.ExternalID == b.ExternalID && a.RootPath == b.RootPath
+}
+func temporaryCleanupPath(r computers.Runtime, root string) (string, error) {
+	if r.ID == "" || r.ID == "." || r.ID == ".." || strings.ContainsAny(r.ID, "/\\") || strings.TrimSpace(root) == "" {
+		return "", errors.New("temporary cleanup storage identity is invalid")
+	}
+	relative := path.Join("computers", r.ID, "workspace")
+	expected := path.Join(strings.ReplaceAll(root, "\\", "/"), relative)
+	if r.RootPath != "" && path.Clean(strings.ReplaceAll(r.RootPath, "\\", "/")) != expected {
+		return "", errors.New("temporary cleanup workspace root does not match its runtime")
+	}
+	return relative, nil
+}
+
+// Capture pins a sealed original route before deletion. Neither later computer
+// configuration nor a reused runtime slot can redirect this cleanup capability.
+func (p temporaryComputerProvider) CaptureCleanup(ctx context.Context, r computers.Runtime) (json.RawMessage, error) {
+	actual, err := p.h.computerStore().GetRuntime(ctx, computers.Target{TenantID: r.TenantID, SpaceID: r.SpaceID, ComputerID: r.ComputerID, RuntimeID: r.ID, Incarnation: r.Incarnation})
+	if err != nil {
+		return nil, err
+	}
+	if !cleanupRuntimeIdentityMatches(actual, r) || r.CreateOperationID == "" || r.Incarnation == "" || strings.TrimSpace(r.SessionScope) == "" {
+		return nil, computers.ErrTransitionConflict
+	}
+	var snapshot temporaryCleanupSnapshot
+	snapshot.Runtime = actual
+	err = p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT n.id,n.storage_root FROM computers c JOIN runtime_nodes n ON n.id=c.runtime_node_id AND (n.tenant_id=c.tenant_id OR n.is_shared=TRUE) WHERE c.id=? AND c.tenant_id=? AND c.space_id=? AND c.provider='temporary' AND n.kind IN ('server','computer','local')`), r.ComputerID, r.TenantID, r.SpaceID).Scan(&snapshot.NodeID, &snapshot.StorageRoot)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = temporaryCleanupPath(r, snapshot.StorageRoot); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	sealed, err := computers.SealCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, raw)
+	if err != nil {
+		return nil, errors.New("temporary cleanup snapshot could not be sealed")
+	}
+	return json.Marshal(map[string]string{"sealed": sealed})
+}
+
+func observeTemporaryCleanup(ctx context.Context, runner *runnerSession, r computers.Runtime) (computerContainer, error) {
+	var listed []computerContainer
+	// Unfiltered complete list also finds a known ID whose labels were changed;
+	// an operation-only filter would mistake that case for confirmed absence.
+	if err := runner.call(ctx, "docker.list", map[string]any{}, &listed); err != nil {
+		return computerContainer{}, err
+	}
+	name, labels := computerContainerIdentity(r)
+	var found computerContainer
+	for _, c := range listed {
+		if c.DockerID != r.ExternalID && strings.TrimPrefix(c.Name, "/") != name && c.Labels["zakura.runtime"] != r.ID && c.Labels["zakura.operation"] != r.CreateOperationID {
+			continue
+		}
+		if c.DockerID == "" || strings.TrimPrefix(c.Name, "/") != name || c.Image != serverComputerImage {
+			return computerContainer{}, errors.New("temporary cleanup container identity mismatch")
+		}
+		if r.ExternalID != "" && c.DockerID != r.ExternalID {
+			return computerContainer{}, errors.New("temporary cleanup container was replaced")
+		}
+		for key, value := range labels {
+			if c.Labels[key] != value {
+				return computerContainer{}, errors.New("temporary cleanup container ownership mismatch")
+			}
+		}
+		switch c.Status {
+		case "running", "exited", "created", "dead":
+		default:
+			return computerContainer{}, errors.New("temporary cleanup container state is incomplete")
+		}
+		if found.DockerID != "" {
+			return computerContainer{}, errors.New("ambiguous temporary cleanup containers")
+		}
+		found = c
+	}
+	if found.DockerID == "" && r.ExternalID == "" {
+		return computerContainer{}, errors.New("temporary cleanup creation outcome remains unknown")
+	}
+	return found, nil
+}
+
+// DestroyCleanup only uses the captured route and pinned original identity. It
+// deliberately performs no computer/runtime lookup, allowing owner deletion.
+func (p temporaryComputerProvider) DestroyCleanup(ctx context.Context, r computers.Runtime, data json.RawMessage) error {
+	var envelope struct {
+		Sealed string `json:"sealed"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return errors.New("temporary cleanup snapshot is invalid")
+	}
+	plain, err := computers.OpenCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, envelope.Sealed)
+	if err != nil {
+		return errors.New("temporary cleanup snapshot could not be opened")
+	}
+	var snapshot temporaryCleanupSnapshot
+	if json.Unmarshal(plain, &snapshot) != nil || !cleanupRuntimeIdentityMatches(snapshot.Runtime, r) || snapshot.NodeID == "" {
+		return computers.ErrTransitionConflict
+	}
+	relative, err := temporaryCleanupPath(r, snapshot.StorageRoot)
+	if err != nil {
+		return err
+	}
+	if p.h.hub == nil {
+		return computers.ErrProviderUnavailable
+	}
+	runner, err := p.h.hub.get(snapshot.NodeID)
+	if err != nil {
+		return err
+	}
+	c, err := observeTemporaryCleanup(ctx, runner, r)
+	if err != nil {
+		return err
+	}
+	if c.DockerID != "" {
+		if err = runner.call(ctx, "docker.stop", map[string]any{"id": c.DockerID, "remove": true}, nil); err != nil {
+			return err
+		}
+		observedRuntime := r
+		observedRuntime.ExternalID = c.DockerID
+		after, err := observeTemporaryCleanup(ctx, runner, observedRuntime)
+		if err != nil {
+			return err
+		}
+		if after.DockerID != "" {
+			return errors.New("temporary cleanup removal is not confirmed")
+		}
+	}
+	var removed struct {
+		OK bool `json:"ok"`
+	}
+	if err = runner.call(ctx, "host.fs.remove", map[string]any{"root": snapshot.StorageRoot, "path": relative, "recursive": true}, &removed); err != nil {
+		return err
+	}
+	if !removed.OK {
+		return errors.New("temporary cleanup workspace removal is not confirmed")
+	}
+	return nil
+}
+
 func (h *handler) startComputerCleanup(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -198,6 +350,8 @@ func (h *handler) sweepExpiredComputers(ctx context.Context) {
 	defer func() { _ = recover() }()
 	callCtx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
+	_ = h.recoverSpaceWorkspaces(callCtx, 25)
+	_ = h.sweepManagedContainerCleanup(callCtx, 50)
 	deps := computers.CleanupDeps{Store: h.computerStore(), Destroyers: h.computerDestroyers(), Now: func() time.Time { return h.store.now() }}
 	_, _, _ = deps.ExpireOverdue(callCtx, 50)
 }

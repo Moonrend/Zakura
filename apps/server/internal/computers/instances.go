@@ -69,6 +69,12 @@ func (s Store) CompleteCreation(ctx context.Context, t Target, operation string,
 		return err
 	}
 	defer tx.Rollback()
+	if err = s.lockCreationOwners(ctx, tx, t.TenantID, t.SpaceID, t.ComputerID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTransitionConflict
+		}
+		return err
+	}
 	var provider Provider
 	var idleSeconds, maxSeconds int
 	var approved string

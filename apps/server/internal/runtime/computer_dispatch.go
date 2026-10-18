@@ -22,8 +22,9 @@ func computerBoundTool(name string) bool {
 	return strings.HasPrefix(name, "mcp__") || strings.Contains(name, ":")
 }
 
-// runListComputers exposes only public configuration and this Run's snapshot.
-// A missing snapshot is an error, not permission to consult mutable defaults.
+// runListComputers exposes only public configuration and this Run's computer:
+// its immutable pin, or the Space server computer when the chat chose none.
+// A missing Run is an error, not permission to consult mutable selections.
 func (h *handler) runListComputers(ctx context.Context, tenant, agent, session string) (json.RawMessage, error) {
 	run, _ := ctx.Value(computerRunKey{}).(string)
 	if run == "" {
@@ -43,12 +44,20 @@ func (h *handler) runListComputers(ctx context.Context, tenant, agent, session s
 	if err != nil {
 		return nil, err
 	}
-	var defaultID *string
-	if selected.Valid {
+	var serverID *string
+	for i := range catalog {
+		if catalog[i].IsServer() {
+			serverID = &catalog[i].ID
+			break
+		}
+	}
+	defaultID := serverID
+	if selected.Valid && selected.String != "" {
 		defaultID = &selected.String
 	}
 	return json.Marshal(struct {
 		Computers         any     `json:"computers"`
 		DefaultComputerID *string `json:"defaultComputerId"`
-	}{catalog, defaultID})
+		ServerComputerID  *string `json:"serverComputerId"`
+	}{catalog, defaultID, serverID})
 }

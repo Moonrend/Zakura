@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
 const (
@@ -18,9 +20,9 @@ const (
 )
 
 func (h *handler) runBuiltinToolDesktop(ctx context.Context, tenant, agent, name string, args map[string]any) (json.RawMessage, error) {
-	// Desktop control needs a display server; dedicated computer containers do
-	// not provide one, so the refusal is explicit instead of failing deeper.
-	if err := refuseNonLegacyExecution(ctx, "desktop control"); err != nil {
+	// Desktop control needs the display of the Space workspace container; the
+	// refusal is explicit instead of failing deeper in the transport.
+	if err := requireWorkspaceCapability(ctx, computers.Desktop, "desktop control"); err != nil {
 		return nil, err
 	}
 	switch name {

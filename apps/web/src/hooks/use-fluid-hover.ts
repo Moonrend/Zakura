@@ -271,6 +271,7 @@ export function useFluidHover<T extends HTMLElement>(
         element.offsetWidth > 0 ||
         element.offsetHeight > 0;
       if (!hasLayoutBox) {
+        if (isItemDisabled?.(element)) return;
         everyItemHasLayout = false;
         return;
       }
@@ -320,7 +321,7 @@ export function useFluidHover<T extends HTMLElement>(
       setItemRects(rects);
     }
     return true;
-  }, [containerRef]);
+  }, [containerRef, isItemDisabled]);
 
   const measureItems = useCallback(() => {
     runMeasurement();
@@ -466,7 +467,7 @@ export function useFluidHover<T extends HTMLElement>(
       // A control that sits between the rows (a search field at the top of
       // a menu, a footer button) keeps its own click too.
       const control = (target as Element).closest?.(
-        "input, textarea, select, button, a, summary, [contenteditable], [role='textbox'], [role='searchbox'], [role='button']"
+        `${ACTIVATOR_SELECTOR}, input, textarea, select, label, summary, [contenteditable], [role='textbox'], [role='searchbox']`
       );
       if (control) return;
       if (gapClick === false) return;

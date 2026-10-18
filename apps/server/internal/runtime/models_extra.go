@@ -17,7 +17,7 @@ import (
 
 func validModelCapability(capability string) bool {
 	switch capability {
-	case "chat", "embedding", "rerank", "image":
+	case "chat", "embedding", "rerank", "image", "evaluation":
 		return true
 	}
 	return false
@@ -28,6 +28,18 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
+	}
+	currentUpstream, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if value, exists := m["protocol"]; exists {
+		protocol, ok := value.(string)
+		if !ok || ((protocol == "typesafe") != (currentUpstream.Protocol == "typesafe")) {
+			httpx.Error(w, 400, "Jev provider protocol cannot be changed")
+			return
+		}
 	}
 	sets := []string{}
 	args := []any{}
@@ -43,13 +55,31 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 400, "config must be an object")
 			return
 		}
-		oldEnvelope := ""
-		if cur, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id")); e == nil {
-			var curCfg map[string]any
-			if json.Unmarshal(cur.Config, &curCfg) == nil {
-				oldEnvelope, _ = curCfg["credentialEnc"].(string)
+		cur, err := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+		if err != nil {
+			statusErr(w, err)
+			return
+		}
+		curCfg := map[string]any{}
+		if json.Unmarshal(cur.Config, &curCfg) != nil || curCfg == nil {
+			httpx.Error(w, 400, "invalid stored upstream config")
+			return
+		}
+		oldEnvelope, _ := curCfg["credentialEnc"].(string)
+		// Normalize legacy plaintext before overlaying a blank/redacted client
+		// value, so a no-op save cannot accidentally erase its credential.
+		if err := protectModelConfig(h.deps.Secret, principal(r).TenantID, cur.ID, curCfg, oldEnvelope); err != nil {
+			statusErr(w, err)
+			return
+		}
+		oldEnvelope, _ = curCfg["credentialEnc"].(string)
+		delete(curCfg, "credentialEnc")
+		for key, value := range cfg {
+			if key != "credentialEnc" {
+				curCfg[key] = value
 			}
 		}
+		cfg = curCfg
 		if e := protectModelConfig(h.deps.Secret, principal(r).TenantID, chi.URLParam(r, "id"), cfg, oldEnvelope); e != nil {
 			statusErr(w, e)
 			return
@@ -64,13 +94,23 @@ func (h *handler) patchUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	sets = append(sets, "updated_at=?")
 	args = append(args, runtimeTimeString(h.store.now()), principal(r).TenantID, chi.URLParam(r, "id"))
-	res := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE model_upstreams SET `+strings.Join(sets, ",")+` WHERE tenant_id=? AND id=?`, args...)
+	query := `UPDATE model_upstreams SET ` + strings.Join(sets, ",") + ` WHERE tenant_id=? AND id=?`
+	_, changesConfig := m["config"]
+	if changesConfig {
+		query += ` AND config_json=?`
+		args = append(args, string(currentUpstream.Config))
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Exec(query, args...)
 	if res.Error != nil {
 		statusErr(w, res.Error)
 		return
 	}
 	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
+		if changesConfig {
+			httpx.Error(w, http.StatusConflict, "provider configuration changed; reload and retry")
+		} else {
+			statusErr(w, ErrNotFound)
+		}
 		return
 	}
 	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
@@ -134,6 +174,27 @@ func (h *handler) patchModelRoute(w http.ResponseWriter, r *http.Request) {
 	m, e := decodeMap(r)
 	if e != nil {
 		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	current, e := h.loadModelRouteForTenant(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	capability, upstreamID := current.Capability, current.UpstreamID
+	if value, exists := m["capability"]; exists {
+		capability, _ = value.(string)
+	}
+	if value, exists := m["upstreamId"]; exists {
+		upstreamID, _ = value.(string)
+	}
+	upstream, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, upstreamID)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if e := validateProviderCapability(upstream.Protocol, capability); e != nil {
+		httpx.Error(w, 400, e.Error())
 		return
 	}
 	sets := []string{}
@@ -252,15 +313,17 @@ func (h *handler) setDefaultModelRoute(w http.ResponseWriter, r *http.Request) {
 			if upstreamID == "" {
 				return ErrNotFound
 			}
-			var upCount int64
-			if e := tx.Table("model_upstreams").Where("tenant_id=? AND id=?", tenant, upstreamID).Count(&upCount).Error; e != nil {
+			var up struct {
+				Protocol string `gorm:"column:protocol"`
+			}
+			if e := tx.Table("model_upstreams").Select("protocol").Where("tenant_id=? AND id=?", tenant, upstreamID).Take(&up).Error; e != nil {
 				return e
 			}
-			if upCount == 0 {
-				return ErrNotFound
+			if e := validateProviderCapability(up.Protocol, capability); e != nil {
+				return e
 			}
 			var modelCount int64
-			if e := tx.Table("upstream_models").Where("tenant_id=? AND upstream_id=? AND (native_model=? OR canonical_model=?)", tenant, upstreamID, modelID, modelID).Count(&modelCount).Error; e != nil {
+			if e := tx.Table("upstream_models").Where("tenant_id=? AND upstream_id=? AND capability=? AND (native_model=? OR canonical_model=?)", tenant, upstreamID, capability, modelID, modelID).Count(&modelCount).Error; e != nil {
 				return e
 			}
 			if modelCount == 0 {
@@ -287,6 +350,15 @@ func (h *handler) setDefaultModelRoute(w http.ResponseWriter, r *http.Request) {
 				}
 				targetID = row.ID
 			}
+		}
+		var selected struct {
+			Protocol string `gorm:"column:protocol"`
+		}
+		if err := tx.Table("model_routes AS r").Select("u.protocol").Joins("JOIN model_upstreams AS u ON u.tenant_id=r.tenant_id AND u.id=r.upstream_id").Where("r.tenant_id=? AND r.id=?", tenant, targetID).Take(&selected).Error; err != nil {
+			return err
+		}
+		if err := validateProviderCapability(selected.Protocol, capability); err != nil {
+			return err
 		}
 		if e := tx.Table("model_routes").Where("tenant_id=? AND capability=?", tenant, capability).Update("is_default", false).Error; e != nil {
 			return e

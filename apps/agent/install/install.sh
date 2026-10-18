@@ -37,9 +37,9 @@ if [ "$VERSION" != "latest" ]; then
 fi
 echo "下载 $url"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$tmp/zakura-agent"
+  curl -fsSL -H "Authorization: Bearer $TOKEN" "$url" -o "$tmp/zakura-agent"
 else
-  wget -qO "$tmp/zakura-agent" "$url"
+  wget --header="Authorization: Bearer $TOKEN" -qO "$tmp/zakura-agent" "$url"
 fi
 chmod +x "$tmp/zakura-agent"
 

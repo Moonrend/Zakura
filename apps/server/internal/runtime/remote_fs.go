@@ -8,13 +8,11 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
@@ -28,7 +26,8 @@ type remoteWorkspace struct {
 	spaceID string
 	// root, when set, scopes host.fs.* RPCs to a computer's own workspace
 	// directory instead of the legacy Space workspace.
-	root string
+	root          string
+	privateWrites bool
 }
 
 func runnerWorkspacePath(value string) (string, error) {
@@ -48,9 +47,27 @@ func runnerWorkspacePath(value string) (string, error) {
 }
 
 func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*remoteWorkspace, bool, error) {
+	if exec := pinnedExecution(ctx); exec != nil {
+		if err := h.authorizeContextLocalNode(ctx, tenant, exec.nodeID); err != nil {
+			return nil, true, err
+		}
+	}
 	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
 		if !exec.computer.Has(computers.Files) || strings.TrimSpace(exec.hostRoot) == "" {
 			return nil, true, errors.New("files are not available on this computer")
+		}
+		runner, err := h.hub.get(exec.nodeID)
+		if err != nil {
+			return nil, true, err
+		}
+		return &remoteWorkspace{runner: runner, spaceID: exec.spaceID, root: exec.hostRoot}, true, nil
+	}
+	if exec := pinnedExecution(ctx); exec != nil && exec.legacy {
+		if strings.TrimSpace(exec.nodeID) == "" {
+			return nil, true, errors.New("pinned Space server has no runtime node")
+		}
+		if h.hub == nil {
+			return nil, true, errors.New("runtime node is offline")
 		}
 		runner, err := h.hub.get(exec.nodeID)
 		if err != nil {
@@ -71,6 +88,9 @@ func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*r
 		return nil, false, err
 	}
 	spaceID, nodeID = rec.SpaceID, rec.NodeID
+	if err := h.authorizeContextLocalNode(ctx, tenant, nodeID); err != nil {
+		return nil, true, err
+	}
 	if nodeID == "" {
 		return nil, false, nil
 	}
@@ -82,7 +102,7 @@ func (h *handler) remoteWorkspace(ctx context.Context, tenant, agent string) (*r
 }
 
 func (h *handler) remoteFSRequest(w http.ResponseWriter, r *http.Request) (*remoteWorkspace, bool, bool) {
-	remote, selected, err := h.remoteWorkspace(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	remote, selected, err := h.requestRemoteWorkspace(r)
 	if err != nil {
 		writeRemoteError(w, err)
 		return nil, selected, false
@@ -91,12 +111,16 @@ func (h *handler) remoteFSRequest(w http.ResponseWriter, r *http.Request) (*remo
 }
 
 func (h *handler) remoteProject(r *http.Request) (*remoteWorkspace, bool, error) {
-	remote, selected, err := h.remoteWorkspace(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	remote, selected, err := h.requestRemoteWorkspace(r)
 	if err != nil || !selected {
 		return remote, selected, err
 	}
+	space, err := h.workspaceRequestSpace(r)
+	if err != nil {
+		return nil, selected, err
+	}
 	var count int64
-	err = h.deps.Gorm.WithContext(r.Context()).Table("space_projects AS p").Joins("JOIN agents a ON a.space_id=p.space_id AND a.tenant_id=p.tenant_id").Where("p.tenant_id=? AND a.id=? AND p.slug=?", principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "slug")).Count(&count).Error
+	err = h.deps.Gorm.WithContext(r.Context()).Table("space_projects").Where("tenant_id=? AND space_id=? AND slug=?", principal(r).TenantID, space, chi.URLParam(r, "slug")).Count(&count).Error
 	if err != nil {
 		return nil, true, err
 	}
@@ -112,46 +136,7 @@ func projectRemotePath(slug string, parts ...string) string {
 }
 
 func (r *remoteWorkspace) projectSnapshot(ctx context.Context, slug string) map[string]any {
-	instructions := map[string]any{"file": nil, "content": "", "claudeFallback": false}
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if raw, _, err := r.read(ctx, projectRemotePath(slug, name), 1<<20); err == nil {
-			instructions["file"], instructions["content"], instructions["claudeFallback"] = name, string(raw), name == "CLAUDE.md"
-			break
-		}
-	}
-	events := map[string]any{}
-	hookFile := any(nil)
-	if raw, _, err := r.read(ctx, projectRemotePath(slug, ".zakura", "hooks.json"), 1<<20); err == nil {
-		_ = json.Unmarshal(raw, &events)
-		hookFile = ".zakura/hooks.json"
-	}
-	skills := []map[string]any{}
-	_, entries, _ := r.list(ctx, projectRemotePath(slug, ".zakura", "skills"))
-	for _, entry := range entries {
-		if !entry.IsDir {
-			continue
-		}
-		name := path.Base(entry.Path)
-		raw, _, err := r.read(ctx, projectRemotePath(slug, ".zakura", "skills", name, "SKILL.md"), 1<<20)
-		if err != nil {
-			continue
-		}
-		description := ""
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				description = line
-				break
-			}
-		}
-		skills = append(skills, map[string]any{"name": name, "title": name, "description": description, "path": ".zakura/skills/" + name + "/SKILL.md"})
-	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i]["name"].(string) < skills[j]["name"].(string) })
-	sources := []map[string]any{}
-	if hookFile != nil {
-		sources = append(sources, map[string]any{"file": hookFile, "events": events})
-	}
-	return map[string]any{"slug": slug, "exists": true, "instructions": instructions, "skills": skills, "hooks": map[string]any{"file": hookFile, "events": events, "sources": sources}}
+	return projectSnapshotFromReader(slug, r.projectReader(ctx, slug))
 }
 
 func remotePathParams(spaceID, raw string) (map[string]any, error) {
@@ -176,6 +161,9 @@ func (r *remoteWorkspace) pathParams(raw string) (map[string]any, error) {
 }
 
 func writeRemoteError(w http.ResponseWriter, err error) {
+	if marker, ok := w.(interface{ markWorkspaceWriteError(error) }); ok {
+		marker.markWorkspaceWriteError(err)
+	}
 	if errors.Is(err, ErrNotFound) {
 		httpx.Error(w, 404, "Not found")
 		return
@@ -240,8 +228,14 @@ func (r *remoteWorkspace) write(ctx context.Context, target string, data []byte)
 		return nil, err
 	}
 	params["base64"] = base64.StdEncoding.EncodeToString(data)
+	if r.privateWrites {
+		params["mode"], params["atomic"] = 0o600, true
+	}
 	var result map[string]any
 	err = r.runner.call(ctx, "host.fs.write", params, &result)
+	if err == nil && r.privateWrites && (gwInt(result["mode"]) != 0o600 || result["atomic"] != true) {
+		err = errors.New("runtime node did not confirm secure workspace write")
+	}
 	return result, err
 }
 

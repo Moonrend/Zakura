@@ -1,0 +1,63 @@
+name: PostgreSQL backend
+
+on:
+  pull_request:
+    paths:
+      - 'apps/server/**'
+      - '.github/workflows/postgres-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/server/**'
+      - '.github/workflows/postgres-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        isolation: [database, schema]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: zakura_pgtest
+          POSTGRES_USER: pgtest
+          POSTGRES_PASSWORD: pgtest
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U pgtest -d zakura_pgtest"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        working-directory: apps/server
+    env:
+      CGO_ENABLED: '1'
+      ZAKURA_REQUIRE_POSTGRES: '1'
+      ZAKURA_TEST_POSTGRES_ISOLATION: ${{ matrix.isolation }}
+      ZAKURA_TEST_POSTGRES_URL: postgres://pgtest:pgtest@127.0.0.1:${{ job.services.postgres.ports[5432] }}/zakura_pgtest?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/server/go.mod
+          cache-dependency-path: apps/server/go.sum
+      - name: Provision extension only in the disposable service
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: docker exec "$POSTGRES_CONTAINER" psql -v ON_ERROR_STOP=1 -U pgtest -d zakura_pgtest -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
+      - name: Fixture isolation and environment unit tests
+        run: go test -race -count=1 ./internal/platform/pgtest -run '^Test(Environment|Isolated|Unique|Required|FreshURLIsolation|MigrationLedger)'
+      - name: Required migrations, computers, runtime, config and integration PostgreSQL tests (zero skips)
+        run: sh scripts/test-postgres.sh --external
+      - name: Record archival upgrade prerequisite
+        run: printf '%s\n' 'Native and hand-built legacy fixtures are required. Complete pinned Drizzle history is UNVERIFIED without an immutable ZAKURA_REFERENCE_DRIZZLE_DIR snapshot.' >> "$GITHUB_STEP_SUMMARY"

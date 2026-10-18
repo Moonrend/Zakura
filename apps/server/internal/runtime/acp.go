@@ -2,17 +2,13 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -27,15 +23,16 @@ type acpAdapter struct {
 }
 
 var acpRegistry = []acpAdapter{{ID: "codex", Name: "OpenAI Codex", Command: "codex", Description: "Codex ACP adapter"}, {ID: "claude-code", Name: "Claude Code", Command: "claude", Description: "Claude Code ACP adapter"}, {ID: "gemini-cli", Name: "Gemini CLI", Command: "gemini", Description: "Gemini CLI ACP adapter"}}
-var devicePolls sync.Map
 
 func (h *handler) registerACP(r chi.Router) {
+	h.registerSpaceACP(r)
+	r.Post("/spaces/{spaceId}/acp/agents/{profileId}/terminal-ticket", h.acpTerminalTicket)
 	r.Get("/acp/registry", h.acpRegistry)
 	r.Get("/agents/{id}/acp/adapters", h.acpAdapters)
 	r.Post("/agents/{id}/acp/adapters/{registryId}/install", h.installACPAdapter)
 	r.Delete("/agents/{id}/acp/adapters/{registryId}", h.deleteACPAdapter)
 	r.Post("/agents/{id}/acp/adapters/gc", h.gcACPAdapters)
-	r.Post("/agents/{id}/acp/adapters/{registryId}/adopt", h.installACPAdapter)
+	r.Post("/agents/{id}/acp/adapters/{registryId}/adopt", h.adoptACPAdapter)
 	r.Get("/agents/{id}/acp/config", h.getACPConfig)
 	r.Put("/agents/{id}/acp/config", h.putACPConfig)
 	r.Put("/agents/{id}/acp/agents/{profileId}", h.putACPProfile)
@@ -45,19 +42,22 @@ func (h *handler) registerACP(r chi.Router) {
 	r.Get("/agents/{id}/acp/installs", h.acpInstalls)
 	r.Post("/agents/{id}/acp/draft", h.acpDraft)
 	r.Get("/agents/{id}/sessions/{sid}/acp-runtime", h.getACPRuntime)
+	r.Post("/agents/{id}/sessions/{sid}/acp-runtime/reconnect", h.reconnectACPRuntime)
+	r.Post("/agents/{id}/sessions/{sid}/acp-runtime/close", h.closeACPRuntime)
 	r.Patch("/agents/{id}/sessions/{sid}/acp-runtime/mode", h.patchACPRuntime)
 	r.Patch("/agents/{id}/sessions/{sid}/acp-runtime/model", h.patchACPRuntime)
 	r.Patch("/agents/{id}/sessions/{sid}/acp-runtime/config", h.patchACPRuntime)
 	r.Post("/agents/{id}/sessions/{sid}/acp/permission", h.resolveACPDecision)
 	r.Post("/agents/{id}/sessions/{sid}/acp/elicitation", h.resolveACPDecision)
 	r.Post("/agents/{id}/sessions/{sid}/acp/authenticate", h.acpAuthenticate)
+	r.Post("/agents/{id}/sessions/{sid}/acp/terminal-ticket", h.acpTerminalAuthTicket)
 	r.Post("/agents/{id}/sessions/{sid}/acp/logout", h.acpLogout)
-	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/start", h.deviceStart)
-	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/poll", h.devicePoll)
-	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/cancel", h.deviceCancel)
+	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/start", h.codexDeviceStart)
+	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/poll", h.codexDevicePoll)
+	r.Post("/agents/{id}/acp/agents/{profileId}/oauth/device/cancel", h.codexDeviceCancel)
 }
 func (h *handler) acpRegistry(w http.ResponseWriter, r *http.Request) {
-	httpx.JSON(w, 200, map[string]any{"adapters": acpRegistry})
+	httpx.JSON(w, http.StatusOK, map[string]any{"adapters": acpCatalogOnce().Agents})
 }
 func (h *handler) agentConfig(ctx context.Context, tenant, agent string) (Agent, map[string]any, error) {
 	a, e := h.store.GetAgent(ctx, tenant, agent)
@@ -80,28 +80,52 @@ func acpMap(cfg map[string]any) map[string]any {
 	return v
 }
 func (h *handler) acpAdapters(w http.ResponseWriter, r *http.Request) {
-	_, cfg, e := h.agentConfig(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	a := acpMap(cfg)
-	installed, _ := a["adapters"].(map[string]any)
-	if installed == nil {
-		installed = map[string]any{}
-	}
+	parsed := parseACPConfig(acpMap(cfg))
 	items := []map[string]any{}
-	for _, adapter := range acpRegistry {
-		versions := []string{}
-		if raw, ok := installed[adapter.ID].(map[string]any); ok {
-			if version := strings.TrimSpace(fmt.Sprint(raw["version"])); version != "" && version != "<nil>" {
-				versions = append(versions, version)
+	runner, _, runnerErr := h.acpSpaceRunner(r.Context(), s.TenantID, s.ID)
+	images := []string{}
+	for _, adapter := range acpCatalogOnce().Agents {
+		images = append(images, acpAdapterImage(adapter.ProfileID, parsed.Agents[adapter.ProfileID].PinnedVersion))
+	}
+	var imageState []struct {
+		Image string `json:"image"`
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+	if runnerErr == nil {
+		runnerErr = runner.call(r.Context(), "docker.images", map[string]any{"images": images}, &imageState)
+	}
+	readyImages := map[string]bool{}
+	for _, state := range imageState {
+		readyImages[state.Image] = state.ID != "" && state.Error == ""
+	}
+	for _, adapter := range acpCatalogOnce().Agents {
+		setup := parsed.Agents[adapter.ProfileID]
+		image := acpAdapterImage(adapter.ProfileID, setup.PinnedVersion)
+		item := map[string]any{"id": adapter.ID, "profileId": adapter.ProfileID, "installed": []string{}, "latest": adapter.Version, "updateAvailable": setup.PinnedVersion != "" && setup.PinnedVersion != adapter.Version, "diskKb": map[string]int{}, "source": "container", "image": image, "pinnedVersion": nullString(setup.PinnedVersion)}
+		if runnerErr != nil {
+			item["checkError"] = runnerErr.Error()
+		} else {
+			ready := readyImages[image]
+			item["imageReady"] = ready
+			if ready {
+				version := setup.PinnedVersion
+				if version == "" {
+					version = adapter.Version
+				}
+				item["installed"] = []string{version}
 			}
 		}
-		items = append(items, map[string]any{"id": adapter.ID, "profileId": adapter.ID, "installed": versions, "latest": nil, "updateAvailable": false, "diskKb": map[string]int{}, "source": "workspace"})
+		items = append(items, item)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"adapters": items})
 }
+
 func findAdapter(id string) (acpAdapter, bool) {
 	for _, a := range acpRegistry {
 		if a.ID == id {
@@ -249,133 +273,88 @@ func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent,
 	return result, nil
 }
 func (h *handler) installACPAdapter(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
 	id := chi.URLParam(r, "registryId")
-	adapter, ok := findAdapter(id)
-	if !ok {
-		httpx.Error(w, 404, "Adapter not found")
-		return
+	for _, adapter := range acpCatalogOnce().Agents {
+		if adapter.ID == id {
+			h.installACPProfileID(w, r, adapter.ProfileID)
+			return
+		}
 	}
-	result, e := h.runtimeExec(r.Context(), p.TenantID, chi.URLParam(r, "id"), adapter.Command, "--version")
-	if e != nil {
-		httpx.Error(w, 409, e.Error())
-		return
-	}
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	acp := acpMap(cfg)
-	installed, _ := acp["adapters"].(map[string]any)
-	if installed == nil {
-		installed = map[string]any{}
-	}
-	installed[id] = map[string]any{"id": id, "command": adapter.Command, "installedAt": h.store.now(), "version": result["stdout"]}
-	acp["adapters"] = installed
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 201, map[string]any{"adapter": installed[id]})
+	statusErr(w, ErrNotFound)
 }
 func (h *handler) deleteACPAdapter(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	// Deleting shared images can break other sessions. Clear the Space pin only;
+	// image garbage collection remains the runner operator's responsibility.
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	acp := acpMap(cfg)
-	installed, _ := acp["adapters"].(map[string]any)
-	id := chi.URLParam(r, "registryId")
-	if _, ok := installed[id]; !ok {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	delete(installed, id)
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
-}
-func (h *handler) gcACPAdapters(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	acp := acpMap(cfg)
-	installed, _ := acp["adapters"].(map[string]any)
-	removed := []string{}
-	for id, raw := range installed {
-		v, _ := raw.(map[string]any)
-		cmd, _ := v["command"].(string)
-		if cmd == "" {
-			if adapter, ok := findAdapter(id); ok {
-				cmd = adapter.Command
+	_, err = h.mutateSpaceACP(r.Context(), s.TenantID, s.ID, acpMap(cfg), func(acp map[string]any) (map[string]any, error) {
+		profileID := ""
+		for _, adapter := range acpCatalogOnce().Agents {
+			if adapter.ID == chi.URLParam(r, "registryId") {
+				profileID = adapter.ProfileID
+				break
 			}
 		}
-		if _, e := h.runtimeExec(r.Context(), p.TenantID, a.ID, cmd, "--version"); e != nil {
-			delete(installed, id)
-			removed = append(removed, id)
+		if profileID == "" {
+			return nil, ErrNotFound
 		}
-	}
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
+		parsed := parseACPConfig(acp)
+		if setup, exists := parsed.Agents[profileID]; exists {
+			setup.PinnedVersion = ""
+			parsed.Agents[profileID] = setup
+		}
+		return acpConfigJSON(parsed, acp), nil
+	})
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"removed": removed})
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+func (h *handler) gcACPAdapters(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := h.requestACPSpace(r); err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"removed": []string{}})
 }
 func (h *handler) getACPConfig(w http.ResponseWriter, r *http.Request) {
-	_, cfg, e := h.agentConfig(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	_, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	acp := acpMap(cfg)
-	httpx.JSON(w, http.StatusOK, map[string]any{"config": acp, "profiles": acpProfiles(acp)})
+	httpx.JSON(w, http.StatusOK, acpConfigResponse(acpMap(cfg)))
 }
-func acpProfiles(acp map[string]any) []map[string]any {
-	profiles := []map[string]any{}
-	configured, _ := acp["profiles"].(map[string]any)
-	if configured == nil {
-		configured, _ = acp["agents"].(map[string]any)
-	}
-	for id, raw := range configured {
-		profile, _ := raw.(map[string]any)
-		copy := map[string]any{"id": id, "name": id}
-		for key, value := range profile {
-			copy[key] = value
-		}
-		profiles = append(profiles, copy)
-	}
-	return profiles
+func acpProfiles(raw map[string]any) []acpPublicProfile {
+	return acpCatalogForConfig(parseACPConfig(raw))
 }
 func (h *handler) putACPConfig(w http.ResponseWriter, r *http.Request) {
-	var acp map[string]any
-	if httpx.DecodeJSON(r, &acp) != nil {
+	var incoming map[string]any
+	if httpx.DecodeJSON(r, &incoming) != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	p := principal(r)
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	cfg["acp"] = acp
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
+	next, err := h.mutateSpaceACP(r.Context(), s.TenantID, s.ID, acpMap(cfg), func(previous map[string]any) (map[string]any, error) {
+		return acpConfigJSON(mergeACPConfig(parseACPConfig(previous), parseACPConfig(incoming)), previous), nil
+	})
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"config": acp, "profiles": acpProfiles(acp)})
+	if err = h.acp.enforceApprovalPolicies(s.TenantID, "", s.ID); err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, acpConfigResponse(next))
 }
 func (h *handler) putACPProfile(w http.ResponseWriter, r *http.Request) {
 	var profile map[string]any
@@ -383,85 +362,104 @@ func (h *handler) putACPProfile(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	p := principal(r)
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	acp := acpMap(cfg)
-	profiles, _ := acp["profiles"].(map[string]any)
-	if profiles == nil {
-		profiles = map[string]any{}
-	}
-	profiles[chi.URLParam(r, "profileId")] = profile
-	acp["profiles"] = profiles
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
+	id := chi.URLParam(r, "profileId")
+	if !acpProfileIDPattern.MatchString(id) {
+		httpx.Error(w, 400, "invalid profile id")
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"profile": profile})
+	var saved acpSetup
+	_, err = h.mutateSpaceACP(r.Context(), s.TenantID, s.ID, acpMap(cfg), func(previous map[string]any) (map[string]any, error) {
+		parsed := parseACPConfig(previous)
+		// The legacy profile endpoint implies enabled unless explicitly disabled.
+		one := acpConfig{Agents: map[string]acpSetup{id: parseACPSetup(id, profile, true)}}
+		saved = mergeACPConfig(parsed, one).Agents[id]
+		parsed.Agents[id] = saved
+		return acpConfigJSON(parsed, previous), nil
+	})
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"profile": scrubACPConfig(acpConfig{Agents: map[string]acpSetup{id: saved}}).Agents[id]})
 }
 func (h *handler) deleteACPProfile(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	a, cfg, e := h.agentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"))
-	if e != nil {
-		statusErr(w, e)
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	acp := acpMap(cfg)
-	profiles, _ := acp["profiles"].(map[string]any)
 	id := chi.URLParam(r, "profileId")
-	if _, ok := profiles[id]; !ok {
-		statusErr(w, ErrNotFound)
+	_, err = h.mutateSpaceACP(r.Context(), s.TenantID, s.ID, acpMap(cfg), func(previous map[string]any) (map[string]any, error) {
+		parsed := parseACPConfig(previous)
+		if _, exists := parsed.Agents[id]; !exists {
+			return nil, ErrNotFound
+		}
+		delete(parsed.Agents, id)
+		if parsed.DefaultRuntime == id {
+			parsed.DefaultRuntime = acpZakuraRuntimeID
+		}
+		return acpConfigJSON(parsed, previous), nil
+	})
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	delete(profiles, id)
-	e = h.saveAgentConfig(r.Context(), p.TenantID, a, cfg)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 func (h *handler) acpProfile(ctx context.Context, tenant, agent, id string) (map[string]any, error) {
-	_, cfg, e := h.agentConfig(ctx, tenant, agent)
-	if e != nil {
-		return nil, e
+	_, cfg, err := h.acpSpace(ctx, tenant, agent, "")
+	if err != nil {
+		return nil, err
 	}
-	profiles, _ := acpMap(cfg)["profiles"].(map[string]any)
-	profile, _ := profiles[id].(map[string]any)
-	if profile == nil {
-		return nil, ErrNotFound
-	}
-	return profile, nil
+	return acpRuntimeProfile(acpMap(cfg), id)
 }
 func (h *handler) probeACPProfile(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	profile, e := h.acpProfile(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "profileId"))
-	if e != nil {
-		statusErr(w, e)
+	s, profile, err := h.requestACPProfile(r)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
 	command, _ := profile["command"].(string)
-	if command == "" {
-		httpx.Error(w, 400, "profile command required")
+	if image, _ := profile["image"].(string); image != "" {
+		runner, _, runErr := h.acpSpaceRunner(r.Context(), s.TenantID, s.ID)
+		var images []struct {
+			Image string `json:"image"`
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		}
+		if runErr == nil {
+			runErr = runner.call(r.Context(), "docker.images", map[string]any{"images": []string{image}}, &images)
+		}
+		ready := false
+		for _, state := range images {
+			if state.Image == image && state.ID != "" && state.Error == "" {
+				ready = true
+			}
+		}
+		output := image
+		if runErr != nil {
+			output = runErr.Error()
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"installed": runErr == nil && ready, "command": command, "output": output})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, e := h.runtimeExec(ctx, p.TenantID, chi.URLParam(r, "id"), command, "--version")
+	result, err := h.probeSpaceACPCommand(ctx, s.TenantID, s.ID, command)
 	output := ""
 	if result != nil {
 		output = fmt.Sprint(result["stdout"])
 	}
-	httpx.JSON(w, 200, map[string]any{"installed": e == nil, "command": command, "output": output, "error": func() any {
-		if e != nil {
-			return e.Error()
-		}
-		return nil
-	}()})
+	var failure any
+	if err != nil {
+		failure = err.Error()
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"installed": err == nil, "command": command, "output": output, "error": failure})
 }
 
 func acpInstallCommand(profileID, version string) (string, []string, error) {
@@ -479,23 +477,21 @@ func acpInstallCommand(profileID, version string) (string, []string, error) {
 	return "npm", []string{"install", "--global", "--no-audit", "--no-fund", packageName}, nil
 }
 
-func (h *handler) saveACPInstall(ctx context.Context, tenant, agent, profile string, install map[string]any) error {
-	a, cfg, err := h.agentConfig(ctx, tenant, agent)
-	if err != nil {
-		return err
-	}
-	acp := acpMap(cfg)
-	installs, _ := acp["installs"].(map[string]any)
-	if installs == nil {
-		installs = map[string]any{}
-	}
-	installs[profile] = install
-	acp["installs"] = installs
-	return h.saveAgentConfig(ctx, tenant, a, cfg)
+func (h *handler) saveACPInstall(ctx context.Context, tenant, space, profile string, install map[string]any) error {
+	_, err := h.mutateSpaceACP(ctx, tenant, space, nil, func(acp map[string]any) (map[string]any, error) {
+		installs, _ := acp["installs"].(map[string]any)
+		if installs == nil {
+			installs = map[string]any{}
+		}
+		installs[profile] = install
+		acp["installs"] = installs
+		return acp, nil
+	})
+	return err
 }
 
-func (h *handler) listACPInstallState(ctx context.Context, tenant, agent string) ([]map[string]any, error) {
-	_, cfg, err := h.agentConfig(ctx, tenant, agent)
+func (h *handler) listACPInstallState(ctx context.Context, tenant, space string) ([]map[string]any, error) {
+	_, cfg, err := h.acpSpace(ctx, tenant, "", space)
 	if err != nil {
 		return nil, err
 	}
@@ -514,23 +510,33 @@ func (h *handler) listACPInstallState(ctx context.Context, tenant, agent string)
 }
 
 func (h *handler) installACPProfile(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	profile := chi.URLParam(r, "profileId")
-	adapter, exists := findAdapter(profile)
+	h.installACPProfileID(w, r, chi.URLParam(r, "profileId"))
+}
+func (h *handler) installACPProfileID(w http.ResponseWriter, r *http.Request, profile string) {
+	s, cfg, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	adapter, exists := acpRegistryAgentFor(profile)
 	if !exists {
 		httpx.Error(w, http.StatusBadRequest, "ACP profile has no trusted installation specification")
 		return
 	}
+	setup := parseACPConfig(acpMap(cfg)).Agents[profile]
 	version := strings.TrimSpace(r.URL.Query().Get("version"))
-	command, args, err := acpInstallCommand(profile, version)
+	if version == "" {
+		version = setup.PinnedVersion
+	}
+	image := acpAdapterImage(profile, version)
+	runner, exec, err := h.acpSpaceRunner(r.Context(), s.TenantID, s.ID)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
 	now := h.store.now()
-	agentID := chi.URLParam(r, "id")
-	install := map[string]any{"profileId": profile, "state": "queued", "percent": 0, "downloadedBytes": 0, "totalBytes": 0, "message": "Queued", "startedAt": now, "updatedAt": now, "finishedAt": nil, "output": nil, "error": nil, "version": nullString(version)}
-	if err = h.saveACPInstall(r.Context(), p.TenantID, agentID, profile, install); err != nil {
+	install := map[string]any{"profileId": profile, "registryId": adapter.ID, "computerId": exec.computer.ID, "image": image, "state": "queued", "percent": nil, "downloadedBytes": 0, "totalBytes": 0, "message": "Queued", "startedAt": now, "updatedAt": now, "finishedAt": nil, "output": nil, "error": nil, "version": nullString(version)}
+	if err = h.saveACPInstall(r.Context(), s.TenantID, s.ID, profile, install); err != nil {
 		statusErr(w, err)
 		return
 	}
@@ -539,26 +545,29 @@ func (h *handler) installACPProfile(w http.ResponseWriter, r *http.Request) {
 		progress[key] = value
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(h.deps.RunContext(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(h.deps.RunContext(), 10*time.Minute)
 		defer cancel()
-		progress["state"], progress["percent"], progress["message"], progress["updatedAt"] = "running", 10, "Installing", h.store.now()
-		_ = h.saveACPInstall(ctx, p.TenantID, agentID, profile, progress)
-		result, runErr := h.runtimeExec(ctx, p.TenantID, agentID, command, args...)
-		if runErr == nil {
-			result, runErr = h.runtimeExec(ctx, p.TenantID, agentID, adapter.Command, "--version")
-		}
+		progress["state"], progress["message"], progress["updatedAt"] = "pulling", "Pulling adapter image", h.store.now()
+		_ = h.saveACPInstall(ctx, s.TenantID, s.ID, profile, progress)
+		var result map[string]any
+		runErr := runner.call(ctx, "docker.pull", map[string]any{"image": image}, &result)
 		progress["percent"], progress["updatedAt"], progress["finishedAt"] = 100, h.store.now(), h.store.now()
 		if runErr != nil {
 			progress["state"], progress["message"], progress["error"] = "failed", runErr.Error(), runErr.Error()
 		} else {
-			progress["state"], progress["message"], progress["output"], progress["error"] = "completed", "Installed", result["stdout"], nil
+			progress["state"], progress["message"], progress["output"], progress["error"] = "completed", "Adapter image ready", image, nil
 		}
-		_ = h.saveACPInstall(context.WithoutCancel(ctx), p.TenantID, agentID, profile, progress)
+		_ = h.saveACPInstall(context.WithoutCancel(ctx), s.TenantID, s.ID, profile, progress)
 	}()
 	httpx.JSON(w, http.StatusAccepted, map[string]any{"ok": true, "accepted": true, "install": install})
 }
 func (h *handler) acpInstalls(w http.ResponseWriter, r *http.Request) {
-	installs, err := h.listACPInstallState(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	s, _, err := h.requestACPSpace(r)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	installs, err := h.listACPInstallState(r.Context(), s.TenantID, s.ID)
 	if err != nil {
 		statusErr(w, err)
 		return
@@ -604,7 +613,7 @@ func (h *handler) acpDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	runtime := map[string]any{"runtimeId": "", "sessionId": sess.ID, "profileId": b.ProfileID, "state": "starting"}
 	go func() {
-		ctx, cancel := context.WithTimeout(h.deps.RunContext(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(httpx.WithPrincipal(h.deps.RunContext(), p), 45*time.Second)
 		defer cancel()
 		if _, startErr := h.acp.ensure(ctx, p.TenantID, sess.AgentID, sess.ID); startErr != nil {
 			_, _ = h.store.AppendEvent(context.WithoutCancel(ctx), p.TenantID, sess.AgentID, sess.ID, "acp.runtime.updated", nil, map[string]any{"runtimeId": "", "sessionId": sess.ID, "profileId": b.ProfileID, "state": "error", "error": startErr.Error()})
@@ -615,31 +624,23 @@ func (h *handler) acpDraft(w http.ResponseWriter, r *http.Request) {
 func (h *handler) getACPRuntime(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent, sid := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
-	sess, e := h.store.GetSession(r.Context(), p.TenantID, agent, sid)
-	if e != nil {
-		statusErr(w, e)
+	state, err := h.acp.snapshot(r.Context(), p.TenantID, agent, sid)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	if sess.Kind == "acp" {
-		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
-		defer cancel()
-		if live, startErr := h.acp.ensure(ctx, p.TenantID, agent, sid); startErr == nil {
-			httpx.JSON(w, http.StatusOK, live.snapshot())
-			return
-		}
-	}
-	events, e := h.store.ListEvents(r.Context(), p.TenantID, agent, sid, 0, 1000)
-	if e != nil {
-		statusErr(w, e)
+	if state != nil {
+		httpx.JSON(w, http.StatusOK, state)
 		return
 	}
-	state := map[string]any{"runtimeId": sid, "sessionId": sid, "profileId": "", "state": "closed", "models": map[string]any{"currentId": sess.Model, "available": []any{}}, "modes": map[string]any{"currentId": "default", "available": []any{}}, "config": map[string]any{}}
-	for _, ev := range events {
-		if ev.Type == "acp.runtime.updated" {
-			_ = json.Unmarshal(ev.Payload, &state)
-		}
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+	live, err := h.acp.ensure(ctx, p.TenantID, agent, sid)
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, err.Error())
+		return
 	}
-	httpx.JSON(w, http.StatusOK, state)
+	httpx.JSON(w, http.StatusOK, live.snapshot())
 }
 func (h *handler) patchACPRuntime(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -690,123 +691,171 @@ func (h *handler) resolveACPDecision(w http.ResponseWriter, r *http.Request) {
 	_, _ = h.store.AppendEvent(r.Context(), p.TenantID, agent, sid, resolvedType, nil, body)
 	httpx.JSON(w, 200, map[string]any{"ok": true, "event": ev})
 }
-func (h *handler) runACPCommand(w http.ResponseWriter, r *http.Request, arg string) {
+func (h *handler) acpAuthenticate(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	sess, e := h.store.GetSession(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"))
-	if e != nil {
-		statusErr(w, e)
+	agent, sid := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
+	if p.APIKey && p.AgentID != "" {
+		httpx.Error(w, http.StatusNotFound, "resource not found")
 		return
 	}
-	var origin struct {
-		ProfileID string `json:"acpProfileId"`
-	}
-	_ = json.Unmarshal(sess.Origin, &origin)
-	profile, e := h.acpProfile(r.Context(), p.TenantID, sess.AgentID, origin.ProfileID)
-	if e != nil {
-		statusErr(w, e)
+	if err := httpx.AuthorizeResource(r.Context(), h.deps, p, "", agent); err != nil {
+		statusErr(w, err)
 		return
 	}
-	command, _ := profile["command"].(string)
+	var body struct {
+		MethodID string `json:"methodId"`
+	}
+	if httpx.DecodeJSON(r, &body) != nil || strings.TrimSpace(body.MethodID) == "" {
+		httpx.Error(w, http.StatusBadRequest, "ACP authentication methodId required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	live, err := h.acp.ensure(ctx, p.TenantID, agent, sid)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	lease, err := h.acquireSpaceInfrastructure(ctx, p.TenantID, live.spaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer lease.release()
+	exec, err := resolveACPHost(ctx, h, p.TenantID, agent, sid)
+	if err != nil || exec.spaceID != live.spaceID || exec.computer.ID != live.computerID || exec.nodeID != live.runner.nodeID {
+		httpx.Error(w, http.StatusConflict, "ACP authentication target changed")
+		return
+	}
+	if err = httpx.AuthorizeResource(ctx, h.deps, p, exec.spaceID, ""); err != nil {
+		statusErr(w, err)
+		return
+	}
+	token := h.store.id()
+	if err = h.acquireACPAuthLock(ctx, p.TenantID, exec.spaceID, live.profileID, "protocol", token, 3*time.Minute, exec); err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err = lease.bindSharedProfile(ctx, live.profileID); err != nil {
+		_ = h.releaseACPAuthLock(context.WithoutCancel(ctx), p.TenantID, exec.spaceID, live.profileID, token)
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	retain := false
+	defer func() {
+		if !retain {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = h.releaseACPAuthLock(cleanupCtx, p.TenantID, exec.spaceID, live.profileID, token)
+		}
+	}()
+	live.mu.Lock()
+	valid, active := false, live.currentRunID != ""
+	methods, _ := live.state["authMethods"].([]any)
+	for _, raw := range methods {
+		method, _ := raw.(map[string]any)
+		kind, _ := method["type"].(string)
+		if method["id"] == body.MethodID && (kind == "" || kind == "agent") {
+			valid = true
+		}
+	}
+	live.mu.Unlock()
+	if !valid || active {
+		httpx.Error(w, http.StatusConflict, "unsupported ACP authentication method or active session")
+		return
+	}
+	if err = lease.check(ctx); err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err = live.authenticate(ctx, body.MethodID); err != nil {
+		// An RPC error or cancellation is not proof that shared HOME was untouched.
+		retain = true
+		_ = lease.uncertain(err)
+		httpx.Error(w, http.StatusConflict, "ACP authentication outcome unknown; reconcile profile authentication: "+err.Error())
+		return
+	}
+	if err = h.releaseACPAuthLock(context.WithoutCancel(ctx), p.TenantID, exec.spaceID, live.profileID, token); err != nil {
+		retain = true
+		_ = lease.uncertain(err)
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, live.snapshot())
+}
+func (h *handler) acpLogout(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	agent, sid := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
+	if p.APIKey && p.AgentID != "" {
+		httpx.Error(w, http.StatusNotFound, "resource not found")
+		return
+	}
+	if err := httpx.AuthorizeResource(r.Context(), h.deps, p, "", agent); err != nil {
+		statusErr(w, err)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	result, e := h.runtimeExec(ctx, p.TenantID, sess.AgentID, command, arg)
-	if e != nil {
-		httpx.Error(w, 502, e.Error())
+	live, err := h.acp.ensure(ctx, p.TenantID, agent, sid)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"ok": true, "output": result["stdout"]})
-}
-func (h *handler) acpAuthenticate(w http.ResponseWriter, r *http.Request) {
-	h.runACPCommand(w, r, "login")
-}
-func (h *handler) acpLogout(w http.ResponseWriter, r *http.Request) { h.runACPCommand(w, r, "logout") }
-func (h *handler) deviceStart(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	profile, e := h.acpProfile(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "profileId"))
-	if e != nil {
-		statusErr(w, e)
+	lease, err := h.acquireSpaceInfrastructure(ctx, p.TenantID, live.spaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
-	deviceURL, _ := profile["deviceAuthorizationUrl"].(string)
-	clientID, _ := profile["clientId"].(string)
-	if deviceURL == "" || clientID == "" {
-		httpx.Error(w, 400, "deviceAuthorizationUrl and clientId required")
+	defer lease.release()
+	exec, err := resolveACPHost(ctx, h, p.TenantID, agent, sid)
+	if err != nil || exec.spaceID != live.spaceID || exec.computer.ID != live.computerID || exec.nodeID != live.runner.nodeID {
+		httpx.Error(w, http.StatusConflict, "ACP logout target changed")
 		return
 	}
-	form := url.Values{"client_id": []string{clientID}}
-	if scope, _ := profile["scope"].(string); scope != "" {
-		form.Set("scope", scope)
-	}
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, deviceURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := http.DefaultClient.Do(req)
-	if e != nil {
-		httpx.Error(w, 502, e.Error())
+	if err = httpx.AuthorizeResource(ctx, h.deps, p, exec.spaceID, ""); err != nil {
+		statusErr(w, err)
 		return
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		httpx.Error(w, 502, string(raw))
+	token := h.store.id()
+	if err = h.acquireACPAuthLock(ctx, p.TenantID, exec.spaceID, live.profileID, "protocol", token, time.Minute, exec); err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
-	var result any
-	if json.Unmarshal(raw, &result) != nil {
-		httpx.Error(w, 502, "invalid device response")
+	if err = lease.bindSharedProfile(ctx, live.profileID); err != nil {
+		_ = h.releaseACPAuthLock(context.WithoutCancel(ctx), p.TenantID, exec.spaceID, live.profileID, token)
+		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"device": result})
-}
-func (h *handler) devicePoll(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	profile, e := h.acpProfile(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "profileId"))
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	var b struct {
-		DeviceCode string `json:"deviceCode"`
-	}
-	if httpx.DecodeJSON(r, &b) != nil || b.DeviceCode == "" {
-		httpx.Error(w, 400, "deviceCode required")
-		return
-	}
-	tokenURL, _ := profile["tokenUrl"].(string)
-	clientID, _ := profile["clientId"].(string)
-	if tokenURL == "" || clientID == "" {
-		httpx.Error(w, 400, "tokenUrl and clientId required")
-		return
-	}
-	key := p.TenantID + ":" + chi.URLParam(r, "id") + ":" + chi.URLParam(r, "profileId")
-	ctx, cancel := context.WithCancel(r.Context())
-	devicePolls.Store(key, cancel)
-	defer devicePolls.Delete(key)
-	form := url.Values{"client_id": []string{clientID}, "device_code": []string{b.DeviceCode}, "grant_type": []string{"urn:ietf:params:oauth:grant-type:device_code"}}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewBufferString(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := http.DefaultClient.Do(req)
-	if e != nil {
-		if errors.Is(e, context.Canceled) {
-			httpx.Error(w, 409, "poll cancelled")
-			return
+	retain := false
+	defer func() {
+		if !retain {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = h.releaseACPAuthLock(cleanupCtx, p.TenantID, exec.spaceID, live.profileID, token)
 		}
-		httpx.Error(w, 502, e.Error())
+	}()
+	live.mu.Lock()
+	supported, active := live.state["logoutSupported"] == true, live.currentRunID != ""
+	live.mu.Unlock()
+	if !supported || active {
+		httpx.Error(w, http.StatusConflict, "ACP logout unsupported or session active")
 		return
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var result any
-	_ = json.Unmarshal(raw, &result)
-	httpx.JSON(w, resp.StatusCode, map[string]any{"token": result})
-}
-func (h *handler) deviceCancel(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	key := p.TenantID + ":" + chi.URLParam(r, "id") + ":" + chi.URLParam(r, "profileId")
-	v, ok := devicePolls.Load(key)
-	if !ok {
-		httpx.Error(w, 404, "no active device poll")
+	if err = lease.check(ctx); err != nil {
+		httpx.Error(w, http.StatusConflict, err.Error())
 		return
 	}
-	v.(context.CancelFunc)()
-	httpx.JSON(w, 200, map[string]any{"cancelled": true})
+	if err = live.logout(ctx); err != nil {
+		retain = true
+		_ = lease.uncertain(err)
+		httpx.Error(w, http.StatusConflict, "ACP logout outcome unknown; reconcile profile authentication: "+err.Error())
+		return
+	}
+	if err = h.releaseACPAuthLock(context.WithoutCancel(ctx), p.TenantID, exec.spaceID, live.profileID, token); err != nil {
+		retain = true
+		_ = lease.uncertain(err)
+		httpx.Error(w, http.StatusConflict, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, live.snapshot())
 }

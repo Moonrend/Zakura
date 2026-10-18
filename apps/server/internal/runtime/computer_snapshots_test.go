@@ -28,36 +28,34 @@ func TestComputerSelectionCreationTransactions(t *testing.T) {
 	}
 	selections := computers.Store{DB: db}
 	for _, id := range []string{"one", "two"} {
-		if err := d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,'tenant',?,?,'server','now','now')`, id, space.ID, id).Error; err != nil {
+		if err := d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,'tenant',?,?,'e2b','now','now')`, id, space.ID, id).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Creation persists none. Adding a Space default later must not change it.
+	server := "server:" + space.ID
+	// A new chat records no choice and its Runs pin the Space server computer.
 	empty, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := selections.SetSpaceDefault(ctx, "tenant", space.ID, "one"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := selections.InitializeSessionDefault(ctx, "tenant", space.ID, empty.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("none chat gained default: %v", err)
+		t.Fatalf("new chat gained a choice: %v", err)
 	}
-	noneRun, err := store.StartRun(ctx, "tenant", agent.ID, empty.ID, "hello", nil, nil)
+	serverRun, err := store.StartRun(ctx, "tenant", agent.ID, empty.ID, "hello", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := selections.SetSessionDefault(ctx, "tenant", space.ID, empty.ID, "two"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := selections.SnapshotRunTarget(ctx, "tenant", space.ID, noneRun.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("none Run gained default: %v", err)
+	if id, err := selections.SnapshotRunTarget(ctx, "tenant", space.ID, serverRun.ID); err != nil || id != server {
+		t.Fatalf("Run did not pin the server computer: %s %v", id, err)
 	}
 	chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := selections.SetSpaceDefault(ctx, "tenant", space.ID, "two"); err != nil {
+	if err := selections.SetSessionDefault(ctx, "tenant", space.ID, chat.ID, "one"); err != nil {
 		t.Fatal(err)
 	}
 	run, err := store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hello", nil, nil)

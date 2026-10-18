@@ -33,7 +33,7 @@ if (-not (Test-Path $destDir)) {
 }
 $exe = Join-Path $destDir "zakura-agent.exe"
 Write-Host "下载 $url"
-Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+Invoke-WebRequest -Headers @{Authorization="Bearer $Token"} -Uri $url -OutFile $exe -UseBasicParsing
 
 $svc = "zakura-agent"
 $binPath = "`"$exe`" -server $Server -token $Token -kind $Kind"

@@ -59,11 +59,11 @@ func TestComputerScopedExecutionRouting(t *testing.T) {
 	if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,runtime_node_id,capabilities_json,idle_seconds,max_lifetime_seconds,created_at,updated_at) VALUES('pc','tenant',?,'PC','server','node','["commands","files"]',900,3600,'now','now')`, space.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err = h.computerStore().SetSpaceDefault(ctx, "tenant", space.ID, "pc"); err != nil {
-		t.Fatal(err)
-	}
 	chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.computerStore().SetSessionDefault(ctx, "tenant", space.ID, chat.ID, "pc"); err != nil {
 		t.Fatal(err)
 	}
 	run, err := store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hi", nil, nil)
@@ -282,11 +282,11 @@ func temporaryExecutionRig(t *testing.T, token string, handle func(string, map[s
 	if err = cs.Create(ctx, c, sealed); err != nil {
 		t.Fatal(err)
 	}
-	if err = cs.SetSpaceDefault(ctx, "tenant", space.ID, c.ID); err != nil {
-		t.Fatal(err)
-	}
 	chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cs.SetSessionDefault(ctx, "tenant", space.ID, chat.ID, c.ID); err != nil {
 		t.Fatal(err)
 	}
 	run, err := store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hi", nil, nil)
@@ -396,11 +396,11 @@ func TestE2BComputerReservesApprovalOnExecution(t *testing.T) {
 	if err = cs.Create(ctx, computers.Computer{ID: "e2bpc", TenantID: "tenant", SpaceID: space.ID, Name: "E2B", Provider: computers.E2B, IdleSeconds: 900, MaxLifetimeSeconds: 3600}, sealed); err != nil {
 		t.Fatal(err)
 	}
-	if err = cs.SetSpaceDefault(ctx, "tenant", space.ID, "e2bpc"); err != nil {
-		t.Fatal(err)
-	}
 	chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cs.SetSessionDefault(ctx, "tenant", space.ID, chat.ID, "e2bpc"); err != nil {
 		t.Fatal(err)
 	}
 	run, err := store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hi", nil, nil)

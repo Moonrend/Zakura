@@ -202,15 +202,51 @@ func run(ctx context.Context, spec RunSpec, replace bool) (ContainerInfo, error)
 	return Inspect(ctx, id)
 }
 
+// Start resumes an existing container without replacing it or its bind mounts.
+func Start(ctx context.Context, idOrName string) (ContainerInfo, error) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" || strings.HasPrefix(idOrName, "-") {
+		return ContainerInfo{}, fmt.Errorf("container identity is required")
+	}
+	if err := Require(); err != nil {
+		return ContainerInfo{}, err
+	}
+	out, err := exec.CommandContext(ctx, dockerBin(), "start", idOrName).CombinedOutput()
+	if err != nil {
+		return ContainerInfo{}, fmt.Errorf("docker start: %s", strings.TrimSpace(string(out)))
+	}
+	return Inspect(ctx, idOrName)
+}
+
 func Stop(ctx context.Context, idOrName string, remove bool) error {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" || strings.HasPrefix(idOrName, "-") {
+		return fmt.Errorf("container identity is required")
+	}
 	if err := Require(); err != nil {
 		return err
 	}
-	_ = exec.CommandContext(ctx, dockerBin(), "stop", idOrName).Run()
+	out, err := exec.CommandContext(ctx, dockerBin(), "stop", idOrName).CombinedOutput()
+	if err != nil {
+		if dockerContainerAbsent(out) {
+			return nil
+		}
+		return fmt.Errorf("docker stop: %s: %w", strings.TrimSpace(string(out)), err)
+	}
 	if remove {
-		return exec.CommandContext(ctx, dockerBin(), "rm", "-f", idOrName).Run()
+		out, err = exec.CommandContext(ctx, dockerBin(), "rm", idOrName).CombinedOutput()
+		if err != nil && !dockerContainerAbsent(out) {
+			return fmt.Errorf("docker rm: %s: %w", strings.TrimSpace(string(out)), err)
+		}
 	}
 	return nil
+}
+
+// Only Docker's explicit daemon not-found response proves absence. Timeouts,
+// permission failures and unavailable engines must never authorize removal.
+func dockerContainerAbsent(out []byte) bool {
+	message := strings.TrimSpace(string(out))
+	return strings.HasPrefix(message, "Error response from daemon: No such container:")
 }
 
 func Inspect(ctx context.Context, idOrName string) (ContainerInfo, error) {
@@ -333,7 +369,7 @@ func List(ctx context.Context, label string) ([]ContainerInfo, error) {
 		}
 		info, err := Inspect(ctx, id)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("docker list incomplete (inspect %s): %w", id, err)
 		}
 		list = append(list, info)
 	}

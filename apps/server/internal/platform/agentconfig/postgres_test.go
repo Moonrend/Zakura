@@ -3,20 +3,16 @@ package agentconfig
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/pgtest"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 func TestPostgresUpdateRetriesAgainstFreshConfig(t *testing.T) {
-	dsn := os.Getenv("ZAKURA_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("set ZAKURA_TEST_POSTGRES_DSN to a disposable PostgreSQL test service")
-	}
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "agentconfig")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool, err := sql.Open("postgres", dsn)

@@ -115,7 +115,7 @@ export function ProjectSettingsPane({
   onDelete,
   className,
 }: {
-  agentId: string;
+  agentId: import("@/lib/agent-fs").WorkspaceTarget;
   project: AgentProject;
   onSaved: (project: AgentProject) => void;
   onOpenDir?: (slug: string) => void;

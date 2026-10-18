@@ -3,19 +3,18 @@
  *
  * 策略分层（按优先级）：
  * 1. deny 规则 / 记住的拒绝        → 直接拒绝
- * 2. 记住的允许（always allow）    → 直接允许
- * 3. ask 规则                      → 询问用户
- * 4. allow 规则                    → 直接允许
- * 5. 策略默认值（policy）：
- *    - allow_all  默认允许所有调用（yolo）
- *    - ask        只读工具放行，其余询问用户
- *    - ai         AI 审批门控（JEV System One / 传统 LLM），低置信度升级人工
+ * 2. always_ask（兼容旧 ask）       → 每次人工审批，允许规则不能绕过
+ * 3. 记住的允许 / ask / allow 规则 → 按已有规则裁决
+ * 4. 策略默认值（policy）：
+ *    - allow_all  默认允许所有调用
+ *    - always_ask 所有调用逐次询问（含只读工具）
+ *    - ai         AI 审批门控（Jev / 传统 LLM），低置信度升级人工
  *
  * 规则匹配器复用 Claude 钩子语法：`Bash(git push*)`、`web_*`、`*`。
  */
 import { hookIfHits } from "./agent-hooks.js";
 
-export const TOOL_APPROVAL_POLICIES = ["allow_all", "ask", "ai"] as const;
+export const TOOL_APPROVAL_POLICIES = ["allow_all", "always_ask", "ai"] as const;
 export type ToolApprovalPolicy = (typeof TOOL_APPROVAL_POLICIES)[number];
 
 export const TOOL_APPROVAL_RULE_ACTIONS = ["allow", "deny", "ask"] as const;
@@ -40,7 +39,9 @@ export type ToolApprovalAiGateConfig = {
   jevBaseUrl?: string;
   /** TypeSafe API Key；留空优先用模型路由（evaluation），再回落环境变量 TYPESAFE_API_KEY */
   jevApiKey?: string;
-  /** JEV 评估路由 alias：优先于直连配置（在「模型路由」里配置 typesafe 上游后填这里） */
+  /** 明确的 evaluation 路由 ID；优先于旧 alias 和直连配置。 */
+  routeId?: string;
+  /** 旧配置的评估路由 alias。 */
   routeAlias?: string;
   /** 传统模型：模型路由 alias（provider=llm 时使用） */
   llmModel?: string;
@@ -70,6 +71,7 @@ export const DEFAULT_AI_CONFIDENCE_THRESHOLD = 0.7;
 export const DEFAULT_ASK_TIMEOUT_SECONDS = 300;
 
 export function parseToolApprovalPolicy(raw: unknown): ToolApprovalPolicy {
+  if (raw === "ask") return "always_ask";
   return typeof raw === "string" &&
     (TOOL_APPROVAL_POLICIES as readonly string[]).includes(raw)
     ? (raw as ToolApprovalPolicy)
@@ -80,8 +82,8 @@ export function parseToolApprovalConfig(raw: unknown): ToolApprovalConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const o = raw as Record<string, unknown>;
   const out: ToolApprovalConfig = {};
-  if ((TOOL_APPROVAL_POLICIES as readonly string[]).includes(o.policy as string)) {
-    out.policy = o.policy as ToolApprovalPolicy;
+  if (o.policy === "ask" || (TOOL_APPROVAL_POLICIES as readonly string[]).includes(o.policy as string)) {
+    out.policy = parseToolApprovalPolicy(o.policy);
   }
   if (Array.isArray(o.rules)) {
     const rules: ToolApprovalRule[] = [];
@@ -117,6 +119,7 @@ export function parseToolApprovalConfig(raw: unknown): ToolApprovalConfig {
       gate.jevApiKey = g.jevApiKey.trim();
     }
     if (typeof g.llmModel === "string" && g.llmModel.trim()) gate.llmModel = g.llmModel.trim();
+    if (typeof g.routeId === "string" && g.routeId.trim()) gate.routeId = g.routeId.trim();
     if (typeof g.routeAlias === "string" && g.routeAlias.trim()) {
       gate.routeAlias = g.routeAlias.trim();
     }
@@ -130,7 +133,7 @@ export function parseToolApprovalConfig(raw: unknown): ToolApprovalConfig {
     if (typeof g.escalateOnDeny === "boolean") gate.escalateOnDeny = g.escalateOnDeny;
     if (Object.keys(gate).length) out.aiGate = gate;
   }
-  if (typeof o.askTimeoutSeconds === "number" && o.askTimeoutSeconds >= 0) {
+  if (typeof o.askTimeoutSeconds === "number" && Number.isFinite(o.askTimeoutSeconds) && o.askTimeoutSeconds >= 0) {
     out.askTimeoutSeconds = Math.min(Math.floor(o.askTimeoutSeconds), 86_400);
   }
   return out;
@@ -146,7 +149,7 @@ function parseMatcherList(raw: unknown): string[] | undefined {
 
 /** 策略生效值：未配置按 allow_all（默认允许所有调用） */
 export function resolveApprovalPolicy(config: ToolApprovalConfig | undefined): ToolApprovalPolicy {
-  return config?.policy ?? DEFAULT_TOOL_APPROVAL.policy;
+  return parseToolApprovalPolicy(config?.policy);
 }
 
 export function resolveConfidenceThreshold(config: ToolApprovalConfig | undefined): number {
@@ -158,8 +161,9 @@ export function resolveConfidenceThreshold(config: ToolApprovalConfig | undefine
 
 export function resolveAskTimeoutSeconds(config: ToolApprovalConfig | undefined): number | null {
   const raw = config?.askTimeoutSeconds;
-  if (typeof raw !== "number" || raw <= 0) return null;
-  return raw;
+  if (raw === 0) return null;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return DEFAULT_ASK_TIMEOUT_SECONDS;
+  return Math.min(Math.floor(raw), 86_400);
 }
 
 /** 审批请求原因（事件与 UI 共用） */

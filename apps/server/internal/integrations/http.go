@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,15 +28,24 @@ import (
 
 func strPtr(v string) *string { return &v }
 
+type MCPInstanceLifecycle interface {
+	Start(context.Context, string, string) error
+	Stop(context.Context, string, string) error
+}
+
 type handler struct {
+	lifecycle      MCPInstanceLifecycle
 	deps           *appdeps.Dependencies
 	client         *http.Client
 	runtimeStore   *internalruntime.Store
 	runtimeService *internalruntime.Service
 }
 
-func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
+func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies, lifecycle ...MCPInstanceLifecycle) {
 	h := &handler{deps: deps, client: &http.Client{Timeout: 60 * time.Second}}
+	if len(lifecycle) > 0 {
+		h.lifecycle = lifecycle[0]
+	}
 	h.runtimeStore = internalruntime.NewStore(deps)
 	h.runtimeService = internalruntime.NewService(h.runtimeStore)
 	r.Post("/api/connectors/{ref}/events", h.webhook)
@@ -46,11 +56,14 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Group(func(api chi.Router) {
 		api.Use(httpx.Auth(deps))
 		api.Use(internalruntime.RequireAPIScope)
+		api.Use(h.integrationResourceGuard)
 		h.routes(api)
 	})
 	h.startDeliverer(deps.RunContext())
 	h.startEmailPoller(deps.RunContext())
-	h.seedEmailPackages(deps.RunContext())
+	if err := h.seedEmailPackages(deps.RunContext()); err != nil {
+		slog.Error("email package catalogue initialization failed", "error", err)
+	}
 }
 func (h *handler) routes(r chi.Router) {
 	r.Get("/api/connectors", h.listConnectors)
@@ -97,7 +110,7 @@ func (h *handler) id() string {
 }
 func principal(r *http.Request) httpx.Principal { p, _ := httpx.PrincipalFrom(r.Context()); return p }
 func writeErr(w http.ResponseWriter, e error) {
-	if errors.Is(e, sql.ErrNoRows) || errors.Is(e, gorm.ErrRecordNotFound) {
+	if errors.Is(e, sql.ErrNoRows) || errors.Is(e, gorm.ErrRecordNotFound) || errors.Is(e, httpx.ErrResourceScope) {
 		httpx.Error(w, 404, "Not found")
 	} else {
 		httpx.Error(w, 400, e.Error())
@@ -107,8 +120,19 @@ func validRef(ref string) bool { _, ok := provider(ref); return ok }
 
 func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	var installs []models.AgentConnectorInstallation
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ?", p.TenantID).Find(&installs).Error; e != nil {
+	spaces, e := h.allowedSpaces(r)
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	for _, space := range spaces {
+		if e = h.migrateSpaceConnectors(r.Context(), p.TenantID, space); e != nil {
+			writeErr(w, e)
+			return
+		}
+	}
+	var installs []spaceConnectorInstallation
+	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id IN ?", p.TenantID, spaces).Find(&installs).Error; e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -149,26 +173,18 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	settingsByRef := map[string][]string{}
-	var srows []models.ConnectorSetting
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("scope_key = ?", p.TenantID).Find(&srows).Error; e == nil {
-		for _, row := range srows {
-			if raw, de := decrypt(h.deps.Secret, p.TenantID+":"+row.ConnectorRef, row.ConfigEnc); de == nil {
-				var cfg map[string]any
-				if json.Unmarshal(raw, &cfg) == nil {
-					keys := []string{}
-					for k, v := range cfg {
-						if strings.HasPrefix(k, "oauth") || v == nil {
-							continue
-						}
-						if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
-							continue
-						}
-						keys = append(keys, k)
-					}
-					settingsByRef[row.ConnectorRef] = keys
-				}
+	for _, row := range installs {
+		cfg, e := h.spaceEnvelope(row)
+		if e != nil {
+			continue
+		}
+		keys := []string{}
+		for k, v := range cfg.Settings {
+			if v != nil && !strings.HasPrefix(k, "oauth") {
+				keys = append(keys, k)
 			}
 		}
+		settingsByRef[row.ConnectorRef] = keys
 	}
 	items := make([]map[string]any, 0, len(providers))
 	for _, x := range providers {
@@ -231,6 +247,15 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 		if x.Auth.TokenScheme != "" {
 			auth["tokenScheme"] = x.Auth.TokenScheme
 		}
+		installationViews := []map[string]any{}
+		for _, row := range installs {
+			if row.ConnectorRef == x.Ref {
+				v := connectionView(row)
+				v["enabled"] = row.Enabled
+				v["connectorRef"] = row.ConnectorRef
+				installationViews = append(installationViews, v)
+			}
+		}
 		items = append(items, map[string]any{
 			"id": x.Ref, "ref": x.Ref, "name": x.Name, "description": x.Description,
 			"package": map[string]any{"slug": x.Package.Slug, "name": x.Package.Name, "icon": x.Package.Icon, "accent": x.Package.Accent, "homepage": x.Package.Homepage},
@@ -241,8 +266,9 @@ func (h *handler) listConnectors(w http.ResponseWriter, r *http.Request) {
 			"credentialSource":   credentialSource,
 			"configuredFields":   fields,
 			"configuredSettings": configuredSettings,
-			"authorized":         false, "installations": []any{},
-			"docsUrl": x.Auth.DocsURL, "hasTools": false, "capabilities": []any{},
+			"authorized":         false, "installations": installationViews,
+			"installedSpaces": installed[x.Ref],
+			"docsUrl":         x.Auth.DocsURL, "hasTools": false, "capabilities": []any{},
 			"authKind": x.AuthKind, "installedAgents": installed[x.Ref],
 		})
 	}
@@ -438,10 +464,18 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 404, "Unknown connector")
 		return
 	}
-	var b struct{ ProfileKey, AgentID, RedirectURI string }
+	var b struct{ ProfileKey, AgentID, SpaceID, RedirectURI string }
 	if httpx.DecodeJSON(r, &b) != nil || b.ProfileKey == "" {
 		httpx.Error(w, 400, "profileKey required")
 		return
+	}
+	if b.SpaceID != "" || b.AgentID != "" {
+		space, e := h.resourceSpace(r, b.SpaceID, b.AgentID)
+		if e != nil {
+			writeErr(w, e)
+			return
+		}
+		b.SpaceID = space
 	}
 	cfg, e := h.profileConfig(r.Context(), p.TenantID, b.ProfileKey)
 	if e != nil {
@@ -454,7 +488,7 @@ func (h *handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "OAuth profile is incomplete")
 		return
 	}
-	statePayload, _ := json.Marshal(map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": b.AgentID, "ref": ref, "profileKey": b.ProfileKey, "redirectUri": b.RedirectURI, "exp": h.now().Add(10 * time.Minute).Unix()})
+	statePayload, _ := json.Marshal(map[string]any{"tenantId": p.TenantID, "userId": p.UserID, "agentId": b.AgentID, "spaceId": b.SpaceID, "ref": ref, "profileKey": b.ProfileKey, "redirectUri": b.RedirectURI, "exp": h.now().Add(10 * time.Minute).Unix()})
 	sig := hmac.New(sha256.New, h.deps.Secret)
 	sig.Write(statePayload)
 	state := base64.RawURLEncoding.EncodeToString(statePayload) + "." + base64.RawURLEncoding.EncodeToString(sig.Sum(nil))
@@ -511,6 +545,7 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		TenantID    string `json:"tenantId"`
 		UserID      string `json:"userId"`
 		AgentID     string `json:"agentId"`
+		SpaceID     string `json:"spaceId"`
 		Ref         string `json:"ref"`
 		ProfileKey  string `json:"profileKey"`
 		RedirectURI string `json:"redirectUri"`
@@ -599,34 +634,31 @@ func (h *handler) oauthComplete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"ok": true, "ref": sp.Ref, "profileKey": sp.ProfileKey, "agentId": sp.AgentID})
+	httpx.JSON(w, 200, map[string]any{"ok": true, "ref": sp.Ref, "profileKey": sp.ProfileKey, "agentId": sp.AgentID, "spaceId": sp.SpaceID})
 }
 func (h *handler) install(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
 	ref := chi.URLParam(r, "ref")
 	if !validRef(ref) {
 		httpx.Error(w, 404, "Unknown connector")
 		return
 	}
 	var b struct {
-		AgentID    string          `json:"agentId"`
-		ProfileKey string          `json:"profileKey"`
-		Config     json.RawMessage `json:"config"`
-		Enabled    *bool           `json:"enabled"`
+		SpaceID    string         `json:"spaceId"`
+		AgentID    string         `json:"agentId"`
+		ProfileKey string         `json:"profileKey"`
+		Config     map[string]any `json:"config"`
+		Enabled    *bool          `json:"enabled"`
 	}
-	if httpx.DecodeJSON(r, &b) != nil || b.AgentID == "" {
-		httpx.Error(w, 400, "agentId required")
+	if httpx.DecodeJSON(r, &b) != nil {
+		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	var count int64
-	if e := h.deps.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("tenant_id = ? AND id = ?", p.TenantID, b.AgentID).Count(&count).Error; e != nil || count == 0 {
-		httpx.Error(w, 404, "Agent not found")
-		return
-	}
-	data := map[string]any{"profileKey": b.ProfileKey, "config": json.RawMessage(b.Config)}
-	raw, _ := json.Marshal(data)
-	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+b.AgentID+":"+ref, raw)
+	space, e := h.resourceSpace(r, b.SpaceID, b.AgentID)
 	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.migrateSpaceConnectors(r.Context(), principal(r).TenantID, space); e != nil {
 		writeErr(w, e)
 		return
 	}
@@ -634,21 +666,24 @@ func (h *handler) install(w http.ResponseWriter, r *http.Request) {
 	if b.Enabled != nil {
 		enabled = *b.Enabled
 	}
-	now := h.now().Format(time.RFC3339Nano)
-	row := models.AgentConnectorInstallation{ID: strPtr(h.id()), TenantID: p.TenantID, AgentID: b.AgentID, ConnectorRef: ref, Enabled: enabled, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
-	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "agent_id"}, {Name: "connector_ref"}},
-		DoUpdates: clause.AssignmentColumns([]string{"enabled", "config_enc", "updated_at"}),
-	}).Create(&row).Error
+	row, e := h.saveSpaceConnector(r.Context(), principal(r).TenantID, space, ref, connectorEnvelope{ProfileKey: b.ProfileKey, Config: b.Config}, enabled)
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	httpx.JSON(w, 201, map[string]any{"installation": map[string]any{"agentId": b.AgentID, "connectorRef": ref, "enabled": enabled}})
+	httpx.JSON(w, 201, map[string]any{"installation": connectionView(row)})
 }
 func (h *handler) uninstall(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ? AND connector_ref = ?", p.TenantID, chi.URLParam(r, "agentId"), chi.URLParam(r, "ref")).Delete(&models.AgentConnectorInstallation{})
+	space, e := h.resourceSpace(r, "", chi.URLParam(r, "agentId"))
+	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	if e = h.migrateSpaceConnectors(r.Context(), principal(r).TenantID, space); e != nil {
+		writeErr(w, e)
+		return
+	}
+	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND connector_ref = ?", principal(r).TenantID, space, canonicalRef(chi.URLParam(r, "ref"))).Delete(&spaceConnectorInstallation{})
 	if res.Error != nil {
 		writeErr(w, res.Error)
 		return
@@ -660,81 +695,86 @@ func (h *handler) uninstall(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) listAgentConnectors(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	var rows []models.AgentConnectorInstallation
-	if e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND agent_id = ?", p.TenantID, chi.URLParam(r, "id")).Order("connector_ref").Find(&rows).Error; e != nil {
+	space, e := h.resourceSpace(r, "", chi.URLParam(r, "id"))
+	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	items := make([]map[string]any, 0)
-	index := map[string]int{}
-	for _, row := range rows {
-		ref := canonicalRef(row.ConnectorRef)
-		pr, _ := provider(ref)
-		item := map[string]any{"id": *row.ID, "ref": ref, "name": pr.Name, "enabled": row.Enabled, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt}
-		if i, ok := index[ref]; ok {
-			if current, _ := items[i]["createdAt"].(string); row.CreatedAt < current {
-				items[i] = item
-			}
-			continue
-		}
-		index[ref] = len(items)
-		items = append(items, item)
+	if e = h.migrateSpaceConnectors(r.Context(), principal(r).TenantID, space); e != nil {
+		writeErr(w, e)
+		return
 	}
-	httpx.JSON(w, 200, map[string]any{"connectors": items})
+	var rows []spaceConnectorInstallation
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ?", principal(r).TenantID, space).Order("connector_ref").Find(&rows).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	out := []map[string]any{}
+	for _, row := range rows {
+		v := connectionView(row)
+		v["ref"] = row.ConnectorRef
+		v["enabled"] = row.Enabled
+		out = append(out, v)
+	}
+	httpx.JSON(w, 200, map[string]any{"connectors": out})
 }
 func (h *handler) updateCredentials(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	id := chi.URLParam(r, "id")
 	var b struct {
-		Config json.RawMessage `json:"config"`
+		Config map[string]any `json:"config"`
 	}
 	if httpx.DecodeJSON(r, &b) != nil {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
-	var row models.AgentConnectorInstallation
-	e := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ?", p.TenantID, id).First(&row).Error
+	row, e := h.loadConnection(r, chi.URLParam(r, "id"))
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+row.AgentID+":"+row.ConnectorRef, b.Config)
-	if e == nil {
-		e = h.deps.Gorm.WithContext(r.Context()).Model(&models.AgentConnectorInstallation{}).
-			Where("tenant_id = ? AND id = ?", p.TenantID, id).
-			Updates(map[string]any{"config_enc": enc, "updated_at": h.now().Format(time.RFC3339Nano)}).Error
-	}
+	cfg, e := h.spaceEnvelope(row)
 	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	cfg.Config = b.Config
+	if _, e = h.saveSpaceConnector(r.Context(), row.TenantID, row.SpaceID, row.ConnectorRef, cfg, row.Enabled); e != nil {
 		writeErr(w, e)
 		return
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) putSettings(w http.ResponseWriter, r *http.Request) {
-	p := principal(r)
-	ref := chi.URLParam(r, "ref")
+	ref := canonicalRef(chi.URLParam(r, "ref"))
 	if !validRef(ref) {
 		httpx.Error(w, 404, "Unknown connector")
 		return
 	}
-	var b json.RawMessage
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&b) != nil || !json.Valid(b) {
-		httpx.Error(w, 400, "invalid JSON")
-		return
-	}
-	enc, e := encrypt(h.deps.Secret, p.TenantID+":"+ref, b)
+	space, e := h.resourceSpace(r, r.URL.Query().Get("spaceId"), r.URL.Query().Get("agentId"))
 	if e != nil {
 		writeErr(w, e)
 		return
 	}
-	now := h.now().Format(time.RFC3339Nano)
-	row := models.ConnectorSetting{ID: strPtr(h.id()), ScopeKey: p.TenantID, ConnectorRef: ref, ConfigEnc: enc, CreatedAt: now, UpdatedAt: now}
-	e = h.deps.Gorm.WithContext(r.Context()).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "scope_key"}, {Name: "connector_ref"}},
-		DoUpdates: clause.AssignmentColumns([]string{"config_enc", "updated_at"}),
-	}).Create(&row).Error
+	var settings map[string]any
+	if httpx.DecodeJSON(r, &settings) != nil || settings == nil {
+		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	if e = h.migrateSpaceConnectors(r.Context(), principal(r).TenantID, space); e != nil {
+		writeErr(w, e)
+		return
+	}
+	var row spaceConnectorInstallation
+	if e = h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND space_id = ? AND connector_ref = ?", principal(r).TenantID, space, ref).First(&row).Error; e != nil {
+		writeErr(w, e)
+		return
+	}
+	cfg, e := h.spaceEnvelope(row)
 	if e != nil {
+		writeErr(w, e)
+		return
+	}
+	cfg.Settings = settings
+	if _, e = h.saveSpaceConnector(r.Context(), row.TenantID, row.SpaceID, ref, cfg, row.Enabled); e != nil {
 		writeErr(w, e)
 		return
 	}

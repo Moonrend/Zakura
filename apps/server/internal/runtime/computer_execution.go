@@ -14,8 +14,11 @@ import (
 type computerExecKey struct{}
 
 // resolvedExecution is the execution target for one tool call, resolved once at
-// dispatch from the immutable Run snapshot. legacy keeps the transitional
-// Space-based transports; anything else is pinned to a computer runtime.
+// dispatch from the immutable Run snapshot. legacy marks the Space server
+// computer, whose transport is the Space workspace (host.exec, the workspace
+// container, the Space directory); every other computer is pinned to a
+// computer runtime. The field keeps its historical name because transports
+// outside this file branch on it.
 type resolvedExecution struct {
 	legacy      bool
 	spaceID     string
@@ -31,14 +34,65 @@ func pinnedExecution(ctx context.Context) *resolvedExecution {
 	return exec
 }
 
-// resolveExecutionGuard resolves the pinned run computer into an execution
-// target and never falls back: legacy computers must still match the Space
-// configuration, and new computers must have an active, non-expired runtime.
-// When no active slot exists yet it records intent without contacting any
-// provider. A free, self-hosted temporary container is then approved and created
-// inline so a chat can execute immediately; every other provider (E2B, Railway,
-// SSH) only reserves and reports that creation approval is still required. An
-// ambiguous temporary create leaves the runtime in Unknown and is never retried.
+// serverComputerExecution is the execution target of a Space server computer.
+// It has no runtime row: the workspace transports resolve the Space's runtime
+// node themselves and fail rather than pick another host when it is offline.
+func serverComputerExecution(c computers.Computer) *resolvedExecution {
+	return &resolvedExecution{legacy: true, spaceID: c.SpaceID, nodeID: c.RuntimeNodeID, computer: c}
+}
+
+// resolveServerComputer returns the execution target of a Space's server
+// computer, healing a Space whose server computer is missing.
+func (h *handler) resolveServerComputer(ctx context.Context, tenant, space string) (*resolvedExecution, error) {
+	c, err := h.computerStore().ServerComputer(ctx, tenant, space)
+	if errors.Is(err, computers.ErrNoServerComputer) {
+		c, err = h.computerStore().EnsureServerComputer(ctx, tenant, space, h.store.now())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return serverComputerExecution(c), nil
+}
+
+// serverComputerHostRoot returns the absolute directory of the server
+// computer's workspace on its runtime node, creating it when missing. It is the
+// bind-mount source for anything that must share the workspace filesystem.
+func (h *handler) serverComputerHostRoot(ctx context.Context, exec *resolvedExecution) (string, error) {
+	if exec == nil || !exec.computer.IsServer() {
+		return "", errors.New("not a space server computer")
+	}
+	if exec.nodeID == "" {
+		return "", errors.New("no runtime node bound to this space")
+	}
+	if err := h.authorizeContextLocalNode(ctx, exec.computer.TenantID, exec.nodeID); err != nil {
+		return "", err
+	}
+	runner, err := h.hub.get(exec.nodeID)
+	if err != nil {
+		return "", err
+	}
+	var created struct {
+		Abs string `json:"abs"`
+	}
+	if err = runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": exec.spaceID, "path": "/"}, &created); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(created.Abs) == "" {
+		return "", errors.New("runtime node returned no workspace path")
+	}
+	return created.Abs, nil
+}
+
+// resolveExecutionGuard resolves the computer a tool call runs on and never
+// falls back to another host. An explicit computerId wins for that call; else
+// the Run's pinned computer; else the Space server computer. The server
+// computer runs on the Space workspace transport. Every other computer must
+// have an active, non-expired runtime; when no active slot exists yet it records
+// intent without contacting any provider. A free, self-hosted temporary
+// container is then approved and created inline so a chat can execute
+// immediately; every other provider (E2B, Railway, SSH) only reserves and
+// reports that creation approval is still required. An ambiguous temporary
+// create leaves the runtime in Unknown and is never retried.
 func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, session string, args []byte) (*resolvedExecution, error) {
 	var selection struct {
 		ComputerID *string `json:"computerId"`
@@ -53,7 +107,7 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 		if session != "" || selection.ComputerID != nil {
 			return nil, errors.New("computer execution requires an immutable run target")
 		}
-		return nil, nil // non-session legacy API; no selection was offered
+		return nil, nil // non-session API; transports use the Space workspace
 	}
 	a, err := h.store.GetAgent(ctx, tenant, agent)
 	if err != nil {
@@ -73,30 +127,26 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 		}
 	}
 	c, err := h.computerStore().ResolveRunComputer(ctx, tenant, a.SpaceID, run, explicit)
+	if errors.Is(err, computers.ErrNoServerComputer) {
+		var server *resolvedExecution
+		if server, err = h.resolveServerComputer(ctx, tenant, a.SpaceID); err == nil {
+			if err := h.authorizeContextLocalNode(ctx, tenant, server.nodeID); err != nil {
+				return nil, err
+			}
+			return server, nil
+		}
+	}
 	if err != nil {
+		if explicit != "" && errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("computer %s is not available in this space", explicit)
+		}
 		return nil, err
 	}
-	var legacyScope, kind, node, image sql.NullString
-	err = h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT legacy_workspace_scope,legacy_workspace_kind,runtime_node_id,workspace_image FROM computers WHERE id=? AND tenant_id=? AND space_id=?`), c.ID, tenant, a.SpaceID).Scan(&legacyScope, &kind, &node, &image)
-	if err != nil {
+	if err := h.authorizeContextLocalNode(ctx, tenant, c.RuntimeNodeID); err != nil {
 		return nil, err
 	}
-	if legacyScope.Valid && legacyScope.String == a.SpaceID {
-		space, err := h.store.GetSpace(ctx, tenant, a.SpaceID)
-		if err != nil {
-			return nil, err
-		}
-		currentNode, currentImage := "", ""
-		if space.RuntimeNodeID != nil {
-			currentNode = *space.RuntimeNodeID
-		}
-		if space.WorkspaceImage != nil {
-			currentImage = *space.WorkspaceImage
-		}
-		if !space.EnableComputer || node.String != currentNode || kind.String != space.WorkspaceKind || image.String != currentImage {
-			return nil, errors.New("legacy computer configuration changed; refusing execution on an unbound workspace")
-		}
-		return &resolvedExecution{legacy: true, spaceID: a.SpaceID, nodeID: node.String}, nil
+	if c.IsServer() {
+		return serverComputerExecution(c), nil
 	}
 	// Computer-scoped execution for adapters that are wired (server containers).
 	scope, err := c.Scope(session)
@@ -141,7 +191,7 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 	// leaves the slot in Unknown and is never retried here.
 	if active.State == computers.PendingApproval {
 		if c.Provider != computers.Temporary {
-			return nil, fmt.Errorf("computer %s is awaiting creation approval; approve it in the computer settings before executing; refusing legacy workspace fallback", c.ID)
+			return nil, fmt.Errorf("computer %s is awaiting creation approval; approve it in the computer settings before executing (a chosen computer never falls back to the server computer)", c.ID)
 		}
 		provisioned, pErr := h.computerProvisioner().ApproveAndCreate(ctx, computers.Target{TenantID: tenant, SpaceID: a.SpaceID, ComputerID: c.ID, RuntimeID: active.ID, Incarnation: active.Incarnation}, active.CreateOperationID, "system")
 		if pErr != nil {
@@ -166,10 +216,12 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 	return &resolvedExecution{spaceID: a.SpaceID, nodeID: c.RuntimeNodeID, containerID: active.ExternalID, hostRoot: active.RootPath, computer: c, runtime: active}, nil
 }
 
-// refuseNonLegacyExecution blocks transports that are not wired for dedicated
-// computer containers yet; a pinned legacy run is unaffected.
-func refuseNonLegacyExecution(ctx context.Context, what string) error {
-	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
+// requireWorkspaceCapability gates transports only the Space server computer's
+// workspace implements, such as desktop and browser control, which need the
+// display of a container workspace with the computer stack enabled. A call
+// without a pinned Run keeps the Space workspace transport.
+func requireWorkspaceCapability(ctx context.Context, capability computers.Capability, what string) error {
+	if exec := pinnedExecution(ctx); exec != nil && (!exec.legacy || !exec.computer.Has(capability)) {
 		return fmt.Errorf("%s is not available on this computer", what)
 	}
 	return nil

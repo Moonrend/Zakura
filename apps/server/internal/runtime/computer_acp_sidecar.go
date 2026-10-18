@@ -4,7 +4,6 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,78 +42,33 @@ func acpSidecarIdentity(r computers.Runtime) (string, map[string]string) {
 	}
 }
 
-// resolveACPHost resolves the ACP adapter host. A call carrying an immutable Run
-// resolves the pinned Run target; a call without one resolves the session's
-// selected computer so server-side ACP requests pick the same sidecar host as
-// dispatch. A legacy computer, or a session with no selected computer, returns
-// (nil, nil) so the caller keeps the historical host.pty / workspace-container
-// path. A non-legacy computer must be a persistent server computer with Docker
-// and an active, ready runtime; nothing falls back to another host, and a
-// resolved host must match the session's persisted pin.
+// resolveACPHost always resolves the Space server computer. A selected tool
+// computer is independent of where ACP and its credentials are stored.
 func resolveACPHost(ctx context.Context, h *handler, tenantID, agentID, sid string) (*resolvedExecution, error) {
-	run, _ := ctx.Value(computerRunKey{}).(string)
 	a, err := h.store.GetAgent(ctx, tenantID, agentID)
 	if err != nil {
 		return nil, err
 	}
-	var c computers.Computer
-	var sess Session
-	if run != "" {
-		c, err = h.computerStore().ResolveRunComputer(ctx, tenantID, a.SpaceID, run, "")
+	exec, err := h.resolveServerComputer(ctx, tenantID, a.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	if exec.nodeID == "" {
+		return nil, errors.New("no runtime node bound to this space")
+	}
+	if err := h.authorizeContextLocalNode(ctx, tenantID, exec.nodeID); err != nil {
+		return nil, err
+	}
+	if sid != "" {
+		sess, err := h.store.GetSession(ctx, tenantID, agentID, sid)
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		if sid == "" {
-			return nil, nil
-		}
-		if sess, err = h.store.GetSession(ctx, tenantID, agentID, sid); err != nil {
-			return nil, err
-		}
-		selected, err := h.computerStore().SessionDefault(ctx, tenantID, a.SpaceID, sid)
-		if err != nil {
-			return nil, err
-		}
-		if selected == nil || *selected == "" {
-			return nil, nil
-		}
-		if c, err = h.sessionSelectedComputer(ctx, tenantID, a.SpaceID, *selected); err != nil {
-			return nil, err
+		if pinned := pinnedACPHost(sess); pinned != "" && pinned != exec.computer.ID {
+			return nil, errors.New("ACP session host computer changed; start a new session")
 		}
 	}
-	var legacyScope, kind, node, image sql.NullString
-	err = h.deps.DB.QueryRowContext(ctx, h.deps.Rebind(`SELECT legacy_workspace_scope,legacy_workspace_kind,runtime_node_id,workspace_image FROM computers WHERE id=? AND tenant_id=? AND space_id=?`), c.ID, tenantID, a.SpaceID).Scan(&legacyScope, &kind, &node, &image)
-	if err != nil {
-		return nil, err
-	}
-	if legacyScope.Valid && legacyScope.String == a.SpaceID {
-		return nil, nil
-	}
-	if c.Provider != computers.Server || c.RuntimeNodeID == "" {
-		return nil, errors.New("ACP is only available on persistent server computers")
-	}
-	if !c.Has(computers.Docker) {
-		return nil, errors.New("ACP requires a computer with Docker capability")
-	}
-	scope, err := c.Scope(sid)
-	if err != nil {
-		return nil, err
-	}
-	active, err := h.computerStore().ActiveRuntime(ctx, tenantID, a.SpaceID, c.ID, scope)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("computer %s has no active runtime; approve and reconcile its creation before starting ACP", c.ID)
-		}
-		return nil, err
-	}
-	target := computers.Target{TenantID: tenantID, SpaceID: a.SpaceID, ComputerID: c.ID, RuntimeID: active.ID, Incarnation: active.Incarnation}
-	if err = computers.CheckTarget(target, c, active, scope, computers.Docker, false, h.store.now()); err != nil {
-		return nil, err
-	}
-	if pinned := pinnedACPHost(sess); pinned != "" && pinned != c.ID {
-		return nil, errors.New("ACP session host computer changed; start a new session")
-	}
-	return &resolvedExecution{spaceID: a.SpaceID, nodeID: c.RuntimeNodeID, containerID: active.ExternalID, hostRoot: active.RootPath, computer: c, runtime: active}, nil
+	return exec, nil
 }
 
 // sessionSelectedComputer loads the full configuration of a session's selected

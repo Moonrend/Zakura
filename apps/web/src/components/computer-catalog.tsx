@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Clock,
   Cloud,
@@ -17,10 +17,8 @@ import {
   kindLabel,
   listRuntimeNodes,
   statusLabel,
-  statusVariant,
   type RuntimeNode,
 } from "@/lib/runners";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -35,8 +33,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ComputerRuntimeControls } from "@/components/computer-runtime-controls";
-import { ComputerSelector } from "@/components/computer-selector";
 import { SettingsHeader } from "@/components/settings-shell";
+import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";
 
 type Provider = "server" | "remote_agent" | "ssh" | "temporary" | "e2b" | "railway";
@@ -44,14 +42,17 @@ type Computer = {
   id: string;
   name: string;
   provider: Provider;
+  role?: "server" | "attached";
+  workspaceKind?: "container" | "host" | "local";
   runtimeNodeId?: string;
   capabilities: string[];
   idleSeconds: number;
   maxLifetimeSeconds: number;
 };
 
-const PROVIDERS: { id: Provider; label: string; description: string; icon: LucideIcon }[] = [
-  { id: "server", label: "服务器电脑", description: "绑定服务器节点，长期运行", icon: Server },
+// The Space server computer is created with the Space and cannot be added here.
+type AttachedProvider = Exclude<Provider, "server">;
+const PROVIDERS: { id: AttachedProvider; label: string; description: string; icon: LucideIcon }[] = [
   { id: "remote_agent", label: "远程电脑", description: "经远程代理接入任意节点", icon: Monitor },
   { id: "ssh", label: "SSH 电脑", description: "连接已有 SSH 主机", icon: Terminal },
   { id: "temporary", label: "临时电脑", description: "按对话隔离，到期销毁", icon: Clock },
@@ -59,9 +60,11 @@ const PROVIDERS: { id: Provider; label: string; description: string; icon: Lucid
   { id: "railway", label: "Railway VM", description: "托管虚拟机，自动生成密钥", icon: Container },
 ];
 const providerLabel = (p: Provider) =>
-  PROVIDERS.find((x) => x.id === p)?.label ?? p;
+  p === "server" ? "服务器电脑" : (PROVIDERS.find((x) => x.id === p)?.label ?? p);
 const providerIcon = (p: Provider) =>
-  PROVIDERS.find((x) => x.id === p)?.icon ?? Monitor;
+  p === "server" ? Server : (PROVIDERS.find((x) => x.id === p)?.icon ?? Monitor);
+const workspaceKindLabel = (kind?: Computer["workspaceKind"]) =>
+  kind === "container" ? "运行在工作区容器中" : kind === "host" ? "运行在节点宿主机上" : "尚未绑定运行节点，暂只能浏览文件";
 
 export function ComputerCatalog({ spaceId }: { spaceId: string }) {
   const [items, setItems] = useState<Computer[]>([]);
@@ -86,25 +89,19 @@ export function ComputerCatalog({ spaceId }: { spaceId: string }) {
     void load();
   }, [load]);
 
+  const attached = items.filter((c) => c.role !== "server" && c.provider !== "server");
+
   return (
     <section className="space-y-4">
       <SettingsHeader
-        title="电脑"
-        description="每台电脑独立配置。添加配置不会启动环境或产生云端费用。"
+        title="其他电脑"
+        description="在对话中选用的附加电脑，不改变工作区节点。"
         actions={
           <Button size="sm" onClick={() => setOpen(true)}>
             <Plus className="size-4" />
             添加电脑
           </Button>
         }
-      />
-
-      <ComputerSelector
-        key={`${spaceId}:${items.length}`}
-        selectionUrl={`/api/spaces/${encodeURIComponent(spaceId)}/computer-default`}
-        catalogUrl={base}
-        label="Space 默认电脑"
-        hint="只用于新建对话；已有对话保留自己的选择。"
       />
 
       {error ? (
@@ -121,21 +118,20 @@ export function ComputerCatalog({ spaceId }: { spaceId: string }) {
         <p className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
           正在加载电脑…
         </p>
-      ) : items.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed p-10 text-center">
-          <p className="text-sm text-muted-foreground">
-            还没有电脑。添加一台，供对话运行命令与文件任务。
-          </p>
-          <Button size="sm" onClick={() => setOpen(true)}>
-            <Plus className="size-4" />
-            添加电脑
-          </Button>
-        </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {items.map((c) => (
-            <ComputerCard key={c.id} computer={c} spaceId={spaceId} base={base} />
+          {attached.map((c) => (
+            <ComputerCard key={c.id} computer={c} spaceId={spaceId} base={base} onChanged={load} />
           ))}
+          {attached.length === 0 && (
+            <div className="flex flex-col items-start justify-center gap-2 rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+              <p>还没有附加电脑。需要隔离环境、外部主机或云端沙箱时再添加。</p>
+              <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+                <Plus className="size-4" />
+                添加电脑
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -153,37 +149,88 @@ function ComputerCard({
   computer: c,
   spaceId,
   base,
+  onChanged,
 }: {
   computer: Computer;
   spaceId: string;
   base: string;
+  onChanged: () => Promise<void>;
 }) {
-  const legacy = c.id.startsWith("legacy:");
+  const { confirm } = useConfirmDialog();
+  const [removing, setRemoving] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftName, setDraftName] = useState(c.name);
+  const [editing, setEditing] = useState(false);
+  const [savingName, setSavingName] = useState(false);
+  async function rename() {
+    if (!draftName.trim() || savingName) return;
+    setSavingName(true);
+    try {
+      await api(`${base}/${encodeURIComponent(c.id)}`, { method: "PATCH", json: { name: draftName.trim() } });
+      setRenaming(false);
+      await onChanged();
+    } catch (err) { toast.error(err instanceof Error ? err.message : "改名失败"); }
+    finally { setSavingName(false); }
+  }
+  const isServer = c.role === "server";
   const Icon = providerIcon(c.provider);
-  const note = legacy
-    ? "保留自旧版工作区，可继续在对话中使用。"
+  const note = isServer
+    ? `本 Space 的工作区：默认文件系统、ACP 与技能都在这里；未指定电脑的对话都在此运行。${workspaceKindLabel(c.workspaceKind)}。`
     : c.provider === "temporary" || c.provider === "e2b"
       ? `按对话隔离 · 空闲 ${Math.round(c.idleSeconds / 60)} 分钟 · 最长 ${Math.round(c.maxLifetimeSeconds / 60)} 分钟；到期文件不保留。`
-      : c.provider === "server"
-        ? "绑定服务器节点，按需创建独立运行环境。"
-        : c.provider === "ssh"
-          ? "通过 SSH 密钥连接；主机指纹在首次连接时锁定。"
+      : c.provider === "ssh"
+        ? "通过 SSH 密钥连接；主机指纹在首次连接时锁定。"
+        : c.provider === "remote_agent"
+          ? "经远程代理接入的节点。"
           : "自动生成的 SSH 密钥即身份；预览与认领链接见运行环境状态。";
+
+  async function remove() {
+    const ok = await confirm({
+      title: `移除「${c.name}」？`,
+      description: c.provider === "e2b" || c.provider === "temporary"
+        ? "选用它的对话将改回服务器电脑，已有环境和文件将由后台回收。正在执行的对话结束后才能移除。"
+        : "选用它的对话将改回服务器电脑。只移除连接配置，外部主机仍会保留。正在执行的对话结束后才能移除。",
+      confirmLabel: "移除",
+      destructive: true,
+    });
+    if (!ok) return;
+    setRemoving(true);
+    try {
+      await api(`${base}/${encodeURIComponent(c.id)}`, { method: "DELETE" });
+      toast.success("电脑已移除");
+      await onChanged();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "移除失败");
+    } finally {
+      setRemoving(false);
+    }
+  }
+
   return (
     <article className="flex flex-col rounded-xl bg-card p-4 shadow-surface-2">
       <div className="flex items-start gap-2.5">
         <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-sm font-medium" title={c.name}>
-            {c.name}
-          </h3>
+          {renaming ? <form className="flex flex-wrap gap-1" onSubmit={event => { event.preventDefault(); void rename(); }}><Input aria-label="电脑名称" autoFocus value={draftName} onChange={event => setDraftName(event.target.value)} /><Button size="sm" type="submit" disabled={savingName}>{savingName ? "保存中…" : "保存"}</Button><Button size="sm" variant="ghost" type="button" onClick={() => setRenaming(false)}>取消</Button></form> : <button type="button" className="max-w-full truncate text-left text-sm font-medium weight-hover" title="重命名" onClick={() => { setDraftName(c.name); setRenaming(true); }}>{c.name}</button>}
           <p className="mt-0.5 text-xs text-muted-foreground">
-            {legacy ? "原有工作区" : providerLabel(c.provider)}
+            {isServer ? "服务器电脑 · 工作区" : providerLabel(c.provider)}
           </p>
         </div>
+        {!isServer && <Button variant="ghost" size="sm" disabled={removing} onClick={() => setEditing(true)}>编辑</Button>}
+        {!isServer && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={removing}
+            onClick={() => void remove()}
+          >
+            {removing ? "移除中…" : "移除"}
+          </Button>
+        )}
       </div>
+      <AddComputerDialog open={editing} onOpenChange={setEditing} spaceId={spaceId} computer={c} onCreated={onChanged} />
       <p className="mt-3 text-xs text-muted-foreground">{note}</p>
-      {!legacy && (c.provider === "server" || c.provider === "ssh" || c.provider === "railway") && (
+      {!isServer && (c.provider === "ssh" || c.provider === "railway") && (
         <ComputerRuntimeControls
           key={`${spaceId}:${c.id}`}
           base={`${base}/${encodeURIComponent(c.id)}`}
@@ -200,13 +247,16 @@ function AddComputerDialog({
   onOpenChange,
   spaceId,
   onCreated,
+  computer,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   spaceId: string;
   onCreated: () => Promise<void>;
+  computer?: Computer;
 }) {
-  const [provider, setProvider] = useState<Provider>("server");
+  const wasOpen = useRef(false);
+  const [provider, setProvider] = useState<AttachedProvider>("ssh");
   const [name, setName] = useState("");
   const [node, setNode] = useState("");
   const [config, setConfig] = useState<Record<string, string>>({});
@@ -214,6 +264,10 @@ function AddComputerDialog({
   const [nodesLoading, setNodesLoading] = useState(false);
   const [nodesError, setNodesError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState("");
+  const [idleMinutes, setIdleMinutes] = useState(15);
+  const [lifetimeMinutes, setLifetimeMinutes] = useState(60);
   const base = `/api/spaces/${encodeURIComponent(spaceId)}/computers`;
 
   const loadNodes = useCallback(async () => {
@@ -229,19 +283,34 @@ function AddComputerDialog({
   }, []);
 
   useEffect(() => {
-    if (open) void loadNodes();
-  }, [open, loadNodes]);
+    if (open && (provider === "temporary" || provider === "remote_agent")) void loadNodes();
+  }, [open, provider, loadNodes]);
 
   useEffect(() => {
-    if (open) return;
-    setProvider("server");
-    setName("");
-    setNode("");
+    const opening = open && !wasOpen.current;
+    wasOpen.current = open;
+    if (!opening) return;
+    setProvider(computer?.provider !== "server" ? computer?.provider ?? "ssh" : "ssh");
+    setName(computer?.name ?? `电脑-${Math.random().toString(36).slice(2, 6)}`);
+    setNode(computer?.runtimeNodeId ?? "");
+    setIdleMinutes((computer?.idleSeconds ?? 900) / 60);
+    setLifetimeMinutes((computer?.maxLifetimeSeconds ?? 3600) / 60);
     setConfig({});
-  }, [open]);
+    setConfigError("");
+  }, [open, computer]);
 
-  const local =
-    provider === "server" || provider === "temporary" || provider === "remote_agent";
+  useEffect(() => {
+    if (!open || !computer) return;
+    let cancelled = false;
+    setConfigLoading(true);
+    api<{ config: Record<string, string> }>(`${base}/${encodeURIComponent(computer.id)}/config`, { cacheTtlMs: false })
+      .then(result => { if (!cancelled) setConfig(result.config); })
+      .catch(err => { if (!cancelled) setConfigError(err instanceof Error ? err.message : "加载配置失败"); })
+      .finally(() => { if (!cancelled) setConfigLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, computer?.id, base]);
+
+  const local = provider === "temporary" || provider === "remote_agent";
   const available = nodes.filter((n) =>
     provider === "remote_agent"
       ? true
@@ -252,7 +321,7 @@ function AddComputerDialog({
     if (busy && !next) return;
     onOpenChange(next);
   }
-  function pick(p: Provider) {
+  function pick(p: AttachedProvider) {
     setProvider(p);
     setConfig({});
     setNode("");
@@ -268,22 +337,22 @@ function AddComputerDialog({
       const payload = Object.fromEntries(
         Object.entries(config).filter(([, v]) => v.trim() !== ""),
       );
-      await api(base, {
-        method: "POST",
+      await api(computer ? `${base}/${encodeURIComponent(computer.id)}` : base, {
+        method: computer ? "PATCH" : "POST",
         json: {
           name,
-          provider,
+          ...(!computer && { provider }),
           runtimeNodeId: local ? node : "",
-          idleSeconds: 900,
-          maxLifetimeSeconds: 3600,
+          idleSeconds: Math.round(idleMinutes * 60),
+          maxLifetimeSeconds: Math.round(lifetimeMinutes * 60),
           config: payload,
         },
       });
-      toast.success("电脑配置已添加；尚未创建运行环境");
+      toast.success(computer ? "电脑配置已更新" : "电脑配置已添加；尚未创建运行环境");
       await onCreated();
       onOpenChange(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "添加失败");
+      toast.error(err instanceof Error ? err.message : computer ? "更新失败" : "添加失败");
     } finally {
       setBusy(false);
     }
@@ -293,14 +362,17 @@ function AddComputerDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>添加电脑</DialogTitle>
+          <DialogTitle>{computer ? `编辑 ${computer.name}` : "添加电脑"}</DialogTitle>
           <DialogDescription>
-            选择类型并填写连接信息。添加后只有配置，不会立即启动环境或产生费用。
+            {computer ? "修改连接与环境配置。模板和最长存活时长用于后续创建的环境；密钥留空时保留原值。" : "选择类型并填写连接信息。添加后不会立即启动环境或产生费用。"}
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={create} className="space-y-5">
-          <div className="space-y-2">
+        <form onSubmit={create}>
+          <fieldset disabled={busy || configLoading} className="min-w-0 space-y-5">
+          {configLoading && <p role="status" className="text-sm text-muted-foreground">正在加载配置…</p>}
+          {configError && <p role="alert" className="text-sm text-destructive">{configError}</p>}
+          {!computer && <div className="space-y-2">
             <p className="text-sm font-medium">类型</p>
             <FluidList
               axis="xy"
@@ -333,7 +405,7 @@ function AddComputerDialog({
                 );
               })}
             </FluidList>
-          </div>
+          </div>}
 
           <div className="space-y-1.5">
             <Label htmlFor="computer-name">名称</Label>
@@ -405,7 +477,7 @@ function AddComputerDialog({
                 <Label htmlFor="ssh-key">SSH 私钥</Label>
                 <Textarea
                   id="ssh-key"
-                  required
+                  required={!computer}
                   autoComplete="off"
                   spellCheck={false}
                   disabled={busy}
@@ -425,7 +497,8 @@ function AddComputerDialog({
                 <Input
                   id="e2b-key"
                   type="password"
-                  required
+                  placeholder={computer ? "留空保留现有 API Key" : ""}
+                  required={!computer}
                   autoComplete="off"
                   disabled={busy}
                   value={config.apiKey ?? ""}
@@ -445,6 +518,17 @@ function AddComputerDialog({
               </div>
             </div>
           )}
+
+          {(provider === "e2b" || provider === "temporary") && <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="computer-idle">空闲回收（分钟）</Label>
+              <Input id="computer-idle" type="number" min={1} step={1} max={lifetimeMinutes} required disabled={busy} value={idleMinutes} onChange={event => setIdleMinutes(Number(event.target.value))} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="computer-lifetime">最长存活（分钟）</Label>
+              <Input id="computer-lifetime" type="number" min={idleMinutes || 1} step={1} required disabled={busy} value={lifetimeMinutes} onChange={event => setLifetimeMinutes(Number(event.target.value))} />
+            </div>
+          </div>}
 
           {provider === "railway" && (
             <p className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
@@ -489,7 +573,7 @@ function AddComputerDialog({
                       <FluidItem key={n.id}>
                         <button
                           type="button"
-                          disabled={busy || !online}
+                          disabled={busy || (!online && !selected)}
                           aria-pressed={selected}
                           onClick={() => setNode(n.id)}
                           className={cn(
@@ -502,10 +586,7 @@ function AddComputerDialog({
                             {n.name}
                           </span>
                           <span className="flex flex-wrap items-center gap-1.5">
-                            <Badge variant="outline">{kindLabel(n.kind)}</Badge>
-                            <Badge variant={statusVariant(n.status)}>
-                              {statusLabel(n.status)}
-                            </Badge>
+                            <span className="text-xs text-muted-foreground">{kindLabel(n.kind)} · {statusLabel(n.status)}</span>
                           </span>
                         </button>
                       </FluidItem>
@@ -517,7 +598,7 @@ function AddComputerDialog({
           )}
 
           <p className="text-xs text-muted-foreground">
-            凭据加密保存且不会回显。当前仅保存配置，不表示环境已就绪。
+            凭据加密保存且不会回显。{computer ? "正在使用的环境会保留原连接凭据。" : provider === "e2b" ? "E2B 环境在选用它的对话中确认创建，每个对话独立计费和回收。" : "当前仅保存配置，不表示环境已就绪。"}
           </p>
 
           <DialogFooter>
@@ -531,11 +612,12 @@ function AddComputerDialog({
             </Button>
             <Button
               type="submit"
-              disabled={busy || !name.trim() || (local && !node)}
+              disabled={busy || configLoading || !!configError || !name.trim() || (local && !node) || idleMinutes <= 0 || lifetimeMinutes < idleMinutes}
             >
-              {busy ? "添加中…" : "添加电脑"}
+              {busy ? "保存中…" : computer ? "保存修改" : "添加电脑"}
             </Button>
           </DialogFooter>
+          </fieldset>
         </form>
       </DialogContent>
     </Dialog>

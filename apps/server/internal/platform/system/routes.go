@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/emailtmpl"
@@ -166,7 +167,14 @@ func (h *routes) connect(w http.ResponseWriter, r *http.Request) {
 func (h *routes) listKeys(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
 	var rows []models.APIKey
-	if err := h.d.Gorm.WithContext(r.Context()).Where("tenant_id=? AND revoked_at IS NULL", p.TenantID).Order("created_at DESC").Find(&rows).Error; err != nil {
+	query := h.d.Gorm.WithContext(r.Context()).Where("tenant_id=? AND revoked_at IS NULL", p.TenantID)
+	if p.APIKey && p.SpaceID != "" {
+		query = query.Where("space_id=?", p.SpaceID)
+	}
+	if p.APIKey && p.AgentID != "" {
+		query = query.Where("agent_id=?", p.AgentID)
+	}
+	if err := query.Order("created_at DESC").Find(&rows).Error; err != nil {
 		httpx.Error(w, 500, "query failed")
 		return
 	}
@@ -193,6 +201,10 @@ func (h *routes) createSpaceKey(w http.ResponseWriter, r *http.Request) {
 }
 func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID, spaceID string) {
 	p, _ := httpx.PrincipalFrom(r.Context())
+	if p.APIKey && (p.SpaceID != "" || p.AgentID != "") {
+		httpx.Error(w, http.StatusForbidden, "scoped API keys cannot create API keys")
+		return
+	}
 	var b struct {
 		Name      string   `json:"name"`
 		Scopes    []string `json:"scopes"`
@@ -219,10 +231,21 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID, s
 		}
 	}
 	if agentID != "" {
-		var count int64
-		_ = h.d.Gorm.WithContext(r.Context()).Model(&models.Agent{}).Where("id=? AND tenant_id=?", agentID, p.TenantID).Count(&count)
-		if count != 1 {
+		var agent models.Agent
+		if err := h.d.Gorm.WithContext(r.Context()).Select("space_id").Where("id=? AND tenant_id=?", agentID, p.TenantID).Take(&agent).Error; err != nil {
 			httpx.Error(w, 404, "agent not found")
+			return
+		}
+		for _, scope := range b.Scopes {
+			if scope == "gateway" || strings.HasPrefix(scope, "gateway:") {
+				spaceID, agentID = agent.SpaceID, ""
+				break
+			}
+		}
+	}
+	for _, scope := range b.Scopes {
+		if (scope == "gateway" || strings.HasPrefix(scope, "gateway:")) && spaceID == "" {
+			httpx.Error(w, http.StatusBadRequest, "Gateway keys must be bound to a Space")
 			return
 		}
 	}
@@ -253,7 +276,14 @@ func (h *routes) createKeyFor(w http.ResponseWriter, r *http.Request, agentID, s
 }
 func (h *routes) deleteKey(w http.ResponseWriter, r *http.Request) {
 	p, _ := httpx.PrincipalFrom(r.Context())
-	res := h.d.Gorm.WithContext(r.Context()).Model(&models.APIKey{}).Where("id=? AND tenant_id=? AND revoked_at IS NULL", chi.URLParam(r, "id"), p.TenantID).Update("revoked_at", h.now())
+	query := h.d.Gorm.WithContext(r.Context()).Model(&models.APIKey{}).Where("id=? AND tenant_id=? AND revoked_at IS NULL", chi.URLParam(r, "id"), p.TenantID)
+	if p.APIKey && p.SpaceID != "" {
+		query = query.Where("space_id=?", p.SpaceID)
+	}
+	if p.APIKey && p.AgentID != "" {
+		query = query.Where("agent_id=?", p.AgentID)
+	}
+	res := query.Update("revoked_at", h.now())
 	if res.Error != nil {
 		httpx.Error(w, 500, "revoke failed")
 		return
@@ -596,6 +626,11 @@ func (h *routes) bootstrap(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if e != nil {
 			return e
+		}
+		for _, statement := range computers.ServerComputerStatements(p.TenantID, spaceID, time.Now()) {
+			if _, e = tx.ExecContext(r.Context(), h.q(statement.SQL), statement.Args...); e != nil {
+				return e
+			}
 		}
 		e = tx.QueryRowContext(r.Context(), h.q(`SELECT id FROM agents WHERE tenant_id=? AND space_id=? ORDER BY created_at LIMIT 1`), p.TenantID, spaceID).Scan(&agentID)
 		if errors.Is(e, sql.ErrNoRows) {

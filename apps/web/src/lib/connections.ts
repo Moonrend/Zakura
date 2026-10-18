@@ -42,6 +42,9 @@ export type ConnectionListing = {
 
 export type InstalledConnection = {
   id: string;
+  spaceId?: string;
+  legacyAgentId?: string;
+  legacyRef?: string;
   name: string;
   kind: ConnectionKind;
   status: string;
@@ -62,6 +65,7 @@ export type InstalledConnection = {
 
 export type ConnectionInstallRequest = {
   source: string;
+  spaceId?: string;
   ref?: string;
   kind?: ConnectionKind;
   runtimeNodeId?: string | null;
@@ -166,8 +170,8 @@ export type StorePackageSection = {
   items: StorePackageCard[];
 };
 
-export async function listConnections(): Promise<InstalledConnection[]> {
-  const res = await api<{ items: InstalledConnection[] }>("/api/connections");
+export async function listConnections(spaceId?: string): Promise<InstalledConnection[]> {
+  const res = await api<{ items: InstalledConnection[] }>(`/api/connections${spaceId ? `?spaceId=${encodeURIComponent(spaceId)}` : ""}`);
   return res.items ?? [];
 }
 
@@ -228,6 +232,7 @@ export async function getStorePackage(id: string): Promise<StorePackageDetail> {
 export async function installStorePackage(
   id: string,
   body: {
+    spaceId?: string;
     componentIds?: string[];
     runtimeNodeId?: string | null;
     agentIds?: string[];

@@ -4,11 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { CloudDownload, RefreshCw, Store } from "lucide-react";
-import {
-  fetchAgent,
-  statusVariant,
-  type AgentDetail,
-} from "@/lib/agents";
+import { statusVariant } from "@/lib/agents";
+import { fetchSpaceMcpCapabilities, type SpaceMcpCapabilities } from "@/lib/mcp-space";
 import {
   fetchSpaceProviders,
   saveSpaceProviders,
@@ -68,14 +65,14 @@ type McpBindingState = {
 };
 
 export default function SpaceMcpPage() {
-  const { spaceId, hostAgentId } = useSpaceSettings();
+  const { spaceId } = useSpaceSettings();
   const [opts, setOpts] = useState<SpaceProviderOptions | null>(null);
-  const [detail, setDetail] = useState<AgentDetail | null>(null);
+  const [detail, setDetail] = useState<SpaceMcpCapabilities | null>(null);
   const [state, setState] = useState<McpBindingState | null>(null);
   const [capsBusy, setCapsBusy] = useState(false);
   const [tab, setTab] = useState("bindings");
   const selectedRef = useRef<string[]>([]);
-  const hasCapabilities = Boolean(hostAgentId);
+  const hasCapabilities = true;
 
   const loadBindings = useCallback(async () => {
     try {
@@ -94,27 +91,26 @@ export default function SpaceMcpPage() {
   }, [spaceId]);
 
   const loadCapabilities = useCallback(async () => {
-    if (!hostAgentId) return;
     setCapsBusy(true);
     try {
-      const d = await fetchAgent(hostAgentId);
+      const d = await fetchSpaceMcpCapabilities(spaceId);
       setDetail(d);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setCapsBusy(false);
     }
-  }, [hostAgentId]);
+  }, [spaceId]);
 
   useEffect(() => {
     void loadBindings();
   }, [loadBindings]);
 
   useEffect(() => {
-    if (tab !== "bindings" && !detail && hostAgentId) {
+    if (tab !== "bindings" && !detail) {
       void loadCapabilities();
     }
-  }, [tab, detail, loadCapabilities, hostAgentId]);
+  }, [tab, detail, loadCapabilities]);
 
   const persist = useCallback(
     async (patch: Partial<McpBindingState>) => {
@@ -174,14 +170,7 @@ export default function SpaceMcpPage() {
 
   const instances = opts.mcp.instances;
   const selectedSet = new Set(state.selected);
-  const tools =
-    detail?.tools.map((t) => ({
-      qualifiedName: t.name,
-      description: t.description,
-      providerId: t.providerId,
-      inputSchema: t.inputSchema,
-      spaceScoped: t.spaceScoped,
-    })) ?? [];
+  const tools = detail?.tools ?? [];
   const resources = detail?.resources ?? [];
   const prompts = detail?.prompts ?? [];
   const templates = detail?.resourceTemplates ?? [];
@@ -383,6 +372,7 @@ export default function SpaceMcpPage() {
                 <PageLoading />
               ) : (
                 <McpToolsExplorer
+                  spaceId={spaceId}
                   tools={tools}
                   emptyHint="当前绑定下暂无聚合工具（请确认实例运行中）"
                 />
@@ -394,6 +384,7 @@ export default function SpaceMcpPage() {
                 <PageLoading />
               ) : (
                 <McpResourcesExplorer
+                  spaceId={spaceId}
                   resources={resources}
                   templates={templates}
                   emptyHint="当前绑定下暂无资源"
@@ -406,6 +397,7 @@ export default function SpaceMcpPage() {
                 <PageLoading />
               ) : (
                 <McpPromptsExplorer
+                  spaceId={spaceId}
                   prompts={prompts}
                   emptyHint="当前绑定下暂无 Prompts"
                 />

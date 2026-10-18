@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 
 func testPostgresStore(t *testing.T) Store {
 	t.Helper()
-	url := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "computers")
+	url := pgtest.FreshURL(t, pgtest.URL(t), "computers")
 	ctx := context.Background()
 	conn, err := platformdb.Open(ctx, url)
 	if err != nil {
@@ -25,80 +24,20 @@ func testPostgresStore(t *testing.T) Store {
 	if conn.Dialect != "postgres" {
 		t.Fatalf("expected postgres dialect, got %q", conn.Dialect)
 	}
-	if _, err := conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatalf("reset disposable PostgreSQL database: %v", err)
-	}
 	if err := migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatal(err)
 	}
 	s := Store{DB: conn.DB, Rebind: conn.Rebind}
-	for _, tenant := range []string{"tenant", "other"} {
-		execTest(t, s, `INSERT INTO tenants(id,slug,name,created_at,updated_at) VALUES(?,?,?,'now','now')`, tenant, tenant, tenant)
-	}
-	for _, row := range [][2]string{{"space", "tenant"}, {"space2", "tenant"}, {"foreign", "other"}} {
-		execTest(t, s, `INSERT INTO spaces(id,tenant_id,name,slug,created_at,updated_at) VALUES(?,?,?,?,'now','now')`, row[0], row[1], row[0], row[0])
-		execTest(t, s, `INSERT INTO agents(id,tenant_id,space_id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?,'now','now')`, "agent-"+row[0], row[1], row[0], row[0], row[0])
-		execTest(t, s, `INSERT INTO cloud_agent_sessions(id,tenant_id,agent_id,created_at,updated_at) VALUES(?,?,?,'now','now')`, "chat-"+row[0], row[1], "agent-"+row[0])
-		execTest(t, s, `INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,?,?,?,'e2b','now','now')`, "computer-"+row[0], row[1], row[0], row[0])
-	}
-	execTest(t, s, `INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES('second','tenant','space','Second','e2b','now','now')`)
-	for _, run := range []string{"run1", "run2"} {
-		execTest(t, s, `INSERT INTO cloud_agent_runs(id,session_id,status,created_at) VALUES(?,'chat-space','queued','now')`, run)
-	}
+	seedComputerFixtures(t, s)
 	return s
 }
 
 func TestPostgresDefaultsAndSnapshots(t *testing.T) {
-	s := testPostgresStore(t)
-	ctx := context.Background()
-	execTest(t, s, `INSERT INTO cloud_agent_runs(id,session_id,status,created_at) VALUES('run-none','chat-space','queued','now')`)
-	if _, err := s.SnapshotRunTarget(ctx, "tenant", "space", "run-none"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("missing default: %v", err)
-	}
-	if err := s.SetSpaceDefault(ctx, "tenant", "space", "computer-space"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.SnapshotRunTarget(ctx, "tenant", "space", "run-none"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("unexpected space fallback: %v", err)
-	}
-	if id, err := s.InitializeSessionDefault(ctx, "tenant", "space", "chat-space"); err != nil || id != "computer-space" {
-		t.Fatalf("initialize: %s %v", id, err)
-	}
-	if id, err := s.SnapshotRunTarget(ctx, "tenant", "space", "run1"); err != nil || id != "computer-space" {
-		t.Fatalf("snapshot: %s %v", id, err)
-	}
-	if err := s.SetSpaceDefault(ctx, "tenant", "space", "second"); err != nil {
-		t.Fatal(err)
-	}
-	if id, err := s.InitializeSessionDefault(ctx, "tenant", "space", "chat-space"); err != nil || id != "computer-space" {
-		t.Fatalf("reinitialization changed chat: %s %v", id, err)
-	}
-	if err := s.SetSessionDefault(ctx, "tenant", "space", "chat-space", "second"); err != nil {
-		t.Fatal(err)
-	}
-	if id, err := s.SnapshotRunTarget(ctx, "tenant", "space", "run1"); err != nil || id != "computer-space" {
-		t.Fatalf("active run changed: %s %v", id, err)
-	}
-	if id, err := s.SnapshotRunTarget(ctx, "tenant", "space", "run2"); err != nil || id != "second" {
-		t.Fatalf("next run: %s %v", id, err)
-	}
-	for _, computer := range []string{"computer-space2", "computer-foreign", "missing"} {
-		if err := s.SetSpaceDefault(ctx, "tenant", "space", computer); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("space accepted %s: %v", computer, err)
-		}
-		if err := s.SetSessionDefault(ctx, "tenant", "space", "chat-space", computer); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("chat accepted %s: %v", computer, err)
-		}
-	}
-	if err := s.SetSessionDefault(ctx, "other", "space", "chat-space", "second"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("tenant spoof: %v", err)
-	}
-	if _, err := s.SnapshotRunTarget(ctx, "other", "space", "run1"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("snapshot tenant leak: %v", err)
-	}
-	if _, err := s.InitializeSessionDefault(ctx, "tenant", "space2", "chat-space"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("chat space leak: %v", err)
-	}
+	checkDefaultsAndSnapshots(t, testPostgresStore(t))
+}
+
+func TestPostgresServerComputerInvariants(t *testing.T) {
+	checkServerComputerInvariants(t, testPostgresStore(t))
 }
 
 func TestPostgresRuntimeLifecycle(t *testing.T) {

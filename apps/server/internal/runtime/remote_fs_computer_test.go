@@ -78,11 +78,11 @@ func computerExecRig(t *testing.T, token string, provider computers.Provider, ro
 	if err = cs.Create(ctx, c, sealed); err != nil {
 		t.Fatal(err)
 	}
-	if err = cs.SetSpaceDefault(ctx, "tenant", space.ID, "pc"); err != nil {
-		t.Fatal(err)
-	}
 	chat, err := store.CreateSession(ctx, "tenant", "", agent.ID, Session{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cs.SetSessionDefault(ctx, "tenant", space.ID, chat.ID, "pc"); err != nil {
 		t.Fatal(err)
 	}
 	run, err := store.StartRun(ctx, "tenant", agent.ID, chat.ID, "hi", nil, nil)

@@ -182,6 +182,11 @@ func (s *Store) DeleteSpace(ctx context.Context, tenant, id string) error {
 	return nil
 }
 func (s *Store) UpdateSpace(ctx context.Context, tenant, id string, patch map[string]any) (Space, error) {
+	for _, key := range []string{"enableComputer", "workspaceImage", "runtimeNodeId", "workspaceKind"} {
+		if _, ok := patch[key]; ok {
+			return Space{}, fmt.Errorf("%w: use workspace initialization or migration", ErrConflict)
+		}
+	}
 	allowed := map[string]string{"name": "name", "slug": "slug", "description": "description", "enableComputer": "enable_computer", "workspaceImage": "workspace_image", "runtimeNodeId": "runtime_node_id", "workspaceKind": "workspace_kind", "config": "config_json"}
 	sets := []string{}
 	args := []any{}
@@ -274,6 +279,15 @@ func (s *Store) CreateAgent(ctx context.Context, tenant string, in Agent) (Agent
 	if len(in.Config) == 0 {
 		in.Config = json.RawMessage(`{}`)
 	}
+	var config map[string]any
+	if json.Unmarshal(in.Config, &config) != nil || config == nil {
+		return Agent{}, errors.New("invalid agent configuration")
+	}
+	discardClientApprovalEnvelope(config)
+	if err := protectAgentApprovals(s.deps.Secret, tenant, in.ID, config); err != nil {
+		return Agent{}, err
+	}
+	in.Config, _ = json.Marshal(config)
 	in.CreatedAt = now
 	in.UpdatedAt = now
 	err := s.deps.Gorm.WithContext(ctx).Table("agents").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "space_id": in.SpaceID, "name": in.Name, "slug": in.Slug, "description": in.Description, "enable_memory": in.EnableMemory, "memory_provider_id": in.MemoryProviderID, "config_json": validJSON(in.Config, "{}"), "last_error": in.LastError, "avatar_color": in.AvatarColor, "avatar_shape": in.AvatarShape, "avatar_url": in.AvatarURL, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
@@ -304,7 +318,49 @@ func (s *Store) DeleteAgent(ctx context.Context, tenant, id string) error {
 	return nil
 }
 func (s *Store) UpdateAgent(ctx context.Context, tenant, id string, patch map[string]any) (Agent, error) {
-	allowed := map[string]string{"spaceId": "space_id", "name": "name", "slug": "slug", "description": "description", "enableMemory": "enable_memory", "memoryProviderId": "memory_provider_id", "config": "config_json", "avatarColor": "avatar_color", "avatarShape": "avatar_shape", "avatarUrl": "avatar_url"}
+	if destination, ok := patch["spaceId"]; ok {
+		current, err := s.GetAgent(ctx, tenant, id)
+		if err != nil {
+			return Agent{}, err
+		}
+		if destination != current.SpaceID {
+			return Agent{}, ErrConflict
+		}
+	}
+	allowed := map[string]string{"name": "name", "slug": "slug", "description": "description", "enableMemory": "enable_memory", "memoryProviderId": "memory_provider_id", "config": "config_json", "avatarColor": "avatar_color", "avatarShape": "avatar_shape", "avatarUrl": "avatar_url"}
+	if value, ok := patch["config"]; ok {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return Agent{}, err
+		}
+		var incoming map[string]any
+		if json.Unmarshal(encoded, &incoming) != nil || incoming == nil {
+			return Agent{}, errors.New("invalid agent configuration")
+		}
+		discardClientApprovalEnvelope(incoming)
+		encoded, _ = json.Marshal(incoming)
+		columns := map[string]any{}
+		for key, column := range allowed {
+			if key != "config" {
+				if v, ok := patch[key]; ok {
+					columns[column] = v
+				}
+			}
+		}
+		return s.updateAgentConfig(ctx, tenant, id, columns, func(current map[string]any) error {
+			var replacement map[string]any
+			if err := json.Unmarshal(encoded, &replacement); err != nil {
+				return err
+			}
+			for key := range current {
+				delete(current, key)
+			}
+			for key, value := range replacement {
+				current[key] = value
+			}
+			return nil
+		})
+	}
 	sets := []string{}
 	args := []any{}
 	for k, col := range allowed {
@@ -314,6 +370,14 @@ func (s *Store) UpdateAgent(ctx context.Context, tenant, id string, patch map[st
 				if e != nil {
 					return Agent{}, e
 				}
+				var config map[string]any
+				if json.Unmarshal(b, &config) != nil || config == nil {
+					return Agent{}, errors.New("invalid agent configuration")
+				}
+				if err := protectAgentApprovals(s.deps.Secret, tenant, id, config); err != nil {
+					return Agent{}, err
+				}
+				b, _ = json.Marshal(config)
 				v = string(b)
 			}
 			sets = append(sets, col+"=?")
@@ -466,14 +530,19 @@ func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, pat
 	return s.GetSession(ctx, tenant, agent, id)
 }
 func (s *Store) DeleteSession(ctx context.Context, tenant, agent, id string) error {
-	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Delete(nil)
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.cancelApprovalsTx(ctx, tx, tenant, agent, id, ""); err != nil {
+			return err
+		}
+		res := tx.Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Delete(nil)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (s *Store) appendEventTx(ctx context.Context, tx *gorm.DB, sessionID, typ string, runID *string, payload any) (Event, error) {
@@ -531,15 +600,46 @@ func (s *Store) ListEvents(ctx context.Context, tenant, agent, session string, a
 	return out, nil
 }
 func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content string, attachments, options json.RawMessage) (Run, error) {
-	if strings.TrimSpace(content) == "" && len(attachments) == 0 {
+	return s.StartRunWith(ctx, tenant, agent, session, runStartSpec{Content: content, Attachments: attachments, Options: options})
+}
+
+// runStartSpec describes the user_message/run_start pair a new run writes.
+// SkipUserMessage is set when regenerating: the run answers an existing
+// message (ReplyTo) instead of appending a new one.
+type runStartSpec struct {
+	MessageID       string
+	Content         string
+	Attachments     json.RawMessage
+	Options         json.RawMessage
+	HasParent       bool
+	ParentRunID     *string
+	Continue        bool
+	SkipUserMessage bool
+	ReplyTo         string
+	UserID          string
+	UserName        string
+}
+
+func (s *Store) StartRunWith(ctx context.Context, tenant, agent, session string, spec runStartSpec) (Run, error) {
+	if !spec.SkipUserMessage && strings.TrimSpace(spec.Content) == "" && !hasAttachments(spec.Attachments) {
 		return Run{}, errors.New("content or attachments required")
 	}
 	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
 		return Run{}, e
 	}
+	if spec.MessageID == "" && !spec.SkipUserMessage {
+		spec.MessageID = s.id()
+	}
+	replyTo := spec.ReplyTo
+	if replyTo == "" {
+		replyTo = spec.MessageID
+	}
 	now := s.now()
 	run := Run{ID: s.id(), SessionID: session, Status: "running", StartedAt: &now, CreatedAt: now}
 	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.guardAgentWorkspaceTx(tx, tenant, agent); err != nil {
+			return err
+		}
 		res := tx.Table("cloud_agent_sessions").Where("tenant_id = ? AND agent_id = ? AND id = ? AND active_run_id IS NULL", tenant, agent, session).Updates(map[string]any{"active_run_id": run.ID, "updated_at": runtimeTimeString(now)})
 		if res.Error != nil {
 			return res.Error
@@ -553,10 +653,33 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 		if e := tx.Exec(computers.SnapshotRunTargetSQL, run.ID, tenant).Error; e != nil {
 			return e
 		}
-		if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, map[string]any{"content": content, "attachments": json.RawMessage(validJSON(attachments, "[]")), "options": json.RawMessage(validJSON(options, "{}"))}); e != nil {
-			return e
+		if !spec.SkipUserMessage {
+			payload := map[string]any{"messageId": spec.MessageID, "content": spec.Content, "attachments": json.RawMessage(validJSON(spec.Attachments, "[]")), "options": json.RawMessage(validJSON(spec.Options, "{}"))}
+			if spec.HasParent {
+				if spec.ParentRunID != nil && *spec.ParentRunID != "" {
+					payload["parentRunId"] = *spec.ParentRunID
+				} else {
+					payload["parentRunId"] = nil
+				}
+			}
+			if spec.Continue {
+				payload["continue"] = true
+			}
+			if spec.UserID != "" {
+				payload["userId"] = spec.UserID
+				if spec.UserName != "" {
+					payload["userName"] = spec.UserName
+				}
+			}
+			if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, payload); e != nil {
+				return e
+			}
 		}
-		_, e := s.appendEventTx(ctx, tx, session, "run_start", &run.ID, map[string]any{"runId": run.ID, "status": "running"})
+		start := map[string]any{"runId": run.ID, "status": "running", "replyToMessageId": replyTo}
+		if len(spec.Options) > 0 && json.Valid(spec.Options) && string(spec.Options) != "{}" && string(spec.Options) != "null" {
+			start["options"] = json.RawMessage(spec.Options)
+		}
+		_, e := s.appendEventTx(ctx, tx, session, "run_start", &run.ID, start)
 		return e
 	})
 	if e == nil {
@@ -617,16 +740,29 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 		if e := tx.Table("cloud_agent_sessions").Where("id = ? AND active_run_id = ?", session, runID).Updates(map[string]any{"active_run_id": nil, "updated_at": runtimeTimeString(now)}).Error; e != nil {
 			return e
 		}
-		typ := "run_end"
-		if status == "failed" {
-			typ = "run_error"
+		if e := s.cancelApprovalsTx(ctx, tx, tenant, agent, session, runID); e != nil {
+			return e
 		}
 		terminalPayload := map[string]any{"runId": runID, "status": status}
 		if errText != nil {
 			terminalPayload["error"] = *errText
 		}
 		terminalPayload["result"] = payload
-		_, e := s.appendEventTx(ctx, tx, session, typ, &runID, terminalPayload)
+		if status == "failed" {
+			message := "run failed"
+			if errText != nil && *errText != "" {
+				message = *errText
+			}
+			terminalPayload["message"] = message
+			if _, e := s.appendEventTx(ctx, tx, session, "run_error", &runID, terminalPayload); e != nil {
+				return e
+			}
+			// run_end is what clients key "run finished" on; run_error alone
+			// leaves the UI believing the run is still active.
+			_, e := s.appendEventTx(ctx, tx, session, "run_end", &runID, map[string]any{"runId": runID, "status": status, "error": message})
+			return e
+		}
+		_, e := s.appendEventTx(ctx, tx, session, "run_end", &runID, terminalPayload)
 		return e
 	})
 	if e == nil {
@@ -685,6 +821,9 @@ func (s *Store) CancelRun(ctx context.Context, tenant, agent, session string) (R
 		if res.RowsAffected == 0 {
 			return ErrConflict
 		}
+		if e := s.cancelApprovalsTx(ctx, tx, tenant, agent, session, rid); e != nil {
+			return e
+		}
 		_, e := s.appendEventTx(ctx, tx, session, "run_end", &rid, map[string]any{"runId": rid, "status": "cancelled"})
 		return e
 	})
@@ -705,131 +844,44 @@ func (s *Store) RecoverRuns(ctx context.Context) (int64, error) {
 		Run     string `gorm:"column:run_id"`
 	}
 	items := []recovered{}
-	_ = s.deps.Gorm.WithContext(ctx).Raw(`SELECT cs.tenant_id,cs.agent_id,cs.id,r.id AS run_id FROM cloud_agent_runs r JOIN cloud_agent_sessions cs ON cs.id=r.session_id WHERE r.status='running'`).Scan(&items).Error
+	if err := s.deps.Gorm.WithContext(ctx).Raw(`SELECT cs.tenant_id,cs.agent_id,cs.id AS session_id,r.id AS run_id FROM cloud_agent_runs r JOIN cloud_agent_sessions cs ON cs.id=r.session_id WHERE r.status='running'`).Scan(&items).Error; err != nil {
+		return 0, err
+	}
 	now := s.now()
 	res := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_runs").Where("status = 'running'").Updates(map[string]any{"status": "failed", "error": "server restarted", "completed_at": runtimeTimeString(now)})
 	// phase5: NOT EXISTS subquery — keep Exec (gorm has no chain equivalent)
 	if res.Error != nil {
 		return 0, res.Error
 	}
-	_ = s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE active_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_agent_runs r WHERE r.id=cloud_agent_sessions.active_run_id AND r.status='running')`, runtimeTimeString(now))
+	if err := s.deps.Gorm.WithContext(ctx).Exec(`UPDATE cloud_agent_sessions SET active_run_id=NULL,updated_at=? WHERE active_run_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM cloud_agent_runs r WHERE r.id=cloud_agent_sessions.active_run_id AND r.status='running')`, runtimeTimeString(now)).Error; err != nil {
+		return res.RowsAffected, err
+	}
+	// Protocol processes and human waits cannot safely survive this process.
+	// Cancel runless ACP requests too; replay must never grant fresh execution.
+	var pending []struct {
+		Tenant  string `gorm:"column:tenant_id"`
+		Agent   string `gorm:"column:agent_id"`
+		Session string `gorm:"column:session_id"`
+	}
+	if err := s.deps.Gorm.WithContext(ctx).Table("agent_tool_approvals").Select("DISTINCT tenant_id,agent_id,session_id").Where("status='pending'").Find(&pending).Error; err != nil {
+		return res.RowsAffected, err
+	}
+	for _, approval := range pending {
+		if err := s.cancelApprovals(ctx, approval.Tenant, approval.Agent, approval.Session, ""); err != nil {
+			return res.RowsAffected, err
+		}
+	}
 	for _, item := range items {
+		rid := item.Run
+		if _, err := s.AppendEvent(ctx, item.Tenant, item.Agent, item.Session, "run_error", &rid, map[string]any{"runId": rid, "status": "failed", "error": "server restarted", "message": "server restarted"}); err != nil {
+			return res.RowsAffected, err
+		}
+		if _, err := s.AppendEvent(ctx, item.Tenant, item.Agent, item.Session, "run_end", &rid, map[string]any{"runId": rid, "status": "failed", "error": "server restarted"}); err != nil {
+			return res.RowsAffected, err
+		}
 		s.recordRunTerminal(context.WithoutCancel(ctx), item.Tenant, item.Agent, item.Session, item.Run, "failed")
 	}
 	return res.RowsAffected, nil
-}
-
-func (s *Store) Enqueue(ctx context.Context, tenant, agent, session string, msg QueueMessage) (QueueMessage, error) {
-	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
-		return QueueMessage{}, e
-	}
-	msg.Content = strings.TrimSpace(msg.Content)
-	if msg.Content == "" && len(msg.Attachments) == 0 {
-		return QueueMessage{}, errors.New("content or attachments required")
-	}
-	if msg.ID == "" {
-		msg.ID = s.id()
-	}
-	if len(msg.Attachments) == 0 {
-		msg.Attachments = json.RawMessage(`[]`)
-	}
-	if len(msg.Options) == 0 {
-		msg.Options = json.RawMessage(`{}`)
-	}
-	_, e := s.AppendEvent(ctx, tenant, agent, session, "queue.added", nil, msg)
-	return msg, e
-}
-func (s *Store) UpdateQueued(ctx context.Context, tenant, agent, session, id string, patch QueueMessage) (QueueMessage, error) {
-	items, e := s.PendingQueue(ctx, tenant, agent, session)
-	if e != nil {
-		return QueueMessage{}, e
-	}
-	var cur *QueueMessage
-	for i := range items {
-		if items[i].ID == id {
-			cur = &items[i]
-			break
-		}
-	}
-	if cur == nil {
-		return QueueMessage{}, ErrNotFound
-	}
-	if patch.Content != "" {
-		cur.Content = patch.Content
-	}
-	if len(patch.Attachments) > 0 {
-		cur.Attachments = patch.Attachments
-	}
-	if len(patch.Options) > 0 {
-		cur.Options = patch.Options
-	}
-	_, e = s.AppendEvent(ctx, tenant, agent, session, "queue.updated", nil, *cur)
-	return *cur, e
-}
-func (s *Store) DeleteQueued(ctx context.Context, tenant, agent, session, id string) error {
-	items, e := s.PendingQueue(ctx, tenant, agent, session)
-	if e != nil {
-		return e
-	}
-	found := false
-	for _, x := range items {
-		if x.ID == id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return ErrNotFound
-	}
-	_, e = s.AppendEvent(ctx, tenant, agent, session, "queue.deleted", nil, map[string]any{"id": id})
-	return e
-}
-func (s *Store) PendingQueue(ctx context.Context, tenant, agent, session string) ([]QueueMessage, error) {
-	events, e := s.ListEvents(ctx, tenant, agent, session, 0, 1000)
-	if e != nil {
-		return nil, e
-	}
-	order := []string{}
-	state := map[string]QueueMessage{}
-	for _, ev := range events {
-		switch ev.Type {
-		case "queue.added", "queue.updated":
-			var m QueueMessage
-			if json.Unmarshal(ev.Payload, &m) != nil || m.ID == "" {
-				continue
-			}
-			if _, ok := state[m.ID]; !ok {
-				order = append(order, m.ID)
-			}
-			state[m.ID] = m
-		case "queue.deleted", "queue.started":
-			var x struct {
-				ID string `json:"id"`
-			}
-			if json.Unmarshal(ev.Payload, &x) == nil {
-				delete(state, x.ID)
-			}
-		}
-	}
-	out := make([]QueueMessage, 0, len(state))
-	for _, id := range order {
-		if m, ok := state[id]; ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
-}
-func (s *Store) TakeQueued(ctx context.Context, tenant, agent, session string) (QueueMessage, error) {
-	items, e := s.PendingQueue(ctx, tenant, agent, session)
-	if e != nil {
-		return QueueMessage{}, e
-	}
-	if len(items) == 0 {
-		return QueueMessage{}, ErrNotFound
-	}
-	m := items[0]
-	_, e = s.AppendEvent(ctx, tenant, agent, session, "queue.started", nil, map[string]any{"id": m.ID})
-	return m, e
 }
 
 func (s *Store) ListMemories(ctx context.Context, tenant, agent, q, layer string, limit int) ([]Memory, error) {
@@ -951,6 +1003,9 @@ func (s *Store) ListUpstreams(ctx context.Context, tenant string) ([]Upstream, e
 }
 func (s *Store) CreateUpstream(ctx context.Context, tenant string, in Upstream) (Upstream, error) {
 	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" && in.Protocol == "typesafe" {
+		in.Name = "Jev"
+	}
 	if in.Name == "" {
 		return Upstream{}, errors.New("name required")
 	}
@@ -970,6 +1025,9 @@ func (s *Store) CreateUpstream(ctx context.Context, tenant string, in Upstream) 
 	in.ID = s.id()
 	var protected map[string]any
 	if json.Unmarshal(in.Config, &protected) == nil {
+		if in.Protocol == "typesafe" && mapStringValue(protected["baseUrl"]) == "" {
+			protected["baseUrl"] = "https://api.typesafe.ai"
+		}
 		if e := protectModelConfig(s.deps.Secret, tenant, in.ID, protected, ""); e != nil {
 			return Upstream{}, e
 		}
@@ -977,7 +1035,16 @@ func (s *Store) CreateUpstream(ctx context.Context, tenant string, in Upstream) 
 	}
 	in.CreatedAt = now
 	in.UpdatedAt = now
-	e := s.deps.Gorm.WithContext(ctx).Table("model_upstreams").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "protocol": in.Protocol, "config_json": validJSON(in.Config, "{}"), "status": in.Status, "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+	e := s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("model_upstreams").Create(map[string]any{"id": in.ID, "tenant_id": tenant, "name": in.Name, "slug": in.Slug, "protocol": in.Protocol, "config_json": validJSON(in.Config, "{}"), "status": in.Status, "last_error": in.LastError, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error; err != nil {
+			return err
+		}
+		local := *s
+		deps := *s.deps
+		deps.Gorm = tx
+		local.deps = &deps
+		return local.ensureJevPreset(ctx, tenant, in)
+	})
 	return in, e
 }
 func (s *Store) GetUpstream(ctx context.Context, tenant, id string) (Upstream, error) {
@@ -1040,8 +1107,9 @@ func (s *Store) ListRoutes(ctx context.Context, tenant, capability string) ([]Mo
 	return out, nil
 }
 func (s *Store) CreateRoute(ctx context.Context, tenant string, in ModelRoute) (ModelRoute, error) {
-	if _, e := s.GetUpstream(ctx, tenant, in.UpstreamID); e != nil {
-		return ModelRoute{}, e
+	upstream, upstreamErr := s.GetUpstream(ctx, tenant, in.UpstreamID)
+	if upstreamErr != nil {
+		return ModelRoute{}, upstreamErr
 	}
 	if in.Name == "" {
 		return ModelRoute{}, errors.New("name required")
@@ -1051,6 +1119,9 @@ func (s *Store) CreateRoute(ctx context.Context, tenant string, in ModelRoute) (
 	}
 	if in.Capability == "" {
 		in.Capability = "chat"
+	}
+	if err := validateProviderCapability(upstream.Protocol, in.Capability); err != nil {
+		return ModelRoute{}, err
 	}
 	if in.Model == "" {
 		return ModelRoute{}, errors.New("model required")

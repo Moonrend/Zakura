@@ -42,7 +42,7 @@ import type {
   TimelineMemoryItem,
 } from "@/lib/cloud-agent";
 import { collectTurnSharedFiles, collectTurnSources } from "@/lib/cloud-agent";
-import { ChatMarkdown } from "@/components/markdown/chat-markdown";
+import { GeneratedUIContent, type UIContinue } from "./generative-ui/content";
 import { ToolActivity, type ActivityStep } from "./tool-activity";
 import { AnswerSourcesSheet, AnswerSourcesTrigger } from "./answer-sources";
 import { UserAvatar } from "@/components/user-avatar";
@@ -499,6 +499,8 @@ function renderRunItems(
   opts: {
     showStatus: boolean;
     canAct: boolean;
+    onUIContinue?: UIContinue;
+    readOnly?: boolean;
     onRetry: () => void;
     onOpenFile?: (path: string) => void;
     agentId?: string | null;
@@ -515,7 +517,7 @@ function renderRunItems(
       requestId: string;
       decision: "approved" | "denied";
       alwaysAllow?: boolean;
-    }) => void;
+    }) => void | Promise<unknown>;
   },
 ) {
   const blocks: ReactNode[] = [];
@@ -637,7 +639,7 @@ function renderRunItems(
           key={`a-${it.id}-${it.seq}`}
           className="mt-1.5 flex w-full flex-col items-start"
         >
-          <ChatMarkdown content={it.content} final={it.final} fade={false} />
+          <GeneratedUIContent content={it.content} final={it.final} messageId={it.id} runId={it.runId} agentId={opts.agentId} sessionId={opts.sessionId} snapshots={it.uiStates} canSubmit={opts.canAct} readOnly={opts.readOnly} onContinue={opts.onUIContinue} />
         </div>,
       );
     } else if (it.kind === "plan") {
@@ -669,27 +671,7 @@ function renderRunItems(
                 : ""}
             </div>
           ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {it.options.map((opt) => (
-                <Button
-                  key={opt.optionId}
-                  type="button"
-                  size="sm"
-                  variant={String(opt.kind).startsWith("allow") ? "default" : "outline"}
-                  onClick={() => opts.onPermission?.(it.requestId, opt.optionId)}
-                >
-                  {opt.name}
-                </Button>
-              ))}
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => opts.onPermission?.(it.requestId, undefined, true)}
-              >
-                取消
-              </Button>
-            </div>
+            <p className="text-xs text-muted-foreground">旧授权请求已失效，请重新发起任务。</p>
           )}
         </div>,
       );
@@ -836,6 +818,8 @@ export function ChatMessages({
   onElicitation,
   onAskUser,
   onToolApproval,
+  onUIContinue,
+  readOnly,
 }: {
   turns: ConversationTurn[];
   runActive: boolean;
@@ -844,6 +828,8 @@ export function ChatMessages({
   agentId?: string | null;
   sessionId?: string | null;
   canAct: boolean;
+  onUIContinue?: UIContinue;
+  readOnly?: boolean;
   /** 正在下方 Composer 编辑的消息 id */
   editingMessageId?: string | null;
   onRegenerate: (messageId: string) => void;
@@ -869,7 +855,7 @@ export function ChatMessages({
     requestId: string;
     decision: "approved" | "denied";
     alwaysAllow?: boolean;
-  }) => void;
+  }) => void | Promise<unknown>;
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
@@ -1027,6 +1013,8 @@ export function ChatMessages({
                 onPermission,
                 onElicitation,
                 onAskUser,
+                onUIContinue,
+                readOnly,
                 onToolApproval,
               })}
 

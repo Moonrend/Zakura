@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,18 +42,26 @@ type handler struct {
 	trigramStates   map[string]string
 }
 
-func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
+func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecycle {
 	h := &handler{deps: deps, store: NewStore(deps), mcpSessions: map[string]spaceMCPSession{}}
+	if err := h.store.protectStoredAgentApprovals(deps.RunContext()); err != nil {
+		panic(fmt.Errorf("initialize tool approval protection: %w", err))
+	}
+	if _, err := h.store.RecoverRuns(deps.RunContext()); err != nil {
+		panic(fmt.Errorf("recover interrupted runs and approvals: %w", err))
+	}
 	h.hub = newRunnerHub(deps)
 	h.service = NewService(h.store)
 	h.acp = newACPRuntimeManager(h)
 	h.migrateLegacyComponentConfigs(deps.RunContext())
+	h.service.acpQueueAdmission = h.admitACPQueue
+	h.service.acpQueueRequired = h.requiresACPQueueReceipt
 	h.service.acpRunner = func(ctx context.Context, tenant, agent, session, runID, content string) error {
-		if _, err := h.resolveExecutionGuard(ctx, tenant, agent, session, nil); err != nil {
-			return err
-		}
 		runtime, err := h.acp.ensure(ctx, tenant, agent, session)
 		if err != nil {
+			return err
+		}
+		if err := validateACPQueueExecution(ctx, runtime); err != nil {
 			return err
 		}
 		return runtime.prompt(ctx, runID, content)
@@ -64,7 +73,8 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	}
 	h.service.loadedTools = h.sessionLoadedTools
 	h.service.toolRunner = h.dispatchAgentTool
-	_, _ = h.store.RecoverRuns(deps.RunContext())
+	h.service.toolAuthorizer = h.authorizeAgentTool
+	h.wireAgentService()
 	r.Post("/api/routines/{id}/hook", h.routineHook)
 	r.Get("/api/files/shared/{token}", h.downloadSharedFile)
 	r.Get("/api/mcp/upstream-oauth/callback", h.mcpOAuthCallback)
@@ -79,15 +89,21 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 	r.Get("/api/zakurabot/ws", h.zakuraBotWS)
 	r.Get("/api/agents/{id}/desktop-proxy", h.desktopProxy)
 	r.Get("/api/agents/{id}/terminal-proxy", h.terminalProxy)
+	r.Get("/api/agents/{id}/sessions/{sid}/acp/terminal-proxy", h.acpTerminalAuthProxy)
+	r.Get("/api/spaces/{spaceId}/acp/agents/{profileId}/terminal-proxy", h.acpTerminalProxy)
+	r.Get("/api/spaces/{id}/desktop-proxy", h.spaceDesktopProxy)
+	r.Get("/api/spaces/{id}/workspace-terminal-proxy", h.spaceTerminalProxy)
 	r.Get("/api/spaces/{id}/computers/{cid}/terminal-proxy", h.computerTerminalProxy)
 	r.Get("/api/runtime-nodes/agent-binaries/{os}/{arch}", h.runtimeAgentBinary)
 	r.Handle("/api/socket.io", http.HandlerFunc(h.socketIO))
 	r.Handle("/api/socket.io/", http.HandlerFunc(h.socketIO))
+	r.Handle("/mcp/acp/{sessionId}", http.HandlerFunc(h.acpMCPGateway))
 	r.Handle("/mcp", http.HandlerFunc(h.mcpEntry))
 	r.Handle("/mcp/*", http.HandlerFunc(h.mcpEntry))
 	r.Route("/api", func(api chi.Router) {
 		api.Use(httpx.Auth(deps))
 		api.Use(RequireAPIScope)
+		api.Use(h.resourceScopeMiddleware)
 		h.registerCore(api)
 		h.registerComputers(api)
 		h.registerAutomation(api)
@@ -107,6 +123,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) {
 		g.Post("/v1/chat/completions", h.gateway("chat", "chat"))
 		g.Post("/v1/messages", h.gateway("chat", "messages"))
 	})
+	return h.MCPInstanceLifecycle()
 }
 
 func (h *handler) registerCore(r chi.Router) {
@@ -115,6 +132,8 @@ func (h *handler) registerCore(r chi.Router) {
 	r.Get("/spaces/{id}", h.getSpace)
 	r.Patch("/spaces/{id}", h.patchSpace)
 	r.Delete("/spaces/{id}", h.deleteSpace)
+	r.Get("/spaces/{id}/gateway/config", h.spaceGatewayConfig)
+	r.Put("/spaces/{id}/gateway/config", h.spaceGatewayConfig)
 	r.Get("/agents", h.listAgents)
 	r.Post("/agents", h.createAgent)
 	r.Get("/agents/{id}", h.getAgent)
@@ -128,6 +147,7 @@ func (h *handler) registerCore(r chi.Router) {
 	r.Get("/agents/{id}/cloud/sessions/{sid}", h.getSession)
 	r.Patch("/agents/{id}/cloud/sessions/{sid}", h.patchSession)
 	r.Delete("/agents/{id}/cloud/sessions/{sid}", h.deleteSession)
+	r.Put("/agents/{id}/cloud/sessions/{sid}/ui-state", h.saveUIState)
 	r.Post("/agents/{id}/cloud/sessions/{sid}/messages", h.sendMessage)
 	r.Post("/agents/{id}/cloud/sessions/{sid}/cancel", h.cancelRun)
 	r.Post("/agents/{id}/cloud/sessions/{sid}/retry", h.retryRun)
@@ -201,6 +221,8 @@ func decodeMap(r *http.Request) (map[string]any, error) {
 }
 func statusErr(w http.ResponseWriter, e error) {
 	switch {
+	case errors.Is(e, errLocalRunnerForbidden):
+		httpx.Error(w, 403, e.Error())
 	case errors.Is(e, ErrNotFound):
 		httpx.Error(w, 404, "Not found")
 	case errors.Is(e, ErrConflict):
@@ -322,14 +344,21 @@ func (h *handler) agentCreateResponse(ctx context.Context, p httpx.Principal, a 
 }
 
 func (h *handler) listSpaces(w http.ResponseWriter, r *http.Request) {
-	x, e := h.store.ListSpaces(r.Context(), principal(r).TenantID)
+	p := principal(r)
+	x, e := h.store.ListSpaces(r.Context(), p.TenantID)
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	out := make([]map[string]any, 0, len(x))
 	for _, space := range x {
-		out = append(out, h.spaceDTO(r.Context(), principal(r).TenantID, space))
+		if p.APIKey && p.AgentID != "" {
+			continue
+		}
+		if p.APIKey && p.SpaceID != "" && p.SpaceID != space.ID {
+			continue
+		}
+		out = append(out, h.spaceDTO(r.Context(), p.TenantID, space))
 	}
 	httpx.JSON(w, 200, out)
 }
@@ -339,6 +368,12 @@ func (h *handler) createSpace(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
+	if in.RuntimeNodeID != nil || in.WorkspaceImage != nil || in.WorkspaceKind != "" && in.WorkspaceKind != "container" {
+		httpx.Error(w, http.StatusBadRequest, "create the workspace after creating the Space")
+		return
+	}
+	in.WorkspaceKind = "container"
+	in.EnableComputer = true
 	x, e := h.store.CreateSpace(r.Context(), principal(r).TenantID, in)
 	if e != nil {
 		statusErr(w, e)
@@ -360,6 +395,12 @@ func (h *handler) patchSpace(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
+	for _, key := range []string{"enableComputer", "workspaceImage", "runtimeNodeId", "workspaceKind"} {
+		if _, ok := p[key]; ok {
+			httpx.Error(w, http.StatusConflict, "configure the server computer through /api/spaces/{id}/computer/config")
+			return
+		}
+	}
 	x, e := h.store.UpdateSpace(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), p)
 	if e != nil {
 		statusErr(w, e)
@@ -368,7 +409,17 @@ func (h *handler) patchSpace(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, h.spaceDTO(r.Context(), principal(r).TenantID, x))
 }
 func (h *handler) deleteSpace(w http.ResponseWriter, r *http.Request) {
-	e := h.store.DeleteSpace(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	p := principal(r)
+	space := chi.URLParam(r, "id")
+	if err := httpx.AuthorizeResource(r.Context(), h.deps, p, space, ""); err != nil {
+		statusErr(w, err)
+		return
+	}
+	if err := h.prepareSpaceDeletion(r.Context(), p.TenantID, space); err != nil {
+		computerStatusError(w, err)
+		return
+	}
+	e := h.store.DeleteSpace(r.Context(), p.TenantID, space)
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -385,6 +436,9 @@ func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 	spaceFilter := strings.TrimSpace(r.URL.Query().Get("spaceId"))
 	out := make([]map[string]any, 0, len(x))
 	for _, a := range x {
+		if p.APIKey && (p.AgentID != "" && p.AgentID != a.ID || p.SpaceID != "" && p.SpaceID != a.SpaceID) {
+			continue
+		}
 		if spaceFilter != "" && a.SpaceID != spaceFilter {
 			continue
 		}
@@ -416,7 +470,7 @@ func (h *handler) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(spaces) == 0 {
-			space, e := h.store.CreateSpace(r.Context(), p.TenantID, Space{Name: "Default", Slug: "default", EnableComputer: b.EnableComputer != nil && *b.EnableComputer, WorkspaceImage: b.WorkspaceImage, WorkspaceKind: "container", WorkspaceStatus: "ready"})
+			space, e := h.store.CreateSpace(r.Context(), p.TenantID, Space{Name: "Default", Slug: "default", EnableComputer: b.EnableComputer == nil || *b.EnableComputer, WorkspaceImage: b.WorkspaceImage, WorkspaceKind: "container", WorkspaceStatus: "ready"})
 			if e != nil {
 				statusErr(w, e)
 				return
@@ -455,7 +509,11 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := h.agentDTO(r.Context(), p.TenantID, x)
-	tools, resources, prompts, templates := h.agentMCPInventory(r.Context(), p.TenantID, x.SpaceID)
+	tools, resources, prompts, templates, e := h.scopedMCPInventory(r.Context(), p, x.SpaceID, x.ID)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
 	out["tools"] = tools
 	out["resources"] = resources
 	out["prompts"] = prompts
@@ -486,66 +544,6 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
-func (h *handler) agentMCPInventory(ctx context.Context, tenant, spaceID string) ([]map[string]any, []map[string]any, []map[string]any, []map[string]any) {
-	type bound struct {
-		ID  string `gorm:"column:id"`
-		Ref string `gorm:"column:component_ref"`
-	}
-	boundInstances := []bound{}
-	_ = h.deps.Gorm.WithContext(ctx).Raw(`SELECT DISTINCT i.id AS id,i.component_ref AS component_ref FROM component_instances i JOIN agent_bindings b ON b.instance_id=i.id WHERE b.tenant_id=? AND b.space_id=? AND b.agent_id IS NULL AND i.component_type='mcp' AND i.status IN ('ready','running') ORDER BY i.name`, tenant, spaceID).Scan(&boundInstances).Error
-	tools := []map[string]any{}
-	resources := []map[string]any{}
-	prompts := []map[string]any{}
-	templates := []map[string]any{}
-	for _, item := range boundInstances {
-		instance, err := h.getMCPInstance(ctx, tenant, item.ID)
-		if err != nil {
-			continue
-		}
-		call := func(method string, target any) {
-			callCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-			if result, err := h.mcpRPC(callCtx, instance, method, map[string]any{}); err == nil {
-				_ = json.Unmarshal(result, target)
-			}
-		}
-		var listedTools struct {
-			Tools []struct {
-				Name, Description string
-				InputSchema       map[string]any `json:"inputSchema"`
-			} `json:"tools"`
-		}
-		call("tools/list", &listedTools)
-		for _, tool := range listedTools.Tools {
-			tools = append(tools, map[string]any{"name": slugify(item.Ref) + "__" + tool.Name, "qualifiedName": slugify(item.Ref) + "__" + tool.Name, "localName": tool.Name, "description": tool.Description, "inputSchema": tool.InputSchema, "providerId": item.Ref, "instanceId": item.ID, "spaceScoped": true})
-		}
-		var listedResources struct {
-			Resources []map[string]any `json:"resources"`
-		}
-		call("resources/list", &listedResources)
-		for _, resource := range listedResources.Resources {
-			resource["providerId"] = item.Ref
-			resources = append(resources, resource)
-		}
-		var listedPrompts struct {
-			Prompts []map[string]any `json:"prompts"`
-		}
-		call("prompts/list", &listedPrompts)
-		for _, prompt := range listedPrompts.Prompts {
-			prompt["providerId"] = item.Ref
-			prompts = append(prompts, prompt)
-		}
-		var listedTemplates struct {
-			ResourceTemplates []map[string]any `json:"resourceTemplates"`
-		}
-		call("resources/templates/list", &listedTemplates)
-		for _, template := range listedTemplates.ResourceTemplates {
-			template["providerId"] = item.Ref
-			templates = append(templates, template)
-		}
-	}
-	return tools, resources, prompts, templates
-}
 func (h *handler) patchAgent(w http.ResponseWriter, r *http.Request) {
 	p, e := decodeMap(r)
 	if e != nil {
@@ -558,22 +556,19 @@ func (h *handler) patchAgent(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	spacePatch := map[string]any{}
 	for _, key := range []string{"enableComputer", "workspaceImage", "runtimeNodeId", "workspaceKind"} {
-		if v, ok := p[key]; ok {
-			spacePatch[key] = v
-			delete(p, key)
-		}
-	}
-	delete(p, "restart")
-	if len(spacePatch) > 0 {
-		if _, e = h.store.UpdateSpace(r.Context(), actor.TenantID, current.SpaceID, spacePatch); e != nil {
-			statusErr(w, e)
+		if _, ok := p[key]; ok {
+			httpx.Error(w, http.StatusConflict, "configure the Space server computer through /api/spaces/{id}/computer/config")
 			return
 		}
 	}
+	delete(p, "restart")
 	x, e := h.store.UpdateAgent(r.Context(), actor.TenantID, current.ID, p)
 	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	if e = h.acp.enforceApprovalPolicies(actor.TenantID, current.ID, ""); e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -695,12 +690,36 @@ func (h *handler) searchSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 type messageBody struct {
+	MessageID    string          `json:"messageId"`
 	Content      string          `json:"content"`
 	Attachments  json.RawMessage `json:"attachments"`
 	Options      json.RawMessage `json:"options"`
 	FollowUpMode string          `json:"followUpMode"`
 	FollowUp     string          `json:"followUp"`
 	ParentRunID  *string         `json:"parentRunId"`
+	hasParent    bool
+}
+
+func (b *messageBody) UnmarshalJSON(data []byte) error {
+	type body messageBody
+	var decoded body
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		switch name {
+		case "messageId", "content", "attachments", "options", "followUpMode", "followUp", "parentRunId":
+		default:
+			return fmt.Errorf("json: unknown field %q", name)
+		}
+	}
+	*b = messageBody(decoded)
+	_, b.hasParent = fields["parentRunId"]
+	return nil
 }
 
 func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -714,13 +733,18 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = b.FollowUpMode
 	}
-	run, q, e := h.service.StartTurn(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"), b.Content, b.Attachments, b.Options, mode != "interrupt")
+	run, q, e := h.service.Start(r.Context(), TurnRequest{
+		Tenant: p.TenantID, Agent: chi.URLParam(r, "id"), Session: chi.URLParam(r, "sid"),
+		Content: b.Content, MessageID: b.MessageID, Attachments: b.Attachments, Options: b.Options,
+		FollowUpMode: mode, QueueOnConflict: mode != "interrupt",
+		ParentRunID: b.ParentRunID, HasParent: b.hasParent, UserID: p.UserID,
+	})
 	if e != nil {
 		statusErr(w, e)
 		return
 	}
 	if q != nil {
-		httpx.JSON(w, 202, map[string]any{"queued": true, "messageId": q.ID, "mode": map[bool]string{true: "steer", false: "queue"}[mode == "steer"]})
+		httpx.JSON(w, 202, map[string]any{"queued": true, "messageId": q.ID, "mode": q.Mode})
 		return
 	}
 	httpx.JSON(w, 202, map[string]any{"runId": run.ID})
@@ -739,15 +763,28 @@ func (h *handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"ok": true, "runId": x.ID})
 }
 func (h *handler) retryRun(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.NoBody
-	h.startSynthetic(w, r, "Retry the previous request")
+	h.restartRun(w, r, false)
 }
 func (h *handler) continueRun(w http.ResponseWriter, r *http.Request) {
-	h.startSynthetic(w, r, "Continue")
+	h.restartRun(w, r, true)
 }
-func (h *handler) startSynthetic(w http.ResponseWriter, r *http.Request, text string) {
+func (h *handler) restartRun(w http.ResponseWriter, r *http.Request, resume bool) {
+	var b struct {
+		MessageID string          `json:"messageId"`
+		Options   json.RawMessage `json:"options"`
+	}
+	if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+		if httpx.DecodeJSON(r, &b) != nil {
+			httpx.Error(w, 400, "invalid JSON")
+			return
+		}
+	}
 	p := principal(r)
-	run, _, e := h.service.StartTurn(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"), text, nil, nil, false)
+	run, _, e := h.service.Start(r.Context(), TurnRequest{
+		Tenant: p.TenantID, Agent: chi.URLParam(r, "id"), Session: chi.URLParam(r, "sid"),
+		Options: b.Options, ReplyToMessageID: b.MessageID, UserID: p.UserID,
+		Retry: !resume, SkipUserMessage: !resume, Continue: resume,
+	})
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -791,34 +828,17 @@ func (h *handler) deleteQueue(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	h.service.forgetACPQueueReceipt(p.TenantID, a, sid, mid)
 	httpx.JSON(w, 200, map[string]any{"ok": true, "removed": true, "item": hit})
 }
 func (h *handler) interruptQueue(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	a, sid, mid := chi.URLParam(r, "id"), chi.URLParam(r, "sid"), chi.URLParam(r, "messageId")
-	items, e := h.store.PendingQueue(r.Context(), p.TenantID, a, sid)
-	if e != nil {
+	if e := h.service.Interrupt(r.Context(), p.TenantID, a, sid, mid); e != nil {
 		statusErr(w, e)
 		return
 	}
-	var msg *QueueMessage
-	for i := range items {
-		if items[i].ID == mid {
-			msg = &items[i]
-		}
-	}
-	if msg == nil {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	_, _ = h.service.Cancel(r.Context(), p.TenantID, a, sid)
-	_ = h.store.DeleteQueued(r.Context(), p.TenantID, a, sid, mid)
-	run, _, e := h.service.StartTurn(r.Context(), p.TenantID, a, sid, msg.Content, msg.Attachments, msg.Options, false)
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"ok": true, "runId": run.ID})
+	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 
 func (h *handler) cloudConfig(w http.ResponseWriter, r *http.Request) {
@@ -833,8 +853,34 @@ func (h *handler) cloudConfig(w http.ResponseWriter, r *http.Request) {
 	if cloud == nil {
 		cloud = map[string]any{}
 	}
+	approvals, _ := cloud["approvals"].(map[string]any)
+	if approvals == nil {
+		approvals = map[string]any{}
+		cloud["approvals"] = approvals
+	}
+	if policy, _ := approvals["policy"].(string); policy == "" {
+		var acpSessions int64
+		if err := h.deps.Gorm.WithContext(r.Context()).Table("cloud_agent_sessions").Where("tenant_id=? AND agent_id=? AND kind='acp'", a.TenantID, a.ID).Count(&acpSessions).Error; err != nil {
+			statusErr(w, err)
+			return
+		}
+		if acpSessions > 0 {
+			_, raw, err := h.acpSpace(r.Context(), a.TenantID, a.ID, a.SpaceID)
+			if err != nil {
+				statusErr(w, err)
+				return
+			}
+			if parseACPConfig(acpMap(raw)).PermissionPolicy != "allow" {
+				approvals["policy"] = "always_ask"
+			}
+		}
+	}
+	if approvals["policy"] == "ask" {
+		approvals["policy"] = "always_ask"
+	}
 	var routes int64
 	_ = h.deps.Gorm.WithContext(r.Context()).Model(&models.ModelRoute{}).Where("tenant_id=? AND capability='chat' AND status='ready'", principal(r).TenantID).Count(&routes).Error
+	redactCloudApprovals(cloud)
 	httpx.JSON(w, 200, map[string]any{"cloud": cloud, "hasChatRoute": routes > 0})
 }
 func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
@@ -843,6 +889,12 @@ func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid JSON")
 		return
 	}
+	if approvals, ok := patch["approvals"].(map[string]any); ok {
+		if gate, ok := approvals["aiGate"].(map[string]any); ok {
+			delete(gate, "jevMigrationEnc")
+			delete(gate, "jevMigrationPending")
+		}
+	}
 	p := principal(r)
 	var cloud map[string]any
 	_, e := h.store.updateAgentConfig(r.Context(), p.TenantID, chi.URLParam(r, "id"), nil, func(cfg map[string]any) error {
@@ -850,11 +902,19 @@ func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
 		if cloud == nil {
 			cloud = map[string]any{}
 		}
-		for k, v := range patch {
-			if v == nil || v == "" {
-				delete(cloud, k)
-			} else {
-				cloud[k] = v
+		mergeConfigPatch(cloud, patch)
+		if approvals, ok := cloud["approvals"].(map[string]any); ok {
+			if policy, _ := approvals["policy"].(string); policy == "ask" {
+				approvals["policy"] = "always_ask"
+			}
+			if gate, ok := approvals["aiGate"].(map[string]any); ok {
+				if err := protectLegacyJevGate(h.deps.Secret, p.TenantID, chi.URLParam(r, "id"), gate); err != nil {
+					return err
+				}
+			}
+			encoded, _ := json.Marshal(map[string]any{"cloud": cloud})
+			if _, err := parseApprovalConfig(encoded, "allow_all"); err != nil {
+				return err
 			}
 		}
 		cfg["cloud"] = cloud
@@ -864,6 +924,11 @@ func (h *handler) updateCloudConfig(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	if e = h.acp.enforceApprovalPolicies(p.TenantID, chi.URLParam(r, "id"), ""); e != nil {
+		statusErr(w, e)
+		return
+	}
+	redactCloudApprovals(cloud)
 	httpx.JSON(w, 200, map[string]any{"cloud": cloud})
 }
 func (h *handler) composer(w http.ResponseWriter, r *http.Request) {
@@ -1091,7 +1156,7 @@ func (h *handler) clearMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) modelMeta(w http.ResponseWriter, r *http.Request) {
-	httpx.JSON(w, 200, map[string]any{"protocols": []string{"openai", "anthropic", "openai-compatible"}, "capabilities": []string{"chat", "embedding", "rerank", "image"}})
+	httpx.JSON(w, 200, map[string]any{"protocols": []string{"openai", "anthropic", "openai-compatible", "typesafe"}, "capabilities": []string{"chat", "embedding", "rerank", "image", "evaluation"}})
 }
 func (h *handler) listUpstreams(w http.ResponseWriter, r *http.Request) {
 	x, e := h.store.ListUpstreams(r.Context(), principal(r).TenantID)
@@ -1156,7 +1221,12 @@ func (h *handler) listModelRoutes(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"routes": x, "capabilities": []string{"chat", "embedding", "rerank", "image"}})
+	routes, e := h.modelRoutesWithMetadata(r.Context(), principal(r).TenantID, x)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	httpx.JSON(w, 200, map[string]any{"routes": routes, "capabilities": []string{"chat", "embedding", "rerank", "image", "evaluation"}})
 }
 func (h *handler) createModelRoute(w http.ResponseWriter, r *http.Request) {
 	var in ModelRoute
@@ -1181,44 +1251,66 @@ func (h *handler) deleteModelRoute(w http.ResponseWriter, r *http.Request) {
 }
 func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !gatewayPrincipalAllowed(principal(r)) {
-			httpx.JSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{"message": "API key is not bound to an agent or lacks Gateway permission", "type": "permission_error", "param": nil, "code": "insufficient_scope"}})
+		p := principal(r)
+		if !gatewayPrincipalAllowed(p) || !apiKeyScopeAllows(p, "gateway", "gateway:chat") {
+			writeGatewayError(w, operation, http.StatusForbidden, "API key is not bound to a Space or lacks Gateway permission", "insufficient_scope")
 			return
 		}
-		var body []byte
+		space, err := h.store.GetSpace(r.Context(), p.TenantID, p.SpaceID)
+		if err != nil {
+			writeGatewayFailure(w, operation, err)
+			return
+		}
 		var v map[string]any
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&v) == nil {
-			body, _ = json.Marshal(v)
-		} else {
-			httpx.Error(w, 400, "invalid JSON")
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20))
+		decoder.UseNumber()
+		if decoder.Decode(&v) != nil || v == nil || decoder.Decode(new(any)) != io.EOF {
+			writeGatewayError(w, operation, http.StatusBadRequest, "invalid JSON body", "invalid_request")
 			return
 		}
-		model, _ := v["model"].(string)
-		resp, e := h.service.gateway.Do(r.Context(), principal(r).TenantID, capability, operation, model, body)
-		if e != nil {
-			statusErr(w, e)
+		var cfg map[string]any
+		_ = json.Unmarshal(space.Config, &cfg)
+		cloud := gwMap(cfg["cloud"])
+		model := gwStr(v["model"])
+		if mapped := gwStr(gwMap(cloud["gatewayModelMap"])[model]); mapped != "" {
+			model = mapped
+		}
+		if model == "" {
+			model = gwOr(gwStr(cloud["modelRouteId"]), gwStr(cloud["model"]))
+		}
+		v["model"] = model
+		body, _ := json.Marshal(v)
+		ctx := withGatewayClientHeaders(r.Context(), r.Header)
+		resp, err := h.service.gateway.Do(ctx, p.TenantID, capability, operation, model, body)
+		if err != nil {
+			writeGatewayFailure(w, operation, err)
 			return
 		}
 		_ = copyProviderResponse(w, resp)
 	}
 }
 func (h *handler) listGatewayModels(w http.ResponseWriter, r *http.Request) {
-	if !gatewayPrincipalAllowed(principal(r)) {
-		httpx.JSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{"message": "API key is not bound to an agent or lacks Gateway permission", "type": "permission_error", "param": nil, "code": "insufficient_scope"}})
+	p := principal(r)
+	if !gatewayPrincipalAllowed(p) || !apiKeyScopeAllows(p, "gateway", "gateway:models") {
+		writeGatewayError(w, "chat", http.StatusForbidden, "API key is not bound to a Space or lacks Gateway permission", "insufficient_scope")
 		return
 	}
-	routes, e := h.store.ListRoutes(r.Context(), principal(r).TenantID, "")
-	if e != nil {
-		statusErr(w, e)
+	if _, err := h.store.GetSpace(r.Context(), p.TenantID, p.SpaceID); err != nil {
+		writeGatewayFailure(w, "chat", err)
 		return
 	}
-	data := make([]map[string]any, 0, len(routes))
-	for _, x := range routes {
-		id := x.Model
-		if x.Alias != nil {
-			id = *x.Alias
+	models, err := h.gatewayModels(r.Context(), p.TenantID)
+	if err != nil {
+		writeGatewayFailure(w, "chat", err)
+		return
+	}
+	data := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		item := map[string]any{"id": model.ID, "object": "model", "owned_by": "zakura"}
+		for key, value := range model.Metadata {
+			item[key] = value
 		}
-		data = append(data, map[string]any{"id": id, "object": "model", "owned_by": "zakura"})
+		data = append(data, item)
 	}
-	httpx.JSON(w, 200, map[string]any{"object": "list", "data": data})
+	httpx.JSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }

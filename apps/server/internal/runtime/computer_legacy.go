@@ -1,23 +1,27 @@
 package runtime
 
-import "gorm.io/gorm"
+import (
+	"time"
 
-// adoptLegacyComputer registers an explicitly enabled old-style workspace in the
-// same transaction as its creation. Never overwrite a selection, existing
-// computer identity, or a chat/Run snapshot when the Space is edited later.
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
+	"gorm.io/gorm"
+)
+
+// ensureServerComputer guarantees, inside the Space's own transaction, that the
+// Space has its server computer and refreshes the computer's cached workspace
+// columns. It never touches a chat selection, a Run pin, a runtime or any
+// attached computer, and it never contacts a runner.
+func ensureServerComputer(tx *gorm.DB, tenant, space string) error {
+	for _, statement := range computers.ServerComputerStatements(tenant, space, time.Now()) {
+		if err := tx.Exec(statement.SQL, statement.Args...).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// adoptLegacyComputer is the hook Store.CreateSpace and Store.UpdateSpace call
+// in their transactions; it now ensures the Space server computer.
 func adoptLegacyComputer(tx *gorm.DB, tenant, space string) error {
-	result := tx.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,runtime_node_id,legacy_workspace_scope,legacy_workspace_kind,workspace_image,created_at,updated_at)
- SELECT 'legacy:' || s.id,s.tenant_id,s.id,s.name,
- CASE WHEN n.kind='computer' THEN 'remote_agent' ELSE 'server' END,
- s.runtime_node_id,s.id,s.workspace_kind,s.workspace_image,s.created_at,s.updated_at
- FROM spaces s LEFT JOIN runtime_nodes n ON n.id=s.runtime_node_id
- WHERE s.tenant_id=? AND s.id=? AND s.enable_computer
- ON CONFLICT(id) DO NOTHING`, tenant, space)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return nil
-	}
-	return tx.Exec(`INSERT INTO space_computer_defaults(space_id,tenant_id,computer_id) VALUES(?,? ,?) ON CONFLICT(space_id) DO NOTHING`, space, tenant, "legacy:"+space).Error
+	return ensureServerComputer(tx, tenant, space)
 }

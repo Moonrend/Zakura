@@ -49,5 +49,5 @@ func RequireAPIScope(next http.Handler) http.Handler {
 }
 
 func gatewayPrincipalAllowed(p httpx.Principal) bool {
-	return p.APIKey && p.AgentID != "" && apiKeyScopeAllows(p, "gateway", "gateway:models", "gateway:chat")
+	return p.APIKey && p.SpaceID != "" && apiKeyScopeAllows(p, "gateway", "gateway:models", "gateway:chat")
 }

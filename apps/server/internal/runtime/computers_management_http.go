@@ -1,10 +1,12 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -46,8 +48,12 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Name = strings.TrimSpace(in.Name)
-	if in.Name == "" || len(in.Name) > 200 {
-		httpx.Error(w, 400, "name is required (maximum 200 bytes)")
+	if in.Name == "" {
+		suffix := h.store.id()
+		in.Name = "电脑 " + suffix[:min(8, len(suffix))]
+	}
+	if len(in.Name) > 200 {
+		httpx.Error(w, 400, "name must not exceed 200 bytes")
 		return
 	}
 	if in.IdleSeconds == 0 {
@@ -57,12 +63,21 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 		in.MaxLifetimeSeconds = 3600
 	}
 	p := principal(r)
-	c := computers.Computer{ID: h.store.id(), TenantID: p.TenantID, SpaceID: chi.URLParam(r, "id"), Name: in.Name, Provider: in.Provider, RuntimeNodeID: in.RuntimeNodeID, IdleSeconds: in.IdleSeconds, MaxLifetimeSeconds: in.MaxLifetimeSeconds, Capabilities: []computers.Capability{}}
+	c := computers.Computer{ID: h.store.id(), TenantID: p.TenantID, SpaceID: chi.URLParam(r, "id"), Name: in.Name, Provider: in.Provider, Role: computers.RoleAttached, RuntimeNodeID: in.RuntimeNodeID, IdleSeconds: in.IdleSeconds, MaxLifetimeSeconds: in.MaxLifetimeSeconds, Capabilities: []computers.Capability{}}
+	// The Space already has exactly one server computer: its workspace.
+	if c.Provider == computers.Server {
+		httpx.Error(w, 400, "each space has exactly one server computer, created with the space; attach an ssh, e2b, railway, temporary or remote_agent computer instead")
+		return
+	}
 	if err := c.Validate(); err != nil {
 		httpx.Error(w, 400, err.Error())
 		return
 	}
-	if c.Provider == computers.Server || c.Provider == computers.RemoteAgent || c.Provider == computers.Temporary {
+	if c.Provider == computers.RemoteAgent || c.Provider == computers.Temporary {
+		if err := h.authorizeLocalNode(r.Context(), p, c.RuntimeNodeID); err != nil {
+			statusErr(w, err)
+			return
+		}
 		var node struct {
 			Kind string `gorm:"column:kind"`
 		}
@@ -71,7 +86,7 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 400, "runtime node is unavailable")
 			return
 		}
-		if (c.Provider == computers.Server || c.Provider == computers.Temporary) && node.Kind != "server" && node.Kind != "computer" && node.Kind != "local" {
+		if c.Provider == computers.Temporary && node.Kind != "server" && node.Kind != "computer" && node.Kind != "local" {
 			httpx.Error(w, 400, "a server or computer node is required")
 			return
 		}
@@ -112,23 +127,35 @@ func (h *handler) createComputer(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 201, c)
 }
-func (h *handler) renameComputer(w http.ResponseWriter, r *http.Request) {
+
+// deleteComputer removes an attached computer. Chats that chose it fall back to
+// the Space server computer, which itself can never be removed here.
+func (h *handler) deleteComputer(w http.ResponseWriter, r *http.Request) {
 	if !h.manageComputerScope(w, r) {
 		return
 	}
-	var in struct {
-		Name string `json:"name"`
-	}
-	if httpx.DecodeJSON(r, &in) != nil || strings.TrimSpace(in.Name) == "" || len(in.Name) > 200 {
-		httpx.Error(w, 400, "invalid computer name")
-		return
-	}
-	if err := h.computerStore().Rename(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"), in.Name); err != nil {
+	p := principal(r)
+	space := chi.URLParam(r, "id")
+	computer := chi.URLParam(r, "cid")
+	if err := h.prepareComputerDeletion(r.Context(), p.TenantID, space, computer); err != nil {
 		computerStatusError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"name": strings.TrimSpace(in.Name)})
+	if err := h.computerStore().Delete(r.Context(), p.TenantID, space, computer); err != nil {
+		computerStatusError(w, err)
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+	defer cancel()
+	if err := h.finishAttachedComputerDeletion(cleanupCtx, p.TenantID, space, computer); err != nil {
+		computerStatusError(w, err)
+		return
+	}
+	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
+
+// getSpaceComputer reports the computer new chats start on: always the Space
+// server computer.
 func (h *handler) getSpaceComputer(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	space := chi.URLParam(r, "id")
@@ -136,13 +163,20 @@ func (h *handler) getSpaceComputer(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 403, "computer scope denied")
 		return
 	}
-	id, err := h.computerStore().SpaceDefault(r.Context(), p.TenantID, space)
+	if _, err := h.store.GetSpace(r.Context(), p.TenantID, space); err != nil {
+		statusErr(w, err)
+		return
+	}
+	server, err := h.resolveServerComputer(r.Context(), p.TenantID, space)
 	if err != nil {
 		computerStatusError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"computerId": id})
+	httpx.JSON(w, 200, map[string]any{"computerId": server.computer.ID, "serverComputerId": server.computer.ID})
 }
+
+// setSpaceComputer keeps the retired Space default route answering: null or the
+// server computer is accepted unchanged, any other computer is a conflict.
 func (h *handler) setSpaceComputer(w http.ResponseWriter, r *http.Request) {
 	if !h.manageComputerScope(w, r) {
 		return
@@ -158,18 +192,18 @@ func (h *handler) setSpaceComputer(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "computerId must be a nonempty string or null")
 		return
 	}
-	s := h.computerStore()
 	p := principal(r)
 	space := chi.URLParam(r, "id")
-	var err error
-	if value == nil {
-		err = s.ClearSpaceDefault(r.Context(), p.TenantID, space)
-	} else {
-		err = s.SetSpaceDefault(r.Context(), p.TenantID, space, id)
-	}
+	server, err := h.resolveServerComputer(r.Context(), p.TenantID, space)
 	if err != nil {
 		computerStatusError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"computerId": value})
+	if value != nil {
+		if err = h.computerStore().SetSpaceDefault(r.Context(), p.TenantID, space, id); err != nil {
+			computerStatusError(w, err)
+			return
+		}
+	}
+	httpx.JSON(w, 200, map[string]any{"computerId": server.computer.ID, "serverComputerId": server.computer.ID})
 }

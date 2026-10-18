@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Cable, ShieldCheck } from "lucide-react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useSpaceSettings } from "@/components/space-settings-layout";
-import { SpaceConnectPanel } from "@/components/space-connect-panel";
-import { SettingsHeader, SettingsSection } from "@/components/settings-shell";
+import { SpaceAccessPanel } from "@/components/space-access-panel";
+import { SettingsHeader } from "@/components/settings-shell";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { fetchSpace, type SpaceItem } from "@/lib/spaces";
 
-export default function SpaceConnectPage() {
+function SpaceConnectPageContent() {
   const { spaceId } = useSpaceSettings();
+  const searchParams = useSearchParams();
   const [space, setSpace] = useState<SpaceItem | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,29 +34,21 @@ export default function SpaceConnectPage() {
   if (!space) return <PageLoading />;
 
   return (
-    <div className="max-w-3xl space-y-5">
-      <SettingsHeader
-        title="接入"
-        description="作为远程 MCP 服务接入外部客户端"
+    <div className="space-y-6">
+      <SettingsHeader title="接入" description="在外部客户端中使用当前空间的工具和模型。" />
+      <SpaceAccessPanel
+        key={space.id}
+        space={space}
+        initialProtocol={searchParams.get("tab") === "gateway" ? "gateway" : "mcp"}
       />
-      <SettingsSection title="MCP 接入信息">
-        <SpaceConnectPanel
-          spaceId={space.id}
-          spaceSlug={space.slug}
-          spaceName={space.name}
-          mcpUrl={space.mcpUrl}
-        />
-      </SettingsSection>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="flex gap-3 rounded-lg border border-border/70 bg-muted/20 p-4">
-          <Cable className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <div><p className="text-sm font-medium">远程 MCP</p><p className="mt-1 text-xs leading-5 text-muted-foreground">使用 Streamable HTTP，客户端只需填写 URL 与 Bearer Key。</p></div>
-        </div>
-        <div className="flex gap-3 rounded-lg border border-border/70 bg-muted/20 p-4">
-          <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <div><p className="text-sm font-medium">按空间授权</p><p className="mt-1 text-xs leading-5 text-muted-foreground">生成的 Key 可访问该空间内所有 Agent 共享的 MCP 工具，撤销后立即失效。</p></div>
-        </div>
-      </div>
     </div>
+  );
+}
+
+export default function SpaceConnectPage() {
+  return (
+    <Suspense fallback={<PageLoading />}>
+      <SpaceConnectPageContent />
+    </Suspense>
   );
 }

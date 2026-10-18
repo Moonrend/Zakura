@@ -122,25 +122,24 @@ func (h *handler) computerLifecycleScope(w http.ResponseWriter, r *http.Request)
 	if !h.manageComputerScope(w, r) {
 		return computers.Computer{}, false
 	}
-	items, err := h.computerStore().List(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
+	c, err := h.computerStore().Get(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "cid"))
 	if err != nil {
 		computerStatusError(w, err)
 		return computers.Computer{}, false
 	}
-	for _, c := range items {
-		if c.ID != chi.URLParam(r, "cid") {
-			continue
-		}
-		// Legacy volumes remain under the legacy lifecycle, and adapters without a
-		// registered provider stay unavailable rather than failing at dispatch.
-		if (c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B && c.Provider != computers.Railway && c.Provider != computers.SSH) || strings.HasPrefix(c.ID, "legacy:") {
-			httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
-			return computers.Computer{}, false
-		}
-		return c, true
+	// The server computer is the Space workspace; its container follows the
+	// workspace lifecycle, never a provider runtime.
+	if c.IsServer() {
+		httpx.Error(w, http.StatusConflict, computers.ErrServerComputerManaged.Error())
+		return computers.Computer{}, false
 	}
-	computerStatusError(w, sql.ErrNoRows)
-	return computers.Computer{}, false
+	// Adapters without a registered provider stay unavailable rather than
+	// failing at dispatch.
+	if c.Provider != computers.Server && c.Provider != computers.Temporary && c.Provider != computers.E2B && c.Provider != computers.Railway && c.Provider != computers.SSH {
+		httpx.Error(w, http.StatusNotImplemented, "computer lifecycle adapter is unavailable")
+		return computers.Computer{}, false
+	}
+	return c, true
 }
 func computerLifecycleError(w http.ResponseWriter, err error) {
 	switch {
@@ -148,7 +147,7 @@ func computerLifecycleError(w http.ResponseWriter, err error) {
 		httpx.Error(w, 503, "computer provider unavailable")
 	case errors.Is(err, computers.ErrCreationUncertain):
 		httpx.Error(w, 409, "computer creation outcome uncertain; reconcile the same runtime before any further action")
-	case errors.Is(err, computers.ErrTransitionConflict), errors.Is(err, computers.ErrApprovalRequired), errors.Is(err, computers.ErrRuntimeEnded), errors.Is(err, computers.ErrReplaceUnavailable):
+	case errors.Is(err, computers.ErrTransitionConflict), errors.Is(err, computers.ErrApprovalRequired), errors.Is(err, computers.ErrRuntimeEnded), errors.Is(err, computers.ErrReplaceUnavailable), errors.Is(err, computers.ErrServerComputerManaged):
 		httpx.Error(w, 409, err.Error())
 	case errors.Is(err, sql.ErrNoRows):
 		httpx.Error(w, 404, "computer runtime not found")

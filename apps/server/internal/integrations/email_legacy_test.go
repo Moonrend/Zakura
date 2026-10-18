@@ -69,8 +69,12 @@ func TestInstallationConfigLegacyEmailFallback(t *testing.T) {
 	if e != nil {
 		t.Fatalf("modern installation: %v", e)
 	}
-	if cfg["fromEmail"] != "modern@example.com" {
-		t.Fatalf("primary ref must win over legacy fallback: %#v", cfg)
+	if cfg["fromEmail"] != "legacy@example.com" {
+		t.Fatalf("late conflicting legacy config must not overwrite canonical Space configuration: %#v", cfg)
+	}
+	var unresolved int
+	if e := d.DB.QueryRow(`SELECT COUNT(*) FROM space_connector_legacy_installations WHERE resolved=false`).Scan(&unresolved); e != nil || unresolved != 1 {
+		t.Fatalf("late legacy conflict not preserved: %d %v", unresolved, e)
 	}
 }
 

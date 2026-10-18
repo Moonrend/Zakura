@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { ComputerSelector } from "@/components/computer-selector";
 import { ComputerSessionApproval } from "@/components/computer-session-approval";
 import { useRouter } from "next/navigation";
@@ -31,8 +32,6 @@ import type {
   CloudAgentFollowUpMode,
   CloudAgentRunOptions,
   ComposerCapabilities,
-  ToolApprovalConfig,
-  ToolApprovalPolicy,
 } from "@zakura/shared";
 import {
   DEFAULT_CONTEXT_LIMIT_TOKENS,
@@ -41,6 +40,7 @@ import {
   estimateTokensFromChars,
   ZAKURA_RUNTIME_ID,
   type AcpRuntimeState,
+  type AcpRuntimeStatus,
 } from "@zakura/shared";
 import { Button } from "@/components/ui/button";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -75,7 +75,7 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
-import { fetchAcpConfig, fetchAcpRuntime, prepareAcpDraft, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
+import { fetchAcpConfig, fetchAcpRuntime, reconnectAcpRuntime, closeAcpRuntime, prepareAcpDraft, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
 import {
   buildConversationTurns,
   cancelCloudRun,
@@ -155,6 +155,17 @@ import {
   buildContextWindowInfo,
 } from "./chat-helpers";
 
+const WorkspaceTerminalDialog = dynamic(
+  () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
+  { ssr: false },
+);
+
+type ChatAcpAuthMethod = { id: string; name: string; description?: string; type?: string };
+type ChatAcpAuthStatus = Omit<AcpRuntimeStatus, "state" | "authMethods"> & {
+  state: AcpRuntimeState | "auth_required" | "error";
+  authMethods?: ChatAcpAuthMethod[];
+};
+
 export function ChatApp() {
   const { confirm } = useConfirmDialog();
   const router = useRouter();
@@ -227,7 +238,6 @@ export function ChatApp() {
   const [logOpen, setLogOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const [compactingContext, setCompactingContext] = useState(false);
-  const [systemPrompt, setSystemPrompt] = useState("");
   const [model, setModel] = useState("");
   const [modelRouteId, setModelRouteId] = useState<string | null>(null);
   const [reasoning, setReasoning] = useState<ComposerReasoningValue>(() => {
@@ -238,15 +248,8 @@ export function ChatApp() {
     if (saved?.trim() && saved.length <= 64) return saved as ComposerReasoningValue;
     return "default";
   });
-  const [enableTools, setEnableTools] = useState(true);
-  const [autoMemory, setAutoMemory] = useState(true);
-  const [autoTitle, setAutoTitle] = useState(true);
   /** 运行中再发：steer=下一工具后注入（默认）；queue=整轮结束后再发 */
   const [followUpMode, setFollowUpMode] = useState<CloudAgentFollowUpMode>("steer");
-  const [maxSubagentDepth, setMaxSubagentDepth] = useState("2");
-  /** 工具审批策略（快捷项）；完整配置在 Agent 设置页编辑 */
-  const [approvalPolicy, setApprovalPolicy] = useState<ToolApprovalPolicy>("allow_all");
-  const approvalsRef = useRef<ToolApprovalConfig>({});
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [hasChatRoute, setHasChatRoute] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -286,17 +289,156 @@ export function ChatApp() {
   const [realtimeOffline, setRealtimeOffline] = useState(false);
   const defaultRuntimeRef = useRef(ZAKURA_RUNTIME_ID);
   const [acpRuntime, setAcpRuntime] = useState<{
-    state?: AcpRuntimeState;
+    state?: ChatAcpAuthStatus["state"];
+    authMethods?: ChatAcpAuthMethod[];
+    authRequired?: boolean;
+    mcpReconnectRequired?: boolean;
     error?: string;
     modes?: { currentId?: string; available: Array<{ id: string; name: string }> };
     availableCommands?: Array<{ name: string; description?: string }>;
     models?: { currentId?: string; available: Array<{ id: string; name: string }>; configId?: string };
     reasoning?: { current?: string; available: Array<{ id: string; name: string }>; configId?: string };
   } | null>(null);
+  const [acpAuthPending, setAcpAuthPending] = useState(false);
+  const [acpAuthDetail, setAcpAuthDetail] = useState<string | null>(null);
+  const [acpAuthTerminal, setAcpAuthTerminal] = useState<{
+    agentId: string;
+    sessionId: string;
+    methodId: string;
+    methodName: string;
+  } | null>(null);
+  const acpAuthRefreshRef = useRef(0);
   const acpPreparingProfileIdRef = useRef<string | null>(null);
   acpPreparingProfileIdRef.current = acpPreparingProfileId;
   const acpControlPendingRef = useRef(acpControlPending);
   acpControlPendingRef.current = acpControlPending;
+  const acpAuthAgentRef = useRef(agentId);
+  acpAuthAgentRef.current = agentId;
+
+  useEffect(() => {
+    acpAuthRefreshRef.current += 1;
+    setAcpAuthTerminal(null);
+    setAcpAuthDetail(null);
+    setAcpAuthPending(false);
+    return () => { acpAuthRefreshRef.current += 1; };
+  }, [agentId, sessionId]);
+
+  async function refreshAcpAfterAuthentication(aid: string, sid: string) {
+    const generation = ++acpAuthRefreshRef.current;
+    const current = () => generation === acpAuthRefreshRef.current
+      && acpAuthAgentRef.current === aid && sessionIdRef.current === sid;
+    setAcpAuthPending(true);
+    setAcpAuthDetail("正在确认认证状态…");
+    let last: ChatAcpAuthStatus | undefined;
+    let lastError: unknown;
+    try {
+      // Terminal exit zero precedes the server's reconnect; retry only within
+      // this bounded window, and never update a different selected session.
+      for (const delay of [0, 300, 600, 1000, 1600, 2000]) {
+        if (delay) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+        if (!current()) return;
+        try {
+          const status: ChatAcpAuthStatus = await fetchAcpRuntime(aid, sid);
+          if (!current()) return;
+          last = status;
+          lastError = undefined;
+          setAcpRuntime(status);
+          if (!status.authRequired && (status.state === "idle" || status.state === "active")) {
+            setAcpAuthDetail(null);
+            setAcpAuthTerminal(null);
+            return;
+          }
+        } catch (error) { lastError = error; }
+      }
+      if (current()) setAcpAuthDetail(lastError
+        ? "认证状态获取失败，请刷新状态后重试。"
+        : last?.authRequired || last?.state === "auth_required"
+          ? "登录命令已结束，Agent 仍需要认证。"
+          : "登录命令已结束，尚未确认 Agent 就绪。请刷新状态。");
+    } finally {
+      if (current()) setAcpAuthPending(false);
+    }
+  }
+
+  async function handleAcpReconnect() {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid || acpAuthPending) return;
+    const generation = ++acpAuthRefreshRef.current;
+    const current = () => generation === acpAuthRefreshRef.current
+      && acpAuthAgentRef.current === aid && sessionIdRef.current === sid;
+    setAcpAuthPending(true);
+    setAcpAuthDetail("正在以当前身份重连 Agent…");
+    try {
+      const status = await reconnectAcpRuntime(aid, sid);
+      if (current()) {
+        setAcpRuntime(status);
+        setAcpAuthDetail(null);
+      }
+    } catch (error) {
+      if (current()) setAcpAuthDetail(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (current()) setAcpAuthPending(false);
+    }
+  }
+
+  async function handleAcpClose() {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid || acpAuthPending) return;
+    const generation = ++acpAuthRefreshRef.current;
+    const current = () => generation === acpAuthRefreshRef.current
+      && acpAuthAgentRef.current === aid && sessionIdRef.current === sid;
+    setAcpAuthPending(true);
+    setAcpAuthDetail("正在关闭 Agent 进程…");
+    try {
+      const status = await closeAcpRuntime(aid, sid);
+      if (current()) {
+        setAcpRuntime(status);
+        setAcpAuthDetail("Agent 进程已关闭，对话、凭据和队列已保留；需要时请显式重新连接。");
+      }
+    } catch (error) {
+      if (current()) setAcpAuthDetail(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (current()) setAcpAuthPending(false);
+    }
+  }
+
+  async function handleAcpAuthentication(method: ChatAcpAuthMethod) {
+    const aid = agentId;
+    const sid = sessionIdRef.current;
+    if (!aid || !sid || acpAuthPending) return;
+    setAcpAuthDetail(null);
+    if (method.type === "terminal") {
+      setAcpAuthTerminal({ agentId: aid, sessionId: sid, methodId: method.id, methodName: method.name });
+      return;
+    }
+    if (method.type && method.type !== "agent") return;
+    setAcpAuthPending(true);
+    try {
+      const status = await api<ChatAcpAuthStatus>(`/api/agents/${encodeURIComponent(aid)}/sessions/${encodeURIComponent(sid)}/acp/authenticate`, {
+        method: "POST", json: { methodId: method.id },
+      });
+      if (acpAuthAgentRef.current !== aid || sessionIdRef.current !== sid) return;
+      setAcpRuntime(status);
+      await refreshAcpAfterAuthentication(aid, sid);
+    } catch (error) {
+      if (acpAuthAgentRef.current === aid && sessionIdRef.current === sid) setAcpAuthDetail(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (acpAuthAgentRef.current === aid && sessionIdRef.current === sid) setAcpAuthPending(false);
+    }
+  }
+
+  function handleAcpAuthTerminalExit(code: number | null) {
+    const terminal = acpAuthTerminal;
+    if (!terminal || acpAuthAgentRef.current !== terminal.agentId || sessionIdRef.current !== terminal.sessionId) return;
+    if (code === 0) {
+      void refreshAcpAfterAuthentication(terminal.agentId, terminal.sessionId);
+    } else {
+      setAcpAuthDetail(code === null ? "终端连接已关闭，未收到退出状态；认证未确认。" : `登录命令退出（code ${code}），认证未完成。`);
+    }
+  }
+
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [disabledGroupIds, setDisabledGroupIds] = useState<string[]>([]);
   /** 服务端排队的后续消息（queue_update 快照实时同步，跨设备一致） */
@@ -660,6 +802,21 @@ export function ChatApp() {
         return [...prev, ev].sort((a, b) => a.seq - b.seq);
       });
       if (ev.seq > seqRef.current) seqRef.current = ev.seq;
+      if (ev.type === "queue.authorization_required") {
+        setAcpAuthDetail("排队消息的原授权已无法确认；请移除该消息，再以当前身份重新发送。重连不会自动重发。");
+      }
+      if (ev.type === "acp.runtime.updated") {
+        setAcpRuntime(ev.payload as ChatAcpAuthStatus);
+        const state = (ev.payload as ChatAcpAuthStatus).state;
+        if (state !== "starting") setAcpPreparingProfileId(null);
+      }
+      if ((ev.type === "run_error" || ev.type === "run_end") && liveRef.current.runtimeId !== ZAKURA_RUNTIME_ID) {
+        const aid = acpAuthAgentRef.current;
+        const sid = ev.sessionId;
+        if (aid) void fetchAcpRuntime(aid, sid).then((status) => {
+          if (acpAuthAgentRef.current === aid && sessionIdRef.current === sid) setAcpRuntime(status);
+        }).catch(() => { /* The persisted run error remains visible. */ });
+      }
       // 服务端队列快照：全量替换（只认更新的 seq，重放不回退）
       if (ev.type === "queue_update") {
         const p = ev.payload as { items?: CloudAgentQueuedMessage[] };
@@ -849,6 +1006,9 @@ export function ChatApp() {
               ...prev,
               state: status.state,
               error: status.error,
+              authMethods: status.authMethods,
+              authRequired: status.authRequired,
+              mcpReconnectRequired: status.mcpReconnectRequired,
               availableCommands: status.availableCommands ?? prev?.availableCommands,
               modes: status.modes ?? prev?.modes,
               models: status.models ?? prev?.models,
@@ -1099,21 +1259,14 @@ export function ChatApp() {
         setActiveProject(null);
         setSettingsProject(null);
         setHasChatRoute(cfg.hasChatRoute);
-        setSystemPrompt(cfg.cloud.systemPrompt ?? "");
-        setModel(cfg.cloud.model ?? "");
+                setModel(cfg.cloud.model ?? "");
         setModelRouteId(cfg.cloud.modelRouteId ?? null);
         agentDefaultsRef.current = {
           model: cfg.cloud.model ?? "",
           modelRouteId: cfg.cloud.modelRouteId ?? null,
         };
-        setEnableTools(cfg.cloud.enableTools !== false);
-        setAutoMemory(cfg.cloud.autoMemory !== false);
-        setAutoTitle(cfg.cloud.autoTitle !== false);
-        setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
-        setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
-        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
-        approvalsRef.current = cfg.cloud.approvals ?? {};
-        setModels(chatModels);
+                                setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
+                setModels(chatModels);
         const pending = pendingSessionRef.current;
         pendingSessionRef.current = null;
         // 有待发送 prompt 时开新会话草稿，避免挂在旧对话上
@@ -1280,8 +1433,7 @@ export function ChatApp() {
           void getCloudConfig(agentId)
             .then((cfg) => {
               setHasChatRoute(cfg.hasChatRoute);
-              setSystemPrompt(cfg.cloud.systemPrompt ?? "");
-              agentDefaultsRef.current = {
+                            agentDefaultsRef.current = {
                 model: cfg.cloud.model ?? "",
                 modelRouteId: cfg.cloud.modelRouteId ?? null,
               };
@@ -1297,14 +1449,8 @@ export function ChatApp() {
                 setModel(nextModel);
                 setModelRouteId(nextRoute);
               }
-              setEnableTools(cfg.cloud.enableTools !== false);
-              setAutoMemory(cfg.cloud.autoMemory !== false);
-              setAutoTitle(cfg.cloud.autoTitle !== false);
-              setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
-              setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
-        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
-        approvalsRef.current = cfg.cloud.approvals ?? {};
-            })
+                                                        setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
+                          })
             .catch(() => {});
         }
       },
@@ -1314,8 +1460,7 @@ export function ChatApp() {
         void getCloudConfig(agentId)
           .then((cfg) => {
             setHasChatRoute(cfg.hasChatRoute);
-            setSystemPrompt(cfg.cloud.systemPrompt ?? "");
-            agentDefaultsRef.current = {
+                        agentDefaultsRef.current = {
               model: cfg.cloud.model ?? "",
               modelRouteId: cfg.cloud.modelRouteId ?? null,
             };
@@ -1323,14 +1468,8 @@ export function ChatApp() {
               setModel(cfg.cloud.model ?? "");
               setModelRouteId(cfg.cloud.modelRouteId ?? null);
             }
-            setEnableTools(cfg.cloud.enableTools !== false);
-            setAutoMemory(cfg.cloud.autoMemory !== false);
-            setAutoTitle(cfg.cloud.autoTitle !== false);
-            setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
-            setMaxSubagentDepth(String(cfg.cloud.maxSubagentDepth ?? 2));
-        setApprovalPolicy(cfg.cloud.approvals?.policy ?? "allow_all");
-        approvalsRef.current = cfg.cloud.approvals ?? {};
-          })
+                                                setFollowUpMode(cfg.cloud.followUpMode === "queue" ? "queue" : "steer");
+                      })
           .catch(() => {});
       },
     );
@@ -2049,6 +2188,9 @@ export function ChatApp() {
               ...prev,
               state: status.state,
               error: status.error,
+              authMethods: status.authMethods,
+              authRequired: status.authRequired,
+              mcpReconnectRequired: status.mcpReconnectRequired,
               availableCommands: status.availableCommands ?? prev?.availableCommands,
               modes: status.modes ?? prev?.modes,
               models: status.models ?? prev?.models,
@@ -2263,34 +2405,13 @@ export function ChatApp() {
     }
   }
 
-  type ChatSettingsPatch = {
-    systemPrompt?: string;
-    enableTools?: boolean;
-    autoMemory?: boolean;
-    autoTitle?: boolean;
-    followUpMode?: CloudAgentFollowUpMode;
-    maxSubagentDepth?: string;
-    approvalsPolicy?: ToolApprovalPolicy;
-  };
+  type ChatSettingsPatch = { followUpMode?: CloudAgentFollowUpMode };
 
   const persistChatSettings = useCallback(
     async (patch: ChatSettingsPatch) => {
       if (!agentId) return;
       const body: Parameters<typeof saveCloudConfig>[1] = {};
-      if (patch.systemPrompt !== undefined) body.systemPrompt = patch.systemPrompt;
-      if (patch.enableTools !== undefined) body.enableTools = patch.enableTools;
-      if (patch.autoMemory !== undefined) body.autoMemory = patch.autoMemory;
-      if (patch.autoTitle !== undefined) body.autoTitle = patch.autoTitle;
       if (patch.followUpMode !== undefined) body.followUpMode = patch.followUpMode;
-      if (patch.maxSubagentDepth !== undefined) {
-        const n = Number(patch.maxSubagentDepth);
-        body.maxSubagentDepth =
-          Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 5) : null;
-      }
-      if (patch.approvalsPolicy !== undefined) {
-        // 只带 policy：服务端按 key 合并，不覆盖规则 / AI 门控
-        body.approvals = { policy: patch.approvalsPolicy };
-      }
       await saveCloudConfig(agentId, body);
     },
     [agentId],
@@ -2299,7 +2420,6 @@ export function ChatApp() {
   const {
     status: settingsSaveStatus,
     error: settingsSaveError,
-    schedule: scheduleSettings,
     saveNow: saveSettingsNow,
   } = useAutoSave(persistChatSettings, { debounceMs: 550 });
 
@@ -2690,6 +2810,27 @@ export function ChatApp() {
           >
             <AlarmClock className="h-4 w-4" />
           </Button>
+          {agentId && sessionId && !isNewSession && draftRuntimeId !== ZAKURA_RUNTIME_ID && (
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button size="icon-sm" variant="ghost" aria-label="Agent 进程" title="Agent 进程" />}>
+                <Bot className="h-4 w-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={acpAuthPending}
+                  onClick={() => void refreshAcpAfterAuthentication(agentId, sessionId)}>
+                  刷新进程状态
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={acpAuthPending || Boolean(activeRunId) || sending}
+                  onClick={() => void handleAcpReconnect()}>
+                  重新连接
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={acpAuthPending || Boolean(activeRunId) || sending || acpRuntime?.state === "closed"}
+                  onClick={() => void handleAcpClose()}>
+                  关闭进程
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <Button
             size="icon-sm"
             variant="ghost"
@@ -2741,6 +2882,20 @@ export function ChatApp() {
               sessionId={sessionId}
               canAct={(hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID) && !runActive && !sending}
               editingMessageId={editingTarget?.messageId ?? null}
+              readOnly={isGatewaySession}
+              onUIContinue={(message, state, source) => {
+                const targetAgent = agentId;
+                const targetSession = sessionId;
+                if (!targetAgent || !targetSession || runActive || sending || isGatewaySession) return Promise.reject(new Error("当前会话暂时无法提交"));
+                const parentRunId = source.runId ?? parentForSend();
+                const task = sendChainRef.current.catch(() => {}).then(async () => {
+                  const content = `${message}\n\n表单内容：\n${JSON.stringify(state, null, 2)}`;
+                  await sendCloudMessage(targetAgent, targetSession, content, parentRunId, undefined, runOptions, undefined, source.submissionId);
+                  if (sessionIdRef.current === targetSession) { await refreshSessions(); scrollToBottom("smooth"); }
+                });
+                sendChainRef.current = task.catch(() => {});
+                return task;
+              }}
               onRegenerate={(mid) => void handleRegenerate(mid)}
               onEditStart={handleEditStart}
               onSelectVariant={(mid, runId) =>
@@ -2778,9 +2933,10 @@ export function ChatApp() {
               }}
               onToolApproval={(input) => {
                 if (!agentId || !sessionId) return;
-                void resolveToolApproval(agentId, sessionId, input).catch((err) =>
-                  toast.error(err instanceof Error ? err.message : String(err)),
-                );
+                return resolveToolApproval(agentId, sessionId, input).catch((err) => {
+                  toast.error(err instanceof Error ? err.message : String(err));
+                  throw err;
+                });
               }}
             />
               </>
@@ -2807,6 +2963,49 @@ export function ChatApp() {
               <ComputerSelector key={`${agentId}:${sessionId}`} selectionUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computer`} catalogUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computers`} label="对话执行电脑" hint="切换仅影响后续运行，不会移动文件或改变当前运行的电脑。" />
               {agent?.spaceId && <ComputerSessionApproval agentId={agentId} sessionId={sessionId} spaceId={agent.spaceId} />}
             </div>
+          )}
+          {agentId && sessionId && draftRuntimeId !== ZAKURA_RUNTIME_ID
+            && (acpRuntime?.authRequired || acpRuntime?.state === "auth_required" || acpRuntime?.state === "closed" || acpRuntime?.state === "error" || acpRuntime?.mcpReconnectRequired || acpAuthDetail) && (
+            <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className="text-muted-foreground" role="status">{acpAuthDetail || (acpRuntime?.mcpReconnectRequired ? "工具授权已失效，请以当前身份重新连接。" : acpRuntime?.error || "Agent 需要认证")}</span>
+              {(acpRuntime?.authMethods ?? [])
+                .filter((method) => !method.type || method.type === "agent" || method.type === "terminal")
+                .map((method) => (
+                  <Button key={method.id} type="button" variant="ghost" size="sm"
+                    className="h-7 px-2 text-xs" title={method.description}
+                    disabled={acpAuthPending || runActive || sending}
+                    onClick={() => void handleAcpAuthentication(method)}>
+                    {method.name}{method.type === "terminal" ? " · 终端" : ""}
+                  </Button>
+                ))}
+              <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs"
+                disabled={acpAuthPending}
+                onClick={() => void refreshAcpAfterAuthentication(agentId, sessionId)}>
+                {acpAuthPending ? <Loader2 className="size-3 animate-spin" /> : null}刷新状态
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs"
+                disabled={acpAuthPending || Boolean(activeRunId) || sending}
+                title="关闭旧进程，以当前身份重载会话；不会自动重发队列消息"
+                onClick={() => void handleAcpReconnect()}>
+                重新连接
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs"
+                disabled={acpAuthPending || Boolean(activeRunId) || sending || acpRuntime?.state === "closed"}
+                title="仅关闭当前 Agent 进程，保留对话、凭据和队列；不会重新启动"
+                onClick={() => void handleAcpClose()}>
+                关闭进程
+              </Button>
+            </div>
+          )}
+          {acpAuthTerminal && (
+            <WorkspaceTerminalDialog
+              open
+              ticketPath={`/api/agents/${encodeURIComponent(acpAuthTerminal.agentId)}/sessions/${encodeURIComponent(acpAuthTerminal.sessionId)}/acp/terminal-ticket`}
+              ticketBody={{ methodId: acpAuthTerminal.methodId }}
+              request={{ profileName: acpAuthTerminal.methodName }}
+              onExit={handleAcpAuthTerminalExit}
+              onOpenChange={(open) => { if (!open) setAcpAuthTerminal(null); }}
+            />
           )}
           <Composer
             value={input}
@@ -2995,22 +3194,20 @@ export function ChatApp() {
             onCancelUpload={cancelUpload}
             skills={composerCap.skills}
             selectedSkills={selectedSkills}
-            onToggleSkill={(name) =>
-              setSelectedSkills((prev) => {
-                const next = prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name];
-                liveRef.current.skills = next;
-                return next;
-              })
-            }
+            onToggleSkill={(name) => {
+              const current = liveRef.current.skills ?? [];
+              const next = current.includes(name) ? current.filter(s => s !== name) : [...current, name];
+              liveRef.current.skills = next;
+              setSelectedSkills(next);
+            }}
             toolGroups={composerCap.groups}
             disabledGroupIds={disabledGroupIds}
-            onToggleGroup={(id) =>
-              setDisabledGroupIds((prev) => {
-                const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
-                liveRef.current.groups = next;
-                return next;
-              })
-            }
+            onToggleGroup={(id) => {
+              const current = liveRef.current.groups ?? [];
+              const next = current.includes(id) ? current.filter(value => value !== id) : [...current, id];
+              liveRef.current.groups = next;
+              setDisabledGroupIds(next);
+            }}
             models={modelItems}
             model={displayModel}
             modelRouteId={modelRouteId}
@@ -3163,40 +3360,11 @@ export function ChatApp() {
         agentId={agentId}
         saveStatus={settingsSaveStatus}
         saveError={settingsSaveError}
-        systemPrompt={systemPrompt}
-        onSystemPromptChange={(v) => {
-          setSystemPrompt(v);
-          scheduleSettings({ systemPrompt: v });
-        }}
-        enableTools={enableTools}
-        onEnableToolsChange={(v) => {
-          setEnableTools(v);
-          saveSettingsNow({ enableTools: v });
-        }}
-        autoMemory={autoMemory}
-        onAutoMemoryChange={(v) => {
-          setAutoMemory(v);
-          saveSettingsNow({ autoMemory: v });
-        }}
-        autoTitle={autoTitle}
-        onAutoTitleChange={(v) => {
-          setAutoTitle(v);
-          saveSettingsNow({ autoTitle: v });
-        }}
+        spaceId={agent?.spaceId}
         followUpMode={followUpMode}
         onFollowUpModeChange={(v) => {
           setFollowUpMode(v);
           saveSettingsNow({ followUpMode: v });
-        }}
-        approvalPolicy={approvalPolicy}
-        onApprovalPolicyChange={(v) => {
-          setApprovalPolicy(v);
-          saveSettingsNow({ approvalsPolicy: v });
-        }}
-        maxSubagentDepth={maxSubagentDepth}
-        onMaxSubagentDepthChange={(v) => {
-          setMaxSubagentDepth(v);
-          saveSettingsNow({ maxSubagentDepth: v });
         }}
       />
     </div>

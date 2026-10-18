@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import {
   ACP_PROVISION_ROOT,
   acpAdapterSource,
@@ -33,6 +33,21 @@ import {
 } from "../src/index.js";
 
 const SHA = "a".repeat(64);
+
+// WSL may have Windows interop disabled and no Linux node. Prefer Git Bash on
+// Windows so the generated script and its node.exe shim share the host runtime.
+const BASH = (() => {
+  if (process.platform === "win32") {
+    try {
+      const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+      const gitBash = resolve(gitExecPath, "../../../bin/bash.exe");
+      if (existsSync(gitBash)) return gitBash;
+    } catch {
+      // Hosts without Git for Windows can still supply a working bash on PATH.
+    }
+  }
+  return "bash";
+})();
 
 /**
  * bash on this host may be WSL or Git-for-Windows, and neither reads a native
@@ -71,7 +86,7 @@ function scratchRoot(): string {
  */
 function runInstallScript(file: string): void {
   if (process.platform !== "win32") {
-    execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+    execFileSync(BASH, [bashPath(file)], { stdio: "pipe" });
     return;
   }
   const dir = mkdtempSync(join(scratchRoot(), "acp-nodeshim-"));
@@ -79,8 +94,9 @@ function runInstallScript(file: string): void {
     const shim = join(dir, "node");
     writeFileSync(shim, '#!/bin/sh\nexec node.exe "$@"\n');
     chmodSync(shim, 0o755);
-    execFileSync("bash", ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
+    execFileSync(BASH, ["-c", `PATH="$PWD/${bashPath(dir)}:$PATH" bash ${bashPath(file)}`], {
       stdio: "pipe",
+      env: { ...process.env, MSYS: `${process.env.MSYS ?? ""} winsymlinks:nativestrict`.trim() },
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -92,7 +108,7 @@ function assertValidBash(script: string, label: string): void {
   try {
     const file = join(dir, "script.sh");
     writeFileSync(file, script);
-    execFileSync("bash", ["-n", bashPath(file)], { stdio: "pipe" });
+    execFileSync(BASH, ["-n", bashPath(file)], { stdio: "pipe" });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     assert.fail(`${label} 不是合法的 bash：${detail}`);
@@ -269,7 +285,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
       );
       const file = join(root, "install.sh");
       writeFileSync(file, script);
-      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+      execFileSync(BASH, [bashPath(file)], { stdio: "pipe" });
 
       assert.ok(existsSync(join(root, "acp/codex-acp/1.6.2/.ok")), "缺少 .ok 标记");
       assert.ok(
@@ -279,7 +295,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
 
       // 二次运行必须靠 .ok 短路：删掉可执行文件后重跑，它不应该被重新装回来。
       rmSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp"), { force: true });
-      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+      execFileSync(BASH, [bashPath(file)], { stdio: "pipe" });
       assert.ok(
         !existsSync(join(root, "acp/codex-acp/1.6.2/node_modules/.bin/codex-acp")),
         "已有 .ok 时不应重复安装",
@@ -351,7 +367,7 @@ describe("ACP 安装脚本行为（桩掉真实安装）", () => {
         .join(bashPath(join(root, "acp")));
       const file = join(root, "gc.sh");
       writeFileSync(file, gc);
-      execFileSync("bash", [bashPath(file)], { stdio: "pipe" });
+      execFileSync(BASH, [bashPath(file)], { stdio: "pipe" });
 
       assert.ok(existsSync(join(root, "acp/codex-acp/1.6.2")), "不该删掉要保留的版本");
       assert.ok(!existsSync(join(root, "acp/codex-acp/9.9.9")), "旧版本应被回收");

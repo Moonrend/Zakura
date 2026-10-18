@@ -1,0 +1,2874 @@
+{
+ "digest": "057821b59672c55f",
+ "imagePrefix": "ghcr.io/moonrend/acp-registry",
+ "profiles": [
+  {
+   "id": "agoragentic-acp",
+   "displayName": "Agoragentic",
+   "description": "",
+   "managed": true,
+   "command": "agoragentic-acp",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "amp",
+   "displayName": "Amp",
+   "description": "Amp Agent CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "amp",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Sourcegraph API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "antigravity-acp",
+   "displayName": "Google Antigravity",
+   "description": "",
+   "managed": true,
+   "command": "antigravity-acp",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "auggie",
+   "displayName": "Auggie CLI",
+   "description": "Augment Code CLI（npx 分发，按需安装）",
+   "managed": true,
+   "command": "auggie",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "autohand",
+   "displayName": "Autohand Code",
+   "description": "",
+   "managed": true,
+   "command": "autohand",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "claude-code",
+   "displayName": "Claude Code",
+   "description": "Anthropic Claude Code，经官方 ACP 适配器接入",
+   "managed": true,
+   "command": "claude-agent-acp",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "sessionModeId": "default",
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Anthropic API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "sk-ant-…",
+     "help": "API key 模式下写入 ANTHROPIC_API_KEY。self 模式则使用容器内已有登录。"
+    },
+    {
+     "id": "oauth_token",
+     "label": "Claude setup-token",
+     "type": "password",
+     "sensitive": true,
+     "placeholder": "粘贴 claude setup-token 输出",
+     "help": "OAuth 模式注入 CLAUDE_CODE_OAUTH_TOKEN。订阅 token 给 Agent SDK 可能被 Anthropic 拒绝，失败请改用 API key。"
+    },
+    {
+     "id": "base_url",
+     "label": "Anthropic base URL",
+     "type": "url",
+     "placeholder": "https://api.anthropic.com"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "claude-sonnet-4-5",
+     "help": "在创建 ACP 会话前写入 Agent 配置；若 Agent 同时提供协议模型列表，聊天框仍可切换。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "cline",
+   "displayName": "Cline",
+   "description": "Cline CLI（npx 分发，按需安装）",
+   "managed": true,
+   "command": "cline",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "codebuddy",
+   "displayName": "Codebuddy Code",
+   "description": "Codebuddy Code Agent（npx 分发，按需安装）",
+   "managed": true,
+   "command": "codebuddy-code",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "codex",
+   "displayName": "Codex",
+   "description": "OpenAI Codex CLI，经官方 ACP 适配器接入",
+   "managed": true,
+   "command": "codex-acp",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "OpenAI API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "sk-…",
+     "help": "API key 模式下写入 OPENAI_API_KEY。OAuth 可用设置页设备码，或聊天里协议登录。"
+    },
+    {
+     "id": "base_url",
+     "label": "OpenAI base URL",
+     "type": "url",
+     "placeholder": "https://api.openai.com/v1"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "gpt-5.2-codex",
+     "help": "写入 CODEX_HOME/config.toml 的 model；Codex 不读取 OPENAI_MODEL 环境变量。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "cortex-code",
+   "displayName": "Cortex Code",
+   "description": "",
+   "managed": true,
+   "command": "cortex-code",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "corust-agent",
+   "displayName": "Corust Agent",
+   "description": "",
+   "managed": true,
+   "command": "corust-agent",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "crow-cli",
+   "displayName": "crow-cli",
+   "description": "",
+   "managed": true,
+   "command": "crow-cli",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "cursor",
+   "displayName": "Cursor",
+   "description": "Cursor Agent CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "cursor",
+   "args": [],
+   "setupModes": [
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "deepagents",
+   "displayName": "DeepAgents",
+   "description": "DeepAgents CLI（npx 分发，按需安装）",
+   "managed": true,
+   "command": "deepagents",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "devin",
+   "displayName": "Devin",
+   "description": "Cognition Devin CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "devin",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Devin API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "dimcode",
+   "displayName": "DimCode",
+   "description": "",
+   "managed": true,
+   "command": "dimcode",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "dirac",
+   "displayName": "Dirac",
+   "description": "Dirac CLI Agent（npx 分发，按需安装）",
+   "managed": true,
+   "command": "dirac",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "factory-droid",
+   "displayName": "Factory Droid",
+   "description": "Factory AI Droid CLI（npx 分发，按需安装）",
+   "managed": true,
+   "command": "factory-droid",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Factory API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "fast-agent",
+   "displayName": "fast-agent",
+   "description": "fast-agent（uvx 分发，按需安装）",
+   "managed": true,
+   "command": "fast-agent",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "fx",
+   "displayName": "fx",
+   "description": "Vercel fx — 轻量原生编码 Agent（fx acp）",
+   "managed": true,
+   "command": "fx",
+   "args": [
+    "acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "AI Gateway API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "vck_…",
+     "help": "写入 AI_GATEWAY_API_KEY。fx 通过 Vercel AI Gateway 路由到各家模型。"
+    },
+    {
+     "id": "base_url",
+     "label": "Gateway Base URL",
+     "type": "url",
+     "placeholder": "https://ai-gateway.vercel.sh/v1",
+     "help": "留空时使用 fx 默认 Gateway 端点。"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "zai/glm-5.2-fast",
+     "help": "写入 FX_MODEL，作为会话默认模型。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "gemini-cli",
+   "displayName": "Gemini CLI",
+   "description": "Google Gemini CLI 的内置 ACP 入口",
+   "managed": true,
+   "command": "gemini",
+   "args": [
+    "--acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Gemini API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "AIza…",
+     "help": "API key 模式下写入 GEMINI_API_KEY 或 GOOGLE_API_KEY。OAuth 走 ACP authenticate。"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "gemini-2.5-pro",
+     "help": "写入 GEMINI_MODEL，作为会话默认模型。之后仍可通过 ACP 协议切换。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "copilot",
+   "displayName": "GitHub Copilot",
+   "description": "GitHub Copilot CLI 原生 ACP（官方 Registry 入口 copilot --acp）",
+   "managed": true,
+   "command": "copilot",
+   "args": [
+    "--acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "GitHub PAT",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "ghp_...",
+     "help": "官方文档要求 fine-grained PAT 含 Copilot Requests 权限，并通过 GH_TOKEN 或 GITHUB_TOKEN 注入。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "glm-acp-agent",
+   "displayName": "GLM Agent",
+   "description": "",
+   "managed": true,
+   "command": "glm-acp-agent",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "goose",
+   "displayName": "Goose",
+   "description": "Block Goose Agent CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "goose",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "grok",
+   "displayName": "Grok Build",
+   "description": "xAI Grok Build，支持 xAI API key 或 Agent 自身登录",
+   "managed": true,
+   "command": "grok",
+   "args": [
+    "agent",
+    "stdio"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "xAI API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "xai-…",
+     "help": "写入 XAI_API_KEY/GROK_API_KEY；使用 API key 模式时不会触发交互登录。"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "grok-4-1-fast-reasoning"
+    },
+    {
+     "id": "base_url",
+     "label": "xAI base URL",
+     "type": "url",
+     "placeholder": "https://api.x.ai/v1"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "harn",
+   "displayName": "Harn",
+   "description": "",
+   "managed": true,
+   "command": "harn",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "hermes",
+   "displayName": "Hermes",
+   "description": "Nous Research Hermes Agent（ACP）",
+   "managed": true,
+   "command": "hermes-acp",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "provider",
+     "label": "Provider",
+     "type": "text",
+     "required": true,
+     "placeholder": "openai",
+     "help": "写入 durable .env 的 LLM_PROVIDER。"
+    },
+    {
+     "id": "model",
+     "label": "Model",
+     "type": "text",
+     "required": true,
+     "placeholder": "gpt-4.1"
+    },
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url",
+     "placeholder": "https://api.openai.com/v1"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "junie",
+   "displayName": "Junie",
+   "description": "JetBrains Junie Agent CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "junie",
+   "args": [],
+   "setupModes": [
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "kilo",
+   "displayName": "Kilo",
+   "description": "",
+   "managed": true,
+   "command": "kilo",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "kimi-code",
+   "displayName": "Kimi Code",
+   "description": "Moonshot Kimi Code CLI 原生 ACP（官方入口 kimi acp）",
+   "managed": true,
+   "command": "kimi",
+   "args": [
+    "acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Moonshot Kimi API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "sk-...",
+     "help": "API key 模式下写入 KIMI_API_KEY。"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "kimi-k2.5"
+    },
+    {
+     "id": "base_url",
+     "label": "Moonshot / OpenAI 兼容 Base URL",
+     "type": "url"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "kiro",
+   "displayName": "Kiro CLI",
+   "description": "AWS Kiro CLI（kiro-cli acp）— 支持 AGENTS.md、Skills 与 MCP",
+   "managed": true,
+   "command": "kiro-cli",
+   "args": [
+    "acp"
+   ],
+   "setupModes": [
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "minion-code",
+   "displayName": "Minion Code",
+   "description": "",
+   "managed": true,
+   "command": "minion-code",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "mistral-vibe",
+   "displayName": "Mistral Vibe",
+   "description": "Mistral AI Vibe Agent（binary 分发，按需安装）",
+   "managed": true,
+   "command": "mistral-vibe",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Mistral API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "mistral-medium-3"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "nova",
+   "displayName": "Nova",
+   "description": "Amazon Nova Agent CLI（npx 分发，按需安装）",
+   "managed": true,
+   "command": "nova",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "AWS Access Key / API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "opencode",
+   "displayName": "OpenCode",
+   "description": "OpenCode 原生 ACP（ACP 官方 Registry 入口 opencode acp）",
+   "managed": true,
+   "command": "opencode",
+   "args": [
+    "acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "help": "OpenCode 通过生成的 opencode.json 接入该 key；sk-ant- 前缀走 Anthropic 协议，其余走 OpenAI 兼容协议。"
+    },
+    {
+     "id": "base_url",
+     "label": "OpenAI 兼容 Base URL",
+     "type": "url",
+     "placeholder": "https://api.openai.com/v1",
+     "help": "留空时按 key 前缀使用内置 Anthropic/OpenAI 供应商；填写后会生成自定义 provider 配置。"
+    },
+    {
+     "id": "model",
+     "label": "模型",
+     "type": "text",
+     "required": true,
+     "placeholder": "kimi-k2.5 / gpt-5.2 / claude-sonnet-4-5",
+     "help": "OpenCode 需要显式默认模型才能启动；Zakura 路由下可留空（自动取网关模型列表）。"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "pi",
+   "displayName": "Pi Coding Agent",
+   "description": "Pi coding agent，经社区 pi-acp MVP 适配器接入",
+   "managed": true,
+   "command": "pi-acp",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "oauth",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "provider",
+     "label": "Provider",
+     "type": "text",
+     "required": true,
+     "placeholder": "openai",
+     "help": "写入 LLM_PROVIDER。"
+    },
+    {
+     "id": "model",
+     "label": "Model",
+     "type": "text",
+     "required": true,
+     "placeholder": "gpt-4o"
+    },
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "OpenAI 兼容 Base URL",
+     "type": "url",
+     "placeholder": "https://api.openai.com/v1"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "poolside",
+   "displayName": "Poolside",
+   "description": "Poolside Agent CLI（binary 分发，按需安装）",
+   "managed": true,
+   "command": "poolside",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "Poolside API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "qoder",
+   "displayName": "Qoder CLI",
+   "description": "",
+   "managed": true,
+   "command": "qoder",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "qwen-code",
+   "displayName": "Qwen Code",
+   "description": "Alibaba Qwen Code Agent（npx 分发，按需安装）",
+   "managed": true,
+   "command": "qwen-code",
+   "args": [
+    "--acp"
+   ],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": true,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "DashScope API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true,
+     "placeholder": "sk-..."
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text",
+     "placeholder": "qwen3-coder"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "sigit",
+   "displayName": "siGit Code",
+   "description": "siGit Code Agent（npx + binary 双分发，按需安装）",
+   "managed": true,
+   "command": "sigit",
+   "args": [],
+   "setupModes": [
+    "api_key",
+    "self"
+   ],
+   "supportsZakuraRoute": false,
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "stakpak",
+   "displayName": "Stakpak",
+   "description": "",
+   "managed": true,
+   "command": "stakpak",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  },
+  {
+   "id": "vtcode",
+   "displayName": "VT Code",
+   "description": "",
+   "managed": true,
+   "command": "vtcode",
+   "args": [],
+   "setupModes": [
+    "self",
+    "api_key"
+   ],
+   "managedFields": [
+    {
+     "id": "api_key",
+     "label": "API key",
+     "type": "password",
+     "required": true,
+     "sensitive": true
+    },
+    {
+     "id": "base_url",
+     "label": "Base URL",
+     "type": "url"
+    },
+    {
+     "id": "model",
+     "label": "默认模型",
+     "type": "text"
+    }
+   ],
+   "supportsZakuraRoute": false,
+   "forceHttpMcp": false,
+   "preinstalled": false
+  }
+ ],
+ "agents": [
+  {
+   "id": "agoragentic-acp",
+   "name": "Agoragentic",
+   "version": "1.3.0",
+   "profileId": "agoragentic-acp",
+   "image": "ghcr.io/moonrend/acp-registry/agoragentic-acp:1.3.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "amp-acp",
+   "name": "Amp",
+   "version": "0.9.0",
+   "profileId": "amp",
+   "image": "ghcr.io/moonrend/acp-registry/amp-acp:0.9.0",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "antigravity-acp",
+   "name": "Google Antigravity",
+   "version": "1.1.1",
+   "profileId": "antigravity-acp",
+   "image": "ghcr.io/moonrend/acp-registry/antigravity-acp:1.1.1",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "auggie",
+   "name": "Auggie CLI",
+   "version": "0.36.0",
+   "profileId": "auggie",
+   "image": "ghcr.io/moonrend/acp-registry/auggie:0.36.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "autohand",
+   "name": "Autohand Code",
+   "version": "0.2.1",
+   "profileId": "autohand",
+   "image": "ghcr.io/moonrend/acp-registry/autohand:0.2.1",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "claude-acp",
+   "name": "Claude Agent",
+   "version": "0.75.1",
+   "profileId": "claude-code",
+   "image": "ghcr.io/moonrend/acp-registry/claude-acp:0.75.1",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}",
+     "CLAUDE_CONFIG_DIR": "${STATE_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".claude/.credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     },
+     {
+      "durable": ".claude/settings.json",
+      "runtime": "settings.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     },
+     {
+      "durable": ".claude/settings.local.json",
+      "runtime": "settings.local.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     },
+     {
+      "durable": ".claude/CLAUDE.md",
+      "runtime": "CLAUDE.md",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     },
+     {
+      "durable": ".claude.json",
+      "runtime": ".claude.json",
+      "sync": "none",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "sessionModeId": "default"
+   }
+  },
+  {
+   "id": "cline",
+   "name": "Cline",
+   "version": "3.0.61",
+   "profileId": "cline",
+   "image": "ghcr.io/moonrend/acp-registry/cline:3.0.61",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "codebuddy-code",
+   "name": "Codebuddy Code",
+   "version": "2.147.0",
+   "profileId": "codebuddy",
+   "image": "ghcr.io/moonrend/acp-registry/codebuddy-code:2.147.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "codex-acp",
+   "name": "Codex",
+   "version": "1.10.0",
+   "profileId": "codex",
+   "image": "ghcr.io/moonrend/acp-registry/codex-acp:1.10.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}",
+     "CODEX_HOME": "${STATE_DIR}",
+     "CODEX_SQLITE_HOME": "${STATE_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".codex/auth.json",
+      "runtime": "auth.json",
+      "sync": "codex_auth",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     },
+     {
+      "durable": ".codex/auth.json",
+      "runtime": "auth.json",
+      "sync": "none",
+      "when": [
+       "api_key"
+      ]
+     },
+     {
+      "durable": ".codex/config.toml",
+      "runtime": "config.toml",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     },
+     {
+      "durable": ".codex/config.toml",
+      "runtime": "config.toml",
+      "sync": "none",
+      "when": [
+       "oauth",
+       "api_key"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ],
+    "apiKeyEnv": [
+     "OPENAI_API_KEY"
+    ],
+    "noBrowserEnv": {
+     "NO_BROWSER": "1"
+    }
+   },
+   "integration": {
+    "zakuraRoute": true
+   }
+  },
+  {
+   "id": "cortex-code",
+   "name": "Cortex Code",
+   "version": "1.0.73",
+   "profileId": "cortex-code",
+   "image": "ghcr.io/moonrend/acp-registry/cortex-code:1.0.73",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "corust-agent",
+   "name": "Corust Agent",
+   "version": "0.6.0",
+   "profileId": "corust-agent",
+   "image": "ghcr.io/moonrend/acp-registry/corust-agent:0.6.0",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "crow-cli",
+   "name": "crow-cli",
+   "version": "0.1.24",
+   "profileId": "crow-cli",
+   "image": "ghcr.io/moonrend/acp-registry/crow-cli:0.1.24",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "cursor",
+   "name": "Cursor",
+   "version": "2026.09.02",
+   "profileId": "cursor",
+   "image": "ghcr.io/moonrend/acp-registry/cursor:2026.09.02",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self"
+    ]
+   }
+  },
+  {
+   "id": "deepagents",
+   "name": "DeepAgents",
+   "version": "0.1.7",
+   "profileId": "deepagents",
+   "image": "ghcr.io/moonrend/acp-registry/deepagents:0.1.7",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "devin",
+   "name": "Devin",
+   "version": "3000.6.14",
+   "profileId": "devin",
+   "image": "ghcr.io/moonrend/acp-registry/devin:3000.6.14",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "dimcode",
+   "name": "DimCode",
+   "version": "0.3.30",
+   "profileId": "dimcode",
+   "image": "ghcr.io/moonrend/acp-registry/dimcode:0.3.30",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "dirac",
+   "name": "Dirac",
+   "version": "0.5.10",
+   "profileId": "dirac",
+   "image": "ghcr.io/moonrend/acp-registry/dirac:0.5.10",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true,
+    "env": {
+     "DIRAC_PROVIDER": "openai",
+     "DIRAC_API_KEY": "${managed.zakura_api_key}",
+     "DIRAC_BASE_URL": "${managed.zakura_base_url}",
+     "DIRAC_MODEL": "${managed.model}"
+    }
+   }
+  },
+  {
+   "id": "factory-droid",
+   "name": "Factory Droid",
+   "version": "0.213.0",
+   "profileId": "factory-droid",
+   "image": "ghcr.io/moonrend/acp-registry/factory-droid:0.213.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "fast-agent",
+   "name": "fast-agent",
+   "version": "0.10.1",
+   "profileId": "fast-agent",
+   "image": "ghcr.io/moonrend/acp-registry/fast-agent:0.10.1",
+   "dist": {
+    "kind": "uvx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true,
+    "env": {
+     "FAST_AGENT_MODEL": "generic.${managed.model}",
+     "GENERIC__API_KEY": "${managed.zakura_api_key}",
+     "GENERIC__BASE_URL": "${managed.zakura_base_url}",
+     "GENERIC__DEFAULT_MODEL": "${managed.model}"
+    }
+   }
+  },
+  {
+   "id": "fx-acp",
+   "name": "fx",
+   "version": "0.0.7",
+   "profileId": "fx",
+   "image": "ghcr.io/moonrend/acp-registry/fx-acp:0.0.7",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${HOME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".fx",
+      "runtime": ".fx",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "description": "fx CLI（fx acp）— Vercel AI Gateway 驱动的编码代理",
+   "homepage": "https://fx.sh",
+   "integration": {
+    "zakuraRoute": true
+   }
+  },
+  {
+   "id": "gemini",
+   "name": "Gemini CLI",
+   "version": "0.58.0",
+   "profileId": "gemini-cli",
+   "image": "ghcr.io/moonrend/acp-registry/gemini:0.58.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "github-copilot-cli",
+   "name": "GitHub Copilot",
+   "version": "1.0.83",
+   "profileId": "copilot",
+   "image": "ghcr.io/moonrend/acp-registry/github-copilot-cli:1.0.83",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "glm-acp-agent",
+   "name": "GLM Agent",
+   "version": "1.8.0",
+   "profileId": "glm-acp-agent",
+   "image": "ghcr.io/moonrend/acp-registry/glm-acp-agent:1.8.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "goose",
+   "name": "goose",
+   "version": "1.49.0",
+   "profileId": "goose",
+   "image": "ghcr.io/moonrend/acp-registry/goose:1.49.0",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true,
+    "env": {
+     "GOOSE_PROVIDER": "openai",
+     "GOOSE_MODEL": "${managed.model}",
+     "OPENAI_API_KEY": "${managed.zakura_api_key}",
+     "OPENAI_HOST": "${managed.zakura_base_url}",
+     "OPENAI_BASE_PATH": "chat/completions"
+    }
+   }
+  },
+  {
+   "id": "grok-build",
+   "name": "Grok Build",
+   "version": "1.0.24",
+   "profileId": "grok",
+   "image": "ghcr.io/moonrend/acp-registry/grok-build:1.0.24",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true
+   }
+  },
+  {
+   "id": "harn",
+   "name": "Harn",
+   "version": "0.10.133",
+   "profileId": "harn",
+   "image": "ghcr.io/moonrend/acp-registry/harn:0.10.133",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "hermes-acp",
+   "name": "Hermes",
+   "version": "0.19.0",
+   "profileId": "hermes",
+   "image": "ghcr.io/moonrend/acp-registry/hermes-acp:0.19.0",
+   "dist": {
+    "kind": "uvx"
+   },
+   "storage": {
+    "mode": "home",
+    "env": {
+     "HOME": "${HOME_DIR}",
+     "HERMES_HOME": "${HOME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     },
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "none",
+      "when": [
+       "api_key"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   },
+   "description": "Hermes Agent（hermes-acp）— 支持 MCP 的 Python 编码代理",
+   "homepage": "https://pypi.org/project/hermes-agent/",
+   "integration": {
+    "zakuraRoute": true,
+    "dotenv": {
+     ".env": "LLM_PROVIDER=${provider}\nLLM_MODEL=${model}\nLLM_API_KEY=${api_key}\nOPENAI_API_KEY=${api_key}\nHERMES_API_KEY=${api_key}\nOPENAI_API_TOKEN=${api_key}\nAPI_KEY=${api_key}\nLLM_BASE_URL=${base_url}\nOPENAI_BASE_URL=${base_url}\nOPENAI_API_BASE=${base_url}\nOPENAI_API_BASE_URL=${base_url}\nLLM_API_BASE=${base_url}\nLLM_API_BASE_URL=${base_url}\nHERMES_BASE_URL=${base_url}\n"
+    },
+    "runtimeFiles": {
+     "config.yaml": "model:\n  provider: ${runtime_provider}\n  default: ${model}\n  base_url: ${base_url}\n"
+    }
+   }
+  },
+  {
+   "id": "junie",
+   "name": "Junie",
+   "version": "3123.7.0",
+   "profileId": "junie",
+   "image": "ghcr.io/moonrend/acp-registry/junie:3123.7.0",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self"
+    ]
+   }
+  },
+  {
+   "id": "kilo",
+   "name": "Kilo",
+   "version": "7.5.16",
+   "profileId": "kilo",
+   "image": "ghcr.io/moonrend/acp-registry/kilo:7.5.16",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "kimi",
+   "name": "Kimi CLI",
+   "version": "1.50.0",
+   "profileId": "kimi-code",
+   "image": "ghcr.io/moonrend/acp-registry/kimi:1.50.0",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true
+   }
+  },
+  {
+   "id": "kiro-acp",
+   "name": "Kiro CLI",
+   "version": "2.21.1",
+   "profileId": "kiro",
+   "image": "ghcr.io/moonrend/acp-registry/kiro-acp:2.21.1",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit"
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self"
+    ]
+   },
+   "description": "AWS Kiro CLI（kiro-cli acp）— 支持 AGENTS.md、Skills 与 MCP",
+   "homepage": "https://kiro.dev"
+  },
+  {
+   "id": "minion-code",
+   "name": "Minion Code",
+   "version": "0.1.44",
+   "profileId": "minion-code",
+   "image": "ghcr.io/moonrend/acp-registry/minion-code:0.1.44",
+   "dist": {
+    "kind": "uvx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "mistral-vibe",
+   "name": "Mistral Vibe",
+   "version": "2.24.1",
+   "profileId": "mistral-vibe",
+   "image": "ghcr.io/moonrend/acp-registry/mistral-vibe:2.24.1",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "nova",
+   "name": "Nova",
+   "version": "1.1.37",
+   "profileId": "nova",
+   "image": "ghcr.io/moonrend/acp-registry/nova:1.1.37",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "opencode",
+   "name": "OpenCode",
+   "version": "1.18.29",
+   "profileId": "opencode",
+   "image": "ghcr.io/moonrend/acp-registry/opencode:1.18.29",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     },
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "none",
+      "when": [
+       "api_key"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true,
+    "modelPrefix": "zakura/"
+   }
+  },
+  {
+   "id": "pi-acp",
+   "name": "pi ACP",
+   "version": "0.0.33-zakura.1",
+   "profileId": "pi",
+   "image": "ghcr.io/moonrend/acp-registry/pi-acp:0.0.33-zakura.1",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "state-home",
+    "xdg": true,
+    "artifacts": [
+     {
+      "durable": "home",
+      "runtime": "home",
+      "sync": "exit",
+      "when": [
+       "self",
+       "oauth"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "oauth",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true,
+    "modelPrefix": "zakura/"
+   }
+  },
+  {
+   "id": "poolside",
+   "name": "Poolside",
+   "version": "1.0.16",
+   "profileId": "poolside",
+   "image": "ghcr.io/moonrend/acp-registry/poolside:1.0.16",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "qoder",
+   "name": "Qoder CLI",
+   "version": "0.2.14",
+   "profileId": "qoder",
+   "image": "ghcr.io/moonrend/acp-registry/qoder:0.2.14",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "qwen-code",
+   "name": "Qwen Code",
+   "version": "0.23.0",
+   "profileId": "qwen-code",
+   "image": "ghcr.io/moonrend/acp-registry/qwen-code:0.23.0",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   },
+   "integration": {
+    "zakuraRoute": true
+   }
+  },
+  {
+   "id": "sigit",
+   "name": "siGit Code",
+   "version": "1.5.7",
+   "profileId": "sigit",
+   "image": "ghcr.io/moonrend/acp-registry/sigit:1.5.7",
+   "dist": {
+    "kind": "npx"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "stakpak",
+   "name": "Stakpak",
+   "version": "0.3.88",
+   "profileId": "stakpak",
+   "image": "ghcr.io/moonrend/acp-registry/stakpak:0.3.88",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  },
+  {
+   "id": "vtcode",
+   "name": "VT Code",
+   "version": "0.96.14",
+   "profileId": "vtcode",
+   "image": "ghcr.io/moonrend/acp-registry/vtcode:0.96.14",
+   "dist": {
+    "kind": "binary"
+   },
+   "storage": {
+    "mode": "files",
+    "env": {
+     "HOME": "${RUNTIME_DIR}"
+    },
+    "artifacts": [
+     {
+      "durable": ".credentials.json",
+      "runtime": ".credentials.json",
+      "sync": "exit",
+      "when": [
+       "self"
+      ]
+     }
+    ]
+   },
+   "auth": {
+    "modes": [
+     "self",
+     "api_key"
+    ]
+   }
+  }
+ ]
+}

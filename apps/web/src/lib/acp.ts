@@ -12,12 +12,20 @@ export type AcpConfigResponse = {
   configError?: string;
 };
 
-export async function fetchAcpConfig(agentId: string) {
-  return api<AcpConfigResponse>(`/api/agents/${agentId}/acp/config`, { cacheTtlMs: false });
+export type AcpSettingsTarget = string | { spaceId: string };
+
+function acpSettingsPath(target: AcpSettingsTarget): string {
+  return typeof target === "string"
+    ? `/api/agents/${target}/acp`
+    : `/api/spaces/${target.spaceId}/acp`;
 }
 
-export async function saveAcpConfig(agentId: string, config: AcpAgentConfig) {
-  return api<AcpConfigResponse>(`/api/agents/${agentId}/acp/config`, {
+export async function fetchAcpConfig(agentId: AcpSettingsTarget) {
+  return api<AcpConfigResponse>(`${acpSettingsPath(agentId)}/config`, { cacheTtlMs: false });
+}
+
+export async function saveAcpConfig(agentId: AcpSettingsTarget, config: AcpAgentConfig) {
+  return api<AcpConfigResponse>(`${acpSettingsPath(agentId)}/config`, {
     method: "PUT",
     json: config,
   });
@@ -55,6 +63,18 @@ export async function fetchAcpRuntime(agentId: string, sessionId: string) {
   });
 }
 
+export async function reconnectAcpRuntime(agentId: string, sessionId: string) {
+  return api<AcpRuntimeStatus>(`/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/acp-runtime/reconnect`, {
+    method: "POST",
+  });
+}
+
+export async function closeAcpRuntime(agentId: string, sessionId: string) {
+  return api<AcpRuntimeStatus>(`/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/acp-runtime/close`, {
+    method: "POST",
+  });
+}
+
 export async function prepareAcpDraft(agentId: string, profileId: string, project?: string | null) {
   return api<{
     session: import("./cloud-agent").CloudSession;
@@ -87,53 +107,101 @@ export async function resolveAcpElicitation(
   });
 }
 
-export async function startAcpDeviceLogin(agentId: string, profileId: string) {
-  return api<{
-    loginId: string;
-    userCode: string;
-    verificationUrl: string;
-    interval: number;
-    expiresIn: number;
-    status: string;
-    error?: string;
-  }>(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/oauth/device/start`, {
+export type AcpDeviceAttempt = {
+  attemptId: string;
+  status: "pending" | "complete" | "cancelled" | "expired" | "failed" | "unknown";
+  userCode?: string;
+  verificationUri?: string;
+  expiresAt: string;
+  nextPollAt?: string;
+  interval: number;
+  error?: string;
+};
+
+export async function startAcpDeviceLogin(
+  agentId: AcpSettingsTarget,
+  profileId: string,
+  signal?: AbortSignal,
+): Promise<AcpDeviceAttempt> {
+  const result = await api<{ device: AcpDeviceAttempt }>(
+    `${acpSettingsPath(agentId)}/agents/${encodeURIComponent(profileId)}/oauth/device/start`,
+    { method: "POST", signal },
+  );
+  return result.device;
+}
+
+export async function pollAcpDeviceLogin(
+  agentId: AcpSettingsTarget,
+  profileId: string,
+  attemptId: string,
+  signal?: AbortSignal,
+): Promise<AcpDeviceAttempt> {
+  const result = await api<{ device: AcpDeviceAttempt }>(
+    `${acpSettingsPath(agentId)}/agents/${encodeURIComponent(profileId)}/oauth/device/poll`,
+    { method: "POST", json: { attemptId }, signal },
+  );
+  return result.device;
+}
+
+export async function cancelAcpDeviceLogin(
+  agentId: AcpSettingsTarget,
+  profileId: string,
+  attemptId: string,
+  signal?: AbortSignal,
+): Promise<{ cancelled: boolean }> {
+  return api(`${acpSettingsPath(agentId)}/agents/${encodeURIComponent(profileId)}/oauth/device/cancel`, {
     method: "POST",
+    json: { attemptId },
+    signal,
   });
 }
 
-export async function pollAcpDeviceLogin(agentId: string, profileId: string, loginId: string) {
-  return api<{
-    loginId: string;
-    userCode: string;
-    verificationUrl: string;
-    interval: number;
-    expiresIn: number;
-    status: string;
-    error?: string;
-  }>(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/oauth/device/poll`, {
-    method: "POST",
-    json: { loginId },
+export type AcpAuthRecovery = {
+  authentication: {
+    kind: string;
+    /** Authentication lease expiry, in Unix milliseconds. */
+    expiresAt: number;
+    nodeId: string;
+    computerId: string;
+  } | null;
+  recoveryToken?: string;
+};
+
+export async function fetchAcpAuthRecovery(
+  spaceId: string,
+  profileId: string,
+  signal?: AbortSignal,
+): Promise<AcpAuthRecovery> {
+  return api(`/api/spaces/${encodeURIComponent(spaceId)}/acp/agents/${encodeURIComponent(profileId)}/auth-recovery`, {
+    cacheTtlMs: false,
+    signal,
   });
 }
 
-export async function cancelAcpDeviceLogin(agentId: string, profileId: string, loginId: string) {
-  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/oauth/device/cancel`, {
+export async function acknowledgeAcpAuthRecovery(
+  spaceId: string,
+  profileId: string,
+  recoveryToken: string,
+  signal?: AbortSignal,
+): Promise<{ reconciled: boolean }> {
+  return api(`/api/spaces/${encodeURIComponent(spaceId)}/acp/agents/${encodeURIComponent(profileId)}/auth-recovery/acknowledge`, {
     method: "POST",
-    json: { loginId },
+    json: { recoveryToken, operationQuiesced: true },
+    signal,
   });
 }
 
 export async function probeAcpAdapter(
-  agentId: string,
+  agentId: AcpSettingsTarget,
   profileId: string,
 ): Promise<{ installed: boolean; command: string; output: string }> {
-  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/probe`, {
+  return api(`${acpSettingsPath(agentId)}/agents/${encodeURIComponent(profileId)}/probe`, {
     method: "POST",
   });
 }
 
 export async function installAcpAdapter(
-  agentId: string,
+  agentId: AcpSettingsTarget,
   profileId: string,
   opts?: { version?: string; update?: boolean; rebuild?: boolean },
 ): Promise<{ ok: boolean; accepted: boolean; install: AcpAdapterInstallProgress }> {
@@ -142,7 +210,7 @@ export async function installAcpAdapter(
   if (opts?.update) params.set("update", "true");
   if (opts?.rebuild) params.set("rebuild", "true");
   const query = params.toString();
-  return api(`/api/agents/${agentId}/acp/agents/${encodeURIComponent(profileId)}/install${query ? `?${query}` : ""}`, {
+  return api(`${acpSettingsPath(agentId)}/agents/${encodeURIComponent(profileId)}/install${query ? `?${query}` : ""}`, {
     method: "POST",
   });
 }
@@ -164,10 +232,10 @@ export type AcpAdapterInstallProgress = {
 };
 
 export async function fetchAcpAdapterInstalls(
-  agentId: string,
+  agentId: AcpSettingsTarget,
 ): Promise<AcpAdapterInstallProgress[]> {
   const result = await api<{ installs: AcpAdapterInstallProgress[] }>(
-    `/api/agents/${agentId}/acp/installs`,
+    `${acpSettingsPath(agentId)}/installs`,
     { cacheTtlMs: false },
   );
   return result.installs;
@@ -207,22 +275,22 @@ export type AcpAdapterStatus = {
  * snapshot version by passing null.
  */
 export async function adoptAcpAdapterVersion(
-  agentId: string,
+  agentId: AcpSettingsTarget,
   registryId: string,
   version: string | null,
 ): Promise<{ id: string; pinnedVersion: string | null; image: string }> {
-  return api(`/api/agents/${agentId}/acp/adapters/${encodeURIComponent(registryId)}/adopt`, {
+  return api(`${acpSettingsPath(agentId)}/adapters/${encodeURIComponent(registryId)}/adopt`, {
     method: "POST",
     json: { version: version ?? "" },
   });
 }
 
 export async function fetchAcpAdapterStatus(
-  agentId: string,
+  agentId: AcpSettingsTarget,
   opts?: { refresh?: boolean },
 ): Promise<AcpAdapterStatus[]> {
   const res = await api<{ adapters: AcpAdapterStatus[] }>(
-    `/api/agents/${agentId}/acp/adapters${opts?.refresh ? "?refresh=1" : ""}`,
+    `${acpSettingsPath(agentId)}/adapters${opts?.refresh ? "?refresh=1" : ""}`,
   );
   return res.adapters;
 }

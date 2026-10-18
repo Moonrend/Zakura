@@ -51,6 +51,7 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "assistant_delta",
   "assistant_message",
   "assistant_rollback",
+  "ui_state_updated",
   "tool_call_start",
   "tool_call_args",
   "tool_call_progress",
@@ -69,6 +70,8 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "session_update",
   /** 服务端后续消息队列快照（每次变更全量广播，多设备同步） */
   "queue_update",
+  "queue.authorization_required",
+  "acp.runtime.updated",
   /** ACP：第三方 Agent 请求工具授权 */
   "permission_request",
   "permission_resolved",
@@ -552,7 +555,17 @@ export type CloudAgentAcpPlanPayload = {
   entries: CloudAgentAcpPlanEntry[];
 };
 
+export type CloudAgentUIStatePayload = {
+  messageId: string;
+  blockIndex: number;
+  catalogVersion: number;
+  contentHash: string;
+  revision: number;
+  state: Record<string, string | number | boolean | null>;
+};
+
 export type CloudAgentEventPayload =
+  | CloudAgentUIStatePayload
   | CloudAgentUserMessagePayload
   | CloudAgentRunStartPayload
   | CloudAgentReasoningDeltaPayload
@@ -581,7 +594,9 @@ export type CloudAgentEventPayload =
   | CloudAgentAskUserResolvedPayload
   | CloudAgentToolApprovalRequestPayload
   | CloudAgentToolApprovalResolvedPayload
-  | CloudAgentAcpPlanPayload;
+  | CloudAgentAcpPlanPayload
+  | { messageId: string; error: string }
+  | import("./acp.js").AcpRuntimeStatus;
 
 export type CloudAgentEvent = {
   id: string;

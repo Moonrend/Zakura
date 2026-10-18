@@ -10,7 +10,6 @@ import {
   FluidHoverProvider,
   useFluidHoverScope,
   useFluidItem,
-  useFluidHoverIndex,
   useOptionalFluidHover,
 } from "@/components/ui/fluid-hover"
 
@@ -105,8 +104,7 @@ function DropdownMenuItem({
 }) {
   const ref = React.useRef<HTMLDivElement>(null)
   const hover = useOptionalFluidHover()
-  const index = useFluidHoverIndex()
-  useFluidItem(ref)
+  const index = useFluidItem(ref)
   return (
     <MenuPrimitive.Item
       ref={ref}

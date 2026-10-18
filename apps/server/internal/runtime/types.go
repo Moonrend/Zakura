@@ -83,11 +83,18 @@ type Run struct {
 	CreatedAt       time.Time  `json:"createdAt"`
 }
 
+// QueueMessage is a follow-up held in the server-side session queue. Its JSON
+// form (see queue.go) carries both "id" and the frontend's "messageId".
 type QueueMessage struct {
-	ID          string          `json:"id"`
-	Content     string          `json:"content"`
-	Attachments json.RawMessage `json:"attachments,omitempty"`
-	Options     json.RawMessage `json:"options,omitempty"`
+	ID          string
+	Content     string
+	Attachments json.RawMessage
+	Options     json.RawMessage
+	Mode        string
+	Interrupt   bool
+	CreatedAt   string
+	UserID      string
+	UserName    string
 }
 
 type Memory struct {

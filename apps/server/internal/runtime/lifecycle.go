@@ -4,10 +4,12 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 	"gorm.io/gorm"
 )
 
@@ -71,6 +73,9 @@ func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
 	h.service.cancelRunIDs(ids)
 	now := h.store.now()
 	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := h.store.cancelOwnerApprovalsTx(ctx, tx, tenant, ""); err != nil {
+			return err
+		}
 		if err := tx.Exec(`UPDATE cloud_agent_runs SET cancel_requested=TRUE,status='cancelled',completed_at=? WHERE id IN (SELECT r.id FROM cloud_agent_runs r JOIN cloud_agent_sessions s ON s.id=r.session_id WHERE s.tenant_id=? AND r.status IN ('queued','running'))`, runtimeTimeString(now), tenant).Error; err != nil {
 			return err
 		}
@@ -86,40 +91,99 @@ func (h *handler) cancelTenantRuns(ctx context.Context, tenant string) error {
 
 func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 	h.closeLiveAccess(tenant, "")
-	h.acp.closeTenant(tenant)
+	if h.acp != nil {
+		h.acp.closeTenant(tenant)
+	}
 	if err := h.cancelTenantRuns(ctx, tenant); err != nil {
 		return err
 	}
-	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT id,docker_id,runtime_node_id FROM managed_containers WHERE tenant_id=? AND docker_id IS NOT NULL AND status NOT IN ('removed','stopped') ORDER BY id`, tenant).Rows()
+	var spaces []struct {
+		ID string `gorm:"column:id"`
+	}
+	if err := h.deps.Gorm.WithContext(ctx).Table("spaces").Select("id").Where("tenant_id=?", tenant).Order("id").Find(&spaces).Error; err != nil {
+		return err
+	}
+	// A completed retry can follow the first callback disconnecting runners
+	// before the surrounding tenant DELETE committed. Every Space must still
+	// own its prepared deletion token, and no cleanup may remain pending.
+	drained, err := h.ownerCleanupDrained(ctx, tenant, "")
 	if err != nil {
 		return err
 	}
-	type container struct{ id, dockerID, nodeID string }
-	containers := []container{}
-	for rows.Next() {
-		var item container
-		if err := rows.Scan(&item.id, &item.dockerID, &item.nodeID); err != nil {
-			rows.Close()
+	prepared := drained && len(spaces) > 0
+	for _, space := range spaces {
+		var leaseRow struct {
+			IntentJSON string `gorm:"column:intent_json"`
+			Pending    bool   `gorm:"column:deletion_pending"`
+		}
+		res := h.deps.Gorm.WithContext(ctx).Table("computer_workspace_leases l").Select("l.intent_json,s.deletion_pending").Joins("JOIN spaces s ON s.id=l.space_id AND s.tenant_id=l.tenant_id").Where("l.tenant_id=? AND l.space_id=? AND l.operation='deleting' AND l.token<>''", tenant, space.ID).Scan(&leaseRow)
+		var intent workspaceIntent
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 || !leaseRow.Pending || json.Unmarshal([]byte(leaseRow.IntentJSON), &intent) != nil || !intent.OwnerCleanupPrepared || !intent.TenantCleanupPrepared || intent.OwnerCleanupComputer != "" {
+			prepared = false
+		}
+	}
+	for _, space := range spaces {
+		if err := h.prepareSpaceDeletion(ctx, tenant, space.ID); err != nil {
 			return err
 		}
-		containers = append(containers, item)
 	}
-	rows.Close()
-	for _, item := range containers {
-		if item.nodeID == "" {
-			return fmt.Errorf("container %s has no runtime node for cleanup", item.id)
-		}
-		runner, err := h.hub.get(item.nodeID)
+	// Tenant-level MCP containers may not have a Space. Capture them as well,
+	// including stopped containers, before disconnecting the tenant's runners.
+	if !prepared {
+		snapshots, err := h.captureOwnerManagedContainers(ctx, tenant, "", "")
 		if err != nil {
-			return fmt.Errorf("container %s cleanup: %w", item.id, err)
+			return err
 		}
-		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = runner.call(callCtx, "docker.stop", map[string]any{"id": item.dockerID, "remove": true}, nil)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("container %s cleanup: %w", item.id, err)
+		for _, snapshot := range snapshots {
+			if err = h.queueManagedContainerCleanup(ctx, snapshot); err != nil {
+				return err
+			}
 		}
-		_ = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Where("id = ? AND tenant_id = ?", item.id, tenant).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": runtimeTimeString(h.store.now())})
+		// Tenant-wide orphans are now durable too; a Space-only marker is not
+		// enough because an earlier tenant capture could have failed midway.
+		for _, space := range spaces {
+			var row struct {
+				Token      string `gorm:"column:token"`
+				IntentJSON string `gorm:"column:intent_json"`
+			}
+			if err = h.deps.Gorm.WithContext(ctx).Table("computer_workspace_leases").Select("token,intent_json").Where("tenant_id=? AND space_id=? AND operation='deleting'", tenant, space.ID).Take(&row).Error; err != nil {
+				return err
+			}
+			current, readErr := h.store.GetSpace(ctx, tenant, space.ID)
+			if readErr != nil {
+				return readErr
+			}
+			lease := &workspaceLease{h: h, Space: current, Token: row.Token, Operation: "deleting", retained: true}
+			if err = json.Unmarshal([]byte(row.IntentJSON), &lease.Intent); err != nil || !lease.Intent.OwnerCleanupPrepared || lease.Intent.OwnerCleanupComputer != "" {
+				return errOwnerDeletionUncertain
+			}
+			lease.Intent.TenantCleanupPrepared = true
+			raw, _ := json.Marshal(lease.Intent)
+			if err = lease.fenced(ctx, func(tx *gorm.DB) error {
+				return tx.Table("computer_workspace_leases").Where("tenant_id=? AND space_id=? AND token=? AND operation='deleting'", tenant, space.ID, lease.Token).Update("intent_json", string(raw)).Error
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	deps := computers.CleanupDeps{Store: h.computerStore(), Destroyers: h.computerDestroyers(), Now: func() time.Time { return h.store.now() }}
+	if _, _, err = deps.ExpireOverdue(ctx, 1000); err != nil {
+		return err
+	}
+	if err = h.sweepManagedContainerCleanup(ctx, 1000); err != nil {
+		return err
+	}
+	for _, table := range []string{"computer_cleanup_intents", "managed_container_cleanup_intents"} {
+		var pending int64
+		if err = h.deps.Gorm.WithContext(ctx).Table(table).Where("tenant_id=? AND pending=TRUE", tenant).Count(&pending).Error; err != nil {
+			return err
+		}
+		if pending != 0 {
+			return fmt.Errorf("tenant cleanup remains pending; retry before deleting runtime nodes")
+		}
 	}
 	var nodeRows *sql.Rows
 	nodeRows, err = h.deps.Gorm.WithContext(ctx).Raw(`SELECT id FROM runtime_nodes WHERE tenant_id=?`, tenant).Rows()
@@ -135,6 +199,9 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 	}
 	nodeRows.Close()
 	for _, id := range nodes {
+		if h.hub == nil {
+			continue
+		}
 		if runner, err := h.hub.get(id); err == nil {
 			runner.close(errors.New("tenant deleted"))
 			h.hub.remove(runner)
@@ -145,6 +212,11 @@ func (h *handler) beforeTenantDelete(ctx context.Context, tenant string) error {
 
 func (h *handler) afterMemberRemoved(ctx context.Context, tenant, user string) error {
 	h.closeLiveAccess(tenant, user)
+	if err := h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return h.store.cancelOwnerApprovalsTx(ctx, tx, tenant, user)
+	}); err != nil {
+		return err
+	}
 	rows, err := h.deps.Gorm.WithContext(ctx).Raw(`SELECT s.agent_id,s.id FROM cloud_agent_sessions s WHERE s.tenant_id=? AND s.created_by_user_id=? AND s.active_run_id IS NOT NULL`, tenant, user).Rows()
 	if err != nil {
 		return err

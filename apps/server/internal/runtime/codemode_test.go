@@ -64,7 +64,11 @@ func startCodemodeRunner(t *testing.T, serverURL, token string, handle func(meth
 				continue
 			}
 			result, after := handle(frame.Method, frame.Params, emit)
-			response, _ := json.Marshal(map[string]any{"type": "res", "id": frame.ID, "ok": true, "result": result})
+			reply := map[string]any{"type": "res", "id": frame.ID, "ok": true, "result": result}
+			if err, ok := result.(error); ok {
+				reply["ok"], reply["error"], reply["result"] = false, err.Error(), nil
+			}
+			response, _ := json.Marshal(reply)
 			writeMaskedText(t, conn, string(response))
 			if after != nil {
 				after()
@@ -77,7 +81,7 @@ func codemodeToolHarness(t *testing.T, d *appdeps.Dependencies, runnerToken stri
 	t.Helper()
 	now := d.Clock()
 	hash := sha256.Sum256([]byte(runnerToken))
-	if _, err := d.DB.Exec(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,token_hash,capabilities_json,host_info_json,storage_root,labels_json,is_shared,created_at,updated_at) VALUES('node','tenant','Runner','runner','computer','offline',?,'{}','{}','/srv/zakura','{}',false,?,?)`, hex.EncodeToString(hash[:]), now, now); err != nil {
+	if _, err := d.DB.Exec(d.Rebind(`INSERT INTO runtime_nodes(id,tenant_id,name,slug,kind,status,token_hash,capabilities_json,host_info_json,storage_root,labels_json,is_shared,created_at,updated_at) VALUES('node','tenant','Runner','runner','computer','offline',?,'{}','{}','/srv/zakura','{}',false,?,?)`), hex.EncodeToString(hash[:]), now, now); err != nil {
 		t.Fatal(err)
 	}
 	h := &handler{deps: d, store: NewStore(d), mcpSessions: map[string]spaceMCPSession{}}
@@ -151,7 +155,7 @@ func TestRunCodemodeToolProtocol(t *testing.T) {
 		case "host.fs.write":
 			return map[string]any{"ok": true, "path": fmt.Sprint(params["path"])}, nil
 		case "docker.list":
-			return []map[string]any{{"dockerId": "ws", "labels": map[string]string{"zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
+			return []map[string]any{{"dockerId": "ws", "status": "running", "labels": map[string]string{"zakura.tenant": "tenant", "zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
 		case "docker.exec.start":
 			return map[string]any{"id": "proc1"}, nil
 		case "docker.exec.close":
@@ -175,7 +179,16 @@ func TestRunCodemodeToolProtocol(t *testing.T) {
 			return nil, nil
 		}
 	})
-	raw, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"const r = await tools.mcp__echo__echo({ value: \"hi\" }); return r;"}`))
+	session, err := store.CreateSession(context.Background(), "tenant", "", agent.ID, Session{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartRun(context.Background(), "tenant", agent.ID, session.ID, "test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), computerRunKey{}, run.ID)
+	raw, err := h.runCodemodeTool(ctx, "tenant", agent.ID, session.ID, "outer", json.RawMessage(`{"code":"const r = await tools.mcp__echo__echo({ value: \"hi\" }); return r;"}`))
 	if err != nil {
 		t.Fatalf("runCodemodeTool: %v", err)
 	}
@@ -214,7 +227,7 @@ func TestRunCodemodeToolRejectsNested(t *testing.T) {
 		case "host.fs.write":
 			return map[string]any{"ok": true}, nil
 		case "docker.list":
-			return []map[string]any{{"dockerId": "ws", "labels": map[string]string{"zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
+			return []map[string]any{{"dockerId": "ws", "status": "running", "labels": map[string]string{"zakura.tenant": "tenant", "zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
 		case "docker.exec.start":
 			return map[string]any{"id": "proc1"}, nil
 		case "docker.exec.close":
@@ -269,7 +282,7 @@ func TestRunCodemodeToolScriptFailure(t *testing.T) {
 		case "host.fs.write":
 			return map[string]any{"ok": true}, nil
 		case "docker.list":
-			return []map[string]any{{"dockerId": "ws", "labels": map[string]string{"zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
+			return []map[string]any{{"dockerId": "ws", "status": "running", "labels": map[string]string{"zakura.tenant": "tenant", "zakura.space": space.ID, "zakura.purpose": "workspace"}}}, nil
 		case "docker.exec.start":
 			return map[string]any{"id": "proc1"}, nil
 		case "docker.exec.close":

@@ -1,6 +1,7 @@
 package host
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,143 +18,271 @@ type Entry struct {
 	Path    string `json:"path"`
 	IsDir   bool   `json:"isDir"`
 	Size    int64  `json:"size"`
+	Mode    string `json:"mode"`
 	ModTime string `json:"modTime"`
 }
 
-func Stat(root, rel string) (Entry, error) {
+// Keep path aliases compatible with Jail, but perform every filesystem access
+// through an OS root handle. Lexical validation or EvalSymlinks followed by a
+// path-based operation is insufficient when an untrusted process swaps parents.
+func rootedPath(root, rel string, create bool) (*os.Root, string, error) {
 	p, err := Jail(root, rel)
 	if err != nil {
-		return Entry{}, err
+		return nil, "", err
 	}
-	st, err := os.Stat(p)
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, "", err
+	}
+	relative, err := filepath.Rel(abs, p)
+	if err != nil {
+		return nil, "", err
+	}
+	if create {
+		if err = os.MkdirAll(abs, 0o755); err != nil {
+			return nil, "", err
+		}
+	}
+	handle, err := os.OpenRoot(abs)
+	return handle, relative, err
+}
+
+func Stat(root, rel string) (Entry, error) {
+	return statEntry(root, rel, false)
+}
+
+// Lstat reports the final entry itself, including symlink and special-file
+// type bits. Parent resolution remains bounded by os.Root; this does not claim
+// a snapshot or prevent another process changing the tree between requests.
+func Lstat(root, rel string) (Entry, error) {
+	return statEntry(root, rel, true)
+}
+
+func statEntry(root, rel string, noFollow bool) (Entry, error) {
+	r, p, err := rootedPath(root, rel, false)
 	if err != nil {
 		return Entry{}, err
 	}
-	return Entry{
-		Name:    st.Name(),
-		Path:    WorkspacePath(root, p),
-		IsDir:   st.IsDir(),
-		Size:    st.Size(),
-		ModTime: st.ModTime().UTC().Format(time.RFC3339),
-	}, nil
+	defer r.Close()
+	stat := r.Stat
+	if noFollow {
+		stat = r.Lstat
+	}
+	st, err := stat(p)
+	if err != nil {
+		return Entry{}, err
+	}
+	return Entry{Name: st.Name(), Path: WorkspacePath(root, filepath.Join(root, p)), IsDir: st.IsDir(), Size: st.Size(), Mode: st.Mode().String(), ModTime: st.ModTime().UTC().Format(time.RFC3339)}, nil
 }
 
 func List(root, rel string) ([]Entry, error) {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, false)
 	if err != nil {
 		return nil, err
 	}
-	ents, err := os.ReadDir(p)
+	defer r.Close()
+	ents, err := fs.ReadDir(r.FS(), filepath.ToSlash(p))
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Entry, 0, len(ents))
 	for _, e := range ents {
-		info, err := e.Info()
+		child := filepath.Join(p, e.Name())
+		info, err := r.Lstat(child)
 		if err != nil {
 			continue
 		}
-		name := e.Name()
-		out = append(out, Entry{
-			Name:    name,
-			Path:    WorkspacePath(root, filepath.Join(p, name)),
-			IsDir:   e.IsDir(),
-			Size:    info.Size(),
-			ModTime: info.ModTime().UTC().Format(time.RFC3339),
-		})
+		out = append(out, Entry{Name: e.Name(), Path: WorkspacePath(root, filepath.Join(root, child)), IsDir: info.IsDir(), Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime().UTC().Format(time.RFC3339)})
 	}
 	return out, nil
 }
 
 func ReadFile(root, rel string, max int64) ([]byte, error) {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, false)
 	if err != nil {
 		return nil, err
 	}
-	st, err := os.Stat(p)
+	defer r.Close()
+	f, err := r.Open(p)
 	if err != nil {
 		return nil, err
 	}
-	if st.IsDir() {
-		return nil, fmt.Errorf("是目录")
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
 	}
 	if max > 0 && st.Size() > max {
 		return nil, fmt.Errorf("文件过大（%d > %d）", st.Size(), max)
 	}
-	return os.ReadFile(p)
+	var reader io.Reader = f
+	if max > 0 {
+		reader = io.LimitReader(f, max+1)
+	}
+	data, err := io.ReadAll(reader)
+	if err == nil && max > 0 && int64(len(data)) > max {
+		return nil, fmt.Errorf("文件过大")
+	}
+	return data, err
 }
 
 func WriteFile(root, rel string, data []byte) (string, error) {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, true)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	defer r.Close()
+	if err = r.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(p, data, 0o644); err != nil {
+	if err = r.WriteFile(p, data, 0o644); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:8]), nil
+	return fileRevision(data), nil
 }
 
+// WritePrivateFile atomically replaces a credential file without a readable
+// intermediate file. Both temp creation and rename use one pinned parent handle,
+// so concurrent directory/symlink swaps cannot redirect secrets outside root.
+// The regular WriteFile contract intentionally stays 0644 and non-atomic.
+func WritePrivateFile(root, rel string, data []byte) (string, error) {
+	r, p, err := rootedPath(root, rel, true)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	if p == "." {
+		return "", fmt.Errorf("invalid private file path")
+	}
+	parent := filepath.Dir(p)
+	if err = r.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	dir, err := r.OpenRoot(parent)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+	name := filepath.Base(p)
+	if st, e := dir.Lstat(name); e == nil {
+		if !st.Mode().IsRegular() {
+			return "", fmt.Errorf("private destination must be a regular file")
+		}
+	} else if !os.IsNotExist(e) {
+		return "", e
+	}
+	var nonce [16]byte
+	if _, err = rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	temporary := ".zakura-private-" + hex.EncodeToString(nonce[:])
+	f, err := dir.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Remove(temporary)
+	defer f.Close()
+	if err = f.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if _, err = f.Write(data); err != nil {
+		return "", err
+	}
+	if err = f.Sync(); err != nil {
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", err
+	}
+	if err = dir.Rename(temporary, name); err != nil {
+		return "", err
+	}
+	return fileRevision(data), nil
+}
+
+func fileRevision(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:8]) }
+
 func Mkdir(root, rel string) error {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, true)
 	if err != nil {
 		return err
 	}
-	return os.MkdirAll(p, 0o755)
+	defer r.Close()
+	return r.MkdirAll(p, 0o755)
 }
 
 func Remove(root, rel string, recursive bool) error {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, false)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 	if recursive {
-		return os.RemoveAll(p)
+		return r.RemoveAll(p)
 	}
-	return os.Remove(p)
+	return r.Remove(p)
 }
 
 func Rename(root, oldRel, newRel string) error {
-	a, err := Jail(root, oldRel)
+	r, a, err := rootedPath(root, oldRel, false)
 	if err != nil {
 		return err
 	}
-	b, err := Jail(root, newRel)
+	defer r.Close()
+	bAbs, err := Jail(root, newRel)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(b), 0o755); err != nil {
+	abs, err := filepath.Abs(root)
+	if err != nil {
 		return err
 	}
-	return os.Rename(a, b)
+	b, err := filepath.Rel(abs, bAbs)
+	if err != nil {
+		return err
+	}
+	if err = r.MkdirAll(filepath.Dir(b), 0o755); err != nil {
+		return err
+	}
+	return r.Rename(a, b)
 }
 
 func CopyFile(root, rel string, w io.Writer) error {
-	p, err := Jail(root, rel)
+	r, p, err := rootedPath(root, rel, false)
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(p)
+	defer r.Close()
+	f, err := r.Open(p)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
 	_, err = io.Copy(w, f)
 	return err
 }
 
 func WalkJSON(root string) ([]byte, error) {
+	r, _, err := rootedPath(root, ".", false)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
 	var names []string
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	_ = fs.WalkDir(r.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err == nil {
+			names = append(names, filepath.FromSlash(path))
 		}
-		rel, _ := filepath.Rel(root, path)
-		names = append(names, rel)
 		return nil
 	})
 	return json.Marshal(names)

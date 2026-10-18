@@ -45,13 +45,33 @@ test("parseToolApprovalConfig 解析合法字段并丢弃非法项", () => {
 test("策略与阈值解析：缺省回落 allow_all / 0.7", () => {
   assert.equal(resolveApprovalPolicy(undefined), "allow_all");
   assert.equal(resolveApprovalPolicy({}), "allow_all");
-  assert.equal(resolveApprovalPolicy({ policy: "ask" }), "ask");
+  assert.equal(resolveApprovalPolicy({ policy: "always_ask" }), "always_ask");
+  assert.equal(parseToolApprovalConfig({ policy: "ask" }).policy, "always_ask");
   assert.equal(resolveConfidenceThreshold(undefined), 0.7);
   assert.equal(resolveConfidenceThreshold({ aiGate: { confidenceThreshold: 0.9 } }), 0.9);
-  // 超时：0 / 缺省 = 不限时
-  assert.equal(resolveAskTimeoutSeconds(undefined), null);
+  // Only explicit zero disables the default timeout.
+  assert.equal(resolveAskTimeoutSeconds(undefined), 300);
+  assert.equal(resolveAskTimeoutSeconds({}), 300);
+  assert.equal(resolveAskTimeoutSeconds({ askTimeoutSeconds: -1 }), 300);
+  assert.equal(resolveAskTimeoutSeconds({ askTimeoutSeconds: NaN }), 300);
   assert.equal(resolveAskTimeoutSeconds({ askTimeoutSeconds: 0 }), null);
   assert.equal(resolveAskTimeoutSeconds({ askTimeoutSeconds: 60 }), 60);
+});
+
+test("strict policy normalization preserves explicit choices and legacy restrictions", () => {
+  for (const policy of ["ask", "always_ask"]) {
+    const config = parseToolApprovalConfig({ policy, alwaysAllow: ["*"], alwaysDeny: ["delete"], rules: [{ id: "allow", matcher: "*", action: "allow" }] });
+    assert.equal(config.policy, "always_ask");
+    assert.deepEqual(config.alwaysAllow, ["*"]);
+    assert.deepEqual(config.alwaysDeny, ["delete"]);
+    assert.equal(config.rules?.length, 1);
+  }
+  assert.equal(parseToolApprovalConfig({ policy: "allow_all" }).policy, "allow_all");
+  assert.equal(parseToolApprovalConfig({ policy: "ai" }).policy, "ai");
+  assert.equal(parseToolApprovalConfig({ policy: "invalid" }).policy, undefined);
+  assert.deepEqual(parseToolApprovalConfig({ aiGate: { routeId: " route-1 ", routeAlias: " legacy " } }).aiGate, { routeId: "route-1", routeAlias: "legacy" });
+  assert.equal(parseToolApprovalConfig({ askTimeoutSeconds: Infinity }).askTimeoutSeconds, undefined);
+  assert.equal(parseToolApprovalConfig({ askTimeoutSeconds: 0 }).askTimeoutSeconds, 0);
 });
 
 test("approvalRuleHits 复用 Claude 钩子匹配语法", () => {

@@ -56,8 +56,8 @@ func Router(cfg config.Config, d *appdeps.Dependencies, log *slog.Logger) http.H
 	admin.RegisterRoutes(r, d)
 	usage.RegisterRoutes(r, d)
 	platformsystem.RegisterRoutes(r, d)
-	runtime.RegisterRoutes(r, d)
-	integrations.RegisterRoutes(r, d)
+	mcpLifecycle := runtime.RegisterRoutes(r, d)
+	integrations.RegisterRoutes(r, d, mcpLifecycle)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) { httpx.Error(w, 404, "not found") })
 	return r
 }

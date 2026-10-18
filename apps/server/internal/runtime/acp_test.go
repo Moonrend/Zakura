@@ -67,7 +67,10 @@ func TestACPDispatchesThroughSelectedRuntimeNode(t *testing.T) {
 			}
 		}
 		for {
-			raw := readServerText(t, reader)
+			raw, readErr := readRunnerServerText(reader)
+			if readErr != nil {
+				return
+			}
 			var frame struct {
 				Type   string         `json:"type"`
 				ID     string         `json:"id"`

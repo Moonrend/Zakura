@@ -2,7 +2,10 @@
 package runtime
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -89,15 +92,41 @@ func TestWorkspaceMigrationTransfersBetweenSelectedRunners(t *testing.T) {
 	defer server.Close()
 
 	info := func(kind string) map[string]any {
-		return map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true}, "hostInfo": map[string]any{"platform": "linux"}, "node": kind}
+		return map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true, "privateAtomicFS": true, "filesystemNoFollowStat": true, "filesystemWorkspaceMigration": true}, "hostInfo": map[string]any{"platform": "linux"}, "node": kind}
 	}
+	var transfer bytes.Buffer
+	gz := gzip.NewWriter(&transfer)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: "a.txt", Typeflag: tar.TypeReg, Mode: 0640, Size: 5})
+	_, _ = tw.Write([]byte("hello"))
+	_ = tw.Close()
+	_ = gz.Close()
+	digest := sha256.Sum256(transfer.Bytes())
+	digestHex := hex.EncodeToString(digest[:])
 	startMigrationRunner(t, server.URL, "rnr_source-token", func(method string, params map[string]any) (any, error) {
 		switch method {
+		case "host.fs.migration":
+			if params["operation"] == "inspect" {
+				return map[string]any{"phase": "inspected"}, nil
+			}
+			if params["operation"] == "export" {
+				return map[string]any{"phase": "exported", "archiveBase64": base64.StdEncoding.EncodeToString(transfer.Bytes()), "archiveSha256": digestHex, "size": transfer.Len()}, nil
+			}
+			return nil, fmt.Errorf("unexpected source migration operation %v", params["operation"])
 		case "sys.info":
 			return info("source"), nil
+		case "docker.list":
+			return []any{}, nil
 		case "host.fs.stat":
-			path := fmt.Sprint(params["path"])
-			return map[string]any{"name": strings.Trim(path, "/"), "path": path, "isDir": path == "/", "size": 5, "mode": "0640", "modTime": "2026-01-01T00:00:00Z"}, nil
+			if params["noFollow"] != true {
+				return nil, fmt.Errorf("migration stat must not follow symlinks")
+			}
+			p := fmt.Sprint(params["path"])
+			mode := "-rw-r-----"
+			if p == "/" {
+				mode = "drwxr-x---"
+			}
+			return map[string]any{"name": strings.Trim(p, "/"), "path": p, "isDir": p == "/", "size": 5, "mode": mode, "modTime": "2026-01-01T00:00:00Z"}, nil
 		case "host.fs.list":
 			return map[string]any{"path": "/", "entries": []map[string]any{{"name": "a.txt", "path": "/a.txt", "isDir": false, "size": 5}}}, nil
 		case "host.fs.read":
@@ -111,9 +140,39 @@ func TestWorkspaceMigrationTransfersBetweenSelectedRunners(t *testing.T) {
 	written := map[string][]byte{}
 	startMigrationRunner(t, server.URL, "rnr_target-token", func(method string, params map[string]any) (any, error) {
 		switch method {
+		case "host.fs.migration":
+			op := fmt.Sprint(params["operation"])
+			phase := map[string]string{"prepare": "prepared", "import": "imported", "verify": "verified", "commit": "committed", "status": "committed"}[op]
+			if phase == "" {
+				return nil, fmt.Errorf("unexpected target migration operation %s", op)
+			}
+			if op == "import" {
+				data, _ := base64.StdEncoding.DecodeString(fmt.Sprint(params["archiveBase64"]))
+				if !bytes.Equal(data, transfer.Bytes()) {
+					return nil, fmt.Errorf("archive mismatch")
+				}
+				mu.Lock()
+				written["/a.txt"] = []byte("hello")
+				mu.Unlock()
+			}
+			return map[string]any{"phase": phase, "archiveSha256": digestHex, "verified": phase == "verified" || phase == "committed"}, nil
 		case "sys.info":
 			return info("target"), nil
+		case "docker.list":
+			return []any{}, nil
+		case "host.fs.list":
+			mu.Lock()
+			entries := []map[string]any{}
+			for name := range written {
+				entries = append(entries, map[string]any{"path": name, "isDir": false})
+			}
+			mu.Unlock()
+			return map[string]any{"path": "/", "entries": entries}, nil
 		case "host.fs.write":
+			receivedMode, _ := params["mode"].(float64)
+			if receivedMode != 0o600 || params["atomic"] != true {
+				return nil, fmt.Errorf("migration write was not private and atomic: %#v", params)
+			}
 			path := fmt.Sprint(params["path"])
 			raw, _ := base64.StdEncoding.DecodeString(fmt.Sprint(params["base64"]))
 			mu.Lock()
@@ -123,10 +182,13 @@ func TestWorkspaceMigrationTransfersBetweenSelectedRunners(t *testing.T) {
 				written[path] = append([]byte(nil), raw...)
 			}
 			mu.Unlock()
-			return map[string]any{"ok": true, "path": path}, nil
+			return map[string]any{"ok": true, "path": path, "mode": 384, "atomic": true}, nil
 		case "host.fs.read":
 			mu.Lock()
 			data := append([]byte(nil), archive...)
+			if !strings.Contains(fmt.Sprint(params["path"]), ".zakura-migration-") {
+				data = append([]byte(nil), written[fmt.Sprint(params["path"])]...)
+			}
 			mu.Unlock()
 			return map[string]any{"path": params["path"], "base64": base64.StdEncoding.EncodeToString(data), "size": len(data)}, nil
 		case "host.fs.remove", "host.fs.mkdir":

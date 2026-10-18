@@ -195,6 +195,31 @@ export async function saveAgentProviders(
   });
 }
 
+export type SpaceWebProviderOptions = {
+  webSearch: AgentProviderOptions["webSearch"] & {
+    configured: boolean;
+    source: string;
+    space: { enabled: boolean; defaultEngine: string | null };
+    effective: { enabled: boolean; defaultEngine: string | null };
+  };
+  webFetch: AgentProviderOptions["webFetch"] & {
+    configured: boolean;
+    source: string;
+    space: { enabled: boolean; defaultBackend: string | null };
+    effective: { enabled: boolean; defaultBackend: string | null };
+  };
+};
+
+export async function fetchSpaceWebProviders(id: string) {
+  return api<SpaceWebProviderOptions>(`/api/spaces/${encodeURIComponent(id)}/providers`, { cacheTtlMs: false });
+}
+export async function saveSpaceWebProviders(
+  id: string,
+  body: Pick<Parameters<typeof saveAgentProviders>[1], "webSearch" | "webFetch">,
+) {
+  return api<SpaceWebProviderOptions>(`/api/spaces/${encodeURIComponent(id)}/providers`, { method: "PUT", json: body });
+}
+
 export async function fetchAgentProgress(id: string) {
   return api<{
     agent: { lastError: string | null };

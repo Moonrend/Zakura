@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,10 +26,9 @@ import (
 )
 
 // TestPostgresCoreWorkflow is deliberately opt-in locally and mandatory in CI.
-// Its database must be disposable: the test resets the public schema so every
-// run exercises the complete PostgreSQL migration path through lib/pq.
+// FreshURL supplies an empty private database or schema; never reset public.
 func TestPostgresCoreWorkflow(t *testing.T) {
-	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "integration_core")
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "integration_core")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	conn, err := platformdb.Open(ctx, dsn)
@@ -38,9 +38,6 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 	defer conn.DB.Close()
 	if conn.Dialect != "postgres" {
 		t.Fatalf("expected postgres dialect, got %q", conn.Dialect)
-	}
-	if _, err = conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatalf("reset disposable PostgreSQL database: %v", err)
 	}
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("apply PostgreSQL migrations: %v", err)
@@ -89,23 +86,27 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 		t.Fatalf("agents: %d %#v", status, agents)
 	}
 
-	var migrationsApplied, users, tenants, agentCount int
+	assertPostgresMigrations(t, ctx, conn)
+	var users, tenants, agentCount int
 	for query, target := range map[string]*int{
-		`SELECT COUNT(*) FROM schema_migrations`: &migrationsApplied,
-		`SELECT COUNT(*) FROM users`:             &users,
-		`SELECT COUNT(*) FROM tenants`:           &tenants,
-		`SELECT COUNT(*) FROM agents`:            &agentCount,
+		`SELECT COUNT(*) FROM users`:   &users,
+		`SELECT COUNT(*) FROM tenants`: &tenants,
+		`SELECT COUNT(*) FROM agents`:  &agentCount,
 	} {
 		if err = conn.DB.QueryRowContext(ctx, query).Scan(target); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if migrationsApplied != 8 || users != 1 || tenants != 1 || agentCount != 1 {
-		t.Fatalf("unexpected durable rows: migrations=%d users=%d tenants=%d agents=%d", migrationsApplied, users, tenants, agentCount)
+	if users != 1 || tenants != 1 || agentCount != 1 {
+		t.Fatalf("unexpected durable rows: users=%d tenants=%d agents=%d", users, tenants, agentCount)
 	}
 
 	// Runtime store flow (converted SQL→GORM surface) end-to-end on PostgreSQL.
 	agentID := agents[0].(map[string]any)["id"].(string)
+	spaceID, _ := agents[0].(map[string]any)["spaceId"].(string)
+	if spaceID == "" {
+		t.Fatalf("Agent is missing its canonical Space: %#v", agents[0])
+	}
 	status, created := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/agents/"+agentID+"/cloud/sessions", session, map[string]any{"title": "pg e2e session"})
 	if status != http.StatusCreated || created["id"] == nil {
 		t.Fatalf("create session: %d %#v", status, created)
@@ -140,18 +141,92 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 		t.Fatalf("session title in PG: %q", storedTitle)
 	}
 
-	status, instance := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/instances", session, map[string]any{"type": "mcp", "name": "pg-e2e-mcp", "providerId": "pg-e2e-mcp"})
-	if status != http.StatusCreated || instance["id"] == nil {
-		t.Fatalf("create instance: %d %#v", status, instance)
+	// A real loopback MCP upstream exercises the same HTTP initialization and
+	// Space-scoped capability/call path as production, without external services.
+	var mcpInitializations, mcpCalls atomic.Int64
+	mcpUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params map[string]any  `json:"params"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&request) != nil {
+			http.Error(w, "invalid MCP request", http.StatusBadRequest)
+			return
+		}
+		var result any
+		switch request.Method {
+		case "initialize":
+			mcpInitializations.Add(1)
+			result = map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{"tools": map[string]any{}}}
+		case "tools/list":
+			result = map[string]any{"tools": []map[string]any{{"name": "echo", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}}}}}
+		case "resources/list":
+			result = map[string]any{"resources": []any{}}
+		case "resources/templates/list":
+			result = map[string]any{"resourceTemplates": []any{}}
+		case "prompts/list":
+			result = map[string]any{"prompts": []any{}}
+		case "tools/call":
+			if request.Params["name"] != "echo" {
+				http.Error(w, "unexpected tool", http.StatusBadRequest)
+				return
+			}
+			mcpCalls.Add(1)
+			result = map[string]any{"content": []map[string]any{{"type": "text", "text": "pg loopback echo"}}}
+		default:
+			http.Error(w, "unexpected MCP method", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+	}))
+	defer mcpUpstream.Close()
+	status, instance := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/instances", session, map[string]any{
+		"type": "mcp", "name": "pg-e2e-mcp", "providerId": "pg-e2e-mcp", "spaceId": spaceID,
+		"config": map[string]any{"url": mcpUpstream.URL, "transport": "http"},
+	})
+	if status != http.StatusCreated || instance["id"] == nil || instance["status"] != "stopped" {
+		t.Fatalf("create Space MCP instance: %d %#v", status, instance)
 	}
 	instanceID := instance["id"].(string)
+	var canonicalOwner string
+	var spaceOwned bool
+	if err = conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT config_json::jsonb->>'ownerSpaceId',agent_id IS NULL FROM component_instances WHERE id=?`), instanceID).Scan(&canonicalOwner, &spaceOwned); err != nil || canonicalOwner != spaceID || !spaceOwned {
+		t.Fatalf("canonical MCP ownership: owner=%q spaceOwned=%v err=%v", canonicalOwner, spaceOwned, err)
+	}
+	var bindings int
+	if err = conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT COUNT(*) FROM agent_bindings WHERE instance_id=? AND space_id=? AND agent_id IS NULL`), instanceID, spaceID).Scan(&bindings); err != nil || bindings != 1 {
+		t.Fatalf("explicit Space MCP binding: count=%d err=%v", bindings, err)
+	}
 	status, instances := arrayCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/instances", session)
-	if status != http.StatusOK || len(instances) != 1 || instances[0].(map[string]any)["status"] != "stopped" {
-		t.Fatalf("list instances: %d %#v", status, instances)
+	if status != http.StatusOK || len(instances) != 1 || instances[0].(map[string]any)["status"] != "stopped" || mcpInitializations.Load() != 0 {
+		t.Fatalf("list stopped instances: %d %#v initializations=%d", status, instances, mcpInitializations.Load())
+	}
+	status, startedMCP := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/instances/"+instanceID+"/start", session, map[string]any{})
+	if status != http.StatusOK || startedMCP["status"] != "running" || mcpInitializations.Load() != 1 {
+		t.Fatalf("start MCP requires real upstream initialization: %d %#v initializations=%d", status, startedMCP, mcpInitializations.Load())
+	}
+	status, capabilities := jsonCall(t, srv.Client(), http.MethodGet, srv.URL+"/api/spaces/"+spaceID+"/mcp/capabilities", session, nil)
+	tools, _ := capabilities["tools"].([]any)
+	if status != http.StatusOK || len(tools) != 1 || tools[0].(map[string]any)["instanceId"] != instanceID {
+		t.Fatalf("Space MCP capabilities: %d %#v", status, capabilities)
+	}
+	status, called := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/mcp/call", session, map[string]any{"spaceId": spaceID, "instanceId": instanceID, "toolName": "echo", "arguments": map[string]any{"text": "hello"}})
+	if status != http.StatusOK || called["ok"] != true || mcpCalls.Load() != 1 || !strings.Contains(fmt.Sprint(called["result"]), "pg loopback echo") {
+		t.Fatalf("Space MCP tool call: %d %#v calls=%d", status, called, mcpCalls.Load())
 	}
 	status, _ = jsonCall(t, srv.Client(), http.MethodPatch, srv.URL+"/api/instances/"+instanceID, session, map[string]any{"name": "pg-e2e-mcp-v2"})
 	if status != http.StatusOK {
 		t.Fatalf("patch instance: %d", status)
+	}
+	status, stoppedMCP := jsonCall(t, srv.Client(), http.MethodPost, srv.URL+"/api/instances/"+instanceID+"/stop", session, map[string]any{})
+	if status != http.StatusOK || stoppedMCP["ok"] != true {
+		t.Fatalf("stop MCP instance: %d %#v", status, stoppedMCP)
+	}
+	var stoppedStatus string
+	if err = conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT status FROM component_instances WHERE id=?`), instanceID).Scan(&stoppedStatus); err != nil || stoppedStatus != "stopped" {
+		t.Fatalf("persisted stopped MCP: status=%q err=%v", stoppedStatus, err)
 	}
 	status, _ = jsonCall(t, srv.Client(), http.MethodDelete, srv.URL+"/api/instances/"+instanceID, session, nil)
 	if status != http.StatusOK {
@@ -182,7 +257,7 @@ func TestPostgresCoreWorkflow(t *testing.T) {
 }
 
 func TestPostgresLegacyCompatibility(t *testing.T) {
-	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "integration_legacy")
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "integration_legacy")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	conn, err := platformdb.Open(ctx, dsn)
@@ -190,9 +265,6 @@ func TestPostgresLegacyCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.DB.Close()
-	if _, err = conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
 	legacy := []string{
 		`CREATE TABLE platform_meta(id TEXT PRIMARY KEY DEFAULT 'platform',setup_completed BOOLEAN NOT NULL DEFAULT FALSE,mode TEXT NOT NULL DEFAULT 'single-tenant',version TEXT NOT NULL DEFAULT '0.1.0',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`INSERT INTO platform_meta(id,setup_completed) VALUES('platform',TRUE)`,
@@ -207,6 +279,7 @@ func TestPostgresLegacyCompatibility(t *testing.T) {
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("upgrade pinned PostgreSQL schema: %v", err)
 	}
+	assertPostgresMigrations(t, ctx, conn)
 	var setup bool
 	if err = conn.DB.QueryRowContext(ctx, `SELECT setup_completed FROM platform_meta WHERE singleton=1`).Scan(&setup); err != nil || !setup {
 		t.Fatalf("legacy platform row was not adopted: setup=%v err=%v", setup, err)
@@ -233,13 +306,13 @@ func TestPostgresLegacyCompatibility(t *testing.T) {
 // TestPostgresPinnedDrizzleUpgrade executes every pinned TypeScript migration
 // through a real PostgreSQL wire connection before applying the native additive
 // migration. This catches type/DDL compatibility that SQLite and PGlite cannot
-// prove. CI sets ZAKURA_REFERENCE_DRIZZLE_DIR to the preserved frontend/server
-// checkout; local runs skip when that immutable reference is unavailable.
+// prove. This archival check is separate from the required native suite: supply
+// ZAKURA_REFERENCE_DRIZZLE_DIR from an immutable preserved checkout to select it.
 func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
-	dsnEnv := os.Getenv("ZAKURA_TEST_POSTGRES_URL")
+	dsnEnv := pgtest.URL(t)
 	drizzleDir := os.Getenv("ZAKURA_REFERENCE_DRIZZLE_DIR")
-	if dsnEnv == "" || drizzleDir == "" {
-		t.Skip("PostgreSQL URL or pinned Drizzle directory is not set")
+	if drizzleDir == "" {
+		pgtest.Unavailable(t, "archival PostgreSQL upgrade unverified: ZAKURA_REFERENCE_DRIZZLE_DIR is not set")
 	}
 	dsn := pgtest.FreshURL(t, dsnEnv, "integration_drizzle")
 	files, err := filepath.Glob(filepath.Join(drizzleDir, "*.sql"))
@@ -254,9 +327,6 @@ func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.DB.Close()
-	if _, err = conn.DB.ExecContext(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
 	statements := 0
 	for _, file := range files {
 		raw, readErr := os.ReadFile(file)
@@ -277,6 +347,7 @@ func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
 	if err = migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
 		t.Fatalf("native migration over complete pinned schema: %v", err)
 	}
+	assertPostgresMigrations(t, ctx, conn)
 	var tables, columns int
 	if err = conn.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=current_schema()`).Scan(&tables); err != nil {
 		t.Fatal(err)
@@ -303,7 +374,23 @@ func TestPostgresPinnedDrizzleUpgrade(t *testing.T) {
 	}
 }
 
+func assertPostgresMigrations(t *testing.T, ctx context.Context, conn *platformdb.Connection) {
+	t.Helper()
+	reference, err := platformdb.Open(ctx, "file:"+filepath.Join(t.TempDir(), "migration-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reference.DB.Close()
+	if err := migrations.Apply(ctx, reference.DB, reference.Dialect, reference.Rebind); err != nil {
+		t.Fatalf("apply reference migration registry: %v", err)
+	}
+	pgtest.AssertMigrationLedger(t, ctx, conn.DB, reference.DB)
+	if err := migrations.Apply(ctx, conn.DB, conn.Dialect, conn.Rebind); err != nil {
+		t.Fatalf("reapply PostgreSQL migrations: %v", err)
+	}
+	pgtest.AssertMigrationLedger(t, ctx, conn.DB, reference.DB)
+}
+
 // Keep imports used even if this test is compiled in isolation by tooling that
 // prunes sibling test files containing jsonCall.
 var _ = json.NewDecoder
-

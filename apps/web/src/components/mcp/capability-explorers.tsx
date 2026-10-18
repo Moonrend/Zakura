@@ -18,6 +18,7 @@ export type McpToolRow = {
   qualifiedName: string;
   description?: string;
   providerId?: string;
+  instanceId?: string;
   inputSchema?: Record<string, unknown>;
   localName?: string;
   spaceScoped?: boolean;
@@ -30,6 +31,7 @@ export type McpResourceRow = {
   mimeType?: string;
   title?: string;
   providerId?: string;
+  instanceId?: string;
 };
 
 export type McpPromptRow = {
@@ -38,6 +40,7 @@ export type McpPromptRow = {
   title?: string;
   arguments?: Array<{ name: string; description?: string; required?: boolean }>;
   providerId?: string;
+  instanceId?: string;
 };
 
 export type McpResourceTemplateRow = {
@@ -47,6 +50,7 @@ export type McpResourceTemplateRow = {
   mimeType?: string;
   title?: string;
   providerId?: string;
+  instanceId?: string;
 };
 
 function EmptyRow({ colSpan, children }: { colSpan: number; children: React.ReactNode }) {
@@ -60,9 +64,11 @@ function EmptyRow({ colSpan, children }: { colSpan: number; children: React.Reac
 }
 
 export function McpToolsExplorer({
+  spaceId,
   tools,
   emptyHint = "暂无工具",
 }: {
+  spaceId?: string;
   tools: McpToolRow[];
   emptyHint?: string;
 }) {
@@ -85,6 +91,9 @@ export function McpToolsExplorer({
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/call", {
         method: "POST",
         json: {
+          spaceId,
+          instanceId: selected.instanceId,
+          toolName: selected.localName ?? selected.qualifiedName,
           qualifiedName: selected.qualifiedName,
           arguments: args,
         },
@@ -171,10 +180,12 @@ export function McpToolsExplorer({
 }
 
 export function McpResourcesExplorer({
+  spaceId,
   resources,
   templates = [],
   emptyHint = "暂无资源",
 }: {
+  spaceId?: string;
   resources: McpResourceRow[];
   templates?: McpResourceTemplateRow[];
   emptyHint?: string;
@@ -190,7 +201,7 @@ export function McpResourcesExplorer({
     try {
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/resources/read", {
         method: "POST",
-        json: { uri: row.uri },
+        json: { spaceId, instanceId: row.instanceId, uri: row.uri },
       });
       setResultText(JSON.stringify(res.result, null, 2));
     } catch (err) {
@@ -318,9 +329,11 @@ export function McpResourcesExplorer({
 }
 
 export function McpPromptsExplorer({
+  spaceId,
   prompts,
   emptyHint = "暂无 Prompts",
 }: {
+  spaceId?: string;
   prompts: McpPromptRow[];
   emptyHint?: string;
 }) {
@@ -358,6 +371,8 @@ export function McpPromptsExplorer({
       const res = await api<{ ok: boolean; result: unknown }>("/api/mcp/prompts/get", {
         method: "POST",
         json: {
+          spaceId,
+          instanceId: selected.instanceId,
           name: selected.name,
           arguments: args,
         },
@@ -454,9 +469,13 @@ export function McpPromptsExplorer({
 
 /** Prompt 参数补全（completion/complete）简易面板 */
 export function McpPromptCompletePanel({
+  spaceId,
+  instanceId,
   promptName,
   argumentName,
 }: {
+  spaceId?: string;
+  instanceId?: string;
   promptName: string;
   argumentName: string;
 }) {
@@ -473,8 +492,12 @@ export function McpPromptCompletePanel({
       }>("/api/mcp/complete", {
         method: "POST",
         json: {
-          ref: { type: "ref/prompt", name: promptName },
-          argument: { name: argumentName, value },
+          spaceId,
+          instanceId,
+          params: {
+            ref: { type: "ref/prompt", name: promptName },
+            argument: { name: argumentName, value },
+          },
         },
       });
       setSuggestions(res.result.completion?.values ?? []);

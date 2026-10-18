@@ -56,17 +56,49 @@ func TestComputerSelectionHTTP(t *testing.T) {
 	if w := call(http.MethodPut, path, `{"computerId":"missing"}`, p); w.Code != 404 {
 		t.Fatalf("missing: %d %s", w.Code, w.Body)
 	}
-	for _, body := range []string{`{"computerId":"one"}`, `{"computerId":null}`} {
-		if w := call(http.MethodPut, path, body, p); w.Code != 200 {
+	server := "server:" + space.ID
+	for _, tc := range []struct{ body, choice, effective string }{
+		{`{"computerId":"one"}`, "one", "one"},
+		{`{"computerId":null}`, "", server},
+		{`{"computerId":"` + server + `"}`, "", server},
+	} {
+		if w := call(http.MethodPut, path, tc.body, p); w.Code != 200 {
 			t.Fatalf("selection: %d %s", w.Code, w.Body)
 		}
-		if w := call(http.MethodGet, path, "", p); w.Code != 200 || strings.TrimSpace(w.Body.String()) != body {
+		w := call(http.MethodGet, path, "", p)
+		var got struct {
+			ComputerID          *string `json:"computerId"`
+			EffectiveComputerID string  `json:"effectiveComputerId"`
+			ServerComputerID    string  `json:"serverComputerId"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
 			t.Fatalf("read selection: %d %s", w.Code, w.Body)
+		}
+		choice := ""
+		if got.ComputerID != nil {
+			choice = *got.ComputerID
+		}
+		if choice != tc.choice || got.EffectiveComputerID != tc.effective || got.ServerComputerID != server {
+			t.Fatalf("selection after %s: %s", tc.body, w.Body)
 		}
 	}
 	w := call(http.MethodGet, "/spaces/"+space.ID+"/computers", "", p)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || !strings.Contains(w.Body.String(), `"id":"`+server+`"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
 		t.Fatalf("catalog: %d %s", w.Code, w.Body)
+	}
+	var catalog []map[string]any
+	if json.Unmarshal(w.Body.Bytes(), &catalog) != nil || len(catalog) != 2 || catalog[0]["id"] != server || catalog[0]["role"] != "server" {
+		t.Fatalf("server computer must be listed first: %s", w.Body)
+	}
+	if w := call(http.MethodGet, "/spaces/"+space.ID+"/computer-default", "", p); w.Code != 200 || !strings.Contains(w.Body.String(), server) {
+		t.Fatalf("space default: %d %s", w.Code, w.Body)
+	}
+	owner := httpx.Principal{TenantID: "tenant", Role: "owner"}
+	if w := call(http.MethodPut, "/spaces/"+space.ID+"/computer-default", `{"computerId":"one"}`, owner); w.Code != 409 {
+		t.Fatalf("attached space default accepted: %d %s", w.Code, w.Body)
+	}
+	if w := call(http.MethodDelete, "/spaces/"+space.ID+"/computers/"+server, "", owner); w.Code != 409 {
+		t.Fatalf("server computer deleted: %d %s", w.Code, w.Body)
 	}
 	bound := httpx.Principal{TenantID: "tenant", SpaceID: space.ID, AgentID: agent.ID}
 	if w := call(http.MethodGet, path+"s", "", bound); w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"one"`) || strings.Contains(w.Body.String(), "secret") || strings.Contains(w.Body.String(), "apiKey") {
@@ -126,7 +158,7 @@ func TestComputerManagementHTTP(t *testing.T) {
 		}
 	}
 	var ciphertext, computerID string
-	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? LIMIT 1`, space.ID).Scan(&ciphertext, &computerID); err != nil {
+	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? AND role='attached' LIMIT 1`, space.ID).Scan(&ciphertext, &computerID); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(ciphertext, "private-key-value") {
@@ -169,14 +201,18 @@ func TestComputerManagementAcceptsComputerNode(t *testing.T) {
 		router.ServeHTTP(w, req)
 		return w
 	}
-	if w := call(`{"name":"Local","provider":"server","runtimeNodeId":"cnode","config":{}}`); w.Code != 201 {
+	if w := call(`{"name":"Local","provider":"temporary","runtimeNodeId":"cnode","config":{}}`); w.Code != 201 {
 		t.Fatalf("computer node rejected: %d %s", w.Code, w.Body)
 	}
-	if w := call(`{"name":"LocalRunner","provider":"server","runtimeNodeId":"lnode","config":{}}`); w.Code != 201 {
+	if w := call(`{"name":"LocalRunner","provider":"temporary","runtimeNodeId":"lnode","config":{}}`); w.Code != 201 {
 		t.Fatalf("local node rejected: %d %s", w.Code, w.Body)
 	}
-	if w := call(`{"name":"Bad","provider":"server","runtimeNodeId":"rnode","config":{}}`); w.Code != 400 {
+	if w := call(`{"name":"Bad","provider":"temporary","runtimeNodeId":"rnode","config":{}}`); w.Code != 400 {
 		t.Fatalf("unrelated node kind accepted: %d %s", w.Code, w.Body)
+	}
+	// The Space already owns its server computer; another cannot be added.
+	if w := call(`{"name":"Second","provider":"server","runtimeNodeId":"cnode","config":{}}`); w.Code != 400 {
+		t.Fatalf("second server computer accepted: %d %s", w.Code, w.Body)
 	}
 }
 
@@ -198,7 +234,7 @@ func TestComputerManagementRailwayAutoKey(t *testing.T) {
 		t.Fatalf("railway create: %d %s", w.Code, w.Body)
 	}
 	var secret, computerID string
-	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=?`, space.ID).Scan(&secret, &computerID); err != nil {
+	if err := d.DB.QueryRow(`SELECT secret_ref,id FROM computers WHERE space_id=? AND role='attached'`, space.ID).Scan(&secret, &computerID); err != nil {
 		t.Fatal(err)
 	}
 	plain, err := computers.OpenCredentials(d.Secret, "tenant", space.ID, computerID, secret)

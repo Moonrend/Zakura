@@ -84,12 +84,17 @@ func (h *handler) forkSession(w http.ResponseWriter, r *http.Request) {
 		if b.AtSeq > 0 && ev.Seq > b.AtSeq {
 			break
 		}
-		if ev.Type != "user_message" && ev.Type != "assistant_message" && ev.Type != "message.created" && ev.Type != "session.compacted" {
+		if ev.Type != "user_message" && ev.Type != "assistant_message" && ev.Type != "message.created" && ev.Type != "ui_state_updated" && ev.Type != "session.compacted" {
 			continue
 		}
 		var payload any
 		if json.Unmarshal(ev.Payload, &payload) != nil {
 			continue
+		}
+		if ev.Type == "assistant_message" {
+			if object, ok := payload.(map[string]any); ok && object["messageId"] == nil {
+				object["messageId"] = ev.ID
+			}
 		}
 		if _, e = h.store.AppendEvent(r.Context(), p.TenantID, agent, fork.ID, ev.Type, nil, payload); e != nil {
 			statusErr(w, e)

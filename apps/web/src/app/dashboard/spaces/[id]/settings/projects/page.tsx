@@ -6,7 +6,8 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { FolderKanban, MoreHorizontal, Trash2 } from "lucide-react";
-import { useAgentDetail } from "@/components/agent-detail-context";
+import { useParams } from "next/navigation";
+import { useMemo } from "react";
 import { SettingsHeader } from "@/components/settings-shell";
 import { PageLoading } from "@/components/ui/progress-linear";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -26,7 +27,9 @@ import { ProjectSettingsPane } from "@/components/chat/project-pane";
 
 export default function AgentProjectsPage() {
   const { confirm } = useConfirmDialog();
-  const { id, agent, loading } = useAgentDetail();
+  const { id: spaceId } = useParams<{ id: string }>();
+  const id = useMemo(() => ({ spaceId }), [spaceId]);
+  const [loading, setLoading] = useState(true);
   const [projects, setProjects] = useState<AgentProject[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -37,12 +40,14 @@ export default function AgentProjectsPage() {
       .then((res) => {
         if (cancelled) return;
         setProjects(res.projects);
+        setLoading(false);
         setListError(null);
         setSelected((prev) => prev ?? res.projects[0]?.slug ?? null);
       })
       .catch((err) => {
         if (cancelled) return;
         setProjects([]);
+        setLoading(false);
         setListError(err instanceof Error ? err.message : String(err));
       });
     return () => {
@@ -74,7 +79,7 @@ export default function AgentProjectsPage() {
 
   const current = projects.find((p) => p.slug === selected) ?? null;
 
-  if (loading || !agent) {
+  if (loading) {
     return <PageLoading />;
   }
 

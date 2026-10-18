@@ -233,6 +233,145 @@ func (p e2bComputerProvider) Find(ctx context.Context, r computers.Runtime) (com
 	return computers.CreationResult{ExternalID: listed[0].SandboxID}, nil
 }
 
+type e2bCleanupSnapshot struct {
+	Runtime       computers.Runtime `json:"runtime"`
+	Configuration e2bConfiguration  `json:"configuration"`
+	APIBase       string            `json:"apiBase"`
+}
+
+var _ computers.CleanupSnapshotProvider = e2bComputerProvider{}
+
+func (p e2bComputerProvider) CaptureCleanup(ctx context.Context, r computers.Runtime) (json.RawMessage, error) {
+	actual, err := p.pinnedRuntime(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if !cleanupRuntimeIdentityMatches(actual, r) || r.Incarnation == "" || r.CreateOperationID == "" || strings.TrimSpace(r.SessionScope) == "" {
+		return nil, computers.ErrTransitionConflict
+	}
+	var provider string
+	if err = p.h.deps.DB.QueryRowContext(ctx, p.h.deps.Rebind(`SELECT provider FROM computers WHERE tenant_id=? AND space_id=? AND id=?`), r.TenantID, r.SpaceID, r.ComputerID).Scan(&provider); err != nil {
+		return nil, err
+	}
+	if provider != "e2b" {
+		return nil, computers.ErrTransitionConflict
+	}
+	cfg, err := p.configuration(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(e2bCleanupSnapshot{Runtime: actual, Configuration: cfg, APIBase: p.base()})
+	if err != nil {
+		return nil, errors.New("E2B cleanup snapshot could not be encoded")
+	}
+	sealed, err := computers.SealCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, raw)
+	if err != nil {
+		return nil, errors.New("E2B cleanup snapshot could not be sealed")
+	}
+	return json.Marshal(map[string]string{"sealed": sealed})
+}
+
+// Cleanup uses the original sealed account/configuration and immutable runtime,
+// never the owner's current credentials. An exact ownership probe must succeed
+// before DELETE; missing external identities are discovered by operation metadata.
+func (p e2bComputerProvider) DestroyCleanup(ctx context.Context, r computers.Runtime, data json.RawMessage) error {
+	var envelope struct {
+		Sealed string `json:"sealed"`
+	}
+	if json.Unmarshal(data, &envelope) != nil {
+		return errors.New("E2B cleanup snapshot is invalid")
+	}
+	plain, err := computers.OpenCredentials(p.h.deps.Secret, r.TenantID, r.SpaceID, r.ComputerID, envelope.Sealed)
+	if err != nil {
+		return errors.New("E2B cleanup snapshot could not be opened")
+	}
+	var snapshot e2bCleanupSnapshot
+	if json.Unmarshal(plain, &snapshot) != nil || !cleanupRuntimeIdentityMatches(snapshot.Runtime, r) || snapshot.APIBase == "" || snapshot.Configuration.APIKey == "" {
+		return computers.ErrTransitionConflict
+	}
+	client := *p.client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if strings.TrimSpace(r.ExternalID) == "" {
+		query := url.Values{}
+		query.Set("metadata", "zakura.operation="+r.CreateOperationID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(snapshot.APIBase, "/")+"/sandboxes?"+query.Encode(), nil)
+		if err != nil {
+			return errors.New("E2B cleanup lookup request could not be built")
+		}
+		req.Header.Set("X-API-Key", snapshot.Configuration.APIKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			return errors.New("E2B cleanup lookup request failed")
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("E2B cleanup lookup rejected with status %d", resp.StatusCode)
+		}
+		var listed []struct {
+			SandboxID string            `json:"sandboxID"`
+			Metadata  map[string]string `json:"metadata"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&listed) != nil {
+			return errors.New("E2B cleanup lookup response could not be read")
+		}
+		// An empty list cannot prove an in-flight creation will never appear.
+		// Leave the durable intent pending so the worker keeps discovering it.
+		if len(listed) != 1 || listed[0].SandboxID == "" || !e2bMetadataMatches(listed[0].Metadata, r) {
+			return errors.New("E2B cleanup creation outcome remains unknown")
+		}
+		// Persisted snapshot identity remains unchanged; the discovered ID is used
+		// only after checking the exact operation's ownership metadata.
+		r.ExternalID = listed[0].SandboxID
+	}
+	endpoint := strings.TrimRight(snapshot.APIBase, "/") + "/sandboxes/" + url.PathEscape(r.ExternalID)
+	probe, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return errors.New("E2B cleanup ownership request could not be built")
+	}
+	probe.Header.Set("X-API-Key", snapshot.Configuration.APIKey)
+	resp, err := client.Do(probe)
+	if err != nil {
+		return errors.New("E2B cleanup ownership request failed")
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = resp.Body.Close()
+		return fmt.Errorf("E2B cleanup ownership request rejected with status %d", resp.StatusCode)
+	}
+	var actual struct {
+		SandboxID string            `json:"sandboxID"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&actual)
+	_ = resp.Body.Close()
+	if decodeErr != nil {
+		return errors.New("E2B cleanup ownership response could not be read")
+	}
+	if actual.SandboxID != r.ExternalID || !e2bMetadataMatches(actual.Metadata, r) {
+		return errors.New("E2B cleanup sandbox ownership could not be verified")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return errors.New("E2B cleanup destroy request could not be built")
+	}
+	req.Header.Set("X-API-Key", snapshot.Configuration.APIKey)
+	resp, err = client.Do(req)
+	if err != nil {
+		return errors.New("E2B cleanup destroy request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("E2B cleanup destroy request rejected with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // Destroy is the control-plane teardown used by the cleanup worker, whose
 // request context may already be cancelled, so the call runs detached.
 func (p e2bComputerProvider) Destroy(ctx context.Context, r computers.Runtime) error {

@@ -10,8 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"gorm.io/gorm/clause"
 )
 
 type agentTool struct {
@@ -173,6 +171,16 @@ func (h *handler) agentMCPInstances(ctx context.Context, tenant, agentID, spaceI
 		}
 		seen[id] = true
 		if inst, err := h.getMCPInstance(ctx, tenant, id); err == nil {
+			policies, e := h.effectiveMCPPolicies(ctx, tenant, agentID, spaceID)
+			if e != nil || !policies.instanceAllowed(inst.ID) {
+				return
+			}
+			if _, stdio := stdioBodyFromConfig(inst.Config); stdio {
+				owner, e := h.mcpOwnerSpace(ctx, inst)
+				if e != nil || owner != spaceID {
+					return
+				}
+			}
 			out = append(out, inst)
 		}
 	}
@@ -191,28 +199,15 @@ func (h *handler) agentMCPInstances(ctx context.Context, tenant, agentID, spaceI
 	return out
 }
 
-func (h *handler) mcpToolPolicy(ctx context.Context, tenant, agentID, spaceID string) (allow, deny, instanceAllow []string) {
-	var row struct {
-		PolicyJSON string `gorm:"column:policy_json"`
-	}
-	err := h.deps.Gorm.WithContext(ctx).Table("mcp_policies").Select("policy_json").
-		Where("tenant_id=? AND (agent_id=? OR (space_id=? AND agent_id IS NULL) OR (agent_id IS NULL AND space_id IS NULL))", tenant, agentID, spaceID).
-		Order(clause.OrderBy{Expression: clause.Expr{SQL: "CASE WHEN agent_id=? THEN 0 WHEN space_id=? AND agent_id IS NULL THEN 1 ELSE 2 END,created_at", Vars: []any{agentID, spaceID}}}).
-		Take(&row).Error
-	if err != nil {
-		return nil, nil, nil
-	}
-	policy := map[string]any{}
-	_ = json.Unmarshal([]byte(row.PolicyJSON), &policy)
-	return mcpStringList(policy["toolAllowlist"]), mcpStringList(policy["toolDenylist"]), mcpStringList(policy["instanceIds"])
-}
-
 func (h *handler) agentMCPCatalogTools(ctx context.Context, tenant, agentID, spaceID string) []agentTool {
 	instances := h.agentMCPInstances(ctx, tenant, agentID, spaceID)
-	allow, deny, instanceAllow := h.mcpToolPolicy(ctx, tenant, agentID, spaceID)
+	policies, err := h.effectiveMCPPolicies(ctx, tenant, agentID, spaceID)
+	if err != nil {
+		return []agentTool{}
+	}
 	out := []agentTool{}
 	for _, inst := range instances {
-		if len(instanceAllow) > 0 && !listContains(instanceAllow, inst.ID) {
+		if !policies.instanceAllowed(inst.ID) {
 			continue
 		}
 		cfg := map[string]any{}
@@ -240,12 +235,7 @@ func (h *handler) agentMCPCatalogTools(ctx context.Context, tenant, agentID, spa
 			if local == "" {
 				continue
 			}
-			rawQualified := slugify(inst.Ref) + "__" + local
-			qualified := rawQualified
-			if len(allow) > 0 && !listContains(allow, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
-				continue
-			}
-			if listContains(deny, qualified, rawQualified, "re_"+qualified, "re_"+local, local) {
+			if !policies.operationAllowed(inst, "tools/call", local) {
 				continue
 			}
 			out = append(out, agentTool{

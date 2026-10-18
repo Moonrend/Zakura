@@ -83,6 +83,14 @@ func connectOnce(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	var requestMu sync.Mutex
+	requests := map[string]context.CancelFunc{}
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+		cfg.Handler.CloseStreams()
+	}()
 	c.SetReadLimit(16 << 20)
 	for {
 		_, data, err := c.ReadMessage()
@@ -99,10 +107,34 @@ func connectOnce(ctx context.Context, cfg Config) error {
 			}
 			continue
 		}
+		if msg.Type == "cancel" {
+			requestMu.Lock()
+			stop := requests[msg.ID]
+			requestMu.Unlock()
+			if stop != nil {
+				stop()
+			}
+			continue
+		}
 		if msg.Type != "req" {
 			continue
 		}
-		go cfg.Handler.Dispatch(connCtx, msg, send)
+		requestCtx, stop := context.WithCancel(connCtx)
+		requestMu.Lock()
+		if requests[msg.ID] != nil {
+			requestMu.Unlock()
+			stop()
+			continue
+		}
+		requests[msg.ID] = stop
+		requestMu.Unlock()
+		workers.Add(1)
+		go func(msg rpc.Msg) {
+			defer workers.Done()
+			defer stop()
+			defer func() { requestMu.Lock(); delete(requests, msg.ID); requestMu.Unlock() }()
+			cfg.Handler.Dispatch(requestCtx, msg, send)
+		}(msg)
 	}
 }
 

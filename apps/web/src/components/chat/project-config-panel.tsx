@@ -38,7 +38,7 @@ export function ProjectConfigPanel({
   slug,
   className,
 }: {
-  agentId: string;
+  agentId: import("@/lib/agent-fs").WorkspaceTarget;
   slug: string;
   className?: string;
 }) {
@@ -81,10 +81,10 @@ export function ProjectConfigPanel({
     try {
       const res = await saveProjectInstructions(agentId, slug, {
         content: instructions,
-        file: "AGENTS.md",
+        file: config?.instructions.file ?? "AGENTS.md",
       });
       setConfig(res.config);
-      toast.success("已保存 AGENTS.md");
+      toast.success(`已保存 ${res.config.instructions.file ?? "AGENTS.md"}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -205,7 +205,7 @@ export function ProjectConfigPanel({
         <TabsContent value="instructions" className="mt-3 space-y-3">
           <p className="text-xs text-muted-foreground">
             {config.instructions.claudeFallback
-              ? "目前只有 CLAUDE.md，保存后会写成优先使用的 AGENTS.md。"
+              ? "当前使用 CLAUDE.md，保存会保留原文件；AGENTS.md 存在时优先使用。"
               : config.instructions.file
                 ? `正在编辑 ${config.instructions.file}。绑定本项目的会话会自动注入。`
                 : "还没有指令文件。保存后写入项目根目录 AGENTS.md。"}
@@ -218,7 +218,7 @@ export function ProjectConfigPanel({
           />
           <Button size="sm" onClick={() => void saveInstructions()} disabled={savingInstructions}>
             {savingInstructions ? <Loader2 className="size-3.5 animate-spin" /> : null}
-            保存 AGENTS.md
+            保存 {config.instructions.file ?? "AGENTS.md"}
           </Button>
         </TabsContent>
 

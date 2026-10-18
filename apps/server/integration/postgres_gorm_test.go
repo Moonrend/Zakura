@@ -3,7 +3,6 @@ package integration_test
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 )
 
 func TestPostgresGormConnection(t *testing.T) {
-	dsn := pgtest.FreshURL(t, os.Getenv("ZAKURA_TEST_POSTGRES_URL"), "integration_gorm")
+	dsn := pgtest.FreshURL(t, pgtest.URL(t), "integration_gorm")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, err := platformdb.OpenGorm(ctx, dsn)

@@ -42,6 +42,7 @@ export function SkillInstallDialog({
   open,
   onOpenChange,
   source,
+  spaceId,
   agents,
   defaultAgentIds,
   onInstalled,
@@ -49,6 +50,7 @@ export function SkillInstallDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   source: string;
+  spaceId?: string;
   agents: AgentListItem[];
   defaultAgentIds?: string[];
   onInstalled?: (installedNames: string[]) => void;
@@ -70,7 +72,7 @@ export function SkillInstallDialog({
     setError(null);
     setResolved(null);
     try {
-      const res = await resolveSkillSource(source);
+      const res = await resolveSkillSource(source, spaceId);
       setResolved(res);
       const names = res.skills.map((s) => s.name);
       setSelectedSkills(names);
@@ -80,7 +82,7 @@ export function SkillInstallDialog({
     } finally {
       setLoading(false);
     }
-  }, [source]);
+  }, [source, spaceId]);
 
   useEffect(() => {
     if (!open) return;
@@ -104,8 +106,7 @@ export function SkillInstallDialog({
     !loading &&
     !installing &&
     selectedSkills.length > 0 &&
-    agents.length > 0 &&
-    targetCount > 0;
+    (Boolean(spaceId) || (agents.length > 0 && targetCount > 0));
   const bundled = active?.files.filter((f) => f.path !== "SKILL.md") ?? [];
 
   async function install() {
@@ -115,7 +116,7 @@ export function SkillInstallDialog({
       const res = await installSkill({
         source,
         names: selectedSkills,
-        ...(agentTarget.all ? { all: true } : { agentIds: targetIds }),
+        ...(spaceId ? { spaceId } : agentTarget.all ? { all: true } : { agentIds: targetIds }),
       });
       const names = res.skills.map((s) => s.name);
       const failed = res.installs.filter((i) => i.status === "error");
@@ -125,7 +126,7 @@ export function SkillInstallDialog({
         });
       } else {
         toast.success(
-          `已安装 ${names.join("、")} 到 ${agentTarget.all ? "全部" : targetCount} 个 Agent`,
+          spaceId ? `已安装 ${names.join("、")} 到 Space` : `已安装 ${names.join("、")} 到 ${agentTarget.all ? "全部" : targetCount} 个 Agent`,
           res.warnings.length ? { description: res.warnings[0] } : undefined,
         );
       }
@@ -304,12 +305,12 @@ export function SkillInstallDialog({
           ) : null}
 
           <div className="space-y-3 px-4 py-3 sm:px-5">
-            <AgentTargetPicker
+            {spaceId ? <p className="text-xs text-muted-foreground">安装到当前 Space。随后可在各 Agent 的技能页启用。</p> : <AgentTargetPicker
               agents={agents}
               value={agentTarget}
               onChange={setAgentTarget}
               disabled={installing}
-            />
+            />}
             <div className="flex items-center justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
                 取消

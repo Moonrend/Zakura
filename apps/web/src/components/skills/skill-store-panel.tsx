@@ -154,11 +154,13 @@ function RepoFilter({
 }
 
 export function SkillStorePanel({
+  spaceId,
   agents,
   stores: storesProp,
   defaultAgentIds,
   onInstalled,
 }: {
+  spaceId?: string;
   agents: AgentListItem[];
   stores?: SkillStoreMeta[];
   defaultAgentIds?: string[];
@@ -181,10 +183,10 @@ export function SkillStorePanel({
   const meta = stores.find((s) => s.id === store);
 
   const loadRepos = useCallback(() => {
-    void listSkillRepos()
+    void listSkillRepos(spaceId)
       .then(setRepos)
       .catch(() => setRepos([]));
-  }, []);
+  }, [spaceId]);
 
   useEffect(() => {
     loadRepos();
@@ -200,6 +202,7 @@ export function SkillStorePanel({
     setLoading(true);
     try {
       const res = await searchSkills(debounced, store, {
+        spaceId,
         ...(store === "curated" && repoSlug ? { repo: repoSlug } : {}),
         limit: PAGE_SIZE,
       });
@@ -216,7 +219,7 @@ export function SkillStorePanel({
       if (id === requestId.current) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debounced, store, repoSlug]);
+  }, [debounced, store, repoSlug, spaceId]);
 
   useEffect(() => {
     void load();
@@ -226,6 +229,7 @@ export function SkillStorePanel({
     setLoadingMore(true);
     try {
       const res = await searchSkills(debounced, store, {
+        spaceId,
         ...(store === "curated" && repoSlug ? { repo: repoSlug } : {}),
         offset: page.items.length,
         limit: PAGE_SIZE,
@@ -251,7 +255,7 @@ export function SkillStorePanel({
   }
 
   function openInstall(spec: string) {
-    if (!agents.length) {
+    if (!spaceId && !agents.length) {
       toast.error("还没有 Agent，请先创建一个 Agent 再安装技能");
       return;
     }
@@ -448,6 +452,7 @@ export function SkillStorePanel({
       )}
 
       <SkillInstallDialog
+        spaceId={spaceId}
         open={Boolean(installSource)}
         onOpenChange={(open) => {
           if (!open) setInstallSource(null);

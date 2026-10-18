@@ -15,9 +15,17 @@ func (h *handler) computerStore() computers.Store {
 }
 
 func (h *handler) registerComputers(r chi.Router) {
+	r.Post("/spaces/{id}/desktop-ticket", h.spaceDesktopTicket)
+	r.Get("/spaces/{id}/computer", h.getServerComputer)
+	r.Put("/spaces/{id}/computer/config", h.configureServerComputer)
+	r.Post("/spaces/{id}/computer/start", h.startServerComputer)
+	r.Post("/spaces/{id}/computer/stop", h.stopServerComputer)
+	r.Post("/spaces/{id}/computer/recovery/acknowledge", h.acknowledgeWorkspaceRecovery)
 	r.Get("/spaces/{id}/computers", h.listComputers)
 	r.Post("/spaces/{id}/computers", h.createComputer)
-	r.Patch("/spaces/{id}/computers/{cid}", h.renameComputer)
+	r.Patch("/spaces/{id}/computers/{cid}", h.updateComputer)
+	r.Get("/spaces/{id}/computers/{cid}/config", h.computerConfiguration)
+	r.Delete("/spaces/{id}/computers/{cid}", h.deleteComputer)
 	r.Post("/spaces/{id}/computers/{cid}/terminal-ticket", h.computerTerminalTicket)
 	r.Post("/spaces/{id}/computers/{cid}/runtimes", h.reserveComputerRuntime)
 	r.Get("/spaces/{id}/computers/{cid}/runtimes/{rid}", h.getComputerRuntime)
@@ -46,11 +54,29 @@ func computerScopeAllowed(p httpx.Principal, space, agent string) bool {
 	return true
 }
 func computerStatusError(w http.ResponseWriter, err error) {
-	if errors.Is(err, sql.ErrNoRows) {
-		httpx.Error(w, 404, "computer selection not found")
-		return
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		httpx.Error(w, 404, "computer not found")
+	case errors.Is(err, computers.ErrServerComputerManaged), errors.Is(err, computers.ErrComputerInUse), errors.Is(err, computers.ErrSpaceDefaultFixed), errors.Is(err, computers.ErrOwnerDeleting), errors.Is(err, computers.ErrTransitionConflict), errors.Is(err, errOwnerDeletionUncertain), errors.Is(err, errWorkspaceStarting), errors.Is(err, errWorkspaceLeaseLost):
+		httpx.Error(w, http.StatusConflict, err.Error())
+	default:
+		statusErr(w, err)
 	}
-	statusErr(w, err)
+}
+
+// spaceComputers lists the catalog, creating the Space server computer first
+// when a Space predates it or was written by a path that bypassed the Space
+// transaction. Listing never provisions a runtime.
+func (h *handler) spaceComputers(r *http.Request, tenant, space string) ([]computers.Computer, error) {
+	s := h.computerStore()
+	if _, err := s.ServerComputer(r.Context(), tenant, space); errors.Is(err, computers.ErrNoServerComputer) {
+		if _, err = s.EnsureServerComputer(r.Context(), tenant, space, h.store.now()); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	return s.List(r.Context(), tenant, space)
 }
 func (h *handler) listComputers(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -63,7 +89,7 @@ func (h *handler) listComputers(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
-	items, err := h.computerStore().List(r.Context(), p.TenantID, space)
+	items, err := h.spaceComputers(r, p.TenantID, space)
 	if err != nil {
 		computerStatusError(w, err)
 		return
@@ -88,18 +114,45 @@ func (h *handler) sessionComputerScope(w http.ResponseWriter, r *http.Request) (
 	}
 	return agent.SpaceID, true
 }
+
+// sessionComputerResponse reports the chat's explicit choice (null when it
+// follows the server computer) next to the computer its next Run will use.
+func (h *handler) sessionComputerResponse(r *http.Request, space, session string) (map[string]any, error) {
+	tenant := principal(r).TenantID
+	s := h.computerStore()
+	server, err := s.ServerComputer(r.Context(), tenant, space)
+	if errors.Is(err, computers.ErrNoServerComputer) {
+		server, err = s.EnsureServerComputer(r.Context(), tenant, space, h.store.now())
+	}
+	if err != nil {
+		return nil, err
+	}
+	selected, err := s.SessionDefault(r.Context(), tenant, space, session)
+	if err != nil {
+		return nil, err
+	}
+	effective := server.ID
+	var choice any
+	if selected != nil {
+		choice, effective = *selected, *selected
+	}
+	return map[string]any{"computerId": choice, "effectiveComputerId": effective, "serverComputerId": server.ID}, nil
+}
 func (h *handler) getSessionComputer(w http.ResponseWriter, r *http.Request) {
 	space, ok := h.sessionComputerScope(w, r)
 	if !ok {
 		return
 	}
-	id, err := h.computerStore().SessionDefault(r.Context(), principal(r).TenantID, space, chi.URLParam(r, "sid"))
+	out, err := h.sessionComputerResponse(r, space, chi.URLParam(r, "sid"))
 	if err != nil {
 		computerStatusError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"computerId": id})
+	httpx.JSON(w, 200, out)
 }
+
+// setSessionComputer changes the chat's choice for subsequent Runs. null, or
+// the server computer itself, makes the chat follow the server computer.
 func (h *handler) setSessionComputer(w http.ResponseWriter, r *http.Request) {
 	space, ok := h.sessionComputerScope(w, r)
 	if !ok {
@@ -124,6 +177,16 @@ func (h *handler) setSessionComputer(w http.ResponseWriter, r *http.Request) {
 	s := h.computerStore()
 	p := principal(r)
 	sid := chi.URLParam(r, "sid")
+	if value != nil {
+		c, err := s.Get(r.Context(), p.TenantID, space, id)
+		if err != nil {
+			computerStatusError(w, err)
+			return
+		}
+		if c.IsServer() {
+			value = nil
+		}
+	}
 	var err error
 	if value == nil {
 		err = s.ClearSessionDefault(r.Context(), p.TenantID, space, sid)
@@ -134,7 +197,12 @@ func (h *handler) setSessionComputer(w http.ResponseWriter, r *http.Request) {
 		computerStatusError(w, err)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"computerId": value})
+	out, err := h.sessionComputerResponse(r, space, sid)
+	if err != nil {
+		computerStatusError(w, err)
+		return
+	}
+	httpx.JSON(w, 200, out)
 }
 
 // Session-scoped catalog allows an agent-bound credential to discover only its
@@ -144,7 +212,7 @@ func (h *handler) listSessionComputers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := h.computerStore().List(r.Context(), principal(r).TenantID, space)
+	items, err := h.spaceComputers(r, principal(r).TenantID, space)
 	if err != nil {
 		computerStatusError(w, err)
 		return

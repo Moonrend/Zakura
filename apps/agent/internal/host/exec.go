@@ -13,11 +13,12 @@ import (
 )
 
 type ExecParams struct {
-	Command    []string          `json:"command"`
-	WorkingDir string            `json:"workingDir"`
-	Env        map[string]string `json:"env"`
-	TimeoutMs  int               `json:"timeoutMs"`
-	Stdin      string            `json:"stdin"`
+	Command        []string          `json:"command"`
+	WorkingDir     string            `json:"workingDir"`
+	Env            map[string]string `json:"env"`
+	TimeoutMs      int               `json:"timeoutMs"`
+	Stdin          string            `json:"stdin"`
+	MaxOutputBytes int               `json:"maxOutputBytes,omitempty"`
 }
 
 type ExecResult struct {
@@ -26,8 +27,37 @@ type ExecResult struct {
 	Stderr   string `json:"stderr"`
 }
 
+type outputBudget struct {
+	mu        sync.Mutex
+	remaining int
+	limited   bool
+}
+
+type boundedOutput struct {
+	budget *outputBudget
+	dst    *bytes.Buffer
+}
+
+func (w *boundedOutput) Write(p []byte) (int, error) {
+	w.budget.mu.Lock()
+	defer w.budget.mu.Unlock()
+	n := len(p)
+	if w.budget.limited {
+		n = min(n, w.budget.remaining)
+		w.budget.remaining -= n
+	}
+	_, _ = w.dst.Write(p[:n])
+	return len(p), nil
+}
+
 func Run(root string, p ExecParams) (ExecResult, error) {
-	ctx := context.Background()
+	return RunContext(context.Background(), root, p)
+}
+
+func RunContext(ctx context.Context, root string, p ExecParams) (ExecResult, error) {
+	if p.MaxOutputBytes < 0 || p.MaxOutputBytes > 16<<20 {
+		return ExecResult{}, os.ErrInvalid
+	}
 	if p.TimeoutMs > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(p.TimeoutMs)*time.Millisecond)
@@ -38,8 +68,9 @@ func Run(root string, p ExecParams) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	var outB, errB bytes.Buffer
-	cmd.Stdout = &outB
-	cmd.Stderr = &errB
+	budget := &outputBudget{remaining: p.MaxOutputBytes, limited: p.MaxOutputBytes > 0}
+	cmd.Stdout = &boundedOutput{budget: budget, dst: &outB}
+	cmd.Stderr = &boundedOutput{budget: budget, dst: &errB}
 	if p.Stdin != "" {
 		cmd.Stdin = bytes.NewBufferString(p.Stdin)
 	}

@@ -107,6 +107,9 @@ func openEarlyGoSecretBox(key []byte, scope, value string) ([]byte, error) {
 	return g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], []byte(scope))
 }
 func (h *handler) skillStores(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorizeSkillSpace(w, r); !ok {
+		return
+	}
 	catalog := make([]map[string]any, 0, len(builtins.All()))
 	for _, d := range builtins.All() {
 		requires := d.Requires
@@ -119,7 +122,12 @@ func (h *handler) skillStores(w http.ResponseWriter, r *http.Request) {
 		}
 		catalog = append(catalog, map[string]any{"name": d.Name, "title": d.Title, "description": d.Description, "recommended": d.Recommended, "requires": requires, "tags": tags})
 	}
-	httpx.JSON(w, 200, map[string]any{"stores": []map[string]any{{"id": "github", "name": "GitHub", "supportsSearch": true}, {"id": "gitlab", "name": "GitLab", "supportsSearch": true}}, "builtin": catalog})
+	httpx.JSON(w, 200, map[string]any{"stores": []map[string]any{
+		{"id": "curated", "name": "官方仓库", "description": "服务端同步的技能仓库", "url": "https://github.com/topics/agent-skills", "searchPlaceholder": "搜索已同步的技能", "local": true, "browsable": true},
+		{"id": "builtin", "name": "内置技能", "description": "平台内置技能", "url": "https://agentskills.io", "searchPlaceholder": "搜索内置技能", "local": true, "browsable": false},
+		{"id": "skills-sh", "name": "skills.sh", "description": "开放技能目录", "url": "https://skills.sh", "searchPlaceholder": "搜索技能", "local": false, "browsable": false},
+		{"id": "github", "name": "GitHub", "description": "搜索仓库或粘贴 owner/repo", "url": "https://github.com", "searchPlaceholder": "owner/repo 或搜索词", "local": false, "browsable": false},
+	}, "builtin": catalog})
 }
 
 type builtinSkillFile struct {
@@ -166,6 +174,7 @@ func (h *handler) upsertBuiltinSkill(ctx context.Context, tenant string, def bui
 	return h.deps.Gorm.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "name"}},
+			Where:   clause.Where{Exprs: []clause.Expression{clause.Eq{Column: clause.Column{Table: "skills", Name: "builtin"}, Value: true}}},
 			DoUpdates: clause.Assignments(map[string]any{
 				"title":       def.Title,
 				"description": def.Description,
@@ -217,6 +226,30 @@ func (h *handler) installRecommendedSkills(ctx context.Context, tenant, agentID 
 	if tenant == "" || agentID == "" {
 		return
 	}
+	a, err := h.store.GetAgent(ctx, tenant, agentID)
+	if err != nil {
+		return
+	}
+	h.syncBuiltinSkills(ctx, tenant)
+	if err = h.canonicalizeSpaceSkills(ctx, tenant, a.SpaceID); err != nil {
+		return
+	}
+	for _, def := range builtins.Recommended() {
+		var m models.Skill
+		if err = h.deps.Gorm.WithContext(ctx).Where("tenant_id=? AND name=? AND builtin=true", tenant, def.Name).Take(&m).Error; err != nil {
+			continue
+		}
+		row, err := h.installSpaceSnapshot(ctx, tenant, a.SpaceID, skillFromModel(m))
+		if err != nil {
+			continue
+		}
+		_, _ = h.enableSpaceSkill(ctx, tenant, agentID, row, true)
+	}
+}
+func (h *handler) legacyInstallRecommendedSkills(ctx context.Context, tenant, agentID string) {
+	if tenant == "" || agentID == "" {
+		return
+	}
 	h.syncBuiltinSkills(ctx, tenant)
 	recommended := builtins.Recommended()
 	names := make([]string, 0, len(recommended))
@@ -235,17 +268,24 @@ func (h *handler) installRecommendedSkills(ctx context.Context, tenant, agentID 
 		if m.ID == nil {
 			continue
 		}
+		status := "installed"
+		var installError *string
+		if err := h.materializeSkill(ctx, tenant, agentID, m.Name, json.RawMessage(m.FilesJSON)); err != nil {
+			status = "error"
+			message := err.Error()
+			installError = &message
+		}
 		id := h.store.id()
 		_ = h.deps.Gorm.WithContext(ctx).
 			Clauses(clause.OnConflict{
 				Columns: []clause.Column{{Name: "agent_id"}, {Name: "name"}},
 				DoUpdates: clause.Assignments(map[string]any{
 					"skill_id": gorm.Expr("excluded.skill_id"), "enabled": true, "version": gorm.Expr("excluded.version"),
-					"status": "installed", "error": nil, "updated_at": now,
+					"status": status, "error": installError, "updated_at": now,
 				}),
 			}).
 			Table("agent_skills").
-			Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agentID, "skill_id": *m.ID, "name": m.Name, "enabled": true, "path": "/skills/" + m.Name, "version": m.Version, "status": "installed", "error": nil, "created_at": now, "updated_at": now}).Error
+			Create(map[string]any{"id": id, "tenant_id": tenant, "agent_id": agentID, "skill_id": *m.ID, "name": m.Name, "enabled": true, "path": "/skills/" + m.Name, "version": m.Version, "status": status, "error": installError, "created_at": now, "updated_at": now}).Error
 	}
 }
 
@@ -483,6 +523,9 @@ func curatedRepoPlaceholder(key string, c curatedSkillRepo) map[string]any {
 }
 
 func (h *handler) listSkillRepos(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorizeSkillSpace(w, r); !ok {
+		return
+	}
 	var ms []models.PlatformSkillRepo
 	if e := h.deps.Gorm.WithContext(r.Context()).Order("checked_at DESC").Find(&ms).Error; e != nil {
 		statusErr(w, e)
@@ -525,7 +568,7 @@ func (h *handler) skillToken(ctx context.Context, tenant, provider string) (stri
 	}
 	return "", sql.ErrNoRows
 }
-func (h *handler) syncRepo(ctx context.Context, provider, owner, repo string) (map[string]any, error) {
+func (h *handler) legacySyncRepo(ctx context.Context, provider, owner, repo string) (map[string]any, error) {
 	if provider == "" {
 		provider = "github"
 	}
@@ -812,7 +855,18 @@ func (h *handler) checkSkillUpdates(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		if _, e := h.syncRepo(r.Context(), "github", g.owner, g.repo); e != nil {
+		var cached models.PlatformSkillRepo
+		var src skillSource
+		err := h.deps.Gorm.WithContext(r.Context()).Where("repo_key=?", g.key).Take(&cached).Error
+		if err == nil {
+			_ = json.Unmarshal([]byte(cached.SourceJSON), &src)
+			src.Kind = cached.Provider
+			if src.Ref == "" && cached.Ref != nil {
+				src.Ref = *cached.Ref
+			}
+			_, err = h.syncSkillSource(r.Context(), tenant, src)
+		}
+		if e := err; e != nil {
 			for _, s := range g.skills {
 				summary.Failed = append(summary.Failed, skillUpdateFailure{Name: s.Name, Error: e.Error()})
 			}
@@ -822,7 +876,16 @@ func (h *handler) checkSkillUpdates(w http.ResponseWriter, r *http.Request) {
 		for _, s := range g.skills {
 			v := latest.upstream(s.Name)
 			if v != "" && (s.Version == nil || *s.Version != v) {
-				summary.Updated = append(summary.Updated, s.Name)
+				var skill models.Skill
+				if err := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id=? AND name=?", tenant, s.Name).Take(&skill).Error; err != nil {
+					summary.Failed = append(summary.Failed, skillUpdateFailure{Name: s.Name, Error: err.Error()})
+				} else if skill.ID != nil {
+					if _, err := h.updateSkillFromCache(r.Context(), tenant, *skill.ID); err != nil {
+						summary.Failed = append(summary.Failed, skillUpdateFailure{Name: s.Name, Error: err.Error()})
+					} else {
+						summary.Updated = append(summary.Updated, s.Name)
+					}
+				}
 			} else {
 				summary.UpToDate++
 			}
@@ -844,14 +907,18 @@ func (h *handler) listSkillTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, map[string]any{"scope": m.ScopeKey, "provider": m.Provider, "label": m.Label, "hint": m.Hint, "lastUsedAt": m.LastUsedAt, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
+		scope := "tenant"
+		if m.ScopeKey == "platform" {
+			scope = "platform"
+		}
+		out = append(out, map[string]any{"scope": scope, "provider": m.Provider, "label": m.Label, "hint": m.Hint, "lastUsedAt": m.LastUsedAt, "createdAt": m.CreatedAt, "updatedAt": m.UpdatedAt})
 	}
-	httpx.JSON(w, 200, map[string]any{"tokens": out})
+	httpx.JSON(w, 200, map[string]any{"tokens": out, "canManagePlatform": p.IsPlatformAdmin})
 }
 func (h *handler) putSkillToken(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	provider := chi.URLParam(r, "provider")
-	var b struct{ Token, Label, Scope string }
+	var b struct{ Token, Label, Scope, Provider string }
 	if httpx.DecodeJSON(r, &b) != nil || b.Token == "" {
 		httpx.Error(w, 400, "token required")
 		return
@@ -885,7 +952,11 @@ func (h *handler) putSkillToken(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
-	httpx.JSON(w, 200, map[string]any{"scope": scope, "provider": provider, "hint": hint})
+	scopeLabel := "tenant"
+	if scope == "platform" {
+		scopeLabel = "platform"
+	}
+	httpx.JSON(w, 200, map[string]any{"token": map[string]any{"scope": scopeLabel, "provider": provider, "hint": hint, "label": nullString(b.Label), "lastUsedAt": nil, "updatedAt": now}})
 }
 func (h *handler) deleteSkillToken(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -909,7 +980,7 @@ func (h *handler) deleteSkillToken(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
-func (h *handler) resolveSkill(w http.ResponseWriter, r *http.Request) {
+func (h *handler) legacyResolveSkill(w http.ResponseWriter, r *http.Request) {
 	var b struct{ RepoKey, Name string }
 	if httpx.DecodeJSON(r, &b) != nil || b.RepoKey == "" || b.Name == "" {
 		httpx.Error(w, 400, "repoKey and name required")
@@ -941,6 +1012,9 @@ func (h *handler) resolveSkill(w http.ResponseWriter, r *http.Request) {
 	statusErr(w, ErrNotFound)
 }
 func (h *handler) updateSkill(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorizeSkillSpace(w, r); !ok {
+		return
+	}
 	updated, e := h.updateSkillFromCache(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
 	if e != nil {
 		statusErr(w, e)
@@ -949,7 +1023,7 @@ func (h *handler) updateSkill(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"skill": updated})
 }
 
-func (h *handler) updateSkillFromCache(ctx context.Context, tenant, skillID string) (Skill, error) {
+func (h *handler) legacyUpdateSkillFromCache(ctx context.Context, tenant, skillID string) (Skill, error) {
 	var m models.Skill
 	e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND id = ?", tenant, skillID).Take(&m).Error
 	if errors.Is(e, gorm.ErrRecordNotFound) {
@@ -1078,12 +1152,16 @@ func (h *handler) refreshStaleSkillRepos(ctx context.Context, limit int) {
 		rows = rows[:limit]
 	}
 	for _, row := range rows {
-		var src struct{ Owner, Repo string }
+		var src skillSource
 		_ = json.Unmarshal([]byte(row.SourceJSON), &src)
 		if src.Owner == "" || src.Repo == "" {
 			continue
 		}
-		_, _ = h.syncRepo(ctx, row.Provider, src.Owner, src.Repo)
+		src.Kind = row.Provider
+		if src.Ref == "" && row.Ref != nil {
+			src.Ref = *row.Ref
+		}
+		_, _ = h.syncSkillSource(ctx, "platform", src)
 	}
 }
 
@@ -1125,6 +1203,32 @@ func (h *handler) activeSkillTenantIDs(ctx context.Context, limit int) []string 
 }
 
 func (h *handler) autoUpdateTenant(ctx context.Context, tenant string) skillUpdateSummary {
+	summary := skillUpdateSummary{Updated: []string{}, Failed: []skillUpdateFailure{}}
+	var rows []spaceSkill
+	if err := h.deps.Gorm.WithContext(ctx).Where("tenant_id=? AND auto_update=? AND status='installed'", tenant, true).Find(&rows).Error; err != nil {
+		return summary
+	}
+	for _, row := range rows {
+		files, version, err := h.cachedSkillUpdate(ctx, tenant, row.SkillID)
+		if err != nil {
+			summary.Failed = append(summary.Failed, skillUpdateFailure{Name: row.Name, Error: err.Error()})
+			continue
+		}
+		if sameSkillVersion(row.Version, version) {
+			summary.UpToDate++
+			continue
+		}
+		if err = h.replaceSpaceSnapshot(ctx, row, files, version, false); err != nil {
+			summary.Failed = append(summary.Failed, skillUpdateFailure{Name: row.Name, Error: err.Error()})
+		} else {
+			summary.Updated = append(summary.Updated, row.Name)
+		}
+	}
+	summary.BuiltinSynced = h.syncBuiltinSkills(ctx, tenant)
+	h.recordSkillAutoRun(ctx, tenant, summary)
+	return summary
+}
+func (h *handler) legacyAutoUpdateTenant(ctx context.Context, tenant string) skillUpdateSummary {
 	summary := skillUpdateSummary{Updated: []string{}, Failed: []skillUpdateFailure{}}
 	var rows []models.Skill
 	if e := h.deps.Gorm.WithContext(ctx).Where("tenant_id = ? AND builtin = false", tenant).Find(&rows).Error; e != nil {

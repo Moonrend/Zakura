@@ -118,8 +118,8 @@ func TestAgentSessionHistoryReplay(t *testing.T) {
 	if !strings.Contains(strings.Join(third, "|"), "user:p1") || !strings.Contains(strings.Join(third, "|"), "assistant:hi1") || !strings.Contains(strings.Join(third, "|"), "user:p2") || !strings.Contains(strings.Join(third, "|"), "assistant:hi2") || !strings.Contains(strings.Join(third, "|"), "user:p3") {
 		t.Fatalf("third request messages=%v", third)
 	}
-	first := messageContents(bodies[0])
-	if len(first) != 1 || first[0] != "user:p1" {
+	first := requestMessages(bodies[0])
+	if len(first) != 2 || first[0]["role"] != "system" || first[1]["role"] != "user" || first[1]["content"] != "p1" {
 		t.Fatalf("first request messages=%v", first)
 	}
 }

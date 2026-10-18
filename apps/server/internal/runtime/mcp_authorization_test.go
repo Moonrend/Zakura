@@ -144,6 +144,10 @@ func TestGatewayRequiresBoundScopedAPIKey(t *testing.T) {
 	seedTenant(t, d, "tenant")
 	h := &handler{deps: d, store: NewStore(d)}
 	h.service = NewService(h.store)
+	space, err := h.store.CreateSpace(context.Background(), "tenant", Space{Name: "Gateway", WorkspaceKind: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := func(p httpx.Principal) (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		req = req.WithContext(httpx.WithPrincipal(req.Context(), p))
@@ -162,7 +166,7 @@ func TestGatewayRequiresBoundScopedAPIKey(t *testing.T) {
 			t.Fatalf("gateway principal should be denied (%+v): %d %#v", principal, code, body)
 		}
 	}
-	if code, body := request(httpx.Principal{TenantID: "tenant", APIKey: true, AgentID: "agent", APIKeyScopes: `["gateway:models"]`}); code != http.StatusOK || body["object"] != "list" {
+	if code, body := request(httpx.Principal{TenantID: "tenant", APIKey: true, SpaceID: space.ID, APIKeyScopes: `["gateway:models"]`}); code != http.StatusOK || body["object"] != "list" {
 		t.Fatalf("scoped gateway key: %d %#v", code, body)
 	}
 }

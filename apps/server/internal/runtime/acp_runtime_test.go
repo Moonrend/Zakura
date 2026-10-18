@@ -22,13 +22,17 @@ import (
 )
 
 type fakeACPAdapter struct {
-	mu        sync.Mutex
-	methods   []string
-	loads     int
-	process   int
-	promptID  any
-	processID string
-	conn      net.Conn
+	mu            sync.Mutex
+	methods       []string
+	loads         int
+	process       int
+	promptID      any
+	processID     string
+	conn          net.Conn
+	requireAuth   bool
+	authenticated bool
+	failClose     bool
+	onRPC         func(string, map[string]any, func(any)) bool
 }
 
 func (f *fakeACPAdapter) record(method string) {
@@ -65,7 +69,9 @@ func startACPRunner(t *testing.T, serverURL, token string, fake *fakeACPAdapter)
 		if err != nil {
 			return
 		}
+		fake.mu.Lock()
 		fake.conn = conn
+		fake.mu.Unlock()
 		defer conn.Close()
 		_, _ = fmt.Fprintf(conn, "GET /api/runtime-nodes/hub HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", u.Host, token)
 		reader := bufio.NewReader(conn)
@@ -109,6 +115,14 @@ func startACPRunner(t *testing.T, serverURL, token string, fake *fakeACPAdapter)
 				fake.mu.Unlock()
 				result = map[string]any{"id": process, "mode": "pty"}
 			case "host.pty.close":
+				fake.mu.Lock()
+				failClose := fake.failClose
+				fake.mu.Unlock()
+				if failClose {
+					response, _ := json.Marshal(map[string]any{"type": "res", "id": frame.ID, "ok": false, "error": "fixture cleanup response lost"})
+					writeMaskedText(t, conn, string(response))
+					continue
+				}
 			case "host.pty.write":
 				process := fmt.Sprint(frame.Params["id"])
 				payload, _ := base64.StdEncoding.DecodeString(fmt.Sprint(frame.Params["base64"]))
@@ -119,11 +133,21 @@ func startACPRunner(t *testing.T, serverURL, token string, fake *fakeACPAdapter)
 					fake.record(method)
 				}
 				after = func() {
+					if fake.onRPC != nil && fake.onRPC(process, rpc, func(message any) { sendStream(process, message) }) {
+						return
+					}
 					id, hasID := rpc["id"]
 					switch method {
 					case "initialize":
-						sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"agentCapabilities": map[string]any{"loadSession": true, "promptCapabilities": map[string]any{"image": false}}}})
+						sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"authMethods": []any{map[string]any{"id": "login", "name": "Login"}, map[string]any{"id": "tty", "name": "Terminal", "type": "terminal"}}, "agentCapabilities": map[string]any{"loadSession": true, "auth": map[string]any{"logout": map[string]any{}}, "promptCapabilities": map[string]any{"image": false}}}})
+					case "authenticate", "logout":
+						fake.authenticated = method == "authenticate"
+						sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
 					case "session/new", "session/load":
+						if fake.requireAuth && !fake.authenticated {
+							sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": -32000, "message": "Authentication required"}})
+							return
+						}
 						sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"sessionId": "acp-session-1", "modes": map[string]any{"currentModeId": "ask", "availableModes": []any{map[string]any{"id": "ask", "name": "Ask"}, map[string]any{"id": "code", "name": "Code"}}}, "configOptions": []any{map[string]any{"id": "model", "currentValue": "small", "options": []any{map[string]any{"value": "small", "name": "Small"}, map[string]any{"value": "large", "name": "Large"}}}}}})
 					case "session/set_mode", "session/set_model", "session/set_config_option":
 						sendStream(process, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{}})
@@ -236,10 +260,15 @@ func TestACPPersistentRuntimeNegotiatesUpdatesDecisionsAndRecovery(t *testing.T)
 	if code != http.StatusAccepted {
 		t.Fatalf("prompt: %d %#v", code, out)
 	}
+	approvalID := ""
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		events, _ := store.ListEvents(context.Background(), "tenant", agent.ID, sid, 0, 100)
 		for _, event := range events {
-			if event.Type == "permission_request" {
+			if event.Type == "tool_approval_request" {
+				var payload map[string]any
+				_ = json.Unmarshal(event.Payload, &payload)
+				approvalID, _ = payload["requestId"].(string)
 				goto permissionReady
 			}
 		}
@@ -248,7 +277,7 @@ func TestACPPersistentRuntimeNegotiatesUpdatesDecisionsAndRecovery(t *testing.T)
 	t.Fatal("adapter permission request was not surfaced")
 
 permissionReady:
-	code, out = doJSON(t, server.Client(), http.MethodPost, server.URL+"/api/agents/"+agent.ID+"/sessions/"+sid+"/acp/permission", token, map[string]any{"requestId": "permission-1", "optionId": "once"})
+	code, out = doJSON(t, server.Client(), http.MethodPost, server.URL+"/api/agents/"+agent.ID+"/sessions/"+sid+"/approvals", token, map[string]any{"requestId": approvalID, "decision": "approved", "alwaysAllow": false})
 	if code != 200 {
 		t.Fatalf("permission resolution: %d %#v", code, out)
 	}
@@ -336,6 +365,7 @@ func TestACPRuntimeCacheRequiresSessionOwnership(t *testing.T) {
 	rt := &acpLiveRuntime{done: make(chan struct{})}
 	for _, pending := range []bool{false, true} {
 		m := &acpRuntimeManager{h: h, runtimes: map[string]*acpLiveRuntime{}, starting: map[string]*acpRuntimeStart{}}
+		rt.manager = m
 		if pending {
 			done := make(chan struct{})
 			close(done)

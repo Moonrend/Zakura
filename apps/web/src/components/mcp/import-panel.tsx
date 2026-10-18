@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { fetchSpaces, type SpaceItem } from "@/lib/spaces";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -72,6 +73,13 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("url");
   const [busy, setBusy] = useState(false);
+  const [spaces, setSpaces] = useState<SpaceItem[]>([]);
+  const [spaceId, setSpaceId] = useState("");
+  useEffect(() => { void fetchSpaces().then(setSpaces).catch((err: unknown) => toast.error(err instanceof Error ? err.message : String(err))); }, []);
+  function owningSpace() {
+    if (!spaceId) throw new Error("请选择所属空间");
+    return spaceId;
+  }
 
   const [mcpUrl, setMcpUrl] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -112,6 +120,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
       }>("/api/mcp/import", {
         method: "POST",
         json: {
+          spaceId: owningSpace(),
           mcpUrl: mcpUrl.trim(),
           name: autoName || undefined,
           authMode,
@@ -208,7 +217,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
         }>;
       }>("/api/mcp/import-vscode", {
         method: "POST",
-        json: { config: vscodeJson, keys, start: startAfter, all: true },
+        json: { config: vscodeJson, keys, start: startAfter, spaceId: owningSpace() },
       });
       toast.success(`已导入 ${res.count} 个 MCP`);
       onComplete?.({ instanceIds: res.results.map((result) => result.instance.id) });
@@ -250,7 +259,7 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
           args: config.args,
           packageManager: config.packageManager,
           start: startAfter,
-          all: true,
+          spaceId: owningSpace(),
         },
       });
       toast.success(
@@ -269,6 +278,14 @@ export function McpImportPanel({ embedded = false, onComplete }: McpImportPanelP
 
   return (
     <div className="space-y-5">
+      <div className="space-y-1.5">
+        <Label htmlFor="mcp-owner-space">所属空间</Label>
+        <select id="mcp-owner-space" className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={spaceId} onChange={(event) => setSpaceId(event.target.value)} disabled={busy}>
+          <option value="">选择空间</option>
+          {spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}
+        </select>
+        <p className="text-xs text-muted-foreground">Stdio MCP 安装在所属空间的服务器电脑，不随聊天电脑选择改变。</p>
+      </div>
       <div className="flex flex-wrap gap-1">
         {(
           [

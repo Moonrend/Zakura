@@ -21,7 +21,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/Moonrend/Zakura/apps/agent/install"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
@@ -51,7 +53,7 @@ func (h *handler) authorizeRunnerNode(r *http.Request, nodeID string, allowQuery
 	var expectedRow struct {
 		TokenHash string `gorm:"column:token_hash"`
 	}
-	if err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("token_hash").Where("id = ? AND token_hash IS NOT NULL", nodeID).Take(&expectedRow).Error; err != nil {
+	if err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("token_hash").Where("id = ? AND token_hash IS NOT NULL AND kind<>'local'", nodeID).Take(&expectedRow).Error; err != nil {
 		return false
 	}
 	expected := expectedRow.TokenHash
@@ -69,7 +71,7 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	if b.Token == "" {
 		b.Token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	if !strings.HasPrefix(b.Token, "rnr_") {
+	if !strings.HasPrefix(b.Token, "rnr_") || len(b.Token) > 4096 {
 		httpx.Error(w, 400, "token (rnr_*) is required")
 		return
 	}
@@ -84,9 +86,9 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	}
 	var e error
 	if b.ID != "" {
-		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("id = ? AND token_hash = ?", b.ID, hash).Take(&nodeRow).Error
+		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("id = ? AND token_hash = ? AND kind<>'local'", b.ID, hash).Take(&nodeRow).Error
 	} else {
-		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash = ?", hash).Take(&nodeRow).Error
+		e = h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("id").Where("token_hash = ? AND kind<>'local'", hash).Take(&nodeRow).Error
 	}
 	if e != nil {
 		httpx.Error(w, 401, "unauthorized")
@@ -95,7 +97,7 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 	nodeID := nodeRow.ID
 	runnerTokenCache.Store(nodeID, b.Token)
 	now := runtimeTimeString(h.store.now())
-	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", nodeID).Updates(map[string]any{"status": "online", "endpoint": b.Endpoint, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "agent_version": nullString(b.AgentVersion), "last_seen_at": now, "updated_at": now}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", nodeID).Updates(map[string]any{"endpoint": b.Endpoint, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "agent_version": nullString(b.AgentVersion), "last_seen_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -105,6 +107,7 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	h.projectRuntimeNode(node)
 	httpx.JSON(w, http.StatusOK, map[string]any{"node": node})
 }
 func (h *handler) runtimeMeshStatus(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +130,7 @@ func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	sum := sha256.Sum256([]byte(token))
 	var count int64
-	if !strings.HasPrefix(token, "rnr_") || h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Where("token_hash = ?", hex.EncodeToString(sum[:])).Count(&count) != nil || count == 0 {
+	if !strings.HasPrefix(token, "rnr_") || len(token) > 4096 || h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Where("token_hash = ? AND kind<>'local'", hex.EncodeToString(sum[:])).Count(&count).Error != nil || count == 0 {
 		httpx.Error(w, 401, "unauthorized")
 		return
 	}
@@ -136,23 +139,25 @@ func (h *handler) runtimeAgentBinary(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "invalid platform")
 		return
 	}
-	base := os.Getenv("ZAKURA_AGENT_BINARY_DIR")
+	base := os.Getenv("ZAKURA_AGENT_BINARIES_DIR")
 	if base == "" {
-		base = "dist/agent"
+		base = os.Getenv("ZAKURA_AGENT_BINARY_DIR")
 	}
-	name := "zakura-agent"
+	if base == "" {
+		base = "../agent/dist"
+	}
+	name := "zakura-agent_" + osName + "_" + arch
+	legacyName := "zakura-agent"
 	if osName == "windows" {
 		name += ".exe"
+		legacyName += ".exe"
 	}
-	file := filepath.Join(base, osName+"-"+arch, name)
-	abs, _ := filepath.Abs(file)
-	root, _ := filepath.Abs(base)
-	rel, _ := filepath.Rel(root, abs)
-	if strings.HasPrefix(rel, "..") {
-		httpx.Error(w, 403, "Forbidden")
-		return
+	file := filepath.Join(base, name)
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		// Compatibility with installations that published nested artifacts.
+		file = filepath.Join(base, osName+"-"+arch, legacyName)
 	}
-	http.ServeFile(w, r, abs)
+	http.ServeFile(w, r, file)
 }
 func (h *handler) runtimeInstallInfo(w http.ResponseWriter, r *http.Request) {
 	node, e := h.getRuntimeNodeMap(r)
@@ -221,7 +226,7 @@ func (h *handler) runnerInstallPackage(node map[string]any, token string, tailsc
 		query += "&tailscale=1"
 	}
 	bootstrap := base + "/api/runtime-nodes/" + url.PathEscape(id) + "/bootstrap.sh" + query
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\n%sOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", base, token, kind, tailscaleSetup, id)
+	script := runnerShellInstaller(base, token, kind, tailscaleSetup)
 	return map[string]any{"compose": "", "filename": "install.sh", "script": script, "dockerRun": "", "enableTailscale": enableTailscale, "tsHostname": tsHostname, "slug": slug, "hasAuthKey": enableTailscale, "meshConnected": enableTailscale, "bootstrapUrl": bootstrap, "installCurl": "curl -fsSL " + shellQuote(bootstrap) + " | sudo sh", "installShUrl": bootstrap, "installPs1Url": base + "/api/runtime-nodes/" + url.PathEscape(id) + "/install.ps1?token=" + url.QueryEscape(token) + "&kind=" + kind, "needsReinstall": false}
 }
 
@@ -262,7 +267,7 @@ func (h *handler) runnerTailscalePrelude(ctx context.Context, nodeID string) str
 		TenantID string `gorm:"column:tenant_id"`
 		Slug     string `gorm:"column:slug"`
 	}
-	if e := h.deps.Gorm.WithContext(ctx).Raw(`SELECT tenant_id, slug FROM runtime_nodes WHERE id = ?`, nodeID).Scan(&row); e != nil || row.TenantID == "" {
+	if e := h.deps.Gorm.WithContext(ctx).Raw(`SELECT tenant_id, slug FROM runtime_nodes WHERE id = ?`, nodeID).Scan(&row).Error; e != nil || row.TenantID == "" {
 		return ""
 	}
 	resolved := h.loadPlatformHeadscaleResolved(ctx)
@@ -280,9 +285,35 @@ func (h *handler) runnerTailscalePrelude(ctx context.Context, nodeID string) str
 	return fmt.Sprintf("if ! command -v tailscale >/dev/null 2>&1; then\n  curl -fsSL https://tailscale.com/install.sh | sh\nfi\ntailscale up --login-server=%q --authkey=%q --hostname=%q --accept-routes || true\n", resolved.URL, created.Key, runnerTailscaleHostname(row.Slug))
 }
 
+// projectRuntimeNode derives reachability from the actual execution channel,
+// never the historical persisted status. Draining remains an operator state.
+func (h *handler) projectRuntimeNode(node map[string]any) {
+	id, _ := node["id"].(string)
+	session, err := h.hub.get(id)
+	node["executable"] = err == nil
+	if node["status"] != "draining" {
+		if err == nil {
+			node["status"] = "online"
+		} else {
+			node["status"] = "offline"
+		}
+	}
+	if err == nil {
+		node["lastSeenAt"] = runtimeTimeString(time.UnixMilli(session.lastSeen.Load()).UTC())
+	}
+}
+
+func runnerShellInstaller(server, token, kind, prelude string) string {
+	return "#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=" + shellQuote(server) + "\nexport ZAKURA_AGENT_TOKEN=" + shellQuote(token) + "\nexport ZAKURA_AGENT_KIND=" + shellQuote(kind) + "\n" + prelude + install.Shell
+}
+
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 func (h *handler) getRuntimeNodeMap(r *http.Request) (map[string]any, error) {
-	return scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
+	node, err := scanRuntimeNode(h.deps.Gorm.WithContext(r.Context()).Raw(`SELECT id,name,slug,kind,status,endpoint,capabilities_json,host_info_json,storage_root,agent_version,last_seen_at,labels_json,is_shared,created_at,updated_at FROM runtime_nodes WHERE (tenant_id=? OR is_shared=true) AND id=?`, principal(r).TenantID, chi.URLParam(r, "id")).Row())
+	if err == nil {
+		h.projectRuntimeNode(node)
+	}
+	return node, err
 }
 func (h *handler) runtimeInstallSh(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), true) {
@@ -302,7 +333,7 @@ func (h *handler) runtimeInstallSh(w http.ResponseWriter, r *http.Request) {
 		tailscalePrelude = h.runnerTailscalePrelude(r.Context(), chi.URLParam(r, "id"))
 	}
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
-	fmt.Fprintf(w, "#!/bin/sh\nset -eu\nexport ZAKURA_AGENT_SERVER=%q\nexport ZAKURA_AGENT_TOKEN=%q\nexport ZAKURA_AGENT_KIND=%q\n%sOS=$(uname -s | tr '[:upper:]' '[:lower:]')\nARCH=$(uname -m); [ \"$ARCH\" = x86_64 ] && ARCH=amd64; [ \"$ARCH\" = aarch64 ] && ARCH=arm64\ncurl -fsSL -H \"Authorization: Bearer $ZAKURA_AGENT_TOKEN\" \"$ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/$OS/$ARCH\" -o /usr/local/bin/zakura-agent\nchmod 0755 /usr/local/bin/zakura-agent\nexec /usr/local/bin/zakura-agent --server \"$ZAKURA_AGENT_SERVER\" --node-id %q --token \"$ZAKURA_AGENT_TOKEN\" --kind \"$ZAKURA_AGENT_KIND\"\n", strings.TrimRight(h.deps.PublicURL, "/"), token, kind, tailscalePrelude, chi.URLParam(r, "id"))
+	_, _ = io.WriteString(w, runnerShellInstaller(strings.TrimRight(h.deps.PublicURL, "/"), token, kind, tailscalePrelude))
 }
 func (h *handler) runtimeInstallPS(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), true) {
@@ -319,13 +350,8 @@ func (h *handler) runtimeInstallPS(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	fmt.Fprintf(w, `$ErrorActionPreference='Stop'
-$env:ZAKURA_AGENT_SERVER = '%s'
-$env:ZAKURA_AGENT_TOKEN = '%s'
-$env:ZAKURA_AGENT_KIND = '%s'
-Invoke-WebRequest -Headers @{Authorization="Bearer $env:ZAKURA_AGENT_TOKEN"} -Uri "$env:ZAKURA_AGENT_SERVER/api/runtime-nodes/agent-binaries/windows/amd64" -OutFile "$env:ProgramData\Zakura\zakura-agent.exe"
-& "$env:ProgramData\Zakura\zakura-agent.exe" --server $env:ZAKURA_AGENT_SERVER --node-id '%s' --token $env:ZAKURA_AGENT_TOKEN --kind $env:ZAKURA_AGENT_KIND
-`, strings.ReplaceAll(strings.TrimRight(h.deps.PublicURL, "/"), "'", "''"), strings.ReplaceAll(token, "'", "''"), kind, chi.URLParam(r, "id"))
+	fmt.Fprintf(w, "$env:ZAKURA_AGENT_SERVER = '%s'\n$env:ZAKURA_AGENT_TOKEN = '%s'\n$env:ZAKURA_AGENT_KIND = '%s'\n", strings.ReplaceAll(strings.TrimRight(h.deps.PublicURL, "/"), "'", "''"), strings.ReplaceAll(token, "'", "''"), kind)
+	_, _ = io.WriteString(w, install.PowerShell)
 }
 
 func (h *handler) runtimeBootstrapSh(w http.ResponseWriter, r *http.Request) {

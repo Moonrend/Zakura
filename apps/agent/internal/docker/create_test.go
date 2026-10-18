@@ -31,6 +31,12 @@ func TestMain(m *testing.M) {
 				os.Exit(1)
 			}
 			fmt.Println("exact-container-id")
+		case "start":
+			if os.Getenv("ZAKURA_TEST_START_FAILED") == "1" {
+				fmt.Fprintln(os.Stderr, "container cannot be started")
+				os.Exit(1)
+			}
+			fmt.Println("exact-container-id")
 		case "inspect":
 			fmt.Println(`[{"Id":"exact-container-id","Name":"/stable-name","State":{"Status":"running"},"Config":{"Image":"workspace:1"}}]`)
 		default:

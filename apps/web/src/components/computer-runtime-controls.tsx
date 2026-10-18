@@ -107,13 +107,11 @@ export function ComputerRuntimeControls({ base, name, provider = "server" }: { b
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("refresh")}>刷新状态</Button>
         {runtime.state === "pending_approval" && !uncertain && <Button size="sm" disabled={busy} onClick={() => setConfirm(true)}>创建运行环境</Button>}
         {["unknown", "creating"].includes(runtime.state) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("reconcile")}>核实创建结果</Button>}
-        {runtime.state === "unknown" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void act("replace")}>重建运行环境</Button>}
         {terminal && <Button size="sm" variant="outline" onClick={() => setTerminalOpen(true)}><Terminal className="size-4" />终端</Button>}
       </>}
     </div>
-    {runtime && ["unknown", "creating"].includes(runtime.state) && <p className="text-xs text-muted-foreground">核实只查找本次创建的环境，不会创建第二个容器。</p>}
     <Dialog open={confirm} onOpenChange={value => { if (!busy) setConfirm(value); }}>
-      <DialogContent><DialogHeader><DialogTitle>创建 {name} 的运行环境？</DialogTitle><DialogDescription>将在所选服务器上创建独立容器和数据卷，占用服务器资源。不会替换已有电脑或共用其文件。当前执行通道尚未接通，创建后仍不能用于对话执行。</DialogDescription></DialogHeader>
+      <DialogContent><DialogHeader><DialogTitle>创建 {name} 的运行环境？</DialogTitle><DialogDescription>{provider === "railway" || provider === "e2b" ? "将在云服务中创建环境，可能产生费用。" : "将连接这台电脑并准备执行环境。"}</DialogDescription></DialogHeader>
         <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setConfirm(false)}>取消</Button><Button disabled={busy || uncertain || runtime?.state !== "pending_approval"} onClick={() => void act("approve")}>确认创建</Button></div>
       </DialogContent>
     </Dialog>

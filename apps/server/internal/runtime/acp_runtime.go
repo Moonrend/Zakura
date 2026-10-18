@@ -15,16 +15,18 @@ import (
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
 
 // acpRuntimeManager owns long-lived ACP adapter processes on selected runtime
 // nodes.  The Go server only transports JSON-RPC; commands always execute in
 // the agent's jailed host workspace or workspace container.
 type acpRuntimeManager struct {
-	h        *handler
-	mu       sync.Mutex
-	runtimes map[string]*acpLiveRuntime
-	starting map[string]*acpRuntimeStart
+	h         *handler
+	mu        sync.Mutex
+	runtimes  map[string]*acpLiveRuntime
+	starting  map[string]*acpRuntimeStart
+	mcpGrants map[string]*acpMCPGrant
 }
 
 type acpRuntimeStart struct {
@@ -38,17 +40,31 @@ type acpRPCReply struct {
 	err    error
 }
 
+type acpRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *acpRPCError) Error() string { return fmt.Sprintf("ACP error %d: %s", e.Code, e.Message) }
+func acpAuthRequired(err error) bool {
+	var rpcErr *acpRPCError
+	return errors.As(err, &rpcErr) && rpcErr.Code == -32000
+}
+
 type acpInbound struct {
-	method string
-	id     json.RawMessage
+	method  string
+	id      json.RawMessage
+	options map[string]string
 }
 
 type acpLiveRuntime struct {
 	manager                  *acpRuntimeManager
 	tenantID, agentID, sid   string
 	profileID, acpSessionID  string
+	adapterImage             string
 	runner                   *runnerSession
 	processID                string
+	containerID              string
 	computerID               string
 	writeMethod, closeMethod string
 	detach                   func()
@@ -59,12 +75,25 @@ type acpLiveRuntime struct {
 	buffer                   []byte
 	done                     chan struct{}
 	closeOne                 sync.Once
+	closeErr                 error
 	state                    map[string]any
 	currentRunID             string
 	assistant                strings.Builder
 	userID                   string
 	toolStarted              map[string]time.Time
 	toolRecorded             map[string]bool
+	spaceID, workingDir      string
+	previousSessionID        string
+	loadSupported            bool
+	authMu                   sync.Mutex
+	approvalMu               sync.Mutex
+	approvalUpdatePending    atomic.Bool
+	terminals                map[string]*acpTerminal
+	callbackSlots            chan struct{}
+	snapshotMu               sync.Mutex
+	mcpHTTP                  bool
+	mcpActor                 *httpx.Principal
+	mcpGrantHash             string
 }
 
 func newACPRuntimeManager(h *handler) *acpRuntimeManager {
@@ -111,9 +140,23 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 	if current := m.runtimes[key]; current != nil {
 		select {
 		case <-current.done:
-			delete(m.runtimes, key)
+			m.mu.Unlock()
+			// done revokes callbacks before cleanup finishes. Wait for its outcome
+			// before replacing the process, and retain unconfirmed cleanup.
+			if err := current.close(nil); err != nil {
+				return nil, err
+			}
+			m.mu.Lock()
+			if m.runtimes[key] == current {
+				delete(m.runtimes, key)
+			}
+			m.mu.Unlock()
+			return m.ensure(ctx, tenantID, agentID, sid)
 		default:
 			m.mu.Unlock()
+			if err := current.validateMCPCaller(ctx); err != nil {
+				return nil, err
+			}
 			return current, nil
 		}
 	}
@@ -121,6 +164,11 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 		m.mu.Unlock()
 		select {
 		case <-inFlight.done:
+			if inFlight.err == nil && inFlight.rt != nil {
+				if err := inFlight.rt.validateMCPCaller(ctx); err != nil {
+					return nil, err
+				}
+			}
 			return inFlight.rt, inFlight.err
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -147,6 +195,37 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 		return m.finishStart(key, inFlight, nil, err)
 	}
 	return m.finishStart(key, inFlight, rt, nil)
+}
+
+// snapshot is a read-only GET hook: it never relaunches an exited adapter.
+// A nil snapshot means a session has never started and the caller may ensure it.
+func (m *acpRuntimeManager) snapshot(ctx context.Context, tenantID, agentID, sid string) (map[string]any, error) {
+	sess, err := m.h.store.GetSession(ctx, tenantID, agentID, sid)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Kind != "acp" {
+		return nil, errors.New("not an ACP session")
+	}
+	m.mu.Lock()
+	rt := m.runtimes[tenantID+"\x00"+sid]
+	m.mu.Unlock()
+	if rt != nil {
+		state := rt.snapshot()
+		if rt.validateMCPCaller(ctx) != nil {
+			state["mcpReconnectRequired"] = true
+		}
+		return state, nil
+	}
+	var origin map[string]any
+	_ = json.Unmarshal(sess.Origin, &origin)
+	state, _ := origin["acpRuntimeState"].(map[string]any)
+	// A prior process cannot still be live after server restart. Keep the
+	// durable terminal states, and let ensure recover prior live sessions.
+	if state != nil && (state["state"] == "closed" || state["state"] == "error") {
+		return state, nil
+	}
+	return nil, nil
 }
 
 func (m *acpRuntimeManager) finishStart(key string, inFlight *acpRuntimeStart, rt *acpLiveRuntime, err error) (*acpLiveRuntime, error) {
@@ -179,6 +258,9 @@ func (m *acpRuntimeManager) closeTenant(tenantID string) {
 }
 
 func stringSlice(value any) []string {
+	if list, ok := value.([]string); ok {
+		return append([]string(nil), list...)
+	}
 	list, _ := value.([]any)
 	out := make([]string, 0, len(list))
 	for _, item := range list {
@@ -190,6 +272,13 @@ func stringSlice(value any) []string {
 }
 
 func stringMap(value any) map[string]string {
+	if object, ok := value.(map[string]string); ok {
+		out := map[string]string{}
+		for key, text := range object {
+			out[key] = text
+		}
+		return out
+	}
 	object, _ := value.(map[string]any)
 	out := map[string]string{}
 	for key, item := range object {
@@ -200,7 +289,7 @@ func stringMap(value any) map[string]string {
 	return out
 }
 
-func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, profileID, previousACPSessionID string, sess Session, profile map[string]any) (*acpLiveRuntime, error) {
+func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, profileID, previousACPSessionID string, sess Session, profile map[string]any) (_ *acpLiveRuntime, startErr error) {
 	command, _ := profile["command"].(string)
 	if strings.TrimSpace(command) == "" {
 		return nil, errors.New("ACP profile command required")
@@ -211,9 +300,21 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	if sess.Project != nil && *sess.Project != "" && !strings.Contains(*sess.Project, "..") && !strings.HasPrefix(*sess.Project, "/") {
 		workingDir += "/" + strings.Trim(*sess.Project, "/")
 	}
+	agent, err := m.h.store.GetAgent(ctx, tenantID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := m.h.acquireSpaceInfrastructure(ctx, tenantID, agent.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.release()
 	exec, acpErr := resolveACPHost(ctx, m.h, tenantID, agentID, sid)
 	if acpErr != nil {
 		return nil, acpErr
+	}
+	if exec.spaceID != lease.Space.ID {
+		return nil, errors.New("ACP session Space changed during startup")
 	}
 	var pinnedHost string
 	if len(sess.Origin) > 0 {
@@ -230,61 +331,95 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	if pinnedHost != "" && pinnedHost != resolvedHost {
 		return nil, errors.New("ACP session host computer changed; start a new session")
 	}
-	var runner *runnerSession
+	runner, err := m.h.hub.get(exec.nodeID)
+	if err != nil {
+		return nil, err
+	}
+	authToken := m.h.store.id()
+	if err = m.h.acquireACPAuthLock(ctx, tenantID, exec.spaceID, profileID, "protocol", authToken, workspaceLeaseDuration, exec); err != nil {
+		return nil, err
+	}
+	if err = lease.bindSharedProfile(ctx, profileID); err != nil {
+		_ = m.h.releaseACPAuthLock(context.WithoutCancel(ctx), tenantID, exec.spaceID, profileID, authToken)
+		return nil, err
+	}
+	remoteEffect := false
+	defer func() {
+		if startErr != nil && remoteEffect {
+			// A timeout, missing process ID, or failed initialization does not prove
+			// remote writes/processes stopped. Keep both durable claims for recovery.
+			startErr = lease.uncertain(startErr)
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := m.h.releaseACPAuthLock(cleanupCtx, tenantID, exec.spaceID, profileID, authToken); err != nil && startErr == nil {
+			startErr = lease.uncertain(err)
+		}
+	}()
 	var params map[string]any
-	var err error
+	var containerID string
 	startMethod, writeMethod, closeMethod := "host.pty.start", "host.pty.write", "host.pty.close"
-	if exec != nil {
-		if runner, err = m.h.hub.get(exec.nodeID); err != nil {
+	if image, _ := profile["image"].(string); image != "" {
+		setup, _ := profile["setup"].(acpSetup)
+		preferred := ""
+		if sess.Model != nil {
+			preferred = *sess.Model
+		}
+		if err := lease.check(ctx); err != nil {
 			return nil, err
 		}
-		sidecarID, sidecarErr := m.h.ensureACPSidecar(ctx, exec)
-		if sidecarErr != nil {
-			return nil, sidecarErr
+		remoteEffect = true
+		fileEnv, prepareErr := m.h.prepareACPFiles(ctx, runner, exec, profileID, setup, preferred)
+		if prepareErr != nil {
+			return nil, prepareErr
 		}
-		startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
-		params = map[string]any{"id": sidecarID, "command": argv, "workingDir": workingDir, "env": env}
-	} else {
-		var nodeID, spaceID, workspaceKind string
-		var rec struct {
-			NodeID        string `gorm:"column:node_id"`
-			SpaceID       string `gorm:"column:space_id"`
-			WorkspaceKind string `gorm:"column:workspace_kind"`
+		for key, value := range fileEnv {
+			env[key] = value
 		}
-		err = m.h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenantID, agentID).Take(&rec).Error
+		containerID, err = m.h.startACPContainer(ctx, runner, exec, sid, profileID, image, workingDir, env)
 		if err != nil {
-			return nil, errors.New("agent runtime node is not online")
-		}
-		nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
-		if runner, err = m.h.hub.get(nodeID); err != nil {
 			return nil, err
 		}
-		params = map[string]any{"spaceId": spaceID, "command": argv, "workingDir": workingDir, "env": env, "cols": 120, "rows": 40}
-		if workspaceKind != "host" {
-			var containers []struct {
-				DockerID string            `json:"dockerId"`
-				Labels   map[string]string `json:"labels"`
+		startMethod, writeMethod, closeMethod = "docker.attach", "docker.exec.write", "docker.exec.close"
+		params = map[string]any{"id": containerID}
+	} else {
+		space, spaceErr := m.h.store.GetSpace(ctx, tenantID, exec.spaceID)
+		if spaceErr != nil {
+			return nil, spaceErr
+		}
+		params = map[string]any{"spaceId": exec.spaceID, "command": argv, "workingDir": workingDir, "env": env, "cols": 120, "rows": 40}
+		if space.WorkspaceKind != "host" {
+			observation, observeErr := m.h.observeSpaceWorkspace(ctx, space)
+			if observeErr != nil {
+				return nil, observeErr
 			}
-			if err := runner.call(ctx, "docker.list", map[string]any{"label": "zakura.space=" + spaceID}, &containers); err != nil {
-				return nil, err
-			}
-			dockerID := ""
-			for _, container := range containers {
-				if container.Labels["zakura.purpose"] == "workspace" || dockerID == "" {
-					dockerID = container.DockerID
-				}
-			}
-			if dockerID == "" {
+			workspaceID := observation.Container.DockerID
+			if workspaceID == "" || observation.Container.Status != "running" {
 				return nil, errors.New("workspace container is not running")
 			}
 			startMethod, writeMethod, closeMethod = "docker.exec.start", "docker.exec.write", "docker.exec.close"
-			params = map[string]any{"id": dockerID, "command": argv, "workingDir": workingDir, "env": env}
+			params = map[string]any{"id": workspaceID, "command": argv, "workingDir": workingDir, "env": env}
 		}
 	}
 	var started struct {
 		ID string `json:"id"`
 	}
+	if containerID != "" {
+		defer func() {
+			if started.ID == "" {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				defer cancel()
+				_ = runner.call(cleanupCtx, "docker.stop", map[string]any{"id": containerID, "remove": true}, nil)
+			}
+		}()
+	}
+	if err = lease.check(ctx); err != nil {
+		return nil, err
+	}
+	remoteEffect = true
 	if err := runner.call(ctx, startMethod, params, &started); err != nil {
+		started.ID = ""
 		return nil, err
 	}
 	if started.ID == "" {
@@ -294,19 +429,22 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	if sess.CreatedByUserID != nil {
 		userID = *sess.CreatedByUserID
 	}
-	rt := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: profileID, runner: runner, processID: started.ID, computerID: resolvedHost, writeMethod: writeMethod, closeMethod: closeMethod, pending: map[string]chan acpRPCReply{}, inbound: map[string]acpInbound{}, done: make(chan struct{}), state: map[string]any{"runtimeId": started.ID, "sessionId": sid, "profileId": profileID, "state": "starting"}, userID: userID, toolStarted: map[string]time.Time{}, toolRecorded: map[string]bool{}}
-	lines := make(chan []byte, 128)
+	rt := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: profileID, runner: runner, processID: started.ID, containerID: containerID, computerID: resolvedHost, writeMethod: writeMethod, closeMethod: closeMethod, pending: map[string]chan acpRPCReply{}, inbound: map[string]acpInbound{}, done: make(chan struct{}), state: map[string]any{"runtimeId": started.ID, "sessionId": sid, "profileId": profileID, "state": "starting"}, userID: userID, toolStarted: map[string]time.Time{}, toolRecorded: map[string]bool{}}
+	rt.spaceID, rt.workingDir, rt.previousSessionID = exec.spaceID, workingDir, previousACPSessionID
+	rt.adapterImage, _ = profile["image"].(string)
+	if actor, exists := httpx.PrincipalFrom(ctx); exists {
+		rt.mcpActor = &actor
+	}
+	rt.terminals = map[string]*acpTerminal{}
+	rt.callbackSlots = make(chan struct{}, 32)
+	rt.mu.Lock()
+	rt.applySessionState(nil)
+	rt.mu.Unlock()
+	lines := make(chan runnerStreamEvent, 128)
 	rt.detach = runner.onStream(started.ID, func(channel string, data []byte) {
-		if channel == "exit" {
-			// Runner stream callbacks execute on its read loop. Closing requires a
-			// runner RPC, so move it off that loop to avoid a reply deadlock.
-			go rt.close(errors.New("ACP adapter exited"))
-			return
-		}
-		if channel == "stdout" {
-			copyData := append([]byte(nil), data...)
+		if channel == "stdout" || channel == "exit" || channel == "error" {
 			select {
-			case lines <- copyData:
+			case lines <- runnerStreamEvent{channel: channel, data: append([]byte(nil), data...)}:
 			case <-rt.done:
 			}
 		}
@@ -316,41 +454,38 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var initialized map[string]any
-	if err := rt.call(initCtx, "initialize", map[string]any{"protocolVersion": 1, "clientCapabilities": map[string]any{"fs": map[string]any{"readTextFile": true, "writeTextFile": true}, "terminal": true, "elicitation": map[string]any{"form": map[string]any{}, "url": map[string]any{}}, "session": map[string]any{"configOptions": map[string]any{"boolean": map[string]any{}}}}, "clientInfo": map[string]any{"name": "zakura", "title": "Zakura", "version": "go-rewrite"}}, &initialized); err != nil {
+	if err := rt.call(initCtx, "initialize", map[string]any{"protocolVersion": 1, "clientCapabilities": map[string]any{"auth": map[string]any{"terminal": true}, "fs": map[string]any{"readTextFile": true, "writeTextFile": true}, "terminal": true, "elicitation": map[string]any{"form": map[string]any{}, "url": map[string]any{}}, "session": map[string]any{"configOptions": map[string]any{"boolean": map[string]any{}}}}, "clientInfo": map[string]any{"name": "zakura", "title": "Zakura", "version": "go-rewrite"}}, &initialized); err != nil {
 		rt.close(err)
 		return nil, fmt.Errorf("ACP initialize: %w", err)
 	}
 	_ = rt.notify(initCtx, "notifications/initialized", map[string]any{})
-	loadSupported := false
+	rt.mu.Lock()
+	rt.state["authMethods"] = initialized["authMethods"]
+	if rt.state["authMethods"] == nil {
+		rt.state["authMethods"] = []any{}
+	}
+	rt.state["authRequired"], rt.state["authenticated"] = false, false
 	if caps, _ := initialized["agentCapabilities"].(map[string]any); caps != nil {
-		loadSupported, _ = caps["loadSession"].(bool)
+		rt.loadSupported, _ = caps["loadSession"].(bool)
+		mcpCaps, _ := caps["mcpCapabilities"].(map[string]any)
+		rt.mcpHTTP, _ = mcpCaps["http"].(bool)
 		rt.state["promptCapabilities"] = caps["promptCapabilities"]
+		auth, _ := caps["auth"].(map[string]any)
+		_, logoutSupported := auth["logout"].(map[string]any)
+		rt.state["logoutSupported"] = logoutSupported
 	}
-	openParams := map[string]any{"cwd": workingDir, "mcpServers": []any{}}
-	var opened map[string]any
-	if previousACPSessionID != "" && loadSupported {
-		openParams["sessionId"] = previousACPSessionID
-		err = rt.call(initCtx, "session/load", openParams, &opened)
+	rt.mu.Unlock()
+	if err := rt.openSession(initCtx); err != nil {
+		if !acpAuthRequired(err) {
+			rt.close(err)
+			return nil, fmt.Errorf("ACP open session: %w", err)
+		}
+		// Authentication is a live protocol exchange. Keep this initialized
+		// adapter so a later authenticate call can unblock session creation.
+		rt.mu.Lock()
+		rt.state["state"], rt.state["authRequired"] = "auth_required", true
+		rt.mu.Unlock()
 	}
-	if previousACPSessionID == "" || !loadSupported || err != nil {
-		delete(openParams, "sessionId")
-		err = rt.call(initCtx, "session/new", openParams, &opened)
-	}
-	if err != nil {
-		rt.close(err)
-		return nil, fmt.Errorf("ACP open session: %w", err)
-	}
-	rt.acpSessionID, _ = opened["sessionId"].(string)
-	if rt.acpSessionID == "" {
-		rt.acpSessionID = previousACPSessionID
-	}
-	if rt.acpSessionID == "" {
-		rt.close(errors.New("ACP adapter returned no session id"))
-		return nil, errors.New("ACP adapter returned no session id")
-	}
-	rt.applySessionState(opened)
-	rt.state["state"] = "idle"
-	rt.state["acpSessionId"] = rt.acpSessionID
 	if err := rt.persistSnapshot(context.WithoutCancel(ctx)); err != nil {
 		rt.close(err)
 		return nil, err
@@ -358,17 +493,154 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	return rt, nil
 }
 
-func (rt *acpLiveRuntime) consume(chunks <-chan []byte) {
+func (rt *acpLiveRuntime) openSession(ctx context.Context) (openErr error) {
+	servers, err := rt.mcpSessionServers(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if openErr != nil {
+			rt.revokeMCPGrant()
+		}
+	}()
+	params := map[string]any{"cwd": rt.workingDir, "mcpServers": servers}
+	var opened map[string]any
+	if rt.previousSessionID != "" && rt.loadSupported {
+		params["sessionId"] = rt.previousSessionID
+		err = rt.call(ctx, "session/load", params, &opened)
+		if acpAuthRequired(err) {
+			return &acpRPCError{Code: -32000, Message: "ACP authentication required"}
+		}
+	}
+	if rt.previousSessionID == "" || !rt.loadSupported || err != nil {
+		delete(params, "sessionId")
+		err = rt.call(ctx, "session/new", params, &opened)
+	}
+	if err != nil {
+		if len(servers) != 0 {
+			if acpAuthRequired(err) {
+				return &acpRPCError{Code: -32000, Message: "ACP authentication required"}
+			}
+			// An adapter error may echo request headers. Never persist a grant
+			// through lifecycle snapshots/events or return it to the dashboard.
+			return errors.New("ACP session initialization with MCP failed; reopen the session")
+		}
+		return err
+	}
+	id, _ := opened["sessionId"].(string)
+	if id == "" {
+		return errors.New("ACP adapter returned no session id")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	select {
+	case <-rt.done:
+		return errors.New("ACP adapter closed")
+	default:
+	}
+	rt.acpSessionID = id
+	rt.applySessionState(opened)
+	rt.state["state"], rt.state["acpSessionId"] = "idle", id
+	rt.state["authRequired"] = false
+	delete(rt.state, "error")
+	return nil
+}
+
+func (rt *acpLiveRuntime) authenticate(ctx context.Context, methodID string) error {
+	rt.authMu.Lock()
+	defer rt.authMu.Unlock()
+	rt.mu.Lock()
+	valid := false
+	if methods, ok := rt.state["authMethods"].([]any); ok {
+		for _, raw := range methods {
+			method, _ := raw.(map[string]any)
+			kind, _ := method["type"].(string)
+			if methodID != "" && method["id"] == methodID && (kind == "" || kind == "agent") {
+				valid = true
+			}
+		}
+	}
+	active := rt.currentRunID != ""
+	rt.mu.Unlock()
+	if !valid {
+		return errors.New("unsupported ACP authentication method")
+	}
+	if active {
+		return errors.New("ACP session is active")
+	}
+	if err := rt.call(ctx, "authenticate", map[string]any{"methodId": methodID}, nil); err != nil {
+		return err
+	}
+	rt.mu.Lock()
+	rt.state["authenticated"], rt.state["authRequired"] = true, false
+	needsSession := rt.acpSessionID == ""
+	rt.mu.Unlock()
+	if needsSession {
+		if err := rt.openSession(ctx); err != nil {
+			rt.mu.Lock()
+			rt.state["state"], rt.state["error"] = "error", err.Error()
+			if acpAuthRequired(err) {
+				rt.state["state"], rt.state["authRequired"] = "auth_required", true
+			}
+			rt.mu.Unlock()
+			_ = rt.persistSnapshot(context.WithoutCancel(ctx))
+			return err
+		}
+	}
+	return rt.persistSnapshot(context.WithoutCancel(ctx))
+}
+
+func (rt *acpLiveRuntime) logout(ctx context.Context) error {
+	rt.authMu.Lock()
+	defer rt.authMu.Unlock()
+	rt.mu.Lock()
+	supported, active := rt.state["logoutSupported"] == true, rt.currentRunID != ""
+	rt.mu.Unlock()
+	if !supported {
+		return errors.New("ACP adapter does not support logout")
+	}
+	if active {
+		return errors.New("ACP session is active")
+	}
+	rt.revokeMCPGrant()
+	if err := rt.call(ctx, "logout", map[string]any{}, nil); err != nil {
+		return err
+	}
+	rt.mu.Lock()
+	rt.acpSessionID = ""
+	rt.state["acpSessionId"] = ""
+	rt.state["authenticated"], rt.state["authRequired"], rt.state["state"] = false, true, "auth_required"
+	rt.mu.Unlock()
+	return rt.persistSnapshot(context.WithoutCancel(ctx))
+}
+
+func (rt *acpLiveRuntime) consume(chunks <-chan runnerStreamEvent) {
 	for {
 		select {
 		case <-rt.done:
 			return
-		case chunk := <-chunks:
+		case event := <-chunks:
+			// Consume all preceding output before recording exit; a final prompt
+			// response may be in the same startup/exit burst.
+			if event.channel == "exit" {
+				rt.close(errors.New("ACP adapter exited"))
+				return
+			}
+			if event.channel == "error" {
+				rt.close(fmt.Errorf("ACP runner disconnected: %s", string(event.data)))
+				return
+			}
+			chunk := event.data
 			rt.mu.Lock()
 			rt.buffer = append(rt.buffer, chunk...)
 			for {
 				index := bytes.IndexByte(rt.buffer, '\n')
 				if index < 0 {
+					if len(rt.buffer) > 4<<20 {
+						rt.mu.Unlock()
+						rt.close(errors.New("ACP protocol line exceeds limit"))
+						return
+					}
 					break
 				}
 				line := append([]byte(nil), bytes.TrimSpace(rt.buffer[:index])...)
@@ -401,10 +673,7 @@ func (rt *acpLiveRuntime) handleLine(line []byte) {
 		Method  string          `json:"method"`
 		Params  json.RawMessage `json:"params"`
 		Result  json.RawMessage `json:"result"`
-		Error   *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Error   *acpRPCError    `json:"error"`
 	}
 	if json.Unmarshal(line, &message) != nil || message.JSONRPC != "2.0" {
 		return
@@ -417,7 +686,7 @@ func (rt *acpLiveRuntime) handleLine(line []byte) {
 		rt.mu.Unlock()
 		if pending != nil {
 			if message.Error != nil {
-				pending <- acpRPCReply{err: fmt.Errorf("ACP error %d: %s", message.Error.Code, message.Error.Message)}
+				pending <- acpRPCReply{err: message.Error}
 			} else {
 				pending <- acpRPCReply{result: message.Result}
 			}
@@ -432,25 +701,26 @@ func (rt *acpLiveRuntime) handleLine(line []byte) {
 		}
 		return
 	}
-	requestID := rpcIDDisplay(message.ID)
-	switch message.Method {
-	case "session/request_permission":
-		rt.mu.Lock()
-		rt.inbound[requestID] = acpInbound{method: message.Method, id: append(json.RawMessage(nil), message.ID...)}
-		run := rt.currentRunID
-		rt.mu.Unlock()
-		params["requestId"] = requestID
-		_, _ = rt.manager.h.store.AppendEvent(rt.manager.h.deps.RunContext(), rt.tenantID, rt.agentID, rt.sid, "permission_request", optionalString(run), params)
-	case "elicitation/create":
-		rt.mu.Lock()
-		rt.inbound[requestID] = acpInbound{method: message.Method, id: append(json.RawMessage(nil), message.ID...)}
-		run := rt.currentRunID
-		rt.mu.Unlock()
-		params["requestId"] = requestID
-		_, _ = rt.manager.h.store.AppendEvent(rt.manager.h.deps.RunContext(), rt.tenantID, rt.agentID, rt.sid, "elicitation_request", optionalString(run), params)
-	default:
-		_ = rt.respond(message.ID, nil, &map[string]any{"code": -32601, "message": "Method not supported by Zakura ACP client"})
+	if params == nil {
+		params = map[string]any{}
 	}
+	// Callback work can call runner RPCs or wait for a terminal. It must never
+	// block parsing a following ACP response (including initialize/authenticate).
+	id := append(json.RawMessage(nil), message.ID...)
+	if rt.callbackSlots != nil {
+		select {
+		case rt.callbackSlots <- struct{}{}:
+		default:
+			go rt.close(errors.New("too many pending ACP callbacks"))
+			return
+		}
+	}
+	go func() {
+		if rt.callbackSlots != nil {
+			defer func() { <-rt.callbackSlots }()
+		}
+		rt.handleCallback(message.Method, id, params)
+	}()
 }
 
 func optionalString(value string) *string {
@@ -461,6 +731,9 @@ func optionalString(value string) *string {
 }
 
 func (rt *acpLiveRuntime) handleUpdate(params map[string]any) {
+	if !rt.validSession(params) {
+		return
+	}
 	update, _ := params["update"].(map[string]any)
 	if update == nil {
 		return
@@ -513,6 +786,13 @@ func (rt *acpLiveRuntime) handleUpdate(params map[string]any) {
 	if update["sessionUpdate"] == "current_mode_update" || update["sessionUpdate"] == "config_option_update" || update["sessionUpdate"] == "available_commands_update" {
 		_ = rt.persistSnapshot(rt.manager.h.deps.RunContext())
 	}
+	if (update["sessionUpdate"] == "current_mode_update" || update["sessionUpdate"] == "config_option_update") && rt.auditedClaudeACP() && rt.approvalUpdatePending.CompareAndSwap(false, true) {
+		// Keep response parsing available while a policy check closes the process.
+		go func() {
+			defer rt.approvalUpdatePending.Store(false)
+			rt.enforceActiveApprovalPolicy()
+		}()
+	}
 }
 
 func (rt *acpLiveRuntime) call(ctx context.Context, method string, params any, out any) error {
@@ -521,7 +801,7 @@ func (rt *acpLiveRuntime) call(ctx context.Context, method string, params any, o
 	rt.mu.Lock()
 	rt.pending[id] = result
 	rt.mu.Unlock()
-	if err := rt.write(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+	if err := rt.writeContext(ctx, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		rt.mu.Lock()
 		delete(rt.pending, id)
 		rt.mu.Unlock()
@@ -542,6 +822,9 @@ func (rt *acpLiveRuntime) call(ctx context.Context, method string, params any, o
 		rt.mu.Unlock()
 		return ctx.Err()
 	case <-rt.done:
+		rt.mu.Lock()
+		delete(rt.pending, id)
+		rt.mu.Unlock()
 		return errors.New("ACP adapter closed")
 	}
 }
@@ -551,7 +834,7 @@ func (rt *acpLiveRuntime) notify(ctx context.Context, method string, params any)
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-		return rt.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+		return rt.writeContext(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
 	}
 }
 
@@ -566,6 +849,12 @@ func (rt *acpLiveRuntime) respond(id json.RawMessage, result any, rpcError *map[
 }
 
 func (rt *acpLiveRuntime) write(message any) error {
+	ctx, cancel := context.WithTimeout(rt.manager.h.deps.RunContext(), 10*time.Second)
+	defer cancel()
+	return rt.writeContext(ctx, message)
+}
+
+func (rt *acpLiveRuntime) writeContext(ctx context.Context, message any) error {
 	select {
 	case <-rt.done:
 		return errors.New("ACP adapter closed")
@@ -577,7 +866,7 @@ func (rt *acpLiveRuntime) write(message any) error {
 	}
 	raw = append(raw, '\n')
 	var ignored map[string]any
-	return rt.runner.call(rt.manager.h.deps.RunContext(), rt.writeMethod, map[string]any{"id": rt.processID, "base64": base64.StdEncoding.EncodeToString(raw)}, &ignored)
+	return rt.runner.call(ctx, rt.writeMethod, map[string]any{"id": rt.processID, "base64": base64.StdEncoding.EncodeToString(raw)}, &ignored)
 }
 
 func (rt *acpLiveRuntime) applySessionState(response map[string]any) {
@@ -627,6 +916,8 @@ func (rt *acpLiveRuntime) snapshot() map[string]any {
 }
 
 func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
+	rt.snapshotMu.Lock()
+	defer rt.snapshotMu.Unlock()
 	state := rt.snapshot()
 	_, err := rt.manager.h.store.AppendEvent(ctx, rt.tenantID, rt.agentID, rt.sid, "acp.runtime.updated", nil, state)
 	if err != nil {
@@ -640,8 +931,11 @@ func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
 	_ = json.Unmarshal(sess.Origin, &origin)
 	origin["runtime"] = "acp"
 	origin["acpProfileId"] = rt.profileID
-	origin["acpSessionId"] = rt.acpSessionID
 	origin["acpRuntimeId"] = rt.processID
+	origin["acpRuntimeState"] = state
+	if sessionID, exists := state["acpSessionId"]; exists {
+		origin["acpSessionId"] = sessionID
+	}
 	if rt.computerID != "" {
 		origin["acpComputerId"] = rt.computerID
 	}
@@ -651,7 +945,19 @@ func (rt *acpLiveRuntime) persistSnapshot(ctx context.Context) error {
 }
 
 func (rt *acpLiveRuntime) patch(ctx context.Context, patch map[string]any) error {
-	params := map[string]any{"sessionId": rt.acpSessionID}
+	rt.authMu.Lock()
+	defer rt.authMu.Unlock()
+	rt.mu.Lock()
+	sessionID := rt.acpSessionID
+	required := rt.state["authRequired"] == true
+	rt.mu.Unlock()
+	if sessionID == "" || required {
+		return &acpRPCError{Code: -32000, Message: "Authentication required"}
+	}
+	if err := rt.checkApprovalModePatch(ctx, patch); err != nil {
+		return err
+	}
+	params := map[string]any{"sessionId": sessionID}
 	method := ""
 	if mode, ok := patch["modeId"].(string); ok && mode != "" {
 		method, params["modeId"] = "session/set_mode", mode
@@ -691,7 +997,7 @@ func (rt *acpLiveRuntime) patch(ctx context.Context, patch map[string]any) error
 			return err
 		}
 		result = map[string]any{}
-		if fallbackErr := rt.call(ctx, "session/set_config_option", map[string]any{"sessionId": rt.acpSessionID, "configId": configID, "value": patch["modelId"]}, &result); fallbackErr != nil {
+		if fallbackErr := rt.call(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": configID, "value": patch["modelId"]}, &result); fallbackErr != nil {
 			return fallbackErr
 		}
 	}
@@ -728,49 +1034,135 @@ func (rt *acpLiveRuntime) patch(ctx context.Context, patch map[string]any) error
 }
 
 func (rt *acpLiveRuntime) resolveDecision(body map[string]any, permission bool) error {
-	requestID := fmt.Sprint(body["requestId"])
+	requestID, ok := body["requestId"].(string)
+	if !ok || requestID == "" {
+		return errors.New("requestId required")
+	}
 	rt.mu.Lock()
 	pending, ok := rt.inbound[requestID]
-	if ok {
-		delete(rt.inbound, requestID)
+	if ok && pending.method == "session/request_permission" {
+		rt.mu.Unlock()
+		return errors.New("use the shared tool approval request")
 	}
-	rt.mu.Unlock()
 	if !ok {
+		rt.mu.Unlock()
 		return errors.New("no pending ACP request")
 	}
+	if permission != (pending.method == "session/request_permission") {
+		rt.mu.Unlock()
+		return errors.New("ACP request type mismatch")
+	}
 	var result any
+	cancelled, _ := body["cancelled"].(bool)
 	if permission {
-		if cancelled, _ := body["cancelled"].(bool); cancelled || fmt.Sprint(body["optionId"]) == "" {
+		if cancelled {
 			result = map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
 		} else {
-			result = map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": fmt.Sprint(body["optionId"])}}
+			optionID, _ := body["optionId"].(string)
+			if optionID == "" || pending.options[optionID] == "" {
+				rt.mu.Unlock()
+				return errors.New("invalid ACP permission optionId")
+			}
+			result = map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optionID}}
 		}
-	} else if action := fmt.Sprint(body["action"]); action == "accept" || action == "accepted" {
-		result = map[string]any{"action": "accept", "content": body["content"]}
 	} else {
-		result = map[string]any{"action": "cancel"}
+		action, hasAction := body["action"].(string)
+		if cancelled {
+			action = "cancel"
+		} else if !hasAction {
+			if value, exists := body["cancelled"]; exists && value == false {
+				action = "accept"
+			}
+		}
+		if action == "accepted" {
+			action = "accept"
+		}
+		if action != "accept" && action != "decline" && action != "cancel" {
+			rt.mu.Unlock()
+			return errors.New("invalid ACP elicitation action")
+		}
+		result = map[string]any{"action": action}
+		if action == "accept" {
+			result.(map[string]any)["content"] = body["content"]
+		}
 	}
+	delete(rt.inbound, requestID)
+	rt.mu.Unlock()
 	return rt.respond(pending.id, result, nil)
 }
 
 func (rt *acpLiveRuntime) prompt(ctx context.Context, runID, content string) error {
+	rt.authMu.Lock()
+	defer rt.authMu.Unlock()
 	rt.mu.Lock()
+	if rt.acpSessionID == "" || rt.state["authRequired"] == true {
+		rt.mu.Unlock()
+		return &acpRPCError{Code: -32000, Message: "Authentication required"}
+	}
+	rt.mu.Unlock()
+	if err := rt.constrainApprovalMode(ctx); err != nil {
+		return err
+	}
+	if err := rt.checkApprovalCompatibility(ctx); err != nil {
+		return err
+	}
+	rt.mu.Lock()
+	select {
+	case <-rt.done:
+		rt.mu.Unlock()
+		return errors.New("ACP adapter closed")
+	default:
+	}
+	if rt.acpSessionID == "" || rt.state["authRequired"] == true {
+		rt.mu.Unlock()
+		return &acpRPCError{Code: -32000, Message: "Authentication required"}
+	}
+	if rt.currentRunID != "" {
+		rt.mu.Unlock()
+		return errors.New("ACP session is active")
+	}
+	sessionID := rt.acpSessionID
 	rt.currentRunID = runID
 	rt.assistant.Reset()
 	rt.state["state"] = "active"
 	rt.mu.Unlock()
 	_ = rt.persistSnapshot(context.WithoutCancel(ctx))
+	if rt.auditedClaudeACP() {
+		// Recheck after publishing the active identity to cover a concurrent save.
+		rt.enforceActiveApprovalPolicy()
+		stopped, watcherDone := make(chan struct{}), make(chan struct{})
+		ticker := time.NewTicker(time.Second)
+		defer func() {
+			ticker.Stop()
+			close(stopped)
+			<-watcherDone
+		}()
+		go func() {
+			defer close(watcherDone)
+			rt.watchApprovalPolicy(ctx, ticker.C, stopped)
+		}()
+	}
 	var result map[string]any
-	err := rt.call(ctx, "session/prompt", map[string]any{"sessionId": rt.acpSessionID, "prompt": []any{map[string]any{"type": "text", "text": content}}}, &result)
+	err := rt.call(ctx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": []any{map[string]any{"type": "text", "text": content}, map[string]any{"type": "text", "text": "Zakura host rendering capabilities (platform context, not a user request):\n" + generativeUIPrompt}}}, &result)
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		cancelCtx, cancel := context.WithTimeout(rt.manager.h.deps.RunContext(), 3*time.Second)
 		defer cancel()
-		_ = rt.notify(cancelCtx, "session/cancel", map[string]any{"sessionId": rt.acpSessionID})
+		_ = rt.notify(cancelCtx, "session/cancel", map[string]any{"sessionId": sessionID})
 	}
 	rt.mu.Lock()
 	text := rt.assistant.String()
 	rt.currentRunID = ""
-	rt.state["state"] = "idle"
+	select {
+	case <-rt.done: // close already recorded the terminal lifecycle state
+	default:
+		rt.state["state"] = "idle"
+		if err != nil && ctx.Err() == nil {
+			rt.state["state"], rt.state["error"] = "error", err.Error()
+		}
+		if acpAuthRequired(err) {
+			rt.state["state"], rt.state["authRequired"] = "auth_required", true
+		}
+	}
 	rt.mu.Unlock()
 	_ = rt.persistSnapshot(context.WithoutCancel(ctx))
 	if err != nil {
@@ -783,13 +1175,19 @@ func (rt *acpLiveRuntime) prompt(ctx context.Context, runID, content string) err
 	return err
 }
 
-func (rt *acpLiveRuntime) close(reason error) {
+func (rt *acpLiveRuntime) close(reason error) error {
 	rt.closeOne.Do(func() {
-		close(rt.done)
-		if rt.detach != nil {
-			rt.detach()
+		rt.revokeMCPGrant()
+		if reason == nil {
+			reason = errors.New("ACP adapter closed")
 		}
 		rt.mu.Lock()
+		rt.state["state"] = "closed"
+		rt.state["error"] = reason.Error()
+		if reason.Error() != "server shutting down" && reason.Error() != "tenant runtime stopped" && reason.Error() != "ACP adapter closed" {
+			rt.state["state"] = "error"
+		}
+		close(rt.done)
 		for key, pending := range rt.pending {
 			delete(rt.pending, key)
 			select {
@@ -797,20 +1195,49 @@ func (rt *acpLiveRuntime) close(reason error) {
 			default:
 			}
 		}
-		for key, inbound := range rt.inbound {
-			delete(rt.inbound, key)
-			_ = rt.respond(inbound.id, nil, &map[string]any{"code": -32000, "message": "ACP runtime closed"})
-		}
+		rt.inbound = map[string]acpInbound{}
+		terminals := rt.terminals
+		rt.terminals = map[string]*acpTerminal{}
 		rt.mu.Unlock()
-		ctx, cancel := context.WithTimeout(rt.manager.h.deps.RunContext(), 3*time.Second)
-		defer cancel()
-		var ignored map[string]any
-		_ = rt.runner.call(ctx, rt.closeMethod, map[string]any{"id": rt.processID}, &ignored)
-		rt.manager.mu.Lock()
-		key := rt.tenantID + "\x00" + rt.sid
-		if rt.manager.runtimes[key] == rt {
-			delete(rt.manager.runtimes, key)
+		if rt.manager.h.store != nil {
+			settle, cancel := context.WithTimeout(context.WithoutCancel(rt.manager.h.deps.RunContext()), 3*time.Second)
+			_ = rt.manager.h.store.cancelApprovals(settle, rt.tenantID, rt.agentID, rt.sid, "")
+			cancel()
 		}
-		rt.manager.mu.Unlock()
+		if rt.detach != nil {
+			rt.detach()
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(rt.manager.h.deps.RunContext()), 3*time.Second)
+		defer cancel()
+		// Persist terminal state before cleanup RPCs, which may fail or time out.
+		_ = rt.persistSnapshot(ctx)
+		for _, terminal := range terminals {
+			if terminal.detach != nil {
+				terminal.detach()
+			}
+			terminal.once.Do(func() { close(terminal.done) })
+			if rt.runner.call(ctx, terminal.closeMethod, map[string]any{"id": terminal.id}, nil) != nil {
+				rt.closeErr = errACPCleanupUnconfirmed
+			}
+		}
+		if rt.runner.call(ctx, rt.closeMethod, map[string]any{"id": rt.processID}, nil) != nil {
+			rt.closeErr = errACPCleanupUnconfirmed
+		}
+		if rt.containerID != "" {
+			if rt.runner.call(ctx, "docker.stop", map[string]any{"id": rt.containerID, "remove": true}, nil) != nil {
+				rt.closeErr = errACPCleanupUnconfirmed
+			}
+		}
+		if rt.closeErr != nil {
+			rt.mu.Lock()
+			rt.state["state"], rt.state["error"] = "error", rt.closeErr.Error()
+			rt.mu.Unlock()
+			persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer persistCancel()
+			_ = rt.persistSnapshot(persistCtx)
+		}
+		// Keep the closed runtime snapshot in the manager until explicit ensure
+		// recovery replaces it. GET must not silently restart failed adapters.
 	})
+	return rt.closeErr
 }

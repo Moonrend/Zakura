@@ -32,6 +32,9 @@ type computerPTYRunnerState struct {
 	started    int
 	execID     string
 	startCmd   []string
+	tty        bool
+	startCols  int
+	startRows  int
 	resizes    int
 	resizeCols int
 	resizeRows int
@@ -83,11 +86,14 @@ func startComputerPTYRunner(t *testing.T, serverURL, token string, state *comput
 			var after func()
 			switch frame.Method {
 			case "sys.info":
-				result = map[string]any{"version": "test", "kind": "computer", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true, "docker": true}, "hostInfo": map[string]any{}}
+				result = map[string]any{"version": "test", "kind": "computer", "streamOwner": "pty-fixture-executor", "storageRoot": "/srv/zakura", "capabilities": map[string]any{"host": true, "docker": true}, "hostInfo": map[string]any{}}
 			case "docker.exec.start":
 				state.mu.Lock()
 				state.started++
 				state.execID = fmt.Sprint(frame.Params["id"])
+				state.tty, _ = frame.Params["tty"].(bool)
+				state.startCols = int(frame.Params["cols"].(float64))
+				state.startRows = int(frame.Params["rows"].(float64))
 				if cmd, ok := frame.Params["command"].([]any); ok {
 					state.startCmd = nil
 					for _, part := range cmd {
@@ -107,7 +113,7 @@ func startComputerPTYRunner(t *testing.T, serverURL, token string, state *comput
 					frameBytes, _ := json.Marshal(map[string]any{"type": "stream", "stream": process, "chan": "stdout", "data": base64.StdEncoding.EncodeToString(payload)})
 					writeMaskedText(t, conn, string(frameBytes))
 				}
-			case "host.pty.resize":
+			case "docker.exec.resize":
 				state.mu.Lock()
 				state.resizes++
 				state.resizeCols = int(frame.Params["cols"].(float64))
@@ -202,6 +208,11 @@ func TestComputerPTYServerRunnerEcho(t *testing.T) {
 	started, execID, resizes, cols, rows, closes := state.snapshot()
 	if started != 1 || execID != "computer-ctr" {
 		t.Fatalf("docker.exec.start: started=%d execID=%q", started, execID)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.tty || state.startCols != 100 || state.startRows != 40 {
+		t.Fatalf("TTY allocation: enabled=%v cols=%d rows=%d", state.tty, state.startCols, state.startRows)
 	}
 	if strings.Join(state.startCmd, " ") != "bash -l" {
 		t.Fatalf("start command = %v", state.startCmd)
@@ -375,10 +386,10 @@ func TestComputerTerminalRefusesWithoutPTY(t *testing.T) {
 func seedTerminalComputer(t *testing.T, d *appdeps.Dependencies, spaceID, computerID string, caps string) {
 	t.Helper()
 	now := d.Clock().UTC().Format(time.RFC3339Nano)
-	if _, err := d.DB.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,capabilities_json,idle_seconds,max_lifetime_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?,900,3600,?,?)`, computerID, "tenant", spaceID, computerID, string(computers.Server), caps, now, now); err != nil {
+	if _, err := d.DB.Exec(d.Rebind(`INSERT INTO computers(id,tenant_id,space_id,name,provider,capabilities_json,idle_seconds,max_lifetime_seconds,created_at,updated_at) VALUES(?,?,?,?,?,?,900,3600,?,?)`), computerID, "tenant", spaceID, computerID, string(computers.Server), caps, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.DB.Exec(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,created_at,updated_at) VALUES(?,?,?,?,'',?,?,'ready','ctr-1',?,?)`, "rt-"+computerID, "tenant", spaceID, computerID, "inc-"+computerID, "op-"+computerID, now, now); err != nil {
+	if _, err := d.DB.Exec(d.Rebind(`INSERT INTO computer_runtimes(id,tenant_id,space_id,computer_id,session_scope,incarnation,create_operation_id,state,external_id,created_at,updated_at) VALUES(?,?,?,?,'',?,?,'ready','ctr-1',?,?)`), "rt-"+computerID, "tenant", spaceID, computerID, "inc-"+computerID, "op-"+computerID, now, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -407,7 +418,7 @@ func TestComputerTerminalTicketScoping(t *testing.T) {
 		router.ServeHTTP(w, req)
 		return w
 	}
-	p := httpx.Principal{TenantID: "tenant"}
+	p := acpLoginPrincipal()
 	w := call("/spaces/"+s1.ID+"/computers/c1/terminal-ticket", p)
 	if w.Code != 200 {
 		t.Fatalf("ticket: %d %s", w.Code, w.Body)
@@ -419,13 +430,13 @@ func TestComputerTerminalTicketScoping(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out.Ticket == "" || !strings.Contains(out.URL, "/terminal-proxy?token=") {
 		t.Fatalf("ticket shape: %s", w.Body)
 	}
-	if _, err := h.verifyComputerTicket(out.Ticket, s1.ID, "c1"); err != nil {
+	if _, err := h.verifyComputerTicket(ctx, out.Ticket, s1.ID, "c1"); err != nil {
 		t.Fatalf("valid ticket rejected: %v", err)
 	}
-	if _, err := h.verifyComputerTicket(out.Ticket, s2.ID, "c1"); err == nil {
+	if _, err := h.verifyComputerTicket(ctx, out.Ticket, s2.ID, "c1"); err == nil {
 		t.Fatal("cross-space ticket accepted")
 	}
-	if _, err := h.verifyComputerTicket(out.Ticket, s1.ID, "c2"); err == nil {
+	if _, err := h.verifyComputerTicket(ctx, out.Ticket, s1.ID, "c2"); err == nil {
 		t.Fatal("cross-computer ticket accepted")
 	}
 	if w := call("/spaces/"+s2.ID+"/computers/c2/terminal-ticket", httpx.Principal{TenantID: "tenant", SpaceID: s1.ID}); w.Code != 403 {
@@ -436,16 +447,85 @@ func TestComputerTerminalTicketScoping(t *testing.T) {
 	}
 }
 
-func TestComputerTerminalTicketKeepsLegacyTickets(t *testing.T) {
-	d := testDeps(t)
-	seedTenant(t, d, "tenant")
-	h := newACPResolveHandler(d)
-	ctx := context.Background()
-	node := "node"
-	space, err := h.store.CreateSpace(ctx, "tenant", Space{Name: "S", RuntimeNodeID: &node, WorkspaceKind: "container", EnableComputer: true})
-	if err != nil {
-		t.Fatal(err)
+func TestComputerTerminalTicketRevocationAndSingleUse(t *testing.T) {
+	for _, scenario := range []string{"valid", "revoked-key", "revoked-session", "oauth-expired", "changed-node", "changed-container", "changed-incarnation", "capability-removed"} {
+		t.Run(scenario, func(t *testing.T) {
+			d := testDeps(t)
+			seedTenant(t, d, "tenant")
+			h := newACPResolveHandler(d)
+			ctx := context.Background()
+			space, err := h.store.CreateSpace(ctx, "tenant", Space{Name: "Attached terminal"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seedTerminalComputer(t, d, space.ID, "attached", `["commands","files","docker","pty"]`)
+			actor := acpLoginPrincipal()
+			if scenario == "revoked-session" || scenario == "oauth-expired" {
+				actor = connectionTicketUser(t, h)
+				if scenario == "oauth-expired" {
+					actor.OAuth, actor.OAuthScope, actor.OAuthExpiresAt = true, "api", h.store.now().Add(10*time.Second)
+				}
+			}
+			router := chi.NewRouter()
+			h.registerComputers(router)
+			req := httptest.NewRequest(http.MethodPost, "/spaces/"+space.ID+"/computers/attached/terminal-ticket", strings.NewReader(`{}`))
+			req = req.WithContext(httpx.WithPrincipal(req.Context(), actor))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("ticket=%d %s", w.Code, w.Body)
+			}
+			var response struct{ Ticket string }
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "revoked-key":
+				err = d.Gorm.Table("api_keys").Where("id=?", actor.APIKeyID).Update("revoked_at", runtimeTimeString(h.store.now())).Error
+			case "revoked-session":
+				err = d.Gorm.Table("user_sessions").Where("id=?", actor.SessionID).Update("revoked_at", runtimeTimeString(h.store.now())).Error
+			case "oauth-expired":
+				clock := d.Clock
+				d.Clock = func() time.Time { return clock().Add(11 * time.Second) }
+			case "changed-node":
+				err = d.Gorm.Table("computers").Where("id=?", "attached").Update("runtime_node_id", "replacement").Error
+			case "changed-container":
+				err = d.Gorm.Table("computer_runtimes").Where("computer_id=?", "attached").Update("external_id", "replacement").Error
+			case "changed-incarnation":
+				err = d.Gorm.Table("computer_runtimes").Where("computer_id=?", "attached").Update("incarnation", "replacement").Error
+			case "capability-removed":
+				err = d.Gorm.Table("computers").Where("id=?", "attached").Update("capabilities_json", `["commands"]`).Error
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ticket, err := h.verifyComputerTicket(ctx, response.Ticket, space.ID, "attached")
+			if err == nil {
+				_, _, err = h.computerTicketTarget(ctx, ticket)
+			}
+			if scenario != "valid" {
+				if err == nil {
+					t.Fatal("changed identity or target accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := h.consumeComputerTicket(ctx, ticket, response.Ticket); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.consumeComputerTicket(ctx, ticket, response.Ticket); err == nil {
+				t.Fatal("terminal ticket replay accepted")
+			}
+		})
 	}
+}
+
+func TestAgentTerminalTicketUsesCanonicalSpaceGate(t *testing.T) {
+	rig := newWorkspaceProxyRig(t)
+	h, space := rig.h, rig.space
+	ctx := context.Background()
 	agent, err := h.store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -453,23 +533,35 @@ func TestComputerTerminalTicketKeepsLegacyTickets(t *testing.T) {
 	router := chi.NewRouter()
 	router.Post("/agents/{id}/terminal-ticket", h.terminalTicket)
 	req := httptest.NewRequest(http.MethodPost, "/agents/"+agent.ID+"/terminal-ticket", nil)
-	req = req.WithContext(httpx.WithPrincipal(req.Context(), httpx.Principal{TenantID: "tenant"}))
+	req = req.WithContext(httpx.WithPrincipal(req.Context(), acpLoginPrincipal()))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != 200 {
-		t.Fatalf("legacy ticket: %d %s", w.Code, w.Body)
+		t.Fatalf("compatibility ticket: %d %s", w.Code, w.Body)
 	}
 	var out struct {
 		Ticket string `json:"ticket"`
+		URL    string `json:"url"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	ticket, err := h.verifyWorkspaceTicket(out.Ticket, agent.ID, "terminal")
-	if err != nil || ticket.AgentID != agent.ID || ticket.Kind != "terminal" {
-		t.Fatalf("legacy ticket broken: %+v %v", ticket, err)
+	if !strings.Contains(out.URL, "/api/spaces/"+space.ID+"/workspace-terminal-proxy") {
+		t.Fatalf("not routed to canonical Space gate: %s", out.URL)
 	}
-	if _, err := h.verifyComputerTicket(out.Ticket, space.ID, "c1"); err == nil {
-		t.Fatal("legacy ticket accepted by the computer proxy")
+	target, lease, _, err := h.consumeSpaceWorkspaceTicket(ctx, out.Ticket, space.ID, "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.release()
+	if target.container != "canonical-container" {
+		t.Fatal("compatibility path changed the target")
+	}
+	if _, replay, _, err := h.consumeSpaceWorkspaceTicket(ctx, out.Ticket, space.ID, "terminal"); err == nil {
+		replay.release()
+		t.Fatal("compatibility ticket replayed")
+	}
+	if _, err := h.verifyComputerTicket(ctx, out.Ticket, space.ID, "c1"); err == nil {
+		t.Fatal("workspace ticket accepted by the computer proxy")
 	}
 }

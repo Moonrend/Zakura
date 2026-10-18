@@ -65,25 +65,12 @@ type modelItem struct {
 }
 
 func (h *handler) fetchUpstreamModelList(ctx context.Context, tenant string, u Upstream) ([]remoteModel, error) {
-	var cfg upstreamConfig
-	if e := json.Unmarshal(u.Config, &cfg); e != nil {
-		return nil, fmt.Errorf("invalid upstream config: %w", e)
+	if u.Protocol == "typesafe" {
+		return []remoteModel{{ID: jevDefaultModel, Name: "Jev", OwnedBy: "jev", Capability: "evaluation"}}, nil
 	}
-	if cfg.CredentialEnc != "" {
-		if raw, e := openSecretBox(h.store.deps.Secret, "model:"+tenant+":"+u.ID, cfg.CredentialEnc); e == nil {
-			var credentials map[string]any
-			if json.Unmarshal(raw, &credentials) == nil {
-				if v, ok := credentials["apiKey"].(string); ok {
-					cfg.APIKey = v
-				}
-				if v, ok := credentials["accessToken"].(string); ok {
-					cfg.AccessToken = v
-				}
-			}
-		}
-	}
-	if cfg.APIKey == "" {
-		cfg.APIKey = cfg.AccessToken
+	cfg, err := loadUpstreamConfig(h.store.deps.Secret, tenant, u)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.BaseURL == "" {
 		return nil, errors.New("baseUrl not configured")
@@ -232,7 +219,7 @@ func (h *handler) listUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("grouped") == "1" {
 		models = groupUpstreamModels(x)
 	}
-	httpx.JSON(w, 200, map[string]any{"models": models, "capabilities": []map[string]any{{"id": "chat", "name": "Chat"}, {"id": "embedding", "name": "Embedding"}, {"id": "rerank", "name": "Rerank"}, {"id": "image", "name": "Image"}}})
+	httpx.JSON(w, 200, map[string]any{"models": models, "capabilities": []map[string]any{{"id": "chat", "name": "Chat"}, {"id": "embedding", "name": "Embedding"}, {"id": "rerank", "name": "Rerank"}, {"id": "image", "name": "Image"}, {"id": "evaluation", "name": "Evaluation"}}})
 }
 func (h *handler) modelsForUpstream(w http.ResponseWriter, r *http.Request) {
 	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, chi.URLParam(r, "id"))
@@ -253,8 +240,16 @@ func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, 400, "upstreamId and nativeModel required")
 		return
 	}
-	if _, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, x.UpstreamID); e != nil {
+	u, e := h.store.GetUpstream(r.Context(), principal(r).TenantID, x.UpstreamID)
+	if e != nil {
 		statusErr(w, e)
+		return
+	}
+	if x.Capability == "" && u.Protocol == "typesafe" {
+		x.Capability = "evaluation"
+	}
+	if e := validateProviderCapability(u.Protocol, firstNonEmpty(x.Capability, "chat")); e != nil {
+		httpx.Error(w, 400, e.Error())
 		return
 	}
 	if x.CanonicalModel == "" {
@@ -271,7 +266,7 @@ func (h *handler) createUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	}
 	now := runtimeTimeString(h.store.now())
 	x.ID = h.store.id()
-	e := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": strconv.FormatFloat(x.Weight, 'f', -1, 64), "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
+	e = h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Create(map[string]any{"id": x.ID, "tenant_id": principal(r).TenantID, "upstream_id": x.UpstreamID, "native_model": x.NativeModel, "canonical_model": x.CanonicalModel, "display_name": x.DisplayName, "capability": x.Capability, "weight": strconv.FormatFloat(x.Weight, 'f', -1, 64), "is_default": x.IsDefault, "options_json": validJSON(x.Options, "{}"), "meta_json": validJSON(x.Meta, "{}"), "status": x.Status, "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error
 	if e != nil {
 		statusErr(w, e)
 		return
@@ -282,6 +277,26 @@ func (h *handler) patchUpstreamModel(w http.ResponseWriter, r *http.Request) {
 	m, e := decodeMap(r)
 	if e != nil {
 		httpx.Error(w, 400, "invalid JSON")
+		return
+	}
+	var current struct {
+		UpstreamID string `gorm:"column:upstream_id"`
+		Capability string `gorm:"column:capability"`
+	}
+	if err := h.deps.Gorm.WithContext(r.Context()).Table("upstream_models").Select("upstream_id,capability").Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Take(&current).Error; err != nil {
+		statusErr(w, err)
+		return
+	}
+	if value, exists := m["capability"]; exists {
+		current.Capability, _ = value.(string)
+	}
+	upstream, err := h.store.GetUpstream(r.Context(), principal(r).TenantID, current.UpstreamID)
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	if err := validateProviderCapability(upstream.Protocol, current.Capability); err != nil {
+		httpx.Error(w, 400, err.Error())
 		return
 	}
 	sets := []string{}
@@ -427,6 +442,12 @@ func (h *handler) syncUpstreamModels(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	if u.Protocol == "typesafe" {
+		if e := h.store.ensureJevPreset(r.Context(), tenant, u); e != nil {
+			statusErr(w, e)
+			return
+		}
+	}
 	list, e := h.fetchUpstreamModelList(r.Context(), tenant, u)
 	if e != nil {
 		httpx.Error(w, 502, e.Error())
@@ -476,14 +497,16 @@ func (h *handler) syncUpstreamModels(w http.ResponseWriter, r *http.Request) {
 				}),
 			}).
 			Table("upstream_models").
-			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": "chat", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
+			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": firstNonEmpty(m.Capability, "chat"), "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error != nil {
 			statusErr(w, res.Error)
 			return
 		}
-		if e := h.ensureAutoRoute(r.Context(), tenant, id, m.ID, m.Name); e != nil {
-			statusErr(w, e)
-			return
+		if u.Protocol != "typesafe" {
+			if e := h.ensureAutoRoute(r.Context(), tenant, id, m.ID, m.Name); e != nil {
+				statusErr(w, e)
+				return
+			}
 		}
 		if known[m.ID] {
 			updated++
@@ -494,10 +517,50 @@ func (h *handler) syncUpstreamModels(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, 200, map[string]any{"synced": len(targets), "created": created, "updated": updated, "unmatchedModels": unmatched})
 }
+
+// ensureJevPreset is local-only and must never probe /v1/models. It creates no
+// default route and never merges providers by their URL, name, or credentials.
+func (s *Store) ensureJevPreset(ctx context.Context, tenant string, u Upstream) error {
+	if u.Protocol != "typesafe" {
+		return nil
+	}
+	return s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := runtimeTimeString(s.now())
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tenant_id"}, {Name: "upstream_id"}, {Name: "native_model"}, {Name: "capability"}},
+			DoUpdates: clause.Assignments(map[string]any{"synced_at": now, "updated_at": now}),
+		}).Table("upstream_models").Create(map[string]any{"id": s.id(), "tenant_id": tenant, "upstream_id": u.ID, "native_model": jevDefaultModel, "canonical_model": jevDefaultModel, "display_name": "Jev", "capability": "evaluation", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
+		var existing struct {
+			ID    string  `gorm:"column:id"`
+			Alias *string `gorm:"column:alias"`
+		}
+		err := tx.Table("model_routes").Select("id,alias").Where("tenant_id=? AND upstream_id=? AND model=? AND capability=?", tenant, u.ID, jevDefaultModel, "evaluation").Order("id").Take(&existing).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil && existing.Alias != nil && strings.TrimSpace(*existing.Alias) != "" {
+			return nil
+		}
+		alias := "jev-" + u.ID
+		if existing.ID != "" {
+			return tx.Table("model_routes").Where("tenant_id=? AND id=?", tenant, existing.ID).Updates(map[string]any{"alias": alias, "updated_at": now}).Error
+		}
+		return tx.Table("model_routes").Create(map[string]any{"id": s.id(), "tenant_id": tenant, "name": "Jev", "slug": alias, "capability": "evaluation", "alias": alias, "upstream_id": u.ID, "model": jevDefaultModel, "options_json": "{}", "priority": "100", "weight": "100", "is_default": false, "status": "ready", "last_error": nil, "created_at": now, "updated_at": now}).Error
+	})
+}
+
 func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string) (int, error) {
 	u, e := h.store.GetUpstream(ctx, tenant, id)
 	if e != nil {
 		return 0, e
+	}
+	if u.Protocol == "typesafe" {
+		if err := h.store.ensureJevPreset(ctx, tenant, u); err != nil {
+			return 0, err
+		}
+		return 1, nil
 	}
 	list, e := h.fetchUpstreamModelList(ctx, tenant, u)
 	if e != nil {
@@ -515,7 +578,7 @@ func (h *handler) discoverUpstreamModels(ctx context.Context, tenant, id string)
 				}),
 			}).
 			Table("upstream_models").
-			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": "chat", "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
+			Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "upstream_id": id, "native_model": m.ID, "canonical_model": m.ID, "display_name": nullString(m.Name), "capability": firstNonEmpty(m.Capability, "chat"), "weight": "100", "is_default": false, "options_json": "{}", "meta_json": "{}", "status": "ready", "last_error": nil, "synced_at": now, "created_at": now, "updated_at": now})
 		if res.Error != nil {
 			return count, res.Error
 		}
@@ -542,23 +605,20 @@ func (h *handler) matchModelCatalog(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, 200, map[string]any{"models": out})
 }
 func (h *handler) refreshModelCatalog(w http.ResponseWriter, r *http.Request) {
-	tenant := principal(r).TenantID
-	ups, e := h.store.ListUpstreams(r.Context(), tenant)
-	if e != nil {
-		statusErr(w, e)
+	result, err := h.refreshCatalogMetadata(r.Context(), principal(r).TenantID)
+	if err != nil {
+		if len(result.Failed) == len(modelCatalogSources) {
+			details := []string{err.Error()}
+			for _, source := range modelCatalogSources {
+				details = append(details, source.name+": "+result.Failed[source.name])
+			}
+			httpx.Error(w, http.StatusBadGateway, strings.Join(details, "; "))
+		} else {
+			statusErr(w, err)
+		}
 		return
 	}
-	synced := 0
-	failed := map[string]string{}
-	for _, u := range ups {
-		n, e := h.discoverUpstreamModels(r.Context(), tenant, u.ID)
-		if e != nil {
-			failed[u.ID] = e.Error()
-			continue
-		}
-		synced += n
-	}
-	httpx.JSON(w, 200, map[string]any{"synced": synced, "failed": failed})
+	httpx.JSON(w, 200, result)
 }
 func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 	var b struct {
@@ -576,8 +636,20 @@ func (h *handler) importModelCatalog(w http.ResponseWriter, r *http.Request) {
 		if m.CanonicalModel == "" {
 			m.CanonicalModel = m.NativeModel
 		}
+		upstream, err := h.store.GetUpstream(r.Context(), principal(r).TenantID, m.UpstreamID)
+		if err != nil {
+			httpx.Error(w, 400, "invalid upstream reference")
+			return
+		}
 		if m.Capability == "" {
 			m.Capability = "chat"
+			if upstream.Protocol == "typesafe" {
+				m.Capability = "evaluation"
+			}
+		}
+		if err := validateProviderCapability(upstream.Protocol, m.Capability); err != nil {
+			httpx.Error(w, 400, err.Error())
+			return
 		}
 		if m.Weight == 0 {
 			m.Weight = 100

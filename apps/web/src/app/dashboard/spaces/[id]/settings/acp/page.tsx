@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import { Check, ChevronLeft, ChevronRight, Download, Loader2, Package, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
-import { useAgentDetail } from "@/components/agent-detail-context";
+import { useSpaceSettings } from "@/components/space-settings-layout";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   SettingsHeader,
@@ -32,12 +32,17 @@ import {
   startAcpDeviceLogin,
   pollAcpDeviceLogin,
   cancelAcpDeviceLogin,
+  fetchAcpAuthRecovery,
+  acknowledgeAcpAuthRecovery,
+  type AcpAuthRecovery,
   probeAcpAdapter,
   installAcpAdapter,
   fetchAcpAdapterInstalls,
   fetchAcpAdapterStatus,
   type AcpAdapterInstallProgress,
+  type AcpSettingsTarget,
   type AcpAdapterStatus,
+  type AcpDeviceAttempt,
 } from "@/lib/acp";
 const WorkspaceTerminalDialog = dynamic(
   () => import("@/components/workspace-terminal-dialog").then((m) => m.WorkspaceTerminalDialog),
@@ -62,8 +67,9 @@ function formatBytes(bytes: number): string {
   return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
-export default function AgentAcpPage() {
-  const { id } = useAgentDetail();
+export default function SpaceAcpPage() {
+  const { spaceId } = useSpaceSettings();
+  const id = spaceId;
   const { confirm } = useConfirmDialog();
   const [config, setConfig] = useState<AcpAgentConfig | null>(null);
   const [profiles, setProfiles] = useState<AcpPublicProfile[]>([]);
@@ -82,6 +88,7 @@ export default function AgentAcpPage() {
   const [installOutput, setInstallOutput] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { installed: boolean; output: string }>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [authRecoveryVersion, setAuthRecoveryVersion] = useState(0);
 
   const persist = useCallback(
     async (patch: Partial<AcpAgentConfig>) => {
@@ -93,12 +100,15 @@ export default function AgentAcpPage() {
         defaultRuntime: patch.defaultRuntime ?? current.defaultRuntime,
         agents: patch.agents ?? current.agents,
       };
-      const res = await saveAcpConfig(id, next);
+      const res = await saveAcpConfig({ spaceId: id }, next);
       // 保存响应里的敏感字段是掩码；直接回填会把正在输入框里编辑的内容
       // 覆盖成 ***xxxx。本地仍在编辑（非掩码）时保留本地值。
-      const merged = preserveEditingSecrets(next, res.config);
-      configRef.current = merged;
-      setConfig(merged);
+      const merged = preserveEditingSecrets(configRef.current ?? next, res.config);
+      // A completed save must not replace input edited while it was in flight.
+      if (configRef.current === current) {
+        configRef.current = merged;
+        setConfig(merged);
+      }
       setProfiles(res.profiles);
       setConfigError(res.configError ?? null);
     },
@@ -111,9 +121,9 @@ export default function AgentAcpPage() {
     setLoadError(null);
     try {
       const [res, adapters, installs] = await Promise.all([
-        fetchAcpConfig(id),
-        fetchAcpAdapterStatus(id).catch(() => []),
-        fetchAcpAdapterInstalls(id).catch(() => []),
+        fetchAcpConfig({ spaceId: id }),
+        fetchAcpAdapterStatus({ spaceId: id }).catch(() => []),
+        fetchAcpAdapterInstalls({ spaceId: id }).catch(() => []),
       ]);
       configRef.current = res.config;
       setConfig(res.config);
@@ -142,7 +152,7 @@ export default function AgentAcpPage() {
     let stopped = false;
     const poll = async () => {
       try {
-        const installs = await fetchAcpAdapterInstalls(id);
+        const installs = await fetchAcpAdapterInstalls({ spaceId: id });
         if (!stopped && Array.isArray(installs)) {
           setInstallJobs((current) => {
             const next = Object.fromEntries(installs.map((job) => [job.profileId, job]));
@@ -185,7 +195,7 @@ export default function AgentAcpPage() {
         toast.error(job.error ?? job.message ?? "适配器安装失败");
         setInstallOutput(job.error ?? job.message);
       }
-      void fetchAcpAdapterStatus(id).then(setAdapterStatuses).catch(() => undefined);
+      void fetchAcpAdapterStatus({ spaceId: id }).then(setAdapterStatuses).catch(() => undefined);
     }
   }, [id, installJobs]);
 
@@ -222,14 +232,14 @@ export default function AgentAcpPage() {
   }
 
   function openTerminal(profile: AcpPublicProfile) {
-    setTerminalProfile(profile.displayName);
+    setTerminalProfile(profile.displayName || profile.id);
     setTerminalProfileId(profile.id);
     setTerminalOpen(true);
   }
 
   async function handleProbe(profileId: string) {
     try {
-      const result = await probeAcpAdapter(id, profileId);
+      const result = await probeAcpAdapter({ spaceId: id }, profileId);
       setProbeResults((prev) => ({ ...prev, [profileId]: result }));
       if (result.installed) {
         toast.success(`${profileId} 已就绪`);
@@ -261,7 +271,7 @@ export default function AgentAcpPage() {
       const version = isUpdate
         ? (adapterStatuses.find((status) => status.profileId === profileId)?.latest ?? undefined)
         : undefined;
-      const result = await installAcpAdapter(id, profileId, {
+      const result = await installAcpAdapter({ spaceId: id }, profileId, {
         version,
         update: isUpdate,
         rebuild: isRebuild,
@@ -291,7 +301,7 @@ export default function AgentAcpPage() {
   async function handleCheckUpdates() {
     setCheckingUpdates(true);
     try {
-      const next = await fetchAcpAdapterStatus(id, { refresh: true });
+      const next = await fetchAcpAdapterStatus({ spaceId: id }, { refresh: true });
       setAdapterStatuses(next);
       const count = next.filter((a) => a.updateAvailable).length;
       if (count > 0) toast.success(`发现 ${count} 个适配器有更新`);
@@ -491,7 +501,7 @@ export default function AgentAcpPage() {
                     ))}
                 </>
               ) : null}
-              {selectedProfile.id === "codex" ? <CodexDevicePanel agentId={id} /> : null}
+              {selectedProfile.id === "codex" ? <CodexDevicePanel key={`${id}:${authRecoveryVersion}`} agentId={{ spaceId: id }} /> : null}
               {selectedProfile.id !== "claude-code" && selectedProfile.id !== "codex" ? (
                 <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 p-3">
                   <p className="min-w-0 text-xs text-muted-foreground">
@@ -534,6 +544,12 @@ export default function AgentAcpPage() {
               </Button>
             </div>
           ) : null}
+          <AcpAuthRecoveryPanel
+            key={`${id}:${selectedProfile.id}`}
+            spaceId={id}
+            profileId={selectedProfile.id}
+            onReconciled={() => setAuthRecoveryVersion((version) => version + 1)}
+          />
           {!selectedProfile.managed ? (
             <>
               <SettingsRow label="命令">
@@ -589,8 +605,8 @@ export default function AgentAcpPage() {
           ) : null}
         </SettingsSection>
         <WorkspaceTerminalDialog
-          agentId={id}
-          request={{ profileId: selectedProfile.id, profileName: terminalProfile }}
+          ticketPath={terminalProfileId ? `/api/spaces/${encodeURIComponent(id)}/acp/agents/${encodeURIComponent(terminalProfileId)}/terminal-ticket` : undefined}
+          request={terminalProfileId ? { profileId: terminalProfileId, profileName: terminalProfile } : undefined}
           open={terminalOpen}
           onOpenChange={setTerminalOpen}
         />
@@ -640,80 +656,6 @@ export default function AgentAcpPage() {
             </SelectContent>
           </Select>
         </SettingsRow>
-        <SettingsRow
-          label="工具授权"
-          description="ask 每次确认，allow 自动允许"
-        >
-          <Select
-            value={config.permissionPolicy}
-            onValueChange={(v) => {
-              if (v === "ask" || v === "allow") {
-                patch((p) => ({ ...p, permissionPolicy: v }), true);
-              }
-            }}
-            items={[
-              { value: "ask", label: "每次询问" },
-              { value: "allow", label: "自动允许" },
-            ]}
-          >
-            <SelectTrigger className="w-36">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ask">每次询问</SelectItem>
-              <SelectItem value="allow">自动允许</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingsRow>
-        {config.permissionGrants.length ? (
-          <div className="space-y-2 px-1">
-            <p className="text-xs text-muted-foreground">
-              已记住 {config.permissionGrants.length} 条「始终允许」，按工具类型与路径匹配：
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {config.permissionGrants.map((grant, index) => (
-                <span
-                  key={`${grant.kind}|${grant.pathPrefix ?? ""}|${index}`}
-                  className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 py-0.5 pr-0.5 pl-2 text-xs"
-                >
-                  <span className="truncate">
-                    {grant.kind}
-                    {grant.pathPrefix ? ` · ${grant.pathPrefix}` : ""}
-                  </span>
-                  <button
-                    type="button"
-                    aria-label="移除此授权"
-                    className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    onClick={() =>
-                      patch(
-                        (p) => ({
-                          ...p,
-                          permissionGrants: p.permissionGrants.filter((_, i) => i !== index),
-                        }),
-                        true,
-                      )
-                    }
-                  >
-                    <X className="size-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="text-muted-foreground"
-              onClick={() => patch((p) => ({ ...p, permissionGrants: [] }), true)}
-            >
-              清空全部
-            </Button>
-          </div>
-        ) : (
-          <SettingsRow label="始终允许" description="在聊天里点「始终允许」后会记在这里">
-            <span className="text-xs text-muted-foreground">暂无记录</span>
-          </SettingsRow>
-        )}
       </SettingsSection>
 
       <div className="space-y-2">
@@ -963,7 +905,7 @@ export default function AgentAcpPage() {
         </SettingsRow>
       </SettingsSection>
       <WorkspaceTerminalDialog
-        agentId={id}
+        ticketPath={terminalProfileId ? `/api/spaces/${encodeURIComponent(id)}/acp/agents/${encodeURIComponent(terminalProfileId)}/terminal-ticket` : undefined}
         request={terminalProfileId ? { profileId: terminalProfileId, profileName: terminalProfile } : undefined}
         open={terminalOpen}
         onOpenChange={setTerminalOpen}
@@ -1080,101 +1022,267 @@ function setupModeItems(modes: AcpSetupMode[]) {
   return modes.map((value) => ({ value, label: labels[value] }));
 }
 
-type DeviceLoginSnap = {
-  loginId: string;
-  userCode: string;
-  verificationUrl: string;
-  interval: number;
-  expiresIn?: number;
-  status: string;
-  error?: string;
-};
-
-function CodexDevicePanel({ agentId }: { agentId: string }) {
-  const [snap, setSnap] = useState<DeviceLoginSnap | null>(null);
+function AcpAuthRecoveryPanel({ spaceId, profileId, onReconciled }: {
+  spaceId: string;
+  profileId: string;
+  onReconciled: () => void;
+}) {
+  const [snapshot, setSnapshot] = useState<AcpAuthRecovery | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState<"check" | "recover" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reconciled, setReconciled] = useState(false);
+  const request = useRef<AbortController | null>(null);
+  const mounted = useRef(false);
 
   useEffect(() => {
-    if (!snap || snap.status !== "pending" || error) return;
-    const t = window.setTimeout(() => {
-      void pollAcpDeviceLogin(agentId, "codex", snap.loginId)
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      request.current?.abort();
+    };
+  }, []);
+
+  const check = async () => {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("check");
+    setError(null);
+    setConfirmed(false);
+    setReconciled(false);
+    setSnapshot((previous) => previous ? { ...previous, recoveryToken: undefined } : null);
+    try {
+      const next = await fetchAcpAuthRecovery(spaceId, profileId, controller.signal);
+      if (!mounted.current || controller.signal.aborted) return;
+      setSnapshot(next);
+    } catch (err) {
+      if (mounted.current && !controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (request.current === controller) request.current = null;
+      if (mounted.current && !controller.signal.aborted) setBusy(null);
+    }
+  };
+
+  const recover = async () => {
+    const authentication = snapshot?.authentication;
+    const token = snapshot?.recoveryToken;
+    if (request.current || !confirmed || !authentication || !token
+      || !Number.isFinite(authentication.expiresAt) || authentication.expiresAt > Date.now()) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("recover");
+    setError(null);
+    try {
+      const result = await acknowledgeAcpAuthRecovery(spaceId, profileId, token, controller.signal);
+      if (!mounted.current || controller.signal.aborted) return;
+      if (!result.reconciled) throw new Error("服务端尚未确认解除隔离");
+      setSnapshot({ authentication: null });
+      setConfirmed(false);
+      setReconciled(true);
+      onReconciled();
+    } catch (err) {
+      if (mounted.current && !controller.signal.aborted) {
+        // Failed observation can rotate the server's CAS token. Require a new
+        // check and a new operator confirmation, never replay the old token.
+        setSnapshot((previous) => previous ? { ...previous, recoveryToken: undefined } : null);
+        setConfirmed(false);
+        setError(`恢复未确认：${err instanceof Error ? err.message : String(err)}。请重新检查状态。`);
+      }
+    } finally {
+      if (request.current === controller) request.current = null;
+      if (mounted.current && !controller.signal.aborted) setBusy(null);
+    }
+  };
+
+  const authentication = snapshot?.authentication;
+  const expired = !!authentication && Number.isFinite(authentication.expiresAt)
+    && authentication.expiresAt <= Date.now();
+  return (
+    <div className="space-y-2 px-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-xs text-muted-foreground">认证操作异常时，由空间 owner / admin 检查恢复状态。</p>
+        <Button type="button" variant="ghost" size="sm" disabled={!!busy} onClick={() => void check()}>
+          {busy === "check" ? "正在检查…" : snapshot ? "重新检查状态" : "检查认证恢复状态"}
+        </Button>
+      </div>
+      {authentication ? <>
+        <p className="break-all text-xs text-muted-foreground">
+          认证操作：{authentication.kind} · 原节点 {authentication.nodeId || "未知"} · 电脑 {authentication.computerId || "未知"}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {expired ? "租约已到期，但不代表远端操作已经结束。" : "租约尚未到期或到期时间未知，暂不能恢复；到期后请重新检查。"}
+          必须先确认原节点的旧登录、ACP 会话和凭据写入操作真实已结束。原节点离线或仍有 ACP / 登录容器时，服务端会拒绝恢复。
+        </p>
+        <p className="text-xs text-muted-foreground">恢复只解除认证隔离，保留现有凭据文件，不代表已成功登录；需要时请重新开始登录。</p>
+        <label className="flex items-start gap-2 text-xs text-muted-foreground">
+          <input type="checkbox" className="mt-0.5" checked={confirmed} disabled={!!busy || !expired || !snapshot?.recoveryToken}
+            onChange={(event) => setConfirmed(event.target.checked)} />
+          我已确认旧远端操作真实结束，并理解此操作不会删除凭据或完成登录。
+        </label>
+        <Button type="button" variant="outline" size="sm"
+          disabled={!!busy || !expired || !confirmed || !snapshot?.recoveryToken} onClick={() => void recover()}>
+          {busy === "recover" ? "正在验证并解除隔离…" : "确认解除认证隔离"}
+        </Button>
+      </> : snapshot ? <p className="text-xs text-muted-foreground" role="status">
+        {reconciled ? "已解除认证隔离，现有凭据未改动。尚未重新登录，请按需开始新的登录。" : "当前没有待恢复的认证操作；这不表示登录成功。"}
+      </p> : null}
+      {error ? <p className="text-xs text-muted-foreground" role="alert">{error}</p> : null}
+    </div>
+  );
+}
+
+function CodexDevicePanel({ agentId }: { agentId: AcpSettingsTarget }) {
+  // Parent settings renders a fresh target object on every render. Key by its
+  // identity so polling is stable, and switching Spaces unmounts all old work.
+  const targetKey = typeof agentId === "string" ? `agent:${agentId}` : `space:${agentId.spaceId}`;
+  return <CodexDeviceAttemptPanel key={targetKey} targetKey={targetKey} />;
+}
+
+function CodexDeviceAttemptPanel({ targetKey }: { targetKey: string }) {
+  const [snap, setSnap] = useState<AcpDeviceAttempt | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
+  const generation = useRef(0);
+  const request = useRef<AbortController | null>(null);
+  const mounted = useRef(false);
+  const target = useCallback((): AcpSettingsTarget => targetKey.startsWith("space:")
+    ? { spaceId: targetKey.slice(6) }
+    : targetKey.slice(6), [targetKey]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      request.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!snap || snap.status !== "pending" || error || busy) return;
+    const attemptId = snap.attemptId;
+    const current = generation.current;
+    const controller = new AbortController();
+    const interval = Number.isFinite(snap.interval) && snap.interval > 0 ? snap.interval : 5;
+    const nextPoll = snap.nextPollAt ? Date.parse(snap.nextPollAt) : NaN;
+    const delay = Number.isFinite(nextPoll)
+      ? Math.max(1000, nextPoll - Date.now())
+      : Math.max(1, interval) * 1000;
+    const timer = window.setTimeout(() => {
+      request.current = controller;
+      void pollAcpDeviceLogin(target(), "codex", attemptId, controller.signal)
         .then((next) => {
-          setError(null);
-          setSnap(next);
+          if (!mounted.current || controller.signal.aborted || generation.current !== current) return;
+          if (next.attemptId !== attemptId) throw new Error("设备登录尝试不匹配，请重试查询");
+          setSnap((previous) => previous?.attemptId === attemptId ? next : previous);
         })
         .catch((err) => {
-          // 记录错误并停住轮询；界面给出重试入口，而不是永远停在「等待确认」。
+          if (!mounted.current || controller.signal.aborted || generation.current !== current) return;
           setError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (request.current === controller) request.current = null;
         });
-    }, Math.max(2, snap.interval || 5) * 1000);
-    return () => window.clearTimeout(t);
-  }, [agentId, snap, error]);
+    }, delay);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      if (request.current === controller) request.current = null;
+    };
+  }, [snap, error, busy, target]);
+
+  const start = async () => {
+    if (busy || request.current) return;
+    const current = ++generation.current;
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("start");
+    setError(null);
+    try {
+      const next = await startAcpDeviceLogin(target(), "codex", controller.signal);
+      if (!mounted.current || controller.signal.aborted || generation.current !== current) return;
+      setSnap(next);
+    } catch (err) {
+      if (mounted.current && !controller.signal.aborted && generation.current === current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (request.current === controller) request.current = null;
+      if (mounted.current && generation.current === current) setBusy(null);
+    }
+  };
+
+  const cancel = async () => {
+    if (!snap || snap.status !== "pending" || busy) return;
+    const attemptId = snap.attemptId;
+    const current = ++generation.current;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("cancel");
+    setError(null);
+    try {
+      const result = await cancelAcpDeviceLogin(target(), "codex", attemptId, controller.signal);
+      if (!mounted.current || controller.signal.aborted || generation.current !== current) return;
+      if (!result.cancelled) throw new Error("服务端尚未确认取消");
+      // The attempt may have completed before cancel reached the server. The
+      // acknowledgement alone is not proof that cancellation beat persistence.
+      const confirmed = await pollAcpDeviceLogin(target(), "codex", attemptId, controller.signal);
+      if (!mounted.current || controller.signal.aborted || generation.current !== current) return;
+      if (confirmed.attemptId !== attemptId || confirmed.status === "pending") {
+        throw new Error("服务端尚未确认取消");
+      }
+      setSnap((previous) => previous?.attemptId === attemptId ? confirmed : previous);
+    } catch (err) {
+      if (mounted.current && !controller.signal.aborted && generation.current === current) {
+        // Keep the attempt, its code and retry controls until cancellation is
+        // confirmed. Aborting a browser fetch does not cancel server-side work.
+        setError(`取消未确认：${err instanceof Error ? err.message : String(err)}`);
+      }
+    } finally {
+      if (request.current === controller) request.current = null;
+      if (mounted.current && generation.current === current) setBusy(null);
+    }
+  };
+
+  const pending = snap?.status === "pending";
+  const unknown = snap?.status === "unknown";
+  const expiry = snap ? Date.parse(snap.expiresAt) : NaN;
+  const verificationUri = snap?.verificationUri === "https://auth.openai.com/codex/device"
+    ? snap.verificationUri : null;
+  const statusText = !snap ? null
+    : unknown ? "凭据写入结果未知。请管理员确认操作已停止，并恢复此配置的认证状态后再登录；不要直接重试登录。"
+    : pending ? `等待确认${Number.isFinite(expiry) ? `（代码有效至 ${new Date(expiry).toLocaleTimeString()}）` : "…"}`
+    : snap.status === "complete" ? "已安全写入 Space 工作区 auth.json"
+    : snap.status === "cancelled" ? "设备登录已取消"
+    : snap.status === "expired" ? "设备码已过期，请重新开始"
+    : snap.error || "设备登录失败";
 
   return (
     <div className="space-y-2 px-1">
-      {snap ? (
-        <>
-          <p className="text-xs text-muted-foreground">
-            打开{" "}
-            <a href={snap.verificationUrl} target="_blank" rel="noreferrer" className="underline">
-              {snap.verificationUrl}
-            </a>
-            ，输入代码{" "}
-            <span className="font-mono text-foreground">{snap.userCode}</span>
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {error
-              ? `轮询失败：${error}`
-              : snap.status === "pending"
-                ? `等待确认…${snap.expiresIn ? `（代码约 ${Math.round(snap.expiresIn / 60)} 分钟内有效）` : ""}`
-                : snap.status === "complete"
-                  ? "已写入工作区 auth.json"
-                  : snap.error || snap.status}
-          </p>
-          <div className="flex gap-2">
-            {error && snap.status === "pending" ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setError(null)}
-              >
-                重试轮询
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                if (snap.status === "pending" && !error) {
-                  void cancelAcpDeviceLogin(agentId, "codex", snap.loginId).catch(() => undefined);
-                }
-                setSnap(null);
-                setError(null);
-              }}
-            >
-              取消
-            </Button>
-          </div>
-        </>
-      ) : (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            void startAcpDeviceLogin(agentId, "codex")
-              .then((next) => {
-                setError(null);
-                setSnap(next);
-              })
-              .catch((err) => toast.error(err instanceof Error ? err.message : String(err)));
-          }}
-        >
-          开始设备码登录
-        </Button>
-      )}
+      {pending && snap.userCode ? (
+        <p className="text-xs text-muted-foreground">
+          {verificationUri ? <>
+            打开{" "}<a href={verificationUri} target="_blank" rel="noreferrer" className="underline">{verificationUri}</a>，
+          </> : null}
+          输入代码 <span className="font-mono text-foreground">{snap.userCode}</span>
+        </p>
+      ) : null}
+      {statusText ? <p className="text-xs text-muted-foreground" role="status">{statusText}</p> : null}
+      {error ? <p className="text-xs text-muted-foreground" role="alert">{error}</p> : null}
+      <div className="flex flex-wrap gap-2">
+        {pending ? <>
+          {error ? <Button type="button" variant="outline" size="sm" disabled={!!busy} onClick={() => setError(null)}>重试查询</Button> : null}
+          <Button type="button" variant="ghost" size="sm" disabled={!!busy} onClick={() => void cancel()}>
+            {busy === "cancel" ? "正在取消…" : "取消登录"}
+          </Button>
+        </> : !unknown ? (
+          <Button type="button" variant="outline" size="sm" disabled={!!busy} onClick={() => void start()}>
+            {busy === "start" ? "正在获取设备码…" : snap ? "重新开始设备登录" : "开始设备码登录"}
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }

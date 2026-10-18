@@ -1,14 +1,18 @@
+# Disposable test fixture only. No persistent volumes, fixed container name,
+# or fixed host port; test-postgres.sh supplies a unique compose project.
 services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: zakura_test
-      POSTGRES_USER: zakura
-      POSTGRES_PASSWORD: zakura-test-only
+      POSTGRES_DB: zakura_pgtest
+      POSTGRES_USER: pgtest
+      POSTGRES_PASSWORD: pgtest
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zakura -d zakura_test"]
+      test: ["CMD-SHELL", "pg_isready -U pgtest -d zakura_pgtest"]
       interval: 1s
       timeout: 3s
       retries: 30

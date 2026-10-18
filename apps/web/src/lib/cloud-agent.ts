@@ -1,5 +1,6 @@
 "use client";
 
+import type { UISnapshot } from "./generative-ui";
 import type {
   CloudAgentAttachment,
   CloudAgentConfig,
@@ -113,6 +114,7 @@ export type TimelineItem =
       kind: "assistant";
       id: string;
       content: string;
+      uiStates?: Record<number, UISnapshot>;
       final: boolean;
       seq: number;
       runId?: string | null;
@@ -508,6 +510,15 @@ export function collectTurnSharedFiles(
 
 /** 将事件日志还原为 UI 时间线（多设备重连后可确定性重建） */
 export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
+  const uiStates = new Map<string, Record<number, UISnapshot>>();
+  for (const event of events) {
+    if (event.type !== "ui_state_updated") continue;
+    const snapshot = event.payload as UISnapshot;
+    if (typeof snapshot.messageId !== "string" || !Number.isInteger(snapshot.blockIndex) || !snapshot.state) continue;
+    const states = uiStates.get(snapshot.messageId) ?? {};
+    if (!states[snapshot.blockIndex] || states[snapshot.blockIndex]!.revision < snapshot.revision) states[snapshot.blockIndex] = snapshot;
+    uiStates.set(snapshot.messageId, states);
+  }
   const items: TimelineItem[] = [];
   const toolMap = new Map<string, TimelineToolCall>();
   /** toolCallId → 所属 runId，用于 Run 结束时只收尾自己的工具调用 */
@@ -541,6 +552,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       kind: "assistant",
       id: currentAssistant.id,
       content: currentAssistant.content,
+      uiStates: uiStates.get(currentAssistant.id),
       final: currentAssistant.final,
       seq: currentAssistant.seq,
       runId: currentAssistant.runId,
@@ -847,6 +859,8 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
       continue;
     }
     if (ev.type === "permission_request") {
+      const requestId = typeof p.requestId === "string" ? p.requestId : ev.id;
+      if (items.some(item => item.kind === "tool_approval" && item.requestId === requestId)) continue;
       flushReasoning();
       flushAssistant();
       items.push({
@@ -994,10 +1008,16 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
             degraded?: boolean;
           }
         | undefined;
+      const requestId = typeof p.requestId === "string" ? p.requestId : ev.id;
+      const duplicate = items.findIndex(item => (item.kind === "permission" || item.kind === "tool_approval") && item.requestId === requestId);
+      const existing = items[duplicate];
+      // A replayed request must never reopen an already resolved approval.
+      if (existing?.kind === "tool_approval" && existing.resolved) continue;
+      if (duplicate >= 0) items.splice(duplicate, 1);
       items.push({
         kind: "tool_approval",
         id: ev.id,
-        requestId: typeof p.requestId === "string" ? p.requestId : ev.id,
+        requestId,
         toolCallId: typeof p.toolCallId === "string" ? p.toolCallId : undefined,
         toolName: typeof p.toolName === "string" ? p.toolName : "",
         qualifiedName: typeof p.qualifiedName === "string" ? p.qualifiedName : undefined,
@@ -1200,6 +1220,14 @@ export function buildConversationTurns(
         runsByReply.set(replyTo, list);
       }
       lastRunId = rid;
+      continue;
+    }
+    if (ev.type === "ui_state_updated") {
+      const messageId = typeof p.messageId === "string" ? p.messageId : "";
+      const rid = ev.runId ?? `orphan:${messageId}`;
+      const list = eventsByRun.get(rid) ?? [];
+      list.push(ev);
+      eventsByRun.set(rid, list);
       continue;
     }
     // Gateway 等无 Run 的事件流：assistant_message.runId 为空，合成一条 run 挂到上一用户消息
@@ -1474,6 +1502,10 @@ export async function fetchComposerCapabilities(agentId: string) {
   });
 }
 
+export async function saveGeneratedUIState(agentId: string, sessionId: string, input: Omit<UISnapshot, "revision"> & { expectedRevision: number }) {
+  return api<UISnapshot>(`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/ui-state`, { method: "PUT", json: input });
+}
+
 export async function sendCloudMessage(
   agentId: string,
   sessionId: string,
@@ -1482,8 +1514,9 @@ export async function sendCloudMessage(
   attachments?: CloudAgentAttachment[],
   options?: CloudAgentRunOptions,
   followUp?: CloudAgentFollowUpMode,
+  messageId?: string,
 ) {
-  const json: Record<string, unknown> = { content };
+  const json: Record<string, unknown> = { content, ...(messageId ? { messageId } : {}) };
   if (parentRunId !== undefined) json.parentRunId = parentRunId;
   if (attachments?.length) json.attachments = attachments;
   if (options && Object.keys(options).length > 0) json.options = options;
@@ -1701,19 +1734,15 @@ export async function listModelsByCapability(
 ): Promise<ChatModelOption[]> {
   try {
     const res = await api<{
-      routes: Array<{
-        alias?: string;
-        id?: string;
-        name?: string;
-        isDefault?: boolean;
-        meta?: {
-          reasoning?: boolean;
-          reasoningLevels?: string[];
-          defaultReasonLevel?: string;
-          contextLimit?: number;
-        };
-        upstream?: { id?: string; name?: string } | null;
-      }>;
+      routes?: Array<{
+        alias?: unknown;
+        model?: unknown;
+        id?: unknown;
+        name?: unknown;
+        isDefault?: unknown;
+        meta?: unknown;
+        upstream?: { name?: unknown } | null;
+      } | null>;
     }>(`/api/model-routes?capability=${encodeURIComponent(capability)}`);
     const byAlias = new Map<
       string,
@@ -1727,47 +1756,56 @@ export async function listModelsByCapability(
         reasoningFlags: boolean[];
         levels: string[][];
         defaultReasonLevel?: string;
-        contextLimits: number[];
+        contextLimit?: number;
       }
     >();
-    for (const r of res.routes ?? []) {
-      const alias = r.alias?.trim();
+    for (const r of Array.isArray(res.routes) ? res.routes : []) {
+      if (!r || typeof r !== "object") continue;
+      const alias = (typeof r.alias === "string" ? r.alias.trim() : "") ||
+        (typeof r.model === "string" ? r.model.trim() : "");
       if (!alias) continue;
+      const name = typeof r.name === "string" ? r.name : "";
+      const upstreamName = typeof r.upstream?.name === "string" ? r.upstream.name : "";
+      const routeId = typeof r.id === "string" ? r.id : "";
+      const meta = r.meta && typeof r.meta === "object" && !Array.isArray(r.meta)
+        ? r.meta as Record<string, unknown>
+        : undefined;
       const entry =
         byAlias.get(alias) ??
         {
           alias,
-          name: r.name || alias,
+          name: name || alias,
           upstreams: [],
           providers: [],
           isDefault: false,
           reasoningFlags: [],
           levels: [],
-          contextLimits: [],
         };
-      if (r.name && entry.name === alias) entry.name = r.name;
-      if (r.upstream?.name && !entry.upstreams.includes(r.upstream.name)) {
-        entry.upstreams.push(r.upstream.name);
+      if (name && entry.name === alias) entry.name = name;
+      if (upstreamName && !entry.upstreams.includes(upstreamName)) {
+        entry.upstreams.push(upstreamName);
       }
-      const providerName = r.upstream?.name || r.name || alias;
-      if (r.id && !entry.providers.some((p) => p.id === r.id)) {
-        entry.providers.push({ id: r.id, name: providerName });
+      const providerName = upstreamName || name || alias;
+      if (routeId && !entry.providers.some((p) => p.id === routeId)) {
+        entry.providers.push({ id: routeId, name: providerName });
       }
-      if (r.isDefault) {
+      if (r.isDefault === true) {
         entry.isDefault = true;
-        if (r.id) entry.defaultRouteId = r.id;
+        if (routeId) entry.defaultRouteId = routeId;
       }
-      if (typeof r.meta?.reasoning === "boolean") {
-        entry.reasoningFlags.push(r.meta.reasoning);
+      if (typeof meta?.reasoning === "boolean") {
+        entry.reasoningFlags.push(meta.reasoning);
       }
-      if (Array.isArray(r.meta?.reasoningLevels)) {
-        entry.levels.push(r.meta.reasoningLevels.map(String).filter(Boolean));
+      if (Array.isArray(meta?.reasoningLevels)) {
+        entry.levels.push(meta.reasoningLevels
+          .filter((level): level is string => typeof level === "string")
+          .map((level) => level.trim()).filter(Boolean));
       }
-      if (!entry.defaultReasonLevel && r.meta?.defaultReasonLevel) {
-        entry.defaultReasonLevel = r.meta.defaultReasonLevel;
+      if (!entry.defaultReasonLevel && typeof meta?.defaultReasonLevel === "string") {
+        entry.defaultReasonLevel = meta.defaultReasonLevel.trim() || undefined;
       }
-      if (typeof r.meta?.contextLimit === "number" && r.meta.contextLimit > 0) {
-        entry.contextLimits.push(r.meta.contextLimit);
+      if (typeof meta?.contextLimit === "number" && Number.isFinite(meta.contextLimit) && meta.contextLimit > 0) {
+        entry.contextLimit = Math.min(entry.contextLimit ?? meta.contextLimit, meta.contextLimit);
       }
       byAlias.set(alias, entry);
     }
@@ -1796,7 +1834,7 @@ export async function listModelsByCapability(
               : undefined,
         reasoningLevels,
         defaultReasonLevel: entry.defaultReasonLevel,
-        contextLimit: entry.contextLimits.length ? Math.min(...entry.contextLimits) : undefined,
+        contextLimit: entry.contextLimit,
       };
     });
   } catch {

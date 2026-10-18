@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -24,11 +26,57 @@ func mcpNamespaceKey(value string) string {
 	return strings.ReplaceAll(normalizeMCPNamespaceArg(value), "-", "_")
 }
 
+func withMCPAgentScope(ctx context.Context, tenant, agent, space string) context.Context {
+	actor, _ := httpx.PrincipalFrom(ctx)
+	if actor.TenantID == "" {
+		actor.TenantID = tenant
+	}
+	return httpx.WithPrincipal(ctx, mcpScopedPrincipal(actor, space, agent))
+}
+func (h *handler) mcpAgentContext(ctx context.Context, tenant, agent string) (context.Context, error) {
+	a, err := h.store.GetAgent(ctx, tenant, agent)
+	if err != nil {
+		return ctx, err
+	}
+	actor, exists := httpx.PrincipalFrom(ctx)
+	if exists {
+		if actor.TenantID != tenant {
+			return ctx, ErrNotFound
+		}
+		if _, _, err = h.authorizeMCPScope(ctx, actor, a.SpaceID, agent); err != nil {
+			return ctx, err
+		}
+	}
+	return withMCPAgentScope(ctx, tenant, agent, a.SpaceID), nil
+}
+
+func (h *handler) runAgentMCPCall(ctx context.Context, tenant, agent string, inst mcpInstance, method string, params map[string]any) (json.RawMessage, error) {
+	ctx, err := h.mcpAgentContext(ctx, tenant, agent)
+	if err != nil {
+		return nil, err
+	}
+	actor, _ := httpx.PrincipalFrom(ctx)
+	allowed := false
+	for _, current := range h.agentMCPInstances(ctx, tenant, agent, actor.SpaceID) {
+		if current.ID == inst.ID {
+			inst = current
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, ErrNotFound
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/internal/mcp", nil)
+	return h.authorizedMCPRPC(req, actor, actor.SpaceID, inst, method, params)
+}
+
 func (h *handler) mcpResourceInstances(ctx context.Context, tenant, agent string) []mcpInstance {
 	record, err := h.store.GetAgent(ctx, tenant, agent)
 	if err != nil {
 		return nil
 	}
+	ctx = withMCPAgentScope(ctx, tenant, agent, record.SpaceID)
 	return h.agentMCPInstances(ctx, tenant, agent, record.SpaceID)
 }
 
@@ -76,10 +124,22 @@ func (h *handler) mcpResourcePage(ctx context.Context, inst mcpInstance, method,
 		return nil, "", err
 	}
 	next, _ := listed["nextCursor"].(string)
+	actor, _ := httpx.PrincipalFrom(ctx)
+	policies, policyErr := h.effectiveMCPPolicies(ctx, inst.TenantID, actor.AgentID, actor.SpaceID)
+	if policyErr != nil {
+		return nil, "", policyErr
+	}
 	items := []map[string]any{}
 	if raw, ok := listed[field].([]any); ok {
 		for _, item := range raw {
 			if entry, ok := item.(map[string]any); ok {
+				uri, _ := entry["uri"].(string)
+				if field == "resourceTemplates" {
+					uri, _ = entry["uriTemplate"].(string)
+				}
+				if !policies.operationAllowed(inst, "resources/read", uri) {
+					continue
+				}
 				items = append(items, entry)
 			}
 		}
@@ -124,6 +184,11 @@ func (h *handler) runBuiltinToolResources(ctx context.Context, tenant, agent, na
 }
 
 func (h *handler) runListMCPResources(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
+	var scopeErr error
+	ctx, scopeErr = h.mcpAgentContext(ctx, tenant, agent)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	instances := h.mcpResourceInstances(ctx, tenant, agent)
 	serverArg := strings.TrimSpace(builtinStringArg(args, "server"))
 	cursor := strings.TrimSpace(builtinStringArg(args, "cursor"))
@@ -153,6 +218,11 @@ func (h *handler) runListMCPResources(ctx context.Context, tenant, agent string,
 }
 
 func (h *handler) runListMCPResourceTemplates(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
+	var scopeErr error
+	ctx, scopeErr = h.mcpAgentContext(ctx, tenant, agent)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	instances := h.mcpResourceInstances(ctx, tenant, agent)
 	serverArg := strings.TrimSpace(builtinStringArg(args, "server"))
 	if serverArg != "" {
@@ -178,6 +248,11 @@ func (h *handler) runListMCPResourceTemplates(ctx context.Context, tenant, agent
 }
 
 func (h *handler) runReadMCPResource(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
+	var scopeErr error
+	ctx, scopeErr = h.mcpAgentContext(ctx, tenant, agent)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	serverArg := strings.TrimSpace(builtinStringArg(args, "server"))
 	uri := strings.TrimSpace(builtinStringArg(args, "uri"))
 	if serverArg == "" {
@@ -193,7 +268,9 @@ func (h *handler) runReadMCPResource(ctx context.Context, tenant, agent string, 
 	}
 	callCtx, cancel := context.WithTimeout(ctx, mcpResourceCallTimeout)
 	defer cancel()
-	result, err := h.mcpRPC(callCtx, inst, "resources/read", map[string]any{"uri": uri})
+	actor, _ := httpx.PrincipalFrom(callCtx)
+	req, _ := http.NewRequestWithContext(callCtx, http.MethodPost, "/internal/mcp", nil)
+	result, err := h.authorizedMCPRPC(req, actor, actor.SpaceID, inst, "resources/read", map[string]any{"uri": uri})
 	if err != nil {
 		return nil, err
 	}

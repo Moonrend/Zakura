@@ -17,8 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"gorm.io/gorm"
 )
 
 const (
@@ -145,48 +143,11 @@ func (h *handler) webSearchConfig(ctx context.Context, tenant, agent string) (we
 	if err != nil {
 		return webSearchEngine{}, err
 	}
-	agentSearch := agentProviderConfig(record, "webSearch")
-	platform := h.platformWebToolDefaults(ctx)
-	searchEnabled := platform.webSearchEnabled
-	if enabled, ok := agentSearch["enabled"].(bool); ok {
-		searchEnabled = enabled
+	config, err := h.effectiveWeb(ctx, tenant, record.SpaceID, agent)
+	if err != nil {
+		return webSearchEngine{}, err
 	}
-	if !searchEnabled {
-		return webSearchEngine{}, errors.New("web search is disabled for this agent")
-	}
-	settings := map[string]any{}
-	if value, settingErr := h.getSetting(ctx, "tenant:"+tenant, "web-search"); settingErr == nil {
-		settings = value
-	} else if !errors.Is(settingErr, gorm.ErrRecordNotFound) {
-		return webSearchEngine{}, settingErr
-	}
-	engines := map[string]map[string]any{}
-	if rawEngines, ok := settings["engines"].(map[string]any); ok {
-		for id, rawEntry := range rawEngines {
-			if entry, ok := rawEntry.(map[string]any); ok {
-				engines[id] = entry
-			}
-		}
-	}
-	pick := func(id string) (webSearchEngine, bool) {
-		entry, ok := engines[id]
-		if !ok {
-			return webSearchEngine{}, false
-		}
-		return webSearchEngineFromEntry(h, ctx, id, entry)
-	}
-	defaultEngine := firstNonEmpty(mapStringValue(agentSearch["defaultEngine"]), platform.searchEngine, mapStringValue(settings["defaultEngine"]))
-	if defaultEngine != "" {
-		if engine, ok := pick(defaultEngine); ok {
-			return engine, nil
-		}
-	}
-	for _, id := range webSearchEngineIDs {
-		if engine, ok := pick(id); ok {
-			return engine, nil
-		}
-	}
-	return webSearchEngine{}, errors.New("web search is not configured")
+	return config.search, config.searchErr
 }
 
 func (h *handler) webFetchConfig(ctx context.Context, tenant, agent string) (webFetchBackend, error) {
@@ -194,54 +155,11 @@ func (h *handler) webFetchConfig(ctx context.Context, tenant, agent string) (web
 	if err != nil {
 		return webFetchBackend{}, err
 	}
-	agentFetch := agentProviderConfig(record, "webFetch")
-	platform := h.platformWebToolDefaults(ctx)
-	fetchEnabled := platform.webFetchEnabled
-	if enabled, ok := agentFetch["enabled"].(bool); ok {
-		fetchEnabled = enabled
+	config, err := h.effectiveWeb(ctx, tenant, record.SpaceID, agent)
+	if err != nil {
+		return webFetchBackend{}, err
 	}
-	if !fetchEnabled {
-		return webFetchBackend{}, errors.New("web fetch is disabled for this agent")
-	}
-	settings := map[string]any{}
-	if value, settingErr := h.getSetting(ctx, "tenant:"+tenant, "web-fetch"); settingErr == nil {
-		settings = value
-	} else if !errors.Is(settingErr, gorm.ErrRecordNotFound) {
-		return webFetchBackend{}, settingErr
-	}
-	backends := map[string]map[string]any{}
-	if rawBackends, ok := settings["backends"].(map[string]any); ok {
-		for id, rawEntry := range rawBackends {
-			if entry, ok := rawEntry.(map[string]any); ok {
-				backends[id] = entry
-			}
-		}
-	}
-	backendID := firstNonEmpty(mapStringValue(agentFetch["defaultBackend"]), platform.fetchBackend, mapStringValue(settings["defaultBackend"]))
-	if backendID == "" {
-		backendID = "native"
-	}
-	entry := backends[backendID]
-	backend := webFetchBackend{
-		ID:                backendID,
-		AllowPrivateHosts: mapBoolValue(settings["allowPrivateHosts"]) || mapBoolValue(agentFetch["allowPrivateHosts"]) || mapBoolValue(entry["allowPrivateHosts"]),
-	}
-	switch backendID {
-	case "native":
-	case "jina-reader":
-		backend.BaseURL = firstNonEmpty(mapStringValue(entry["baseUrl"]), h.platformServiceEndpoint(ctx, "jina-reader"), "https://r.jina.ai")
-	case "firecrawl":
-		backend.APIKey = strings.TrimSpace(mapStringValue(entry["apiKey"]))
-		backend.BaseURL = firstNonEmpty(mapStringValue(entry["baseUrl"]), h.platformServiceEndpoint(ctx, "firecrawl"), "https://api.firecrawl.dev")
-	case "crawl4ai":
-		backend.BaseURL = firstNonEmpty(mapStringValue(entry["baseUrl"]), h.platformServiceEndpoint(ctx, "crawl4ai"))
-		if backend.BaseURL == "" {
-			return webFetchBackend{}, errors.New("web fetch backend crawl4ai is not configured")
-		}
-	default:
-		return webFetchBackend{}, fmt.Errorf("unknown web fetch backend %q", backendID)
-	}
-	return backend, nil
+	return config.fetch, config.fetchErr
 }
 
 func (h *handler) runWebSearch(ctx context.Context, tenant, agent string, args json.RawMessage) (json.RawMessage, error) {

@@ -35,11 +35,11 @@ func TestPlatformWebDefaultsDisableWebTools(t *testing.T) {
 	}
 }
 
-func TestAgentExplicitEnabledOverridesPlatformDisabled(t *testing.T) {
+func TestAgentExplicitEnabledCannotBroadenPlatformDisabled(t *testing.T) {
 	h, agentID := newWebHandlerWithConfig(t, `{"providers":{"webSearch":{"enabled":true}}}`)
 	setPlatformAgentWebDefaults(t, h, `{"webSearchEnabled":false}`)
-	if _, err := h.webSearchConfig(context.Background(), "tenant", agentID); err == nil || err.Error() != "web search is not configured" {
-		t.Fatalf("agent override should re-enable search: %v", err)
+	if _, err := h.webSearchConfig(context.Background(), "tenant", agentID); err == nil || err.Error() != "web search is disabled for this agent" {
+		t.Fatalf("agent override must not broaden policy: %v", err)
 	}
 }
 
@@ -84,16 +84,17 @@ func TestPlatformDefaultFetchBackendFallback(t *testing.T) {
 func TestBuildAgentProvidersInheritsPlatformDefaults(t *testing.T) {
 	h, agentID := newWebHandler(t)
 	setPlatformAgentWebDefaults(t, h, `{"webSearchEnabled":false,"searchEngine":"searxng","fetchBackend":"jina-reader"}`)
-	options, err := h.buildAgentProviders(context.Background(), "tenant", agentID)
+	record, _ := h.store.GetAgent(context.Background(), "tenant", agentID)
+	options, err := h.webProviderOptions(context.Background(), "tenant", record.SpaceID, agentID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	search := options["webSearch"].(map[string]any)["agent"].(map[string]any)
-	if search["enabled"] != false || search["defaultEngine"] != "searxng" {
+	if search["enabled"] != false || options["webSearch"].(map[string]any)["effective"].(map[string]any)["defaultEngine"] != "searxng" {
 		t.Fatalf("web search did not inherit platform defaults: %#v", search)
 	}
 	fetch := options["webFetch"].(map[string]any)["agent"].(map[string]any)
-	if fetch["enabled"] != true || fetch["defaultBackend"] != "jina-reader" {
+	if fetch["enabled"] != true || options["webFetch"].(map[string]any)["effective"].(map[string]any)["defaultBackend"] != "jina-reader" {
 		t.Fatalf("web fetch did not inherit platform defaults: %#v", fetch)
 	}
 }
@@ -101,12 +102,13 @@ func TestBuildAgentProvidersInheritsPlatformDefaults(t *testing.T) {
 func TestBuildAgentProvidersAgentOverridesPlatformDefaults(t *testing.T) {
 	h, agentID := newWebHandlerWithConfig(t, `{"providers":{"webSearch":{"enabled":true,"defaultEngine":"tavily"}}}`)
 	setPlatformAgentWebDefaults(t, h, `{"webSearchEnabled":false,"searchEngine":"searxng"}`)
-	options, err := h.buildAgentProviders(context.Background(), "tenant", agentID)
+	record, _ := h.store.GetAgent(context.Background(), "tenant", agentID)
+	options, err := h.webProviderOptions(context.Background(), "tenant", record.SpaceID, agentID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	search := options["webSearch"].(map[string]any)["agent"].(map[string]any)
-	if search["enabled"] != true || search["defaultEngine"] != "tavily" {
-		t.Fatalf("agent values should win over platform defaults: %#v", search)
+	if search["enabled"] != false || search["defaultEngine"] != "tavily" {
+		t.Fatalf("agent selection cannot broaden the disabled parent policy: %#v", search)
 	}
 }

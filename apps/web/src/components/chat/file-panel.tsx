@@ -125,7 +125,7 @@ export function FilePanel({
   onClose,
   onOpenPath,
 }: {
-  agentId: string;
+  agentId: string | { spaceId: string };
   fsEnabled: boolean;
   /** 外部请求打开的文件：{path, nonce}；nonce 变化触发。dir=true 时展开目录。 */
   openRequest?: { path: string; nonce: number; dir?: boolean } | null;

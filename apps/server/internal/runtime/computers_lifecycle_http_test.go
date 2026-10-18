@@ -31,7 +31,7 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No live runner: approval must become uncertain, not retry implicitly.
-	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"temporary", "temporary"}, {"railway", "railway"}, {"legacy:" + space.ID, "server"}} {
+	for _, entry := range []struct{ id, provider string }{{"server", "server"}, {"cloud", "e2b"}, {"temporary", "temporary"}, {"railway", "railway"}} {
 		if err = d.Gorm.Exec(`INSERT INTO computers(id,tenant_id,space_id,name,provider,created_at,updated_at) VALUES(?,'tenant',?,'Computer',?,'now','now')`, entry.id, space.ID, entry.provider).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -69,8 +69,10 @@ func TestComputerLifecycleHTTP(t *testing.T) {
 	if count != 0 {
 		t.Fatal("denied request reserved a runtime")
 	}
-	for _, id := range []string{"legacy:" + space.ID, "missing"} {
-		want := 501
+	// The Space server computer is its workspace and never gets a provider
+	// runtime; an unknown computer is simply missing.
+	for _, id := range []string{"server:" + space.ID, "missing"} {
+		want := 409
 		if id == "missing" {
 			want = 404
 		}

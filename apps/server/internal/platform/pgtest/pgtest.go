@@ -1,9 +1,5 @@
-// Package pgtest isolates PostgreSQL-gated Go tests from one another.
-//
-// Parallel test packages all consume the same ZAKURA_TEST_POSTGRES_URL, so the
-// default `go test ./...` lets their migrations, extension creation, and schema
-// resets race on one shared database. FreshURL hands every caller a private
-// database (derived from the shared URL) that is dropped when the test ends.
+// Package pgtest isolates opt-in PostgreSQL tests. Fixtures must use the returned
+// URL without resetting public: restricted roles use a private schema instead.
 package pgtest
 
 import (
@@ -11,122 +7,166 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 const connectTimeout = 15 * time.Second
 
 var unsafeIdent = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
 
-// FreshURL returns a PostgreSQL DSN pointing at a private database derived from
-// rawURL and registers its cleanup. An empty rawURL skips the test; a
-// non-PostgreSQL URL is returned unchanged. When the connecting role cannot
-// CREATE DATABASE the helper falls back to a private schema in the original
-// database and points the DSN at it via search_path.
+// URL accepts the canonical URL and legacy DSN environment variable names. Both
+// take PostgreSQL URLs (as required by platform/db), not SQLite paths. Required
+// suites fail, rather than silently skipping, when their fixture is missing.
+func URL(t testing.TB) string {
+	t.Helper()
+	raw, err := environmentURL(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw == "" {
+		Unavailable(t, "set ZAKURA_TEST_POSTGRES_URL (or ZAKURA_TEST_POSTGRES_DSN) to a disposable PostgreSQL fixture")
+	}
+	return raw
+}
+
+func environmentURL(getenv func(string) string) (string, error) {
+	canonical := strings.TrimSpace(getenv("ZAKURA_TEST_POSTGRES_URL"))
+	legacy := strings.TrimSpace(getenv("ZAKURA_TEST_POSTGRES_DSN"))
+	if canonical != "" && legacy != "" && canonical != legacy {
+		return "", errors.New("ZAKURA_TEST_POSTGRES_URL and ZAKURA_TEST_POSTGRES_DSN disagree; set only one or use identical URLs")
+	}
+	if canonical == "" {
+		canonical = legacy
+	}
+	if canonical != "" {
+		if _, err := parseURL(canonical); err != nil {
+			return "", err
+		}
+	}
+	return canonical, nil
+}
+
+// Unavailable marks an optional prerequisite missing, or fails a required suite.
+func Unavailable(t testing.TB, reason string) {
+	t.Helper()
+	if os.Getenv("ZAKURA_REQUIRE_POSTGRES") == "1" {
+		t.Fatal(reason)
+	}
+	t.Skip(reason)
+}
+
+// FreshURL creates a fresh database using template0. Only permission denial may
+// fall back to a private schema; connection/configuration failures fail closed.
+// ZAKURA_TEST_POSTGRES_ISOLATION=schema exercises that fallback explicitly.
+// Inherited dbname/search_path/options cannot redirect the isolated connection.
 func FreshURL(t testing.TB, rawURL, label string) string {
 	t.Helper()
-	if rawURL == "" {
-		t.Skip("ZAKURA_TEST_POSTGRES_URL is not set")
+	if strings.TrimSpace(rawURL) == "" {
+		rawURL = URL(t)
 	}
-	parsed, err := url.Parse(rawURL)
+	parsed, err := parseURL(rawURL)
 	if err != nil {
-		t.Fatalf("parse ZAKURA_TEST_POSTGRES_URL: %v", err)
+		t.Fatal(err)
 	}
-	if parsed.Scheme != "postgres" && parsed.Scheme != "postgresql" {
-		return rawURL
+	mode := os.Getenv("ZAKURA_TEST_POSTGRES_ISOLATION")
+	if mode != "" && mode != "database" && mode != "schema" {
+		t.Fatal("ZAKURA_TEST_POSTGRES_ISOLATION must be database or schema")
 	}
-	base := strings.Trim(parsed.Path, "/")
-	if base == "" {
-		base = "postgres"
-	}
+	return freshURL(t, parsed, label, mode, withPool)
+}
 
-	name := uniqueName(base, label, randomSuffix(t))
-	if err := withAdminPool(rawURL, func(ctx context.Context, pool *sql.DB) error {
-		_, execErr := pool.ExecContext(ctx, "CREATE DATABASE "+quoteIdent(name))
-		return execErr
-	}); err == nil {
-		t.Cleanup(func() { dropDatabase(rawURL, name) })
-		unique := *parsed
-		unique.Path = "/" + name
-		return unique.String()
-	}
+type poolAction func(context.Context, *sql.DB) error
+type poolRunner func(string, poolAction) error
 
-	schema := "pgtest_" + safeIdent(label) + "_" + randomSuffix(t)
-	if err := withPool(rawURL, func(ctx context.Context, pool *sql.DB) error {
-		_, execErr := pool.ExecContext(ctx, "CREATE SCHEMA "+quoteIdent(schema))
-		return execErr
+func freshURL(t testing.TB, base *url.URL, label, mode string, run poolRunner) string {
+	t.Helper()
+	name := uniqueName("pgtest", label, randomSuffix(t))
+	if mode != "schema" {
+		err := run(base.String(), func(ctx context.Context, pool *sql.DB) error {
+			_, err := pool.ExecContext(ctx, "CREATE DATABASE "+quoteIdent(name)+" TEMPLATE template0")
+			return err
+		})
+		if err == nil {
+			t.Cleanup(func() {
+				if err := run(base.String(), func(ctx context.Context, pool *sql.DB) error {
+					_, err := pool.ExecContext(ctx, "DROP DATABASE "+quoteIdent(name)+" WITH (FORCE)")
+					return err
+				}); err != nil {
+					t.Errorf("clean up isolated PostgreSQL database %s: %v", name, err)
+				}
+			})
+			return isolatedURL(base, name, "public")
+		}
+		var pgerr *pq.Error
+		if mode == "database" || !errors.As(err, &pgerr) || pgerr.Code != "42501" {
+			t.Fatalf("create isolated PostgreSQL database: %v", err)
+		}
+	}
+	if err := run(base.String(), func(ctx context.Context, pool *sql.DB) error {
+		// Apply() may attempt extension creation. Require a preinstalled pg_trgm
+		// before schema fallback, so cleanup cannot drop an extension newly
+		// installed in this private schema and break concurrent fixtures.
+		var installed bool
+		if err := pool.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='pg_trgm')`).Scan(&installed); err != nil {
+			return err
+		}
+		if !installed {
+			return errors.New("schema isolation requires pg_trgm preinstalled in the disposable fixture database")
+		}
+		_, err := pool.ExecContext(ctx, "CREATE SCHEMA "+quoteIdent(name))
+		return err
 	}); err != nil {
-		t.Fatalf("isolate PostgreSQL test (no CREATE DATABASE and no schema fallback): %v", err)
+		t.Fatalf("create isolated PostgreSQL schema: %v", err)
 	}
-	t.Cleanup(func() { dropSchema(rawURL, schema) })
-	unique := *parsed
-	query := unique.Query()
+	t.Cleanup(func() {
+		if err := run(base.String(), func(ctx context.Context, pool *sql.DB) error {
+			_, err := pool.ExecContext(ctx, "DROP SCHEMA "+quoteIdent(name)+" CASCADE")
+			return err
+		}); err != nil {
+			t.Errorf("clean up isolated PostgreSQL schema %s: %v", name, err)
+		}
+	})
+	// Do not include public: CREATE TABLE IF NOT EXISTS would otherwise adopt
+	// existing public tables instead of creating isolated fixture tables.
+	return isolatedURL(base, "", name)
+}
+
+func parseURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.Opaque != "" || parsed.Fragment != "" {
+		// Never include the supplied URL in diagnostics: it may contain secrets.
+		return nil, errors.New("PostgreSQL fixture must be a valid postgres:// or postgresql:// URL")
+	}
+	if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
+		return nil, errors.New("invalid PostgreSQL fixture URL query")
+	}
+	return parsed, nil
+}
+
+func isolatedURL(base *url.URL, database, schema string) string {
+	isolated := *base
+	query := isolated.Query()
+	if database != "" {
+		isolated.Path = "/" + database
+		isolated.RawPath = ""
+		query.Del("dbname")
+	}
+	query.Del("options")
 	query.Set("search_path", schema)
-	unique.RawQuery = query.Encode()
-	return unique.String()
+	isolated.RawQuery = query.Encode()
+	return isolated.String()
 }
 
-func dropDatabase(rawURL, name string) {
-	_ = withAdminPool(rawURL, func(ctx context.Context, pool *sql.DB) error {
-		_, _ = pool.ExecContext(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, name)
-		_, err := pool.ExecContext(ctx, "DROP DATABASE IF EXISTS "+quoteIdent(name))
-		return err
-	})
-}
-
-func dropSchema(rawURL, schema string) {
-	_ = withPool(rawURL, func(ctx context.Context, pool *sql.DB) error {
-		_, err := pool.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+quoteIdent(schema)+" CASCADE")
-		return err
-	})
-}
-
-// withAdminPool runs fn against the URL's own database, falling back to the
-// "postgres" maintenance database when the original one is unreachable.
-func withAdminPool(rawURL string, fn func(context.Context, *sql.DB) error) error {
-	candidates := []string{}
-	if parsed, err := url.Parse(rawURL); err == nil {
-		if name := strings.Trim(parsed.Path, "/"); name != "" {
-			candidates = append(candidates, name)
-		}
-	}
-	candidates = append(candidates, "postgres")
-	var lastErr error
-	for _, dbname := range candidates {
-		if err := withDB(rawURL, dbname, fn); err != nil {
-			lastErr = err
-			continue
-		}
-		return nil
-	}
-	return lastErr
-}
-
-// withPool runs fn against the database named in rawURL.
-func withPool(rawURL string, fn func(context.Context, *sql.DB) error) error {
-	name := ""
-	if parsed, err := url.Parse(rawURL); err == nil {
-		name = strings.Trim(parsed.Path, "/")
-	}
-	return withDB(rawURL, name, fn)
-}
-
-func withDB(rawURL, dbname string, fn func(context.Context, *sql.DB) error) error {
-	dsn := rawURL
-	if parsed, err := url.Parse(rawURL); err == nil {
-		if dbname == "" {
-			parsed.Path = ""
-		} else {
-			parsed.Path = "/" + dbname
-		}
-		dsn = parsed.String()
-	}
+func withPool(dsn string, fn poolAction) error {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	pool, err := sql.Open("postgres", dsn)
@@ -142,7 +182,7 @@ func withDB(rawURL, dbname string, fn func(context.Context, *sql.DB) error) erro
 
 func randomSuffix(t testing.TB) string {
 	t.Helper()
-	var raw [4]byte
+	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		t.Fatalf("generate PostgreSQL test suffix: %v", err)
 	}
@@ -150,16 +190,11 @@ func randomSuffix(t testing.TB) string {
 }
 
 func uniqueName(base, label, suffix string) string {
-	tail := "_" + safeIdent(label) + "_" + suffix
-	base = strings.ToLower(base)
-	if len(base)+len(tail) > 63 {
-		keep := 63 - len(tail)
-		if keep < 1 {
-			return safeIdent(label) + "_" + suffix
-		}
-		base = base[:keep]
+	prefix := safeIdent(base) + "_" + safeIdent(label)
+	if keep := 63 - len(suffix) - 1; len(prefix) > keep {
+		prefix = prefix[:keep]
 	}
-	return base + tail
+	return prefix + "_" + suffix
 }
 
 func safeIdent(label string) string {
@@ -171,5 +206,36 @@ func safeIdent(label string) string {
 }
 
 func quoteIdent(name string) string {
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	return pq.QuoteIdentifier(name)
+}
+
+// AssertMigrationLedger compares every version and name, not a stale hardcoded
+// count. The expectation can come from applying the same production migration
+// registry to an isolated in-memory SQLite database; no production API needed.
+func AssertMigrationLedger(t testing.TB, ctx context.Context, actual, expected *sql.DB) {
+	t.Helper()
+	read := func(db *sql.DB) []string {
+		rows, err := db.QueryContext(ctx, `SELECT version,name FROM schema_migrations ORDER BY version`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var entries []string
+		for rows.Next() {
+			var version int
+			var name string
+			if err := rows.Scan(&version, &name); err != nil {
+				t.Fatal(err)
+			}
+			entries = append(entries, fmt.Sprintf("%d:%s", version, name))
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+	want, got := read(expected), read(actual)
+	if len(want) == 0 || strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("migration ledger mismatch: got %v, want nonempty %v", got, want)
+	}
 }

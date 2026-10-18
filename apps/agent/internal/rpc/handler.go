@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,7 +24,9 @@ type Handler struct {
 	sandboxJobs     *sandbox.Registry
 	sandboxEnforced bool
 	ptys            map[string]*host.LiveStream
+	streamOwner     string
 	mu              sync.Mutex
+	migrationMu     sync.Mutex
 }
 
 func New(kind, storageRoot string) *Handler {
@@ -34,7 +37,28 @@ func New(kind, storageRoot string) *Handler {
 		sandboxJobs:     sandbox.NewRegistry(),
 		sandboxEnforced: sandboxEnforcement(os.Getenv("ZAKURA_SANDBOX_ENABLED")),
 		ptys:            map[string]*host.LiveStream{},
+		streamOwner:     rand.Text(),
 	}
+}
+
+// CloseStreams tears down interactive transports when their connection closes.
+// Detached exec jobs intentionally remain available for receipt/poll recovery.
+func (h *Handler) CloseStreams() {
+	h.mu.Lock()
+	streams := h.ptys
+	h.ptys = map[string]*host.LiveStream{}
+	h.mu.Unlock()
+	for _, stream := range streams {
+		_ = stream.Close()
+	}
+}
+
+func (h *Handler) finishStream(sess *host.LiveStream) {
+	h.mu.Lock()
+	delete(h.ptys, sess.ID)
+	h.mu.Unlock()
+	_ = sess.Close()
+	_ = sess.Wait()
 }
 
 func (h *Handler) workspace(spaceID string) string {
@@ -42,13 +66,17 @@ func (h *Handler) workspace(spaceID string) string {
 }
 
 func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
+	if err := ctx.Err(); err != nil {
+		send(Err(msg.ID, err.Error()))
+		return
+	}
 	var err error
 	var result any
 
 	// Do not let an explicit isolation request silently use an unsupported
 	// execution transport. Docker management is not the sandbox backend API.
 	switch msg.Method {
-	case "docker.create", "docker.run", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate":
+	case "docker.create", "docker.run", "docker.start", "docker.exec", "docker.exec.start", "docker.attach", "docker.recreate":
 		requested, policyErr := h.sandboxRequested(msg.Params)
 		if policyErr != nil {
 			send(Err(msg.ID, policyErr.Error()))
@@ -70,7 +98,9 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		if p.Light {
 			result = sys.VersionInfo()
 		} else {
-			result = sys.Collect(h.Kind, h.StorageRoot)
+			info := sys.Collect(h.Kind, h.StorageRoot)
+			info.StreamOwner = h.streamOwner
+			result = info
 		}
 	case "sys.update":
 		var p sys.UpdateParams
@@ -85,6 +115,8 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			}
 		}
 		result, err = sys.Apply(ctx, p, progress)
+	case "host.fs.migration":
+		result, err = h.workspaceMigration(ctx, msg.Params)
 	case "host.fs.stat":
 		result, err = h.fsStat(msg.Params)
 	case "host.fs.list":
@@ -145,21 +177,20 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 		err = docker.PullWithProgress(ctx, p.Image, progress)
 		result = map[string]string{"image": p.Image}
 	case "docker.create":
-		var spec docker.RunSpec
-		decoder := json.NewDecoder(strings.NewReader(string(msg.Params)))
-		decoder.DisallowUnknownFields()
-		if err = decoder.Decode(&spec); err == nil {
-			var trailing any
-			if trailingErr := decoder.Decode(&trailing); trailingErr != io.EOF {
-				err = fmt.Errorf("docker.create requires exactly one JSON object")
-			} else {
-				result, err = docker.Create(ctx, spec)
-			}
-		}
+		result, err = h.dockerCreate(ctx, msg.Params)
+	case "docker.create.status":
+		result, err = h.dockerCreateStatus(ctx, msg.Params)
 	case "docker.run":
 		var spec docker.RunSpec
 		_ = json.Unmarshal(msg.Params, &spec)
 		result, err = docker.Run(ctx, spec)
+	case "docker.start":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if err = json.Unmarshal(msg.Params, &p); err == nil {
+			result, err = docker.Start(ctx, p.ID)
+		}
 	case "docker.stop":
 		var p struct {
 			ID     string `json:"id"`
@@ -221,12 +252,27 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	case "docker.exec.write":
 		err = h.ptyWrite(msg.Params)
 		result = map[string]bool{"ok": err == nil}
+	case "docker.exec.resize":
+		err = h.ptyResize(msg.Params)
+		result = map[string]bool{"ok": err == nil}
 	case "docker.exec.close":
 		err = h.ptyClose(msg.Params)
 		result = map[string]bool{"ok": true}
 	default:
 		send(Err(msg.ID, "未知方法: "+msg.Method))
 		return
+	}
+	if ctx.Err() != nil {
+		switch msg.Method {
+		case "host.pty.start", "docker.exec.start", "docker.attach":
+			if value, ok := result.(map[string]any); ok {
+				if id, ok := value["id"].(string); ok {
+					raw, _ := json.Marshal(map[string]string{"id": id})
+					_ = h.ptyClose(raw)
+				}
+			}
+		}
+		err = ctx.Err()
 	}
 	if err != nil {
 		message := err.Error()
@@ -274,9 +320,21 @@ func (h *Handler) apiPath(p spacePath, path string) string {
 }
 
 func (h *Handler) fsStat(raw json.RawMessage) (any, error) {
-	var p spacePath
-	_ = json.Unmarshal(raw, &p)
-	return host.Stat(h.rootOf(p), p.Path)
+	var p struct {
+		spacePath
+		NoFollow json.RawMessage `json:"noFollow"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	switch strings.TrimSpace(string(p.NoFollow)) {
+	case "true":
+		return host.Lstat(h.rootOf(p.spacePath), p.Path)
+	case "", "false":
+		return host.Stat(h.rootOf(p.spacePath), p.Path)
+	default:
+		return nil, fmt.Errorf("noFollow must be a boolean")
+	}
 }
 
 func (h *Handler) fsList(raw json.RawMessage) (any, error) {
@@ -313,10 +371,24 @@ func (h *Handler) fsRead(raw json.RawMessage) (any, error) {
 func (h *Handler) fsWrite(raw json.RawMessage) (any, error) {
 	var p struct {
 		spacePath
-		Content string `json:"content"`
-		Base64  string `json:"base64"`
+		Content string  `json:"content"`
+		Base64  string  `json:"base64"`
+		Mode    *uint32 `json:"mode"`
+		Atomic  *bool   `json:"atomic"`
 	}
-	_ = json.Unmarshal(raw, &p)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &options); err != nil {
+		return nil, err
+	}
+	_, modeSet := options["mode"]
+	_, atomicSet := options["atomic"]
+	secure := modeSet || atomicSet
+	if secure && (p.Mode == nil || *p.Mode != 0o600 || p.Atomic == nil || !*p.Atomic) {
+		return nil, fmt.Errorf("secure writes require mode 0600 and atomic true")
+	}
 	data := []byte(p.Content)
 	if p.Base64 != "" {
 		var err error
@@ -325,11 +397,19 @@ func (h *Handler) fsWrite(raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 	}
-	rev, err := host.WriteFile(h.rootOf(p.spacePath), p.Path, data)
+	write := host.WriteFile
+	if secure {
+		write = host.WritePrivateFile
+	}
+	rev, err := write(h.rootOf(p.spacePath), p.Path, data)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": h.apiPath(p.spacePath, p.Path), "ok": true, "revision": rev}, nil
+	result := map[string]any{"path": h.apiPath(p.spacePath, p.Path), "ok": true, "revision": rev}
+	if secure {
+		result["mode"], result["atomic"] = 0o600, true
+	}
+	return result, nil
 }
 
 func (h *Handler) fsMkdir(raw json.RawMessage) (any, error) {
@@ -371,7 +451,7 @@ func (h *Handler) fsRename(raw json.RawMessage) (any, error) {
 	return map[string]any{"ok": true, "path": h.apiPath(p.spacePath, p.NewPath)}, nil
 }
 
-func (h *Handler) hostExec(raw json.RawMessage) (any, error) {
+func (h *Handler) hostExec(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p struct {
 		host.ExecParams
 		SpaceID string `json:"spaceId"`
@@ -382,7 +462,7 @@ func (h *Handler) hostExec(raw json.RawMessage) (any, error) {
 		root = h.workspace(p.SpaceID)
 		_ = host.EnsureDir(root)
 	}
-	return host.Run(root, p.ExecParams)
+	return host.RunContext(ctx, root, p.ExecParams)
 }
 
 func (h *Handler) hostExecStart(raw json.RawMessage) (any, error) {
@@ -444,6 +524,7 @@ func (h *Handler) ptyStart(raw json.RawMessage, send func(Msg)) (any, error) {
 	h.ptys[sess.ID] = sess
 	h.mu.Unlock()
 	go func() {
+		defer h.finishStream(sess)
 		buf := make([]byte, 4096)
 		for {
 			n, err := sess.Read(buf)
@@ -457,7 +538,7 @@ func (h *Handler) ptyStart(raw json.RawMessage, send func(Msg)) (any, error) {
 			}
 			if err != nil {
 				if err != io.EOF && !strings.Contains(err.Error(), "file already closed") {
-					send(Msg{Type: "stream", Stream: sess.ID, Chan: "stderr", Data: err.Error()})
+					send(Msg{Type: "stream", Stream: sess.ID, Chan: "stderr", Data: base64.StdEncoding.EncodeToString([]byte(err.Error()))})
 				}
 				send(Msg{Type: "stream", Stream: sess.ID, Chan: "exit"})
 				return
@@ -510,9 +591,15 @@ func (h *Handler) ptyResize(raw json.RawMessage) error {
 
 func (h *Handler) ptyClose(raw json.RawMessage) error {
 	var p struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		StreamOwner string `json:"streamOwner"`
 	}
-	_ = json.Unmarshal(raw, &p)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	if p.StreamOwner != "" && p.StreamOwner != h.streamOwner {
+		return fmt.Errorf("stream executor changed; cleanup is unconfirmed")
+	}
 	h.mu.Lock()
 	s := h.ptys[p.ID]
 	delete(h.ptys, p.ID)
@@ -532,12 +619,29 @@ func (h *Handler) dockerStdioStart(raw json.RawMessage, send func(Msg)) (any, er
 		Command    []string          `json:"command"`
 		WorkingDir string            `json:"workingDir"`
 		Env        map[string]string `json:"env"`
+		TTY        bool              `json:"tty"`
+		Cols       int               `json:"cols"`
+		Rows       int               `json:"rows"`
 	}
-	_ = json.Unmarshal(raw, &p)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
 	if p.ID == "" || len(p.Command) == 0 {
 		return nil, fmt.Errorf("id 与 command 必填")
 	}
-	sess, err := host.StartDockerExec(p.ID, p.Command, p.WorkingDir, p.Env)
+	var sess *host.LiveStream
+	var err error
+	if p.TTY {
+		if p.Cols == 0 {
+			p.Cols = 80
+		}
+		if p.Rows == 0 {
+			p.Rows = 24
+		}
+		sess, err = host.StartDockerExecTTY(p.ID, p.Command, p.WorkingDir, p.Env, p.Cols, p.Rows)
+	} else {
+		sess, err = host.StartDockerExec(p.ID, p.Command, p.WorkingDir, p.Env)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -545,6 +649,12 @@ func (h *Handler) dockerStdioStart(raw json.RawMessage, send func(Msg)) (any, er
 	h.ptys[sess.ID] = sess
 	h.mu.Unlock()
 	go func() {
+		defer func() {
+			h.mu.Lock()
+			delete(h.ptys, sess.ID)
+			h.mu.Unlock()
+			_ = sess.Close()
+		}()
 		buf := make([]byte, 4096)
 		for {
 			n, err := sess.Read(buf)
@@ -552,7 +662,9 @@ func (h *Handler) dockerStdioStart(raw json.RawMessage, send func(Msg)) (any, er
 				send(Msg{Type: "stream", Stream: sess.ID, Chan: "stdout", Data: base64.StdEncoding.EncodeToString(buf[:n])})
 			}
 			if err != nil {
-				send(Msg{Type: "stream", Stream: sess.ID, Chan: "exit"})
+				code := sess.Wait()
+				status, _ := json.Marshal(map[string]int{"exitCode": code})
+				send(Msg{Type: "stream", Stream: sess.ID, Chan: "exit", Data: base64.StdEncoding.EncodeToString(status)})
 				return
 			}
 		}
@@ -579,6 +691,7 @@ func (h *Handler) dockerAttach(raw json.RawMessage, send func(Msg)) (any, error)
 	h.ptys[sess.ID] = sess
 	h.mu.Unlock()
 	go func() {
+		defer h.finishStream(sess)
 		buf := make([]byte, 4096)
 		for {
 			n, err := sess.Read(buf)

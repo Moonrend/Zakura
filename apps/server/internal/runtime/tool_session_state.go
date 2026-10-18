@@ -64,7 +64,7 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 		if e != nil {
 			return nil, e
 		}
-		result, e := h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": parts[1], "arguments": json.RawMessage(args)})
+		result, e := h.runAgentMCPCall(ctx, tenant, agent, inst, "tools/call", map[string]any{"name": parts[1], "arguments": json.RawMessage(args)})
 		if e != nil {
 			return nil, e
 		}
@@ -251,7 +251,7 @@ func (h *handler) runCatalogMCPTool(ctx context.Context, tenant, agent, name str
 		if err != nil {
 			return nil, err
 		}
-		result, err := h.mcpRPC(ctx, inst, "tools/call", map[string]any{"name": tool.LocalName, "arguments": json.RawMessage(args)})
+		result, err := h.runAgentMCPCall(ctx, tenant, agent, inst, "tools/call", map[string]any{"name": tool.LocalName, "arguments": json.RawMessage(args)})
 		if err != nil {
 			return nil, err
 		}
