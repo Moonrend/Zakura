@@ -20,6 +20,7 @@ type agentTool struct {
 	Description       string
 	InputSchema       map[string]any
 	Exposure          string
+	Parallel          bool
 	ServerName        string
 	ServerRef         string
 	ServerDescription string
@@ -122,11 +123,14 @@ func toolExposureOf(config map[string]any, localToolName string) string {
 }
 
 func directBuiltin(name, description string, properties map[string]any, required ...string) agentTool {
+	if properties == nil {
+		properties = map[string]any{}
+	}
 	schema := map[string]any{"type": "object", "properties": properties}
 	if len(required) > 0 {
 		schema["required"] = required
 	}
-	return agentTool{Name: name, Kind: "builtin", LocalName: name, Description: description, InputSchema: schema, Exposure: "direct"}
+	return agentTool{Name: name, Kind: "builtin", LocalName: name, Description: description, InputSchema: schema, Exposure: "direct", Parallel: name == "fs_read" || name == "fs_list"}
 }
 
 func normalizeToolSchema(schema map[string]any) map[string]any {

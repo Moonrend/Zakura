@@ -353,7 +353,9 @@ func runEventsToMessages(events []histEvent) []chatMessage {
 		case "user_message":
 			flush()
 			content := userPayloadContent(p)
-			out = append(out, userChatMessage(content, parseChatAttachments(p["attachments"])))
+			message := userChatMessage(content, parseChatAttachments(p["attachments"]))
+			message.UserMessageID, _ = p["messageId"].(string)
+			out = append(out, message)
 		case "assistant_delta":
 			if mid, _ := p["messageId"].(string); rolled[mid] {
 				continue
@@ -449,14 +451,15 @@ func patchOrphanToolCalls(messages []chatMessage) []chatMessage {
 		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
 			continue
 		}
-		have := map[string]bool{}
+		have := map[string]chatMessage{}
 		j := i + 1
 		for ; j < len(messages) && messages[j].Role == "tool"; j++ {
-			have[messages[j].ToolCallID] = true
-			out = append(out, messages[j])
+			have[messages[j].ToolCallID] = messages[j]
 		}
 		for _, c := range m.ToolCalls {
-			if !have[c.ID] {
+			if result, ok := have[c.ID]; ok {
+				out = append(out, result)
+			} else {
 				out = append(out, chatMessage{Role: "tool", ToolCallID: c.ID, Content: "（该工具调用未完成：运行已中断）"})
 			}
 		}

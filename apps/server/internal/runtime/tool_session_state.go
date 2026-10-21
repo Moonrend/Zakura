@@ -98,6 +98,9 @@ func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session,
 }
 
 func (h *handler) runToolExecute(ctx context.Context, tenant, agent, session, toolCallID string, args json.RawMessage) (json.RawMessage, error) {
+	if err := validateToolArguments(toolExecuteDefinition(), args); err != nil {
+		return nil, err
+	}
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`

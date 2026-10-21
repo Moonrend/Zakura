@@ -15,6 +15,7 @@ require (
 	github.com/pkg/sftp v1.13.11
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/reearth/ygo v1.50.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/tools v0.49.0
 	gorm.io/driver/postgres v1.5.9

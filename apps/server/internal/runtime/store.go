@@ -756,7 +756,7 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 		}
 		terminalPayload["result"] = payload
 		if status == "failed" {
-			if e := s.persistBotFailureTx(ctx, tx, tenant, agent, session); e != nil {
+			if e := s.persistBotFailureTx(ctx, tx, tenant, agent, session, runID); e != nil {
 				return e
 			}
 			message := "run failed"

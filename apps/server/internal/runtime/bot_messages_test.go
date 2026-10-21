@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 )
@@ -144,6 +145,126 @@ func TestBotMessageAttachmentsStayScopedAndReplayable(t *testing.T) {
 	}
 	if err := h.zakuraBotSend(ctx, socket, actor, agent.ID, binding, "with-file", "read this"); err == nil {
 		t.Fatal("retry silently removed attachment")
+	}
+	if err := h.deps.Gorm.Exec("DELETE FROM zakurabot_files WHERE id=?", "file1").Error; err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := h.zakuraBotSend(ctx, socket, actor, agent.ID, binding, "with-file", "read this", botFileRef{FileID: "file1"}); err != nil {
+		t.Fatalf("accepted receipt depends on a deleted file: %v", err)
+	}
+	if got := readServerText(t, bufio.NewReader(&output)); got != receipt.Frame {
+		t.Fatalf("receipt changed after file cleanup: %s", got)
+	}
+	if err := h.zakuraBotSend(ctx, socket, actor, agent.ID, binding, "new-file-message", "read this", botFileRef{FileID: "file1"}); err == nil {
+		t.Fatal("new message accepted a deleted attachment")
+	}
+}
+
+func TestBotMessageFailureCorrelatesWithOriginalUser(t *testing.T) {
+	s, agent, _ := loopHarness(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, textCompletion("ok")) })
+	h := &handler{store: s.store, service: s, deps: s.store.deps}
+	seedBotUser(t, s.store)
+	ctx := context.Background()
+	actor := httpx.Principal{TenantID: "tenant", UserID: "user"}
+	_, bindings, _ := h.zakuraBotRoster(ctx, actor)
+	sid, err := h.zakuraBotSession(ctx, actor, agent.ID, bindings[agent.ID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.store.StartRunWith(ctx, "tenant", agent.ID, sid, runStartSpec{MessageID: "original", Content: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.Enqueue(ctx, "tenant", agent.ID, sid, QueueMessage{ID: "next", Content: "next task"}); err != nil {
+		t.Fatal(err)
+	}
+	failure := "private provider diagnostic"
+	if err := s.store.FinishRun(ctx, "tenant", agent.ID, sid, run.ID, "failed", &failure, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Regeneration must correlate to the original user, too.
+	retry, err := s.store.StartRunWith(ctx, "tenant", agent.ID, sid, runStartSpec{SkipUserMessage: true, ReplyTo: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.FinishRun(ctx, "tenant", agent.ID, sid, retry.ID, "failed", &failure, nil); err != nil {
+		t.Fatal(err)
+	}
+	var rows []struct {
+		Frame string `gorm:"column:frame_json"`
+	}
+	if err := h.deps.Gorm.Table("zakurabot_messages").Select("frame_json").Where("agent_id=?", agent.ID).Order("seq").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	failures := 0
+	for _, row := range rows {
+		var frame map[string]any
+		_ = json.Unmarshal([]byte(row.Frame), &frame)
+		if frame["type"] != "error" {
+			continue
+		}
+		failures++
+		if frame["clientMessageId"] != "original" || frame["turnEnded"] != true || strings.Contains(row.Frame, failure) {
+			t.Fatalf("incorrect failure correlation: %s", row.Frame)
+		}
+	}
+	if failures != 2 {
+		t.Fatalf("expected two correlated failures, got %d", failures)
+	}
+}
+
+func TestBotMessageInterruptContinuesQueuedTurn(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s, agent, _ := loopHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			_, _ = io.WriteString(w, textCompletion("next reply"))
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	h := &handler{store: s.store, service: s, deps: s.store.deps}
+	seedBotUser(t, s.store)
+	ctx := context.Background()
+	actor := httpx.Principal{TenantID: "tenant", UserID: "user"}
+	_, bindings, _ := h.zakuraBotRoster(ctx, actor)
+	binding := bindings[agent.ID]
+	sid, err := h.zakuraBotSession(ctx, actor, agent.ID, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.store.StartRunWith(ctx, "tenant", agent.ID, sid, runStartSpec{MessageID: "first", Content: "first task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.Enqueue(ctx, "tenant", agent.ID, sid, QueueMessage{ID: "next", Content: "next task"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.interruptZakuraBot(ctx, actor, agent.ID, binding); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued turn did not start after Stop")
+	}
+	cancelled, err := s.store.GetRun(ctx, "tenant", agent.ID, sid, run.ID)
+	if err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("original run did not stop: %#v %v", cancelled, err)
+	}
+	state, err := h.zakuraSessionStatus(ctx, actor, agent.ID, binding)
+	if err != nil || state["status"] != "running" {
+		t.Fatalf("queued turn lost its active state: %#v %v", state, err)
+	}
+	active := state["activeRunId"].(*string)
+	if active == nil || *active == run.ID {
+		t.Fatalf("expected the next active run: %#v", state)
+	}
+	if _, err := s.Cancel(ctx, "tenant", agent.ID, sid); err != nil {
+		t.Fatal(err)
 	}
 }
 

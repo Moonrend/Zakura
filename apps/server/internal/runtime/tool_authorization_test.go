@@ -133,7 +133,8 @@ func TestCodemodeToolCallsShareApprovalAndCancellation(t *testing.T) {
 			go func() {
 				args := json.RawMessage(`{"content":"fixture note"}`)
 				if scenario == "tool-failure" {
-					args = json.RawMessage(`{}`)
+					// Schema-valid input still fails the runner's nonempty-content check.
+					args = json.RawMessage(`{"content":""}`)
 				}
 				_, err := h.runCodemodeCall(ctx, "tenant", a.ID, session.ID, "outer/codemode-1", "memory_remember", args)
 				done <- err

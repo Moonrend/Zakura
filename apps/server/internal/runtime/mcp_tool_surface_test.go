@@ -108,6 +108,18 @@ func TestMCPCompactDiscoveryExecuteAndPinning(t *testing.T) {
 	if len(found) != 1 || found[0].(map[string]any)["inputSchema"] == nil {
 		t.Fatalf("schema missing: %#v", search)
 	}
+	for _, name := range []string{"mcp__issues__issue_51", "tool_execute"} {
+		var args any = map[string]any{"query": 42}
+		if name == "tool_execute" {
+			args = map[string]any{"name": "mcp__issues__issue_51", "arguments": args}
+		}
+		if got := invoke("tools/call", name, args, false); got["error"] == nil {
+			t.Fatalf("invalid MCP arguments accepted: %#v", got)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("invalid arguments reached upstream")
+	}
 	call := map[string]any{"name": "mcp__issues__issue_51", "arguments": map[string]any{"query": "bug"}}
 	result := invoke("tools/call", "tool_execute", call, false)["result"].(map[string]any)
 	if result["isError"] != true || result["structuredContent"] == nil || calls.Load() != 1 {

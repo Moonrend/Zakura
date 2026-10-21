@@ -39,12 +39,28 @@ func (s *Store) persistBotUserTx(ctx context.Context, tx *gorm.DB, tenant, agent
 	return s.insertBotFrame(ctx, tx, s.id(), tenant, origin.UserID, origin.BindingID, agent, messageID, frame)
 }
 
-func (s *Store) persistBotFailureTx(ctx context.Context, tx *gorm.DB, tenant, agent, session string) error {
+func (s *Store) persistBotFailureTx(ctx context.Context, tx *gorm.DB, tenant, agent, session, runID string) error {
 	origin, err := botOriginTx(tx, session)
 	if err != nil || origin.Platform != "zakurabot" {
 		return err
 	}
-	return s.insertBotFrame(ctx, tx, s.id(), tenant, origin.UserID, origin.BindingID, agent, "", map[string]any{"type": "error", "agentId": agent, "turnEnded": true, "message": "Could not finish this reply. Try again."})
+	var start struct {
+		Payload string `gorm:"column:payload_json"`
+	}
+	if err := tx.Table("cloud_agent_events").Select("payload_json").Where("session_id=? AND run_id=? AND type='run_start'", session, runID).Take(&start).Error; err != nil {
+		return err
+	}
+	var payload struct {
+		ReplyTo string `json:"replyToMessageId"`
+	}
+	if err := json.Unmarshal([]byte(start.Payload), &payload); err != nil {
+		return err
+	}
+	frame := map[string]any{"type": "error", "agentId": agent, "turnEnded": payload.ReplyTo != "", "message": "Could not finish this reply. Try again."}
+	if payload.ReplyTo != "" {
+		frame["clientMessageId"] = payload.ReplyTo
+	}
+	return s.insertBotFrame(ctx, tx, s.id(), tenant, origin.UserID, origin.BindingID, agent, "", frame)
 }
 
 func (s *Store) publishBotMessage(ctx context.Context, tenant, agent, session, runID, messageID, content, toolCallID, sourceMessageID string) error {

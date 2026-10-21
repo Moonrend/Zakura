@@ -26,7 +26,9 @@ The WebSocket v1 gateway resolves the signed-in user's thread automatically. It 
 
 The main web timeline renders `bot_message` as its own bot bubble. A successful linked tool card is replaced by that bubble; failed sends keep their tool result. A final answer sent automatically carries its `sourceMessageId`, so it does not also appear as an ordinary assistant answer. Reasoning remains available in Zakura.
 
-When no explicit `chat_reply` has been sent in the run, the normal final answer is delivered automatically. Replies survive socket disconnects. Reconnect replays the latest 100 frames, then continues from the stored sequence. Reusing an accepted client message id replays its receipt; changing text or attachment identities under that id is rejected.
+When no explicit `chat_reply` has been sent in the run, the normal final answer is delivered automatically. Replies survive socket disconnects. Reconnect replays the latest 100 frames, then continues from the stored sequence. Reusing an accepted client message id replays its receipt even after its uploaded file has been removed; changing text or attachment identities under that id is rejected. New sends still require accessible attachments.
+
+Stop returns `interrupt_ack` without declaring the conversation idle: queued messages continue running, and the watcher reports their actual activity through `typing`. The acknowledgement echoes the optional `requestId`; the client clears only the matching pending Stop request, so a delayed acknowledgement cannot settle a later request. Failures include the original `clientMessageId`, including regenerated runs, so a replayed failure cannot end a newer message's turn.
 
 ## Automatic context maintenance
 

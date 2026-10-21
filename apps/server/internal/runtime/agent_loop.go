@@ -333,11 +333,19 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		maxResult = toolOutputMaxBytes
 	}
 	var images map[string]inlineImage
-	if s.attachmentReader != nil {
-		images = resolveImages(ctx, messages, func(ctx context.Context, path string, max int64) ([]byte, error) {
-			return s.attachmentReader(ctx, req.Tenant, req.Agent, path, max)
-		})
+	if _, err := s.injectSteers(ctx, req, live.id, &messages); err != nil {
+		return err
 	}
+	refreshImages := func() {
+		if s.attachmentReader != nil {
+			images = resolveImages(ctx, messages, func(ctx context.Context, path string, max int64) ([]byte, error) {
+				return s.attachmentReader(ctx, req.Tenant, req.Agent, path, max)
+			})
+		}
+	}
+	refreshImages()
+	recoveredLength := false
+	seenCalls := map[string]bool{}
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -374,12 +382,24 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		if len(result.ToolCalls) > 0 && round >= maxRounds {
 			return fmt.Errorf("maximum tool rounds (%d) reached", maxRounds)
 		}
-		if len(result.ToolCalls) > 0 {
-			for i := range result.ToolCalls {
-				if result.ToolCalls[i].ID == "" {
-					result.ToolCalls[i].ID = s.store.id()
+		if err := prepareToolCallIDs(result.ToolCalls, live.id, round, seenCalls); err != nil {
+			return err
+		}
+		incomplete := result.FinishReason == "length" || result.FinishReason == "max_tokens" || result.FinishReason == "incomplete" || result.FinishReason == "content_filter"
+		if incomplete {
+			failure := fmt.Errorf("model response incomplete (%s %s); no tools in this batch were executed. Retry with fewer calls and shorter arguments", result.FinishReason, result.IncompleteReason)
+			if len(result.ToolCalls) > 0 {
+				messages = append(messages, chatMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
+				if err := s.rejectRoundTools(ctx, req, sess, live.id, result.ToolCalls, maxResult, &messages, failure); err != nil {
+					return err
 				}
 			}
+			length := result.FinishReason == "length" || result.FinishReason == "max_tokens" || result.IncompleteReason == "max_output_tokens"
+			if !length || recoveredLength || len(result.ToolCalls) == 0 {
+				return failure
+			}
+			recoveredLength = true
+		} else if len(result.ToolCalls) > 0 {
 			messages = append(messages, chatMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
 			if err := s.runRoundTools(ctx, req, sess, live.id, result.ToolCalls, catalog, cloud.EnableTools, maxResult, &messages); err != nil {
 				return err
@@ -387,39 +407,14 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		} else {
 			messages = append(messages, chatMessage{Role: "assistant", Content: result.Text})
 		}
-		steers, err := s.store.drainSteers(ctx, req.Tenant, req.Agent, req.Session)
+		steers, err := s.injectSteers(ctx, req, live.id, &messages)
 		if err != nil {
 			return err
 		}
-		for steerIndex, steer := range steers {
-			contextText, hookErr := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "UserPromptSubmit", Prompt: steer.Content}, false)
-			if hookErr != nil {
-				for i := len(steers) - 1; i >= steerIndex; i-- {
-					_ = s.store.requeueFront(context.WithoutCancel(ctx), req.Tenant, req.Agent, req.Session, steers[i])
-				}
-				return hookErr
-			}
-			if contextText != "" {
-				messages = append(messages, chatMessage{Role: "system", Content: contextText})
-			}
-			payload := map[string]any{"messageId": steer.ID, "content": steer.Content, "attachments": json.RawMessage(validJSON(steer.Attachments, "[]")), "steer": true}
-			if steer.Context != nil {
-				payload["context"] = steer.Context
-			}
-			if steer.UserID != "" {
-				payload["userId"], payload["userName"] = steer.UserID, steer.UserName
-			}
-			if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "user_message", &live.id, payload); err != nil {
-				_ = s.store.requeueFront(context.WithoutCancel(ctx), req.Tenant, req.Agent, req.Session, steer)
-				return err
-			}
-			var attachments any
-			_ = json.Unmarshal(steer.Attachments, &attachments)
-			message := userChatMessage(steer.Context.render(steer.Content), parseChatAttachments(attachments))
-			message.UserMessageID = steer.ID
-			messages = append(messages, message)
+		if steers > 0 {
+			refreshImages()
 		}
-		if len(result.ToolCalls) == 0 && len(steers) == 0 {
+		if len(result.ToolCalls) == 0 && steers == 0 {
 			if _, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "Stop"}, true); err != nil {
 				return err
 			}
@@ -549,14 +544,11 @@ func (s *Service) readModelRound(ctx context.Context, tenant, model string, payl
 }
 
 func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Session, runID string, calls []modelToolCall, catalog agentCatalog, enabled bool, maxResult int, messages *[]chatMessage) error {
-	allowed := reachableToolNames(catalog, nil)
-	for _, call := range calls {
-		if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "tool_call_start", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name}); err != nil {
-			return err
-		}
-		if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "tool_call_args", &runID, map[string]any{"toolCallId": call.ID, "arguments": defaultArgs(call.Arguments)}); err != nil {
-			return err
-		}
+	if parallelToolBatch(ctx, calls, catalog) {
+		return s.runParallelTools(ctx, req, sess, runID, calls, catalog, enabled, maxResult, messages)
+	}
+	if err := s.startToolBatch(ctx, req, runID, calls); err != nil {
+		return err
 	}
 	var blocked error
 	var hookContext strings.Builder
@@ -565,19 +557,12 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 		var result json.RawMessage
 		var err error
 		executed := false
+		preflightErr := s.toolPreflight(ctx, req, call, catalog, enabled)
 		switch {
 		case blocked != nil:
 			err = blocked
-		case ctx.Err() != nil:
-			err = ctx.Err()
-		case !enabled || toolDisabled(ctx, call.Name):
-			err = fmt.Errorf("tool %s is disabled for this run", call.Name)
-		case s.toolRunner == nil:
-			err = errors.New("tool runner is unavailable")
-		case s.catalogProvider != nil && !allowed[call.Name]:
-			err = fmt.Errorf("tool %s is unavailable", call.Name)
-		case !json.Valid([]byte(defaultArgs(call.Arguments))):
-			err = errors.New("invalid tool arguments: expected JSON")
+		case preflightErr != nil:
+			err = preflightErr
 		case call.Name == "tool_execute":
 			// The dispatcher guards, approves and hooks the concrete target.
 			// Asking for the wrapper as well would duplicate every approval.
@@ -610,16 +595,11 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 			}
 		}
 		text = shrinkText(text, maxResult)
-		settle := context.WithoutCancel(ctx)
-		if _, writeErr := s.store.AppendEvent(settle, req.Tenant, req.Agent, req.Session, "tool_call_result", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name, "resultText": text, "isError": isError, "durationMs": time.Since(started).Milliseconds()}); writeErr != nil {
+		message, writeErr := s.settleToolResult(ctx, req, sess, runID, call, toolBatchResult{result: result, err: err, duration: time.Since(started)}, maxResult)
+		if writeErr != nil {
 			return writeErr
 		}
-		*messages = append(*messages, chatMessage{Role: "tool", ToolCallID: call.ID, Content: text})
-		usageStatus := "ok"
-		if isError {
-			usageStatus = "error"
-		}
-		s.recordToolUsage(settle, sess, req.Tenant, req.Agent, req.Session, call.ID, call.Name, usageStatus, time.Since(started).Milliseconds())
+		*messages = append(*messages, message)
 		if executed && blocked == nil && ctx.Err() == nil {
 			event := "PostToolUse"
 			if isError {

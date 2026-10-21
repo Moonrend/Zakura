@@ -1019,6 +1019,16 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 		if len(pms.Arguments) == 0 {
 			pms.Arguments = json.RawMessage(`{}`)
 		}
+		if pms.Name == "tool_search" || pms.Name == "tool_execute" {
+			definition := toolExecuteDefinition()
+			if pms.Name == "tool_search" {
+				definition = directBuiltin("tool_search", TOOL_SEARCH_DESCRIPTION, toolDiscoveryProperties())
+			}
+			if err := validateToolArguments(definition, pms.Arguments); err != nil {
+				reply(nil, map[string]any{"code": -32602, "message": err.Error()})
+				return
+			}
+		}
 		if pms.Name == "tool_search" {
 			var query toolDiscoveryQuery
 			if e := json.Unmarshal(pms.Arguments, &query); e != nil {

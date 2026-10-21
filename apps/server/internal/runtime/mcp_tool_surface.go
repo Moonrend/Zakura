@@ -74,6 +74,10 @@ func (h *handler) callExposedMCPTool(r *http.Request, p httpx.Principal, space s
 		if name != canonical && legacy != item.Name && legacy != item.Instance.ID+":"+item.LocalName {
 			continue
 		}
+		schema, _ := item.Tool["inputSchema"].(map[string]any)
+		if err := validateToolArguments(agentTool{Name: canonical, InputSchema: schema}, args); err != nil {
+			return nil, err
+		}
 		// Resolve the current binding/config again; discovered names never grant
 		// access after a policy change, disable, or unbind.
 		inst, err := h.accessibleMCPInstance(r, p, space, item.Instance.ID)

@@ -89,9 +89,8 @@ func (h *handler) runCodemodeCall(ctx context.Context, tenant, agent, session, c
 	if !reachableToolNames(catalog, disabledToolsFromContext(ctx))[name] {
 		return nil, fmt.Errorf("tool %s is unavailable; use tool_search to discover tools", name)
 	}
-	var object map[string]any
-	if json.Unmarshal(args, &object) != nil || object == nil {
-		return nil, errors.New("tool arguments must be a JSON object")
+	if err := validateToolArguments(catalogTool(catalog, name), args); err != nil {
+		return nil, err
 	}
 	check, err := h.service.toolExecutionGuard(ctx, tenant, agent, session, run, call, name, args)
 	if err != nil {

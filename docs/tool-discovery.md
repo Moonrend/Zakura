@@ -86,7 +86,19 @@ return results.map((result) => result.status === "fulfilled"
 - 内部调用事件保留用于 UI 与审计，重建模型历史时只放入外层调用的输出。
 - 禁止递归启动 `codemode` 或 `tool_execute`。脚本直接调用目标工具即可。
 
+## Agent 执行轮次
+
+普通 Agent 调用、`tool_execute` 的实际目标、Code Mode 内部调用和下游 MCP 共用 JSON Schema 参数预检。参数必须是对象，并满足工具声明的必填、类型、枚举及其他 Schema 约束；错误会在审批和项目 hooks 前返回。校验不会填默认值或转换类型，不加载网络/文件等外部 Schema 引用。参数上限 4 MiB，Schema 上限 1 MiB；不合法的上游 Schema 会明确报错。
+
+参考 Pi 的工具批次边界，Zakura 仅在整个批次都是 `fs_read` / `fs_list` 且没有工具 hooks 时启用最多 4 路并发。其他批次继续串行。预检和审批按声明顺序完成；结果一完成就记录事件，交给模型及历史回放的结果仍按原调用顺序排列。取消会停止派发、取消已启动调用并记录剩余结果；无法确认是否完成的调用标记为结果未知。
+
+OpenAI `length`、Anthropic `max_tokens` 和 Responses `incomplete` 不再触发该回复中的工具执行。可识别的调用获得配对失败结果，长度截断最多允许一次带修正提示的继续；再次截断或其他 incomplete 原因明确结束运行。重复或冲突的调用 ID 会拒绝整个批次，缺失 ID 则生成运行内唯一标识。
+
+引导消息在首次模型请求前及每轮工具完成后注入。对应的用户消息和队列移除在同一事务中提交；数据库失败不会丢失已出队消息。一次可合并多条兼容的引导消息，遇到会改变当前运行选项的消息时保留它及后续引导消息，等待独立运行应用这些设置。新图片会在下一次模型请求前读取，仍只发送最新两个含图片的用户消息。外部 hooks 不属于数据库事务，不能保证恰好执行一次。停止当前运行后继续处理队列。
+
 ## 参考
+
+- Pi Agent loop：<https://github.com/earendil-works/pi/blob/main/packages/agent/src/agent-loop.ts>
 
 - Pi Code Mode：<https://pi.dev/docs/latest/codemode>
 - OpenCode Code Mode：<https://github.com/anomalyco/opencode/blob/dev/packages/codemode/README.md>

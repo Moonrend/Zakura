@@ -20,9 +20,13 @@ func messageBytes(messages []chatMessage) int {
 // Prefer user boundaries. A long single turn may also compact completed tool
 // rounds, but never separate a tool call from any of its results.
 func compactionSplit(messages []chatMessage, budget int) int {
-	kept, split := 0, 0
+	suffixBytes := make([]int, len(messages)+1)
+	for i := len(messages) - 1; i >= 0; i-- {
+		suffixBytes[i] = suffixBytes[i+1] + messages[i].size()
+	}
+	split := 0
 	for i := len(messages) - 1; i > 0; i-- {
-		kept += messages[i].size()
+		kept := suffixBytes[i]
 		if messages[i].Role == "user" && messages[i].UserMessageID != "" {
 			if split > 0 && kept > budget/3 {
 				break
@@ -30,14 +34,14 @@ func compactionSplit(messages []chatMessage, budget int) int {
 			split = i
 		}
 	}
-	if split > 0 && messageBytes(messages[split:]) < budget {
+	if split > 0 && suffixBytes[split] < budget {
 		return split
 	}
 	pending := map[string]bool{}
 	for i, message := range messages {
 		if i > 0 && message.Role == "assistant" && len(pending) == 0 {
 			split = i
-			if messageBytes(messages[i:]) <= budget/3 {
+			if suffixBytes[i] <= budget/3 {
 				break
 			}
 		}

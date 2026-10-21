@@ -120,6 +120,9 @@ func (h *handler) callMCPBuiltin(r *http.Request, p httpx.Principal, space, name
 	allowed := false
 	for _, tool := range tools {
 		if tool.Name == name {
+			if err := validateToolArguments(tool, raw); err != nil {
+				return nil, err
+			}
 			allowed = true
 			break
 		}

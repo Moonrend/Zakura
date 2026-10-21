@@ -301,21 +301,3 @@ func (s *Store) TakeQueued(ctx context.Context, tenant, agent, session string) (
 	})
 	return taken, err
 }
-
-// drainSteers removes every steer item (oldest first) so the active run can
-// inject them into its current turn.
-func (s *Store) drainSteers(ctx context.Context, tenant, agent, session string) ([]QueueMessage, error) {
-	var drained []QueueMessage
-	_, err := s.mutateQueue(ctx, tenant, agent, session, func(items []QueueMessage) ([]QueueMessage, bool, error) {
-		kept := make([]QueueMessage, 0, len(items))
-		for _, item := range items {
-			if item.Mode == queueModeSteer && !item.Interrupt {
-				drained = append(drained, item)
-				continue
-			}
-			kept = append(kept, item)
-		}
-		return kept, len(drained) > 0, nil
-	})
-	return drained, err
-}

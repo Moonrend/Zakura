@@ -172,6 +172,7 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 			Type            string       `json:"type"`
 			AgentID         string       `json:"agentId"`
 			ClientMessageID string       `json:"clientMessageId"`
+			RequestID       string       `json:"requestId"`
 			Text            string       `json:"text"`
 			Attachments     []botFileRef `json:"attachments"`
 		}
@@ -200,13 +201,25 @@ func (h *handler) zakuraBotWS(w http.ResponseWriter, r *http.Request) {
 				_ = socket.send(map[string]any{"type": "error", "message": err.Error(), "agentId": frame.AgentID, "clientMessageId": frame.ClientMessageID})
 			}
 		case "interrupt":
+			if len(frame.RequestID) > 256 {
+				socket.fail("Invalid stop request", 1008, true, nil)
+				return
+			}
 			bindingID := bindings[frame.AgentID]
 			if bindingID == "" {
 				_ = socket.send(map[string]any{"type": "error", "message": "This conversation is no longer available", "agentId": frame.AgentID})
 				continue
 			}
-			_ = h.interruptZakuraBot(r.Context(), actor, frame.AgentID, bindingID)
-			_ = socket.send(map[string]any{"type": "typing", "agentId": frame.AgentID, "active": false})
+			if err := h.interruptZakuraBot(r.Context(), actor, frame.AgentID, bindingID); err != nil {
+				_ = socket.send(map[string]any{"type": "error", "message": "Could not stop this reply. Try again.", "agentId": frame.AgentID, "turnEnded": false})
+				continue
+			}
+			// A queued turn may already be running. Only the watcher reports activity.
+			ack := map[string]any{"type": "interrupt_ack", "agentId": frame.AgentID}
+			if frame.RequestID != "" {
+				ack["requestId"] = frame.RequestID
+			}
+			_ = socket.send(ack)
 		case "hello":
 			socket.fail("Wait for ready before sending channel data", 1008, true, nil)
 			return
@@ -310,10 +323,6 @@ func (h *handler) zakuraBotRoster(ctx context.Context, actor httpx.Principal) ([
 }
 
 func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, actor httpx.Principal, agentID, bindingID, clientMessageID, text string, refs ...botFileRef) error {
-	attachments, err := h.botAttachments(ctx, actor, agentID, bindingID, refs)
-	if err != nil {
-		return err
-	}
 	sessionID, err := h.zakuraBotSession(ctx, actor, agentID, bindingID)
 	if err != nil {
 		return err
@@ -349,6 +358,10 @@ func (h *handler) zakuraBotSend(ctx context.Context, socket *zakuraBotSocket, ac
 		return socket.send(json.RawMessage(existing.FrameJSON))
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	attachments, err := h.botAttachments(ctx, actor, agentID, bindingID, refs)
+	if err != nil {
 		return err
 	}
 	var user struct {
@@ -400,11 +413,15 @@ func (h *handler) zakuraBotSession(ctx context.Context, actor httpx.Principal, a
 }
 
 func (h *handler) interruptZakuraBot(ctx context.Context, actor httpx.Principal, agentID, bindingID string) error {
-	sessionID, err := h.zakuraBotSession(ctx, actor, agentID, bindingID)
-	if err != nil {
+	state, err := h.zakuraSessionStatus(ctx, actor, agentID, bindingID)
+	if err != nil || state["status"] != "running" {
 		return err
 	}
+	sessionID, _ := state["sessionId"].(string)
 	_, err = h.service.Cancel(ctx, actor.TenantID, agentID, sessionID)
+	if errors.Is(err, ErrConflict) {
+		return nil // The turn finished while the stop request was arriving.
+	}
 	return err
 }
 
