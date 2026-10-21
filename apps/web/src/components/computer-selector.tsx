@@ -1,8 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Loader2, Monitor } from "lucide-react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 type ComputerOption = { id: string; name: string; provider: string; role?: string };
 type Selection = { computerId: string | null; serverComputerId?: string };
@@ -57,16 +64,57 @@ export function ComputerSelector({ selectionUrl, catalogUrl, label, hint }: {
   }
   const server = items.find(c => c.role === "server");
   const attached = items.filter(c => c.role !== "server");
-  return <div className="space-y-1.5 text-xs">
-    <label className="flex flex-wrap items-center gap-2">
-      <span className="text-muted-foreground">{label}</span>
-      <select aria-label={label} disabled={loading || busy || Boolean(error)} value={value} onChange={e => void select(e.target.value)} className="h-8 max-w-full rounded-md border bg-background px-2 text-xs disabled:opacity-50">
-        <option value="">{loading ? "正在加载…" : `${server?.name ?? "工作区"} · 服务器电脑`}</option>
-        {value && !attached.some(c => c.id === value) && <option value={value}>当前电脑不可用</option>}
-        {attached.map(c => <option key={c.id} value={c.id}>{c.name} · {c.provider}</option>)}
-      </select>
-      {busy && <span role="status">正在保存…</span>}
-    </label>
-    {error ? <p role="alert" className="text-destructive">{error} <button type="button" className="underline" onClick={() => setRetry(n => n + 1)}>重试</button></p> : <p className="text-muted-foreground">{hint}</p>}
-  </div>;
+  const selectedName = value
+    ? attached.find(c => c.id === value)?.name ?? "当前电脑不可用"
+    : server?.name ?? "工作区";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        disabled={loading || busy}
+        render={
+          <button
+            type="button"
+            aria-label={label}
+            aria-busy={loading || busy}
+            title={error || selectedName}
+            className="inline-flex h-7 max-w-[min(14rem,60vw)] min-w-0 items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-default disabled:opacity-60"
+          />
+        }
+      >
+        {loading || busy ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : <Monitor className="size-3.5 shrink-0" />}
+        <span className="min-w-0 truncate">{error ? "电脑不可用" : loading ? "电脑" : selectedName}</span>
+        <ChevronDown className="size-3 shrink-0 opacity-45" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" sideOffset={6} className="w-64 max-w-[calc(100vw-2rem)]">
+        {error ? (
+          <>
+            <p role="alert" className="px-2 py-1.5 text-xs text-destructive">{error}</p>
+            <DropdownMenuItem onClick={() => setRetry(n => n + 1)}>重试</DropdownMenuItem>
+          </>
+        ) : (
+          <>
+            <DropdownMenuItem onClick={() => void select("")}>
+              <Monitor className="size-3.5" />
+              <span className="min-w-0 flex-1 truncate">{server?.name ?? "工作区"}</span>
+              <span className="text-xs text-muted-foreground">服务器电脑</span>
+              {!value ? <Check className="size-3.5" /> : null}
+            </DropdownMenuItem>
+            {value && !attached.some(c => c.id === value) ? (
+              <DropdownMenuItem disabled>当前电脑不可用</DropdownMenuItem>
+            ) : null}
+            {attached.map(c => (
+              <DropdownMenuItem key={c.id} onClick={() => void select(c.id)}>
+                <Monitor className="size-3.5" />
+                <span className="min-w-0 flex-1 truncate">{c.name}</span>
+                <span className="text-xs text-muted-foreground">{c.provider}</span>
+                {value === c.id ? <Check className="size-3.5" /> : null}
+              </DropdownMenuItem>
+            ))}
+            <p className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">{hint}</p>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }

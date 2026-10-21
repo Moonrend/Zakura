@@ -2958,10 +2958,9 @@ export function ChatApp() {
               回到底部
             </Button>
           )}
-          {agentId && sessionId && !isNewSession && (
+          {agentId && sessionId && !isNewSession && agent?.spaceId && (
             <div className="mx-auto mb-2 max-w-3xl">
-              <ComputerSelector key={`${agentId}:${sessionId}`} selectionUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computer`} catalogUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computers`} label="对话执行电脑" hint="切换仅影响后续运行，不会移动文件或改变当前运行的电脑。" />
-              {agent?.spaceId && <ComputerSessionApproval agentId={agentId} sessionId={sessionId} spaceId={agent.spaceId} />}
+              <ComputerSessionApproval agentId={agentId} sessionId={sessionId} spaceId={agent.spaceId} />
             </div>
           )}
           {agentId && sessionId && draftRuntimeId !== ZAKURA_RUNTIME_ID
@@ -3166,6 +3165,17 @@ export function ChatApp() {
             sending={sending}
             runActive={runActive}
             runSendHint={followUpMode === "steer" ? "注入当前回合" : "加入队列"}
+            computerSlot={
+              agentId && sessionId && !isNewSession ? (
+                <ComputerSelector
+                  key={`${agentId}:${sessionId}`}
+                  selectionUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computer`}
+                  catalogUrl={`/api/agents/${encodeURIComponent(agentId)}/cloud/sessions/${encodeURIComponent(sessionId)}/computers`}
+                  label="选择执行电脑"
+                  hint="切换仅影响后续运行，不会移动文件或改变当前运行的电脑。"
+                />
+              ) : null
+            }
             queueSlot={
               queue.length > 0 ? (
                 <MessageQueue

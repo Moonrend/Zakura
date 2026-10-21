@@ -15,7 +15,6 @@ import {
 } from "react";
 import {
   ArrowUp,
-  Brain,
   File as FileIcon,
   Loader2,
   Play,
@@ -320,6 +319,7 @@ export function Composer({
   onContextWindowOpenChange,
   onCompactContext,
   queueSlot,
+  computerSlot,
   canRecallQueued,
   onRecallQueued,
   editing,
@@ -387,6 +387,8 @@ export function Composer({
   onCompactContext: () => void;
   /** 贴在输入卡片上方的排队列表 */
   queueSlot?: ReactNode;
+  /** 底部工具栏中的电脑选择 */
+  computerSlot?: ReactNode;
   /** 输入框为空时按 ↑ 可把最近排队的消息召回编辑（Codex edit_queued_message） */
   canRecallQueued?: boolean;
   onRecallQueued?: () => void;
@@ -626,30 +628,14 @@ export function Composer({
             size="sm"
             disabled={!routeReady}
             onClick={() => onContinue?.()}
-            className="animate-pop absolute top-0 left-0 z-20 h-7 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-full border-0 bg-background/90 px-2.5 text-xs font-normal text-foreground/80 hover:text-foreground"
+            className="animate-pop absolute top-0 left-0 z-20 h-7 -translate-y-[calc(100%+0.375rem)] gap-1 rounded-md border-0 bg-background px-2.5 text-xs font-normal text-foreground/80 hover:text-foreground"
           >
             <Play className="size-3 fill-current" />
             继续
           </Button>
         ) : null}
 
-        {runtimes && runtimes.length > 0 && onRuntimeChange ? (
-          <SessionContextBar
-            isNew={Boolean(isNewSession)}
-            project={project ?? null}
-            projects={projects ?? []}
-            onProjectChange={(next) => onProjectChange?.(next)}
-            runtimes={runtimes}
-            runtimeId={runtimeId ?? "zakura"}
-            runtimeDisabled={runtimeDisabled}
-            runtimeLoading={runtimeLoading}
-            runtimeDisabledHint={runtimeDisabledHint}
-            onRuntimeChange={onRuntimeChange}
-            flashProject={remoteFlash?.project}
-            flashRuntime={remoteFlash?.runtime}
-          />
-        ) : null}
-
+        <div className="rounded-xl bg-muted/60">
         <div className="relative">
         {slashOpen ? (
           <div className="absolute inset-x-0 bottom-full z-30 mb-1.5">
@@ -670,15 +656,14 @@ export function Composer({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={cn(
-            "relative z-10 rounded-2xl bg-card shadow-surface-2",
-            "transition-[box-shadow] duration-200 ease-fluid",
-            focused || editing ? "shadow-surface-3" : "",
-            dragging && "shadow-surface-3",
+            "relative z-10 rounded-xl border bg-card",
+            "transition-colors duration-200 ease-fluid",
+            focused || editing || dragging ? "border-foreground/30" : "border-border",
           )}
         >
         {/* 拖放覆盖层 */}
         {dragging && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-2xl border border-dashed border-foreground/30 bg-background/95 text-sm text-foreground">
+          <div className="absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-xl border border-dashed border-foreground/30 bg-background/95 text-sm text-foreground">
             <Upload className="size-4" />
             {canAttach ? "松开即可上传到工作区" : "该 Agent 未开启电脑环境"}
           </div>
@@ -764,7 +749,7 @@ export function Composer({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           className={cn(
-            "block max-h-52 w-full resize-none bg-transparent outline-none",
+            "block min-h-16 max-h-52 w-full resize-none bg-transparent outline-none",
             COMPOSER_FIELD_CLASS,
             "placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60",
           )}
@@ -772,7 +757,7 @@ export function Composer({
         </div>
 
         {/* 工具行：添加 · 模型 ————— 发送 */}
-        <div className="flex items-center gap-0.5 p-2 pl-2.5">
+        <div className="flex items-end gap-0.5 px-2 py-1.5">
           <input
             ref={fileInputRef}
             type="file"
@@ -803,12 +788,40 @@ export function Composer({
             }}
           />
 
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-0.5 gap-y-1">
+          {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
+            <RemoteNudge token={remoteFlash?.acpMode} className="min-w-0 rounded-md">
+              <Select
+                value={acpModes.currentId || acpModes.available[0]?.id}
+                onValueChange={(v) => {
+                  if (v) onAcpModeChange(v);
+                }}
+                disabled={runtimeLoading}
+                items={acpModes.available.map((m) => ({ value: m.id, label: m.name }))}
+              >
+                <SelectTrigger
+                  aria-label="ACP 模式"
+                  className="max-w-28 min-w-0 rounded-md border-0 px-2 text-xs text-muted-foreground shadow-none hover:bg-muted hover:text-foreground dark:bg-transparent dark:hover:bg-muted"
+                >
+                  <SelectValue className="block truncate" />
+                </SelectTrigger>
+                <SelectContent side="top" align="start" sideOffset={8}>
+                  {acpModes.available.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </RemoteNudge>
+          ) : null}
+
           {hideZakuraModel ? (
             <>
               {/* 适配器未通过 session/new 公告模型列表时（如靠启动参数定模型的
                   CLI），不渲染死占位；模型到设置页的 profile 里配置。 */}
               {acpModels && acpModels.available.length > 0 && onAcpModelChange ? (
-                <RemoteNudge token={remoteFlash?.acpModel} className="rounded-full">
+                <RemoteNudge token={remoteFlash?.acpModel} className="min-w-0 rounded-md">
                 <ModelRouteSelector
                   items={acpModels.available.map((m) => ({ value: m.id, label: m.name }))}
                   value={acpModels.currentId || acpModels.available[0]?.id}
@@ -817,12 +830,12 @@ export function Composer({
                   }}
                   disabled={runtimeLoading}
                   side="top"
-                  className={remoteFlash?.acpModel ? "animate-remote-nudge" : undefined}
+                  className={cn("max-w-[min(13rem,45vw)] rounded-md px-2 text-xs", remoteFlash?.acpModel && "animate-remote-nudge")}
                 />
                 </RemoteNudge>
               ) : null}
               {acpReasoning && acpReasoning.available.length > 0 && onAcpReasoningChange ? (
-                <RemoteNudge token={remoteFlash?.acpReasoning} className="rounded-full">
+                <RemoteNudge token={remoteFlash?.acpReasoning} className="min-w-0 rounded-md">
                 <Select
                   value={acpReasoning.current || acpReasoning.available[0]?.id}
                   onValueChange={(v) => {
@@ -834,12 +847,11 @@ export function Composer({
                   <SelectTrigger
                     aria-label="ACP 思考强度"
                     className={cn(
-                      "h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground",
+                      "h-8 max-w-28 min-w-0 rounded-md border-0 px-2 text-xs text-muted-foreground shadow-none hover:bg-muted hover:text-foreground dark:bg-transparent dark:hover:bg-muted",
                       remoteFlash?.acpReasoning && "animate-remote-nudge",
                     )}
                   >
-                    <Brain className="size-3.5 opacity-60" />
-                    <SelectValue />
+                    <SelectValue className="block truncate" />
                   </SelectTrigger>
                   <SelectContent side="top" align="start" sideOffset={8}>
                     {acpReasoning.available.map((m) => (
@@ -855,20 +867,22 @@ export function Composer({
                 <span
                   role="status"
                   aria-live="polite"
-                  className="inline-flex h-8 items-center gap-1.5 rounded-full bg-muted px-2.5 text-xs text-muted-foreground"
+                  className="inline-flex size-8 shrink-0 items-center justify-center text-muted-foreground"
                 >
-                  <Loader2 className="size-3.5 animate-spin" />
-                  {acpControlPending === "model"
-                    ? "正在切换模型…"
-                    : acpControlPending === "mode"
-                      ? "正在切换模式…"
-                      : "正在更新思考强度…"}
+                  <Loader2 aria-hidden className="size-3.5 animate-spin" />
+                  <span className="sr-only">
+                    {acpControlPending === "model"
+                      ? "正在切换模型…"
+                      : acpControlPending === "mode"
+                        ? "正在切换模式…"
+                        : "正在更新思考强度…"}
+                  </span>
                 </span>
               ) : null}
             </>
           ) : (
             <>
-          <RemoteNudge token={remoteFlash?.model} className="rounded-full">
+          <RemoteNudge token={remoteFlash?.model} className="min-w-0 rounded-md">
           <ModelRouteSelector
             items={models}
             value={model}
@@ -876,11 +890,11 @@ export function Composer({
             onSelectionChange={onModelSelection}
             disabled={models.length === 0}
             side="top"
-            className={remoteFlash?.model ? "animate-remote-nudge" : undefined}
+            className={cn("max-w-[min(13rem,45vw)] rounded-md px-2 text-xs", remoteFlash?.model && "animate-remote-nudge")}
           />
           </RemoteNudge>
 
-          <RemoteNudge token={remoteFlash?.reasoning} className="rounded-full">
+          <RemoteNudge token={remoteFlash?.reasoning} className="min-w-0 rounded-md">
           <Select
             value={reasoning}
             onValueChange={(v) => {
@@ -891,14 +905,13 @@ export function Composer({
             <SelectTrigger
               aria-label="思考强度"
               className={cn(
-                "h-8 rounded-full border-0 px-2 text-[13px] text-muted-foreground shadow-none",
-                "transition-[background-color,color] duration-200 ease-fluid hover:bg-muted/70 hover:text-foreground",
+                "h-8 max-w-28 min-w-0 rounded-md border-0 px-2 text-xs text-muted-foreground shadow-none dark:bg-transparent dark:hover:bg-muted",
+                "transition-[background-color,color] duration-200 ease-fluid hover:bg-muted hover:text-foreground",
                 "focus-visible:ring-2 focus-visible:ring-ring/50",
                 remoteFlash?.reasoning && "animate-remote-nudge",
               )}
             >
-              <Brain className="size-3.5 opacity-60" />
-              <SelectValue />
+              <SelectValue className="block truncate" />
             </SelectTrigger>
             <SelectContent side="top" align="start" sideOffset={8}>
                   {reasoningItems.map((item) => (
@@ -912,7 +925,7 @@ export function Composer({
             </>
           )}
 
-          <div className="flex-1" />
+          </div>
 
           {!hideZakuraModel ? (
             <ContextWindowButton
@@ -936,7 +949,7 @@ export function Composer({
                 }
                 disabled={showStop ? false : !canSend}
                 onClick={() => (showStop ? onStop() : onSend())}
-                className="relative size-9 shrink-0 rounded-full"
+                className="relative size-8 shrink-0 rounded-full disabled:bg-muted disabled:text-muted-foreground disabled:opacity-60"
               >
                 {showStop && (
                   <svg
@@ -988,36 +1001,27 @@ export function Composer({
         </div>
         </div>
 
-        {acpModes && acpModes.available.length > 0 && onAcpModeChange ? (
-          <div className="mt-1 flex items-center gap-1 px-0.5">
-            <RemoteNudge token={remoteFlash?.acpMode} className="rounded-md">
-            <Select
-              value={acpModes.currentId || acpModes.available[0]?.id}
-              onValueChange={(v) => {
-                if (v) onAcpModeChange(v);
-              }}
-              items={acpModes.available.map((m) => ({ value: m.id, label: m.name }))}
-            >
-              <SelectTrigger
-                aria-label="ACP 模式"
-                className={cn(
-                  "h-7 max-w-36 rounded-md border-0 px-1.5 text-[12px] text-muted-foreground shadow-none hover:bg-muted/70 hover:text-foreground",
-                  remoteFlash?.acpMode && "animate-remote-nudge",
-                )}
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent side="top" align="start" sideOffset={6}>
-                {acpModes.available.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            </RemoteNudge>
+        {computerSlot || (runtimes && runtimes.length > 0 && onRuntimeChange) ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1">
+            {computerSlot}
+            {runtimes && runtimes.length > 0 && onRuntimeChange ? (
+              <SessionContextBar
+                project={project ?? null}
+                projects={projects ?? []}
+                onProjectChange={(next) => onProjectChange?.(next)}
+                runtimes={runtimes}
+                runtimeId={runtimeId ?? "zakura"}
+                runtimeDisabled={runtimeDisabled}
+                runtimeLoading={runtimeLoading}
+                runtimeDisabledHint={runtimeDisabledHint}
+                onRuntimeChange={onRuntimeChange}
+                flashProject={remoteFlash?.project}
+                flashRuntime={remoteFlash?.runtime}
+              />
+            ) : null}
           </div>
         ) : null}
+        </div>
         </div>
       </div>
     </div>
