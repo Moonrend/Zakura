@@ -865,6 +865,8 @@ export type {
   CloudAgentQueuedMessage,
   CloudAgentQueueUpdatePayload,
   CloudAgentUserMessagePayload,
+  CloudAgentMessageContext,
+  CloudAgentBotMessagePayload,
   CloudAgentRunStartPayload,
   CloudAgentReasoningDeltaPayload,
   CloudAgentAssistantDeltaPayload,

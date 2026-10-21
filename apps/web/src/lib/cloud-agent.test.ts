@@ -7,6 +7,39 @@ function event(type: CloudAgentEvent["type"], seq: number, payload: Record<strin
   return { id: `event-${seq}`, sessionId: "session", runId: "run", seq, type, payload, createdAt: "2026-10-18T00:00:00Z" } as CloudAgentEvent;
 }
 
+test("bot replies and message wrappers replay separately without duplicate answers", () => {
+  const events = [
+    event("user_message", 1, { messageId: "user", content: "Hello", context: { prefix: "Sender: Ada", suffix: "Reply in bot" } }),
+    event("run_start", 2, { replyToMessageId: "user" }),
+    event("assistant_delta", 3, { messageId: "answer", delta: "Hi" }),
+    event("assistant_message", 4, { messageId: "answer", content: "Hi" }),
+    event("bot_message", 5, { messageId: "sent", sourceMessageId: "answer", content: "Hi", platform: "zakurabot", botName: "Scout" }),
+  ];
+  const turn = buildConversationTurns(events)[0]!;
+  assert.equal(turn.message.content, "Hello");
+  const user = turn.items.find(item => item.kind === "user");
+  assert.deepEqual(user?.context, { prefix: "Sender: Ada", suffix: "Reply in bot" });
+  assert.equal(turn.items.filter(item => item.kind === "assistant").length, 0);
+  assert.equal(turn.items.filter(item => item.kind === "bot").length, 1);
+  assert.equal(turn.items.find(item => item.kind === "bot")?.content, "Hi");
+  const legacy = eventsToTimeline([event("user_message", 1, { content: "Plain text" })]);
+  assert.equal(legacy[0]?.kind, "user");
+  if (legacy[0]?.kind === "user") assert.equal(legacy[0].context, undefined);
+});
+
+test("delivered bot tools collapse into their message while failed sends stay visible", () => {
+  const items = eventsToTimeline([
+    event("tool_call_start", 1, { toolCallId: "sent", name: "chat_reply" }),
+    event("bot_message", 2, { messageId: "bot", toolCallId: "sent", content: "Hello", platform: "zakurabot" }),
+    event("tool_call_result", 3, { toolCallId: "sent", result: { sent: true } }),
+    event("tool_call_start", 4, { toolCallId: "failed", name: "chat_reply" }),
+    event("tool_call_result", 5, { toolCallId: "failed", isError: true, result: "Connection unavailable" }),
+  ]);
+  assert.equal(items.filter(item => item.kind === "bot").length, 1);
+  assert.equal(items.filter(item => item.kind === "tool").length, 1);
+  assert.equal(items.find(item => item.kind === "tool")?.id, "failed");
+});
+
 test("standard and ACP unified approvals replay through the same card", () => {
   for (const toolName of ["re_shell_exec", "acp:edit"]) {
     const items = eventsToTimeline([

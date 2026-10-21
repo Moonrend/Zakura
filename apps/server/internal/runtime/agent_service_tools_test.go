@@ -26,6 +26,8 @@ func wireAgentToolService(h *handler) {
 		switch {
 		case name == "tool_search":
 			return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
+		case name == "tool_execute":
+			return h.runToolExecute(ctx, tenant, agent, session, toolCallID, args)
 		case isBuiltinToolName(name):
 			return h.runBuiltinTool(ctx, tenant, agent, name, args)
 		case strings.HasPrefix(name, "mcp__"):
@@ -213,14 +215,14 @@ func runToolScenario(t *testing.T, agentMemory bool, exposure string, extra map[
 	return store, agent, fake, captured
 }
 
-func TestCloudAgentDynamicToolLoading(t *testing.T) {
+func TestCloudAgentCompactToolDiscovery(t *testing.T) {
 	const mcpToolName = "mcp__echo__echo"
 	modelHandler := func(w http.ResponseWriter, r *http.Request, call int) {
 		switch call {
 		case 1:
 			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"s1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"echo\"}"}}]},"finish_reason":"tool_calls"}]}`)
 		case 2:
-			_, _ = io.WriteString(w, fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"m1","type":"function","function":{"name":%q,"arguments":"{\"value\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}`, mcpToolName))
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"m1","type":"function","function":{"name":"tool_execute","arguments":"{\"name\":\"mcp__echo__echo\",\"arguments\":{\"value\":\"hi\"}}"}}]},"finish_reason":"tool_calls"}]}`)
 		default:
 			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)
 		}
@@ -237,7 +239,7 @@ func TestCloudAgentDynamicToolLoading(t *testing.T) {
 		t.Fatalf("first request leaked tools=%v", firstNames)
 	}
 	secondNames := requestToolNames(bodies[1])
-	if !containsToolName(secondNames, mcpToolName) || !containsToolName(secondNames, "tool_search") {
+	if containsToolName(secondNames, mcpToolName) || !containsToolName(secondNames, "tool_execute") {
 		t.Fatalf("second request tools=%v", secondNames)
 	}
 	hints := systemMessageContent(bodies[1])
@@ -259,8 +261,8 @@ func TestCloudAgentDynamicToolLoading(t *testing.T) {
 	for _, ev := range events {
 		types[ev.Type] = true
 	}
-	if !types["tools_loaded"] {
-		t.Fatalf("missing tools_loaded event: %v", types)
+	if types["tools_loaded"] {
+		t.Fatalf("search must not expand future declarations: %v", types)
 	}
 }
 
@@ -292,7 +294,7 @@ func TestCloudAgentToolSearchNoMatch(t *testing.T) {
 		t.Fatalf("model calls=%d", len(bodies))
 	}
 	result := toolMessageContent(bodies[1])
-	if !strings.Contains(result, "No matching tools found.") {
+	if !strings.Contains(result, `"tools":[]`) {
 		t.Fatalf("tool result=%q", result)
 	}
 	sessionID := sessionIDForAgent(t, store, agent.ID)

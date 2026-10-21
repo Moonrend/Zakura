@@ -36,7 +36,7 @@ func TestAgentToolCatalogSessionsAutomationDelegate(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing tool %s: %v", name, catalog.Tools)
 		}
-		if tool.Kind != "builtin" || tool.Exposure != "deferred" || tool.LocalName != name {
+		if tool.Kind != "builtin" || tool.Exposure != "direct" || tool.LocalName != name {
 			t.Fatalf("tool %s metadata: %+v", name, tool)
 		}
 	}

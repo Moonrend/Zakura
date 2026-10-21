@@ -2312,6 +2312,9 @@ export function ChatApp() {
         parentKey === "" ? null : parentKey,
         sentAttachments.length > 0 ? sentAttachments : undefined,
         runOptions,
+        undefined,
+        undefined,
+        turns.find((turn) => turn.message.id === editingTarget?.messageId)?.items.filter((item) => item.kind === "user").find((item) => item.id === editingTarget?.messageId)?.context,
       );
       setBranchByParent((prev) => {
         const next = { ...prev };

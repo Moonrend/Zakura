@@ -50,6 +50,7 @@ export const CLOUD_AGENT_EVENT_TYPES = [
   "reasoning_delta",
   "assistant_delta",
   "assistant_message",
+  "bot_message",
   "assistant_rollback",
   "ui_state_updated",
   "tool_call_start",
@@ -215,7 +216,24 @@ export type CloudAgentAttachment = {
   kind: "image" | "file";
 };
 
+/** Visible text stays in content; wrappers are sent upstream in prefix/content/suffix order. */
+export type CloudAgentMessageContext = {
+  prefix?: string;
+  suffix?: string;
+};
+
+export type CloudAgentBotMessagePayload = {
+  messageId: string;
+  content: string;
+  platform: string;
+  botName?: string;
+  replyTo?: string;
+  toolCallId?: string;
+  sourceMessageId?: string;
+};
+
 export type CloudAgentUserMessagePayload = {
+  context?: CloudAgentMessageContext;
   messageId: string;
   content: string;
   /**
@@ -249,6 +267,7 @@ export type CloudAgentFollowUpMode = "steer" | "queue";
  * 逐条开新回合（一次一条），mode=steer 的条目在活跃 Run 的下一工具批后注入。
  */
 export type CloudAgentQueuedMessage = {
+  context?: CloudAgentMessageContext;
   messageId: string;
   content: string;
   attachments?: CloudAgentAttachment[];
@@ -567,6 +586,7 @@ export type CloudAgentUIStatePayload = {
 export type CloudAgentEventPayload =
   | CloudAgentUIStatePayload
   | CloudAgentUserMessagePayload
+  | CloudAgentBotMessagePayload
   | CloudAgentRunStartPayload
   | CloudAgentReasoningDeltaPayload
   | CloudAgentAssistantDeltaPayload

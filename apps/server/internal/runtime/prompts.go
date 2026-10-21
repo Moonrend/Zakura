@@ -136,7 +136,10 @@ func buildSystemPrompt(in promptInput) string {
 		"- Web Fetch: "+enabledLabel(webFetch),
 	)
 	if has("tool_search") {
-		lines = append(lines, "- 部分工具（MCP 服务器工具、会话 / Routine / 委派、桌面与浏览器控制、网页搜索 / 抓取等）不会预先列出：用 tool_search 以简短关键词搜索并加载，加载后下一轮即可调用。")
+		lines = append(lines, "- Zakura 内置的电脑、记忆、Skill、会话、Routine 和网页等已启用工具始终直接列出并调用。其他上游 MCP 工具通过 tool_search 发现：用 includeSchemas=true 或 names 查询完整参数，再用 tool_execute({name, arguments}) 调用；搜索不会增加后续轮次的工具声明。")
+	}
+	if has("codemode") {
+		lines = append(lines, "- 多步工具操作可用 codemode：await searchTools(query, options) 搜索，await describeTool(name) 查询参数，await tools[name](args) 调用。独立操作用 Promise.all / Promise.allSettled 并发；依赖操作按顺序 await。工具中间结果留在脚本中，仅 text(value) / return 输出进入上下文。MCP 的 isError 需自行检查。")
 	}
 	lines = append(lines, "", generativeUIPrompt)
 	if hints := strings.TrimSpace(in.ServerHints); hints != "" {
@@ -155,7 +158,9 @@ func buildSystemPrompt(in promptInput) string {
 			}
 			lines = append(lines, entry)
 		}
-		if has("fs_read") {
+		if has("read_skill") {
+			lines = append(lines, "- 当前任务命中某个技能时，先用 read_skill 读取其 SKILL.md；list_skills 可查看当前启用的技能。按读到的说明执行，不要凭印象猜内容。")
+		} else if has("fs_read") {
 			lines = append(lines, "- 当前任务命中某个技能时，先用 fs_read 读取其 SKILL.md，再按它说的做；不要凭印象猜内容。")
 		}
 	}

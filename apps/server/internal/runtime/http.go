@@ -692,6 +692,7 @@ func (h *handler) searchSessions(w http.ResponseWriter, r *http.Request) {
 type messageBody struct {
 	MessageID    string          `json:"messageId"`
 	Content      string          `json:"content"`
+	Context      *MessageContext `json:"context,omitempty"`
 	Attachments  json.RawMessage `json:"attachments"`
 	Options      json.RawMessage `json:"options"`
 	FollowUpMode string          `json:"followUpMode"`
@@ -712,7 +713,7 @@ func (b *messageBody) UnmarshalJSON(data []byte) error {
 	}
 	for name := range fields {
 		switch name {
-		case "messageId", "content", "attachments", "options", "followUpMode", "followUp", "parentRunId":
+		case "messageId", "content", "context", "attachments", "options", "followUpMode", "followUp", "parentRunId":
 		default:
 			return fmt.Errorf("json: unknown field %q", name)
 		}
@@ -735,7 +736,7 @@ func (h *handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	run, q, e := h.service.Start(r.Context(), TurnRequest{
 		Tenant: p.TenantID, Agent: chi.URLParam(r, "id"), Session: chi.URLParam(r, "sid"),
-		Content: b.Content, MessageID: b.MessageID, Attachments: b.Attachments, Options: b.Options,
+		Content: b.Content, Context: b.Context, MessageID: b.MessageID, Attachments: b.Attachments, Options: b.Options,
 		FollowUpMode: mode, QueueOnConflict: mode != "interrupt",
 		ParentRunID: b.ParentRunID, HasParent: b.hasParent, UserID: p.UserID,
 	})
@@ -798,7 +799,7 @@ func (h *handler) patchQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	x, e := h.store.UpdateQueued(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"), chi.URLParam(r, "messageId"), QueueMessage{Content: b.Content, Attachments: b.Attachments, Options: b.Options})
+	x, e := h.store.UpdateQueued(r.Context(), p.TenantID, chi.URLParam(r, "id"), chi.URLParam(r, "sid"), chi.URLParam(r, "messageId"), QueueMessage{Content: b.Content, Context: b.Context, Attachments: b.Attachments, Options: b.Options})
 	if e != nil {
 		statusErr(w, e)
 		return

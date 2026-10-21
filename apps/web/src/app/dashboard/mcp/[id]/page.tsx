@@ -26,6 +26,8 @@ import {
   McpPromptsExplorer,
   McpResourcesExplorer,
   McpToolsExplorer,
+  ToolExposureSelect,
+  type ToolExposure,
   type McpPromptRow,
   type McpResourceRow,
   type McpResourceTemplateRow,
@@ -572,6 +574,30 @@ function McpServerDetailInner() {
     }
   }
 
+  async function setExposure(config: Record<string, unknown>) {
+    setActionBusy(true);
+    try {
+      await api(`/api/instances/${id}`, { method: "PATCH", json: { config } });
+      await load(true);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  function exposureOf(tool: McpToolRow): ToolExposure {
+    const config = instance?.config ?? {};
+    const overrides = (config.toolExposure ?? {}) as Record<string, ToolExposure>;
+    const name = tool.localName ?? tool.qualifiedName;
+    if (overrides[name]) return overrides[name];
+    for (const pattern of Object.keys(overrides).filter((key) => key.includes("*")).sort()) {
+      const regex = pattern.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*");
+      if (new RegExp(`^${regex}$`).test(name)) return overrides[pattern];
+    }
+    return (config.exposure as ToolExposure) || "deferred";
+  }
+
   async function setToolPermission(ruleId: string, enabled: boolean) {
     if (!instance) return;
     setActionBusy(true);
@@ -770,10 +796,30 @@ function McpServerDetailInner() {
           <ConfigurationPanel instance={instance} onSaved={() => load()} />
         </TabsContent>
 
-        <TabsContent value="tools" className="mt-4">
+        <TabsContent value="tools" className="mt-4 space-y-5">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <Label className="text-sm">默认展示方式</Label>
+              <ToolExposureSelect value={(instance.config?.exposure as ToolExposure) || "deferred"} disabled={actionBusy} label="服务器默认展示方式" onChange={(exposure) => void setExposure({ exposure })} />
+            </div>
+            <p className="text-xs text-muted-foreground">这里配置上游 MCP 工具：常用工具设为“始终列出”，其余按需搜索。Zakura 自带的电脑、记忆、Skill 等工具始终列出。Agent 与下游 MCP 共用此设置；隐藏的工具无法调用。已连接的客户端需刷新工具列表。</p>
+            <div className="space-y-2">
+              <Label htmlFor="mcp-capability-description" className="text-xs">能力简介</Label>
+              <Input id="mcp-capability-description" key={String(instance.config?.description ?? "")} defaultValue={String(instance.config?.description ?? "")} placeholder="例如：搜索代码仓库、读取 Issue、管理 Pull Request" disabled={actionBusy} onBlur={(event) => {
+                const description = event.target.value.trim();
+                if (description !== (instance.config?.description ?? "")) void setExposure({ description });
+              }} />
+              <p className="text-xs text-muted-foreground">提供给 Agent 的搜索提示，帮助它判断何时使用这个服务器。</p>
+            </div>
+          </div>
           <McpToolsExplorer
             tools={tools}
             emptyHint={emptyHint ?? "暂无 tools"}
+            exposure={{
+              value: exposureOf,
+              disabled: actionBusy,
+              onChange: (tool, value) => void setExposure({ toolExposure: { ...((instance.config?.toolExposure ?? {}) as Record<string, unknown>), [tool.localName ?? tool.qualifiedName]: value } }),
+            }}
           />
         </TabsContent>
 

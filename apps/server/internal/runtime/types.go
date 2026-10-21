@@ -88,6 +88,7 @@ type Run struct {
 type QueueMessage struct {
 	ID          string
 	Content     string
+	Context     *MessageContext
 	Attachments json.RawMessage
 	Options     json.RawMessage
 	Mode        string

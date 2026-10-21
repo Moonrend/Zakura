@@ -192,7 +192,7 @@ func TestAgentToolCatalogBrowserGroup(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing browser tool %s: %v", name, catalog.Tools)
 		}
-		if tool.Kind != "builtin" || tool.Exposure != "deferred" || tool.LocalName != name {
+		if tool.Kind != "builtin" || tool.Exposure != "direct" || tool.LocalName != name {
 			t.Fatalf("browser tool %s metadata: %+v", name, tool)
 		}
 	}

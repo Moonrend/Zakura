@@ -300,8 +300,13 @@ func TestRunCodemodeToolScriptFailure(t *testing.T) {
 			return nil, nil
 		}
 	})
-	if _, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"throw new Error('boom')"}`)); err == nil || !strings.Contains(err.Error(), "codemode script failed: boom") {
-		t.Fatalf("script failure error: %v", err)
+	raw, err := h.runCodemodeTool(context.Background(), "tenant", agent.ID, "", "", json.RawMessage(`{"code":"throw new Error('boom')"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := decodeBuiltinResult(t, raw, nil)
+	if result["isError"] != true || result["error"] != "codemode script failed: boom" {
+		t.Fatalf("script failure result: %s", raw)
 	}
 }
 

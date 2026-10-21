@@ -3,6 +3,7 @@
 import type { UISnapshot } from "./generative-ui";
 import type {
   CloudAgentAttachment,
+  CloudAgentMessageContext,
   CloudAgentConfig,
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
@@ -23,6 +24,7 @@ export { lastCancelledRunId };
 
 export type {
   CloudAgentAttachment,
+  CloudAgentMessageContext,
   CloudAgentContextSourceItem,
   CloudAgentContextSourceKind,
   CloudAgentFollowUpMode,
@@ -103,12 +105,22 @@ export type RunLogEntry = {
 export type TimelineItem =
   | {
       kind: "user";
+      context?: CloudAgentMessageContext;
       id: string;
       content: string;
       seq: number;
       attachments?: CloudAgentAttachment[];
       userId?: string;
       userName?: string;
+    }
+  | {
+      kind: "bot";
+      id: string;
+      content: string;
+      platform: string;
+      botName?: string;
+      seq: number;
+      runId?: string | null;
     }
   | {
       kind: "assistant";
@@ -508,6 +520,14 @@ export function collectTurnSharedFiles(
   return out;
 }
 
+function parseMessageContext(raw: unknown): CloudAgentMessageContext | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const value = raw as Record<string, unknown>;
+  const prefix = typeof value.prefix === "string" ? value.prefix : undefined;
+  const suffix = typeof value.suffix === "string" ? value.suffix : undefined;
+  return prefix || suffix ? { prefix, suffix } : undefined;
+}
+
 /** 将事件日志还原为 UI 时间线（多设备重连后可确定性重建） */
 export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
   const uiStates = new Map<string, Record<number, UISnapshot>>();
@@ -525,6 +545,14 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
   const toolRunIds = new Map<string, string | null>();
   /** 被 assistant_rollback 丢弃的流式消息（模型中断重试），其 delta 不渲染 */
   const rolledBack = new Set<string>();
+  const deliveredSources = new Set<string>();
+  const deliveredTools = new Set<string>();
+  for (const event of events) {
+    const p = event.payload as Record<string, unknown>;
+    if (event.type !== "bot_message") continue;
+    if (typeof p.sourceMessageId === "string") deliveredSources.add(p.sourceMessageId);
+    if (typeof p.toolCallId === "string") deliveredTools.add(p.toolCallId);
+  }
   for (const ev of events) {
     if (ev.type === "assistant_rollback") {
       const p = ev.payload as Record<string, unknown>;
@@ -582,11 +610,21 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         kind: "user",
         id: typeof p.messageId === "string" ? p.messageId : ev.id,
         content: typeof p.content === "string" ? p.content : "",
+        context: parseMessageContext(p.context),
         seq: ev.seq,
         ...(attachments.length ? { attachments } : {}),
         ...(typeof p.userId === "string" ? { userId: p.userId } : {}),
         ...(typeof p.userName === "string" ? { userName: p.userName } : {}),
       });
+      continue;
+    }
+    if (ev.type === "bot_message") {
+      flushReasoning();
+      flushAssistant();
+      items.push({ kind: "bot", id: typeof p.messageId === "string" ? p.messageId : ev.id,
+        content: typeof p.content === "string" ? p.content : "",
+        platform: typeof p.platform === "string" ? p.platform : "bot",
+        botName: typeof p.botName === "string" ? p.botName : undefined, seq: ev.seq, runId: ev.runId });
       continue;
     }
     if (ev.type === "reasoning_delta") {
@@ -608,7 +646,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     if (ev.type === "assistant_delta") {
       flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
-      if (rolledBack.has(mid)) continue;
+      if (rolledBack.has(mid) || deliveredSources.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
         flushAssistant();
         currentAssistant = {
@@ -625,7 +663,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
     if (ev.type === "assistant_message") {
       flushReasoning();
       const mid = typeof p.messageId === "string" ? p.messageId : ev.id;
-      if (rolledBack.has(mid)) continue;
+      if (rolledBack.has(mid) || deliveredSources.has(mid)) continue;
       if (!currentAssistant || currentAssistant.id !== mid) {
         flushAssistant();
         currentAssistant = {
@@ -1115,7 +1153,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
   }
   flushAssistant();
   flushReasoning();
-  return items;
+  return items.filter((item) => item.kind !== "tool" || !deliveredTools.has(item.id));
 }
 
 // —— 消息树（分支 / 重新生成变体） ——
@@ -1250,6 +1288,7 @@ export function buildConversationTurns(
       (ev.type === "assistant_delta" ||
         ev.type === "reasoning_delta" ||
         ev.type === "assistant_message" ||
+        ev.type === "bot_message" ||
         ev.type === "assistant_rollback" ||
         ev.type === "tool_call_start" ||
         ev.type === "tool_call_args" ||
@@ -1515,8 +1554,9 @@ export async function sendCloudMessage(
   options?: CloudAgentRunOptions,
   followUp?: CloudAgentFollowUpMode,
   messageId?: string,
+  context?: CloudAgentMessageContext,
 ) {
-  const json: Record<string, unknown> = { content, ...(messageId ? { messageId } : {}) };
+  const json: Record<string, unknown> = { content, ...(context ? { context } : {}), ...(messageId ? { messageId } : {}) };
   if (parentRunId !== undefined) json.parentRunId = parentRunId;
   if (attachments?.length) json.attachments = attachments;
   if (options && Object.keys(options).length > 0) json.options = options;

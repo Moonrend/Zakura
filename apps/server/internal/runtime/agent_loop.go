@@ -19,6 +19,7 @@ import (
 type TurnRequest struct {
 	Tenant, Agent, Session string
 	Content                string
+	Context                *MessageContext
 	Attachments, Options   json.RawMessage
 	MessageID              string
 	QueueOnConflict        bool
@@ -83,6 +84,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 				continue
 			}
 			req.Content, _ = event.Payload["content"].(string)
+			req.Context = messageContextFromPayload(event.Payload)
 			if len(req.Options) == 0 {
 				req.Options, _ = json.Marshal(event.Payload["options"])
 			}
@@ -111,11 +113,12 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		}
 		for _, event := range prior {
 			var message struct {
-				MessageID string `json:"messageId"`
-				Content   string `json:"content"`
+				MessageID string          `json:"messageId"`
+				Content   string          `json:"content"`
+				Context   *MessageContext `json:"context"`
 			}
 			if json.Unmarshal([]byte(event.Payload), &message) == nil && message.MessageID == req.MessageID && event.RunID != nil {
-				if message.Content != req.Content {
+				if message.Content != req.Content || !message.Context.equal(req.Context) {
 					return Run{}, nil, ErrConflict
 				}
 				run, err := s.store.GetRun(ctx, req.Tenant, req.Agent, req.Session, *event.RunID)
@@ -128,7 +131,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		}
 		for _, message := range queued {
 			if message.ID == req.MessageID {
-				if message.Content != strings.TrimSpace(req.Content) {
+				if message.Content != strings.TrimSpace(req.Content) || !message.Context.equal(req.Context) {
 					return Run{}, nil, ErrConflict
 				}
 				return Run{}, &message, nil
@@ -156,7 +159,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 				}
 			}
 		}
-		queued, err := s.store.Enqueue(ctx, req.Tenant, req.Agent, req.Session, QueueMessage{ID: req.MessageID, Content: req.Content, Attachments: req.Attachments, Options: req.Options, Mode: mode, UserID: req.UserID, UserName: req.UserName})
+		queued, err := s.store.Enqueue(ctx, req.Tenant, req.Agent, req.Session, QueueMessage{ID: req.MessageID, Content: req.Content, Context: req.Context, Attachments: req.Attachments, Options: req.Options, Mode: mode, UserID: req.UserID, UserName: req.UserName})
 		if err == nil && receipt != nil {
 			s.rememberACPQueueReceipt(req.Tenant, req.Agent, req.Session, queued, receipt)
 		}
@@ -166,7 +169,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		req.MessageID = s.store.id()
 	}
 	run, err := s.store.StartRunWith(ctx, req.Tenant, req.Agent, req.Session, runStartSpec{
-		MessageID: req.MessageID, Content: req.Content, Attachments: req.Attachments, Options: req.Options,
+		MessageID: req.MessageID, Content: req.Content, Context: req.Context, Attachments: req.Attachments, Options: req.Options,
 		HasParent: req.HasParent || req.ParentRunID != nil, ParentRunID: req.ParentRunID, Continue: req.Continue,
 		SkipUserMessage: req.SkipUserMessage, ReplyTo: req.ReplyToMessageID, UserID: req.UserID, UserName: req.UserName,
 	})
@@ -226,7 +229,10 @@ func (s *Service) executeTurn(ctx context.Context, live *liveRun, req TurnReques
 			turnErr = errors.New("ACP runtime is unavailable")
 			return
 		}
-		turnErr = s.acpRunner(ctx, req.Tenant, req.Agent, req.Session, live.id, req.Content)
+		turnErr = s.acpRunner(ctx, req.Tenant, req.Agent, req.Session, live.id, req.Context.render(req.Content))
+		if turnErr == nil {
+			turnErr = s.publishBotFallback(ctx, req, sess, live.id, "")
+		}
 		return
 	}
 	turnErr = s.chatTurn(ctx, live, req, agent, sess)
@@ -242,11 +248,11 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 	if req.SkipUserMessage {
 		target = req.ReplyToMessageID
 	}
-	messages := buildChainMessages(s.loadHistoryEvents(ctx, req.Session), target, sessionHistoryBudget)
+	messages := buildChainMessages(s.loadHistoryEvents(ctx, req.Session), target, int(^uint(0)>>1))
 	if len(messages) == 0 {
 		var attachments any
 		_ = json.Unmarshal(req.Attachments, &attachments)
-		messages = []chatMessage{userChatMessage(req.Content, parseChatAttachments(attachments))}
+		messages = []chatMessage{userChatMessage(req.Context.render(req.Content), parseChatAttachments(attachments))}
 	}
 	catalog := agentCatalog{}
 	if cloud.EnableTools && s.catalogProvider != nil {
@@ -336,12 +342,12 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		loaded := map[string]bool{}
-		if s.loadedTools != nil {
-			loaded = s.loadedTools(ctx, req.Tenant, req.Agent, req.Session)
+		messages, err = s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget, false)
+		if err != nil {
+			return err
 		}
 		payload := map[string]any{"model": model, "messages": renderMessages(system, messages, images, "openai"), "stream": true}
-		if tools := declaredTools(catalog, loaded, disabledToolsFromContext(ctx)); len(tools) > 0 {
+		if tools := declaredTools(catalog, nil, disabledToolsFromContext(ctx)); len(tools) > 0 {
 			payload["tools"] = tools
 		}
 		if sess.Reasoning != nil && *sess.Reasoning != "" {
@@ -354,6 +360,14 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 			payload["reasoning"] = opts.Reasoning
 		}
 		result, err := s.modelRound(ctx, req, live.id, model, payload)
+		if contextOverflow(err) {
+			compacted, compactErr := s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget/2, true)
+			if compactErr == nil && messageBytes(compacted) < messageBytes(messages) {
+				messages = compacted
+				payload["messages"] = renderMessages(system, messages, images, "openai")
+				result, err = s.modelRound(ctx, req, live.id, model, payload)
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -389,6 +403,9 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 				messages = append(messages, chatMessage{Role: "system", Content: contextText})
 			}
 			payload := map[string]any{"messageId": steer.ID, "content": steer.Content, "attachments": json.RawMessage(validJSON(steer.Attachments, "[]")), "steer": true}
+			if steer.Context != nil {
+				payload["context"] = steer.Context
+			}
 			if steer.UserID != "" {
 				payload["userId"], payload["userName"] = steer.UserID, steer.UserName
 			}
@@ -398,10 +415,15 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 			}
 			var attachments any
 			_ = json.Unmarshal(steer.Attachments, &attachments)
-			messages = append(messages, userChatMessage(steer.Content, parseChatAttachments(attachments)))
+			message := userChatMessage(steer.Context.render(steer.Content), parseChatAttachments(attachments))
+			message.UserMessageID = steer.ID
+			messages = append(messages, message)
 		}
 		if len(result.ToolCalls) == 0 && len(steers) == 0 {
 			if _, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "Stop"}, true); err != nil {
+				return err
+			}
+			if err := s.publishBotFallback(ctx, req, sess, live.id, result.Text); err != nil {
 				return err
 			}
 			if s.postRun {
@@ -556,6 +578,10 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 			err = fmt.Errorf("tool %s is unavailable", call.Name)
 		case !json.Valid([]byte(defaultArgs(call.Arguments))):
 			err = errors.New("invalid tool arguments: expected JSON")
+		case call.Name == "tool_execute":
+			// The dispatcher guards, approves and hooks the concrete target.
+			// Asking for the wrapper as well would duplicate every approval.
+			result, err = s.toolRunner(ctx, req.Tenant, req.Agent, req.Session, call.ID, call.Name, json.RawMessage(defaultArgs(call.Arguments)))
 		default:
 			check, approvalErr := s.toolExecutionGuard(ctx, req.Tenant, req.Agent, req.Session, runID, call.ID, call.Name, json.RawMessage(defaultArgs(call.Arguments)))
 			err = approvalErr

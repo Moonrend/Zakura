@@ -7,6 +7,25 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+export type ToolExposure = "direct" | "deferred" | "hidden";
+const exposureItems = [
+  { value: "direct", label: "始终列出" },
+  { value: "deferred", label: "按需发现" },
+  { value: "hidden", label: "隐藏" },
+];
+
+export function ToolExposureSelect({ value, disabled, onChange, label }: {
+  value: ToolExposure; disabled?: boolean; onChange: (value: ToolExposure) => void; label: string;
+}) {
+  return (
+    <Select value={value} items={exposureItems} disabled={disabled} onValueChange={(next) => { if (next) onChange(next as ToolExposure); }}>
+      <SelectTrigger size="sm" aria-label={label}><SelectValue /></SelectTrigger>
+      <SelectContent>{exposureItems.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+    </Select>
+  );
+}
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   SchemaToolForm,
@@ -67,10 +86,16 @@ export function McpToolsExplorer({
   spaceId,
   tools,
   emptyHint = "暂无工具",
+  exposure,
 }: {
   spaceId?: string;
   tools: McpToolRow[];
   emptyHint?: string;
+  exposure?: {
+    value: (tool: McpToolRow) => ToolExposure;
+    onChange: (tool: McpToolRow, value: ToolExposure) => void;
+    disabled?: boolean;
+  };
 }) {
   const [selected, setSelected] = useState<McpToolRow | null>(null);
   const [args, setArgs] = useState<Record<string, unknown>>({});
@@ -116,6 +141,7 @@ export function McpToolsExplorer({
             <TableHeader>
               <TableRow>
                 <TableHead>Tool</TableHead>
+                {exposure ? <TableHead className="w-28">展示方式</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -136,9 +162,14 @@ export function McpToolsExplorer({
                       {t.description}
                     </div>
                   </TableCell>
+                  {exposure ? (
+                    <TableCell onClick={(event) => event.stopPropagation()}>
+                      <ToolExposureSelect value={exposure.value(t)} disabled={exposure.disabled} label={`${t.localName ?? t.qualifiedName} 展示方式`} onChange={(value) => exposure.onChange(t, value)} />
+                    </TableCell>
+                  ) : null}
                 </TableRow>
               ))}
-              {!tools.length ? <EmptyRow colSpan={1}>{emptyHint}</EmptyRow> : null}
+              {!tools.length ? <EmptyRow colSpan={exposure ? 2 : 1}>{emptyHint}</EmptyRow> : null}
             </TableBody>
           </Table>
         </div>

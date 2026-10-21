@@ -17,11 +17,12 @@ const (
 // chatMessage is the provider-neutral message the loop keeps; it is rendered
 // to the wire format just before each model call.
 type chatMessage struct {
-	Role       string
-	Content    string
-	ToolCalls  []modelToolCall
-	ToolCallID string
-	Images     []string
+	Role          string
+	Content       string
+	ToolCalls     []modelToolCall
+	ToolCallID    string
+	UserMessageID string `json:",omitempty"`
+	Images        []string
 }
 
 func (m chatMessage) size() int {
@@ -132,6 +133,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 	questions := map[string]askQuestion{}
 	var compactSeq, compactThrough int64
 	compactSummary := ""
+	compactions := []histEvent{}
 	for _, ev := range events {
 		p := ev.Payload
 		typ := ev.Type
@@ -163,7 +165,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 					parent = "r:" + rid
 				}
 			}
-			content, _ := p["content"].(string)
+			content := userPayloadContent(p)
 			key := "u:" + mid
 			nodes[key] = &histNode{key: key, parent: parent, seq: ev.Seq, content: content, attachments: parseChatAttachments(p["attachments"])}
 			lastNode, lastUser = key, key
@@ -233,12 +235,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 			nodes[key] = &histNode{key: key, parent: lastNode, seq: ev.Seq, isRun: true, events: []histEvent{pair}}
 			lastNode = key
 		case "session.compacted":
-			compactSeq = ev.Seq
-			compactThrough = 0
-			if v, ok := p["throughSeq"].(float64); ok {
-				compactThrough = int64(v)
-			}
-			compactSummary = compactSummaryText(p["summary"])
+			compactions = append(compactions, ev)
 		default:
 			if ev.RunID == "" {
 				continue
@@ -265,15 +262,28 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 
+	for _, ev := range compactions {
+		anchor, _ := ev.Payload["anchorMessageId"].(string)
+		if anchor != "" && !seen["u:"+anchor] {
+			continue
+		}
+		compactSeq = ev.Seq
+		if v, ok := ev.Payload["throughSeq"].(float64); ok {
+			compactThrough = int64(v)
+		}
+		compactSummary = compactSummaryText(ev.Payload["summary"])
+	}
 	out := []chatMessage{}
-	dropped := false
+	dropped := compactSeq > 0 && compactThrough > 0 && len(chain) > 0 && chain[0].seq > compactThrough
 	for _, n := range chain {
 		if compactSeq > 0 && n != target && n.seq <= compactThrough {
 			dropped = true
 			continue
 		}
 		if !n.isRun {
-			out = append(out, userChatMessage(n.content, n.attachments))
+			message := userChatMessage(n.content, n.attachments)
+			message.UserMessageID = strings.TrimPrefix(n.key, "u:")
+			out = append(out, message)
 			continue
 		}
 		if n.failed {
@@ -292,6 +302,20 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 }
 
 func runEventsToMessages(events []histEvent) []chatMessage {
+	// Nested calls remain in the event log for UI, approvals and audit, but
+	// only the outer script's selected output belongs in model history.
+	visible := make([]histEvent, 0, len(events))
+	for _, ev := range events {
+		if strings.HasPrefix(ev.Type, "tool_call_") {
+			parent, _ := ev.Payload["parentToolCallId"].(string)
+			id, _ := ev.Payload["toolCallId"].(string)
+			if parent != "" || strings.Contains(id, "/codemode-") || strings.HasSuffix(id, "/execute") {
+				continue
+			}
+		}
+		visible = append(visible, ev)
+	}
+	events = visible
 	rolled := map[string]bool{}
 	for _, ev := range events {
 		if ev.Type == "assistant_rollback" {
@@ -328,7 +352,7 @@ func runEventsToMessages(events []histEvent) []chatMessage {
 		switch ev.Type {
 		case "user_message":
 			flush()
-			content, _ := p["content"].(string)
+			content := userPayloadContent(p)
 			out = append(out, userChatMessage(content, parseChatAttachments(p["attachments"])))
 		case "assistant_delta":
 			if mid, _ := p["messageId"].(string); rolled[mid] {

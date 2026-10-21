@@ -156,9 +156,18 @@ func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent,
 		SpaceID       string `gorm:"column:space_id"`
 		WorkspaceKind string `gorm:"column:workspace_kind"`
 	}
-	err := h.deps.Gorm.WithContext(ctx).Table("agents AS a").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN spaces s ON s.id=a.space_id").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("a.tenant_id=? AND a.id=? AND n.status IN ('online','draining')", tenant, agent).Take(&rec).Error
+	query := h.deps.Gorm.WithContext(ctx).Table("spaces s").Select("n.id AS node_id, s.id AS space_id, s.workspace_kind AS workspace_kind").Joins("JOIN runtime_nodes n ON n.id=s.runtime_node_id").Where("s.tenant_id=? AND n.status IN ('online','draining')", tenant)
+	if exec := pinnedExecution(ctx); exec != nil && exec.legacy {
+		query = query.Where("s.id=? AND n.id=?", exec.spaceID, exec.nodeID)
+	} else {
+		query = query.Joins("JOIN agents a ON a.space_id=s.id AND a.tenant_id=s.tenant_id").Where("a.id=?", agent)
+	}
+	err := query.Take(&rec).Error
 	if err != nil {
-		return nil, errors.New("agent runtime node is not online")
+		return nil, errors.New("workspace runtime node is not online")
+	}
+	if err := h.authorizeContextLocalNode(ctx, tenant, rec.NodeID); err != nil {
+		return nil, err
 	}
 	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
 	if mode == "sandbox" && workspaceKind != "host" {

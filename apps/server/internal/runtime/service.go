@@ -129,7 +129,7 @@ func (s *Service) startNext(ctx context.Context, tenant, agent, session string) 
 			return
 		}
 	}
-	_, _, err = s.startLocked(ctx, TurnRequest{Tenant: tenant, Agent: agent, Session: session, Content: m.Content, Attachments: m.Attachments, Options: m.Options, MessageID: m.ID, UserID: m.UserID, UserName: m.UserName})
+	_, _, err = s.startLocked(ctx, TurnRequest{Tenant: tenant, Agent: agent, Session: session, Content: m.Content, Context: m.Context, Attachments: m.Attachments, Options: m.Options, MessageID: m.ID, UserID: m.UserID, UserName: m.UserName})
 	if err != nil {
 		_ = s.store.requeueFront(ctx, tenant, agent, session, m)
 	} else {
@@ -314,9 +314,9 @@ func declaredTools(catalog agentCatalog, loaded map[string]bool, disabled map[st
 		switch tool.Exposure {
 		case "direct":
 		case "deferred":
-			if loaded == nil || !loaded[tool.Name] {
-				continue
-			}
+			// Discovery and execution use stable entry points. Historical
+			// tools_loaded events no longer grow every model request.
+			continue
 		default:
 			continue
 		}
@@ -337,7 +337,7 @@ func declaredTools(catalog agentCatalog, loaded map[string]bool, disabled map[st
 }
 
 // reachableToolNames lists every tool the model can reach this run: declared
-// tools plus deferred ones loadable through tool_search.
+// tools plus deferred ones callable through tool_execute and codemode.
 func reachableToolNames(catalog agentCatalog, disabled map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	for _, tool := range catalog.Tools {
@@ -354,35 +354,39 @@ func renderServerHints(catalog agentCatalog) string {
 		ref         string
 		name        string
 		description string
+		examples    []string
 	}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	servers := []hintServer{}
 	for _, tool := range catalog.Tools {
 		if tool.Kind != "mcp" || tool.Exposure != "deferred" {
 			continue
 		}
 		key := tool.ServerRef + "\x00" + tool.InstanceID
-		if seen[key] {
+		if index, ok := seen[key]; ok {
+			if len(servers[index].examples) < 3 {
+				servers[index].examples = append(servers[index].examples, tool.LocalName)
+			}
 			continue
 		}
-		seen[key] = true
+		seen[key] = len(servers)
 		description := tool.ServerDescription
 		if description == "" {
 			description = tool.ServerName
 		}
-		servers = append(servers, hintServer{ref: tool.ServerRef, name: tool.ServerName, description: description})
+		servers = append(servers, hintServer{ref: tool.ServerRef, name: tool.ServerName, description: truncateText(description, 180), examples: []string{tool.LocalName}})
 	}
 	if len(servers) == 0 {
 		return ""
 	}
 	sort.SliceStable(servers, func(i, j int) bool { return servers[i].name < servers[j].name })
-	lines := []string{"Tools of the following MCP servers are not listed upfront. Use the tool_search tool with a short query to find and load the tools you need; loaded tools become available on your next turn."}
+	lines := []string{"Additional MCP capabilities (use tool_search with includeSchemas:true, then tool_execute or codemode):"}
 	for _, server := range servers {
 		slug := slugify(server.ref)
 		if slug == "" {
 			slug = slugify(server.name)
 		}
-		lines = append(lines, "- mcp__"+slug+": "+server.description)
+		lines = append(lines, "- mcp__"+slug+": "+server.description+" (e.g. "+strings.Join(server.examples, ", ")+")")
 	}
 	const maxHintChars = 2000
 	for len(lines) > 1 && len(strings.Join(lines, "\n")) > maxHintChars {

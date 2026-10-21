@@ -609,6 +609,7 @@ func (s *Store) StartRun(ctx context.Context, tenant, agent, session, content st
 type runStartSpec struct {
 	MessageID       string
 	Content         string
+	Context         *MessageContext
 	Attachments     json.RawMessage
 	Options         json.RawMessage
 	HasParent       bool
@@ -655,6 +656,9 @@ func (s *Store) StartRunWith(ctx context.Context, tenant, agent, session string,
 		}
 		if !spec.SkipUserMessage {
 			payload := map[string]any{"messageId": spec.MessageID, "content": spec.Content, "attachments": json.RawMessage(validJSON(spec.Attachments, "[]")), "options": json.RawMessage(validJSON(spec.Options, "{}"))}
+			if spec.Context != nil {
+				payload["context"] = spec.Context
+			}
 			if spec.HasParent {
 				if spec.ParentRunID != nil && *spec.ParentRunID != "" {
 					payload["parentRunId"] = *spec.ParentRunID
@@ -672,6 +676,9 @@ func (s *Store) StartRunWith(ctx context.Context, tenant, agent, session string,
 				}
 			}
 			if _, e := s.appendEventTx(ctx, tx, session, "user_message", &run.ID, payload); e != nil {
+				return e
+			}
+			if e := s.persistBotUserTx(ctx, tx, tenant, agent, session, spec.MessageID, spec.Content, spec.Attachments); e != nil {
 				return e
 			}
 		}
@@ -749,6 +756,9 @@ func (s *Store) FinishRun(ctx context.Context, tenant, agent, session, runID, st
 		}
 		terminalPayload["result"] = payload
 		if status == "failed" {
+			if e := s.persistBotFailureTx(ctx, tx, tenant, agent, session); e != nil {
+				return e
+			}
 			message := "run failed"
 			if errText != nil && *errText != "" {
 				message = *errText

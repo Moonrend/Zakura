@@ -19,6 +19,7 @@ type queueMessageJSON struct {
 	ID          string          `json:"id,omitempty"`
 	MessageID   string          `json:"messageId,omitempty"`
 	Content     string          `json:"content"`
+	Context     *MessageContext `json:"context,omitempty"`
 	Attachments json.RawMessage `json:"attachments,omitempty"`
 	Options     json.RawMessage `json:"options,omitempty"`
 	Mode        string          `json:"mode,omitempty"`
@@ -33,7 +34,7 @@ func (m QueueMessage) MarshalJSON() ([]byte, error) {
 	if mode == "" {
 		mode = queueModeQueue
 	}
-	return json.Marshal(queueMessageJSON{ID: m.ID, MessageID: m.ID, Content: m.Content, Attachments: m.Attachments, Options: m.Options, Mode: mode, Interrupt: m.Interrupt, CreatedAt: m.CreatedAt, UserID: m.UserID, UserName: m.UserName})
+	return json.Marshal(queueMessageJSON{ID: m.ID, MessageID: m.ID, Content: m.Content, Context: m.Context, Attachments: m.Attachments, Options: m.Options, Mode: mode, Interrupt: m.Interrupt, CreatedAt: m.CreatedAt, UserID: m.UserID, UserName: m.UserName})
 }
 
 func (m *QueueMessage) UnmarshalJSON(raw []byte) error {
@@ -45,7 +46,7 @@ func (m *QueueMessage) UnmarshalJSON(raw []byte) error {
 	if id == "" {
 		id = v.ID
 	}
-	*m = QueueMessage{ID: id, Content: v.Content, Attachments: v.Attachments, Options: v.Options, Mode: v.Mode, Interrupt: v.Interrupt, CreatedAt: v.CreatedAt, UserID: v.UserID, UserName: v.UserName}
+	*m = QueueMessage{ID: id, Content: v.Content, Context: v.Context, Attachments: v.Attachments, Options: v.Options, Mode: v.Mode, Interrupt: v.Interrupt, CreatedAt: v.CreatedAt, UserID: v.UserID, UserName: v.UserName}
 	return nil
 }
 
@@ -134,6 +135,10 @@ func (s *Store) mutateQueueGuarded(ctx context.Context, tenant, agent, session s
 		if err != nil {
 			return err
 		}
+		known := make(map[string]bool, len(items))
+		for _, item := range items {
+			known[item.ID] = true
+		}
 		next, changed, err := fn(items)
 		if err != nil {
 			return err
@@ -144,6 +149,14 @@ func (s *Store) mutateQueueGuarded(ctx context.Context, tenant, agent, session s
 		}
 		if next == nil {
 			next = []QueueMessage{}
+		}
+		for _, item := range next {
+			if known[item.ID] {
+				continue
+			}
+			if err := s.persistBotUserTx(ctx, tx, tenant, agent, session, item.ID, item.Content, item.Attachments); err != nil {
+				return err
+			}
 		}
 		_, err = s.appendEventTx(ctx, tx, session, "queue_update", nil, map[string]any{"items": next})
 		return err
@@ -213,6 +226,9 @@ func (s *Store) UpdateQueued(ctx context.Context, tenant, agent, session, id str
 			}
 			if strings.TrimSpace(patch.Content) != "" {
 				items[i].Content = strings.TrimSpace(patch.Content)
+			}
+			if patch.Context != nil {
+				items[i].Context = patch.Context
 			}
 			if len(patch.Attachments) > 0 {
 				items[i].Attachments = patch.Attachments

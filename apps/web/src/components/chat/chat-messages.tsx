@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   BookmarkCheck,
+  Bot,
+  Info,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -192,6 +194,21 @@ const STATUS_LABEL: Record<string, string> = {
   streaming: "生成中…",
   tool: "使用工具…",
 };
+
+function UserMessageBody({ content, context }: { content: string; context?: { prefix?: string; suffix?: string } }) {
+  if (!context?.prefix && !context?.suffix) return <div className={USER_BUBBLE_BODY}>{content}</div>;
+  return <details className="group/details">
+    <summary aria-label="查看消息详情" className={cn(USER_BUBBLE_BODY, "cursor-pointer list-none [&::-webkit-details-marker]:hidden")}>
+      {content}<Info className="ml-2 inline size-3 text-muted-foreground" />
+    </summary>
+    <div className="space-y-3 border-t border-border/50 px-4 py-3 text-xs">
+      {([["前置提示", context.prefix], ["后置提示", context.suffix]] as const).map(([label, text]) => text ? <div key={label}>
+        <div className="mb-1 font-medium text-muted-foreground">{label}</div>
+        <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{text}</div>
+      </div> : null)}
+    </div>
+  </details>;
+}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -630,7 +647,20 @@ function renderRunItems(
           {it.attachments?.length ? (
             <AttachmentChips attachments={it.attachments} onOpenFile={opts.onOpenFile} />
           ) : null}
-          <div className={cn(USER_BUBBLE_FRAME, USER_BUBBLE_BODY)}>{it.content}</div>
+          <div className={USER_BUBBLE_FRAME}><UserMessageBody content={it.content} context={it.context} /></div>
+        </div>,
+      );
+    } else if (it.kind === "bot") {
+      blocks.push(
+        <div key={`bot-${it.id}`} className="my-2 flex max-w-[92%] items-start gap-2.5">
+          <Bot aria-hidden="true" className="mt-1 size-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 space-y-1">
+            <div className="text-xs text-muted-foreground">{it.botName || "Bot"}<span className="ml-2">{it.platform === "zakurabot" ? "Zakura Bot" : it.platform}</span></div>
+            <div className="rounded-2xl rounded-tl-sm bg-muted/50 px-4 py-2.5">
+              <GeneratedUIContent content={it.content} final messageId={it.id} runId={it.runId} canSubmit={false} readOnly />
+            </div>
+            <CopyButton text={it.content} />
+          </div>
         </div>,
       );
     } else if (it.kind === "assistant") {
@@ -961,9 +991,7 @@ export function ChatMessages({
                     </div>
                     )}
                     <div className={cn("relative", USER_BUBBLE_FRAME)}>
-                      <div className={USER_BUBBLE_BODY}>
-                        {turn.message.content}
-                      </div>
+                      <UserMessageBody content={turn.message.content} context={userItem?.kind === "user" ? userItem.context : undefined} />
                       {turn.message.userId ? (
                         <Tooltip>
                           <TooltipTrigger

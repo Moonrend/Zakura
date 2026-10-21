@@ -43,12 +43,22 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 		}
 	}
 	switch {
+	case name == "list_skills" || name == "read_skill":
+		a, err := h.store.GetAgent(ctx, tenant, agent)
+		if err != nil {
+			return nil, err
+		}
+		return h.runSkillTool(ctx, tenant, a.SpaceID, agent, name, args)
 	case name == "list_computers":
 		return h.runListComputers(ctx, tenant, agent, session)
 	case name == "tool_search":
 		return h.runToolSearchTool(ctx, tenant, agent, session, toolCallID, args)
+	case name == "tool_execute":
+		return h.runToolExecute(ctx, tenant, agent, session, toolCallID, args)
 	case name == "codemode":
 		return h.runCodemodeTool(ctx, tenant, agent, session, toolCallID, args)
+	case name == "chat_reply":
+		return h.runChatReply(ctx, tenant, agent, session, toolCallID, args)
 	case name == "ask_user":
 		return h.runAskUserTool(ctx, tenant, agent, session, toolCallID, args)
 	case isBuiltinToolName(name):
@@ -73,58 +83,32 @@ func (h *handler) dispatchAgentTool(ctx context.Context, tenant, agent, session,
 }
 
 func (h *handler) runToolSearchTool(ctx context.Context, tenant, agent, session, toolCallID string, args json.RawMessage) (json.RawMessage, error) {
-	parsed := map[string]any{}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &parsed); err != nil {
-			return nil, fmt.Errorf("invalid tool arguments: %w", err)
-		}
+	if toolDisabled(ctx, "tool_search") {
+		return nil, errors.New("tool_search is disabled for this run")
 	}
-	query := strings.TrimSpace(builtinStringArg(parsed, "query"))
-	if query == "" {
-		return nil, errors.New("query must not be empty")
+	var query toolDiscoveryQuery
+	if err := json.Unmarshal(args, &query); err != nil {
+		return nil, fmt.Errorf("invalid tool search arguments: %w", err)
 	}
-	limit := builtinIntArg(parsed, "limit", 8)
 	catalog, err := h.cachedAgentToolCatalog(ctx, tenant, agent)
 	if err != nil {
 		return nil, err
 	}
-	loaded := h.sessionLoadedTools(ctx, tenant, agent, session)
-	matches := runToolSearch(catalog, loaded, query, limit)
-	if disabled := disabledToolsFromContext(ctx); len(disabled) > 0 {
-		filtered := matches[:0]
-		for _, tool := range matches {
-			if !toolNameDisabled(disabled, tool.Name) {
-				filtered = append(filtered, tool)
-			}
-		}
-		matches = filtered
+	return builtinJSON(discoverTools(catalog.Tools, disabledToolsFromContext(ctx), query))
+}
+
+func (h *handler) runToolExecute(ctx context.Context, tenant, agent, session, toolCallID string, args json.RawMessage) (json.RawMessage, error) {
+	var call struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
 	}
-	newly := make([]string, 0, len(matches))
-	for _, tool := range matches {
-		if !loaded[tool.Name] {
-			newly = append(newly, tool.Name)
-		}
+	if err := json.Unmarshal(args, &call); err != nil {
+		return nil, fmt.Errorf("invalid tool execution arguments: %w", err)
 	}
-	if len(newly) > 0 {
-		_ = h.persistSessionLoadedTools(context.WithoutCancel(ctx), tenant, agent, session, newly)
+	if call.Name == "tool_execute" || call.Name == "codemode" {
+		return nil, errors.New("tool_execute cannot start tool_execute or codemode")
 	}
-	if len(matches) == 0 {
-		return []byte("No matching tools found."), nil
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Loaded %d tool(s). They are available from your next turn:", len(matches))
-	for _, tool := range matches {
-		description := strings.TrimSpace(tool.Description)
-		if idx := strings.IndexByte(description, '\n'); idx >= 0 {
-			description = strings.TrimSpace(description[:idx])
-		}
-		if description == "" {
-			b.WriteString("\n- " + tool.Name)
-		} else {
-			b.WriteString("\n- " + tool.Name + ": " + description)
-		}
-	}
-	return []byte(b.String()), nil
+	return h.runCodemodeCall(ctx, tenant, agent, session, toolCallID+"/execute", call.Name, call.Arguments)
 }
 
 type cachedLoaded struct {
