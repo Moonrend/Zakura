@@ -1017,6 +1017,12 @@ function PlatformSidebar({
         ],
       },
       {
+        id: "workflows",
+        href: "/dashboard/workflows",
+        label: "工作流预检",
+        icon: Network,
+      },
+      {
         id: "tool-calls",
         href: "/dashboard/tool-calls",
         label: "分析",

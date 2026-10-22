@@ -1,0 +1,5778 @@
+[
+  {
+    "name": "disconnected-nominal-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 334,
+        "resourceLowerBoundsMs": {
+          "cpu": 210,
+          "model": 88
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 87,
+          "endMs": 157,
+          "waitMs": 87,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 157,
+          "endMs": 226,
+          "waitMs": 70,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 226,
+          "endMs": 245,
+          "waitMs": 226,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 245,
+          "endMs": 298,
+          "waitMs": 245,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 298,
+          "endMs": 334,
+          "waitMs": 53,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 334,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-nominal-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 167,
+        "resourceLowerBoundsMs": {
+          "cpu": 210,
+          "model": 44
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 53,
+          "endMs": 123,
+          "waitMs": 53,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 123,
+          "endMs": 192,
+          "waitMs": 36,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 123,
+          "endMs": 142,
+          "waitMs": 123,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 192,
+          "endMs": 228,
+          "waitMs": 50,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 228,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "disconnected-nominal-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 112,
+        "resourceLowerBoundsMs": {
+          "cpu": 105,
+          "model": 88
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 70,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 53,
+          "endMs": 72,
+          "waitMs": 53,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 87,
+          "endMs": 156,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 87,
+          "endMs": 123,
+          "waitMs": 15,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 156,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-nominal-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 56,
+        "resourceLowerBoundsMs": {
+          "cpu": 53,
+          "model": 30
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 70,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 19,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 19,
+          "endMs": 55,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 87,
+          "endMs": 156,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        }
+      ],
+      "makespanMs": 156,
+      "peakParallel": 4,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-nominal-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 334,
+        "resourceLowerBoundsMs": {
+          "cpu": 210,
+          "model": 88
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 87,
+          "endMs": 156,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 156,
+          "endMs": 175,
+          "waitMs": 156,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 175,
+          "endMs": 211,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 211,
+          "endMs": 264,
+          "waitMs": 211,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 264,
+          "endMs": 334,
+          "waitMs": 264,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 334,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-nominal-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 167,
+        "resourceLowerBoundsMs": {
+          "cpu": 210,
+          "model": 44
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 53,
+          "endMs": 72,
+          "waitMs": 53,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 72,
+          "endMs": 108,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 108,
+          "endMs": 177,
+          "waitMs": 21,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 177,
+          "endMs": 247,
+          "waitMs": 177,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 247,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 2
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "disconnected-nominal-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 112,
+        "resourceLowerBoundsMs": {
+          "cpu": 105,
+          "model": 88
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 19,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 19,
+          "endMs": 55,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 35,
+          "endMs": 105,
+          "waitMs": 35,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 55,
+          "endMs": 107,
+          "waitMs": 20,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 107,
+          "endMs": 176,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        }
+      ],
+      "makespanMs": 176,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": false
+    }
+  },
+  {
+    "name": "disconnected-nominal-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "nominal",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 156,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 52,
+            "retryBoundMs": 124,
+            "costMicros": 1689,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 87,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 121,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 69,
+            "retryBoundMs": 237,
+            "costMicros": 1990,
+            "earliestStartMs": 87,
+            "earliestFinishMs": 156,
+            "latestStartMs": 87,
+            "slackMs": 0,
+            "tailMs": 69,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 19,
+            "retryBoundMs": 157,
+            "costMicros": 2291,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 19,
+            "latestStartMs": 101,
+            "slackMs": 101,
+            "tailMs": 55,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 19,
+            "earliestFinishMs": 55,
+            "latestStartMs": 120,
+            "slackMs": 101,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 53,
+            "retryBoundMs": 114,
+            "costMicros": 2893,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 53,
+            "latestStartMs": 103,
+            "slackMs": 103,
+            "tailMs": 53,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 70,
+            "retryBoundMs": 236,
+            "costMicros": 3194,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 70,
+            "latestStartMs": 86,
+            "slackMs": 86,
+            "tailMs": 70,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 156,
+        "totalWorkMs": 334,
+        "totalCostMicros": 16037,
+        "parallelLowerBoundMs": 56,
+        "resourceLowerBoundsMs": {
+          "cpu": 53,
+          "model": 30
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 19,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 53,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 70,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 19,
+          "endMs": 55,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 87,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 87,
+          "endMs": 156,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        }
+      ],
+      "makespanMs": 156,
+      "peakParallel": 4,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-criticalPath-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 939,
+        "resourceLowerBoundsMs": {
+          "cpu": 544,
+          "model": 160
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 396,
+          "endMs": 632,
+          "waitMs": 396,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 632,
+          "endMs": 789,
+          "waitMs": 632,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 789,
+          "endMs": 903,
+          "waitMs": 789,
+          "resources": {}
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 903,
+          "endMs": 939,
+          "waitMs": 114,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 939,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-criticalPath-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 470,
+        "resourceLowerBoundsMs": {
+          "cpu": 544,
+          "model": 80
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 114,
+          "endMs": 350,
+          "waitMs": 114,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 350,
+          "endMs": 587,
+          "waitMs": 191,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 350,
+          "endMs": 507,
+          "waitMs": 350,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 587,
+          "endMs": 623,
+          "waitMs": 80,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 623,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "disconnected-retryBound-criticalPath-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 313,
+        "resourceLowerBoundsMs": {
+          "cpu": 272,
+          "model": 160
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 114,
+          "endMs": 271,
+          "waitMs": 114,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 271,
+          "endMs": 307,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 396,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-criticalPath-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "criticalPath",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 157,
+        "resourceLowerBoundsMs": {
+          "cpu": 136,
+          "model": 54
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 157,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 157,
+          "endMs": 193,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        }
+      ],
+      "makespanMs": 396,
+      "peakParallel": 4,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-id-capacity0",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 0",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 1,
+        "resources": {
+          "cpu": 1,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 0,
+        "deadlineMs": 0
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 939,
+        "resourceLowerBoundsMs": {
+          "cpu": 544,
+          "model": 160
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 396,
+          "endMs": 553,
+          "waitMs": 396,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 553,
+          "endMs": 589,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 589,
+          "endMs": 703,
+          "waitMs": 589,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 703,
+          "endMs": 939,
+          "waitMs": 703,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 939,
+      "peakParallel": 1,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-id-capacity1",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 1",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 2,
+        "resources": {
+          "cpu": 1,
+          "model": 2
+        },
+        "concurrencyLimits": {
+          "exclusive": 1
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 10000,
+        "deadlineMs": 150
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 470,
+        "resourceLowerBoundsMs": {
+          "cpu": 544,
+          "model": 80
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 114,
+          "endMs": 271,
+          "waitMs": 114,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 396,
+          "endMs": 432,
+          "waitMs": 125,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 432,
+          "endMs": 668,
+          "waitMs": 432,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        }
+      ],
+      "makespanMs": 668,
+      "peakParallel": 2,
+      "peakResources": {
+        "cpu": 1,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": false
+    }
+  },
+  {
+    "name": "disconnected-retryBound-id-capacity2",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 2",
+        "nodes": [
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 3,
+        "resources": {
+          "cpu": 2,
+          "model": 1
+        },
+        "concurrencyLimits": {
+          "exclusive": 2
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 20000,
+        "deadlineMs": 300
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 313,
+        "resourceLowerBoundsMs": {
+          "cpu": 272,
+          "model": 160
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 157,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 114,
+          "endMs": 350,
+          "waitMs": 114,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 350,
+          "endMs": 386,
+          "waitMs": 193,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        }
+      ],
+      "makespanMs": 396,
+      "peakParallel": 3,
+      "peakResources": {
+        "cpu": 2,
+        "model": 1
+      },
+      "withinBudget": false,
+      "withinDeadline": false,
+      "optimal": true
+    }
+  },
+  {
+    "name": "disconnected-retryBound-id-capacity3",
+    "request": {
+      "definition": {
+        "version": 1,
+        "name": "disconnected 3",
+        "nodes": [
+          {
+            "id": "n6",
+            "name": "disconnected task 6",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 70,
+            "costMicros": 3194,
+            "maxAttempts": 3,
+            "backoffMs": 0,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 83,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n5",
+            "name": "disconnected task 5",
+            "kind": "checkpoint",
+            "dependsOn": [],
+            "durationMs": 53,
+            "costMicros": 2893,
+            "maxAttempts": 2,
+            "backoffMs": 8,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 20,
+            "resources": {}
+          },
+          {
+            "id": "n4",
+            "name": "disconnected task 4",
+            "kind": "tool",
+            "dependsOn": [
+              "n3"
+            ],
+            "durationMs": 36,
+            "costMicros": 2592,
+            "maxAttempts": 1,
+            "backoffMs": 5,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 7,
+            "resources": {
+              "cpu": 1,
+              "model": 1
+            },
+            "timeoutMs": 49
+          },
+          {
+            "id": "n3",
+            "name": "disconnected task 3",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 19,
+            "costMicros": 2291,
+            "maxAttempts": 4,
+            "backoffMs": 2,
+            "backoffMultiplier": 4,
+            "maxBackoffMs": 0,
+            "resources": {},
+            "timeoutMs": 32,
+            "concurrencyKey": "exclusive"
+          },
+          {
+            "id": "n2",
+            "name": "disconnected task 2",
+            "kind": "checkpoint",
+            "dependsOn": [
+              "n1"
+            ],
+            "durationMs": 69,
+            "costMicros": 1990,
+            "maxAttempts": 3,
+            "backoffMs": 10,
+            "backoffMultiplier": 3,
+            "maxBackoffMs": 20,
+            "resources": {
+              "cpu": 1
+            }
+          },
+          {
+            "id": "n1",
+            "name": "disconnected task 1",
+            "kind": "tool",
+            "dependsOn": [
+              "n0"
+            ],
+            "durationMs": 52,
+            "costMicros": 1689,
+            "maxAttempts": 2,
+            "backoffMs": 7,
+            "backoffMultiplier": 2,
+            "maxBackoffMs": 7,
+            "resources": {
+              "model": 1
+            },
+            "timeoutMs": 65
+          },
+          {
+            "id": "n0",
+            "name": "disconnected task 0",
+            "kind": "agent",
+            "dependsOn": [],
+            "durationMs": 35,
+            "costMicros": 1388,
+            "maxAttempts": 1,
+            "backoffMs": 4,
+            "backoffMultiplier": 1,
+            "maxBackoffMs": 0,
+            "resources": {
+              "cpu": 1
+            },
+            "timeoutMs": 48,
+            "concurrencyKey": "exclusive"
+          }
+        ]
+      },
+      "options": {
+        "maxParallel": 6,
+        "resources": {
+          "cpu": 4,
+          "model": 3
+        },
+        "concurrencyLimits": {
+          "exclusive": 3
+        },
+        "mode": "retryBound",
+        "priority": "id",
+        "budgetMicros": 100000,
+        "deadlineMs": 1000
+      }
+    },
+    "expected": {
+      "order": [
+        "n0",
+        "n3",
+        "n5",
+        "n6",
+        "n1",
+        "n4",
+        "n2"
+      ],
+      "layers": [
+        [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        [
+          "n1",
+          "n4"
+        ],
+        [
+          "n2"
+        ]
+      ],
+      "analysis": {
+        "nodes": [
+          {
+            "id": "n0",
+            "durationMs": 35,
+            "retryBoundMs": 35,
+            "costMicros": 1388,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 35,
+            "latestStartMs": 0,
+            "slackMs": 0,
+            "tailMs": 396,
+            "level": 0,
+            "critical": true
+          },
+          {
+            "id": "n1",
+            "durationMs": 124,
+            "retryBoundMs": 124,
+            "costMicros": 3378,
+            "earliestStartMs": 35,
+            "earliestFinishMs": 159,
+            "latestStartMs": 35,
+            "slackMs": 0,
+            "tailMs": 361,
+            "level": 1,
+            "critical": true
+          },
+          {
+            "id": "n2",
+            "durationMs": 237,
+            "retryBoundMs": 237,
+            "costMicros": 5970,
+            "earliestStartMs": 159,
+            "earliestFinishMs": 396,
+            "latestStartMs": 159,
+            "slackMs": 0,
+            "tailMs": 237,
+            "level": 2,
+            "critical": true
+          },
+          {
+            "id": "n3",
+            "durationMs": 157,
+            "retryBoundMs": 157,
+            "costMicros": 9164,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 157,
+            "latestStartMs": 203,
+            "slackMs": 203,
+            "tailMs": 193,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n4",
+            "durationMs": 36,
+            "retryBoundMs": 36,
+            "costMicros": 2592,
+            "earliestStartMs": 157,
+            "earliestFinishMs": 193,
+            "latestStartMs": 360,
+            "slackMs": 203,
+            "tailMs": 36,
+            "level": 1,
+            "critical": false
+          },
+          {
+            "id": "n5",
+            "durationMs": 114,
+            "retryBoundMs": 114,
+            "costMicros": 5786,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 114,
+            "latestStartMs": 282,
+            "slackMs": 282,
+            "tailMs": 114,
+            "level": 0,
+            "critical": false
+          },
+          {
+            "id": "n6",
+            "durationMs": 236,
+            "retryBoundMs": 236,
+            "costMicros": 9582,
+            "earliestStartMs": 0,
+            "earliestFinishMs": 236,
+            "latestStartMs": 160,
+            "slackMs": 160,
+            "tailMs": 236,
+            "level": 0,
+            "critical": false
+          }
+        ],
+        "roots": [
+          "n0",
+          "n3",
+          "n5",
+          "n6"
+        ],
+        "sinks": [
+          "n2",
+          "n4",
+          "n5",
+          "n6"
+        ],
+        "criticalPath": [
+          "n0",
+          "n1",
+          "n2"
+        ],
+        "criticalPathMs": 396,
+        "totalWorkMs": 939,
+        "totalCostMicros": 37860,
+        "parallelLowerBoundMs": 157,
+        "resourceLowerBoundsMs": {
+          "cpu": 136,
+          "model": 54
+        }
+      },
+      "slots": [
+        {
+          "nodeId": "n0",
+          "startMs": 0,
+          "endMs": 35,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n3",
+          "startMs": 0,
+          "endMs": 157,
+          "waitMs": 0,
+          "resources": {},
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n5",
+          "startMs": 0,
+          "endMs": 114,
+          "waitMs": 0,
+          "resources": {}
+        },
+        {
+          "nodeId": "n6",
+          "startMs": 0,
+          "endMs": 236,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          },
+          "concurrencyKey": "exclusive"
+        },
+        {
+          "nodeId": "n1",
+          "startMs": 35,
+          "endMs": 159,
+          "waitMs": 0,
+          "resources": {
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n4",
+          "startMs": 157,
+          "endMs": 193,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1,
+            "model": 1
+          }
+        },
+        {
+          "nodeId": "n2",
+          "startMs": 159,
+          "endMs": 396,
+          "waitMs": 0,
+          "resources": {
+            "cpu": 1
+          }
+        }
+      ],
+      "makespanMs": 396,
+      "peakParallel": 4,
+      "peakResources": {
+        "cpu": 3,
+        "model": 2
+      },
+      "withinBudget": true,
+      "withinDeadline": true,
+      "optimal": true
+    }
+  }
+]
