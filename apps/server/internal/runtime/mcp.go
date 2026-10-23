@@ -1204,6 +1204,13 @@ func (h *handler) authorizedMCPRPC(r *http.Request, p httpx.Principal, space str
 	start := time.Now()
 	policies, e := h.effectiveMCPPolicies(r.Context(), p.TenantID, p.AgentID, space)
 	policyMethod, name := mcpOperationName(method, params)
+	if policyMethod == "tools/call" {
+		cfg := map[string]any{}
+		_ = json.Unmarshal(inst.Config, &cfg)
+		if toolExposureOf(cfg, name) == "hidden" {
+			e = ErrNotFound
+		}
+	}
 	if e == nil && !policies.operationAllowed(inst, policyMethod, name) {
 		e = ErrNotFound
 	}
@@ -1227,7 +1234,7 @@ func (h *handler) auditToolCall(ctx context.Context, p httpx.Principal, inst mcp
 	if isError {
 		result = errText
 	}
-	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nullString(p.APIKeyID), "actor_user_id": nullString(p.UserID), "space_id": nullString(p.SpaceID), "agent_id": nullString(p.AgentID), "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": inst.ID, "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": runtimeTimeString(h.store.now())}).Error
+	_ = h.deps.Gorm.WithContext(ctx).Table("tool_call_logs").Create(map[string]any{"id": h.store.id(), "tenant_id": p.TenantID, "api_key_id": nullString(p.APIKeyID), "actor_user_id": nullString(p.UserID), "space_id": nullString(p.SpaceID), "agent_id": nullString(p.AgentID), "qualified_name": inst.Ref + ":" + method, "local_name": method, "provider_id": inst.Ref, "instance_id": nullString(inst.ID), "args_json": string(raw), "result_json": result, "is_error": isError, "duration_ms": d.Milliseconds(), "created_at": runtimeTimeString(h.store.now())}).Error
 }
 
 func (h *handler) listMCPSources(w http.ResponseWriter, r *http.Request) {

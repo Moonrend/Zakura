@@ -197,6 +197,20 @@ func TestZakuraBotRequiresHelloAndReturnsRoster(t *testing.T) {
 		t.Fatalf("ping frames: %#v %#v", agentsFrame, pong)
 	}
 
+	writeMaskedText(t, conn, fmt.Sprintf(`{"type":"interrupt","agentId":%q,"requestId":"stop-1"}`, agent.ID))
+	var stopped map[string]any
+	_ = json.Unmarshal([]byte(readServerText(t, reader)), &stopped)
+	if stopped["type"] != "interrupt_ack" || stopped["agentId"] != agent.ID || stopped["requestId"] != "stop-1" {
+		t.Fatalf("stop must acknowledge without reporting idle: %#v", stopped)
+	}
+	var threads int64
+	if err := d.Gorm.Table("agent_channel_threads").Where("tenant_id=?", "tenant").Count(&threads).Error; err != nil {
+		t.Fatal(err)
+	}
+	if threads != 0 {
+		t.Fatal("stopping an idle bot created a conversation")
+	}
+
 	queryConn, queryReader := openRawWebSocket(t, server.URL, "/api/zakurabot/ws?token=forbidden", "")
 	defer queryConn.Close()
 	var rejection map[string]any

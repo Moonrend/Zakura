@@ -44,7 +44,6 @@ jobs:
       CGO_ENABLED: '1'
       ZAKURA_REQUIRE_POSTGRES: '1'
       ZAKURA_TEST_POSTGRES_ISOLATION: ${{ matrix.isolation }}
-      ZAKURA_TEST_POSTGRES_URL: postgres://pgtest:pgtest@127.0.0.1:${{ job.services.postgres.ports[5432] }}/zakura_pgtest?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -56,8 +55,12 @@ jobs:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: docker exec "$POSTGRES_CONTAINER" psql -v ON_ERROR_STOP=1 -U pgtest -d zakura_pgtest -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm'
       - name: Fixture isolation and environment unit tests
+        env:
+          ZAKURA_TEST_POSTGRES_URL: postgres://pgtest:pgtest@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/zakura_pgtest?sslmode=disable
         run: go test -race -count=1 ./internal/platform/pgtest -run '^Test(Environment|Isolated|Unique|Required|FreshURLIsolation|MigrationLedger)'
       - name: Required migrations, computers, runtime, config and integration PostgreSQL tests (zero skips)
+        env:
+          ZAKURA_TEST_POSTGRES_URL: postgres://pgtest:pgtest@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/zakura_pgtest?sslmode=disable
         run: sh scripts/test-postgres.sh --external
       - name: Record archival upgrade prerequisite
         run: printf '%s\n' 'Native and hand-built legacy fixtures are required. Complete pinned Drizzle history is UNVERIFIED without an immutable ZAKURA_REFERENCE_DRIZZLE_DIR snapshot.' >> "$GITHUB_STEP_SUMMARY"

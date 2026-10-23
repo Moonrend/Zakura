@@ -19,6 +19,7 @@ import (
 type TurnRequest struct {
 	Tenant, Agent, Session string
 	Content                string
+	Context                *MessageContext
 	Attachments, Options   json.RawMessage
 	MessageID              string
 	QueueOnConflict        bool
@@ -30,6 +31,7 @@ type TurnRequest struct {
 	ReplyToMessageID       string
 	SkipUserMessage        bool
 	UserID, UserName       string
+	bypassAlwaysAsk        bool // Set only by automation admission, never client run options.
 }
 
 func (s *Service) Start(ctx context.Context, req TurnRequest) (Run, *QueueMessage, error) {
@@ -83,6 +85,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 				continue
 			}
 			req.Content, _ = event.Payload["content"].(string)
+			req.Context = messageContextFromPayload(event.Payload)
 			if len(req.Options) == 0 {
 				req.Options, _ = json.Marshal(event.Payload["options"])
 			}
@@ -111,11 +114,12 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		}
 		for _, event := range prior {
 			var message struct {
-				MessageID string `json:"messageId"`
-				Content   string `json:"content"`
+				MessageID string          `json:"messageId"`
+				Content   string          `json:"content"`
+				Context   *MessageContext `json:"context"`
 			}
 			if json.Unmarshal([]byte(event.Payload), &message) == nil && message.MessageID == req.MessageID && event.RunID != nil {
-				if message.Content != req.Content {
+				if message.Content != req.Content || !message.Context.equal(req.Context) {
 					return Run{}, nil, ErrConflict
 				}
 				run, err := s.store.GetRun(ctx, req.Tenant, req.Agent, req.Session, *event.RunID)
@@ -128,7 +132,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		}
 		for _, message := range queued {
 			if message.ID == req.MessageID {
-				if message.Content != strings.TrimSpace(req.Content) {
+				if message.Content != strings.TrimSpace(req.Content) || !message.Context.equal(req.Context) {
 					return Run{}, nil, ErrConflict
 				}
 				return Run{}, &message, nil
@@ -156,7 +160,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 				}
 			}
 		}
-		queued, err := s.store.Enqueue(ctx, req.Tenant, req.Agent, req.Session, QueueMessage{ID: req.MessageID, Content: req.Content, Attachments: req.Attachments, Options: req.Options, Mode: mode, UserID: req.UserID, UserName: req.UserName})
+		queued, err := s.store.Enqueue(ctx, req.Tenant, req.Agent, req.Session, QueueMessage{ID: req.MessageID, Content: req.Content, Context: req.Context, Attachments: req.Attachments, Options: req.Options, Mode: mode, UserID: req.UserID, UserName: req.UserName})
 		if err == nil && receipt != nil {
 			s.rememberACPQueueReceipt(req.Tenant, req.Agent, req.Session, queued, receipt)
 		}
@@ -166,7 +170,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		req.MessageID = s.store.id()
 	}
 	run, err := s.store.StartRunWith(ctx, req.Tenant, req.Agent, req.Session, runStartSpec{
-		MessageID: req.MessageID, Content: req.Content, Attachments: req.Attachments, Options: req.Options,
+		MessageID: req.MessageID, Content: req.Content, Context: req.Context, Attachments: req.Attachments, Options: req.Options,
 		HasParent: req.HasParent || req.ParentRunID != nil, ParentRunID: req.ParentRunID, Continue: req.Continue,
 		SkipUserMessage: req.SkipUserMessage, ReplyTo: req.ReplyToMessageID, UserID: req.UserID, UserName: req.UserName,
 	})
@@ -180,6 +184,9 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 	}
 	if receipt, ok := ctx.Value(acpQueueContextKey{}).(*acpQueueReceipt); ok {
 		runCtx = context.WithValue(runCtx, acpQueueContextKey{}, receipt)
+	}
+	if req.bypassAlwaysAsk {
+		runCtx = context.WithValue(runCtx, automationApprovalBypassKey{}, automationApprovalBypass{req.Tenant, req.Agent, req.Session, run.ID})
 	}
 	runCtx = context.WithValue(runCtx, computerRunKey{}, run.ID)
 	runCtx = context.WithValue(runCtx, disabledToolsKey{}, disabledToolSet(req.Options))
@@ -226,7 +233,10 @@ func (s *Service) executeTurn(ctx context.Context, live *liveRun, req TurnReques
 			turnErr = errors.New("ACP runtime is unavailable")
 			return
 		}
-		turnErr = s.acpRunner(ctx, req.Tenant, req.Agent, req.Session, live.id, req.Content)
+		turnErr = s.acpRunner(ctx, req.Tenant, req.Agent, req.Session, live.id, req.Context.render(req.Content))
+		if turnErr == nil {
+			turnErr = s.publishBotFallback(ctx, req, sess, live.id, "")
+		}
 		return
 	}
 	turnErr = s.chatTurn(ctx, live, req, agent, sess)
@@ -242,11 +252,11 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 	if req.SkipUserMessage {
 		target = req.ReplyToMessageID
 	}
-	messages := buildChainMessages(s.loadHistoryEvents(ctx, req.Session), target, sessionHistoryBudget)
+	messages := buildChainMessages(s.loadHistoryEvents(ctx, req.Session), target, int(^uint(0)>>1))
 	if len(messages) == 0 {
 		var attachments any
 		_ = json.Unmarshal(req.Attachments, &attachments)
-		messages = []chatMessage{userChatMessage(req.Content, parseChatAttachments(attachments))}
+		messages = []chatMessage{userChatMessage(req.Context.render(req.Content), parseChatAttachments(attachments))}
 	}
 	catalog := agentCatalog{}
 	if cloud.EnableTools && s.catalogProvider != nil {
@@ -327,21 +337,29 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		maxResult = toolOutputMaxBytes
 	}
 	var images map[string]inlineImage
-	if s.attachmentReader != nil {
-		images = resolveImages(ctx, messages, func(ctx context.Context, path string, max int64) ([]byte, error) {
-			return s.attachmentReader(ctx, req.Tenant, req.Agent, path, max)
-		})
+	if _, err := s.injectSteers(ctx, req, live.id, &messages); err != nil {
+		return err
 	}
+	refreshImages := func() {
+		if s.attachmentReader != nil {
+			images = resolveImages(ctx, messages, func(ctx context.Context, path string, max int64) ([]byte, error) {
+				return s.attachmentReader(ctx, req.Tenant, req.Agent, path, max)
+			})
+		}
+	}
+	refreshImages()
+	recoveredLength := false
+	seenCalls := map[string]bool{}
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		loaded := map[string]bool{}
-		if s.loadedTools != nil {
-			loaded = s.loadedTools(ctx, req.Tenant, req.Agent, req.Session)
+		messages, err = s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget, false)
+		if err != nil {
+			return err
 		}
 		payload := map[string]any{"model": model, "messages": renderMessages(system, messages, images, "openai"), "stream": true}
-		if tools := declaredTools(catalog, loaded, disabledToolsFromContext(ctx)); len(tools) > 0 {
+		if tools := declaredTools(catalog, nil, disabledToolsFromContext(ctx)); len(tools) > 0 {
 			payload["tools"] = tools
 		}
 		if sess.Reasoning != nil && *sess.Reasoning != "" {
@@ -354,18 +372,38 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 			payload["reasoning"] = opts.Reasoning
 		}
 		result, err := s.modelRound(ctx, req, live.id, model, payload)
+		if contextOverflow(err) {
+			compacted, compactErr := s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget/2, true)
+			if compactErr == nil && messageBytes(compacted) < messageBytes(messages) {
+				messages = compacted
+				payload["messages"] = renderMessages(system, messages, images, "openai")
+				result, err = s.modelRound(ctx, req, live.id, model, payload)
+			}
+		}
 		if err != nil {
 			return err
 		}
 		if len(result.ToolCalls) > 0 && round >= maxRounds {
 			return fmt.Errorf("maximum tool rounds (%d) reached", maxRounds)
 		}
-		if len(result.ToolCalls) > 0 {
-			for i := range result.ToolCalls {
-				if result.ToolCalls[i].ID == "" {
-					result.ToolCalls[i].ID = s.store.id()
+		if err := prepareToolCallIDs(result.ToolCalls, live.id, round, seenCalls); err != nil {
+			return err
+		}
+		incomplete := result.FinishReason == "length" || result.FinishReason == "max_tokens" || result.FinishReason == "incomplete" || result.FinishReason == "content_filter"
+		if incomplete {
+			failure := fmt.Errorf("model response incomplete (%s %s); no tools in this batch were executed. Retry with fewer calls and shorter arguments", result.FinishReason, result.IncompleteReason)
+			if len(result.ToolCalls) > 0 {
+				messages = append(messages, chatMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
+				if err := s.rejectRoundTools(ctx, req, sess, live.id, result.ToolCalls, maxResult, &messages, failure); err != nil {
+					return err
 				}
 			}
+			length := result.FinishReason == "length" || result.FinishReason == "max_tokens" || result.IncompleteReason == "max_output_tokens"
+			if !length || recoveredLength || len(result.ToolCalls) == 0 {
+				return failure
+			}
+			recoveredLength = true
+		} else if len(result.ToolCalls) > 0 {
 			messages = append(messages, chatMessage{Role: "assistant", Content: result.Text, ToolCalls: result.ToolCalls})
 			if err := s.runRoundTools(ctx, req, sess, live.id, result.ToolCalls, catalog, cloud.EnableTools, maxResult, &messages); err != nil {
 				return err
@@ -373,35 +411,18 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		} else {
 			messages = append(messages, chatMessage{Role: "assistant", Content: result.Text})
 		}
-		steers, err := s.store.drainSteers(ctx, req.Tenant, req.Agent, req.Session)
+		steers, err := s.injectSteers(ctx, req, live.id, &messages)
 		if err != nil {
 			return err
 		}
-		for steerIndex, steer := range steers {
-			contextText, hookErr := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "UserPromptSubmit", Prompt: steer.Content}, false)
-			if hookErr != nil {
-				for i := len(steers) - 1; i >= steerIndex; i-- {
-					_ = s.store.requeueFront(context.WithoutCancel(ctx), req.Tenant, req.Agent, req.Session, steers[i])
-				}
-				return hookErr
-			}
-			if contextText != "" {
-				messages = append(messages, chatMessage{Role: "system", Content: contextText})
-			}
-			payload := map[string]any{"messageId": steer.ID, "content": steer.Content, "attachments": json.RawMessage(validJSON(steer.Attachments, "[]")), "steer": true}
-			if steer.UserID != "" {
-				payload["userId"], payload["userName"] = steer.UserID, steer.UserName
-			}
-			if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "user_message", &live.id, payload); err != nil {
-				_ = s.store.requeueFront(context.WithoutCancel(ctx), req.Tenant, req.Agent, req.Session, steer)
+		if steers > 0 {
+			refreshImages()
+		}
+		if len(result.ToolCalls) == 0 && steers == 0 {
+			if _, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "Stop"}, true); err != nil {
 				return err
 			}
-			var attachments any
-			_ = json.Unmarshal(steer.Attachments, &attachments)
-			messages = append(messages, userChatMessage(steer.Content, parseChatAttachments(attachments)))
-		}
-		if len(result.ToolCalls) == 0 && len(steers) == 0 {
-			if _, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "Stop"}, true); err != nil {
+			if err := s.publishBotFallback(ctx, req, sess, live.id, result.Text); err != nil {
 				return err
 			}
 			if s.postRun {
@@ -527,14 +548,11 @@ func (s *Service) readModelRound(ctx context.Context, tenant, model string, payl
 }
 
 func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Session, runID string, calls []modelToolCall, catalog agentCatalog, enabled bool, maxResult int, messages *[]chatMessage) error {
-	allowed := reachableToolNames(catalog, nil)
-	for _, call := range calls {
-		if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "tool_call_start", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name}); err != nil {
-			return err
-		}
-		if _, err := s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "tool_call_args", &runID, map[string]any{"toolCallId": call.ID, "arguments": defaultArgs(call.Arguments)}); err != nil {
-			return err
-		}
+	if parallelToolBatch(ctx, calls, catalog) {
+		return s.runParallelTools(ctx, req, sess, runID, calls, catalog, enabled, maxResult, messages)
+	}
+	if err := s.startToolBatch(ctx, req, runID, calls); err != nil {
+		return err
 	}
 	var blocked error
 	var hookContext strings.Builder
@@ -543,19 +561,16 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 		var result json.RawMessage
 		var err error
 		executed := false
+		preflightErr := s.toolPreflight(ctx, req, call, catalog, enabled)
 		switch {
 		case blocked != nil:
 			err = blocked
-		case ctx.Err() != nil:
-			err = ctx.Err()
-		case !enabled || toolDisabled(ctx, call.Name):
-			err = fmt.Errorf("tool %s is disabled for this run", call.Name)
-		case s.toolRunner == nil:
-			err = errors.New("tool runner is unavailable")
-		case s.catalogProvider != nil && !allowed[call.Name]:
-			err = fmt.Errorf("tool %s is unavailable", call.Name)
-		case !json.Valid([]byte(defaultArgs(call.Arguments))):
-			err = errors.New("invalid tool arguments: expected JSON")
+		case preflightErr != nil:
+			err = preflightErr
+		case call.Name == "tool_execute":
+			// The dispatcher guards, approves and hooks the concrete target.
+			// Asking for the wrapper as well would duplicate every approval.
+			result, err = s.toolRunner(ctx, req.Tenant, req.Agent, req.Session, call.ID, call.Name, json.RawMessage(defaultArgs(call.Arguments)))
 		default:
 			check, approvalErr := s.toolExecutionGuard(ctx, req.Tenant, req.Agent, req.Session, runID, call.ID, call.Name, json.RawMessage(defaultArgs(call.Arguments)))
 			err = approvalErr
@@ -584,16 +599,11 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 			}
 		}
 		text = shrinkText(text, maxResult)
-		settle := context.WithoutCancel(ctx)
-		if _, writeErr := s.store.AppendEvent(settle, req.Tenant, req.Agent, req.Session, "tool_call_result", &runID, map[string]any{"toolCallId": call.ID, "name": call.Name, "resultText": text, "isError": isError, "durationMs": time.Since(started).Milliseconds()}); writeErr != nil {
+		message, writeErr := s.settleToolResult(ctx, req, sess, runID, call, toolBatchResult{result: result, err: err, duration: time.Since(started)}, maxResult)
+		if writeErr != nil {
 			return writeErr
 		}
-		*messages = append(*messages, chatMessage{Role: "tool", ToolCallID: call.ID, Content: text})
-		usageStatus := "ok"
-		if isError {
-			usageStatus = "error"
-		}
-		s.recordToolUsage(settle, sess, req.Tenant, req.Agent, req.Session, call.ID, call.Name, usageStatus, time.Since(started).Milliseconds())
+		*messages = append(*messages, message)
 		if executed && blocked == nil && ctx.Err() == nil {
 			event := "PostToolUse"
 			if isError {

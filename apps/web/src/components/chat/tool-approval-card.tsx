@@ -1,51 +1,72 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ShieldCheck, ShieldX } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { TimelineItem } from "@/lib/cloud-agent";
+import type { PendingToolApproval } from "@/lib/tool-approvals";
 
-function remainingLabel(expiresAt?: string | null): string | null {
-  if (!expiresAt) return null;
-  const seconds = Math.ceil((Date.parse(expiresAt) - Date.now()) / 1000);
-  if (!Number.isFinite(seconds)) return null;
-  return seconds <= 0 ? "等待超时处理" : seconds < 60 ? `${seconds} 秒后超时` : `${Math.ceil(seconds / 60)} 分钟后超时`;
+type ApprovalDecision = { requestId: string; decision: "approved" | "denied"; alwaysAllow?: boolean };
+
+export function ToolApprovalTray({ items, onResolve }: {
+  items: PendingToolApproval[];
+  onResolve: (input: ApprovalDecision) => Promise<unknown>;
+}) {
+  const [submitted, setSubmitted] = useState<Set<string>>(() => new Set());
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!items.length) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [items.length]);
+  const pending = items.filter(item => !submitted.has(item.requestId) && !item.resolved
+    && (!item.expiresAt || Date.parse(item.expiresAt) > now));
+  const item = pending[0];
+  if (!item) return null;
+  return <aside aria-label="待审批工具调用" className="pointer-events-none absolute inset-x-4 bottom-full z-30 pb-3">
+    <div className="mx-auto flex max-w-3xl justify-end">
+      <div className="pointer-events-auto w-full max-w-sm overflow-hidden rounded-xl bg-popover text-popover-foreground shadow-lg ring-1 ring-border motion-safe:animate-rise">
+        <div className="flex items-center justify-between px-3 pt-3 text-xs text-muted-foreground"><span>等待你的批准</span>{pending.length > 1 ? <span>还有 {pending.length - 1} 项</span> : null}</div>
+        <ToolApprovalCard key={item.requestId} item={item} onResolve={async input => {
+          await onResolve(input);
+          setSubmitted(current => new Set(current).add(input.requestId));
+        }} />
+      </div>
+    </div>
+  </aside>;
 }
-const resolutions = { approved: "已允许", denied: "已拒绝", timeout: "已超时", cancelled: "已取消" };
 
 export function ToolApprovalCard({ item, onResolve }: {
-  item: Extract<TimelineItem, { kind: "tool_approval" }>;
-  onResolve?: (input: { requestId: string; decision: "approved" | "denied"; alwaysAllow?: boolean }) => void | Promise<unknown>;
+  item: PendingToolApproval;
+  onResolve: (input: ApprovalDecision) => Promise<unknown>;
 }) {
-  const [, tick] = useState(0);
   const [pending, setPending] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  useEffect(() => {
-    if (!item.expiresAt || item.resolved) return;
-    const timer = window.setInterval(() => tick(value => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [item.expiresAt, item.resolved]);
   let argumentsText = item.argumentsJson ?? "";
   let fields: Record<string, unknown> = {};
-  try { fields = JSON.parse(argumentsText); argumentsText = JSON.stringify(fields, null, 2); } catch { /* Preserve the actual command if it was not JSON. */ }
-  const summary = ["command", "cmd", "path", "url", "target", "computerId"].flatMap(key => typeof fields?.[key] === "string" ? [`${key}: ${fields[key]}`] : []);
+  try {
+    const parsed: unknown = JSON.parse(argumentsText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) fields = parsed as Record<string, unknown>;
+    argumentsText = JSON.stringify(parsed, null, 2);
+  } catch { /* Preserve non-JSON command text. */ }
+  const summary = ["command", "cmd", "path", "url", "target", "computerId"].flatMap(key => typeof fields[key] === "string" ? [`${key}: ${fields[key]}`] : []);
   const expired = !!item.expiresAt && Date.parse(item.expiresAt) <= Date.now();
-  const deny = item.resolved?.decision === "denied" || item.resolved?.decision === "timeout";
+  const seconds = item.expiresAt ? Math.max(0, Math.ceil((Date.parse(item.expiresAt) - Date.now()) / 1000)) : null;
   async function resolve(decision: "approved" | "denied") {
-    if (pending || submitted || expired || !onResolve) return;
+    if (pending || expired) return;
     setPending(true);
-    try { await onResolve({ requestId: item.requestId, decision, alwaysAllow: false }); setSubmitted(true); }
-    catch { /* The caller reports the error; retain the pending decision for retry. */ }
+    try { await onResolve({ requestId: item.requestId, decision, alwaysAllow: false }); }
+    catch { /* The caller reports errors; keep the card available for retry. */ }
     finally { setPending(false); }
   }
-  return <div className="surface-2 my-2 max-w-md animate-rise space-y-2.5 rounded-xl px-3 py-3 text-sm">
-    <div className="flex items-start gap-2">{deny ? <ShieldX className="mt-0.5 size-4 shrink-0 text-destructive" /> : <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}<span className="min-w-0 break-words font-medium">{item.title || item.qualifiedName || item.toolName || "工具调用"}</span></div>
-    {summary.length ? <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{summary.join("\n")}</pre> : argumentsText ? <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{argumentsText}</pre> : <p className="text-xs text-muted-foreground">未提供调用参数</p>}
-    {item.ai?.degraded ? <p className="text-xs text-muted-foreground">AI 审批不可用，请人工确认。</p> : item.ai?.decision === "deny" ? <p className="text-xs text-destructive">AI 建议拒绝{item.ai.rationale ? `：${item.ai.rationale}` : ""}</p> : null}
-    {argumentsText || item.ai ? <details className="text-xs text-muted-foreground"><summary className="cursor-pointer weight-hover">详情</summary>{argumentsText ? <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-2 font-mono text-[11px] text-foreground">{argumentsText}</pre> : null}{item.ai ? <div className="mt-2 space-y-1"><p>{item.ai.model} · AI 建议{item.ai.decision === "allow" ? "允许" : "拒绝"}</p>{Number.isFinite(item.ai.confidence) ? <p>置信度 {Math.round(item.ai.confidence * 100)}%</p> : null}{item.ai.rationale ? <p className="break-words">{item.ai.rationale}</p> : null}</div> : null}</details> : null}
-    {item.resolved ? <p className="text-xs text-muted-foreground">{resolutions[item.resolved.decision]}</p> : <>
-      {item.expiresAt ? <p className="text-[11px] text-muted-foreground">{remainingLabel(item.expiresAt)}</p> : null}
-      <div className="flex gap-2"><Button size="sm" disabled={pending || submitted || expired || !onResolve} onClick={() => void resolve("approved")}>允许一次</Button><Button size="sm" variant="outline" disabled={pending || submitted || expired || !onResolve} onClick={() => void resolve("denied")}>拒绝</Button></div>
-    </>}
+  if (item.resolved || expired) return null;
+  return <div className="max-h-[min(26rem,55dvh)] space-y-2.5 overflow-y-auto p-3 text-sm">
+    <div className="flex items-start gap-2"><ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 break-words font-medium">{item.title || item.qualifiedName || item.toolName || "工具调用"}</span></div>
+    {summary.length || argumentsText ? <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">{summary.length ? summary.join("\n") : argumentsText}</pre> : <p className="text-xs text-muted-foreground">未提供调用参数</p>}
+    {item.ai?.degraded ? <p className="text-xs text-muted-foreground">AI 审批不可用，请人工确认。</p> : item.ai?.decision === "deny" ? <p className="text-xs text-muted-foreground">AI 建议拒绝{item.ai.rationale ? `：${item.ai.rationale}` : ""}</p> : item.reason === "ai_low_confidence" ? <p className="text-xs text-muted-foreground">AI 置信度不足，请人工确认。</p> : null}
+    {argumentsText || item.ai ? <details className="text-xs text-muted-foreground"><summary className="cursor-pointer weight-hover">调用详情</summary>{argumentsText ? <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-2 font-mono text-[11px] text-foreground">{argumentsText}</pre> : null}{item.ai ? <div className="mt-2 space-y-1"><p>{item.ai.model}</p>{Number.isFinite(item.ai.confidence) ? <p>置信度 {Math.round(item.ai.confidence * 100)}%</p> : null}{item.ai.rationale ? <p className="break-words">{item.ai.rationale}</p> : null}</div> : null}</details> : null}
+    <div className="flex items-center gap-2">
+      {seconds !== null ? <span className="mr-auto text-[11px] text-muted-foreground">{seconds < 60 ? `${seconds} 秒` : `${Math.ceil(seconds / 60)} 分钟`}后超时</span> : <span className="mr-auto" />}
+      <Button size="sm" variant="ghost" disabled={pending} onClick={() => void resolve("denied")}>拒绝</Button>
+      <Button size="sm" disabled={pending} onClick={() => void resolve("approved")}>{pending ? "处理中…" : "批准"}</Button>
+    </div>
   </div>;
 }

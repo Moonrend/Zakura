@@ -408,6 +408,7 @@ func (h *handler) patchInstance(w http.ResponseWriter, r *http.Request) {
 			statusErr(w, err)
 			return
 		}
+		h.invalidateTenantToolCatalogs(r.Context(), p.TenantID)
 		h.getInstanceHTTP(w, r)
 		return
 	}

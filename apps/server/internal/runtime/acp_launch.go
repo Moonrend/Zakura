@@ -160,10 +160,6 @@ func (h *handler) startACPContainer(ctx context.Context, runner *runnerSession, 
 	identity, _ := json.Marshal([]string{exec.computer.TenantID, exec.spaceID, sid, profileID, h.store.id()})
 	digest := sha256.Sum256(identity)
 	name := "zakura-acp-" + hex.EncodeToString(digest[:16])
-	var pulled map[string]any
-	if err = runner.call(ctx, "docker.pull", map[string]any{"image": image}, &pulled); err != nil {
-		return "", fmt.Errorf("pull ACP adapter: %w", err)
-	}
 	var created acpSidecarContainer
 	err = runner.call(ctx, "docker.create", map[string]any{
 		"name": name, "image": image, "stdinOpen": true, "restart": "no",

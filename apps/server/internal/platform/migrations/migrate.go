@@ -78,6 +78,12 @@ var workspaceConnectionsSQL string
 //go:embed sql/0022_computer_terminal_connections.sql
 var computerTerminalConnectionsSQL string
 
+//go:embed sql/0023_gateway_conversations.sql
+var gatewayConversationsSQL string
+
+//go:embed sql/0024_automation_approvals.sql
+var automationApprovalsSQL string
+
 // postgres replaces sql on PostgreSQL when the dialects need different
 // statements rather than the textual type substitutions of postgresSchema.
 type migration struct {
@@ -108,6 +114,8 @@ var ordered = []migration{
 	{20, "workspace_create_operations", workspaceCreateOperationsSQL, ""},
 	{21, "workspace_connections", workspaceConnectionsSQL, ""},
 	{22, "computer_terminal_connections", computerTerminalConnectionsSQL, ""},
+	{23, "gateway_conversations", gatewayConversationsSQL, ""},
+	{24, "automation_approvals", automationApprovalsSQL, "ALTER TABLE agent_schedules ADD COLUMN bypass_tool_approval BOOLEAN NOT NULL DEFAULT FALSE;"},
 }
 
 func Apply(ctx context.Context, db *sql.DB, dialect string, rebind func(string) string) error {

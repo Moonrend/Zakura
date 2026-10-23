@@ -93,15 +93,12 @@ func TestMCPSpaceAuthorizationAndScopes(t *testing.T) {
 			t.Fatalf("space-scoped tools (%+v): %d %#v", p, code, listed)
 		}
 		tools := listed["result"].(map[string]any)["tools"].([]any)
-		if len(tools) != 2 {
-			t.Fatalf("space tool count (%+v): %d %#v", p, code, listed)
-		}
 		names := map[string]bool{}
 		for _, raw := range tools {
 			names[raw.(map[string]any)["name"].(string)] = true
 		}
-		if !names["alpha-tools__echo"] || !names["beta-tools__echo"] {
-			t.Fatalf("tool names not bare-qualified (%+v): %#v", p, tools)
+		if !names["tool_search"] || !names["tool_execute"] || !names["list_computers"] || !names["read_skill"] {
+			t.Fatalf("compact tool entry points missing (%+v): %#v", p, tools)
 		}
 		code, legacy := call(p, "/mcp/spaces/"+space.Slug, "tools/call", "re_alpha-tools__echo")
 		if code != http.StatusOK || legacy["error"] != nil {
@@ -116,8 +113,12 @@ func TestMCPSpaceAuthorizationAndScopes(t *testing.T) {
 			t.Fatalf("agent alias tools (%+v): %d %#v", p, code, aliasListed)
 		}
 		aliasTools := aliasListed["result"].(map[string]any)["tools"].([]any)
-		if len(aliasTools) != 2 {
-			t.Fatalf("agent alias tool count (%+v): %#v", p, aliasListed)
+		aliasNames := map[string]bool{}
+		for _, tool := range aliasTools {
+			aliasNames[tool.(map[string]any)["name"].(string)] = true
+		}
+		if !aliasNames["tool_search"] || !aliasNames["tool_execute"] || !aliasNames["list_computers"] || !aliasNames["read_skill"] {
+			t.Fatalf("agent alias native tools missing (%+v): %#v", p, aliasListed)
 		}
 		code, denied := call(p, "/mcp/spaces/"+space.Slug, "tools/call", "inst-x:echo")
 		if code != http.StatusOK || denied["error"] == nil {

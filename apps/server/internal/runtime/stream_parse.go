@@ -25,12 +25,13 @@ type modelUsage struct {
 }
 
 type modelRoundResult struct {
-	Text         string
-	Reasoning    string
-	ToolCalls    []modelToolCall
-	FinishReason string
-	Model        string
-	Usage        *modelUsage
+	Text             string
+	Reasoning        string
+	ToolCalls        []modelToolCall
+	FinishReason     string
+	IncompleteReason string
+	Model            string
+	Usage            *modelUsage
 }
 
 // streamSink receives incremental output while a response is parsed. tick is
@@ -135,13 +136,16 @@ type streamAccumulator struct {
 	// Anthropic content blocks keyed by index.
 	blocks map[int]*anthropicBlock
 	// Responses API function calls keyed by item id.
-	respCalls map[string]*modelToolCall
-	respOrder []string
-	finish    string
-	model     string
-	usage     *modelUsage
-	done      bool
-	sawEvent  bool
+	respCalls        map[string]*modelToolCall
+	respOrder        []string
+	respIndexes      map[int]string
+	finish           string
+	incompleteReason string
+	protocolErr      error
+	model            string
+	usage            *modelUsage
+	done             bool
+	sawEvent         bool
 }
 
 type anthropicBlock struct {
@@ -155,7 +159,7 @@ func newStreamAccumulator(sink streamSink) *streamAccumulator {
 	if sink == nil {
 		sink = discardSink{}
 	}
-	return &streamAccumulator{sink: sink, openaiCalls: map[int]*modelToolCall{}, blocks: map[int]*anthropicBlock{}, respCalls: map[string]*modelToolCall{}}
+	return &streamAccumulator{sink: sink, openaiCalls: map[int]*modelToolCall{}, blocks: map[int]*anthropicBlock{}, respCalls: map[string]*modelToolCall{}, respIndexes: map[int]string{}}
 }
 
 func (a *streamAccumulator) addText(s string) {
@@ -191,7 +195,7 @@ func parseModelStream(body io.Reader, sink streamSink) (modelRoundResult, error)
 			return acc.result(), errStreamInterrupted
 		}
 	}
-	return acc.result(), nil
+	return acc.result(), acc.protocolErr
 }
 
 func (a *streamAccumulator) handle(ev sseEvent) (bool, error) {
@@ -268,6 +272,7 @@ func (a *streamAccumulator) handleOpenAI(m map[string]any) {
 			continue
 		}
 		delta, _ := choice["delta"].(map[string]any)
+		fullMessage := delta == nil
 		if delta == nil {
 			// Non-delta chunks (some proxies) carry a full message.
 			delta, _ = choice["message"].(map[string]any)
@@ -295,15 +300,29 @@ func (a *streamAccumulator) handleOpenAI(m map[string]any) {
 					a.openaiCalls[idx] = call
 				}
 				if id, ok := tc["id"].(string); ok && id != "" {
+					if call.ID != "" && call.ID != id {
+						a.protocolErr = errors.New("conflicting tool call IDs at the same index")
+					}
 					call.ID = id
 				}
 				fn, _ := tc["function"].(map[string]any)
 				if name, ok := fn["name"].(string); ok && name != "" {
-					call.Name = name
+					if fullMessage {
+						if call.Name != "" && call.Name != name {
+							a.protocolErr = errors.New("conflicting full tool names")
+						}
+						call.Name = name
+					} else {
+						call.Name += name
+					}
 				}
 				switch args := fn["arguments"].(type) {
 				case string:
-					call.Arguments += args
+					if fullMessage {
+						call.Arguments = args
+					} else {
+						call.Arguments += args
+					}
 				case map[string]any:
 					raw, _ := json.Marshal(args)
 					call.Arguments = string(raw)
@@ -328,6 +347,9 @@ func (a *streamAccumulator) handleAnthropic(typ string, m map[string]any) (bool,
 		}
 	case "content_block_start":
 		idx := intValue(m["index"])
+		if a.blocks[idx] != nil {
+			return true, errors.New("duplicate Anthropic content block index")
+		}
 		cb, _ := m["content_block"].(map[string]any)
 		blockType, _ := cb["type"].(string)
 		b := &anthropicBlock{kind: blockType}
@@ -404,16 +426,20 @@ func (a *streamAccumulator) handleResponses(typ string, m map[string]any) (bool,
 		if key == "" {
 			key, _ = item["call_id"].(string)
 		}
-		call := a.respCalls[key]
-		if call == nil {
-			call = &modelToolCall{}
-			a.respCalls[key] = call
-			a.respOrder = append(a.respOrder, key)
+		call, err := a.responseCall(key, m)
+		if err != nil {
+			return true, err
 		}
 		if id, ok := item["call_id"].(string); ok && id != "" {
+			if call.ID != "" && call.ID != id {
+				return true, errors.New("conflicting Responses call IDs")
+			}
 			call.ID = id
 		}
 		if name, ok := item["name"].(string); ok && name != "" {
+			if call.Name != "" && call.Name != name {
+				return true, errors.New("conflicting Responses tool names")
+			}
 			call.Name = name
 		}
 		if args, ok := item["arguments"].(string); ok && args != "" && typ == "response.output_item.done" {
@@ -421,11 +447,9 @@ func (a *streamAccumulator) handleResponses(typ string, m map[string]any) (bool,
 		}
 	case "response.function_call_arguments.delta":
 		key, _ := m["item_id"].(string)
-		call := a.respCalls[key]
-		if call == nil {
-			call = &modelToolCall{}
-			a.respCalls[key] = call
-			a.respOrder = append(a.respOrder, key)
+		call, err := a.responseCall(key, m)
+		if err != nil {
+			return true, err
 		}
 		s, _ := m["delta"].(string)
 		call.Arguments += s
@@ -437,7 +461,12 @@ func (a *streamAccumulator) handleResponses(typ string, m map[string]any) (bool,
 		if u, ok := resp["usage"].(map[string]any); ok {
 			a.usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
 		}
-		a.finish = "stop"
+		a.finish, a.incompleteReason = responsesFinish(resp)
+		if typ == "response.incomplete" {
+			a.finish = "incomplete"
+			details, _ := resp["incomplete_details"].(map[string]any)
+			a.incompleteReason, _ = details["reason"].(string)
+		}
 		a.done = true
 		return true, nil
 	case "response.failed", "error":
@@ -450,17 +479,66 @@ func (a *streamAccumulator) handleResponses(typ string, m map[string]any) (bool,
 	return false, nil
 }
 
+func responsesFinish(response map[string]any) (string, string) {
+	status, _ := response["status"].(string)
+	if status == "incomplete" || status == "failed" || status == "cancelled" || status == "in_progress" || status == "queued" {
+		details, _ := response["incomplete_details"].(map[string]any)
+		reason, _ := details["reason"].(string)
+		if reason == "" {
+			reason = status
+		}
+		return "incomplete", reason
+	}
+	return "stop", ""
+}
+
+func (a *streamAccumulator) responseCall(key string, event map[string]any) (*modelToolCall, error) {
+	index, indexed := event["output_index"]
+	if indexed {
+		idx := intValue(index)
+		if previous, ok := a.respIndexes[idx]; ok {
+			if key != "" && key != previous {
+				// A previously anonymous item can acquire its provider ID.
+				if !strings.HasPrefix(previous, "index:") {
+					return nil, errors.New("conflicting Responses item IDs")
+				}
+				if existing := a.respCalls[key]; existing != nil && existing != a.respCalls[previous] {
+					return nil, errors.New("Responses item identity is already in use")
+				}
+				a.respCalls[key] = a.respCalls[previous]
+				a.respIndexes[idx] = key
+			}
+			if key == "" {
+				key = previous
+			}
+		} else {
+			if key == "" {
+				key = fmt.Sprintf("index:%d", idx)
+			}
+			a.respIndexes[idx] = key
+		}
+	}
+	if key == "" {
+		return nil, errors.New("Responses tool item has no identity or output index")
+	}
+	call := a.respCalls[key]
+	if call == nil {
+		call = &modelToolCall{}
+		a.respCalls[key] = call
+		a.respOrder = append(a.respOrder, key)
+	}
+	return call, nil
+}
+
 func (a *streamAccumulator) result() modelRoundResult {
-	out := modelRoundResult{Text: a.text.String(), Reasoning: a.reasoning.String(), FinishReason: a.finish, Model: a.model, Usage: a.usage}
+	out := modelRoundResult{Text: a.text.String(), Reasoning: a.reasoning.String(), FinishReason: a.finish, IncompleteReason: a.incompleteReason, Model: a.model, Usage: a.usage}
 	indexes := make([]int, 0, len(a.openaiCalls))
 	for idx := range a.openaiCalls {
 		indexes = append(indexes, idx)
 	}
 	sort.Ints(indexes)
 	for _, idx := range indexes {
-		if c := a.openaiCalls[idx]; c.Name != "" {
-			out.ToolCalls = append(out.ToolCalls, *c)
-		}
+		out.ToolCalls = append(out.ToolCalls, *a.openaiCalls[idx])
 	}
 	blockIdx := make([]int, 0, len(a.blocks))
 	for idx := range a.blocks {
@@ -469,7 +547,7 @@ func (a *streamAccumulator) result() modelRoundResult {
 	sort.Ints(blockIdx)
 	for _, idx := range blockIdx {
 		b := a.blocks[idx]
-		if b.kind != "tool_use" || b.name == "" {
+		if b.kind != "tool_use" {
 			continue
 		}
 		args := strings.TrimSpace(b.input.String())
@@ -479,9 +557,7 @@ func (a *streamAccumulator) result() modelRoundResult {
 		out.ToolCalls = append(out.ToolCalls, modelToolCall{ID: b.id, Name: b.name, Arguments: args})
 	}
 	for _, key := range a.respOrder {
-		if c := a.respCalls[key]; c.Name != "" {
-			out.ToolCalls = append(out.ToolCalls, *c)
-		}
+		out.ToolCalls = append(out.ToolCalls, *a.respCalls[key])
 	}
 	for i := range out.ToolCalls {
 		if strings.TrimSpace(out.ToolCalls[i].Arguments) == "" {
@@ -536,15 +612,13 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 				encoded, _ := json.Marshal(args)
 				call.Arguments = string(encoded)
 			}
-			if call.Name != "" {
-				out.ToolCalls = append(out.ToolCalls, call)
-			}
+			out.ToolCalls = append(out.ToolCalls, call)
 		}
 		out.FinishReason, _ = choice["finish_reason"].(string)
 		if u, ok := m["usage"].(map[string]any); ok {
 			out.Usage = &modelUsage{PromptTokens: intValue(u["prompt_tokens"]), CompletionTokens: intValue(u["completion_tokens"])}
 		}
-	case m["output"] != nil || m["output_text"] != nil:
+	case m["output"] != nil || m["output_text"] != nil || m["object"] == "response":
 		items, _ := m["output"].([]any)
 		var text strings.Builder
 		for _, ri := range items {
@@ -563,9 +637,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 				call.ID, _ = item["call_id"].(string)
 				call.Name, _ = item["name"].(string)
 				call.Arguments, _ = item["arguments"].(string)
-				if call.Name != "" {
-					out.ToolCalls = append(out.ToolCalls, call)
-				}
+				out.ToolCalls = append(out.ToolCalls, call)
 			case "reasoning":
 				summary, _ := item["summary"].([]any)
 				for _, rs := range summary {
@@ -580,7 +652,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 		if out.Text == "" {
 			out.Text, _ = m["output_text"].(string)
 		}
-		out.FinishReason = "stop"
+		out.FinishReason, out.IncompleteReason = responsesFinish(m)
 		if u, ok := m["usage"].(map[string]any); ok {
 			out.Usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
 		}
@@ -605,9 +677,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 				if call.Arguments == "null" {
 					call.Arguments = "{}"
 				}
-				if call.Name != "" {
-					out.ToolCalls = append(out.ToolCalls, call)
-				}
+				out.ToolCalls = append(out.ToolCalls, call)
 			}
 		}
 		out.Text = text.String()

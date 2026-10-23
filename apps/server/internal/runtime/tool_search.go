@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -39,7 +40,7 @@ func tokenizeToolText(text string) []string {
 	text = strings.ToLower(text)
 	out := []string{}
 	for _, term := range strings.FieldsFunc(text, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
 		if term == "" || toolStopWords[term] {
 			continue
@@ -79,7 +80,7 @@ func toolSchemaText(schema any, parts *[]string) {
 }
 
 func buildToolSearchDoc(t agentTool) toolSearchDoc {
-	parts := []string{t.Name, strings.ReplaceAll(t.Name, "_", " "), t.Description}
+	parts := []string{t.Name, strings.ReplaceAll(t.Name, "_", " "), t.Description, t.ServerName, t.ServerRef, t.ServerDescription}
 	toolSchemaText(t.InputSchema, &parts)
 	filtered := make([]string, 0, len(parts))
 	for _, part := range parts {

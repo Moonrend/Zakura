@@ -78,6 +78,24 @@ func (h *handler) PatchMCPConfig(ctx context.Context, tenant, id string, patch j
 	if json.Unmarshal(inst.Config, &current) != nil || json.Unmarshal(patch, &next) != nil {
 		return "", "", errors.New("invalid MCP config")
 	}
+	if value, ok := next["exposure"]; ok {
+		exposure, valid := value.(string)
+		if !valid || !mcpExposureValue(exposure) {
+			return "", "", errors.New("exposure must be direct, deferred or hidden")
+		}
+	}
+	if value, ok := next["toolExposure"]; ok {
+		overrides, valid := value.(map[string]any)
+		if !valid {
+			return "", "", errors.New("toolExposure must be an object")
+		}
+		for name, value := range overrides {
+			exposure, valid := value.(string)
+			if name == "" || !valid || !mcpExposureValue(exposure) {
+				return "", "", errors.New("toolExposure values must be direct, deferred or hidden")
+			}
+		}
+	}
 	for _, key := range []string{"ownerSpaceId", "serverComputerId", "runtimeNodeId", "dataSpaceId", "dataPath"} {
 		if value, ok := next[key]; ok {
 			a, _ := json.Marshal(value)

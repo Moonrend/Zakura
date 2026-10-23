@@ -18,6 +18,7 @@ export type AgentSchedule = {
   prompt: string;
   project: string | null;
   enabled: boolean;
+  bypassToolApproval: boolean;
   maxRuns: number | null;
   runCount: number;
   timezone: string;
@@ -251,6 +252,7 @@ export async function createSchedule(
     prompt: string;
     project?: string | null;
     enabled?: boolean;
+    bypassToolApproval?: boolean;
     maxRuns?: number | null;
   },
 ) {
@@ -270,6 +272,7 @@ export async function updateSchedule(
     pattern: string;
     prompt: string;
     enabled: boolean;
+    bypassToolApproval: boolean;
     maxRuns: number | null;
     project?: string | null;
   }>,

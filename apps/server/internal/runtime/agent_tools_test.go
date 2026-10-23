@@ -211,7 +211,7 @@ func TestAgentToolCatalogResourceToolsGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"} {
+	for _, name := range []string{"list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"} {
 		if _, ok := catalogByName(catalog)[name]; ok {
 			t.Fatalf("%s registered without any MCP instance", name)
 		}
@@ -235,8 +235,8 @@ func TestAgentToolCatalogResourceToolsGate(t *testing.T) {
 			t.Fatalf("%s kind = %q", name, tool.Kind)
 		}
 	}
-	if byName["list_mcp_resources"].Exposure != "deferred" || byName["read_mcp_resource"].Exposure != "deferred" {
-		t.Fatalf("resource tools should be deferred: %+v", byName)
+	if byName["list_mcp_resources"].Exposure != "direct" || byName["read_mcp_resource"].Exposure != "direct" {
+		t.Fatalf("native resource tools should be direct: %+v", byName)
 	}
 }
 
@@ -501,8 +501,8 @@ func TestAgentToolCatalogHiddenMCP(t *testing.T) {
 	if tool, ok := byName["mcp__gh__search_issues"]; !ok || tool.Exposure != "hidden" {
 		t.Fatalf("hidden tool wrong: %+v", tool)
 	}
-	if _, ok := byName["tool_search"]; ok {
-		t.Fatal("tool_search present with only hidden MCP tools")
+	if _, ok := byName["tool_search"]; !ok {
+		t.Fatal("tool_search must remain available for schema inspection")
 	}
 }
 

@@ -24,6 +24,10 @@ func TestMain(m *testing.M) {
 		}
 		switch os.Args[1] {
 		case "version":
+			if message := os.Getenv("ZAKURA_TEST_DOCKER_VERSION_ERROR"); message != "" {
+				fmt.Fprintln(os.Stderr, message)
+				os.Exit(1)
+			}
 			fmt.Println("28.0.0")
 		case "run":
 			if os.Getenv("ZAKURA_TEST_CREATE_CONFLICT") == "1" {

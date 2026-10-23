@@ -85,6 +85,11 @@ func (h *handler) authorizeMCPToolOperation(ctx context.Context, tenant, agent, 
 		if inst.ID != id {
 			continue
 		}
+		cfg := map[string]any{}
+		_ = json.Unmarshal(inst.Config, &cfg)
+		if method == "tools/call" && toolExposureOf(cfg, name) == "hidden" {
+			return ErrNotFound
+		}
 		policies, err := h.effectiveMCPPolicies(ctx, tenant, agent, space)
 		if err != nil {
 			return err

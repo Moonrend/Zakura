@@ -65,6 +65,7 @@ type EditForm = {
   customPattern: string;
   prompt: string;
   enabled: boolean;
+  bypassToolApproval: boolean;
   project: string;
 };
 
@@ -93,6 +94,7 @@ export function AutomationPanel({
   const [createOpen, setCreateOpen] = useState(false);
   const [createGoal, setCreateGoal] = useState("");
   const [createProject, setCreateProject] = useState("");
+  const [createBypassApproval, setCreateBypassApproval] = useState(false);
 
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<AgentSchedule | null>(null);
@@ -137,6 +139,7 @@ export function AutomationPanel({
 
   function openCreate() {
     setCreateGoal("");
+    setCreateBypassApproval(false);
     setCreateProject(projects[0] ?? "");
     setCreateOpen(true);
   }
@@ -147,7 +150,7 @@ export function AutomationPanel({
       toast.error("说一下要定时做什么");
       return;
     }
-    const bits = [goal];
+    const bits = [goal, `请将 create_routine 的 bypassToolApproval 设置为 ${createBypassApproval}。${createBypassApproval ? "我允许此后台任务运行时绕过始终审批，显式拒绝与人工审批规则仍需遵守。" : "此任务遵循当前审批策略。"}`];
     if (createProject.trim()) {
       bits.push(`请把 create_routine 的 project 设为 ${createProject.trim()}。`);
     }
@@ -164,6 +167,7 @@ export function AutomationPanel({
       customPattern: custom || s.pattern,
       prompt: s.prompt,
       enabled: s.enabled,
+      bypassToolApproval: s.bypassToolApproval ?? false,
       project: s.project ?? "",
     });
     setEditOpen(true);
@@ -191,6 +195,7 @@ export function AutomationPanel({
         name,
         prompt,
         enabled: form.enabled,
+        bypassToolApproval: form.bypassToolApproval,
         project: form.project.trim() || null,
         ...(isListener ? {} : { pattern }),
       });
@@ -435,6 +440,7 @@ export function AutomationPanel({
             <p className="text-[11px] text-muted-foreground">
               Agent 会自行决定名称、cron 或事件监听、以及任务意图。⌘/Ctrl + Enter 发送
             </p>
+            <ApprovalBypassSwitch checked={createBypassApproval} onChange={setCreateBypassApproval} />
             {projects.length > 0 ? (
               <div className="space-y-1.5">
                 <Label>项目</Label>
@@ -583,6 +589,7 @@ export function AutomationPanel({
                   </SelectContent>
                 </Select>
               </div>
+              <ApprovalBypassSwitch checked={form.bypassToolApproval} onChange={value => setForm(current => current ? { ...current, bypassToolApproval: value } : current)} />
               <div className="flex items-center justify-between gap-3">
                 <span className="text-sm">启用</span>
                 <Switch
@@ -607,6 +614,13 @@ export function AutomationPanel({
       </Dialog>
     </div>
   );
+}
+
+function ApprovalBypassSwitch({ checked, onChange }: { checked: boolean; onChange: (value: boolean) => void }) {
+  return <div className="flex items-start justify-between gap-4 py-2">
+    <div className="space-y-1"><p className="text-sm">绕过始终审批</p><p className="text-xs text-muted-foreground">仅此任务运行时自动继续。显式拒绝、人工审批规则和 AI 审批仍然生效。</p></div>
+    <Switch className="mt-0.5 shrink-0" aria-label="绕过始终审批" checked={checked} onCheckedChange={onChange} />
+  </div>;
 }
 
 function TaskRow({

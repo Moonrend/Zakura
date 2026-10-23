@@ -1,4 +1,13 @@
 import { api } from "@/lib/api";
+import type { SpaceToolApprovalConfig } from "@zakura/shared";
+
+export function fetchSpaceApprovals(id: string) {
+  return api<SpaceToolApprovalConfig>(`/api/spaces/${encodeURIComponent(id)}/approvals`);
+}
+
+export function saveSpaceApprovals(id: string, patch: Partial<SpaceToolApprovalConfig>) {
+  return api<SpaceToolApprovalConfig>(`/api/spaces/${encodeURIComponent(id)}/approvals`, { method: "PUT", json: patch });
+}
 
 export type SpaceItem = {
   id: string;

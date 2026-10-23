@@ -8,6 +8,7 @@ export const SPACE_SUBNAV = [
   { href: "computers", label: "其他电脑" },
   { href: "mcp", label: "MCP" },
   { href: "web", label: "网页" },
+  { href: "approvals", label: "工具审批" },
   { href: "automation", label: "自动化" },
   { href: "tool-calls", label: "调用记录" },
 ] as const;

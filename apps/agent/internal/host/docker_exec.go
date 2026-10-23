@@ -8,14 +8,13 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/Moonrend/Zakura/apps/agent/internal/docker"
 )
 
 // StartDockerExec 交互式 docker exec -i，复用 PtySession 的管道接口。
 func StartDockerExec(container string, command []string, workdir string, env map[string]string) (*LiveStream, error) {
-	bin := os.Getenv("ZAKURA_DOCKER")
-	if bin == "" {
-		bin = "docker"
-	}
+	bin := docker.Binary()
 	ctx, cancel := context.WithCancel(context.Background())
 	args := []string{"exec", "-i"}
 	if workdir != "" {
@@ -55,10 +54,7 @@ func StartDockerExecTTY(container string, command []string, workdir string, env 
 	if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 {
 		return nil, fmt.Errorf("invalid terminal size")
 	}
-	bin := os.Getenv("ZAKURA_DOCKER")
-	if bin == "" {
-		bin = "docker"
-	}
+	bin := docker.Binary()
 	return StartPty(os.TempDir(), ExecParams{Command: append([]string{bin}, args...), Env: map[string]string{"TERM": "xterm-256color"}}, cols, rows)
 }
 
@@ -90,10 +86,7 @@ func wrapPipes(id string, stdin io.WriteCloser, stdout io.ReadCloser, cmd *exec.
 
 // StartDockerAttach 接到容器 PID1 的 stdio（ACP adapter 用）。
 func StartDockerAttach(container string) (*LiveStream, error) {
-	bin := os.Getenv("ZAKURA_DOCKER")
-	if bin == "" {
-		bin = "docker"
-	}
+	bin := docker.Binary()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, "attach", "--sig-proxy=false", container)
 	stdin, err := cmd.StdinPipe()

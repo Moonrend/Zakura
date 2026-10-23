@@ -171,7 +171,7 @@ func TestToolApprovalJevLowConfidenceBecomesHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "routeId": route.ID}}}})})
+	a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "scope": "all", "routeId": route.ID}}}})})
 	if err != nil {
 		t.Fatal(err)
 	}

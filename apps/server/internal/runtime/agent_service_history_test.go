@@ -138,12 +138,15 @@ func TestAgentSessionHistoryBudget(t *testing.T) {
 	beginTurn(t, store, agent.ID, session.ID, "now")
 
 	bodies := captured()
-	if len(bodies) != 1 {
-		t.Fatalf("model calls=%d", len(bodies))
+	if len(bodies) != 2 {
+		t.Fatalf("expected summary and answer calls, got %d", len(bodies))
 	}
-	joined := strings.Join(messageContents(bodies[0]), "|")
+	joined := strings.Join(messageContents(bodies[1]), "|")
+	if !strings.Contains(joined, "[Earlier conversation summary]\nok") {
+		t.Fatalf("summary missing: %s", joined)
+	}
 	if strings.Contains(joined, long) {
-		t.Fatalf("oversized history message was not trimmed")
+		t.Fatalf("oversized history message was not summarized")
 	}
 	if !strings.Contains(joined, "recent-note") || !strings.Contains(joined, "user:now") {
 		t.Fatalf("recent messages missing: %v", messageContents(bodies[0]))

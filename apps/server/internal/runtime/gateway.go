@@ -14,21 +14,25 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
 const maxProviderResponse = 64 << 20
 
 type Gateway struct {
-	store  *Store
-	client *http.Client
+	store        *Store
+	client       *http.Client
+	captureSlots chan struct{}
+	captureMu    sync.Mutex
+	captureTails map[*gatewayCapture]gatewayCaptureKey
 }
 
 func NewGateway(store *Store) *Gateway {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 16
 	transport.ResponseHeaderTimeout = 90 * time.Second
-	return &Gateway{store: store, client: &http.Client{Transport: transport}}
+	return &Gateway{store: store, client: &http.Client{Transport: transport}, captureSlots: make(chan struct{}, gatewayCaptureSlots)}
 }
 
 type upstreamConfig struct {

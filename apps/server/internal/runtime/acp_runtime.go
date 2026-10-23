@@ -191,10 +191,20 @@ func (m *acpRuntimeManager) ensure(ctx context.Context, tenantID, agentID, sid s
 		return m.finishStart(key, inFlight, nil, err)
 	}
 	rt, err := m.start(ctx, tenantID, agentID, sid, origin.ProfileID, origin.ACPSessionID, sess, profile)
-	if err != nil {
-		return m.finishStart(key, inFlight, nil, err)
+	if err != nil && rt != nil {
+		// Final lease release can fail after initialization. Never cache that
+		// adapter as ready while its startup is quarantined.
+		_ = rt.close(err)
 	}
-	return m.finishStart(key, inFlight, rt, nil)
+	if err != nil && rt == nil {
+		var stopped acpStartStoppedError
+		failed := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: origin.ProfileID,
+			state: map[string]any{"runtimeId": "", "sessionId": sid, "profileId": origin.ProfileID, "state": "error", "error": err.Error(), "processClosed": errors.As(err, &stopped)}}
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_ = failed.persistSnapshot(persistCtx)
+		cancel()
+	}
+	return m.finishStart(key, inFlight, rt, err)
 }
 
 // snapshot is a read-only GET hook: it never relaunches an exited adapter.
@@ -209,7 +219,15 @@ func (m *acpRuntimeManager) snapshot(ctx context.Context, tenantID, agentID, sid
 	}
 	m.mu.Lock()
 	rt := m.runtimes[tenantID+"\x00"+sid]
+	starting := m.starting[tenantID+"\x00"+sid] != nil
 	m.mu.Unlock()
+	if starting {
+		var origin struct {
+			ProfileID string `json:"acpProfileId"`
+		}
+		_ = json.Unmarshal(sess.Origin, &origin)
+		return map[string]any{"runtimeId": "", "sessionId": sid, "profileId": origin.ProfileID, "state": "starting"}, nil
+	}
 	if rt != nil {
 		state := rt.snapshot()
 		if rt.validateMCPCaller(ctx) != nil {
@@ -289,6 +307,11 @@ func stringMap(value any) map[string]string {
 	return out
 }
 
+// Only a completed startup cleanup (or a failure before effects) proves absence.
+type acpStartStoppedError struct{ error }
+
+func (e acpStartStoppedError) Unwrap() error { return e.error }
+
 func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, profileID, previousACPSessionID string, sess Session, profile map[string]any) (_ *acpLiveRuntime, startErr error) {
 	command, _ := profile["command"].(string)
 	if strings.TrimSpace(command) == "" {
@@ -353,8 +376,10 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := m.h.releaseACPAuthLock(cleanupCtx, tenantID, exec.spaceID, profileID, authToken); err != nil && startErr == nil {
-			startErr = lease.uncertain(err)
+		if err := m.h.releaseACPAuthLock(cleanupCtx, tenantID, exec.spaceID, profileID, authToken); err != nil {
+			startErr = lease.uncertain(errors.Join(startErr, err))
+		} else if startErr != nil {
+			startErr = acpStartStoppedError{startErr}
 		}
 	}()
 	var params map[string]any
@@ -368,6 +393,11 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		}
 		if err := lease.check(ctx); err != nil {
 			return nil, err
+		}
+		// Pulling an image cannot leave an adapter or credential writer running.
+		// Fail here before touching HOME so missing Docker/pull failures stay retryable.
+		if err := runner.call(ctx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
+			return nil, fmt.Errorf("pull ACP adapter: %w", err)
 		}
 		remoteEffect = true
 		fileEnv, prepareErr := m.h.prepareACPFiles(ctx, runner, exec, profileID, setup, preferred)
@@ -410,7 +440,9 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 			if started.ID == "" {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 				defer cancel()
-				_ = runner.call(cleanupCtx, "docker.stop", map[string]any{"id": containerID, "remove": true}, nil)
+				if err := runner.call(cleanupCtx, "docker.stop", map[string]any{"id": containerID, "remove": true}, nil); err == nil {
+					remoteEffect = false
+				}
 			}
 		}()
 	}
@@ -455,8 +487,8 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	defer cancel()
 	var initialized map[string]any
 	if err := rt.call(initCtx, "initialize", map[string]any{"protocolVersion": 1, "clientCapabilities": map[string]any{"auth": map[string]any{"terminal": true}, "fs": map[string]any{"readTextFile": true, "writeTextFile": true}, "terminal": true, "elicitation": map[string]any{"form": map[string]any{}, "url": map[string]any{}}, "session": map[string]any{"configOptions": map[string]any{"boolean": map[string]any{}}}}, "clientInfo": map[string]any{"name": "zakura", "title": "Zakura", "version": "go-rewrite"}}, &initialized); err != nil {
-		rt.close(err)
-		return nil, fmt.Errorf("ACP initialize: %w", err)
+		remoteEffect = rt.close(err) != nil
+		return rt, fmt.Errorf("ACP initialize: %w", err)
 	}
 	_ = rt.notify(initCtx, "notifications/initialized", map[string]any{})
 	rt.mu.Lock()
@@ -477,8 +509,8 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	rt.mu.Unlock()
 	if err := rt.openSession(initCtx); err != nil {
 		if !acpAuthRequired(err) {
-			rt.close(err)
-			return nil, fmt.Errorf("ACP open session: %w", err)
+			remoteEffect = rt.close(err) != nil
+			return rt, fmt.Errorf("ACP open session: %w", err)
 		}
 		// Authentication is a live protocol exchange. Keep this initialized
 		// adapter so a later authenticate call can unblock session creation.
@@ -487,8 +519,8 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		rt.mu.Unlock()
 	}
 	if err := rt.persistSnapshot(context.WithoutCancel(ctx)); err != nil {
-		rt.close(err)
-		return nil, err
+		remoteEffect = rt.close(err) != nil
+		return rt, err
 	}
 	return rt, nil
 }
@@ -1232,10 +1264,13 @@ func (rt *acpLiveRuntime) close(reason error) error {
 			rt.mu.Lock()
 			rt.state["state"], rt.state["error"] = "error", rt.closeErr.Error()
 			rt.mu.Unlock()
-			persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			defer persistCancel()
-			_ = rt.persistSnapshot(persistCtx)
 		}
+		rt.mu.Lock()
+		rt.state["processClosed"] = rt.closeErr == nil
+		rt.mu.Unlock()
+		persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer persistCancel()
+		_ = rt.persistSnapshot(persistCtx)
 		// Keep the closed runtime snapshot in the manager until explicit ensure
 		// recovery replaces it. GET must not silently restart failed adapters.
 	})

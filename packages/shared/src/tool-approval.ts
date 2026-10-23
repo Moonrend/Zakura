@@ -4,8 +4,9 @@
  * 策略分层（按优先级）：
  * 1. deny 规则 / 记住的拒绝        → 直接拒绝
  * 2. always_ask（兼容旧 ask）       → 每次人工审批，允许规则不能绕过
- * 3. 记住的允许 / ask / allow 规则 → 按已有规则裁决
- * 4. 策略默认值（policy）：
+ * 3. 显式 ask / Space 危险工具（AI 策略）→ 人工 / AI 审查
+ * 4. 记住的允许 / allow 规则          → 直接允许
+ * 5. 策略默认值（policy）：
  *    - allow_all  默认允许所有调用
  *    - always_ask 所有调用逐次询问（含只读工具）
  *    - ai         AI 审批门控（Jev / 传统 LLM），低置信度升级人工
@@ -30,7 +31,18 @@ export type ToolApprovalRule = {
 
 export type ToolApprovalAiProvider = "jev" | "llm";
 
+export type ToolApprovalScope = "risky" | "all";
+
+export type SpaceToolApprovalConfig = {
+  scope: ToolApprovalScope;
+  autoAllowReadOnly?: boolean;
+  safeTools: string[];
+  dangerousTools: string[];
+};
+
 export type ToolApprovalAiGateConfig = {
+  /** 继承 Space；默认仅审查有风险或未知的调用。 */
+  scope?: ToolApprovalScope | "inherit";
   /** AI 门控后端（默认 jev） */
   provider?: ToolApprovalAiProvider;
   /** TypeSafe System One 模型 id（默认 jev-latest） */
@@ -110,6 +122,7 @@ export function parseToolApprovalConfig(raw: unknown): ToolApprovalConfig {
   if (o.aiGate && typeof o.aiGate === "object" && !Array.isArray(o.aiGate)) {
     const g = o.aiGate as Record<string, unknown>;
     const gate: ToolApprovalAiGateConfig = {};
+    if (g.scope === "risky" || g.scope === "all" || g.scope === "inherit") gate.scope = g.scope;
     if (g.provider === "jev" || g.provider === "llm") gate.provider = g.provider;
     if (typeof g.jevModel === "string" && g.jevModel.trim()) gate.jevModel = g.jevModel.trim();
     if (typeof g.jevBaseUrl === "string" && g.jevBaseUrl.trim()) {

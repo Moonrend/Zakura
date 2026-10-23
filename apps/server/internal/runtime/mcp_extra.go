@@ -594,17 +594,11 @@ func (h *handler) exposedMCPTools(r *http.Request, p httpx.Principal, agentID, s
 	}
 	out := []exposedMCPTool{}
 	for _, instance := range instances {
-		result, err := h.mcpRPC(r.Context(), instance, "tools/list", map[string]any{})
+		listed, err := h.listMCPToolDefinitions(r.Context(), instance)
 		if err != nil {
 			continue
 		}
-		var listed struct {
-			Tools []map[string]any `json:"tools"`
-		}
-		if json.Unmarshal(result, &listed) != nil {
-			continue
-		}
-		for _, tool := range listed.Tools {
+		for _, tool := range listed {
 			local, _ := tool["name"].(string)
 			if local == "" || !policies.operationAllowed(instance, "tools/call", local) {
 				continue
@@ -994,51 +988,98 @@ func (h *handler) mcpServer(w http.ResponseWriter, r *http.Request) {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
 		}
-		tools := make([]map[string]any, 0, len(exposed))
-		for _, item := range exposed {
-			tool := map[string]any{"name": item.Name, "description": item.Tool["description"], "inputSchema": item.Tool["inputSchema"]}
-			if tool["inputSchema"] == nil {
-				tool["inputSchema"] = map[string]any{"type": "object", "properties": map[string]any{}}
+		catalog := mcpDiscoveryCatalog(exposed)
+		builtins, e := h.mcpBuiltinTools(r.Context(), p, spaceID)
+		if e != nil {
+			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
+			return
+		}
+		catalog.Tools = append(builtins, catalog.Tools...)
+		tools := compactMCPTools(catalog)
+		if r.URL.Query().Get("tools") == "expanded" {
+			tools = []map[string]any{}
+			for _, tool := range catalog.Tools {
+				if tool.Exposure != "hidden" {
+					tools = append(tools, mcpListedTool(tool))
+				}
 			}
-			tools = append(tools, tool)
 		}
 		reply(map[string]any{"tools": tools}, nil)
 	case "tools/call":
 		raw, _ := json.Marshal(req.Params)
 		var pms struct {
-			Name      string `json:"name"`
-			Arguments any    `json:"arguments"`
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
 		}
-		_ = json.Unmarshal(raw, &pms)
+		if json.Unmarshal(raw, &pms) != nil || pms.Name == "" {
+			reply(nil, map[string]any{"code": -32602, "message": "tool name required"})
+			return
+		}
+		// Native calls must remain available without probing external MCP servers.
+		if len(pms.Arguments) == 0 {
+			pms.Arguments = json.RawMessage(`{}`)
+		}
+		if pms.Name == "tool_search" || pms.Name == "tool_execute" {
+			definition := toolExecuteDefinition()
+			if pms.Name == "tool_search" {
+				definition = directBuiltin("tool_search", TOOL_SEARCH_DESCRIPTION, toolDiscoveryProperties())
+			}
+			if err := validateToolArguments(definition, pms.Arguments); err != nil {
+				reply(nil, map[string]any{"code": -32602, "message": err.Error()})
+				return
+			}
+		}
+		if pms.Name == "tool_search" {
+			var query toolDiscoveryQuery
+			if e := json.Unmarshal(pms.Arguments, &query); e != nil {
+				reply(nil, map[string]any{"code": -32602, "message": e.Error()})
+				return
+			}
+			exposed, err := h.exposedMCPTools(r, p, "", spaceID)
+			if err != nil {
+				reply(nil, map[string]any{"code": -32603, "message": err.Error()})
+				return
+			}
+			catalog := mcpDiscoveryCatalog(exposed)
+			if len(query.Names) > 0 {
+				builtins, err := h.mcpBuiltinTools(r.Context(), p, spaceID)
+				if err != nil {
+					reply(nil, map[string]any{"code": -32603, "message": err.Error()})
+					return
+				}
+				catalog.Tools = append(catalog.Tools, builtins...)
+			}
+			reply(mcpStructuredResult(discoverTools(catalog.Tools, nil, query)), nil)
+			return
+		}
+		if pms.Name == "tool_execute" {
+			var call struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			}
+			if json.Unmarshal(pms.Arguments, &call) != nil || call.Name == "" || call.Name == "tool_execute" || call.Name == "codemode" {
+				reply(nil, map[string]any{"code": -32602, "message": "tool_execute requires a discovered tool name and arguments"})
+				return
+			}
+			pms.Name, pms.Arguments = call.Name, call.Arguments
+		}
+		if native := strings.TrimPrefix(pms.Name, "re_"); mcpSpaceBuiltin(native) || mcpAgentBuiltin(native) {
+			result, err := h.callMCPBuiltin(r, p, spaceID, native, pms.Arguments)
+			if err != nil {
+				reply(map[string]any{"isError": true, "content": []map[string]any{{"type": "text", "text": err.Error()}}}, nil)
+				return
+			}
+			reply(mcpStructuredResult(json.RawMessage(result)), nil)
+			return
+		}
 		exposed, e := h.exposedMCPTools(r, p, "", spaceID)
 		if e != nil {
 			reply(nil, map[string]any{"code": -32603, "message": e.Error()})
 			return
 		}
-		var selected *exposedMCPTool
-		name := pms.Name
-		for i := range exposed {
-			if exposed[i].Name == name || exposed[i].Instance.ID+":"+exposed[i].LocalName == name {
-				selected = &exposed[i]
-				break
-			}
-		}
-		if selected == nil && strings.HasPrefix(name, "re_") {
-			name = strings.TrimPrefix(name, "re_")
-			for i := range exposed {
-				if exposed[i].Name == name || exposed[i].Instance.ID+":"+exposed[i].LocalName == name {
-					selected = &exposed[i]
-					break
-				}
-			}
-		}
-		if selected == nil {
-			reply(nil, map[string]any{"code": -32602, "message": "Unknown tool: " + pms.Name})
-			return
-		}
-		result, e := h.authorizedMCPRPC(r, p, spaceID, selected.Instance, "tools/call", map[string]any{"name": selected.LocalName, "arguments": pms.Arguments})
+		result, e := h.callExposedMCPTool(r, p, spaceID, exposed, pms.Name, pms.Arguments)
 		if e != nil {
-			reply(nil, map[string]any{"code": -32000, "message": e.Error()})
+			reply(nil, map[string]any{"code": -32602, "message": e.Error()})
 			return
 		}
 		reply(json.RawMessage(result), nil)

@@ -135,6 +135,17 @@ func chatRequestToAnthropic(chat map[string]any, opts gwRouteDefaults) map[strin
 		out["system"] = system
 	}
 	out["messages"] = messages
+	outputConfig := map[string]any{}
+	if effort := gwStr(chat["reasoning_effort"]); effort != "" && effort != "none" {
+		out["thinking"] = map[string]any{"type": "adaptive"}
+		outputConfig["effort"] = effort
+	}
+	if format := gwMap(chat["response_format"]); gwStr(format["type"]) == "json_schema" {
+		outputConfig["format"] = map[string]any{"type": "json_schema", "schema": gwMap(format["json_schema"])["schema"]}
+	}
+	if len(outputConfig) > 0 {
+		out["output_config"] = outputConfig
+	}
 	if t, ok := gwNum(chat["temperature"]); ok {
 		out["temperature"] = min(max(t, 0), 1)
 	} else if opts.Temperature != nil {
@@ -372,6 +383,9 @@ func chatToolsToAnthropic(tools []any) []any {
 				schema = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
 			tool := map[string]any{"name": name, "input_schema": schema}
+			if strict, ok := f["strict"].(bool); ok {
+				tool["strict"] = strict
+			}
 			if d := gwStr(f["description"]); d != "" {
 				tool["description"] = d
 			}
@@ -432,10 +446,20 @@ func anthropicRequestToChat(body map[string]any) map[string]any {
 		}
 		if gwStr(m["role"]) == "assistant" {
 			text, calls := gwAnthropicAssistantToChat(m["content"])
-			if text == "" && len(calls) == 0 {
+			msg := map[string]any{"role": "assistant", "content": text}
+			var reasoning strings.Builder
+			for _, value := range gwSlice(m["content"]) {
+				block := gwMap(value)
+				if gwStr(block["type"]) == "thinking" {
+					reasoning.WriteString(gwStr(block["thinking"]))
+				}
+			}
+			if text == "" && len(calls) == 0 && reasoning.Len() == 0 {
 				continue
 			}
-			msg := map[string]any{"role": "assistant", "content": text}
+			if reasoning.Len() > 0 {
+				msg["reasoning_content"] = reasoning.String()
+			}
 			if len(calls) > 0 {
 				msg["tool_calls"] = calls
 				if text == "" {
@@ -448,10 +472,20 @@ func anthropicRequestToChat(body map[string]any) map[string]any {
 		parts, toolMessages := gwAnthropicUserToChat(m["content"])
 		messages = append(messages, toolMessages...)
 		if len(parts) > 0 {
-			messages = append(messages, map[string]any{"role": "user", "content": gwPartsContent(parts)})
+			role := gwStr(m["role"])
+			if role != "system" && role != "developer" {
+				role = "user"
+			}
+			messages = append(messages, map[string]any{"role": role, "content": gwPartsContent(parts)})
 		}
 	}
 	out["messages"] = messages
+	if effort := gwStr(gwMap(body["output_config"])["effort"]); effort != "" {
+		out["reasoning_effort"] = effort
+	}
+	if format := gwMap(gwMap(body["output_config"])["format"]); gwStr(format["type"]) == "json_schema" {
+		out["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "response", "schema": format["schema"], "strict": true}}
+	}
 	for _, k := range []string{"max_tokens", "temperature", "top_p"} {
 		if v, ok := body[k]; ok && v != nil {
 			out[k] = v
@@ -483,6 +517,9 @@ func anthropicRequestToChat(body map[string]any) map[string]any {
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		fn := map[string]any{"name": name, "parameters": schema}
+		if strict, ok := t["strict"].(bool); ok {
+			fn["strict"] = strict
+		}
 		if d := gwStr(t["description"]); d != "" {
 			fn["description"] = d
 		}
@@ -538,6 +575,8 @@ func gwAnthropicAssistantToChat(content any) (string, []any) {
 		switch gwStr(block["type"]) {
 		case "text":
 			text.WriteString(gwStr(block["text"]))
+		case "compaction":
+			text.WriteString(gwStr(block["content"]))
 		case "tool_use":
 			name := gwStr(block["name"])
 			if name == "" {
@@ -572,6 +611,15 @@ func gwAnthropicUserToChat(content any) ([]any, []any) {
 		case "text":
 			if text := gwStr(block["text"]); text != "" {
 				parts = append(parts, map[string]any{"type": "text", "text": text})
+			}
+		case "compaction":
+			if text := gwStr(block["content"]); text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+			}
+		case "document":
+			source := gwMap(block["source"])
+			if gwStr(source["type"]) == "text" {
+				parts = append(parts, map[string]any{"type": "text", "text": gwStr(source["data"])})
 			}
 		case "image":
 			source := gwMap(block["source"])
@@ -699,6 +747,9 @@ func responsesRequestToChat(body map[string]any) map[string]any {
 		chatMessages = append(chatMessages, m)
 	}
 	out["messages"] = chatMessages
+	if effort := gwStr(gwMap(body["reasoning"])["effort"]); effort != "" {
+		out["reasoning_effort"] = effort
+	}
 	if v, ok := body["max_output_tokens"]; ok && v != nil {
 		out["max_tokens"] = v
 	}
