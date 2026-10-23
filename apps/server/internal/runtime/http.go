@@ -132,8 +132,14 @@ func (h *handler) registerCore(r chi.Router) {
 	r.Get("/spaces/{id}", h.getSpace)
 	r.Patch("/spaces/{id}", h.patchSpace)
 	r.Delete("/spaces/{id}", h.deleteSpace)
+	r.Get("/spaces/{id}/gateway/sessions", h.gatewaySessionRoute(h.listSessions))
+	r.Get("/spaces/{id}/gateway/sessions/{sid}", h.gatewaySessionRoute(h.getSession))
+	r.Patch("/spaces/{id}/gateway/sessions/{sid}", h.gatewaySessionRoute(h.patchSession))
+	r.Delete("/spaces/{id}/gateway/sessions/{sid}", h.gatewaySessionRoute(h.deleteSession))
 	r.Get("/spaces/{id}/gateway/config", h.spaceGatewayConfig)
 	r.Put("/spaces/{id}/gateway/config", h.spaceGatewayConfig)
+	r.Get("/spaces/{id}/approvals", h.spaceApprovalConfig)
+	r.Put("/spaces/{id}/approvals", h.spaceApprovalConfig)
 	r.Get("/agents", h.listAgents)
 	r.Post("/agents", h.createAgent)
 	r.Get("/agents/{id}", h.getAgent)
@@ -647,6 +653,30 @@ func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("afterSeq"), 10, 64)
+	if space, gateway := gatewaySpace(a); gateway {
+		before, _ := strconv.ParseInt(r.URL.Query().Get("beforeSeq"), 10, 64)
+		end := x.LastSeq
+		if before > 0 {
+			end = min(end, before-1)
+		}
+		start := after
+		if after == 0 {
+			start = max(int64(0), end-500)
+		}
+		events, err := h.store.gatewayEvents(r.Context(), p.TenantID, space, sid, start, 500)
+		if err != nil {
+			statusErr(w, err)
+			return
+		}
+		kept := events[:0]
+		for _, event := range events {
+			if event.Seq <= end {
+				kept = append(kept, event)
+			}
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"session": x, "events": kept, "hasMore": start > 0, "hasMoreAfter": after > 0 && after+int64(len(kept)) < end, "queue": []any{}})
+		return
+	}
 	events, e := h.store.ListEvents(r.Context(), p.TenantID, a, sid, after, 500)
 	if e != nil {
 		statusErr(w, e)
@@ -1281,13 +1311,23 @@ func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 		}
 		v["model"] = model
 		body, _ := json.Marshal(v)
+		capture := h.captureGateway(w, p, r.Header, operation, v)
+		if capture != nil {
+			w = capture
+		}
 		ctx := withGatewayClientHeaders(r.Context(), r.Header)
 		resp, err := h.service.gateway.Do(ctx, p.TenantID, capability, operation, model, body)
 		if err != nil {
 			writeGatewayFailure(w, operation, err)
+			if capture != nil {
+				capture.finish(err)
+			}
 			return
 		}
-		_ = copyProviderResponse(w, resp)
+		err = copyProviderResponse(w, resp)
+		if capture != nil {
+			capture.finish(err)
+		}
 	}
 }
 func (h *handler) listGatewayModels(w http.ResponseWriter, r *http.Request) {

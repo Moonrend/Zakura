@@ -74,6 +74,13 @@ test("strict policy normalization preserves explicit choices and legacy restrict
   assert.equal(parseToolApprovalConfig({ askTimeoutSeconds: 0 }).askTimeoutSeconds, 0);
 });
 
+test("AI approval scope preserves explicit choices and defaults to Space inheritance", () => {
+  for (const scope of ["inherit", "risky", "all"] as const) {
+    assert.equal(parseToolApprovalConfig({ aiGate: { scope } }).aiGate?.scope, scope);
+  }
+  assert.equal(parseToolApprovalConfig({ aiGate: { scope: "unknown" } }).aiGate, undefined);
+});
+
 test("approvalRuleHits 复用 Claude 钩子匹配语法", () => {
   const args = { command: "git push origin main" };
   assert.equal(approvalRuleHits("Bash(git push*)", "re_shell_exec", args), true);

@@ -198,13 +198,14 @@ func (h *handler) runListRoutines(ctx context.Context, tenant, agent string, _ m
 	routines := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		routines = append(routines, map[string]any{
-			"id":         row.ID,
-			"name":       row.Name,
-			"enabled":    row.Enabled,
-			"schedule":   row.Pattern,
-			"nextRunAt":  row.NextRunAt,
-			"lastRunAt":  row.LastRunAt,
-			"lastStatus": row.LastStatus,
+			"id":                 row.ID,
+			"name":               row.Name,
+			"enabled":            row.Enabled,
+			"schedule":           row.Pattern,
+			"nextRunAt":          row.NextRunAt,
+			"lastRunAt":          row.LastRunAt,
+			"lastStatus":         row.LastStatus,
+			"bypassToolApproval": row.BypassToolApproval,
 		})
 	}
 	return builtinJSON(map[string]any{"routines": routines})
@@ -217,11 +218,12 @@ func (h *handler) runCreateRoutine(ctx context.Context, tenant, agent string, ar
 	if name == "" || prompt == "" || schedule == "" {
 		return nil, errors.New("name, prompt and schedule are required")
 	}
-	created, err := h.createScheduleInternal(ctx, tenant, agent, Schedule{Name: name, Prompt: prompt, Pattern: schedule, TriggerKind: "cron", Timezone: "UTC", Enabled: true})
+	bypass, _ := args["bypassToolApproval"].(bool)
+	created, err := h.createScheduleInternal(ctx, tenant, agent, Schedule{Name: name, Prompt: prompt, Pattern: schedule, TriggerKind: "cron", Timezone: "UTC", Enabled: true, BypassToolApproval: bypass})
 	if err != nil {
 		return nil, err
 	}
-	return builtinJSON(map[string]any{"id": created.ID, "name": created.Name, "schedule": created.Pattern, "nextRunAt": created.NextRunAt})
+	return builtinJSON(map[string]any{"id": created.ID, "name": created.Name, "schedule": created.Pattern, "nextRunAt": created.NextRunAt, "bypassToolApproval": created.BypassToolApproval})
 }
 
 func (h *handler) runUpdateRoutine(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {
@@ -242,11 +244,14 @@ func (h *handler) runUpdateRoutine(ctx context.Context, tenant, agent string, ar
 	if value, ok := args["enabled"]; ok {
 		patch["enabled"] = value
 	}
+	if value, ok := args["bypassToolApproval"]; ok {
+		patch["bypassToolApproval"] = value
+	}
 	updated, err := h.patchScheduleInternal(ctx, tenant, agent, id, patch)
 	if err != nil {
 		return nil, err
 	}
-	return builtinJSON(map[string]any{"id": updated.ID, "enabled": updated.Enabled, "schedule": updated.Pattern, "nextRunAt": updated.NextRunAt})
+	return builtinJSON(map[string]any{"id": updated.ID, "enabled": updated.Enabled, "schedule": updated.Pattern, "nextRunAt": updated.NextRunAt, "bypassToolApproval": updated.BypassToolApproval})
 }
 
 func (h *handler) runPauseRoutine(ctx context.Context, tenant, agent string, args map[string]any) (json.RawMessage, error) {

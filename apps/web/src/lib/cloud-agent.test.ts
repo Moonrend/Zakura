@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CloudAgentEvent } from "@zakura/shared";
-import { buildConversationTurns, eventsToTimeline, resolveToolApproval } from "./cloud-agent";
+import { buildConversationTurns, buildGatewayConversationTurns, eventsToTimeline, resolveToolApproval, listCloudSessions, getCloudSession } from "./cloud-agent";
 
 function event(type: CloudAgentEvent["type"], seq: number, payload: Record<string, unknown>): CloudAgentEvent {
   return { id: `event-${seq}`, sessionId: "session", runId: "run", seq, type, payload, createdAt: "2026-10-18T00:00:00Z" } as CloudAgentEvent;
@@ -113,6 +113,74 @@ test("forked UI state remains attached to its assistant without a run", () => {
   const ui = turns[0]!.items.find(item => item.kind === "assistant");
   if (ui?.kind !== "assistant") throw new Error("UI missing");
   assert.equal(ui.uiStates?.[0]?.state.quantity, 7);
+});
+
+test("Gateway loops preserve every response, tool result and context across requests", () => {
+  const turns = buildGatewayConversationTurns([
+    event("context_sources", 1, { items: [{ kind: "other", title: "Instructions", content: "rules" }] }),
+    event("user_message", 2, { messageId: "u1", content: "fix" }),
+    event("run_start", 3, { replyToMessageId: "u1" }),
+    event("assistant_delta", 4, { messageId: "a1", delta: "Checking" }),
+    event("assistant_message", 5, { messageId: "a1", content: "Checking" }),
+    event("tool_call_start", 6, { toolCallId: "call", name: "Read", arguments: "{}" }),
+    event("run_end", 7, { status: "completed" }),
+    { ...event("tool_call_result", 8, { toolCallId: "call", resultText: "found" }), runId: "next" },
+    { ...event("assistant_message", 9, { messageId: "a2", content: "Fixed" }), runId: "next" },
+    event("context_compacted", 10, { summary: "Tests fixed" }),
+    event("user_message", 11, { messageId: "u2", content: "continue" }),
+  ]);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0]!.items.filter(item => item.kind === "assistant").map(item => item.content), ["Checking", "Fixed"]);
+  const tool = turns[0]!.items.find(item => item.kind === "tool");
+  assert.equal(tool?.call.resultText, "found");
+  assert.equal(tool?.call.status, "done");
+  assert.ok(turns[0]!.items.some(item => item.kind === "sources"));
+  assert.ok(turns[0]!.items.some(item => item.kind === "compaction"));
+});
+
+test("Gateway final snapshots replace text flushed by a tool start", () => {
+  const turns = buildGatewayConversationTurns([
+    event("user_message", 1, { messageId: "u", content: "inspect" }),
+    event("run_start", 2, { replyToMessageId: "u" }),
+    event("assistant_delta", 3, { messageId: "a", delta: "Checking" }),
+    event("tool_call_start", 4, { toolCallId: "call", name: "Read", arguments: '{"path":"file"}' }),
+    event("assistant_message", 5, { messageId: "a", content: "Checking" }),
+    event("run_end", 6, { status: "completed" }),
+  ]);
+  assert.equal(turns[0]?.items.filter(item => item.kind === "assistant").length, 1);
+  assert.deepEqual(turns[0]?.items.map(item => item.kind), ["user", "assistant", "tool"]);
+  assert.equal(turns[0]?.items.find(item => item.kind === "tool")?.call.arguments, '{"path":"file"}');
+});
+
+test("Gateway live responses retain their active run", () => {
+  const events = [
+    event("user_message", 1, { messageId: "user", content: "hello" }),
+    event("run_start", 2, { replyToMessageId: "user" }),
+    event("assistant_delta", 3, { messageId: "response", delta: "Live" }),
+  ];
+  assert.equal(buildGatewayConversationTurns(events)[0]?.activeRunId, "run");
+  assert.equal(buildGatewayConversationTurns([...events, event("run_end", 4, { status: "completed" })])[0]?.activeRunId, null);
+});
+
+test("Gateway tail pages keep responses without a user anchor", () => {
+  const response = event("assistant_message", 501, { messageId: "answer", content: "tail response" });
+  const tail = buildGatewayConversationTurns([response]);
+  assert.equal(tail.length, 1);
+  assert.equal(tail[0]?.message.continue, true);
+  assert.equal(tail[0]?.items[0]?.kind, "assistant");
+  const withNext = buildGatewayConversationTurns([response, event("user_message", 502, { messageId: "next", content: "next turn" })]);
+  assert.equal(withNext.length, 2);
+  assert.equal(withNext[1]?.items.length, 1);
+  const continuation = buildGatewayConversationTurns([event("user_message", 1, { messageId: "anchor", content: "客户端继续会话", continue: true }), response]);
+  assert.equal(continuation[0]?.message.continue, true);
+});
+
+test("Gateway sessions use Space endpoints", async (t) => {
+  const paths: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: unknown) => { paths.push(String(input)); return Response.json({ sessions: [], events: [] }); });
+  await listCloudSessions("gateway:space", { limit: 200 });
+  await getCloudSession("gateway:space", "session");
+  assert.deepEqual(paths, ["/api/spaces/space/gateway/sessions?limit=200", "/api/spaces/space/gateway/sessions/session?afterSeq=0"]);
 });
 
 test("one-time decisions use the standard durable approval endpoint", async (t) => {

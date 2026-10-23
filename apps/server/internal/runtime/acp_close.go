@@ -60,11 +60,46 @@ func (h *handler) closeACP(ctx context.Context, p httpx.Principal, agent, sid st
 		if state != nil && state["state"] == "closed" {
 			return state, nil
 		}
+		if state != nil && state["processClosed"] == true {
+			agent, err := h.store.GetAgent(ctx, p.TenantID, agent)
+			if err != nil {
+				return nil, err
+			}
+			lease, err := h.acquireSpaceInfrastructure(ctx, p.TenantID, agent.SpaceID)
+			if err != nil {
+				return nil, err
+			}
+			defer lease.release()
+			// Recheck under the shared fence: a different server may have started
+			// this session since the first snapshot was read.
+			state, err = h.acp.snapshot(ctx, p.TenantID, agent.ID, sid)
+			if err != nil {
+				return nil, err
+			}
+			if state == nil || state["processClosed"] != true {
+				return nil, errors.New("ACP runtime changed before closing")
+			}
+			state["state"] = "closed"
+			delete(state, "error")
+			profile, _ := state["profileId"].(string)
+			stopped := &acpLiveRuntime{manager: h.acp, tenantID: p.TenantID, agentID: agent.ID, sid: sid, profileID: profile, state: state}
+			if err := stopped.persistSnapshot(ctx); err != nil {
+				return nil, err
+			}
+			return state, nil
+		}
 		return nil, errors.New("original ACP process is not attached; reconcile profile authentication before reconnecting")
 	}
 	select {
 	case <-rt.done:
 		if rt.close(nil) == nil {
+			rt.mu.Lock()
+			rt.state["state"] = "closed"
+			delete(rt.state, "error")
+			rt.mu.Unlock()
+			if err := rt.persistSnapshot(ctx); err != nil {
+				return nil, err
+			}
 			return rt.snapshot(), nil
 		}
 	default:

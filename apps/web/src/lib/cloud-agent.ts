@@ -714,6 +714,7 @@ export function eventsToTimeline(events: CloudAgentEvent[]): TimelineItem[] {
         toolCallId: id,
         name,
         title: typeof p.title === "string" ? p.title : undefined,
+        arguments: typeof p.arguments === "string" ? p.arguments : undefined,
         status: "running",
       };
       toolMap.set(id, call);
@@ -1415,6 +1416,73 @@ export function eventsToRunLogs(events: CloudAgentEvent[]): RunLogEntry[] {
   return logs;
 }
 
+export function gatewaySpaceId(owner: string): string | null {
+  return owner.startsWith("gateway:") ? owner.slice("gateway:".length) : null;
+}
+
+function sessionBase(owner: string): string {
+  const space = gatewaySpaceId(owner);
+  return space ? `/api/spaces/${encodeURIComponent(space)}/gateway/sessions` : `/api/agents/${owner}/cloud/sessions`;
+}
+
+/** Gateway tool loops are a single chronological transcript, without branches. */
+export function buildGatewayConversationTurns(events: CloudAgentEvent[]): ConversationTurn[] {
+  const turns: ConversationTurn[] = [];
+  const continuations = new Set(events.filter(ev => ev.type === "user_message" && (ev.payload as Record<string, unknown>).continue === true).map(ev => ev.seq));
+  let pending: TimelineItem[] = [];
+  const flushPending = () => {
+    if (!pending.length) return;
+    const first = pending[0]!;
+    turns.push({
+      message: { id: `gateway-continuation-${first.id}`, content: "", seq: first.seq, parentKey: "", continue: true },
+      siblings: [], siblingIndex: 0, variants: [], variantIndex: 0,
+      activeRunId: null, items: pending,
+    });
+    pending = [];
+  };
+  // Tools can flush the streaming answer before its final snapshot arrives.
+  // Place that snapshot at the first delta and suppress its later duplicate.
+  const answers = new Map<string, CloudAgentEvent>();
+  for (const ev of events) {
+    const p = ev.payload as Record<string, unknown>;
+    if (ev.type === "assistant_message" && typeof p.messageId === "string") answers.set(p.messageId, ev);
+  }
+  const emitted = new Set<string>();
+  const projected = events.flatMap(ev => {
+    const p = ev.payload as Record<string, unknown>;
+    if ((ev.type !== "assistant_delta" && ev.type !== "assistant_message") || typeof p.messageId !== "string") return [ev];
+    const final = answers.get(p.messageId);
+    if (!final) return [ev];
+    if (emitted.has(p.messageId)) return [];
+    emitted.add(p.messageId);
+    return [{ ...final, seq: ev.seq }];
+  });
+  for (const item of eventsToTimeline(projected)) {
+    if (item.kind === "user") {
+      // A paginated tail can start halfway through a response. Do not attach
+      // that response to the next user turn or discard a page with no user.
+      if (pending.some(entry => entry.kind !== "sources")) flushPending();
+      const turn: ConversationTurn = {
+        message: { id: item.id, content: item.content, seq: item.seq, parentKey: "", ...(continuations.has(item.seq) ? { continue: true } : {}) },
+        siblings: [item.id], siblingIndex: 0, variants: [], variantIndex: 0,
+        activeRunId: null, items: [item, ...pending],
+      };
+      pending = [];
+      turns.push(turn);
+    } else if (turns.length) {
+      turns[turns.length - 1]!.items.push(item);
+    } else pending.push(item);
+  }
+  flushPending();
+  let latestRun: string | null = null;
+  for (const ev of events) {
+    if (ev.type === "run_start") latestRun = ev.runId;
+    else if (ev.type === "run_end" && ev.runId === latestRun) latestRun = null;
+  }
+  if (latestRun && turns.length) turns[turns.length - 1]!.activeRunId = latestRun;
+  return turns;
+}
+
 export async function listCloudSessions(
   agentId: string,
   opts?: { kinds?: SessionKindsFilter; limit?: number },
@@ -1426,7 +1494,7 @@ export async function listCloudSessions(
   if (opts?.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return api<{ sessions: CloudSession[] }>(
-    `/api/agents/${agentId}/cloud/sessions${qs ? `?${qs}` : ""}`,
+    `${sessionBase(agentId)}${qs ? `?${qs}` : ""}`,
     { cacheTtlMs: false },
   );
 }
@@ -1478,7 +1546,7 @@ export async function getCloudSession(
     hasMoreAfter?: boolean;
     /** 服务端排队中的后续消息（跨设备同步） */
     queue?: CloudAgentQueuedMessage[];
-  }>(`/api/agents/${agentId}/cloud/sessions/${sessionId}?${qs}`, {
+  }>(`${sessionBase(agentId)}/${sessionId}?${qs}`, {
     cacheTtlMs: false,
   });
 }
@@ -1532,7 +1600,7 @@ export async function forkCloudSession(agentId: string, sessionId: string, title
 }
 
 export async function deleteCloudSession(agentId: string, sessionId: string) {
-  return api(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, { method: "DELETE" });
+  return api(`${sessionBase(agentId)}/${sessionId}`, { method: "DELETE" });
 }
 
 export async function fetchComposerCapabilities(agentId: string) {
@@ -1715,7 +1783,7 @@ export async function updateCloudSession(
     origin?: CloudAgentSessionOrigin;
   },
 ) {
-  return api<CloudSession>(`/api/agents/${agentId}/cloud/sessions/${sessionId}`, {
+  return api<CloudSession>(`${sessionBase(agentId)}/${sessionId}`, {
     method: "PATCH",
     json: patch,
   });
@@ -1888,6 +1956,7 @@ export async function listChatModels(): Promise<ChatModelOption[]> {
 }
 
 export async function getCloudConfig(agentId: string) {
+  if (gatewaySpaceId(agentId)) return { cloud: {} as CloudAgentConfig, hasChatRoute: false };
   return api<{ cloud: CloudAgentConfig; hasChatRoute: boolean }>(
     `/api/agents/${agentId}/cloud/config`,
   );

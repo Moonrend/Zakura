@@ -16,7 +16,6 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { AskUserCard } from "@/components/chat/ask-user-card";
-import { ToolApprovalCard } from "@/components/chat/tool-approval-card";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -530,11 +529,6 @@ function renderRunItems(
       selected?: string[];
       text?: string;
     }) => void;
-    onToolApproval?: (input: {
-      requestId: string;
-      decision: "approved" | "denied";
-      alwaysAllow?: boolean;
-    }) => void | Promise<unknown>;
   },
 ) {
   const blocks: ReactNode[] = [];
@@ -722,13 +716,8 @@ function renderRunItems(
         />,
       );
     } else if (it.kind === "tool_approval") {
-      blocks.push(
-        <ToolApprovalCard
-          key={`approval-${it.id}`}
-          item={it}
-          onResolve={opts.onToolApproval}
-        />,
-      );
+      // Pending approvals live above the composer; resolved ones stay in the audit log.
+      continue;
     } else if (it.kind === "error") {
       blocks.push(
         <div
@@ -847,7 +836,6 @@ export function ChatMessages({
   onPermission,
   onElicitation,
   onAskUser,
-  onToolApproval,
   onUIContinue,
   readOnly,
 }: {
@@ -881,11 +869,6 @@ export function ChatMessages({
     selected?: string[];
     text?: string;
   }) => void;
-  onToolApproval?: (input: {
-    requestId: string;
-    decision: "approved" | "denied";
-    alwaysAllow?: boolean;
-  }) => void | Promise<unknown>;
 }) {
   const [sourcesFor, setSourcesFor] = useState<{
     messageId: string;
@@ -1043,7 +1026,6 @@ export function ChatMessages({
                 onAskUser,
                 onUIContinue,
                 readOnly,
-                onToolApproval,
               })}
 
               {sharedFiles.length > 0 && (

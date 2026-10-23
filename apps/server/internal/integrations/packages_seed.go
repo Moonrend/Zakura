@@ -16,6 +16,19 @@ import (
 func (h *handler) seedEmailPackages(ctx context.Context) error {
 	now := h.now().Format(time.RFC3339Nano)
 	return h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		rows, err := tx.Raw(`SELECT * FROM integration_components LIMIT 0`).Rows()
+		if err != nil {
+			return fmt.Errorf("inspect integration components: %w", err)
+		}
+		columns, err := rows.Columns()
+		rows.Close()
+		if err != nil {
+			return fmt.Errorf("read integration component columns: %w", err)
+		}
+		componentColumns := make(map[string]bool, len(columns))
+		for _, column := range columns {
+			componentColumns[column] = true
+		}
 		for _, p := range providers {
 			if !strings.HasPrefix(p.Ref, "email-") {
 				continue
@@ -39,9 +52,21 @@ func (h *handler) seedEmailPackages(ctx context.Context) error {
 				return fmt.Errorf("email package %s has no identity", p.Package.Slug)
 			}
 			compMeta, _ := json.Marshal(map[string]any{"name": p.Name, "description": p.Description, "auth": p.Auth, "needsRunner": false})
-			comp := models.IntegrationComponent{ID: strPtr(*stored.ID + ":connector"), PackageID: *stored.ID, Ref: p.Ref, Kind: "connector", ManifestJSON: string(compMeta)}
-			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "package_id"}, {Name: "ref"}}, DoNothing: true}).Create(&comp).Error; err != nil {
+			comp := map[string]any{"id": *stored.ID + ":connector", "package_id": *stored.ID, "ref": p.Ref, "kind": "connector", "manifest_json": string(compMeta)}
+			// Drizzle catalogues also require display fields outside the manifest.
+			for key, value := range map[string]any{"name": p.Name, "description": p.Description, "config_json": string(compMeta), "created_at": now, "updated_at": now} {
+				if componentColumns[key] {
+					comp[key] = value
+				}
+			}
+			// Legacy catalogues use (package_id, kind, ref); native ones use
+			// (package_id, ref). Let either constraint preserve existing rows.
+			if err := tx.Table(models.TableNameIntegrationComponent).Clauses(clause.OnConflict{DoNothing: true}).Create(comp).Error; err != nil {
 				return err
+			}
+			var component models.IntegrationComponent
+			if err := tx.Where("package_id = ? AND kind = ? AND ref = ?", *stored.ID, "connector", p.Ref).Take(&component).Error; err != nil {
+				return fmt.Errorf("resolve email component %s: %w", p.Ref, err)
 			}
 		}
 		return nil

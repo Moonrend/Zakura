@@ -25,6 +25,7 @@ type approvalRule struct {
 }
 
 type approvalAIConfig struct {
+	Scope               string   `json:"scope"`
 	Provider            string   `json:"provider"`
 	RouteID             string   `json:"routeId"`
 	RouteAlias          string   `json:"routeAlias"`
@@ -35,12 +36,14 @@ type approvalAIConfig struct {
 }
 
 type toolApprovalConfig struct {
-	Policy      string           `json:"policy"`
-	Rules       []approvalRule   `json:"rules"`
-	AlwaysAllow []string         `json:"alwaysAllow"`
-	AlwaysDeny  []string         `json:"alwaysDeny"`
-	AI          approvalAIConfig `json:"aiGate"`
-	Timeout     *int             `json:"askTimeoutSeconds"`
+	Scope           approvalScopeConfig `json:"-"`
+	BypassAlwaysAsk bool                `json:"-"`
+	Policy          string              `json:"policy"`
+	Rules           []approvalRule      `json:"rules"`
+	AlwaysAllow     []string            `json:"alwaysAllow"`
+	AlwaysDeny      []string            `json:"alwaysDeny"`
+	AI              approvalAIConfig    `json:"aiGate"`
+	Timeout         *int                `json:"askTimeoutSeconds"`
 }
 
 func parseApprovalConfig(raw json.RawMessage, fallback string) (toolApprovalConfig, error) {
@@ -74,6 +77,9 @@ func parseApprovalConfig(raw json.RawMessage, fallback string) (toolApprovalConf
 	if cfg.Timeout != nil && (*cfg.Timeout < 0 || *cfg.Timeout > 86400) {
 		return cfg, errors.New("tool approval timeout is invalid")
 	}
+	if cfg.AI.Scope != "" && cfg.AI.Scope != "inherit" && cfg.AI.Scope != "risky" && cfg.AI.Scope != "all" {
+		return cfg, errors.New("tool approval AI scope is invalid")
+	}
 	if n := cfg.AI.ConfidenceThreshold; n != nil && (math.IsNaN(*n) || *n < 0 || *n > 1) {
 		return cfg, errors.New("tool approval confidence is invalid")
 	}
@@ -92,7 +98,7 @@ func approvalMatcher(matcher, name string, args json.RawMessage) bool {
 		var body map[string]any
 		_ = json.Unmarshal(args, &body)
 		value := mapStringValue(body["path"])
-		if name == "shell_exec" || name == "Bash" {
+		if strings.TrimPrefix(name, "re_") == "shell_exec" || name == "Bash" {
 			value = mapStringValue(body["command"])
 		}
 		return approvalGlob(m[2], hookEnvPrefix.ReplaceAllString(value, ""))
@@ -126,22 +132,31 @@ func (c toolApprovalConfig) decision(name string, args json.RawMessage) string {
 			return "deny"
 		}
 	}
-	if c.Policy == "always_ask" {
+	if c.Policy == "always_ask" && !c.BypassAlwaysAsk {
 		return "ask"
+	}
+	for _, r := range c.Rules {
+		if r.Action == "ask" && approvalMatcher(r.Matcher, name, args) {
+			return "ask"
+		}
+	}
+	if c.Policy == "ai" && c.dangerousTool(name, args) {
+		return "ai"
 	}
 	for _, matcher := range c.AlwaysAllow {
 		if approvalMatcher(matcher, name, args) {
 			return "allow"
 		}
 	}
-	for _, action := range []string{"ask", "allow"} {
-		for _, r := range c.Rules {
-			if r.Action == action && approvalMatcher(r.Matcher, name, args) {
-				return action
-			}
+	for _, r := range c.Rules {
+		if r.Action == "allow" && approvalMatcher(r.Matcher, name, args) {
+			return "allow"
 		}
 	}
-	if c.Policy == "allow_all" {
+	if c.Policy == "allow_all" || c.Policy == "always_ask" && c.BypassAlwaysAsk {
+		return "allow"
+	}
+	if !c.needsAIReview(name, args) {
 		return "allow"
 	}
 	return "ai"
@@ -289,7 +304,7 @@ func (s *Service) approveTool(ctx context.Context, tenant, agent, session, run, 
 			return err
 		}
 	}
-	cfg, err := parseApprovalConfig(a.Config, fallback)
+	cfg, err := s.effectiveApprovalConfig(ctx, a, session, run, fallback)
 	if err != nil {
 		return err
 	}
@@ -451,7 +466,7 @@ func (s *Service) recheckToolApproval(ctx context.Context, tenant, agent, sessio
 			return err
 		}
 	}
-	policy, err := parseApprovalConfig(a.Config, fallback)
+	policy, err := s.effectiveApprovalConfig(ctx, a, session, run, fallback)
 	if err != nil {
 		return err
 	}
@@ -471,7 +486,7 @@ func (s *Service) toolExecutionGuard(ctx context.Context, tenant, agent, session
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := parseApprovalConfig(a.Config, "allow_all")
+	cfg, err := s.effectiveApprovalConfig(ctx, a, session, run, "allow_all")
 	if err != nil {
 		return nil, err
 	}

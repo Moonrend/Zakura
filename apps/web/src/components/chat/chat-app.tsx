@@ -75,9 +75,12 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { api, ApiError } from "@/lib/api";
 import { fetchAgents, type AgentListItem } from "@/lib/agents";
+import { fetchSpaces } from "@/lib/spaces";
 import { fetchAcpConfig, fetchAcpRuntime, reconnectAcpRuntime, closeAcpRuntime, prepareAcpDraft, resolveAcpPermission, resolveAcpElicitation, setAcpMode, setAcpModel, setAcpConfigOption } from "@/lib/acp";
 import {
   buildConversationTurns,
+  buildGatewayConversationTurns,
+  gatewaySpaceId,
   cancelCloudRun,
   compactCloudSession,
   continueCloudRun,
@@ -122,6 +125,8 @@ import {
   reasoningItemsFromLevels,
 } from "./composer";
 import { MessageQueue } from "./message-queue";
+import { ToolApprovalTray } from "./tool-approval-card";
+import { pendingToolApprovals } from "@/lib/tool-approvals";
 import type { ContextWindowInfo } from "./context-window";
 import { FilePanel } from "./file-panel";
 import { AutomationPanel } from "./automation-panel";
@@ -509,7 +514,7 @@ export function ChatApp() {
     ready: yjsReady,
   } = useSessionDoc({
     agentId,
-    sessionId,
+    sessionId: agentId && gatewaySpaceId(agentId) ? null : sessionId,
     textareaRef: composerRef,
     onValueChange: setInput,
   });
@@ -524,7 +529,7 @@ export function ChatApp() {
   const activeSession = sessions.find((s) => s.id === sessionId) ?? null;
   // Older cloud sessions may have a null/undefined origin after schema
   // migrations. Treat those as ordinary sessions instead of crashing render.
-  const isGatewaySession = activeSession?.origin?.channel === "openai-gateway";
+  const isGatewaySession = Boolean(agentId && gatewaySpaceId(agentId)) || activeSession?.origin?.channel === "openai-gateway";
   /**
    * 活跃 Run 优先从事件流推导（有序、无请求竞态）。
    * 引导/出队是「run_end(cancelled) → 立刻 run_start 新回合」的连续事件；
@@ -557,9 +562,10 @@ export function ChatApp() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
   const turns = useMemo(
-    () => buildConversationTurns(events, { variantByMessage, branchByParent }),
-    [events, variantByMessage, branchByParent],
+    () => isGatewaySession ? buildGatewayConversationTurns(events) : buildConversationTurns(events, { variantByMessage, branchByParent }),
+    [events, variantByMessage, branchByParent, isGatewaySession],
   );
+  const pendingApprovals = useMemo(() => pendingToolApprovals(events), [events]);
   const currentModelItem = useMemo(() => {
     if (!models.length) return undefined;
     if (!model) return models.find((m) => m.isDefault) ?? models[0];
@@ -724,7 +730,11 @@ export function ChatApp() {
                       email: me.user.email,
                       avatarRev: me.user.avatarRev ?? 0,
                     });
-        const list = await fetchAgents();
+        const [agentList, spaces] = await Promise.all([fetchAgents(), fetchSpaces()]);
+        const list: AgentListItem[] = [...agentList, ...spaces.map((space) => ({
+          id: `gateway:${space.id}`, name: `${space.name} · AI Gateway`, slug: `gateway:${space.id}`,
+          spaceId: space.id, spaceName: space.name, enableComputer: false, enableMemory: false,
+        }))];
         if (cancelled) return;
         setAgents(list);
         setAuthed(true);
@@ -782,7 +792,7 @@ export function ChatApp() {
   }, [agentId]);
 
   const refreshProjects = useCallback(async () => {
-    if (!agentId) return;
+    if (!agentId || gatewaySpaceId(agentId)) return;
     try {
       const res = await listAgentProjects(agentId);
       setProjects(res.projects);
@@ -1224,15 +1234,21 @@ export function ChatApp() {
           }).then((r) => r.sessions),
           getCloudConfig(agentId),
           listChatModels(),
-          listAgentProjects(agentId).catch(() => ({ projects: [] as AgentProject[] })),
+          gatewaySpaceId(agentId) ? Promise.resolve({ projects: [] as AgentProject[] }) : listAgentProjects(agentId).catch(() => ({ projects: [] as AgentProject[] })),
         ]);
         if (cancelled) return;
-        void fetchComposerCapabilities(agentId)
+        void (gatewaySpaceId(agentId) ? Promise.resolve({ skills: [], groups: [] } as ComposerCapabilities) : fetchComposerCapabilities(agentId))
           .then((cap) => {
             if (!cancelled) setComposerCap(cap);
           })
           .catch(() => {});
-        void fetchAcpConfig(agentId)
+        if (gatewaySpaceId(agentId)) {
+          setAcpRuntimes([{ id: ZAKURA_RUNTIME_ID, label: "Zakura" }]);
+          defaultRuntimeRef.current = ZAKURA_RUNTIME_ID;
+          setDraftRuntimeId(ZAKURA_RUNTIME_ID);
+          setAcpRuntime(null);
+        }
+        if (!gatewaySpaceId(agentId)) void fetchAcpConfig(agentId)
           .then((res) => {
             if (cancelled) return;
             const extras = Object.values(res.config.agents)
@@ -1270,7 +1286,7 @@ export function ChatApp() {
         const pending = pendingSessionRef.current;
         pendingSessionRef.current = null;
         // 有待发送 prompt 时开新会话草稿，避免挂在旧对话上
-        if (pendingPromptRef.current) {
+        if (pendingPromptRef.current && !gatewaySpaceId(agentId)) {
           setSessionId(null);
           resetConversationEvents();
           seqRef.current = 0;
@@ -1302,7 +1318,7 @@ export function ChatApp() {
 
   // 引导深链：Agent 就绪后自动发送首条消息
   useEffect(() => {
-    if (!agentId || !authed || !agentReady || autoPromptSentRef.current) return;
+    if (!agentId || gatewaySpaceId(agentId) || !authed || !agentReady || autoPromptSentRef.current) return;
     const prompt = pendingPromptRef.current;
     if (!prompt) return;
     autoPromptSentRef.current = true;
@@ -1502,7 +1518,7 @@ export function ChatApp() {
 
   // 草稿即时落本地，随后同步到服务端，保证刷新和多设备打开都能恢复。
   useEffect(() => {
-    if (!agentId) return;
+    if (!agentId || isGatewaySession) return;
     const expectedKey = sessionId ?? "__new__";
     // 会话刚切换但恢复 effect 尚未执行时，不能把旧会话的输入写到新 key。
     if (draftKeyRef.current !== expectedKey) return;
@@ -1523,7 +1539,7 @@ export function ChatApp() {
       });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [agentId, input, sessionId, yjsReady, editingTarget]);
+  }, [agentId, input, sessionId, yjsReady, editingTarget, isGatewaySession]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -2588,7 +2604,7 @@ export function ChatApp() {
               </Button>
             </div>
           ) : null}
-          <button
+          {!isGatewaySession && <button
             type="button"
             onClick={() => {
               handleNewSession(activeProject);
@@ -2603,7 +2619,7 @@ export function ChatApp() {
           >
             <SquarePen className="h-4 w-4 transition-transform duration-300 ease-overshoot group-hover/new:-rotate-12" />
             新对话
-          </button>
+          </button>}
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -2774,7 +2790,7 @@ export function ChatApp() {
             </span>
           ) : null}
           <div className="flex-1" />
-          {runActive && mainPane === "chat" && (
+          {runActive && !isGatewaySession && mainPane === "chat" && (
             <Button size="sm" variant="ghost" onClick={() => void handleCancel()}>
               <Square className="h-3.5 w-3.5" />
               停止
@@ -2784,6 +2800,7 @@ export function ChatApp() {
             size="icon-sm"
             variant="ghost"
             aria-label="项目"
+            disabled={isGatewaySession}
             className={cn(
               (mainPane === "projects" || mainPane === "project-settings" || activeProject) &&
                 "bg-muted text-foreground",
@@ -2799,6 +2816,7 @@ export function ChatApp() {
             size="icon-sm"
             variant="ghost"
             aria-label="文件"
+            disabled={isGatewaySession}
             className={cn(mainPane === "files" && "bg-muted text-foreground")}
             onClick={() => goPane(mainPane === "files" ? "chat" : "files")}
           >
@@ -2808,6 +2826,7 @@ export function ChatApp() {
             size="icon-sm"
             variant="ghost"
             aria-label="任务"
+            disabled={isGatewaySession}
             className={cn(mainPane === "tasks" && "bg-muted text-foreground")}
             onClick={() => goPane(mainPane === "tasks" ? "chat" : "tasks")}
           >
@@ -2846,6 +2865,7 @@ export function ChatApp() {
             size="icon-sm"
             variant="ghost"
             aria-label="设置"
+            disabled={isGatewaySession}
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 className="h-4 w-4" />
@@ -2883,7 +2903,7 @@ export function ChatApp() {
               agentName={agent?.name}
               agentId={agentId}
               sessionId={sessionId}
-              canAct={(hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID) && !runActive && !sending}
+              canAct={!isGatewaySession && (hasChatRoute || draftRuntimeId !== ZAKURA_RUNTIME_ID) && !runActive && !sending}
               editingMessageId={editingTarget?.messageId ?? null}
               readOnly={isGatewaySession}
               onUIContinue={(message, state, source) => {
@@ -2934,13 +2954,6 @@ export function ChatApp() {
                   toast.error(err instanceof Error ? err.message : String(err)),
                 );
               }}
-              onToolApproval={(input) => {
-                if (!agentId || !sessionId) return;
-                return resolveToolApproval(agentId, sessionId, input).catch((err) => {
-                  toast.error(err instanceof Error ? err.message : String(err));
-                  throw err;
-                });
-              }}
             />
               </>
             )}
@@ -2949,6 +2962,17 @@ export function ChatApp() {
 
         {/* 组合器：排队列表贴在输入框上方连成一块 */}
         <div className="relative shrink-0 px-2.5 pt-1 pb-[max(env(safe-area-inset-bottom),0.625rem)] md:px-4 md:pb-4">
+          {agentId && sessionId && !switchingSession && !isGatewaySession ? <ToolApprovalTray
+            key={`${agentId}:${sessionId}`}
+            items={pendingApprovals}
+            onResolve={async input => {
+              try { await resolveToolApproval(agentId, sessionId, input); }
+              catch (err) {
+                toast.error(err instanceof Error ? err.message : String(err));
+                throw err;
+              }
+            }}
+          /> : null}
           {!atBottom && !emptyConversation && (
             <Button
               type="button"
@@ -2961,7 +2985,7 @@ export function ChatApp() {
               回到底部
             </Button>
           )}
-          {agentId && sessionId && !isNewSession && agent?.spaceId && (
+          {agentId && sessionId && !isNewSession && !isGatewaySession && agent?.spaceId && (
             <div className="mx-auto mb-2 max-w-3xl">
               <ComputerSessionApproval agentId={agentId} sessionId={sessionId} spaceId={agent.spaceId} />
             </div>
@@ -3009,7 +3033,13 @@ export function ChatApp() {
               onOpenChange={(open) => { if (!open) setAcpAuthTerminal(null); }}
             />
           )}
-          <Composer
+          {isGatewaySession ? (
+            <div className="mx-auto max-w-3xl py-3 text-sm text-muted-foreground" role="status">
+              AI Gateway {runActive ? "正在同步" : ""}
+              {activeSession?.origin?.clientSessionKey && <div className="mt-1 break-all font-mono text-xs">{activeSession.origin.clientSessionKey}</div>}
+              <div className="mt-1 text-xs">此对话来自您的客户端 {activeSession?.origin?.harness || "外部客户端"} 的调用</div>
+            </div>
+          ) : <Composer
             value={input}
             onValueChange={bindValueChange}
             remoteFlash={remoteFlash}
@@ -3233,7 +3263,7 @@ export function ChatApp() {
             compactingContext={compactingContext}
             onContextWindowOpenChange={setContextOpen}
             onCompactContext={() => void handleCompactContext()}
-          />
+          />}
         </div>
 
         {/* 空会话时输入框浮到视觉中线；首条消息发出后 flex-grow 归零，输入框顺势落回底部 */}

@@ -77,22 +77,36 @@ func DecodeJSON(r *http.Request, dst any) error {
 func Auth(deps *appdeps.Dependencies) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			deny := func(status int, message string) {
+				if r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens" {
+					typ := "authentication_error"
+					if status == http.StatusForbidden {
+						typ = "permission_error"
+					}
+					JSON(w, status, map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": message}})
+					return
+				}
+				Error(w, status, message)
+			}
 			raw := bearerToken(r.Header.Get("Authorization"))
+			if raw == "" && (r.URL.Path == "/v1/messages" || r.URL.Path == "/v1/messages/count_tokens" || r.URL.Path == "/v1/models") {
+				raw = r.Header.Get("x-api-key")
+			}
 			if raw == "" {
-				Error(w, http.StatusUnauthorized, "unauthorized")
+				deny(http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			p, err := authenticate(r.Context(), deps, raw)
 			if err != nil {
-				Error(w, http.StatusUnauthorized, "unauthorized")
+				deny(http.StatusUnauthorized, "unauthorized")
 				return
 			}
 			if p.OAuth && !oauthScopeAllows(p.OAuthScope, r.URL.Path) {
-				Error(w, http.StatusForbidden, "insufficient_scope")
+				deny(http.StatusForbidden, "insufficient_scope")
 				return
 			}
 			if p.APIKey && strings.HasPrefix(r.URL.Path, "/api/") && !apiKeyAllows(p.APIKeyScopes, "api") {
-				Error(w, http.StatusForbidden, "insufficient_scope")
+				deny(http.StatusForbidden, "insufficient_scope")
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))

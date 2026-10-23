@@ -417,6 +417,10 @@ func (c *realtimeClient) subscribeSession(payload map[string]any, ack func(any))
 		ack(map[string]any{"ok": false, "error": "agentId and sessionId required"})
 		return nil
 	}
+	if space, gateway := gatewaySpace(agent); gateway && httpx.AuthorizeResource(c.h.deps.RunContext(), c.h.deps, c.principal, space, "") != nil {
+		ack(map[string]any{"ok": false, "error": "Not found"})
+		return nil
+	}
 	if _, e := c.h.store.GetSession(c.h.deps.RunContext(), c.principal.TenantID, agent, sid); e != nil {
 		ack(map[string]any{"ok": false, "error": "Not found"})
 		return nil
@@ -523,6 +527,10 @@ func broadcastPlatform(event string, payload any) {
 func (c *realtimeClient) syncSubscribe(payload map[string]any, ack func(any)) error {
 	agent, _ := payload["agentId"].(string)
 	sid, _ := payload["sessionId"].(string)
+	if space, gateway := gatewaySpace(agent); gateway && httpx.AuthorizeResource(c.h.deps.RunContext(), c.h.deps, c.principal, space, "") != nil {
+		ack(map[string]any{"ok": false, "error": "Not found"})
+		return nil
+	}
 	if _, e := c.h.store.GetSession(c.h.deps.RunContext(), c.principal.TenantID, agent, sid); e != nil {
 		ack(map[string]any{"ok": false, "error": "Not found"})
 		return nil

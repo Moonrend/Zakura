@@ -92,7 +92,7 @@ func TestToolApprovalLegacyLLMDecisionMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "llm", "routeId": route.ID, "escalateOnDeny": false}}}})})
+			a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "llm", "scope": "all", "routeId": route.ID, "escalateOnDeny": false}}}})})
 			if err != nil {
 				t.Fatal(err)
 			}

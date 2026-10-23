@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,12 +21,7 @@ type Ping struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func dockerBin() string {
-	if p := os.Getenv("ZAKURA_DOCKER"); p != "" {
-		return p
-	}
-	return "docker"
-}
+func dockerBin() string { return Binary() }
 
 func Probe() Ping {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -33,18 +29,31 @@ func Probe() Ping {
 	cmd := exec.CommandContext(ctx, dockerBin(), "version", "--format", "{{.Server.Version}}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return Ping{OK: false, Error: ErrUnavailable.Error()}
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return Ping{OK: false, Error: ErrUnavailable.Error()}
+		}
+		if ctx.Err() != nil {
+			return Ping{OK: false, Error: "Docker 响应超时，请检查 Docker Engine / Desktop 是否已启动"}
+		}
+		detail := strings.TrimSpace(string(out))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return Ping{OK: false, Error: "Docker 不可用，请检查服务状态、当前 context 和访问权限：" + detail}
 	}
 	ver := strings.TrimSpace(string(out))
 	if ver == "" {
-		return Ping{OK: false, Error: ErrUnavailable.Error()}
+		return Ping{OK: false, Error: "Docker 未返回服务端版本，请检查 Docker Engine / Desktop 是否已启动"}
 	}
 	return Ping{OK: true, Version: ver}
 }
 
 func Require() error {
 	if p := Probe(); !p.OK {
-		return ErrUnavailable
+		if p.Error == ErrUnavailable.Error() {
+			return ErrUnavailable
+		}
+		return errors.New(p.Error)
 	}
 	return nil
 }

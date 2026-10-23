@@ -656,6 +656,8 @@ export type {
   ToolApprovalRule,
   ToolApprovalAiProvider,
   ToolApprovalAiGateConfig,
+  ToolApprovalScope,
+  SpaceToolApprovalConfig,
   ToolApprovalConfig,
   ToolApprovalReason,
   ToolApprovalAiDecision,

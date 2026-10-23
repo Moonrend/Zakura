@@ -206,9 +206,10 @@ func (d *gwStreamDecoder) consume(protocol string, ev gwSSEEvent) ([]gwStreamDel
 func gwInt(v any) int { n, _ := gwNum(v); return int(n) }
 
 type gwStreamItem struct {
-	index          int
-	kind, id, text string
-	tool           *gwStreamTool
+	index           int
+	kind, id, text  string
+	tool            *gwStreamTool
+	started, closed bool
 }
 
 type gwStreamEncoder struct {
@@ -285,14 +286,21 @@ func (e *gwStreamEncoder) item(kind string, tool *gwStreamTool) (*gwStreamItem, 
 	}
 	e.items = append(e.items, item)
 	if e.operation == "messages" {
-		block := map[string]any{"type": "text", "text": ""}
-		if kind == "reasoning" {
-			block = map[string]any{"type": "thinking", "thinking": ""}
+		for _, previous := range e.items[:len(e.items)-1] {
+			if previous.closed {
+				continue
+			}
+			// OpenAI may interleave argument deltas for parallel calls. Anthropic
+			// requires sequential blocks: later calls wait until finish(), while
+			// the first call continues streaming without buffering the response.
+			if previous.tool != nil || !previous.started {
+				return item, nil
+			}
+			if err := e.closeAnthropicItem(previous); err != nil {
+				return nil, err
+			}
 		}
-		if tool != nil {
-			block = map[string]any{"type": "tool_use", "id": gwOr(tool.ID, gwID("toolu_")), "name": tool.Name, "input": map[string]any{}}
-		}
-		return item, e.event("content_block_start", map[string]any{"type": "content_block_start", "index": item.index, "content_block": block})
+		return item, e.startAnthropicItem(item)
 	}
 	if e.operation != "responses" {
 		return item, nil
@@ -307,6 +315,43 @@ func (e *gwStreamEncoder) item(kind string, tool *gwStreamTool) (*gwStreamItem, 
 		return item, e.event("response.reasoning_summary_part.added", map[string]any{"type": "response.reasoning_summary_part.added", "output_index": item.index, "item_id": item.id, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}})
 	}
 	return item, nil
+}
+
+func (e *gwStreamEncoder) startAnthropicItem(item *gwStreamItem) error {
+	block := map[string]any{"type": "text", "text": ""}
+	if item.kind == "reasoning" {
+		block = map[string]any{"type": "thinking", "thinking": "", "signature": ""}
+	}
+	if item.tool != nil {
+		block = map[string]any{"type": "tool_use", "id": item.tool.ID, "name": item.tool.Name, "input": map[string]any{}}
+	}
+	if err := e.event("content_block_start", map[string]any{"type": "content_block_start", "index": item.index, "content_block": block}); err != nil {
+		return err
+	}
+	item.started = true
+	return nil
+}
+
+func (e *gwStreamEncoder) closeAnthropicItem(item *gwStreamItem) error {
+	if err := e.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": item.index}); err != nil {
+		return err
+	}
+	item.closed = true
+	return nil
+}
+
+func (e *gwStreamEncoder) anthropicItemDelta(item *gwStreamItem, value string) error {
+	if !item.started || value == "" {
+		return nil
+	}
+	delta := map[string]any{"type": "text_delta", "text": value}
+	if item.kind == "reasoning" {
+		delta = map[string]any{"type": "thinking_delta", "thinking": value}
+	}
+	if item.tool != nil {
+		delta = map[string]any{"type": "input_json_delta", "partial_json": value}
+	}
+	return e.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": item.index, "delta": delta})
 }
 
 func (e *gwStreamEncoder) delta(delta gwStreamDelta) error {
@@ -335,10 +380,7 @@ func (e *gwStreamEncoder) delta(delta gwStreamDelta) error {
 		item.text += args
 		switch e.operation {
 		case "messages":
-			if args == "" {
-				return nil
-			}
-			return e.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": item.index, "delta": map[string]any{"type": "input_json_delta", "partial_json": args}})
+			return e.anthropicItemDelta(item, args)
 		case "responses":
 			if args == "" {
 				return nil
@@ -369,7 +411,7 @@ func (e *gwStreamEncoder) delta(delta gwStreamDelta) error {
 		}
 		return e.chat(map[string]any{key: value}, nil, nil)
 	}
-	if item == nil {
+	if item == nil || e.operation == "messages" && item.closed {
 		var err error
 		item, err = e.item(kind, nil)
 		if err != nil {
@@ -383,11 +425,7 @@ func (e *gwStreamEncoder) delta(delta gwStreamDelta) error {
 	}
 	item.text += value
 	if e.operation == "messages" {
-		d := map[string]any{"type": "text_delta", "text": value}
-		if kind == "reasoning" {
-			d = map[string]any{"type": "thinking_delta", "thinking": value}
-		}
-		return e.event("content_block_delta", map[string]any{"type": "content_block_delta", "index": item.index, "delta": d})
+		return e.anthropicItemDelta(item, value)
 	}
 	name := "response.output_text.delta"
 	field := "content_index"
@@ -424,7 +462,18 @@ func (e *gwStreamEncoder) finish(res gwResult) error {
 	switch e.operation {
 	case "messages":
 		for _, item := range e.items {
-			if err := e.event("content_block_stop", map[string]any{"type": "content_block_stop", "index": item.index}); err != nil {
+			if item.closed {
+				continue
+			}
+			if !item.started {
+				if err := e.startAnthropicItem(item); err != nil {
+					return err
+				}
+				if err := e.anthropicItemDelta(item, item.text); err != nil {
+					return err
+				}
+			}
+			if err := e.closeAnthropicItem(item); err != nil {
 				return err
 			}
 		}

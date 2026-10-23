@@ -136,6 +136,9 @@ export type CloudAgentSessionOrigin = {
   source?: "agent_loop" | "mcp" | "api" | "system" | "remote";
   /** API 接入通道，例如 OpenAI 兼容中间件 */
   channel?: string;
+  /** Gateway client family and owning Space. */
+  harness?: string;
+  spaceId?: string;
   /** 外部客户端会话关联键（Claude Code / Codex 等自带的 session id） */
   clientSessionKey?: string;
   /** 创建该 Gateway 会话的 API Key id（无客户端 session 时用于粘会话） */
@@ -181,6 +184,8 @@ export function parseCloudAgentSessionOrigin(raw: unknown): CloudAgentSessionOri
   for (const key of [
     "channel",
     "clientSessionKey",
+    "harness",
+    "spaceId",
     "apiKeyId",
     "parentSessionId",
     "parentRunId",

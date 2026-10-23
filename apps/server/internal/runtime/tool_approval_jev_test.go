@@ -34,7 +34,7 @@ func TestToolApprovalJevDecisionMatrix(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				gate := map[string]any{"provider": "jev", "routeId": route.ID, "escalateOnDeny": scenario == "escalate-deny"}
+				gate := map[string]any{"provider": "jev", "scope": "all", "routeId": route.ID, "escalateOnDeny": scenario == "escalate-deny"}
 				a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": gate}}})})
 				if err != nil {
 					t.Fatal(err)
@@ -102,7 +102,7 @@ func TestToolApprovalJevPolicyChangeDuringEvaluation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "routeId": route.ID}}}})})
+	a, err := store.CreateAgent(context.Background(), "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "scope": "all", "routeId": route.ID}}}})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestToolApprovalJevReceivesBoundedContext(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"systemPrompt": "private-system-sentinel", "approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "routeId": route.ID}}}})})
+			a, err := store.CreateAgent(ctx, "tenant", Agent{Name: "A", SpaceID: space.ID, Config: rawJSON(map[string]any{"cloud": map[string]any{"systemPrompt": "private-system-sentinel", "approvals": map[string]any{"policy": "ai", "aiGate": map[string]any{"provider": "jev", "scope": "all", "routeId": route.ID}}}})})
 			if err != nil {
 				t.Fatal(err)
 			}

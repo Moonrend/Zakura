@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	mathrand "math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -463,6 +464,9 @@ func (s *Store) CreateSession(ctx context.Context, tenant, user, agent string, i
 	return in, nil
 }
 func (s *Store) GetSession(ctx context.Context, tenant, agent, id string) (Session, error) {
+	if space, ok := gatewaySpace(agent); ok {
+		return s.getGatewaySession(ctx, tenant, space, id)
+	}
 	var c sessionColumns
 	e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_sessions").Select(sessionColumnsList).Where("tenant_id = ? AND agent_id = ? AND id = ?", tenant, agent, id).Take(&c).Error
 	if errors.Is(e, gorm.ErrRecordNotFound) {
@@ -474,6 +478,9 @@ func (s *Store) GetSession(ctx context.Context, tenant, agent, id string) (Sessi
 	return c.session(), nil
 }
 func (s *Store) ListSessions(ctx context.Context, tenant, agent string, kinds []string, limit, offset int) ([]Session, error) {
+	if space, ok := gatewaySpace(agent); ok {
+		return s.listGatewaySessions(ctx, tenant, space, limit, offset)
+	}
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
@@ -499,13 +506,27 @@ func (s *Store) SearchSessions(ctx context.Context, tenant, q string, limit int)
 	if e := s.deps.Gorm.WithContext(ctx).Raw(`SELECT DISTINCT s.id,s.agent_id,s.title,s.status,s.kind,s.project,s.origin_json,s.model,s.model_route_id,s.reasoning,s.draft_text,s.last_seq,s.active_run_id,s.created_by_user_id,s.created_at,s.updated_at FROM cloud_agent_sessions s LEFT JOIN cloud_agent_events e ON e.session_id=s.id WHERE s.tenant_id=? AND (LOWER(s.title) LIKE LOWER(?) OR LOWER(e.payload_json) LIKE LOWER(?)) ORDER BY s.updated_at DESC LIMIT ?`, tenant, "%"+q+"%", "%"+q+"%", limit).Scan(&rows).Error; e != nil {
 		return nil, e
 	}
+	var gatewayRows []sessionColumns
+	if err := s.deps.Gorm.WithContext(ctx).Raw(`SELECT s.id, 'gateway:' || s.space_id AS agent_id, s.title, s.status, 'chat' AS kind, s.origin_json, s.model, s.last_seq, s.created_at, s.updated_at FROM gateway_sessions s WHERE s.tenant_id=? AND (LOWER(s.title) LIKE LOWER(?) OR EXISTS (SELECT 1 FROM gateway_messages m WHERE m.session_id=s.id AND LOWER(m.payload_json) LIKE LOWER(?))) ORDER BY s.updated_at DESC LIMIT ?`, tenant, "%"+q+"%", "%"+q+"%", limit).Scan(&gatewayRows).Error; err != nil {
+		return nil, err
+	}
+	rows = append(rows, gatewayRows...)
 	out := make([]Session, 0, len(rows))
 	for _, c := range rows {
 		out = append(out, c.session())
 	}
-	return out, nil
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out[:min(len(out), limit)], nil
 }
 func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, patch map[string]any) (Session, error) {
+	if space, ok := gatewaySpace(agent); ok {
+		return s.updateGatewaySession(ctx, tenant, space, id, patch)
+	}
 	allowed := map[string]string{"title": "title", "status": "status", "project": "project", "model": "model", "modelRouteId": "model_route_id", "reasoning": "reasoning", "draftText": "draft_text"}
 	sets := []string{}
 	args := []any{}
@@ -530,6 +551,16 @@ func (s *Store) UpdateSession(ctx context.Context, tenant, agent, id string, pat
 	return s.GetSession(ctx, tenant, agent, id)
 }
 func (s *Store) DeleteSession(ctx context.Context, tenant, agent, id string) error {
+	if space, ok := gatewaySpace(agent); ok {
+		result := s.deps.Gorm.WithContext(ctx).Table("gateway_sessions").Where("tenant_id=? AND space_id=? AND id=?", tenant, space, id).Delete(nil)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
 	return s.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := s.cancelApprovalsTx(ctx, tx, tenant, agent, id, ""); err != nil {
 			return err
@@ -575,6 +606,9 @@ func (s *Store) AppendEvent(ctx context.Context, tenant, agent, session, typ str
 	return out, e
 }
 func (s *Store) ListEvents(ctx context.Context, tenant, agent, session string, after int64, limit int) ([]Event, error) {
+	if space, ok := gatewaySpace(agent); ok {
+		return s.gatewayEvents(ctx, tenant, space, session, after, limit)
+	}
 	if _, e := s.GetSession(ctx, tenant, agent, session); e != nil {
 		return nil, e
 	}

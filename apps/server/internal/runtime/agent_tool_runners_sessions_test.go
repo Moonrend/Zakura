@@ -162,10 +162,10 @@ func TestRunBuiltinToolAutomationGroup(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	createdRaw, createdErr := h.runBuiltinTool(ctx, "tenant", agent.ID, "create_routine", raw(map[string]any{"name": "Daily", "prompt": "summarize", "schedule": "@daily"}))
+	createdRaw, createdErr := h.runBuiltinTool(ctx, "tenant", agent.ID, "create_routine", raw(map[string]any{"name": "Daily", "prompt": "summarize", "schedule": "@daily", "bypassToolApproval": true}))
 	created := decodeBuiltinResult(t, createdRaw, createdErr)
 	id, _ := created["id"].(string)
-	if id == "" || created["schedule"] != "@daily" || created["nextRunAt"] == nil {
+	if id == "" || created["schedule"] != "@daily" || created["nextRunAt"] == nil || created["bypassToolApproval"] != true {
 		t.Fatalf("create_routine: %#v", created)
 	}
 	if _, err := h.runBuiltinTool(ctx, "tenant", agent.ID, "create_routine", raw(map[string]any{"name": "Bad", "prompt": "x", "schedule": "not a cron"})); err == nil {
@@ -182,9 +182,9 @@ func TestRunBuiltinToolAutomationGroup(t *testing.T) {
 		t.Fatalf("list_routines: %#v", routines)
 	}
 
-	updateRaw, updateErr := h.runBuiltinTool(ctx, "tenant", agent.ID, "update_routine", raw(map[string]any{"id": id, "schedule": "@hourly", "name": "Hourly"}))
+	updateRaw, updateErr := h.runBuiltinTool(ctx, "tenant", agent.ID, "update_routine", raw(map[string]any{"id": id, "schedule": "@hourly", "name": "Hourly", "bypassToolApproval": false}))
 	updated := decodeBuiltinResult(t, updateRaw, updateErr)
-	if updated["enabled"] != true || updated["schedule"] != "@hourly" {
+	if updated["enabled"] != true || updated["schedule"] != "@hourly" || updated["bypassToolApproval"] != false {
 		t.Fatalf("update_routine: %#v", updated)
 	}
 

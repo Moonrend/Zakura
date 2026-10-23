@@ -19,7 +19,7 @@ const POLICIES: Array<{ value: ToolApprovalPolicy; label: string }> = [
 ];
 
 export default function AgentApprovalsPage() {
-  const { id } = useAgentDetail();
+  const { id, agent } = useAgentDetail();
   const [config, setConfig] = useState<ToolApprovalConfig | null>(null);
   const [models, setModels] = useState<ChatModelOption[]>([]);
   const [loadError, setLoadError] = useState("");
@@ -61,6 +61,17 @@ export default function AgentApprovalsPage() {
         </Select>
       </SettingsRow>
       {policy === "ai" ? <>
+        <SettingsRow label="审批范围" description="默认继承 Space：自动允许已知只读请求，其他调用交给 AI。通过后直接执行。">
+          <Select value={gate?.scope ?? "inherit"} items={[{ value: "inherit", label: "继承 Space" }, { value: "risky", label: "有风险或未知的调用" }, { value: "all", label: "全部调用" }]} onValueChange={scope => {
+            if (scope !== "inherit" && scope !== "risky" && scope !== "all") return;
+            setConfig(current => current ? { ...current, aiGate: { ...current.aiGate, scope } } : current);
+            saveNow({ aiGate: { scope } });
+          }}>
+            <SelectTrigger className="w-52"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="inherit">继承 Space</SelectItem><SelectItem value="risky">有风险或未知的调用</SelectItem><SelectItem value="all">全部调用</SelectItem></SelectContent>
+          </Select>
+        </SettingsRow>
+        {agent?.spaceId ? <Link href={`/dashboard/spaces/${agent.spaceId}/settings/approvals`} className="text-xs text-muted-foreground underline underline-offset-4">配置 Space 的只读与危险工具范围</Link> : null}
         <SettingsRow label="审批模型">
           <ModelRouteSelector items={items} value={selectedId} placeholder={legacy ? `原模型：${gate?.llmModel || "传统模型"}` : selectedId ? "已选模型不可用" : "选择模型"} disabled={!items.length} onSelectionChange={routeId => {
             const model = models.find(item => item.providers.some(route => route.id === routeId));

@@ -31,6 +31,7 @@ type TurnRequest struct {
 	ReplyToMessageID       string
 	SkipUserMessage        bool
 	UserID, UserName       string
+	bypassAlwaysAsk        bool // Set only by automation admission, never client run options.
 }
 
 func (s *Service) Start(ctx context.Context, req TurnRequest) (Run, *QueueMessage, error) {
@@ -183,6 +184,9 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 	}
 	if receipt, ok := ctx.Value(acpQueueContextKey{}).(*acpQueueReceipt); ok {
 		runCtx = context.WithValue(runCtx, acpQueueContextKey{}, receipt)
+	}
+	if req.bypassAlwaysAsk {
+		runCtx = context.WithValue(runCtx, automationApprovalBypassKey{}, automationApprovalBypass{req.Tenant, req.Agent, req.Session, run.ID})
 	}
 	runCtx = context.WithValue(runCtx, computerRunKey{}, run.ID)
 	runCtx = context.WithValue(runCtx, disabledToolsKey{}, disabledToolSet(req.Options))

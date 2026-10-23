@@ -646,6 +646,12 @@ func (h *handler) getACPRuntime(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	live, err := h.acp.ensure(ctx, p.TenantID, agent, sid)
 	if err != nil {
+		// A failed startup is still a readable runtime state. Preserve its cause
+		// instead of reporting a status-query failure or starting it again on GET.
+		if state, snapshotErr := h.acp.snapshot(r.Context(), p.TenantID, agent, sid); snapshotErr == nil && state != nil {
+			httpx.JSON(w, http.StatusOK, state)
+			return
+		}
 		httpx.Error(w, http.StatusBadGateway, err.Error())
 		return
 	}
