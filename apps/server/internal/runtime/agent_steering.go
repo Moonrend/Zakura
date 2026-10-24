@@ -65,7 +65,7 @@ func (s *Service) injectSteers(ctx context.Context, req TurnRequest, run string,
 	}
 	for i, item := range selected {
 		if contexts[i] != "" {
-			*messages = append(*messages, chatMessage{Role: "system", Content: contexts[i]})
+			*messages = append(*messages, chatMessage{Role: "user", Content: "[Configured hook context]\n" + contexts[i]})
 		}
 		var attachments any
 		_ = json.Unmarshal(item.Attachments, &attachments)

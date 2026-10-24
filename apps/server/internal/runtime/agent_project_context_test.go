@@ -49,8 +49,8 @@ func TestAgentProjectContextFixedSpaceAndRequestedSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, value := range []string{"conversation rules", "canonical directory rules", "actual project skill body", "actual shared skill body"} {
-		if !strings.Contains(got.text, value) {
-			t.Fatalf("missing %q: %s", value, got.text)
+		if !strings.Contains(got.text+got.turnText, value) {
+			t.Fatalf("missing %q: %s", value, got.text+got.turnText)
 		}
 	}
 	if strings.Contains(got.text, "ignored legacy") {

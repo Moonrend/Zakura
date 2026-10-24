@@ -96,8 +96,13 @@ export function groupSessions(
   return groups.filter((g) => g.items.length > 0);
 }
 
+function successfulCompaction(ev: CloudAgentEvent) {
+  const payload = ev.payload as Record<string, unknown>;
+  return ev.type === "context_compacted" && payload.failed !== true && payload.compacted !== false;
+}
+
 export function latestCompaction(events: CloudAgentEvent[]) {
-  return [...events].reverse().find((ev) => ev.type === "context_compacted") ?? null;
+  return [...events].reverse().find(successfulCompaction) ?? null;
 }
 
 /** 最近一次模型调用的 measured prompt_tokens（run_log） */
@@ -128,21 +133,25 @@ export function buildContextWindowInfo(
   const summary =
     typeof compactionPayload.summary === "string" ? compactionPayload.summary : "";
 
-  // 与压缩点之后的事件 + 摘要，用 CJK 感知估算（与服务端一致）
-  let estimatedTokens = events
-    .filter((ev) => ev.seq > compactionSeq)
-    .reduce(
-      (sum, ev) => sum + estimateEventPayloadTokens(ev.payload as Record<string, unknown>),
-      0,
-    );
-  if (summary) estimatedTokens += estimateTextTokens(summary) + 20;
-
-  const measured = latestMeasuredPromptTokens(events);
-  // 有 measured 时优先（更接近真实 prompt）；压缩后 measured 可能偏旧，仍作上限参考
-  const usedTokens =
-    measured != null && measured > 0
-      ? Math.max(estimatedTokens, Math.min(measured, estimatedTokens * 2.2))
-      : estimatedTokens;
+  // Use the latest successful checkpoint or measured request as the baseline.
+  // Failed compactions and pre-checkpoint usage never reset the working context.
+  let baselineSeq = compactionSeq;
+  let baseline = typeof compactionPayload.afterTokens === "number"
+    ? compactionPayload.afterTokens
+    : summary ? estimateTextTokens(summary) + 20 : 0;
+  let measured: number | null = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i]!;
+    if (ev.seq <= compactionSeq) break;
+    if (ev.type !== "run_log") continue;
+    const n = latestMeasuredPromptTokens([ev]);
+    if (n != null) { measured = n; baseline = n; baselineSeq = ev.seq; break; }
+  }
+  const contentEvents = new Set(["user_message", "assistant_message", "tool_call_result", "message.created"]);
+  const growth = events.filter((ev) => ev.seq > baselineSeq && contentEvents.has(ev.type)).reduce(
+    (sum, ev) => sum + estimateEventPayloadTokens(ev.payload as Record<string, unknown>), 0,
+  );
+  const usedTokens = baseline + growth;
 
   const limitTokens =
     modelItem?.contextLimit && modelItem.contextLimit > 0
@@ -170,7 +179,7 @@ export function buildContextWindowInfo(
       (ev) => ev.type === "user_message" || ev.type === "assistant_message",
     ).length,
     toolResultCount: events.filter((ev) => ev.type === "tool_call_result").length,
-    summaryCount: events.filter((ev) => ev.type === "context_compacted").length,
+    summaryCount: events.filter(successfulCompaction).length,
     lastSummary: summary || undefined,
     lastCompactedAt: compaction?.createdAt,
     lastSavedTokens:

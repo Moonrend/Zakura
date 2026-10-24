@@ -53,11 +53,16 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 	if resp.Status < 200 || resp.Status >= 300 {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
+			writeGatewayError(w, resp.Operation, http.StatusBadGateway, err.Error(), "upstream_error")
 			return err
+		}
+		message := gwOr(gwErrorMessage(body), http.StatusText(resp.Status))
+		if stream, ok := w.(*gatewayStreamWriter); ok {
+			return stream.writeError(resp.Operation, resp.Status, message, "upstream_error")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.Status)
-		_, err = w.Write(gwErrorBody(resp.Operation, resp.Status, gwOr(gwErrorMessage(body), http.StatusText(resp.Status)), "upstream_error"))
+		_, err = w.Write(gwErrorBody(resp.Operation, resp.Status, message, "upstream_error"))
 		return err
 	}
 	if resp.Stream && isEventStream(resp.Header.Get("Content-Type")) {
@@ -89,16 +94,19 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 		return translateGatewayStream(w, resp)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProviderResponse+1))
-	if err != nil {
-		return err
+	if err == nil && len(body) > maxProviderResponse {
+		err = errors.New("provider response exceeds size limit")
 	}
-	if len(body) > maxProviderResponse {
-		return errors.New("provider response exceeds size limit")
+	if err != nil {
+		writeGatewayError(w, resp.Operation, http.StatusBadGateway, err.Error(), "upstream_error")
+		return err
 	}
 	if resp.Stream && gwChatOperation(resp.Operation) {
 		res, ok := gwParseResult(resp.Protocol, body)
 		if !ok {
-			return errors.New("upstream returned an invalid completion")
+			err = errors.New("upstream returned an invalid completion")
+			writeGatewayError(w, resp.Operation, http.StatusBadGateway, err.Error(), "upstream_error")
+			return err
 		}
 		res.Model = gwOr(res.Model, resp.Model)
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -133,6 +141,10 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 }
 
 func writeGatewayError(w http.ResponseWriter, operation string, status int, message, code string) {
+	if stream, ok := w.(*gatewayStreamWriter); ok {
+		_ = stream.writeError(operation, status, message, code)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(gwErrorBody(operation, status, message, code))

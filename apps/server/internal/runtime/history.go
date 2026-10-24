@@ -8,11 +8,7 @@ import (
 	"strings"
 )
 
-const (
-	sessionHistoryBudget   = 80000
-	sessionHistoryEventCap = 6000
-	historyToolResultChars = 6000
-)
+const sessionHistoryBudget = 80000 // Legacy callers requesting a byte-limited view.
 
 // chatMessage is the provider-neutral message the loop keeps; it is rendered
 // to the wire format just before each model call.
@@ -23,6 +19,7 @@ type chatMessage struct {
 	ToolCallID    string
 	UserMessageID string `json:",omitempty"`
 	Images        []string
+	InlineImages  map[string]inlineImage
 }
 
 func (m chatMessage) size() int {
@@ -45,7 +42,7 @@ var historyEventTypes = []string{
 	"user_message", "message.created", "run_start", "run_end", "run_error",
 	"assistant_delta", "assistant_message", "assistant_rollback",
 	"tool_call_start", "tool_call_args", "tool_call_result",
-	"ask_user_request", "ask_user_resolved", "session.compacted",
+	"ask_user_request", "ask_user_resolved", "session.compacted", "context.checkpoint", "context.messages", "context.template",
 }
 
 func (s *Service) loadHistoryEvents(ctx context.Context, session string) []histEvent {
@@ -62,7 +59,7 @@ func (s *Service) loadHistoryEvents(ctx context.Context, session string) []histE
 	err := s.store.deps.Gorm.WithContext(ctx).Table("cloud_agent_events").
 		Select("id,seq,type,run_id,payload_json").
 		Where("session_id = ? AND type IN ?", session, historyEventTypes).
-		Order("seq DESC").Limit(sessionHistoryEventCap).Find(&rows).Error
+		Order("seq DESC").Find(&rows).Error
 	if err != nil {
 		return nil
 	}
@@ -107,10 +104,7 @@ type askQuestion struct {
 // chained linearly, so regenerated variants and abandoned edit branches stay
 // out of the context while legacy sessions read as before. Failed runs and
 // rolled-back stream output are dropped; orphan tool calls are patched.
-func buildChainMessages(events []histEvent, targetMessageID string, budget int) []chatMessage {
-	if budget <= 0 {
-		budget = sessionHistoryBudget
-	}
+func historyChain(events []histEvent, targetMessageID string) ([]*histNode, map[string]bool, []histEvent) {
 	nodes := map[string]*histNode{}
 	lastNode, lastUser := "", ""
 	ensureRun := func(rid string, seq int64) *histNode {
@@ -129,10 +123,15 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 				resultIDs[id] = true
 			}
 		}
+		if ev.Type == "context.messages" {
+			for _, m := range decodeContextMessages(ev.Payload["messages"]) {
+				if m.Role == "tool" {
+					resultIDs[m.ToolCallID] = true
+				}
+			}
+		}
 	}
 	questions := map[string]askQuestion{}
-	var compactSeq, compactThrough int64
-	compactSummary := ""
 	compactions := []histEvent{}
 	for _, ev := range events {
 		p := ev.Payload
@@ -234,7 +233,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 			key := "r:ask:" + ev.ID
 			nodes[key] = &histNode{key: key, parent: lastNode, seq: ev.Seq, isRun: true, events: []histEvent{pair}}
 			lastNode = key
-		case "session.compacted":
+		case "session.compacted", "context.checkpoint":
 			compactions = append(compactions, ev)
 		default:
 			if ev.RunID == "" {
@@ -247,7 +246,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 
 	target := nodes["u:"+targetMessageID]
 	if target == nil {
-		return nil
+		return nil, nil, compactions
 	}
 	chain := []*histNode{}
 	seen := map[string]bool{}
@@ -262,7 +261,45 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 		chain[i], chain[j] = chain[j], chain[i]
 	}
 
+	return chain, seen, compactions
+}
+
+func chainCheckpoint(chain []*histNode, compactions []histEvent) *contextCheckpoint {
+	runs := map[string]bool{}
+	for _, n := range chain {
+		if n.isRun && !n.failed {
+			runs[strings.TrimPrefix(n.key, "r:")] = true
+		}
+	}
+	var checkpoint *contextCheckpoint
 	for _, ev := range compactions {
+		if cp, ok := readContextCheckpoint(ev); ok && runs[cp.AnchorRunID] {
+			copy := cp
+			checkpoint = &copy
+		}
+	}
+	return checkpoint
+}
+
+func buildChainMessages(events []histEvent, targetMessageID string, budget int) []chatMessage {
+	if budget <= 0 {
+		budget = sessionHistoryBudget
+	}
+	chain, seen, compactions := historyChain(events, targetMessageID)
+	if len(chain) == 0 {
+		return nil
+	}
+	target := chain[len(chain)-1]
+	checkpoint := chainCheckpoint(chain, compactions)
+	var compactSeq, compactThrough int64
+	compactSummary := ""
+	for _, ev := range compactions {
+		if _, ok := readContextCheckpoint(ev); ok {
+			continue
+		}
+		if ev.Type == "context.checkpoint" {
+			continue
+		}
 		anchor, _ := ev.Payload["anchorMessageId"].(string)
 		if anchor != "" && !seen["u:"+anchor] {
 			continue
@@ -274,6 +311,36 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 		compactSummary = compactSummaryText(ev.Payload["summary"])
 	}
 	out := []chatMessage{}
+	if checkpoint != nil {
+		out = append(out, checkpoint.Messages...)
+		pastAnchor := false
+		for _, n := range chain {
+			covered := checkpoint.ThroughSeq
+			if pastAnchor {
+				covered = 0
+			}
+			if n.key == "r:"+checkpoint.AnchorRunID {
+				pastAnchor = true
+			}
+			if n.isRun {
+				if n.failed {
+					continue
+				}
+				after := []histEvent{}
+				for _, ev := range n.events {
+					if ev.Seq > covered {
+						after = append(after, ev)
+					}
+				}
+				out = appendRunContext(out, runEventsToMessages(after))
+			} else if n.seq > covered {
+				m := userChatMessage(n.content, n.attachments)
+				m.UserMessageID = strings.TrimPrefix(n.key, "u:")
+				out = append(out, m)
+			}
+		}
+		return trimHistory(out, budget)
+	}
 	dropped := compactSeq > 0 && compactThrough > 0 && len(chain) > 0 && chain[0].seq > compactThrough
 	for _, n := range chain {
 		if compactSeq > 0 && n != target && n.seq <= compactThrough {
@@ -289,7 +356,7 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 		if n.failed {
 			continue
 		}
-		out = append(out, runEventsToMessages(n.events)...)
+		out = appendRunContext(out, runEventsToMessages(n.events))
 	}
 	if dropped {
 		content := "[Earlier conversation summary]"
@@ -301,7 +368,26 @@ func buildChainMessages(events []histEvent, targetMessageID string, budget int) 
 	return trimHistory(out, budget)
 }
 
+func appendRunContext(out, messages []chatMessage) []chatMessage {
+	if len(out) > 0 && len(messages) > 0 && messages[0].UserMessageID != "" && messages[0].UserMessageID == out[len(out)-1].UserMessageID {
+		out = out[:len(out)-1]
+	}
+	return append(out, messages...)
+}
+
 func runEventsToMessages(events []histEvent) []chatMessage {
+	lastProjection := -1
+	projected := []chatMessage{}
+	for i, ev := range events {
+		if ev.Type == "context.messages" {
+			projected = append(projected, decodeContextMessages(ev.Payload["messages"])...)
+			lastProjection = i
+		}
+	}
+	if lastProjection >= 0 {
+		// A cancelled run may have an unfinished tail after the last safe round.
+		return append(projected, runEventsToMessages(events[lastProjection+1:])...)
+	}
 	// Nested calls remain in the event log for UI, approvals and audit, but
 	// only the outer script's selected output belongs in model history.
 	visible := make([]histEvent, 0, len(events))
@@ -420,7 +506,7 @@ func runEventsToMessages(events []histEvent) []chatMessage {
 			}
 			answered[id] = true
 			text, _ := p["resultText"].(string)
-			out = append(out, chatMessage{Role: "tool", ToolCallID: id, Content: shrinkText(text, historyToolResultChars)})
+			out = append(out, chatMessage{Role: "tool", ToolCallID: id, Content: text})
 		case "_ask_pair":
 			flush()
 			rid, _ := p["requestId"].(string)

@@ -624,7 +624,7 @@ func (s *Store) ListEvents(ctx context.Context, tenant, agent, session string, a
 		Raw       string  `gorm:"column:payload_json"`
 		CreatedAt string  `gorm:"column:created_at"`
 	}
-	if e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_events").Select("id,session_id,seq,type,run_id,payload_json,created_at").Where("session_id = ? AND seq > ?", session, after).Order("seq").Limit(limit).Scan(&rows).Error; e != nil {
+	if e := s.deps.Gorm.WithContext(ctx).Table("cloud_agent_events").Select("id,session_id,seq,type,run_id,payload_json,created_at").Where("session_id = ? AND seq > ?", session, after).Where("type NOT IN ?", []string{"context.messages", "context.template", "context.checkpoint"}).Order("seq").Limit(limit).Scan(&rows).Error; e != nil {
 		return nil, e
 	}
 	out := make([]Event, 0, len(rows))

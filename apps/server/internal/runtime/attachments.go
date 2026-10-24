@@ -136,6 +136,42 @@ func resolveImages(ctx context.Context, messages []chatMessage, reader func(cont
 	return out
 }
 
+// contextImages freezes image content on first inclusion. Restoring a projected
+// message never re-reads a mutable workspace path or drops an older image.
+func (s *Service) contextImages(ctx context.Context, tenant, agent string, messages []chatMessage) map[string]inlineImage {
+	out := map[string]inlineImage{}
+	unresolved := []chatMessage{}
+	for _, m := range messages {
+		if m.InlineImages == nil {
+			unresolved = append(unresolved, m)
+		}
+	}
+	fresh := map[string]inlineImage{}
+	if s.attachmentReader != nil {
+		fresh = resolveImages(ctx, unresolved, func(ctx context.Context, path string, max int64) ([]byte, error) {
+			return s.attachmentReader(ctx, tenant, agent, path, max)
+		})
+	}
+	for i := range messages {
+		m := &messages[i]
+		if len(m.Images) == 0 {
+			continue
+		}
+		if m.InlineImages == nil {
+			m.InlineImages = map[string]inlineImage{}
+			for _, path := range m.Images {
+				if image, ok := fresh[path]; ok {
+					m.InlineImages[path] = image
+				}
+			}
+		}
+		for path, image := range m.InlineImages {
+			out[path] = image
+		}
+	}
+	return out
+}
+
 // renderMessages converts the loop's messages to the OpenAI chat shape the
 // gateway accepts for every protocol. Image parts use the Anthropic block
 // shape when the upstream speaks Anthropic: the gateway passes user content
@@ -165,7 +201,11 @@ func renderMessages(system string, messages []chatMessage, images map[string]inl
 		default:
 			parts := []any{}
 			for _, p := range m.Images {
-				img, ok := images[p]
+				source := images
+				if m.InlineImages != nil {
+					source = m.InlineImages
+				}
+				img, ok := source[p]
 				if !ok {
 					continue
 				}

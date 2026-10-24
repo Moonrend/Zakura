@@ -3,9 +3,10 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -15,38 +16,19 @@ import (
 func (h *handler) compactSession(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	agent, sid := chi.URLParam(r, "id"), chi.URLParam(r, "sid")
-	events, e := h.store.ListEvents(r.Context(), p.TenantID, agent, sid, 0, 1000)
-	if e != nil {
-		statusErr(w, e)
+	var body struct {
+		RunID string `json:"runId"`
+	}
+	if err := httpx.DecodeJSON(r, &body); err != nil && !errors.Is(err, io.EOF) {
+		httpx.Error(w, http.StatusBadRequest, "invalid compaction request")
 		return
 	}
-	keep := 50
-	if raw := r.URL.Query().Get("keep"); raw != "" {
-		if n, _ := strconv.Atoi(raw); n >= 10 && n <= 200 {
-			keep = n
-		}
-	}
-	if len(events) <= keep {
-		httpx.JSON(w, 200, map[string]any{"compacted": false, "eventCount": len(events)})
+	result, err := h.service.CompactSession(r.Context(), p.TenantID, agent, sid, body.RunID)
+	if err != nil {
+		statusErr(w, err)
 		return
 	}
-	older := events[:len(events)-keep]
-	summary := make([]map[string]any, 0)
-	for _, ev := range older {
-		if ev.Type != "user_message" && ev.Type != "assistant_message" && ev.Type != "message.created" {
-			continue
-		}
-		var x map[string]any
-		if json.Unmarshal(ev.Payload, &x) == nil {
-			summary = append(summary, map[string]any{"role": x["role"], "content": x["content"]})
-		}
-	}
-	ev, e := h.store.AppendEvent(r.Context(), p.TenantID, agent, sid, "session.compacted", nil, map[string]any{"throughSeq": older[len(older)-1].Seq, "summary": summary})
-	if e != nil {
-		statusErr(w, e)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"compacted": true, "event": ev, "summarized": len(older)})
+	httpx.JSON(w, 200, result)
 }
 func (h *handler) forkSession(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)

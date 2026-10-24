@@ -20,8 +20,34 @@ type modelToolCall struct {
 }
 
 type modelUsage struct {
-	PromptTokens     int `json:"promptTokens"`
-	CompletionTokens int `json:"completionTokens"`
+	PromptTokens        int `json:"promptTokens"`
+	CompletionTokens    int `json:"completionTokens"`
+	CacheReadTokens     int `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens    int `json:"cacheWriteTokens,omitempty"`
+	UncachedInputTokens int `json:"uncachedInputTokens"`
+}
+
+func parseModelUsage(u map[string]any, dialect string) *modelUsage {
+	out := &modelUsage{}
+	switch dialect {
+	case "anthropic":
+		out.CacheReadTokens = intValue(u["cache_read_input_tokens"])
+		out.CacheWriteTokens = intValue(u["cache_creation_input_tokens"])
+		out.PromptTokens = intValue(u["input_tokens"]) + out.CacheReadTokens + out.CacheWriteTokens
+		out.CompletionTokens = intValue(u["output_tokens"])
+	case "responses":
+		out.PromptTokens = intValue(u["input_tokens"])
+		out.CompletionTokens = intValue(u["output_tokens"])
+		out.CacheReadTokens = intValue(gwMap(u["input_tokens_details"])["cached_tokens"])
+		out.CacheWriteTokens = intValue(u["cache_write_tokens"])
+	default:
+		out.PromptTokens = intValue(u["prompt_tokens"])
+		out.CompletionTokens = intValue(u["completion_tokens"])
+		out.CacheReadTokens = intValue(gwMap(u["prompt_tokens_details"])["cached_tokens"])
+		out.CacheWriteTokens = intValue(u["cache_write_tokens"])
+	}
+	out.UncachedInputTokens = max(0, out.PromptTokens-out.CacheReadTokens-out.CacheWriteTokens)
+	return out
 }
 
 type modelRoundResult struct {
@@ -260,7 +286,7 @@ func (a *streamAccumulator) handleOpenAI(m map[string]any) {
 		a.model = model
 	}
 	if u, ok := m["usage"].(map[string]any); ok {
-		a.usage = &modelUsage{PromptTokens: intValue(u["prompt_tokens"]), CompletionTokens: intValue(u["completion_tokens"])}
+		a.usage = parseModelUsage(u, "openai")
 	}
 	choices, _ := m["choices"].([]any)
 	for _, raw := range choices {
@@ -343,7 +369,7 @@ func (a *streamAccumulator) handleAnthropic(typ string, m map[string]any) (bool,
 			a.model = model
 		}
 		if u, ok := msg["usage"].(map[string]any); ok {
-			a.usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
+			a.usage = parseModelUsage(u, "anthropic")
 		}
 	case "content_block_start":
 		idx := intValue(m["index"])
@@ -396,9 +422,21 @@ func (a *streamAccumulator) handleAnthropic(typ string, m map[string]any) (bool,
 			if a.usage == nil {
 				a.usage = &modelUsage{}
 			}
-			if v := intValue(u["output_tokens"]); v > 0 {
-				a.usage.CompletionTokens = v
+			if v, ok := u["output_tokens"]; ok {
+				a.usage.CompletionTokens = intValue(v)
 			}
+			// Delta usage is cumulative. Merge only present fields so an output-only
+			// delta preserves the input/cache counters from message_start.
+			if v, ok := u["input_tokens"]; ok {
+				a.usage.UncachedInputTokens = intValue(v)
+			}
+			if v, ok := u["cache_read_input_tokens"]; ok {
+				a.usage.CacheReadTokens = intValue(v)
+			}
+			if v, ok := u["cache_creation_input_tokens"]; ok {
+				a.usage.CacheWriteTokens = intValue(v)
+			}
+			a.usage.PromptTokens = a.usage.UncachedInputTokens + a.usage.CacheReadTokens + a.usage.CacheWriteTokens
 		}
 	case "message_stop":
 		a.done = true
@@ -459,7 +497,7 @@ func (a *streamAccumulator) handleResponses(typ string, m map[string]any) (bool,
 			a.model = model
 		}
 		if u, ok := resp["usage"].(map[string]any); ok {
-			a.usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
+			a.usage = parseModelUsage(u, "responses")
 		}
 		a.finish, a.incompleteReason = responsesFinish(resp)
 		if typ == "response.incomplete" {
@@ -616,7 +654,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 		}
 		out.FinishReason, _ = choice["finish_reason"].(string)
 		if u, ok := m["usage"].(map[string]any); ok {
-			out.Usage = &modelUsage{PromptTokens: intValue(u["prompt_tokens"]), CompletionTokens: intValue(u["completion_tokens"])}
+			out.Usage = parseModelUsage(u, "openai")
 		}
 	case m["output"] != nil || m["output_text"] != nil || m["object"] == "response":
 		items, _ := m["output"].([]any)
@@ -654,7 +692,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 		}
 		out.FinishReason, out.IncompleteReason = responsesFinish(m)
 		if u, ok := m["usage"].(map[string]any); ok {
-			out.Usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
+			out.Usage = parseModelUsage(u, "responses")
 		}
 	case m["content"] != nil:
 		blocks, _ := m["content"].([]any)
@@ -683,7 +721,7 @@ func parseCompletionJSON(raw []byte) (modelRoundResult, error) {
 		out.Text = text.String()
 		out.FinishReason, _ = m["stop_reason"].(string)
 		if u, ok := m["usage"].(map[string]any); ok {
-			out.Usage = &modelUsage{PromptTokens: intValue(u["input_tokens"]), CompletionTokens: intValue(u["output_tokens"])}
+			out.Usage = parseModelUsage(u, "anthropic")
 		}
 	default:
 		return out, errors.New("unrecognized provider response")

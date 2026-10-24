@@ -206,10 +206,14 @@ func (g *Gateway) Do(ctx context.Context, tenant, capability, operation, model s
 	if err != nil {
 		return nil, err
 	}
+	preferContextRoute(ctx, candidates)
 	failure := &gatewayRouteError{}
 	for _, candidate := range candidates {
 		resp, callErr := g.doCandidate(ctx, tenant, operation, payload, candidate.Route, candidate.Upstream)
 		if callErr == nil && !failoverStatus(resp.Status) {
+			if resp.Status >= 200 && resp.Status < 300 {
+				rememberContextRoute(ctx, candidate.Route.ID)
+			}
 			return resp, nil
 		}
 		if resp != nil {
@@ -270,6 +274,7 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 	}
 	streaming, _ := body["stream"].(bool)
 	body = prepareUpstreamRequest(upstream.Protocol, operation, route, body)
+	applyContextCache(ctx, upstream.Protocol, body)
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err

@@ -1314,20 +1314,21 @@ func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 		capture := h.captureGateway(w, p, r.Header, operation, v)
 		if capture != nil {
 			w = capture
+			defer func() { capture.finish(err) }()
 		}
-		ctx := withGatewayClientHeaders(r.Context(), r.Header)
+		ctx, cancel := context.WithCancel(withGatewayClientHeaders(r.Context(), r.Header))
+		defer cancel()
+		if streaming, _ := v["stream"].(bool); streaming && gwChatOperation(operation) {
+			stream := newGatewayStreamWriter(ctx, w, cancel, gatewayKeepaliveInterval)
+			defer stream.close()
+			w = stream
+		}
 		resp, err := h.service.gateway.Do(ctx, p.TenantID, capability, operation, model, body)
 		if err != nil {
 			writeGatewayFailure(w, operation, err)
-			if capture != nil {
-				capture.finish(err)
-			}
 			return
 		}
 		err = copyProviderResponse(w, resp)
-		if capture != nil {
-			capture.finish(err)
-		}
 	}
 }
 func (h *handler) listGatewayModels(w http.ResponseWriter, r *http.Request) {

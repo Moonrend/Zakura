@@ -110,14 +110,14 @@ func TestCompactionLongToolTurn(t *testing.T) {
 		{Role: "assistant", ToolCalls: []modelToolCall{{ID: "b", Name: "tool"}}},
 		{Role: "tool", ToolCallID: "b", Content: "latest result"},
 	}
-	if split := compactionSplit(messages, 1000); split != 3 {
+	if split := checkpointSplit(messages, 1000); split != 3 {
 		t.Fatalf("long turn split=%d, want completed tool round", split)
 	}
 }
 
 func TestCompactionKeepsToolPairsAndBranchScope(t *testing.T) {
 	messages := []chatMessage{{Role: "user", Content: strings.Repeat("old", 100)}, {Role: "assistant", ToolCalls: []modelToolCall{{ID: "c", Name: "tool"}}}, {Role: "tool", ToolCallID: "c", Content: "result"}, {Role: "user", Content: "latest", UserMessageID: "latest"}, {Role: "assistant", ToolCalls: []modelToolCall{{ID: "d", Name: "tool"}}}, {Role: "tool", ToolCallID: "d", Content: "result"}}
-	if split := compactionSplit(messages, 100); split != 3 {
+	if split := checkpointSplit(messages, 100); split != 3 {
 		t.Fatalf("split tool pair: %d", split)
 	}
 	events := []histEvent{

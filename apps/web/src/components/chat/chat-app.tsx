@@ -571,10 +571,18 @@ export function ChatApp() {
     if (!model) return models.find((m) => m.isDefault) ?? models[0];
     return models.find((m) => m.alias === model) ?? models.find((m) => m.isDefault) ?? models[0];
   }, [model, models]);
-  const contextWindow = useMemo(
-    () => buildContextWindowInfo(events, currentModelItem),
-    [events, currentModelItem],
-  );
+  const contextWindow = useMemo(() => {
+    if (isGatewaySession) return buildContextWindowInfo(events, currentModelItem);
+    const runs = new Set(turns.map((turn) => turn.activeRunId).filter(Boolean));
+    const users = new Set(turns.map((turn) => turn.message.seq));
+    const branchEvents = events.filter((ev) => {
+      const p = ev.payload as Record<string, unknown>;
+      if ((ev.type === "context_compacting" || ev.type === "context_compacted") && typeof p.anchorRunId === "string") return runs.has(p.anchorRunId);
+      if (ev.type === "user_message" && p.steer !== true) return users.has(ev.seq);
+      return ev.runId ? runs.has(ev.runId) : true;
+    });
+    return buildContextWindowInfo(branchEvents, currentModelItem);
+  }, [events, currentModelItem, turns, isGatewaySession]);
   const itemCount = useMemo(() => turns.reduce((n, t) => n + t.items.length, 0), [turns]);
   const listedForSidebar = useMemo(() => {
     const raw = activeProject
@@ -2375,11 +2383,13 @@ export function ChatApp() {
     try {
       const result = await compactCloudSession(agentId, sessionId);
       await loadSession(agentId, sessionId);
-      const saved = Math.max(0, result.beforeChars - result.afterChars);
+      const saved = Math.max(0, result.beforeTokens - result.afterTokens);
       toast.success(
-        saved > 0
-          ? `已压缩上下文，约释放 ${Math.round(saved / 4).toLocaleString("zh-CN")} tokens`
-          : "已压缩上下文",
+        !result.compacted
+          ? "当前上下文无需压缩"
+          : saved > 0
+            ? `已压缩上下文，约释放 ${saved.toLocaleString("zh-CN")} tokens`
+            : "已压缩上下文",
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));

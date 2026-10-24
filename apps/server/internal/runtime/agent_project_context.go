@@ -15,9 +15,10 @@ import (
 const projectContextMaxBytes = 128 << 10
 
 type agentProjectContext struct {
-	text  string
-	hooks []projectHookPackage
-	exec  func(context.Context, projectHookPackage, projectHookAction, projectHookInput) (string, error)
+	text     string
+	turnText string
+	hooks    []projectHookPackage
+	exec     func(context.Context, projectHookPackage, projectHookAction, projectHookInput) (string, error)
 }
 
 // loadAgentProjectContext deliberately never consults pinnedExecution. Project
@@ -82,6 +83,7 @@ func (h *handler) loadAgentProjectContext(ctx context.Context, tenant, space, ag
 	for _, skill := range available {
 		byName[skill.Name] = skill
 	}
+	stableLen := text.Len()
 	seen := map[string]bool{}
 	for _, name := range requested {
 		name = strings.TrimSpace(name)
@@ -101,7 +103,8 @@ func (h *handler) loadAgentProjectContext(ctx context.Context, tenant, space, ag
 			return nil, err
 		}
 	}
-	out.text = text.String()
+	out.text = text.String()[:stableLen]
+	out.turnText = text.String()[stableLen:]
 	out.exec = func(ctx context.Context, pkg projectHookPackage, action projectHookAction, input projectHookInput) (string, error) {
 		return h.executeProjectHook(ctx, tenant, space, project, pkg, action, input)
 	}
