@@ -333,6 +333,9 @@ func declaredTools(catalog agentCatalog, loaded map[string]bool, disabled map[st
 			},
 		})
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return gwStr(gwMap(out[i]["function"])["name"]) < gwStr(gwMap(out[j]["function"])["name"])
+	})
 	return out
 }
 

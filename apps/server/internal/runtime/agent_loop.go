@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,8 +55,11 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 		req.Content = continueTurnPrompt
 	}
 	if req.Retry || req.SkipUserMessage {
+		events, err := s.historyTopology(ctx, req.Session, sess.LastSeq)
+		if err != nil {
+			return Run{}, nil, err
+		}
 		if req.ReplyToMessageID == "" {
-			events := s.loadHistoryEvents(ctx, req.Session)
 			for i := len(events) - 1; i >= 0; i-- {
 				if events[i].Type == "user_message" {
 					if steer, _ := events[i].Payload["steer"].(bool); steer {
@@ -73,7 +77,7 @@ func (s *Service) startLocked(ctx context.Context, req TurnRequest) (Run, *Queue
 			return Run{}, nil, errors.New("no user message to retry")
 		}
 		found := false
-		for _, event := range s.loadHistoryEvents(ctx, req.Session) {
+		for _, event := range events {
 			if event.Type != "user_message" {
 				continue
 			}
@@ -243,6 +247,7 @@ func (s *Service) executeTurn(ctx context.Context, live *liveRun, req TurnReques
 }
 
 func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, agent Agent, sess Session) error {
+	ctx = withContextCache(ctx, req.Tenant, req.Session)
 	cloud := parseCloudConfig(agent.Config)
 	space, err := s.store.GetSpace(ctx, req.Tenant, agent.SpaceID)
 	if err != nil {
@@ -252,11 +257,21 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 	if req.SkipUserMessage {
 		target = req.ReplyToMessageID
 	}
-	messages := buildChainMessages(s.loadHistoryEvents(ctx, req.Session), target, int(^uint(0)>>1))
+	current, err := s.store.GetSession(ctx, req.Tenant, req.Agent, req.Session)
+	if err != nil {
+		return err
+	}
+	events, err := s.loadContextHistory(ctx, req.Session, target, "", current.LastSeq)
+	if err != nil {
+		return err
+	}
+	messages := buildChainMessages(events, target, int(^uint(0)>>1))
 	if len(messages) == 0 {
 		var attachments any
 		_ = json.Unmarshal(req.Attachments, &attachments)
-		messages = []chatMessage{userChatMessage(req.Context.render(req.Content), parseChatAttachments(attachments))}
+		message := userChatMessage(req.Context.render(req.Content), parseChatAttachments(attachments))
+		message.UserMessageID = target
+		messages = []chatMessage{message}
 	}
 	catalog := agentCatalog{}
 	if cloud.EnableTools && s.catalogProvider != nil {
@@ -265,6 +280,8 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 			return err
 		}
 	}
+	catalog.Tools = append([]agentTool(nil), catalog.Tools...)
+	sort.SliceStable(catalog.Tools, func(i, j int) bool { return catalog.Tools[i].Name < catalog.Tools[j].Name })
 	input := promptInput{Agent: agent, Space: space, Cloud: cloud, Now: s.store.now(), Tools: reachableToolNames(catalog, disabledToolsFromContext(ctx)), ServerHints: renderServerHints(catalog)}
 	if sess.Project != nil {
 		input.Project = *sess.Project
@@ -279,9 +296,11 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		input.Memories = s.memoryRecall(ctx, req.Tenant, req.Agent, req.Content)
 	}
 	if s.skillsProvider != nil {
-		input.Skills = s.skillsProvider(ctx, req.Tenant, req.Agent)
+		input.Skills = append([]promptSkill(nil), s.skillsProvider(ctx, req.Tenant, req.Agent)...)
+		sort.SliceStable(input.Skills, func(i, j int) bool { return input.Skills[i].Name < input.Skills[j].Name })
 	}
 	system := buildSystemPrompt(input)
+	turnContext := buildTurnContext(input)
 	if s.projectContext != nil {
 		project, err := s.projectContext(ctx, req.Tenant, agent.SpaceID, req.Agent, input.Project, opts.Skills, input.Skills)
 		if err != nil {
@@ -290,43 +309,23 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		ctx = context.WithValue(ctx, agentProjectContextKey{}, project)
 		if project != nil {
 			system += project.text
+			turnContext += project.turnText
 		}
 		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
 			text, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: event, Prompt: req.Content}, false)
 			if err != nil {
 				return err
 			}
-			system += text
+			turnContext += text
 		}
 	}
-	spaceCloud := parseCloudConfig(space.Config)
-	model := spaceCloud.Model
-	routeID := spaceCloud.ModelRouteID
-	if cloud.ModelRouteID != "" || cloud.Model != "" {
-		model, routeID = cloud.Model, cloud.ModelRouteID
+	model, err := s.turnModel(ctx, req.Tenant, agent, space, sess)
+	if err != nil {
+		return err
 	}
-	if sess.Model != nil && *sess.Model != "" {
-		model, routeID = *sess.Model, ""
-	}
-	if sess.ModelRouteID != nil && *sess.ModelRouteID != "" {
-		routeID = *sess.ModelRouteID
-	}
-	if routeID != "" {
-		routes, err := s.store.ListRoutes(ctx, req.Tenant, "chat")
-		if err != nil {
-			return err
-		}
-		found := false
-		for _, route := range routes {
-			if route.ID == routeID && route.Status == "ready" {
-				model = route.ID
-				found = true
-				break
-			}
-		}
-		if !found {
-			return errors.New("selected model route is unavailable")
-		}
+	policy, err := s.contextPolicy(ctx, req.Tenant, model)
+	if err != nil {
+		return err
 	}
 	maxRounds := cloud.MaxToolRounds
 	if maxRounds <= 0 {
@@ -336,29 +335,33 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 	if maxResult <= 0 {
 		maxResult = toolOutputMaxBytes
 	}
-	var images map[string]inlineImage
+	messages = append(messages, chatMessage{Role: "user", Content: turnContext})
 	if _, err := s.injectSteers(ctx, req, live.id, &messages); err != nil {
 		return err
 	}
-	refreshImages := func() {
-		if s.attachmentReader != nil {
-			images = resolveImages(ctx, messages, func(ctx context.Context, path string, max int64) ([]byte, error) {
-				return s.attachmentReader(ctx, req.Tenant, req.Agent, path, max)
-			})
+	images := s.contextImages(ctx, req.Tenant, req.Agent, messages)
+	// Include the target's resolved attachments; replay replaces that user's
+	// event projection with this immutable model-visible version.
+	initial := len(messages) - 1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].UserMessageID == target {
+			initial = i
+			break
 		}
 	}
-	refreshImages()
+	if err = s.recordContextMessages(ctx, req, live.id, messages[initial:]); err != nil {
+		return err
+	}
 	recoveredLength := false
+	compactAt := policy.Trigger
+	lastEstimate, lastActual := 0, 0
+	templateRecorded := false
 	seenCalls := map[string]bool{}
 	for round := 0; ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		messages, err = s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget, false)
-		if err != nil {
-			return err
-		}
-		payload := map[string]any{"model": model, "messages": renderMessages(system, messages, images, "openai"), "stream": true}
+		payload := map[string]any{"model": model, "messages": renderMessages(system, messages, images, "openai"), "stream": true, "max_tokens": policy.Output, "stream_options": map[string]any{"include_usage": true}}
 		if tools := declaredTools(catalog, nil, disabledToolsFromContext(ctx)); len(tools) > 0 {
 			payload["tools"] = tools
 		}
@@ -371,14 +374,49 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		if len(opts.Reasoning) > 0 {
 			payload["reasoning"] = opts.Reasoning
 		}
+		if !templateRecorded {
+			if err = s.recordContextTemplate(ctx, req, live.id, system, payload); err != nil {
+				return err
+			}
+			templateRecorded = true
+		}
+		estimate := estimatePayloadTokens(payload)
+		used := estimate
+		if lastActual > 0 {
+			used = max(estimate, lastActual+estimate-lastEstimate)
+		}
+		if used >= compactAt {
+			compacted, report, compactErr := s.compactWorkingContext(ctx, req, live.id, live.id, messages, payload, policy, "auto", true, 0)
+			if compactErr == nil && report.Compacted {
+				messages = compacted
+				images = s.contextImages(ctx, req.Tenant, req.Agent, messages)
+				payload["messages"] = renderMessages(system, messages, images, "openai")
+				estimate = estimatePayloadTokens(payload)
+				lastActual, lastEstimate = 0, 0
+				compactAt = policy.Trigger
+			} else {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// Do not spend another summary request on the same unchanged context.
+				compactAt = used + max(1024, policy.Trigger/10)
+			}
+		}
 		result, err := s.modelRound(ctx, req, live.id, model, payload)
 		if contextOverflow(err) {
-			compacted, compactErr := s.compactContext(ctx, req, live.id, model, messages, sessionHistoryBudget/2, true)
-			if compactErr == nil && messageBytes(compacted) < messageBytes(messages) {
+			emergency := policy
+			emergency.Target = max(1024, policy.Target/2)
+			compacted, report, compactErr := s.compactWorkingContext(ctx, req, live.id, live.id, messages, payload, emergency, "overflow", true, 0)
+			if compactErr == nil && report.Compacted {
 				messages = compacted
+				images = s.contextImages(ctx, req.Tenant, req.Agent, messages)
 				payload["messages"] = renderMessages(system, messages, images, "openai")
+				estimate = estimatePayloadTokens(payload)
 				result, err = s.modelRound(ctx, req, live.id, model, payload)
 			}
+		}
+		if result.Usage != nil {
+			lastEstimate, lastActual = estimate, result.Usage.PromptTokens
 		}
 		if err != nil {
 			return err
@@ -389,6 +427,7 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 		if err := prepareToolCallIDs(result.ToolCalls, live.id, round, seenCalls); err != nil {
 			return err
 		}
+		roundStart := len(messages)
 		incomplete := result.FinishReason == "length" || result.FinishReason == "max_tokens" || result.FinishReason == "incomplete" || result.FinishReason == "content_filter"
 		if incomplete {
 			failure := fmt.Errorf("model response incomplete (%s %s); no tools in this batch were executed. Retry with fewer calls and shorter arguments", result.FinishReason, result.IncompleteReason)
@@ -416,7 +455,10 @@ func (s *Service) chatTurn(ctx context.Context, live *liveRun, req TurnRequest, 
 			return err
 		}
 		if steers > 0 {
-			refreshImages()
+			images = s.contextImages(ctx, req.Tenant, req.Agent, messages)
+		}
+		if err = s.recordContextMessages(ctx, req, live.id, messages[roundStart:]); err != nil {
+			return err
 		}
 		if len(result.ToolCalls) == 0 && steers == 0 {
 			if _, err := s.invokeProjectHooks(ctx, req, live.id, projectHookInput{Event: "Stop"}, true); err != nil {
@@ -494,6 +536,9 @@ func (s *Service) modelRound(ctx context.Context, req TurnRequest, runID, model 
 			}
 			if result.Text != "" {
 				_, err = s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "assistant_message", &runID, map[string]any{"messageId": mid, "content": result.Text, "model": result.Model, "usage": result.Usage})
+			}
+			if err == nil && result.Usage != nil {
+				_, err = s.store.AppendEvent(ctx, req.Tenant, req.Agent, req.Session, "run_log", &runID, map[string]any{"level": "info", "message": "Model context usage", "data": result.Usage})
 			}
 			return result, err
 		}
@@ -617,7 +662,7 @@ func (s *Service) runRoundTools(ctx context.Context, req TurnRequest, sess Sessi
 		}
 	}
 	if hookContext.Len() > 0 {
-		*messages = append(*messages, chatMessage{Role: "system", Content: hookContext.String()})
+		*messages = append(*messages, chatMessage{Role: "user", Content: "[Configured hook context]\n" + hookContext.String()})
 	}
 	if blocked != nil {
 		return blocked

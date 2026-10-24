@@ -119,7 +119,7 @@ func TestAgentSessionHistoryReplay(t *testing.T) {
 		t.Fatalf("third request messages=%v", third)
 	}
 	first := requestMessages(bodies[0])
-	if len(first) != 2 || first[0]["role"] != "system" || first[1]["role"] != "user" || first[1]["content"] != "p1" {
+	if len(first) != 3 || first[0]["role"] != "system" || first[1]["role"] != "user" || first[1]["content"] != "p1" || !strings.Contains(gwStr(first[2]["content"]), "当前时间") {
 		t.Fatalf("first request messages=%v", first)
 	}
 }

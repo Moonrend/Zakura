@@ -1261,6 +1261,12 @@ export function buildConversationTurns(
       lastRunId = rid;
       continue;
     }
+    if ((ev.type === "context_compacting" || ev.type === "context_compacted") && !ev.runId && typeof p.anchorRunId === "string") {
+      const list = eventsByRun.get(p.anchorRunId) ?? [];
+      list.push(ev);
+      eventsByRun.set(p.anchorRunId, list);
+      continue;
+    }
     if (ev.type === "ui_state_updated") {
       const messageId = typeof p.messageId === "string" ? p.messageId : "";
       const rid = ev.runId ?? `orphan:${messageId}`;
@@ -1725,6 +1731,9 @@ export async function interruptWithQueuedMessage(
 }
 
 export type CloudSessionCompactionResult = {
+  compacted: boolean;
+  beforeTokens: number;
+  afterTokens: number;
   summary: string;
   beforeChars: number;
   afterChars: number;
@@ -1733,10 +1742,10 @@ export type CloudSessionCompactionResult = {
   systemSessionId?: string;
 };
 
-export async function compactCloudSession(agentId: string, sessionId: string) {
+export async function compactCloudSession(agentId: string, sessionId: string, runId?: string) {
   return api<CloudSessionCompactionResult>(
     `/api/agents/${agentId}/cloud/sessions/${sessionId}/compact`,
-    { method: "POST" },
+    { method: "POST", json: runId ? { runId } : {} },
   );
 }
 
