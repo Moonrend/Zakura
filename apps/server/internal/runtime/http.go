@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Moonrend/Zakura/apps/agent/bootstrap"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/appdeps"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
@@ -27,19 +28,20 @@ import (
 )
 
 type handler struct {
-	deps            *appdeps.Dependencies
-	store           *Store
-	service         *Service
-	hub             *runnerHub
-	acp             *acpRuntimeManager
-	mcpMu           sync.Mutex
-	mcpSessions     map[string]spaceMCPSession
-	agentToolMu     sync.Mutex
-	agentToolCache  map[string]cachedCatalog
-	loadedToolMu    sync.Mutex
-	loadedToolCache map[string]cachedLoaded
-	trigramMu       sync.Mutex
-	trigramStates   map[string]string
+	deps             *appdeps.Dependencies
+	nodeInstallation *bootstrap.Installation
+	store            *Store
+	service          *Service
+	hub              *runnerHub
+	acp              *acpRuntimeManager
+	mcpMu            sync.Mutex
+	mcpSessions      map[string]spaceMCPSession
+	agentToolMu      sync.Mutex
+	agentToolCache   map[string]cachedCatalog
+	loadedToolMu     sync.Mutex
+	loadedToolCache  map[string]cachedLoaded
+	trigramMu        sync.Mutex
+	trigramStates    map[string]string
 }
 
 func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecycle {
@@ -49,6 +51,9 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 	}
 	if _, err := h.store.RecoverRuns(deps.RunContext()); err != nil {
 		panic(fmt.Errorf("recover interrupted runs and approvals: %w", err))
+	}
+	if err := h.registerNodeInstallation(); err != nil {
+		panic(fmt.Errorf("initialize Compose node installation: %w", err))
 	}
 	h.hub = newRunnerHub(deps)
 	h.service = NewService(h.store)
@@ -78,6 +83,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 	r.Post("/api/routines/{id}/hook", h.routineHook)
 	r.Get("/api/files/shared/{token}", h.downloadSharedFile)
 	r.Get("/api/mcp/upstream-oauth/callback", h.mcpOAuthCallback)
+	r.Post("/api/runtime-nodes/installation/enroll", h.enrollComposeNode)
 	r.Post("/api/runtime-nodes/register", h.registerRuntimeNode)
 	r.Handle("/api/runtime-nodes/hub", http.HandlerFunc(h.runnerHubHTTP))
 	r.Post("/api/runtime-nodes/{id}/heartbeat", h.runtimeHeartbeat)
@@ -106,6 +112,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 		api.Use(h.resourceScopeMiddleware)
 		h.registerCore(api)
 		h.registerComputers(api)
+		h.registerWorkspaceDisks(api)
 		h.registerAutomation(api)
 		h.registerInteractions(api)
 		h.registerZakuraBotApp(api)
@@ -116,6 +123,7 @@ func RegisterRoutes(r chi.Router, deps *appdeps.Dependencies) MCPInstanceLifecyc
 	h.startScheduler(deps.RunContext())
 	h.startSkillRefresh(deps.RunContext())
 	h.startComputerCleanup(deps.RunContext())
+	h.startWorkspaceCleanup(deps.RunContext())
 	r.Group(func(g chi.Router) {
 		g.Use(httpx.Auth(deps))
 		g.Get("/v1/models", h.listGatewayModels)

@@ -60,8 +60,14 @@ func (h *handler) migrationCheck(ctx context.Context, space Space, target string
 	}
 	if raw, ok := config["projectOperations"]; ok && string(raw) != "null" {
 		var pending map[string]json.RawMessage
-		if json.Unmarshal(raw, &pending) != nil || len(pending) != 0 {
-			return errors.New("finish or reconcile pending project operations before migrating")
+		if json.Unmarshal(raw, &pending) != nil {
+			return errors.New("cannot verify pending project operations before migrating")
+		}
+		for _, value := range pending {
+			var intent projectIntent
+			if json.Unmarshal(value, &intent) != nil || projectIntentMatches(intent, space.CurrentWorkspaceInstanceID, space.WorkspaceGeneration) {
+				return errors.New("finish or reconcile pending project operations before migrating")
+			}
 		}
 	}
 	var active int

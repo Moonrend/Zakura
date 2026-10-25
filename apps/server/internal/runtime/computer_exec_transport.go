@@ -30,6 +30,16 @@ func (h *handler) computerContainerExec(ctx context.Context, exec *resolvedExecu
 	if err != nil {
 		return nil, err
 	}
+	call := func(ctx context.Context, method string, params map[string]any, out any) error {
+		return session.call(ctx, method, params, out)
+	}
+	if exec.workspace != nil {
+		remote, err := h.remotePinnedWorkspace(ctx, exec)
+		if err != nil {
+			return nil, err
+		}
+		call = remote.call
+	}
 	argv := append([]string{command}, args...)
 	timeoutMS := executionTimeoutMS
 	if timeoutMS <= 0 {
@@ -51,7 +61,7 @@ func (h *handler) computerContainerExec(ctx context.Context, exec *resolvedExecu
 	}
 	result := map[string]any{}
 	// docker.exec is synchronous on the runner and bounded by the RPC context.
-	err = session.call(ctx, "docker.exec", map[string]any{
+	err = call(ctx, "docker.exec", map[string]any{
 		"id": exec.containerID, "command": argv, "workingDir": "/workspace", "timeoutMs": timeoutMS,
 	}, &result)
 	if err != nil && result == nil {

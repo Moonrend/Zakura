@@ -30,9 +30,11 @@ func (h *handler) startACPLogin(ctx context.Context, target *acpLoginTarget, nam
 	// profile root, not the old browser-side /workspace/data/acp staging layout.
 	home := "/workspace/.zakura/acp/" + target.ticket.Profile + "/home"
 	env["HOME"], env["XDG_CONFIG_HOME"], env["XDG_DATA_HOME"] = home, home+"/.config", home+"/.local/share"
-	root, err := h.serverComputerHostRoot(ctx, target.exec)
-	if err != nil {
-		return "", err
+	if target.exec.workspace != nil {
+		target.streamOwner, err = workspaceStreamOwner(ctx, target.runner)
+		if err != nil {
+			return "", err
+		}
 	}
 	var pulled map[string]any
 	if err = target.runner.call(ctx, "docker.pull", map[string]any{"image": target.image}, &pulled); err != nil {
@@ -42,9 +44,9 @@ func (h *handler) startACPLogin(ctx context.Context, target *acpLoginTarget, nam
 	// The adapter PID1 waits on its open stdin. Login happens in a distinct exec
 	// TTY; JSON-RPC attach remains non-TTY. No socket, ports, privilege or arbitrary
 	// host path is granted, and no runtime/chat container is reused or removed.
-	err = target.runner.call(ctx, "docker.create", map[string]any{
+	err = h.createWorkspaceSidecar(ctx, target.runner, target.exec, map[string]any{
 		"name": name, "image": target.image, "stdinOpen": true, "restart": "no", "workingDir": "/workspace", "env": env,
-		"labels": acpLoginLabels(target.ticket, name), "volumes": []map[string]any{{"hostPath": root, "containerPath": "/workspace"}},
+		"labels": acpLoginLabels(target.ticket, name),
 	}, &container)
 	if err != nil {
 		return "", err
@@ -81,14 +83,14 @@ func (h *handler) bridgeACPLogin(ctx context.Context, bridge *workspaceBridge, t
 		ID   string `json:"id"`
 		Mode string `json:"mode"`
 	}
-	if err = target.runner.call(ctx, "docker.exec.start", map[string]any{"id": container, "command": []string{"bash", "--noprofile", "--norc", "-i"}, "workingDir": "/workspace", "tty": true, "cols": 80, "rows": 24}, &started); err != nil || started.ID == "" {
+	if err = h.executionRemote(target.runner, target.exec).call(ctx, "docker.exec.start", map[string]any{"id": container, "command": []string{"bash", "--noprofile", "--norc", "-i"}, "workingDir": "/workspace", "tty": true, "cols": 80, "rows": 24}, &started); err != nil || started.ID == "" {
 		_ = bridge.write(0x1, []byte(`{"type":"error","message":"interactive TTY unavailable"}`))
 		return
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = target.runner.call(closeCtx, "docker.exec.close", map[string]any{"id": started.ID}, nil)
+		_ = target.closeStream(closeCtx, started.ID)
 	}()
 	unsubscribe := target.runner.onStream(started.ID, func(channel string, data []byte) {
 		switch channel {
@@ -167,12 +169,12 @@ func (h *handler) bridgeACPLogin(ctx context.Context, bridge *workspaceBridge, t
 		}
 		switch message.Type {
 		case "input":
-			err = target.runner.call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil)
+			err = h.executionRemote(target.runner, target.exec).call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil)
 		case "resize":
 			if message.Cols < 1 || message.Rows < 1 || message.Cols > 1000 || message.Rows > 1000 {
 				continue
 			}
-			err = target.runner.call(ctx, "docker.exec.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil)
+			err = h.executionRemote(target.runner, target.exec).call(ctx, "docker.exec.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil)
 		}
 		if err != nil {
 			return

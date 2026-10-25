@@ -123,7 +123,11 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID = node.ID
-	runnerTokenCache.Store(nodeID, token)
+	installationIncarnation, err := h.cacheRuntimeNodeToken(r.Context(), nodeID, token)
+	if err != nil {
+		httpx.Error(w, http.StatusForbidden, "node enrollment is unavailable")
+		return
+	}
 	key := r.Header.Get("Sec-WebSocket-Key")
 	hijacker, ok := w.(http.Hijacker)
 	if !ok || key == "" {
@@ -163,6 +167,19 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	err = s.call(ctx, "sys.info", map[string]any{}, &info)
+	if err == nil && installationIncarnation != "" {
+		var identity struct {
+			Version     int    `json:"version"`
+			Incarnation string `json:"incarnation"`
+		}
+		err = s.call(ctx, "workspace.identity", map[string]any{}, &identity)
+		if err == nil && (identity.Version != 1 || identity.Incarnation != installationIncarnation || info.Kind != "server") {
+			err = errInstallationRevoked
+		}
+	}
+	if err == nil {
+		err = h.syncWorkspaceRevocations(ctx, s)
+	}
 	cancel()
 	if err != nil {
 		return
@@ -173,7 +190,11 @@ func (h *handler) runnerHubHTTP(w http.ResponseWriter, r *http.Request) {
 		h.hub.mu.Unlock()
 		return
 	}
-	err = h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=? AND kind<>'local'`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), runtimeTimeString(now), runtimeTimeString(now), nodeID).Error
+	result := h.deps.Gorm.WithContext(r.Context()).Exec(`UPDATE runtime_nodes SET status=CASE WHEN status='draining' THEN status ELSE 'online' END,kind=CASE WHEN kind='runner' AND ? IN ('computer','server') THEN ? ELSE kind END,endpoint=NULL,host_info_json=?,capabilities_json=?,agent_version=?,storage_root=?,last_seen_at=?,updated_at=? WHERE id=? AND kind<>'local' AND token_hash=?`, info.Kind, info.Kind, validJSON(info.HostInfo, "{}"), validJSON(info.Capabilities, `{"host":true}`), nullString(info.Version), nullString(info.StorageRoot), runtimeTimeString(now), runtimeTimeString(now), nodeID, hex.EncodeToString(sum[:]))
+	err = result.Error
+	if err == nil && result.RowsAffected != 1 {
+		err = errInstallationRevoked
+	}
 	if err == nil {
 		s.ready.Store(true)
 	}
@@ -235,7 +256,14 @@ func (h *runnerHub) persistHeartbeat(s *runnerSession) error {
 		return nil
 	}
 	seen := runtimeTimeString(time.UnixMilli(s.lastSeen.Load()).UTC())
-	return h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET last_seen_at=?,updated_at=? WHERE id=?`, seen, seen, s.nodeID).Error
+	result := h.deps.Gorm.WithContext(h.deps.RunContext()).Exec(`UPDATE runtime_nodes SET last_seen_at=?,updated_at=? WHERE id=?`, seen, seen, s.nodeID)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errInstallationRevoked
+	}
+	return nil
 }
 
 func (h *runnerHub) get(nodeID string) (*runnerSession, error) {

@@ -13,7 +13,7 @@ const PER_AGENT_SECTIONS = new Set([
   "tool-calls",
 ]);
 
-const SPACE_SECTIONS = new Set(["approvals", "gateway", "acp", "computer", "computers", "projects", "web", "skills", "mcp", "platforms", "connect"]);
+const SPACE_SECTIONS = new Set(["approvals", "gateway", "acp", "computer", "computers", "disks", "projects", "web", "skills", "mcp", "platforms", "connect"]);
 
 type SpaceSettingsValue = {
   spaceId: string;

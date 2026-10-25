@@ -131,6 +131,7 @@ func (h *handler) claimSharedWorkspaceWrite(ctx context.Context, tenant, space s
 			lease.release()
 		})
 	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	return context.WithValue(ctx, workspaceWriteClaimKey{}, workspaceWriteClaim{tenant: tenant, space: space, uncertain: mark}), finish, nil
 }
 

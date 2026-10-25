@@ -190,14 +190,14 @@ func (h *handler) bridgeACPTerminalAuth(ctx context.Context, bridge *workspaceBr
 	var started struct {
 		ID string `json:"id"`
 	}
-	if err = attempt.target.runner.call(ctx, "docker.exec.start", map[string]any{"id": container, "command": attempt.command, "workingDir": rt.workingDir, "env": acpTerminalAuthEnvironment(attempt), "tty": true, "cols": 80, "rows": 24}, &started); err != nil || started.ID == "" {
+	if err = h.executionRemote(attempt.target.runner, attempt.target.exec).call(ctx, "docker.exec.start", map[string]any{"id": container, "command": attempt.command, "workingDir": rt.workingDir, "env": acpTerminalAuthEnvironment(attempt), "tty": true, "cols": 80, "rows": 24}, &started); err != nil || started.ID == "" {
 		_ = bridge.write(0x1, []byte(`{"type":"error","message":"ACP interactive authentication unavailable"}`))
 		return
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = attempt.target.runner.call(closeCtx, "docker.exec.close", map[string]any{"id": started.ID}, nil)
+		_ = attempt.target.closeStream(closeCtx, started.ID)
 	}()
 	exited := make(chan *int, 1)
 	detach := attempt.target.runner.onStream(started.ID, func(channel string, data []byte) {
@@ -270,10 +270,10 @@ func (h *handler) bridgeACPTerminalAuth(ctx context.Context, bridge *workspaceBr
 			continue
 		}
 		if message.Type == "input" {
-			e = attempt.target.runner.call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil)
+			e = h.executionRemote(attempt.target.runner, attempt.target.exec).call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil)
 		}
 		if message.Type == "resize" && message.Cols > 0 && message.Cols <= 1000 && message.Rows > 0 && message.Rows <= 1000 {
-			e = attempt.target.runner.call(ctx, "docker.exec.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil)
+			e = h.executionRemote(attempt.target.runner, attempt.target.exec).call(ctx, "docker.exec.resize", map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil)
 		}
 		if e != nil {
 			break

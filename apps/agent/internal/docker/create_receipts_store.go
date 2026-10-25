@@ -151,7 +151,7 @@ func readCreateIntent(job createJob) (createIntent, error) {
 		return intent, err
 	}
 	digest, err := hex.DecodeString(intent.ConfigDigest)
-	if intent.Version != 1 || !intent.Operation.valid() || !createName.MatchString(intent.Name) ||
+	if intent.Version != intent.Operation.version() || !intent.Operation.valid() || !createName.MatchString(intent.Name) ||
 		err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != intent.ConfigDigest {
 		return intent, fmt.Errorf("invalid receipt intent")
 	}

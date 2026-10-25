@@ -63,6 +63,8 @@ func workspaceProxyRigWithDeps(t *testing.T, d *appdeps.Dependencies) *workspace
 			return []computerContainer{rig.container}, nil
 		case "docker.create.status":
 			return workspaceReceiptStatusFixture(rig.container), nil
+		case "docker.exec":
+			return map[string]any{"exitCode": 0, "stdout": "workspace output"}, nil
 		case "docker.exec.start":
 			return map[string]any{"id": "workspace-stream"}, nil
 		case "docker.exec.write":
@@ -317,7 +319,11 @@ func TestSpaceWorkspaceSocketRunnerDisconnect(t *testing.T) {
 }
 
 func TestSpaceWorkspaceTerminalSocketLifecycle(t *testing.T) {
-	rig := newWorkspaceProxyRig(t)
+	runWorkspaceTerminalSocketLifecycle(t, newWorkspaceProxyRig(t))
+}
+
+func runWorkspaceTerminalSocketLifecycle(t *testing.T, rig *workspaceProxyRig) {
+	t.Helper()
 	token := rig.issue(t, "terminal")
 	router := chi.NewRouter()
 	router.Get("/api/spaces/{id}/workspace-terminal-proxy", rig.h.spaceTerminalProxy)

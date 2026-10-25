@@ -49,6 +49,30 @@ func TestMain(m *testing.M) {
 			os.Exit(92)
 		}
 		fmt.Println(container.DockerID)
+	case "ps":
+		if _, err := os.Stat(state); err == nil {
+			fmt.Println("receipt-rpc-id")
+		}
+	case "exec":
+		if !strings.Contains(strings.Join(os.Args[2:], " "), "receipt-rpc-id") {
+			os.Exit(95)
+		}
+		fmt.Println("pinned-execution")
+	case "start":
+		if len(os.Args) != 3 || os.Args[2] != "receipt-rpc-id" {
+			os.Exit(95)
+		}
+	case "stop":
+		if len(os.Args) != 3 || os.Args[2] != "receipt-rpc-id" {
+			os.Exit(95)
+		}
+	case "rm":
+		if len(os.Args) != 3 || os.Args[2] != "receipt-rpc-id" {
+			os.Exit(95)
+		}
+		if err := os.Remove(state); err != nil {
+			os.Exit(96)
+		}
 	case "inspect":
 		raw, err := os.ReadFile(state)
 		if err != nil {

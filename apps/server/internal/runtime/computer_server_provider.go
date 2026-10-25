@@ -113,14 +113,9 @@ const computerImagePullTimeout = 15 * time.Minute
 // approve request has ended. Only a failed pull is returned as an error. The
 // docker.images probe stays on the fast request context.
 func ensureComputerImage(ctx context.Context, runner *runnerSession, image string) (context.Context, context.CancelFunc, error) {
-	var statuses []computerImageStatus
-	if err := runner.call(ctx, "docker.images", map[string]any{"images": []string{image}}, &statuses); err != nil {
+	present, err := computerImagePresent(ctx, runner, image)
+	if err != nil || present {
 		return ctx, func() {}, err
-	}
-	for _, status := range statuses {
-		if strings.TrimSpace(status.Image) == image && strings.TrimSpace(status.ID) != "" && strings.TrimSpace(status.Error) == "" {
-			return ctx, func() {}, nil
-		}
 	}
 	pullCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), computerImagePullTimeout)
 	if err := runner.call(pullCtx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
@@ -128,6 +123,19 @@ func ensureComputerImage(ctx context.Context, runner *runnerSession, image strin
 		return ctx, func() {}, err
 	}
 	return pullCtx, cancel, nil
+}
+
+func computerImagePresent(ctx context.Context, runner *runnerSession, image string) (bool, error) {
+	var statuses []computerImageStatus
+	if err := runner.call(ctx, "docker.images", map[string]any{"images": []string{image}}, &statuses); err != nil {
+		return false, err
+	}
+	for _, status := range statuses {
+		if strings.TrimSpace(status.Image) == image && strings.TrimSpace(status.ID) != "" && strings.TrimSpace(status.Error) == "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func validateComputerContainer(c computerContainer, r computers.Runtime) error {

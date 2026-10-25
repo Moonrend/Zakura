@@ -134,11 +134,36 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, t
 	if err != nil {
 		return nil, err
 	}
+	run, _ := runCtx.Value(computerRunKey{}).(string)
+	if run != "" {
+		computer, err := h.serverComputerRecord(runCtx, tenant, a.SpaceID)
+		if err != nil {
+			return nil, err
+		}
+		exec, err := h.resolveWorkspaceExecution(runCtx, computer, run)
+		if err != nil {
+			return nil, err
+		}
+		if exec.workspace != nil {
+			target := exec.workspace.Target
+			runCtx = context.WithValue(runCtx, workspaceRequestTargetKey{}, Space{ID: target.SpaceID, TenantID: target.TenantID, CurrentWorkspaceInstanceID: &target.InstanceID, WorkspaceGeneration: target.Generation})
+		}
+	}
 	target, err := h.resolveSpaceWorkspaceTarget(runCtx, tenant, a.SpaceID, "terminal")
 	if err != nil {
 		return nil, err
 	}
-	remote := &remoteWorkspace{runner: target.runner, spaceID: target.space.ID}
+	remote := target.remote
+	if remote == nil {
+		remote = &remoteWorkspace{runner: target.runner, spaceID: target.space.ID}
+	}
+	streamOwner := ""
+	if remote.workspace != nil {
+		streamOwner, err = workspaceStreamOwner(runCtx, remote.runner)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := remote.write(runCtx, "/.zakura/codemode/harness.mjs", []byte(codemodeHarnessJS)); err != nil {
 		return nil, err
 	}
@@ -153,7 +178,7 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, t
 	var started struct {
 		ID string `json:"id"`
 	}
-	if err := runner.call(runCtx, startMethod, params, &started); err != nil {
+	if err := remote.call(runCtx, startMethod, params, &started); err != nil {
 		return nil, err
 	}
 	if started.ID == "" {
@@ -202,8 +227,12 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, t
 		detach()
 		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer closeCancel()
-		var ignored map[string]any
-		_ = runner.call(closeCtx, closeMethod, map[string]any{"id": processID}, &ignored)
+		if remote.workspace != nil {
+			_ = closePinnedWorkspaceStream(closeCtx, runner, closeMethod, processID, streamOwner, remote.workspace)
+		} else {
+			var ignored map[string]any
+			_ = runner.call(closeCtx, closeMethod, map[string]any{"id": processID}, &ignored)
+		}
 	}()
 
 	writeMessage := func(message any) error {
@@ -217,7 +246,7 @@ func (h *handler) runCodemodeTool(ctx context.Context, tenant, agent, session, t
 		for len(raw) > 0 {
 			n := min(len(raw), 32<<10)
 			var ignored map[string]any
-			if err := runner.call(runCtx, writeMethod, map[string]any{"id": processID, "base64": base64.StdEncoding.EncodeToString(raw[:n])}, &ignored); err != nil {
+			if err := remote.call(runCtx, writeMethod, map[string]any{"id": processID, "base64": base64.StdEncoding.EncodeToString(raw[:n])}, &ignored); err != nil {
 				return err
 			}
 			raw = raw[n:]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,12 @@ func TestMain(m *testing.M) {
 				os.Exit(1)
 			}
 			fmt.Println("28.0.0")
+		case "exec":
+			if len(os.Args) < 4 || os.Args[2] != "-i" {
+				os.Exit(93)
+			}
+			_, _ = io.Copy(os.Stdout, os.Stdin)
+			fmt.Fprint(os.Stderr, strings.Repeat("stderr", 10000))
 		case "run":
 			if os.Getenv("ZAKURA_TEST_CREATE_CONFLICT") == "1" {
 				fmt.Fprintln(os.Stderr, "name already in use")

@@ -96,7 +96,7 @@ func (h *handler) PatchMCPConfig(ctx context.Context, tenant, id string, patch j
 			}
 		}
 	}
-	for _, key := range []string{"ownerSpaceId", "serverComputerId", "runtimeNodeId", "dataSpaceId", "dataPath"} {
+	for _, key := range []string{"ownerSpaceId", "serverComputerId", "runtimeNodeId", "dataSpaceId", "dataPath", "workspaceTarget"} {
 		if value, ok := next[key]; ok {
 			a, _ := json.Marshal(value)
 			b, _ := json.Marshal(current[key])

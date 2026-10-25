@@ -1,13 +1,14 @@
 package docker
 
 import (
-	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"time"
 )
@@ -85,6 +86,8 @@ type Volume struct {
 	VolumeName    string `json:"volumeName,omitempty"`
 	ContainerPath string `json:"containerPath"`
 	ReadOnly      bool   `json:"readOnly,omitempty"`
+	VolumeSubpath string `json:"volumeSubpath,omitempty"`
+	NoCopy        bool   `json:"noCopy,omitempty"`
 }
 
 type ContainerInfo struct {
@@ -96,28 +99,48 @@ type ContainerInfo struct {
 	Labels   map[string]string `json:"labels"`
 }
 
-// volumeMountFlag 用 --mount 而不是 -v，避免 Windows 盘符冒号被拆成 host:port。
-func volumeMountFlag(v Volume) string {
-	if v.ContainerPath == "" {
-		return ""
+func (v Volume) validate() error {
+	if v.ContainerPath == "" || (v.VolumeName == "") == (v.HostPath == "") {
+		return fmt.Errorf("mount requires one source and a container path")
 	}
-	if v.VolumeName != "" && v.HostPath == "" {
-		spec := "type=volume,source=" + v.VolumeName + ",target=" + v.ContainerPath
-		if v.ReadOnly {
-			spec += ",readonly"
+	for _, value := range []string{v.HostPath, v.VolumeName, v.ContainerPath, v.VolumeSubpath} {
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("invalid mount path")
 		}
-		return spec
 	}
-	if v.HostPath == "" {
+	if v.VolumeName == "" && (v.VolumeSubpath != "" || v.NoCopy) {
+		return fmt.Errorf("volume options require a named volume")
+	}
+	if v.VolumeSubpath != "" && (strings.ContainsAny(v.VolumeSubpath, `\:`) || path.IsAbs(v.VolumeSubpath) || path.Clean(v.VolumeSubpath) != v.VolumeSubpath || v.VolumeSubpath == "." || v.VolumeSubpath == ".." || strings.HasPrefix(v.VolumeSubpath, "../")) {
+		return fmt.Errorf("volume subpath must be a clean relative directory")
+	}
+	return nil
+}
+
+// --mount uses CSV, including escaping paths containing commas or quotes.
+func volumeMountFlag(v Volume) string {
+	if v.validate() != nil {
 		return ""
 	}
-	// 不用 filepath.ToSlash：Linux 上反斜杠不是分隔符，Windows 盘符路径过 CI 会被原样留下。
-	src := strings.ReplaceAll(v.HostPath, `\`, "/")
-	spec := "type=bind,source=" + src + ",target=" + v.ContainerPath
-	if v.ReadOnly {
-		spec += ",readonly"
+	kind, source := "volume", v.VolumeName
+	if v.HostPath != "" {
+		kind, source = "bind", strings.ReplaceAll(v.HostPath, `\`, "/")
 	}
-	return spec
+	fields := []string{"type=" + kind, "source=" + source, "target=" + v.ContainerPath}
+	if v.VolumeSubpath != "" {
+		fields = append(fields, "volume-subpath="+v.VolumeSubpath)
+	}
+	if v.NoCopy {
+		fields = append(fields, "volume-nocopy")
+	}
+	if v.ReadOnly {
+		fields = append(fields, "readonly")
+	}
+	var buffer strings.Builder
+	writer := csv.NewWriter(&buffer)
+	_ = writer.Write(fields)
+	writer.Flush()
+	return strings.TrimSuffix(buffer.String(), "\n")
 }
 
 func Pull(ctx context.Context, image string) error {
@@ -142,6 +165,11 @@ func Create(ctx context.Context, spec RunSpec) (ContainerInfo, error) {
 }
 
 func run(ctx context.Context, spec RunSpec, replace bool) (ContainerInfo, error) {
+	for _, volume := range spec.Volumes {
+		if err := volume.validate(); err != nil {
+			return ContainerInfo{}, err
+		}
+	}
 	if err := Require(); err != nil {
 		return ContainerInfo{}, err
 	}
@@ -310,32 +338,7 @@ func Inspect(ctx context.Context, idOrName string) (ContainerInfo, error) {
 }
 
 func Exec(ctx context.Context, idOrName string, command []string, workdir string, env map[string]string) (stdout, stderr string, code int, err error) {
-	if err := Require(); err != nil {
-		return "", "", 1, err
-	}
-	args := []string{"exec"}
-	if workdir != "" {
-		args = append(args, "-w", workdir)
-	}
-	for k, v := range env {
-		args = append(args, "-e", k+"="+v)
-	}
-	args = append(args, idOrName)
-	args = append(args, command...)
-	cmd := exec.CommandContext(ctx, dockerBin(), args...)
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-	runErr := cmd.Run()
-	code = 0
-	if runErr != nil {
-		if ee, ok := runErr.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else {
-			return outBuf.String(), errBuf.String(), 1, runErr
-		}
-	}
-	return outBuf.String(), errBuf.String(), code, nil
+	return ExecWithOptions(ctx, idOrName, command, workdir, env, ExecOptions{})
 }
 
 func Logs(ctx context.Context, idOrName string, tail int) (string, error) {

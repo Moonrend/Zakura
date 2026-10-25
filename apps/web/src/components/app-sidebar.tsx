@@ -116,6 +116,7 @@ const SPACE_ICONS: Record<string, IconComp> = {
   projects: FolderKanban,
   skills: Blocks,
   computer: Monitor,
+  disks: HardDrive,
   computers: Monitor,
   mcp: Cable,
   web: Globe,

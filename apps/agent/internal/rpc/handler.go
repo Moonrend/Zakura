@@ -15,29 +15,39 @@ import (
 	"github.com/Moonrend/Zakura/apps/agent/internal/host"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sandbox"
 	"github.com/Moonrend/Zakura/apps/agent/internal/sys"
+	"github.com/Moonrend/Zakura/apps/agent/internal/workspacestate"
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 )
 
 type Handler struct {
-	Kind            string
-	StorageRoot     string
-	jobs            *host.Registry
-	sandboxJobs     *sandbox.Registry
-	sandboxEnforced bool
-	ptys            map[string]*host.LiveStream
-	streamOwner     string
-	mu              sync.Mutex
-	migrationMu     sync.Mutex
+	Kind             string
+	StorageRoot      string
+	workspaceState   workspacestate.Store
+	jobs             *host.Registry
+	sandboxJobs      *sandbox.Registry
+	sandboxEnforced  bool
+	ptys             map[string]*host.LiveStream
+	workspaceStreams map[string]protocol.Binding
+	streamOwner      string
+	mu               sync.Mutex
+	migrationMu      sync.Mutex
 }
 
 func New(kind, storageRoot string) *Handler {
+	stateRoot := os.Getenv("ZAKURA_AGENT_STATE_DIR")
+	if stateRoot == "" {
+		stateRoot = storageRoot
+	}
 	return &Handler{
-		Kind:            kind,
-		StorageRoot:     storageRoot,
-		jobs:            host.NewRegistry(),
-		sandboxJobs:     sandbox.NewRegistry(),
-		sandboxEnforced: sandboxEnforcement(os.Getenv("ZAKURA_SANDBOX_ENABLED")),
-		ptys:            map[string]*host.LiveStream{},
-		streamOwner:     rand.Text(),
+		Kind:             kind,
+		StorageRoot:      storageRoot,
+		workspaceState:   workspacestate.Store{StateRoot: stateRoot, DataRoot: storageRoot, VolumeName: os.Getenv("ZAKURA_WORKSPACE_VOLUME")},
+		jobs:             host.NewRegistry(),
+		sandboxJobs:      sandbox.NewRegistry(),
+		sandboxEnforced:  sandboxEnforcement(os.Getenv("ZAKURA_SANDBOX_ENABLED")),
+		ptys:             map[string]*host.LiveStream{},
+		workspaceStreams: map[string]protocol.Binding{},
+		streamOwner:      rand.Text(),
 	}
 }
 
@@ -47,6 +57,7 @@ func (h *Handler) CloseStreams() {
 	h.mu.Lock()
 	streams := h.ptys
 	h.ptys = map[string]*host.LiveStream{}
+	h.workspaceStreams = map[string]protocol.Binding{}
 	h.mu.Unlock()
 	for _, stream := range streams {
 		_ = stream.Close()
@@ -56,6 +67,7 @@ func (h *Handler) CloseStreams() {
 func (h *Handler) finishStream(sess *host.LiveStream) {
 	h.mu.Lock()
 	delete(h.ptys, sess.ID)
+	delete(h.workspaceStreams, sess.ID)
 	h.mu.Unlock()
 	_ = sess.Close()
 	_ = sess.Wait()
@@ -68,6 +80,9 @@ func (h *Handler) workspace(spaceID string) string {
 func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 	if err := ctx.Err(); err != nil {
 		send(Err(msg.ID, err.Error()))
+		return
+	}
+	if h.dispatchWorkspace(ctx, msg, send) {
 		return
 	}
 	var err error
@@ -86,6 +101,10 @@ func (h *Handler) Dispatch(ctx context.Context, msg Msg, send func(Msg)) {
 			send(Err(msg.ID, "this execution method is unavailable in sandbox mode; use host.exec or host.exec.start"))
 			return
 		}
+	}
+	if err := h.rejectUnpinnedContainer(ctx, msg.Method, msg.Params); err != nil {
+		send(Err(msg.ID, err.Error()))
+		return
 	}
 	switch msg.Method {
 	case "sandbox.policy":
@@ -603,6 +622,7 @@ func (h *Handler) ptyClose(raw json.RawMessage) error {
 	h.mu.Lock()
 	s := h.ptys[p.ID]
 	delete(h.ptys, p.ID)
+	delete(h.workspaceStreams, p.ID)
 	h.mu.Unlock()
 	if s != nil {
 		return s.Close()
@@ -652,6 +672,7 @@ func (h *Handler) dockerStdioStart(raw json.RawMessage, send func(Msg)) (any, er
 		defer func() {
 			h.mu.Lock()
 			delete(h.ptys, sess.ID)
+			delete(h.workspaceStreams, sess.ID)
 			h.mu.Unlock()
 			_ = sess.Close()
 		}()
@@ -709,13 +730,17 @@ func (h *Handler) dockerAttach(raw json.RawMessage, send func(Msg)) (any, error)
 
 func (h *Handler) dockerExec(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p struct {
-		ID         string            `json:"id"`
-		Command    []string          `json:"command"`
-		WorkingDir string            `json:"workingDir"`
-		Env        map[string]string `json:"env"`
+		ID             string            `json:"id"`
+		Command        []string          `json:"command"`
+		WorkingDir     string            `json:"workingDir"`
+		Env            map[string]string `json:"env"`
+		Stdin          string            `json:"stdin"`
+		MaxOutputBytes int               `json:"maxOutputBytes"`
 	}
-	_ = json.Unmarshal(raw, &p)
-	out, errb, code, err := docker.Exec(ctx, p.ID, p.Command, p.WorkingDir, p.Env)
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	out, errb, code, err := docker.ExecWithOptions(ctx, p.ID, p.Command, p.WorkingDir, p.Env, docker.ExecOptions{Stdin: p.Stdin, MaxOutputBytes: p.MaxOutputBytes})
 	if err != nil {
 		return nil, err
 	}

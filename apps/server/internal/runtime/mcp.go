@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/db/models"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
@@ -177,9 +178,10 @@ func (h *handler) getMCPInstance(ctx context.Context, tenant, id string) (mcpIns
 }
 func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, params any) (json.RawMessage, error) {
 	var cfg struct {
-		URL           string            `json:"url"`
-		RuntimeNodeID string            `json:"runtimeNodeId"`
-		Headers       map[string]string `json:"headers"`
+		URL             string            `json:"url"`
+		RuntimeNodeID   string            `json:"runtimeNodeId"`
+		Headers         map[string]string `json:"headers"`
+		WorkspaceTarget *protocol.Target  `json:"workspaceTarget"`
 	}
 	var sec struct {
 		Headers          map[string]string `json:"headers"`
@@ -191,6 +193,29 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 	}
 	if json.Unmarshal(inst.Config, &cfg) != nil || cfg.URL == "" {
 		return nil, errors.New("MCP instance has no HTTP URL")
+	}
+	if cfg.WorkspaceTarget != nil {
+		if cfg.WorkspaceTarget.TenantID != inst.TenantID || cfg.WorkspaceTarget.NodeID != cfg.RuntimeNodeID {
+			return nil, errors.New("MCP workspace identity mismatch")
+		}
+		if _, _, err := h.workspaceStore().Resolve(ctx, *cfg.WorkspaceTarget); err != nil {
+			return nil, err
+		}
+		run, _ := ctx.Value(computerRunKey{}).(string)
+		accepted, hasAccepted := ctx.Value(workspaceRequestTargetKey{}).(Space)
+		if run != "" || hasAccepted && accepted.TenantID == inst.TenantID && accepted.ID == cfg.WorkspaceTarget.SpaceID {
+			computer, err := h.serverComputerRecord(ctx, inst.TenantID, cfg.WorkspaceTarget.SpaceID)
+			if err != nil {
+				return nil, err
+			}
+			exec, err := h.resolveWorkspaceExecution(ctx, computer, run)
+			if err != nil {
+				return nil, err
+			}
+			if exec.workspace == nil || exec.workspace.Target != *cfg.WorkspaceTarget {
+				return nil, errors.New("MCP run workspace changed")
+			}
+		}
 	}
 	_ = json.Unmarshal(inst.Secret, &sec)
 	if sec.Enc != "" {
@@ -242,6 +267,11 @@ func (h *handler) mcpRPC(ctx context.Context, inst mcpInstance, method string, p
 		body   []byte
 	}
 	call := func(callMethod string, callParams any, sid string, notification bool) (callResult, error) {
+		if cfg.WorkspaceTarget != nil {
+			if _, _, err := h.workspaceStore().Resolve(ctx, *cfg.WorkspaceTarget); err != nil {
+				return callResult{}, err
+			}
+		}
 		requestID := any(h.store.id())
 		if notification {
 			requestID = nil
@@ -816,6 +846,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if err := lease.check(ctx); err != nil {
 		return err
 	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	exec, err := h.resolveServerComputer(ctx, tenant, owner)
 	if err != nil {
 		return err
@@ -831,6 +862,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if err != nil {
 		return err
 	}
+	remote := h.executionRemote(runner, exec)
 	packageManager := strings.ToLower(strings.TrimSpace(body.PackageManager))
 	if packageManager == "" {
 		if body.Command == "docker" || body.Command == "podman" {
@@ -838,6 +870,9 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		} else {
 			packageManager = "npm"
 		}
+	}
+	if exec.workspace != nil && packageManager == "oci" {
+		return errors.New("OCI stdio MCP is unavailable on managed disks because nested Docker writers are not tracked")
 	}
 	envName := map[string]string{"npm": "ZAKURA_STDIO_NODE_IMAGE", "pypi": "ZAKURA_STDIO_PYTHON_IMAGE", "oci": "ZAKURA_STDIO_OCI_IMAGE", "binary": "ZAKURA_STDIO_BINARY_IMAGE"}[packageManager]
 	if envName == "" {
@@ -885,13 +920,16 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	var dataRoot struct {
 		Abs string `json:"abs"`
 	}
-	if err = runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": dataSpaceID, "path": dataPath}, &dataRoot); err != nil {
-		return fmt.Errorf("prepare stdio data directory: %w", err)
+	var volumes []map[string]any
+	if exec.workspace == nil {
+		if err = remote.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": dataSpaceID, "path": dataPath}, &dataRoot); err != nil {
+			return fmt.Errorf("prepare stdio data directory: %w", err)
+		}
+		if dataRoot.Abs == "" {
+			return errors.New("runner returned no stdio data directory")
+		}
+		volumes = []map[string]any{{"hostPath": dataRoot.Abs, "containerPath": "/data"}}
 	}
-	if dataRoot.Abs == "" {
-		return errors.New("runner returned no stdio data directory")
-	}
-	volumes := []map[string]any{{"hostPath": dataRoot.Abs, "containerPath": "/data"}}
 	if packageManager == "oci" {
 		platform, _ := host["platform"].(string)
 		dockerCap, _ := capabilities["docker"].(bool)
@@ -911,7 +949,13 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	if err = lease.check(ctx); err != nil {
 		return err
 	}
-	err = runner.call(ctx, "docker.create", map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component", "zakura.space": owner, "zakura.computer": exec.computer.ID, "zakura.tenant": tenant}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}, &running)
+	createParams := map[string]any{"name": "zakura-stdio-" + instanceID, "image": image, "command": []string{"/usr/local/bin/zakura-stdio-bridge"}, "env": env, "labels": map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component", "zakura.space": owner, "zakura.computer": exec.computer.ID, "zakura.tenant": tenant}, "ports": []map[string]any{{"containerPort": 3100, "protocol": "tcp"}}, "volumes": volumes, "workingDir": body.WorkingDir, "restart": "unless-stopped"}
+	if exec.workspace != nil {
+		createParams["name"] = "zakura-stdio-" + h.store.id()
+		err = h.createWorkspaceSidecar(ctx, runner, exec, createParams, &running)
+	} else {
+		err = runner.call(ctx, "docker.create", createParams, &running)
+	}
 	if err != nil {
 		// A failed RPC may have created the process before its response was lost.
 		// Retain the durable intent until recovery observes the remote state.
@@ -923,7 +967,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 	cleanup := func(cause error) error {
 		cleanupCtx, cancel := mcpCleanupContext(ctx)
 		defer cancel()
-		if stopErr := runner.call(cleanupCtx, "docker.stop", map[string]any{"id": running.DockerID, "remove": true}, nil); stopErr != nil {
+		if stopErr := cleanupWorkspaceContainer(cleanupCtx, runner, remote, running.DockerID); stopErr != nil {
 			return lease.uncertain(fmt.Errorf("%w; stdio bridge cleanup failed: %v", cause, stopErr))
 		}
 		return cause
@@ -940,7 +984,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 			case <-time.After(250 * time.Millisecond):
 			}
 		}
-		if inspectErr := runner.call(ctx, "docker.inspect", map[string]any{"id": running.DockerID}, &inspected); inspectErr == nil && strings.EqualFold(inspected.Status, "running") {
+		if inspectErr := remote.call(ctx, "docker.inspect", map[string]any{"id": running.DockerID}, &inspected); inspectErr == nil && strings.EqualFold(inspected.Status, "running") {
 			bridgeReady = true
 			break
 		}
@@ -949,7 +993,7 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		var logs struct {
 			Logs string `json:"logs"`
 		}
-		_ = runner.call(ctx, "docker.logs", map[string]any{"id": running.DockerID, "tail": 50}, &logs)
+		_ = remote.call(ctx, "docker.logs", map[string]any{"id": running.DockerID, "tail": 50}, &logs)
 		return cleanup(fmt.Errorf("stdio bridge container did not stay running (image must contain /usr/local/bin/zakura-stdio-bridge and the requested runtime): %s", strings.TrimSpace(logs.Logs)))
 	}
 	port := 0
@@ -977,7 +1021,11 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		envKeys = append(envKeys, key)
 	}
 	slices.Sort(envKeys)
-	cfg, _ := json.Marshal(map[string]any{"url": endpoint, "ownerSpaceId": owner, "serverComputerId": exec.computer.ID, "runtimeNodeId": nodeID, "dataSpaceId": dataSpaceID, "dataPath": dataPath, "command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": packageManager, "bridgeImage": image})
+	config := map[string]any{"url": endpoint, "ownerSpaceId": owner, "serverComputerId": exec.computer.ID, "runtimeNodeId": nodeID, "dataSpaceId": dataSpaceID, "dataPath": dataPath, "command": body.Command, "args": body.Args, "environmentVariables": envKeys, "workingDir": body.WorkingDir, "packageManager": packageManager, "bridgeImage": image}
+	if exec.workspace != nil {
+		config["workspaceTarget"] = exec.workspace.Target
+	}
+	cfg, _ := json.Marshal(config)
 	now := h.store.now()
 	labels, _ := json.Marshal(map[string]string{"zakura.instance": instanceID, "zakura.purpose": "component"})
 	ports, _ := json.Marshal(running.Ports)
@@ -985,7 +1033,11 @@ func (h *handler) provisionStdioMCPWithLease(ctx context.Context, tenant, instan
 		if e := tx.Exec(`UPDATE component_instances SET config_json=?,status='running',last_error=NULL,updated_at=? WHERE id=? AND tenant_id=?`, string(cfg), runtimeTimeString(now), instanceID, tenant).Error; e != nil {
 			return e
 		}
-		return tx.Table("managed_containers").Create(map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}).Error
+		row := map[string]any{"id": h.store.id(), "tenant_id": tenant, "instance_id": instanceID, "space_id": dataSpaceID, "docker_id": running.DockerID, "name": running.Name, "image": image, "purpose": "component", "status": "running", "labels_json": string(labels), "ports_json": string(ports), "runtime_node_id": nodeID, "created_at": runtimeTimeString(now), "updated_at": runtimeTimeString(now)}
+		if exec.workspace != nil {
+			row["workspace_instance_id"] = exec.workspace.Target.InstanceID
+		}
+		return tx.Table("managed_containers").Create(row).Error
 	})
 	if err != nil {
 		return cleanup(err)

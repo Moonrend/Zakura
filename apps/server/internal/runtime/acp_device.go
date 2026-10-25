@@ -31,25 +31,27 @@ const acpDeviceTable = "acp_device_auth_attempts"
 var errACPDeviceConflict = errors.New("ACP authentication attempt is busy or changed; retry")
 
 type acpDeviceAttempt struct {
-	ID               string `gorm:"column:id"`
-	TenantID         string `gorm:"column:tenant_id"`
-	SpaceID          string `gorm:"column:space_id"`
-	ProfileID        string `gorm:"column:profile_id"`
-	PrincipalID      string `gorm:"column:principal_id"`
-	NodeID           string `gorm:"column:node_id"`
-	ComputerID       string `gorm:"column:computer_id"`
-	ConfigHash       string `gorm:"column:config_hash"`
-	Status           string `gorm:"column:status"`
-	EncryptedPayload string `gorm:"column:encrypted_payload"`
-	UserCode         string `gorm:"column:user_code"`
-	VerificationURI  string `gorm:"column:verification_uri"`
-	IntervalSeconds  int    `gorm:"column:interval_seconds"`
-	ExpiresAt        string `gorm:"column:expires_at"`
-	NextPollAt       string `gorm:"column:next_poll_at"`
-	Version          int64  `gorm:"column:version"`
-	Error            string `gorm:"column:error"`
-	CreatedAt        string `gorm:"column:created_at"`
-	UpdatedAt        string `gorm:"column:updated_at"`
+	ID                  string `gorm:"column:id"`
+	TenantID            string `gorm:"column:tenant_id"`
+	SpaceID             string `gorm:"column:space_id"`
+	ProfileID           string `gorm:"column:profile_id"`
+	PrincipalID         string `gorm:"column:principal_id"`
+	NodeID              string `gorm:"column:node_id"`
+	ComputerID          string `gorm:"column:computer_id"`
+	WorkspaceInstanceID string `gorm:"column:workspace_instance_id"`
+	WorkspaceGeneration int64  `gorm:"column:workspace_generation"`
+	ConfigHash          string `gorm:"column:config_hash"`
+	Status              string `gorm:"column:status"`
+	EncryptedPayload    string `gorm:"column:encrypted_payload"`
+	UserCode            string `gorm:"column:user_code"`
+	VerificationURI     string `gorm:"column:verification_uri"`
+	IntervalSeconds     int    `gorm:"column:interval_seconds"`
+	ExpiresAt           string `gorm:"column:expires_at"`
+	NextPollAt          string `gorm:"column:next_poll_at"`
+	Version             int64  `gorm:"column:version"`
+	Error               string `gorm:"column:error"`
+	CreatedAt           string `gorm:"column:created_at"`
+	UpdatedAt           string `gorm:"column:updated_at"`
 }
 
 type acpDevicePublic struct {
@@ -122,6 +124,9 @@ func (h *handler) codexDeviceTarget(ctx context.Context, tenant, spaceID, profil
 		return target, err
 	}
 	rawSetup, _ := json.Marshal(setup)
+	if exec.workspace != nil {
+		rawSetup, _ = json.Marshal([]any{setup, exec.workspace})
+	}
 	digest := sha256.Sum256(rawSetup)
 	return acpDeviceTarget{space: space, setup: setup, runner: runner, exec: exec, hash: hex.EncodeToString(digest[:])}, nil
 }
@@ -221,22 +226,35 @@ func (h *handler) startACPDeviceAttempt(ctx context.Context, principal, tenant, 
 		return empty, err
 	}
 	defer lease.release()
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	target, err := h.codexDeviceTarget(ctx, tenant, space, profile)
 	if err != nil {
 		return empty, err
 	}
 	now := h.store.now()
 	id := h.store.id()
-	// Expired or interrupted rows cannot retain secrets or prevent a fresh login.
-	res := h.deps.Gorm.WithContext(ctx).Table(acpDeviceTable).Where("tenant_id=? AND space_id=? AND profile_id=? AND status IN ? AND expires_at<=?", tenant, space, profile, []string{"starting", "pending", "polling"}, runtimeTimeString(now)).Updates(map[string]any{"status": "expired", "encrypted_payload": "", "user_code": "", "verification_uri": "", "error": "Device authentication expired", "version": gorm.Expr("version+1"), "updated_at": runtimeTimeString(now)})
-	if res.Error != nil {
-		return empty, res.Error
+	// Expire only attempts owned by this claim. Retirement may have already
+	// opened the same profile on a replacement disk while target resolution ran.
+	instance := ""
+	var generation int64
+	if target.exec.workspace != nil {
+		instance, generation = target.exec.workspace.Target.InstanceID, target.exec.workspace.Target.Generation
+	}
+	if err = lease.fenced(ctx, func(tx *gorm.DB) error {
+		return tx.Table(acpDeviceTable).Where("tenant_id=? AND space_id=? AND profile_id=? AND workspace_instance_id=? AND workspace_generation=? AND status IN ? AND expires_at<=?", tenant, space, profile, instance, generation, []string{"starting", "pending", "polling"}, runtimeTimeString(now)).Updates(map[string]any{"status": "expired", "encrypted_payload": "", "user_code": "", "verification_uri": "", "error": "Device authentication expired", "version": gorm.Expr("version+1"), "updated_at": runtimeTimeString(now)}).Error
+	}); err != nil {
+		return empty, err
 	}
 	if err = h.acquireACPAuthLock(ctx, tenant, space, profile, "device", id, codexDeviceTTL, target.exec); err != nil {
 		return empty, err
 	}
 	a := acpDeviceAttempt{ID: id, TenantID: tenant, SpaceID: space, ProfileID: profile, PrincipalID: principal, NodeID: target.exec.nodeID, ComputerID: target.exec.computer.ID, ConfigHash: target.hash, Status: "starting", IntervalSeconds: 5, ExpiresAt: runtimeTimeString(now.Add(codexDeviceTTL)), NextPollAt: runtimeTimeString(now), Version: 1, CreatedAt: runtimeTimeString(now), UpdatedAt: runtimeTimeString(now)}
-	if err = h.deps.Gorm.WithContext(ctx).Table(acpDeviceTable).Create(&a).Error; err != nil {
+	if target.exec.workspace != nil {
+		a.WorkspaceInstanceID, a.WorkspaceGeneration = target.exec.workspace.Target.InstanceID, target.exec.workspace.Target.Generation
+	}
+	if err = lease.fenced(ctx, func(tx *gorm.DB) error {
+		return tx.Table(acpDeviceTable).Create(&a).Error
+	}); err != nil {
 		_ = h.releaseACPAuthLock(context.WithoutCancel(ctx), tenant, space, profile, id)
 		return empty, errACPDeviceConflict
 	}
@@ -281,6 +299,9 @@ func (h *handler) startACPDeviceAttempt(ctx context.Context, principal, tenant, 
 func (h *handler) validateACPDeviceTarget(ctx context.Context, a acpDeviceAttempt) (acpDeviceTarget, error) {
 	if err := h.requireSpaceInfrastructureAvailable(ctx, a.TenantID, a.SpaceID); err != nil {
 		return acpDeviceTarget{}, errors.New("Space infrastructure is not available for authentication")
+	}
+	if a.WorkspaceInstanceID != "" {
+		ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, Space{ID: a.SpaceID, TenantID: a.TenantID, CurrentWorkspaceInstanceID: &a.WorkspaceInstanceID, WorkspaceGeneration: a.WorkspaceGeneration})
 	}
 	target, err := h.codexDeviceTarget(ctx, a.TenantID, a.SpaceID, a.ProfileID)
 	if err != nil {
@@ -430,7 +451,7 @@ func (h *handler) pollACPDeviceAttempt(ctx context.Context, principal, tenant, s
 	}
 	// Secure-write preflight happened before entering persisting.
 	var ack map[string]any
-	err = target.runner.call(writeCtx, "host.fs.write", map[string]any{"spaceId": space, "path": "/.zakura/acp/codex/home/.codex/auth.json", "base64": base64.StdEncoding.EncodeToString(auth), "mode": 384, "atomic": true}, &ack)
+	err = h.executionRemote(target.runner, target.exec).call(writeCtx, "host.fs.write", map[string]any{"spaceId": space, "path": "/.zakura/acp/codex/home/.codex/auth.json", "base64": base64.StdEncoding.EncodeToString(auth), "mode": 384, "atomic": true}, &ack)
 	if err != nil || gwInt(ack["mode"]) != 384 || ack["atomic"] != true {
 		_ = h.acpDeviceUnknown(context.WithoutCancel(ctx), &a)
 		return a.public(), nil

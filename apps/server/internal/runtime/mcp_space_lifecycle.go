@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"time"
@@ -75,6 +77,7 @@ func (h *handler) startMCPInstance(ctx context.Context, tenant, id string) (err 
 			return e
 		}
 		defer lease.release()
+		ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 		if err = lease.check(ctx); err != nil {
 			return err
 		}
@@ -82,10 +85,11 @@ func (h *handler) startMCPInstance(ctx context.Context, tenant, id string) (err 
 		// The live Space server computer is authoritative, not a stale saved runner.
 		body.RuntimeNodeID = nil
 		var active []struct {
-			DockerID string `gorm:"column:docker_id"`
-			Node     string `gorm:"column:runtime_node_id"`
+			DockerID            string  `gorm:"column:docker_id"`
+			Node                string  `gorm:"column:runtime_node_id"`
+			WorkspaceInstanceID *string `gorm:"column:workspace_instance_id"`
 		}
-		if err = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("docker_id,runtime_node_id").Where("tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')", tenant, id).Find(&active).Error; err != nil {
+		if err = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("docker_id,runtime_node_id,workspace_instance_id").Where("tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')", tenant, id).Find(&active).Error; err != nil {
 			return err
 		}
 		if len(active) > 1 {
@@ -95,6 +99,9 @@ func (h *handler) startMCPInstance(ctx context.Context, tenant, id string) (err 
 			exec, e := h.resolveServerComputer(ctx, tenant, owner)
 			if e != nil {
 				return e
+			}
+			if active[0].WorkspaceInstanceID != nil && (exec.workspace == nil || exec.workspace.Target.InstanceID != *active[0].WorkspaceInstanceID) || active[0].WorkspaceInstanceID == nil && exec.workspace != nil {
+				return errors.New("stdio MCP belongs to a previous workspace; stop it before starting")
 			}
 			if exec.nodeID != active[0].Node {
 				return errors.New("stdio MCP runtime moved; stop the previous container before starting")
@@ -106,7 +113,7 @@ func (h *handler) startMCPInstance(ctx context.Context, tenant, id string) (err 
 			var inspected struct {
 				Status string `json:"status"`
 			}
-			if e = runner.call(ctx, "docker.inspect", map[string]any{"id": active[0].DockerID}, &inspected); e != nil {
+			if e = h.executionRemote(runner, exec).call(ctx, "docker.inspect", map[string]any{"id": active[0].DockerID}, &inspected); e != nil {
 				return e
 			}
 			if inspected.Status != "running" {
@@ -141,11 +148,13 @@ func (h *handler) stopMCPInstance(ctx context.Context, tenant, id string) error 
 		return err
 	}
 	var rows []struct {
-		ID       string `gorm:"column:id"`
-		DockerID string `gorm:"column:docker_id"`
-		Node     string `gorm:"column:runtime_node_id"`
+		ID                  string  `gorm:"column:id"`
+		DockerID            string  `gorm:"column:docker_id"`
+		Node                string  `gorm:"column:runtime_node_id"`
+		Space               string  `gorm:"column:space_id"`
+		WorkspaceInstanceID *string `gorm:"column:workspace_instance_id"`
 	}
-	if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("id,docker_id,runtime_node_id").Where("tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')", tenant, id).Find(&rows).Error; err != nil {
+	if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("id,docker_id,runtime_node_id,space_id,workspace_instance_id").Where("tenant_id=? AND instance_id=? AND docker_id IS NOT NULL AND status IN ('created','running')", tenant, id).Find(&rows).Error; err != nil {
 		return err
 	}
 	for _, row := range rows {
@@ -156,7 +165,23 @@ func (h *handler) stopMCPInstance(ctx context.Context, tenant, id string) error 
 		if err != nil {
 			return err
 		}
-		if err = runner.call(ctx, "docker.stop", map[string]any{"id": row.DockerID, "remove": true}, nil); err != nil {
+		var remote *remoteWorkspace
+		if row.WorkspaceInstanceID != nil {
+			instance, err := h.workspaceStore().Instance(ctx, tenant, row.Space, *row.WorkspaceInstanceID)
+			if err != nil {
+				return err
+			}
+			disk, err := h.workspaceStore().Disk(ctx, tenant, row.Space, instance.DiskID)
+			if err != nil {
+				return err
+			}
+			binding := protocol.Binding{Target: instance.Target, Disk: disk.Wire()}
+			if binding.Validate() != nil || instance.NodeID != row.Node {
+				return errors.New("stdio cleanup workspace identity mismatch")
+			}
+			remote = &remoteWorkspace{runner: runner, spaceID: row.Space, workspace: &binding}
+		}
+		if err = cleanupWorkspaceContainer(ctx, runner, remote, row.DockerID); err != nil {
 			return fmt.Errorf("stop stdio MCP: %w", err)
 		}
 		if err = h.deps.Gorm.WithContext(ctx).Table("managed_containers").Where("tenant_id=? AND id=?", tenant, row.ID).Updates(map[string]any{"status": "removed", "docker_id": nil, "updated_at": runtimeTimeString(h.store.now())}).Error; err != nil {

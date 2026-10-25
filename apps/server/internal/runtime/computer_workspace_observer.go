@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/Moonrend/Zakura/apps/server/internal/workspaces"
 	"gorm.io/gorm"
 )
 
@@ -22,9 +23,20 @@ type workspaceObservation struct {
 // Every lifecycle path uses the same complete node observation. Metadata is a
 // cache, never evidence of absence. In particular, a failed inspect/list must not
 // turn into an empty result and authorize create or configuration changes.
+func workspaceContainerRows(tx *gorm.DB, space Space) *gorm.DB {
+	q := tx.Table("managed_containers").Where("tenant_id=? AND space_id=? AND purpose='workspace'", space.TenantID, space.ID)
+	if space.CurrentWorkspaceInstanceID == nil {
+		return q.Where("workspace_instance_id IS NULL")
+	}
+	return q.Where("workspace_instance_id=?", *space.CurrentWorkspaceInstanceID)
+}
+
 func (h *handler) observeSpaceWorkspace(ctx context.Context, space Space) (workspaceObservation, error) {
 	var obs workspaceObservation
-	if err := h.deps.Gorm.WithContext(ctx).Table("managed_containers").Select("id,docker_id,runtime_node_id").Where("tenant_id=? AND space_id=? AND purpose='workspace' AND (status <> 'removed' OR docker_id IS NOT NULL)", space.TenantID, space.ID).Find(&obs.Rows).Error; err != nil {
+	if space.CurrentWorkspaceInstanceID == nil && space.WorkspaceGeneration != 0 {
+		return obs, workspaces.ErrTargetRevoked
+	}
+	if err := workspaceContainerRows(h.deps.Gorm.WithContext(ctx), space).Select("id,docker_id,runtime_node_id").Where("status <> 'removed' OR docker_id IS NOT NULL").Find(&obs.Rows).Error; err != nil {
 		return obs, err
 	}
 	if space.RuntimeNodeID == nil || *space.RuntimeNodeID == "" {
@@ -49,10 +61,20 @@ func (h *handler) observeSpaceWorkspace(ctx context.Context, space Space) (works
 		return obs, err
 	}
 	var containers []computerContainer
-	if err = runner.call(ctx, "docker.list", map[string]any{"label": "zakura.space=" + space.ID}, &containers); err != nil {
+	label := "zakura.space=" + space.ID
+	if space.CurrentWorkspaceInstanceID != nil {
+		label = "zakura.workspace-instance=" + *space.CurrentWorkspaceInstanceID
+	}
+	if err = runner.call(ctx, "docker.list", map[string]any{"label": label}, &containers); err != nil {
 		return obs, workspaceRunnerError{err}
 	}
 	for _, c := range containers {
+		if space.CurrentWorkspaceInstanceID != nil && c.Labels["zakura.workspace-instance"] != *space.CurrentWorkspaceInstanceID {
+			return obs, errors.New("workspace container instance ownership mismatch")
+		}
+		if space.CurrentWorkspaceInstanceID == nil && c.Labels["zakura.workspace-instance"] != "" {
+			continue
+		}
 		purpose := c.Labels["zakura.purpose"]
 		if purpose != "workspace" && purpose != "" {
 			continue
@@ -99,7 +121,7 @@ func (l *workspaceLease) recordObservation(ctx context.Context, obs workspaceObs
 	return l.fenced(ctx, func(tx *gorm.DB) error {
 		now := runtimeTimeString(l.h.store.now())
 		if obs.Container.DockerID == "" {
-			return tx.Table("managed_containers").Where("tenant_id=? AND space_id=? AND purpose='workspace'", l.Space.TenantID, l.Space.ID).Updates(map[string]any{"docker_id": nil, "status": "removed", "updated_at": now}).Error
+			return workspaceContainerRows(tx, l.Space).Updates(map[string]any{"docker_id": nil, "status": "removed", "updated_at": now}).Error
 		}
 		c := obs.Container
 		labels, _ := json.Marshal(c.Labels)
@@ -108,8 +130,18 @@ func (l *workspaceLease) recordObservation(ctx context.Context, obs workspaceObs
 			status = "stopped"
 		}
 		values := map[string]any{"agent_id": nil, "docker_id": c.DockerID, "name": strings.TrimPrefix(c.Name, "/"), "image": c.Image, "status": status, "labels_json": string(labels), "runtime_node_id": l.Space.RuntimeNodeID, "updated_at": now}
+		if l.Space.CurrentWorkspaceInstanceID != nil {
+			values["workspace_instance_id"] = *l.Space.CurrentWorkspaceInstanceID
+			result := tx.Table("workspace_instances").Where("id=? AND tenant_id=? AND space_id=? AND generation=? AND revoked_at IS NULL", *l.Space.CurrentWorkspaceInstanceID, l.Space.TenantID, l.Space.ID, l.Space.WorkspaceGeneration).Updates(map[string]any{"docker_id": c.DockerID, "state": status, "last_error": nil, "updated_at": now})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return workspaces.ErrTargetRevoked
+			}
+		}
 		if len(obs.Rows) > 0 {
-			if err := tx.Table("managed_containers").Where("tenant_id=? AND space_id=? AND purpose='workspace'", l.Space.TenantID, l.Space.ID).Updates(map[string]any{"docker_id": nil, "status": "removed", "updated_at": now}).Error; err != nil {
+			if err := workspaceContainerRows(tx, l.Space).Updates(map[string]any{"docker_id": nil, "status": "removed", "updated_at": now}).Error; err != nil {
 				return err
 			}
 			return tx.Table("managed_containers").Where("id=? AND tenant_id=?", obs.Rows[0].ID, l.Space.TenantID).Updates(values).Error

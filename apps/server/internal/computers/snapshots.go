@@ -14,10 +14,11 @@ const InitializeSessionDefaultSQL = `INSERT INTO session_computer_defaults(sessi
 
 // SnapshotRunTargetSQL pins the chat's choice, or the Space server computer when
 // the chat has none, so every Run names its computer explicitly.
-const SnapshotRunTargetSQL = `INSERT INTO run_computer_targets(run_id,tenant_id,space_id,computer_id)
- SELECT r.id,cs.tenant_id,a.space_id,COALESCE(d.computer_id,sc.id) FROM cloud_agent_runs r
+const SnapshotRunTargetSQL = `INSERT INTO run_computer_targets(run_id,tenant_id,space_id,computer_id,workspace_instance_id,workspace_generation)
+ SELECT r.id,cs.tenant_id,a.space_id,COALESCE(d.computer_id,sc.id),ws.current_workspace_instance_id,ws.workspace_generation FROM cloud_agent_runs r
  JOIN cloud_agent_sessions cs ON cs.id=r.session_id
  JOIN agents a ON a.id=cs.agent_id AND a.tenant_id=cs.tenant_id
+ JOIN spaces ws ON ws.id=a.space_id AND ws.tenant_id=cs.tenant_id
  LEFT JOIN session_computer_defaults d ON d.session_id=cs.id AND d.tenant_id=cs.tenant_id AND d.space_id=a.space_id
  LEFT JOIN computers sc ON sc.tenant_id=cs.tenant_id AND sc.space_id=a.space_id AND sc.role='server'
  WHERE r.id=? AND cs.tenant_id=? AND a.space_id IS NOT NULL

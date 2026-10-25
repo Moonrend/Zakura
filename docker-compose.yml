@@ -1,6 +1,6 @@
-# Zakura — OSS quickstart（分服务镜像：server + web）
+# Zakura — OSS quickstart（server + web + 独立 node）
 #
-# 默认 SQLite（持久化到命名卷），server 与 web 两个容器：
+# 默认 SQLite（持久化到命名卷），完成管理员初始化后 node 自动登记：
 #   docker compose up -d
 #
 # 使用 Postgres（内置 pgvector 服务，需把 DATABASE_URL 指过去）：
@@ -31,10 +31,12 @@ services:
       WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-http://localhost:3001}
       ZAKURA_EDITION: ${ZAKURA_EDITION:-oss}
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      ZAKURA_NODE_BOOTSTRAP_DIR: /node-bootstrap
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
       OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     volumes:
       - zakura-data:/data
+      - node-bootstrap:/node-bootstrap
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -48,6 +50,39 @@ services:
       postgres:
         condition: service_healthy
         required: false
+    networks:
+      - zakura
+
+  node:
+    image: ${ZAKURA_NODE_IMAGE:-sunwuyuan/zakura-agent:latest}
+    environment:
+      ZAKURA_AGENT_SERVER: http://server:8787
+      ZAKURA_AGENT_KIND: server
+      ZAKURA_AGENT_STATE_DIR: /state
+      ZAKURA_AGENT_DATA_DIR: /workspace-data
+      ZAKURA_NODE_BOOTSTRAP_DIR: /node-bootstrap
+      ZAKURA_WORKSPACE_VOLUME: ${COMPOSE_PROJECT_NAME:-recloud}_workspace-data
+    volumes:
+      - node-state:/state
+      - workspace-data:/workspace-data
+      - type: volume
+        source: node-bootstrap
+        target: /node-bootstrap
+        read_only: true
+        volume:
+          nocopy: true
+      # Docker Socket 赋予节点宿主管理权限；控制面不挂载此 Socket。
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "zakura-agent", "-healthcheck"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - zakura
 
@@ -111,6 +146,10 @@ services:
 
 volumes:
   zakura-data:
+  node-bootstrap:
+  node-state:
+  workspace-data:
+    name: ${COMPOSE_PROJECT_NAME:-recloud}_workspace-data
   postgres-data:
   redis-data:
 

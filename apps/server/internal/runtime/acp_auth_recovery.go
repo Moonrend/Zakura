@@ -14,12 +14,14 @@ import (
 )
 
 type acpAuthRecoveryState struct {
-	Token      string `gorm:"column:token" json:"-"`
-	Kind       string `gorm:"column:kind" json:"kind"`
-	ExpiresAt  int64  `gorm:"column:expires_at" json:"expiresAt"`
-	UpdatedAt  int64  `gorm:"column:updated_at" json:"-"`
-	NodeID     string `gorm:"column:node_id" json:"nodeId"`
-	ComputerID string `gorm:"column:computer_id" json:"computerId"`
+	Token               string `gorm:"column:token" json:"-"`
+	Kind                string `gorm:"column:kind" json:"kind"`
+	ExpiresAt           int64  `gorm:"column:expires_at" json:"expiresAt"`
+	UpdatedAt           int64  `gorm:"column:updated_at" json:"-"`
+	NodeID              string `gorm:"column:node_id" json:"nodeId"`
+	ComputerID          string `gorm:"column:computer_id" json:"computerId"`
+	WorkspaceInstanceID string `gorm:"column:workspace_instance_id" json:"workspaceInstanceId,omitempty"`
+	WorkspaceGeneration int64  `gorm:"column:workspace_generation" json:"workspaceGeneration,omitempty"`
 
 	WorkspaceToken     string `gorm:"-" json:"-"`
 	WorkspaceOperation string `gorm:"-" json:"-"`
@@ -68,10 +70,17 @@ func (h *handler) loadACPRecoveryWorkspace(ctx context.Context, tenant, space st
 // not generic expired-lease acquisition. Both old workspace and auth callbacks
 // are fenced before the original node is observed. Unrelated intents stay busy.
 func (h *handler) claimACPAuthRecovery(ctx context.Context, tenant, space, profile string, state acpAuthRecoveryState) (*workspaceLease, error) {
+	if err := h.validateACPRecoveryInstance(ctx, tenant, space, state); err != nil {
+		return nil, err
+	}
 	if state.WorkspaceToken == "" {
 		lease, err := h.acquireSpaceInfrastructure(ctx, tenant, space)
 		if err != nil {
 			return nil, err
+		}
+		if !acpRecoveryMatchesSpace(state, lease.Space) {
+			lease.release()
+			return nil, errACPAuthLockLost
 		}
 		lease.Intent.Uncertain = true
 		if err = lease.bindSharedProfile(ctx, profile); err != nil {
@@ -106,6 +115,12 @@ func (h *handler) claimACPAuthRecovery(ctx context.Context, tenant, space, profi
 		}
 		if result.RowsAffected != 1 {
 			return ErrConflict
+		}
+		if err := lockWorkspaceInstance(tx, tenant, space, current.CurrentWorkspaceInstanceID, current.WorkspaceGeneration); err != nil {
+			return err
+		}
+		if !acpRecoveryMatchesSpace(state, current) {
+			return errACPAuthLockLost
 		}
 		var auth int64
 		if err := tx.Table("acp_profile_auth_locks").Where("tenant_id=? AND space_id=? AND profile_id=? AND token=? AND updated_at=? AND expires_at<=?", tenant, space, profile, state.Token, state.UpdatedAt, now.UnixMilli()).Count(&auth).Error; err != nil {
@@ -168,6 +183,11 @@ func (h *handler) reconcileACPAuthentication(ctx context.Context, tenant, space,
 	}
 	if state.NodeID == "" || state.ComputerID == "" {
 		return errors.New("legacy authentication lock has no original target; operator reconciliation is required")
+	}
+	if state.WorkspaceInstanceID != "" {
+		// An empty inventory cannot prove that a timed-out credential RPC ended.
+		// Retiring the instance invokes the node's durable writer release barrier.
+		return errors.New("managed workspace authentication is unconfirmed; delete the workspace while retaining its disk to release the original writers")
 	}
 	lease, err := h.claimACPAuthRecovery(ctx, tenant, space, profile, state)
 	if err != nil {

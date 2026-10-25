@@ -156,6 +156,8 @@ func TestWorkspaceMigrationPublicExecutorFilesystem(t *testing.T) {
 							return nil, fmt.Errorf("must retain the original workspace container: %s %s", node, request.Params)
 						}
 						states[node] = "exited"
+					case "docker.images":
+						return []computerImageStatus{}, nil
 					case "docker.pull":
 						if node != "target" {
 							return nil, fmt.Errorf("unexpected source image pull")

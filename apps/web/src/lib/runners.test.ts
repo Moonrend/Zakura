@@ -1,7 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RunnerUpdateStatus } from "@zakura/shared";
-import { updateRunner } from "./runners.ts";
+import { listRuntimeNodes, updateRunner, workspaceNodeUnavailableReason, type RuntimeNode } from "./runners.ts";
+
+test("workspace node selection respects local permission and Docker capabilities", async (t) => {
+  const node: RuntimeNode = {
+    id: "local", tenantId: "tenant", name: "Local", slug: "local", kind: "local", status: "online",
+    capabilities: { docker: true, dockerCreateReceipts: true }, hostInfo: {}, labels: {},
+    endpoint: null, storageRoot: "/data", agentVersion: "embedded", lastSeenAt: null,
+    createdAt: "", updatedAt: "",
+  };
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    nodes: [node, { ...node, id: "remote", kind: "server" }], canUseLocalRunner: false,
+  }));
+  const [local, remote] = await listRuntimeNodes();
+  assert.equal(local.canUse, false);
+  assert.match(workspaceNodeUnavailableReason(local)!, /权限/);
+  assert.equal(remote.canUse, true);
+  assert.equal(workspaceNodeUnavailableReason(remote), null);
+  assert.match(workspaceNodeUnavailableReason({ ...remote, status: "offline" })!, /离线/);
+  assert.match(workspaceNodeUnavailableReason({ ...remote, capabilities: { docker: true } })!, /更新/);
+  assert.equal(workspaceNodeUnavailableReason({ ...remote, capabilities: { docker: false }, dockerError: "Docker socket permission denied" }), "Docker socket permission denied");
+});
 
 function job(phase: RunnerUpdateStatus["phase"] = "queued"): RunnerUpdateStatus {
   return {

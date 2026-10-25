@@ -596,7 +596,7 @@ func (s *Service) samlACS(w http.ResponseWriter, r *http.Request) {
 	}
 	uid, _ := result["_userId"].(string)
 	delete(result, "_userId")
-	result["next"] = "/dashboard/agents"
+	result["next"] = "/chat"
 	ticket, err := s.issueAuthToken(r.Context(), "sso_exchange", uid, result)
 	if err != nil {
 		s.samlFailure(w, r, errors.New("SSO ticket issue failed"))

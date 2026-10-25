@@ -22,6 +22,7 @@ type Config struct {
 	Token     string
 	Kind      string
 	Handler   *rpc.Handler
+	Heartbeat func()
 }
 
 func Loop(ctx context.Context, cfg Config) {
@@ -102,6 +103,9 @@ func connectOnce(ctx context.Context, cfg Config) error {
 			continue
 		}
 		if msg.Type == "welcome" || msg.Type == "ping" {
+			if cfg.Heartbeat != nil {
+				cfg.Heartbeat()
+			}
 			if msg.Type == "ping" {
 				send(rpc.Msg{Type: "pong", ID: msg.ID})
 			}

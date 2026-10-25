@@ -91,29 +91,31 @@ func slugify(v string) string {
 }
 
 type spaceColumns struct {
-	ID              string  `gorm:"column:id"`
-	TenantID        string  `gorm:"column:tenant_id"`
-	Name            string  `gorm:"column:name"`
-	Slug            string  `gorm:"column:slug"`
-	Description     string  `gorm:"column:description"`
-	EnableComputer  bool    `gorm:"column:enable_computer"`
-	WorkspaceImage  *string `gorm:"column:workspace_image"`
-	RuntimeNodeID   *string `gorm:"column:runtime_node_id"`
-	WorkspaceKind   string  `gorm:"column:workspace_kind"`
-	WorkspaceStatus string  `gorm:"column:workspace_status"`
-	Config          string  `gorm:"column:config_json"`
-	LastError       *string `gorm:"column:last_error"`
-	CreatedAt       string  `gorm:"column:created_at"`
-	UpdatedAt       string  `gorm:"column:updated_at"`
+	ID                         string  `gorm:"column:id"`
+	TenantID                   string  `gorm:"column:tenant_id"`
+	Name                       string  `gorm:"column:name"`
+	Slug                       string  `gorm:"column:slug"`
+	Description                string  `gorm:"column:description"`
+	EnableComputer             bool    `gorm:"column:enable_computer"`
+	WorkspaceImage             *string `gorm:"column:workspace_image"`
+	RuntimeNodeID              *string `gorm:"column:runtime_node_id"`
+	WorkspaceKind              string  `gorm:"column:workspace_kind"`
+	WorkspaceStatus            string  `gorm:"column:workspace_status"`
+	CurrentWorkspaceInstanceID *string `gorm:"column:current_workspace_instance_id"`
+	WorkspaceGeneration        int64   `gorm:"column:workspace_generation"`
+	Config                     string  `gorm:"column:config_json"`
+	LastError                  *string `gorm:"column:last_error"`
+	CreatedAt                  string  `gorm:"column:created_at"`
+	UpdatedAt                  string  `gorm:"column:updated_at"`
 }
 
 func (c spaceColumns) space() Space {
-	return Space{ID: c.ID, TenantID: c.TenantID, Name: c.Name, Slug: c.Slug, Description: c.Description, EnableComputer: c.EnableComputer, WorkspaceImage: c.WorkspaceImage, RuntimeNodeID: c.RuntimeNodeID, WorkspaceKind: c.WorkspaceKind, WorkspaceStatus: c.WorkspaceStatus, Config: json.RawMessage(c.Config), LastError: c.LastError, CreatedAt: parseTime(c.CreatedAt), UpdatedAt: parseTime(c.UpdatedAt)}
+	return Space{ID: c.ID, TenantID: c.TenantID, Name: c.Name, Slug: c.Slug, Description: c.Description, EnableComputer: c.EnableComputer, WorkspaceImage: c.WorkspaceImage, RuntimeNodeID: c.RuntimeNodeID, WorkspaceKind: c.WorkspaceKind, WorkspaceStatus: c.WorkspaceStatus, CurrentWorkspaceInstanceID: c.CurrentWorkspaceInstanceID, WorkspaceGeneration: c.WorkspaceGeneration, Config: json.RawMessage(c.Config), LastError: c.LastError, CreatedAt: parseTime(c.CreatedAt), UpdatedAt: parseTime(c.UpdatedAt)}
 }
 
 func (s *Store) ListSpaces(ctx context.Context, tenant string) ([]Space, error) {
 	var rows []spaceColumns
-	if err := s.deps.Gorm.WithContext(ctx).Table("spaces").Select("id,tenant_id,name,slug,description,enable_computer,workspace_image,runtime_node_id,workspace_kind,workspace_status,config_json,last_error,created_at,updated_at").Where("tenant_id = ?", tenant).Order("created_at, id").Scan(&rows).Error; err != nil {
+	if err := s.deps.Gorm.WithContext(ctx).Table("spaces").Select("id,tenant_id,name,slug,description,enable_computer,workspace_image,runtime_node_id,workspace_kind,workspace_status,current_workspace_instance_id,workspace_generation,config_json,last_error,created_at,updated_at").Where("tenant_id = ?", tenant).Order("created_at, id").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]Space, 0, len(rows))
@@ -162,7 +164,7 @@ func (s *Store) CreateSpace(ctx context.Context, tenant string, in Space) (Space
 
 func (s *Store) GetSpace(ctx context.Context, tenant, id string) (Space, error) {
 	var c spaceColumns
-	err := s.deps.Gorm.WithContext(ctx).Table("spaces").Select("id,tenant_id,name,slug,description,enable_computer,workspace_image,runtime_node_id,workspace_kind,workspace_status,config_json,last_error,created_at,updated_at").Where("tenant_id = ? AND id = ?", tenant, id).Take(&c).Error
+	err := s.deps.Gorm.WithContext(ctx).Table("spaces").Select("id,tenant_id,name,slug,description,enable_computer,workspace_image,runtime_node_id,workspace_kind,workspace_status,current_workspace_instance_id,workspace_generation,config_json,last_error,created_at,updated_at").Where("tenant_id = ? AND id = ?", tenant, id).Take(&c).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Space{}, ErrNotFound
 	}

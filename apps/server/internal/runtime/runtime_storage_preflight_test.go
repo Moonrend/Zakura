@@ -121,6 +121,8 @@ func TestWorkspacePreflightFailureDoesNotRetainLease(t *testing.T) {
 						return map[string]any{"abs": ""}, nil
 					}
 					return map[string]any{"abs": "/srv/zakura/workspace"}, nil
+				case "docker.images":
+					return []computerImageStatus{}, nil
 				case "docker.pull":
 					if scenario == "pull" {
 						return nil, errors.New("fixture registry unavailable")
@@ -139,6 +141,7 @@ func TestWorkspacePreflightFailureDoesNotRetainLease(t *testing.T) {
 				if err == nil || errors.Is(err, errWorkspaceStarting) {
 					t.Fatalf("attempt %d did not return retryable preflight failure: %v", attempt, err)
 				}
+				failure := err.Error()
 				var leases int64
 				if err := d.Gorm.Table("computer_workspace_leases").Where("space_id=?", space.ID).Count(&leases).Error; err != nil || leases != 0 {
 					t.Fatalf("preflight retained lease: %d %v", leases, err)
@@ -146,6 +149,9 @@ func TestWorkspacePreflightFailureDoesNotRetainLease(t *testing.T) {
 				current, err := h.store.GetSpace(context.Background(), "tenant", space.ID)
 				if err != nil || current.WorkspaceStatus != "stopped" {
 					t.Fatalf("preflight changed status: %+v %v", current, err)
+				}
+				if current.LastError == nil || *current.LastError != failure {
+					t.Fatalf("preflight diagnostic lost: got %v want %q", current.LastError, failure)
 				}
 			}
 		})

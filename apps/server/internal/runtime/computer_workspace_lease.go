@@ -15,6 +15,7 @@ const workspaceLeaseDuration = 20 * time.Minute
 var errWorkspaceLeaseLost = errors.New("workspace operation lease was replaced or expired")
 
 type workspaceConfig struct {
+	DiskID         string  `json:"diskId,omitempty"`
 	RuntimeNodeID  *string `json:"runtimeNodeId"`
 	WorkspaceKind  string  `json:"workspaceKind"`
 	WorkspaceImage *string `json:"workspaceImage"`
@@ -46,6 +47,11 @@ func (h *handler) acquireSpaceWorkspace(ctx context.Context, tenant, id, operati
 	if err != nil {
 		return nil, err
 	}
+	if accepted, ok := ctx.Value(workspaceRequestTargetKey{}).(Space); ok && accepted.TenantID == tenant && accepted.ID == id {
+		if accepted.WorkspaceGeneration != previous.WorkspaceGeneration || (accepted.CurrentWorkspaceInstanceID == nil) != (previous.CurrentWorkspaceInstanceID == nil) || accepted.CurrentWorkspaceInstanceID != nil && *accepted.CurrentWorkspaceInstanceID != *previous.CurrentWorkspaceInstanceID {
+			return nil, errWorkspaceLeaseLost
+		}
+	}
 	l := &workspaceLease{h: h, Space: previous, Token: h.store.id(), Operation: operation, Intent: workspaceIntent{PreviousStatus: previous.WorkspaceStatus, DesiredConfig: desired}}
 	raw, err := json.Marshal(l.Intent)
 	if err != nil {
@@ -54,6 +60,12 @@ func (h *handler) acquireSpaceWorkspace(ctx context.Context, tenant, id, operati
 	now := h.store.now()
 	err = h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		q := tx.Table("spaces").Where("tenant_id=? AND id=? AND deletion_pending=FALSE AND workspace_status=? AND workspace_status NOT IN ('starting','stopping','configuring','migrating','deleting')", tenant, id, previous.WorkspaceStatus)
+		q = q.Where("workspace_generation=?", previous.WorkspaceGeneration)
+		if previous.CurrentWorkspaceInstanceID == nil {
+			q = q.Where("current_workspace_instance_id IS NULL")
+		} else {
+			q = q.Where("current_workspace_instance_id=?", *previous.CurrentWorkspaceInstanceID)
+		}
 		if stoppedOnly {
 			q = q.Where("workspace_status <> 'running'")
 		}
@@ -64,7 +76,7 @@ func (h *handler) acquireSpaceWorkspace(ctx context.Context, tenant, id, operati
 		if r.RowsAffected != 1 {
 			return errWorkspaceStarting
 		}
-		r = tx.Exec(`INSERT INTO computer_workspace_leases(space_id,tenant_id,token,operation,expires_at,intent_json,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(space_id) DO NOTHING`, id, tenant, l.Token, operation, now.Add(workspaceLeaseDuration).UnixMilli(), string(raw), now.UnixMilli())
+		r = tx.Exec(`INSERT INTO computer_workspace_leases(space_id,tenant_id,token,operation,expires_at,intent_json,updated_at,workspace_instance_id,workspace_generation) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(space_id) DO NOTHING`, id, tenant, l.Token, operation, now.Add(workspaceLeaseDuration).UnixMilli(), string(raw), now.UnixMilli(), previous.CurrentWorkspaceInstanceID, previous.WorkspaceGeneration)
 		if r.Error != nil {
 			return r.Error
 		}
@@ -76,11 +88,7 @@ func (h *handler) acquireSpaceWorkspace(ctx context.Context, tenant, id, operati
 	if err != nil {
 		return nil, err
 	}
-	l.Space, err = h.store.GetSpace(ctx, tenant, id)
-	if err != nil {
-		l.release()
-		return nil, err
-	}
+	l.Space.WorkspaceStatus = operation
 	return l, nil
 }
 
@@ -95,7 +103,25 @@ func (h *handler) claimSpaceWorkspace(ctx context.Context, tenant, id, state str
 func (l *workspaceLease) fenced(ctx context.Context, f func(*gorm.DB) error) error {
 	return l.h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := l.h.store.now()
-		r := tx.Table("computer_workspace_leases").Where("space_id=? AND tenant_id=? AND token=? AND expires_at>?", l.Space.ID, l.Space.TenantID, l.Token, now.UnixMilli()).Updates(map[string]any{"expires_at": now.Add(workspaceLeaseDuration).UnixMilli(), "updated_at": now.UnixMilli()})
+		// Use the same owner-then-lease lock order as retirement. A late callback
+		// must not update the replacement even if it still holds an old token.
+		owner := tx.Table("spaces").Where("tenant_id=? AND id=? AND workspace_generation=?", l.Space.TenantID, l.Space.ID, l.Space.WorkspaceGeneration)
+		lease := tx.Table("computer_workspace_leases").Where("space_id=? AND tenant_id=? AND token=? AND expires_at>? AND workspace_generation=?", l.Space.ID, l.Space.TenantID, l.Token, now.UnixMilli(), l.Space.WorkspaceGeneration)
+		if l.Space.CurrentWorkspaceInstanceID == nil {
+			owner = owner.Where("current_workspace_instance_id IS NULL")
+			lease = lease.Where("workspace_instance_id IS NULL")
+		} else {
+			owner = owner.Where("current_workspace_instance_id=?", *l.Space.CurrentWorkspaceInstanceID)
+			lease = lease.Where("workspace_instance_id=?", *l.Space.CurrentWorkspaceInstanceID)
+		}
+		r := owner.Update("workspace_generation", l.Space.WorkspaceGeneration)
+		if r.Error != nil {
+			return r.Error
+		}
+		if r.RowsAffected != 1 {
+			return errWorkspaceLeaseLost
+		}
+		r = lease.Updates(map[string]any{"expires_at": now.Add(workspaceLeaseDuration).UnixMilli(), "updated_at": now.UnixMilli()})
 		if r.Error != nil {
 			return r.Error
 		}
@@ -144,6 +170,14 @@ func (l *workspaceLease) release() {
 			_ = l.finish(context.Background(), l.Intent.PreviousStatus, nil)
 		}
 	})
+}
+
+// A failed preflight is retryable, but its diagnostic must survive a page reload.
+// Ambiguous effects already retain their intent through uncertain.
+func (l *workspaceLease) recordFailure(cause error) {
+	if !l.retained {
+		_ = l.finish(context.Background(), l.Intent.PreviousStatus, map[string]any{"last_error": cause.Error()})
+	}
 }
 
 // Keep the intent after an uncertain remote response. A second HTTP request may

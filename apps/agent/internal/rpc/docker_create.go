@@ -34,6 +34,9 @@ func (h *Handler) dockerCreate(ctx context.Context, raw json.RawMessage) (docker
 	if request.Operation == nil {
 		return docker.Create(ctx, request.RunSpec)
 	}
+	if request.Operation.InstanceID != "" {
+		return docker.ContainerInfo{}, fmt.Errorf("workspace v2 creation requires a pinned workspace binding")
+	}
 	return docker.CreateWithReceipt(ctx, h.StorageRoot, request.RunSpec, *request.Operation)
 }
 
@@ -42,5 +45,9 @@ func (h *Handler) dockerCreateStatus(ctx context.Context, raw json.RawMessage) (
 	if err := decodeDockerCreate(raw, &request); err != nil {
 		return docker.CreateStatus{}, err
 	}
-	return docker.CreateReceiptStatus(ctx, h.StorageRoot, request)
+	root := h.StorageRoot
+	if request.InstanceID != "" {
+		root = h.workspaceState.StateRoot
+	}
+	return docker.CreateReceiptStatus(ctx, root, request)
 }

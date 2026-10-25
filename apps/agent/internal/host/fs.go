@@ -59,51 +59,94 @@ func Lstat(root, rel string) (Entry, error) {
 }
 
 func statEntry(root, rel string, noFollow bool) (Entry, error) {
-	r, p, err := rootedPath(root, rel, false)
+	r, _, err := rootedPath(root, rel, false)
 	if err != nil {
 		return Entry{}, err
 	}
 	defer r.Close()
-	stat := r.Stat
+	return (PinnedFS{Root: r, HostPath: root}).Stat(rel, noFollow)
+}
+
+// PinnedFS keeps the already verified workspace handle throughout an operation.
+// It never reopens the root by pathname or creates a missing workspace root.
+type PinnedFS struct {
+	Root     *os.Root
+	HostPath string
+}
+
+func (f PinnedFS) resolve(rel string) (string, error) {
+	absolute, err := Jail(f.HostPath, rel)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(f.HostPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Rel(root, absolute)
+}
+
+func (f PinnedFS) Stat(rel string, noFollow bool) (Entry, error) {
+	p, err := f.resolve(rel)
+	if err != nil {
+		return Entry{}, err
+	}
+	stat := f.Root.Stat
 	if noFollow {
-		stat = r.Lstat
+		stat = f.Root.Lstat
 	}
 	st, err := stat(p)
 	if err != nil {
 		return Entry{}, err
 	}
-	return Entry{Name: st.Name(), Path: WorkspacePath(root, filepath.Join(root, p)), IsDir: st.IsDir(), Size: st.Size(), Mode: st.Mode().String(), ModTime: st.ModTime().UTC().Format(time.RFC3339)}, nil
+	return Entry{Name: st.Name(), Path: WorkspacePath(f.HostPath, filepath.Join(f.HostPath, p)), IsDir: st.IsDir(), Size: st.Size(), Mode: st.Mode().String(), ModTime: st.ModTime().UTC().Format(time.RFC3339)}, nil
 }
 
 func List(root, rel string) ([]Entry, error) {
-	r, p, err := rootedPath(root, rel, false)
+	r, _, err := rootedPath(root, rel, false)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	ents, err := fs.ReadDir(r.FS(), filepath.ToSlash(p))
+	return (PinnedFS{Root: r, HostPath: root}).List(rel)
+}
+
+func (f PinnedFS) List(rel string) ([]Entry, error) {
+	p, err := f.resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	ents, err := fs.ReadDir(f.Root.FS(), filepath.ToSlash(p))
 	if err != nil {
 		return nil, err
 	}
 	out := make([]Entry, 0, len(ents))
 	for _, e := range ents {
 		child := filepath.Join(p, e.Name())
-		info, err := r.Lstat(child)
+		info, err := f.Root.Lstat(child)
 		if err != nil {
 			continue
 		}
-		out = append(out, Entry{Name: e.Name(), Path: WorkspacePath(root, filepath.Join(root, child)), IsDir: info.IsDir(), Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime().UTC().Format(time.RFC3339)})
+		out = append(out, Entry{Name: e.Name(), Path: WorkspacePath(f.HostPath, filepath.Join(f.HostPath, child)), IsDir: info.IsDir(), Size: info.Size(), Mode: info.Mode().String(), ModTime: info.ModTime().UTC().Format(time.RFC3339)})
 	}
 	return out, nil
 }
 
 func ReadFile(root, rel string, max int64) ([]byte, error) {
-	r, p, err := rootedPath(root, rel, false)
+	r, _, err := rootedPath(root, rel, false)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	f, err := r.Open(p)
+	return (PinnedFS{Root: r, HostPath: root}).ReadFile(rel, max)
+}
+
+func (pinned PinnedFS) ReadFile(rel string, max int64) ([]byte, error) {
+	p, err := pinned.resolve(rel)
+	if err != nil {
+		return nil, err
+	}
+	f, err := pinned.Root.Open(p)
 	if err != nil {
 		return nil, err
 	}
@@ -130,15 +173,23 @@ func ReadFile(root, rel string, max int64) ([]byte, error) {
 }
 
 func WriteFile(root, rel string, data []byte) (string, error) {
-	r, p, err := rootedPath(root, rel, true)
+	r, _, err := rootedPath(root, rel, true)
 	if err != nil {
 		return "", err
 	}
 	defer r.Close()
-	if err = r.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	return (PinnedFS{Root: r, HostPath: root}).WriteFile(rel, data)
+}
+
+func (f PinnedFS) WriteFile(rel string, data []byte) (string, error) {
+	p, err := f.resolve(rel)
+	if err != nil {
 		return "", err
 	}
-	if err = r.WriteFile(p, data, 0o644); err != nil {
+	if err = f.Root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return "", err
+	}
+	if err = f.Root.WriteFile(p, data, 0o644); err != nil {
 		return "", err
 	}
 	return fileRevision(data), nil
@@ -149,11 +200,20 @@ func WriteFile(root, rel string, data []byte) (string, error) {
 // so concurrent directory/symlink swaps cannot redirect secrets outside root.
 // The regular WriteFile contract intentionally stays 0644 and non-atomic.
 func WritePrivateFile(root, rel string, data []byte) (string, error) {
-	r, p, err := rootedPath(root, rel, true)
+	r, _, err := rootedPath(root, rel, true)
 	if err != nil {
 		return "", err
 	}
 	defer r.Close()
+	return (PinnedFS{Root: r, HostPath: root}).WritePrivateFile(rel, data)
+}
+
+func (pinned PinnedFS) WritePrivateFile(rel string, data []byte) (string, error) {
+	p, err := pinned.resolve(rel)
+	if err != nil {
+		return "", err
+	}
+	r := pinned.Root
 	if p == "." {
 		return "", fmt.Errorf("invalid private file path")
 	}
@@ -206,48 +266,70 @@ func WritePrivateFile(root, rel string, data []byte) (string, error) {
 func fileRevision(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:8]) }
 
 func Mkdir(root, rel string) error {
-	r, p, err := rootedPath(root, rel, true)
+	r, _, err := rootedPath(root, rel, true)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	return r.MkdirAll(p, 0o755)
+	return (PinnedFS{Root: r, HostPath: root}).Mkdir(rel)
+}
+
+func (f PinnedFS) Mkdir(rel string) error {
+	p, err := f.resolve(rel)
+	if err != nil {
+		return err
+	}
+	return f.Root.MkdirAll(p, 0o755)
 }
 
 func Remove(root, rel string, recursive bool) error {
-	r, p, err := rootedPath(root, rel, false)
+	r, _, err := rootedPath(root, rel, false)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	if recursive {
-		return r.RemoveAll(p)
+	return (PinnedFS{Root: r, HostPath: root}).Remove(rel, recursive)
+}
+
+func (f PinnedFS) Remove(rel string, recursive bool) error {
+	p, err := f.resolve(rel)
+	if err != nil {
+		return err
 	}
-	return r.Remove(p)
+	if p == "." {
+		return fmt.Errorf("cannot remove workspace root")
+	}
+	if recursive {
+		return f.Root.RemoveAll(p)
+	}
+	return f.Root.Remove(p)
 }
 
 func Rename(root, oldRel, newRel string) error {
-	r, a, err := rootedPath(root, oldRel, false)
+	r, _, err := rootedPath(root, oldRel, false)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	bAbs, err := Jail(root, newRel)
+	return (PinnedFS{Root: r, HostPath: root}).Rename(oldRel, newRel)
+}
+
+func (f PinnedFS) Rename(oldRel, newRel string) error {
+	a, err := f.resolve(oldRel)
 	if err != nil {
 		return err
 	}
-	abs, err := filepath.Abs(root)
+	b, err := f.resolve(newRel)
 	if err != nil {
 		return err
 	}
-	b, err := filepath.Rel(abs, bAbs)
-	if err != nil {
+	if a == "." || b == "." {
+		return fmt.Errorf("cannot rename workspace root")
+	}
+	if err = f.Root.MkdirAll(filepath.Dir(b), 0o755); err != nil {
 		return err
 	}
-	if err = r.MkdirAll(filepath.Dir(b), 0o755); err != nil {
-		return err
-	}
-	return r.Rename(a, b)
+	return f.Root.Rename(a, b)
 }
 
 func CopyFile(root, rel string, w io.Writer) error {

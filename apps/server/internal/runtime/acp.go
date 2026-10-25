@@ -150,6 +150,9 @@ func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent,
 	if exec := pinnedExecution(ctx); exec != nil && !exec.legacy {
 		return h.computerContainerExec(ctx, exec, mode, executionTimeoutMS, command, args...)
 	}
+	if exec := pinnedExecution(ctx); exec != nil && exec.workspace != nil {
+		return h.workspaceInstanceExec(ctx, exec, mode, executionTimeoutMS, command, args...)
+	}
 	var nodeID, spaceID, workspaceKind string
 	var rec struct {
 		NodeID        string `gorm:"column:node_id"`
@@ -170,6 +173,18 @@ func (h *handler) runtimeExecWithModeTimeout(ctx context.Context, tenant, agent,
 		return nil, err
 	}
 	nodeID, spaceID, workspaceKind = rec.NodeID, rec.SpaceID, rec.WorkspaceKind
+	computer, err := h.serverComputerRecord(ctx, tenant, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	run, _ := ctx.Value(computerRunKey{}).(string)
+	exec, err := h.resolveWorkspaceExecution(ctx, computer, run)
+	if err != nil {
+		return nil, err
+	}
+	if exec.workspace != nil {
+		return h.workspaceInstanceExec(ctx, exec, mode, executionTimeoutMS, command, args...)
+	}
 	if mode == "sandbox" && workspaceKind != "host" {
 		return nil, errors.New("sandbox execution requires a host workspace; this workspace mode is unsupported")
 	}
@@ -731,6 +746,7 @@ func (h *handler) acpAuthenticate(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
+	ctx = live.workspaceContext(ctx)
 	lease, err := h.acquireSpaceInfrastructure(ctx, p.TenantID, live.spaceID)
 	if err != nil {
 		httpx.Error(w, http.StatusConflict, err.Error())
@@ -816,6 +832,7 @@ func (h *handler) acpLogout(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, err)
 		return
 	}
+	ctx = live.workspaceContext(ctx)
 	lease, err := h.acquireSpaceInfrastructure(ctx, p.TenantID, live.spaceID)
 	if err != nil {
 		httpx.Error(w, http.StatusConflict, err.Error())

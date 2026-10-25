@@ -9,20 +9,22 @@ import (
 )
 
 type Space struct {
-	ID              string          `json:"id"`
-	TenantID        string          `json:"tenantId,omitempty"`
-	Name            string          `json:"name"`
-	Slug            string          `json:"slug"`
-	Description     string          `json:"description"`
-	EnableComputer  bool            `json:"enableComputer"`
-	WorkspaceImage  *string         `json:"workspaceImage"`
-	RuntimeNodeID   *string         `json:"runtimeNodeId"`
-	WorkspaceKind   string          `json:"workspaceKind"`
-	WorkspaceStatus string          `json:"workspaceStatus"`
-	Config          json.RawMessage `json:"config"`
-	LastError       *string         `json:"lastError"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
+	ID                         string          `json:"id"`
+	TenantID                   string          `json:"tenantId,omitempty"`
+	Name                       string          `json:"name"`
+	Slug                       string          `json:"slug"`
+	Description                string          `json:"description"`
+	EnableComputer             bool            `json:"enableComputer"`
+	WorkspaceImage             *string         `json:"workspaceImage"`
+	RuntimeNodeID              *string         `json:"runtimeNodeId"`
+	WorkspaceKind              string          `json:"workspaceKind"`
+	WorkspaceStatus            string          `json:"workspaceStatus"`
+	CurrentWorkspaceInstanceID *string         `json:"currentWorkspaceInstanceId"`
+	WorkspaceGeneration        int64           `json:"workspaceGeneration"`
+	Config                     json.RawMessage `json:"config"`
+	LastError                  *string         `json:"lastError"`
+	CreatedAt                  time.Time       `json:"createdAt"`
+	UpdatedAt                  time.Time       `json:"updatedAt"`
 }
 
 type Agent struct {
