@@ -6,23 +6,25 @@ import (
 	"errors"
 	"time"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"gorm.io/gorm"
 )
 
 type workspaceConnection struct {
-	ID          string  `gorm:"column:id"`
-	TenantID    string  `gorm:"column:tenant_id"`
-	SpaceID     string  `gorm:"column:space_id"`
-	NodeID      string  `gorm:"column:node_id"`
-	StreamOwner string  `gorm:"column:stream_owner"`
-	ComputerID  *string `gorm:"column:computer_id"`
-	RuntimeID   *string `gorm:"column:runtime_id"`
-	Incarnation *string `gorm:"column:incarnation"`
-	Kind        string  `gorm:"column:kind"`
-	StreamID    *string `gorm:"column:stream_id"`
-	CloseMethod *string `gorm:"column:close_method"`
-	State       string  `gorm:"column:state"`
-	CreatedAt   string  `gorm:"column:created_at"`
+	ID                  string  `gorm:"column:id"`
+	TenantID            string  `gorm:"column:tenant_id"`
+	SpaceID             string  `gorm:"column:space_id"`
+	NodeID              string  `gorm:"column:node_id"`
+	StreamOwner         string  `gorm:"column:stream_owner"`
+	ComputerID          *string `gorm:"column:computer_id"`
+	RuntimeID           *string `gorm:"column:runtime_id"`
+	Incarnation         *string `gorm:"column:incarnation"`
+	WorkspaceInstanceID *string `gorm:"column:workspace_instance_id"`
+	Kind                string  `gorm:"column:kind"`
+	StreamID            *string `gorm:"column:stream_id"`
+	CloseMethod         *string `gorm:"column:close_method"`
+	State               string  `gorm:"column:state"`
+	CreatedAt           string  `gorm:"column:created_at"`
 }
 
 func workspaceStreamOwner(ctx context.Context, runner *runnerSession) (string, error) {
@@ -50,6 +52,15 @@ func (h *handler) beginWorkspaceConnection(ctx context.Context, lease *workspace
 		return nil, errors.New("workspace connection binding changed")
 	}
 	row := &workspaceConnection{ID: h.store.id(), TenantID: lease.Space.TenantID, SpaceID: lease.Space.ID, NodeID: target.ticket.Node, StreamOwner: owner, Kind: kind, State: "allocating", CreatedAt: runtimeTimeString(h.store.now())}
+	if !sameWorkspaceInstance(target.space, lease.Space) {
+		return nil, errWorkspaceLeaseLost
+	}
+	if lease.Space.CurrentWorkspaceInstanceID != nil {
+		if target.remote == nil || target.remote.workspace == nil || target.remote.workspace.Target.InstanceID != *lease.Space.CurrentWorkspaceInstanceID || target.remote.workspace.Target.Generation != lease.Space.WorkspaceGeneration {
+			return nil, errors.New("workspace connection instance is missing")
+		}
+		row.WorkspaceInstanceID = lease.Space.CurrentWorkspaceInstanceID
+	}
 	if err := lease.fenced(ctx, func(tx *gorm.DB) error {
 		return tx.Table("workspace_connections").Create(row).Error
 	}); err != nil {
@@ -103,10 +114,20 @@ func (h *handler) activateWorkspaceConnection(ctx context.Context, lease *worksp
 }
 
 func closeWorkspaceStream(ctx context.Context, runner *runnerSession, method, id, owner string) error {
+	return closePinnedWorkspaceStream(ctx, runner, method, id, owner, nil)
+}
+
+// Closing an exact old stream remains allowed after retirement. Sending its
+// original binding lets the node check ownership without resolving Space current.
+func closePinnedWorkspaceStream(ctx context.Context, runner *runnerSession, method, id, owner string, binding *protocol.Binding) error {
 	var result struct {
 		OK bool `json:"ok"`
 	}
-	if err := runner.call(ctx, method, map[string]any{"id": id, "streamOwner": owner}, &result); err != nil {
+	params := map[string]any{"id": id, "streamOwner": owner}
+	if binding != nil {
+		params["workspace"] = *binding
+	}
+	if err := runner.call(ctx, method, params, &result); err != nil {
 		return err
 	}
 	if !result.OK {
@@ -133,12 +154,23 @@ func (h *handler) recoverWorkspaceConnections(ctx context.Context, lease *worksp
 }
 
 func (h *handler) recoverOwnerWorkspaceConnections(ctx context.Context, lease *workspaceLease, computer string) error {
-	return h.recoverOwnerConnections(ctx, lease.Space.TenantID, lease.Space.ID, computer, lease.fenced)
+	var instance *string
+	if computer == "" {
+		instance = lease.Space.CurrentWorkspaceInstanceID
+	}
+	return h.recoverInstanceConnections(ctx, lease.Space.TenantID, lease.Space.ID, computer, instance, lease.fenced)
 }
 
 func (h *handler) recoverOwnerConnections(ctx context.Context, tenant, space, computer string, fenced func(context.Context, func(*gorm.DB) error) error) error {
+	return h.recoverInstanceConnections(ctx, tenant, space, computer, nil, fenced)
+}
+
+func (h *handler) recoverInstanceConnections(ctx context.Context, tenant, space, computer string, instance *string, fenced func(context.Context, func(*gorm.DB) error) error) error {
 	var rows []workspaceConnection
 	q := h.deps.Gorm.WithContext(ctx).Table("workspace_connections").Where("tenant_id=? AND space_id=?", tenant, space)
+	if instance != nil {
+		q = q.Where("workspace_instance_id=?", *instance)
+	}
 	if computer != "" {
 		q = q.Where("computer_id=? AND kind='computer_terminal'", computer)
 	}
@@ -160,13 +192,28 @@ func (h *handler) recoverOwnerConnections(ctx context.Context, tenant, space, co
 		if err != nil {
 			return err
 		}
+		var binding *protocol.Binding
+		if row.WorkspaceInstanceID != nil {
+			original, err := h.workspaceStore().Instance(ctx, row.TenantID, row.SpaceID, *row.WorkspaceInstanceID)
+			if err != nil {
+				return err
+			}
+			disk, err := h.workspaceStore().Disk(ctx, row.TenantID, row.SpaceID, original.DiskID)
+			if err != nil {
+				return err
+			}
+			binding = &protocol.Binding{Target: original.Target, Disk: disk.Wire()}
+			if binding.Validate() != nil || original.NodeID != row.NodeID {
+				return errors.New("workspace stream binding changed")
+			}
+		}
 		cleanup, cancel := context.WithTimeout(ctx, 5*time.Second)
 		owner, err := workspaceStreamOwner(cleanup, runner)
 		if err == nil && owner != row.StreamOwner {
 			err = errors.New("workspace stream executor changed; cleanup remains unconfirmed")
 		}
 		if err == nil {
-			err = closeWorkspaceStream(cleanup, runner, *row.CloseMethod, *row.StreamID, row.StreamOwner)
+			err = closePinnedWorkspaceStream(cleanup, runner, *row.CloseMethod, *row.StreamID, row.StreamOwner, binding)
 		}
 		cancel()
 		if err != nil {

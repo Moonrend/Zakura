@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -27,21 +28,33 @@ var (
 	createLocks [64]sync.Mutex
 )
 
-// CreateOperation is supported only for canonical, named workspace containers.
+// CreateOperation identifies a named workspace container or a v2 sidecar.
 // IDs are opaque identities, never filesystem paths.
 type CreateOperation struct {
-	ID         string `json:"id"`
-	TenantID   string `json:"tenantId"`
-	SpaceID    string `json:"spaceId"`
-	ComputerID string `json:"computerId"`
+	ID              string `json:"id"`
+	TenantID        string `json:"tenantId"`
+	SpaceID         string `json:"spaceId"`
+	ComputerID      string `json:"computerId"`
+	InstanceID      string `json:"instanceId,omitempty"`
+	Generation      int64  `json:"generation,omitempty"`
+	DiskID          string `json:"diskId,omitempty"`
+	LocatorVersion  int64  `json:"locatorVersion,omitempty"`
+	NodeIncarnation string `json:"nodeIncarnation,omitempty"`
+	Purpose         string `json:"purpose,omitempty"`
 }
 
 type CreateStatusRequest struct {
-	OperationID string `json:"operationId"`
-	TenantID    string `json:"tenantId"`
-	SpaceID     string `json:"spaceId"`
-	ComputerID  string `json:"computerId"`
-	Name        string `json:"name,omitempty"`
+	OperationID     string `json:"operationId"`
+	TenantID        string `json:"tenantId"`
+	SpaceID         string `json:"spaceId"`
+	ComputerID      string `json:"computerId"`
+	Name            string `json:"name,omitempty"`
+	InstanceID      string `json:"instanceId,omitempty"`
+	Generation      int64  `json:"generation,omitempty"`
+	DiskID          string `json:"diskId,omitempty"`
+	LocatorVersion  int64  `json:"locatorVersion,omitempty"`
+	NodeIncarnation string `json:"nodeIncarnation,omitempty"`
+	Purpose         string `json:"purpose,omitempty"`
 }
 
 type CreateStatus struct {
@@ -76,21 +89,63 @@ func CreateWithReceipt(ctx context.Context, storageRoot string, spec RunSpec, op
 	return (createReceipts{storageRoot, Create, Inspect}).run(ctx, spec, op)
 }
 
+// ValidateCreate checks the complete request before an executor records a
+// durable writer obligation. It performs no Docker or filesystem operations.
+func ValidateCreate(spec RunSpec, op CreateOperation) error {
+	if _, _, err := prepareCreate(spec, op); err != nil {
+		return err
+	}
+	for _, volume := range spec.Volumes {
+		if err := volume.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func CreateReceiptStatus(ctx context.Context, storageRoot string, request CreateStatusRequest) (CreateStatus, error) {
 	return (createReceipts{storageRoot, Create, Inspect}).status(ctx, request)
 }
 
+func (op CreateOperation) version() int {
+	if op.InstanceID != "" {
+		return 2
+	}
+	return 1
+}
+
 func (op CreateOperation) valid() bool {
-	return createIdentity.MatchString(op.ID) && createIdentity.MatchString(op.TenantID) &&
-		createIdentity.MatchString(op.SpaceID) && createIdentity.MatchString(op.ComputerID)
+	if !createIdentity.MatchString(op.ID) || !createIdentity.MatchString(op.TenantID) || !createIdentity.MatchString(op.SpaceID) || !createIdentity.MatchString(op.ComputerID) {
+		return false
+	}
+	if op.InstanceID == "" {
+		return op.Generation == 0 && op.DiskID == "" && op.LocatorVersion == 0 && op.NodeIncarnation == "" && op.Purpose == ""
+	}
+	switch op.Purpose {
+	case "", "acp-adapter", "acp-login", "component":
+	default:
+		return false
+	}
+	return createIdentity.MatchString(op.InstanceID) && createIdentity.MatchString(op.DiskID) && createIdentity.MatchString(op.NodeIncarnation) && op.Generation > 0 && op.LocatorVersion > 0
 }
 
 func (op CreateOperation) labels(digest string) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"zakura.tenant": op.TenantID, "zakura.space": op.SpaceID,
 		"zakura.computer": op.ComputerID, "zakura.purpose": "workspace",
 		createOperationLabel: op.ID, createDigestLabel: digest,
 	}
+	if op.version() == 2 {
+		if op.Purpose != "" {
+			labels["zakura.purpose"] = op.Purpose
+		}
+		labels["zakura.workspace-instance"] = op.InstanceID
+		labels["zakura.workspace-generation"] = strconv.FormatInt(op.Generation, 10)
+		labels["zakura.disk"] = op.DiskID
+		labels["zakura.disk-version"] = strconv.FormatInt(op.LocatorVersion, 10)
+		labels["zakura.node-incarnation"] = op.NodeIncarnation
+	}
+	return labels
 }
 
 func prepareCreate(spec RunSpec, op CreateOperation) (createIntent, RunSpec, error) {
@@ -129,7 +184,7 @@ func prepareCreate(spec RunSpec, op CreateOperation) (createIntent, RunSpec, err
 		return createIntent{}, RunSpec{}, err
 	}
 	digest := sha256.Sum256(raw)
-	intent := createIntent{1, op, hex.EncodeToString(digest[:]), spec.Name}
+	intent := createIntent{op.version(), op, hex.EncodeToString(digest[:]), spec.Name}
 	labels := make(map[string]string, len(spec.Labels)+2)
 	for key, value := range spec.Labels {
 		labels[key] = value
@@ -194,7 +249,8 @@ func (s createReceipts) run(ctx context.Context, spec RunSpec, op CreateOperatio
 }
 
 func (s createReceipts) status(ctx context.Context, request CreateStatusRequest) (CreateStatus, error) {
-	op := CreateOperation{request.OperationID, request.TenantID, request.SpaceID, request.ComputerID}
+	op := CreateOperation{ID: request.OperationID, TenantID: request.TenantID, SpaceID: request.SpaceID, ComputerID: request.ComputerID,
+		InstanceID: request.InstanceID, Generation: request.Generation, DiskID: request.DiskID, LocatorVersion: request.LocatorVersion, NodeIncarnation: request.NodeIncarnation, Purpose: request.Purpose}
 	unknown := CreateStatus{State: "unknown", Name: request.Name}
 	if !op.valid() || (request.Name != "" && !createName.MatchString(request.Name)) {
 		return unknown, fmt.Errorf("docker.create.status requires valid operation identities and an exact name")

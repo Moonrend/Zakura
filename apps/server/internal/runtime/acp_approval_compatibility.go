@@ -137,6 +137,7 @@ func (rt *acpLiveRuntime) stopForApprovalPolicy(reason error) error {
 	h := rt.manager.h
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(h.deps.RunContext()), 10*time.Second)
 	defer cancel()
+	ctx = rt.workspaceContext(ctx)
 	lease, err := h.acquireSpaceInfrastructure(ctx, rt.tenantID, rt.spaceID)
 	if err != nil {
 		// Another infrastructure owner already fences new processes. Still revoke

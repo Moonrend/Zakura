@@ -49,7 +49,12 @@ func resolveACPHost(ctx context.Context, h *handler, tenantID, agentID, sid stri
 	if err != nil {
 		return nil, err
 	}
-	exec, err := h.resolveServerComputer(ctx, tenantID, a.SpaceID)
+	computer, err := h.serverComputerRecord(ctx, tenantID, a.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	run, _ := ctx.Value(computerRunKey{}).(string)
+	exec, err := h.resolveWorkspaceExecution(ctx, computer, run)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +67,9 @@ func resolveACPHost(ctx context.Context, h *handler, tenantID, agentID, sid stri
 	if sid != "" {
 		sess, err := h.store.GetSession(ctx, tenantID, agentID, sid)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkACPSessionWorkspace(sess.Origin, exec); err != nil {
 			return nil, err
 		}
 		if pinned := pinnedACPHost(sess); pinned != "" && pinned != exec.computer.ID {

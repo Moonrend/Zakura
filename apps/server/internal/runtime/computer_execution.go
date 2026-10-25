@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"github.com/Moonrend/Zakura/apps/server/internal/computers"
 )
 
@@ -25,6 +26,7 @@ type resolvedExecution struct {
 	nodeID      string
 	containerID string
 	hostRoot    string
+	workspace   *protocol.Binding
 	computer    computers.Computer
 	runtime     computers.Runtime
 }
@@ -44,14 +46,20 @@ func serverComputerExecution(c computers.Computer) *resolvedExecution {
 // resolveServerComputer returns the execution target of a Space's server
 // computer, healing a Space whose server computer is missing.
 func (h *handler) resolveServerComputer(ctx context.Context, tenant, space string) (*resolvedExecution, error) {
-	c, err := h.computerStore().ServerComputer(ctx, tenant, space)
-	if errors.Is(err, computers.ErrNoServerComputer) {
-		c, err = h.computerStore().EnsureServerComputer(ctx, tenant, space, h.store.now())
-	}
+	c, err := h.serverComputerRecord(ctx, tenant, space)
 	if err != nil {
 		return nil, err
 	}
-	return serverComputerExecution(c), nil
+	return h.resolveWorkspaceExecution(ctx, c, "")
+}
+
+// Configuration and status remain available when there is no current instance.
+func (h *handler) serverComputerRecord(ctx context.Context, tenant, space string) (computers.Computer, error) {
+	c, err := h.computerStore().ServerComputer(ctx, tenant, space)
+	if errors.Is(err, computers.ErrNoServerComputer) {
+		return h.computerStore().EnsureServerComputer(ctx, tenant, space, h.store.now())
+	}
+	return c, err
 }
 
 // serverComputerHostRoot returns the absolute directory of the server
@@ -60,6 +68,9 @@ func (h *handler) resolveServerComputer(ctx context.Context, tenant, space strin
 func (h *handler) serverComputerHostRoot(ctx context.Context, exec *resolvedExecution) (string, error) {
 	if exec == nil || !exec.computer.IsServer() {
 		return "", errors.New("not a space server computer")
+	}
+	if exec.workspace != nil {
+		return "", errors.New("managed workspace disks require an instance mount descriptor")
 	}
 	if exec.nodeID == "" {
 		return "", errors.New("no runtime node bound to this space")
@@ -128,13 +139,7 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 	}
 	c, err := h.computerStore().ResolveRunComputer(ctx, tenant, a.SpaceID, run, explicit)
 	if errors.Is(err, computers.ErrNoServerComputer) {
-		var server *resolvedExecution
-		if server, err = h.resolveServerComputer(ctx, tenant, a.SpaceID); err == nil {
-			if err := h.authorizeContextLocalNode(ctx, tenant, server.nodeID); err != nil {
-				return nil, err
-			}
-			return server, nil
-		}
+		c, err = h.serverComputerRecord(ctx, tenant, a.SpaceID)
 	}
 	if err != nil {
 		if explicit != "" && errors.Is(err, sql.ErrNoRows) {
@@ -146,7 +151,7 @@ func (h *handler) resolveExecutionGuard(ctx context.Context, tenant, agent, sess
 		return nil, err
 	}
 	if c.IsServer() {
-		return serverComputerExecution(c), nil
+		return h.resolveWorkspaceExecution(ctx, c, run)
 	}
 	// Computer-scoped execution for adapters that are wired (server containers).
 	scope, err := c.Scope(session)

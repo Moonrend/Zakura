@@ -144,6 +144,9 @@ func (h *handler) resolveACPTerminalAuth(ctx context.Context, tenant, agent, sid
 	if rt == nil || rt.agentID != agent {
 		return nil, errors.New("ACP runtime is not live")
 	}
+	if err := rt.validateWorkspace(ctx); err != nil {
+		return nil, err
+	}
 	descriptor, err := rt.terminalAuthDescriptor(method)
 	if err != nil {
 		return nil, err

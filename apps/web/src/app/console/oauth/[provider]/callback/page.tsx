@@ -55,7 +55,7 @@ function CallbackInner() {
         setSession(res.session);
         const next =
           res.next ??
-          (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
+          (res.tenant?.onboardingCompleted === false ? "/onboarding" : "/chat");
         router.replace(next);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));

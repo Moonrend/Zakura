@@ -72,6 +72,7 @@ func Collect(kind, storageRoot string) InfoResult {
 			"pty":                          true,
 			"privateAtomicFS":              true,
 			"boundedExecOutput":            true,
+			"boundedDockerExecInputOutput": true,
 			"filesystemNoFollowStat":       true,
 			"filesystemWorkspaceMigration": true,
 			"dockerCreateReceipts":         true,

@@ -18,19 +18,20 @@ import (
 )
 
 type workspaceConnectionTicket struct {
-	TenantID      string          `json:"tenantId"`
-	UserID        string          `json:"userId,omitempty"`
-	AgentID       string          `json:"agentId"`
-	Kind          string          `json:"kind"`
-	Adapter       string          `json:"adapterId,omitempty"`
-	Expires       int64           `json:"exp"`
-	SpaceID       string          `json:"spaceId,omitempty"`
-	ComputerID    string          `json:"computerId,omitempty"`
-	SessionID     string          `json:"sessionId,omitempty"`
-	RuntimeID     string          `json:"runtimeId,omitempty"`
-	Incarnation   string          `json:"incarnation,omitempty"`
-	NodeID        string          `json:"nodeId,omitempty"`
-	Authorization *acpLoginTicket `json:"authorization,omitempty"`
+	TenantID            string          `json:"tenantId"`
+	UserID              string          `json:"userId,omitempty"`
+	AgentID             string          `json:"agentId"`
+	Kind                string          `json:"kind"`
+	Adapter             string          `json:"adapterId,omitempty"`
+	Expires             int64           `json:"exp"`
+	SpaceID             string          `json:"spaceId,omitempty"`
+	ComputerID          string          `json:"computerId,omitempty"`
+	SessionID           string          `json:"sessionId,omitempty"`
+	RuntimeID           string          `json:"runtimeId,omitempty"`
+	Incarnation         string          `json:"incarnation,omitempty"`
+	NodeID              string          `json:"nodeId,omitempty"`
+	WorkspaceInstanceID string          `json:"workspaceInstanceId,omitempty"`
+	Authorization       *acpLoginTicket `json:"authorization,omitempty"`
 }
 
 type workspaceBridge struct {
@@ -42,6 +43,7 @@ type workspaceBridge struct {
 	remoteClosed bool
 	journalID    string
 	streamOwner  string
+	remote       *remoteWorkspace
 	ready        func(string, string) error
 }
 
@@ -71,11 +73,20 @@ func (b *workspaceBridge) write(opcode byte, payload []byte) error {
 	return nil
 }
 
+func (b *workspaceBridge) call(ctx context.Context, session *runnerSession, method string, params map[string]any, out any) error {
+	if b.remote != nil {
+		return b.remote.call(ctx, method, params, out)
+	}
+	return session.call(ctx, method, params, out)
+}
+
 func (b *workspaceBridge) closeRemote(ctx context.Context, session *runnerSession, method, id string) {
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	var err error
-	if b.streamOwner != "" {
+	if b.remote != nil {
+		err = closePinnedWorkspaceStream(cleanup, session, method, id, b.streamOwner, b.remote.workspace)
+	} else if b.streamOwner != "" {
 		err = closeWorkspaceStream(cleanup, session, method, id, b.streamOwner)
 	} else {
 		err = session.call(cleanup, method, map[string]any{"id": id}, nil)
@@ -93,10 +104,37 @@ func (h *handler) closeSpaceWorkspaceBridges(ctx context.Context, tenant, space 
 }
 
 func (h *handler) closeOwnerWorkspaceBridges(ctx context.Context, tenant, space, computer string) error {
+	return h.closeMatchingWorkspaceBridges(ctx, tenant, space, computer, "")
+}
+
+func (h *handler) closeInstanceWorkspaceBridges(ctx context.Context, tenant, space, instance string) error {
+	if instance == "" {
+		return errors.New("workspace instance required")
+	}
+	return h.closeMatchingWorkspaceBridges(ctx, tenant, space, "", instance)
+}
+
+// Retirement closes local access immediately without waiting for an offline
+// node. The durable instance tombstone remains responsible for remote writers.
+func (h *handler) disconnectInstanceWorkspaceBridges(tenant, space, instance string) {
 	liveWorkspaceBridges.Lock()
 	var bridges []*workspaceBridge
 	for bridge, ticket := range liveWorkspaceBridges.items {
-		if ticket.TenantID == tenant && ticket.SpaceID == space && (computer == "" || ticket.ComputerID == computer) {
+		if ticket.TenantID == tenant && ticket.SpaceID == space && ticket.WorkspaceInstanceID == instance {
+			bridges = append(bridges, bridge)
+		}
+	}
+	liveWorkspaceBridges.Unlock()
+	for _, bridge := range bridges {
+		_ = bridge.conn.Close()
+	}
+}
+
+func (h *handler) closeMatchingWorkspaceBridges(ctx context.Context, tenant, space, computer, instance string) error {
+	liveWorkspaceBridges.Lock()
+	var bridges []*workspaceBridge
+	for bridge, ticket := range liveWorkspaceBridges.items {
+		if ticket.TenantID == tenant && ticket.SpaceID == space && (computer == "" || ticket.ComputerID == computer) && (instance == "" || ticket.WorkspaceInstanceID == instance) {
 			bridges = append(bridges, bridge)
 		}
 	}
@@ -157,7 +195,7 @@ func (h *handler) bridgeDesktopContainer(ctx context.Context, bridge *workspaceB
 	var started struct {
 		ID string `json:"id"`
 	}
-	err := session.call(ctx, "docker.exec.start", map[string]any{"id": dockerID, "command": []string{"socat", "STDIO", "TCP:127.0.0.1:5900,connect-timeout=5"}, "workingDir": "/workspace"}, &started)
+	err := bridge.call(ctx, session, "docker.exec.start", map[string]any{"id": dockerID, "command": []string{"socat", "STDIO", "TCP:127.0.0.1:5900,connect-timeout=5"}, "workingDir": "/workspace"}, &started)
 	if err != nil || started.ID == "" {
 		bridge.cleanupErr = errors.New("desktop stream allocation could not be confirmed")
 		_ = bridge.write(0x8, []byte{0x03, 0xf3})
@@ -197,7 +235,7 @@ func (h *handler) bridgeDesktopContainer(ctx context.Context, bridge *workspaceB
 		}
 		if opcode == 0x1 || opcode == 0x2 {
 			encoded := base64.StdEncoding.EncodeToString(payload)
-			if session.call(ctx, "docker.exec.write", map[string]any{"id": started.ID, "base64": encoded}, nil) != nil {
+			if bridge.call(ctx, session, "docker.exec.write", map[string]any{"id": started.ID, "base64": encoded}, nil) != nil {
 				return
 			}
 		}
@@ -241,7 +279,7 @@ func (h *handler) bridgeTerminalContainer(ctx context.Context, bridge *workspace
 	var started struct {
 		ID string `json:"id"`
 	}
-	if err := session.call(ctx, method, params, &started); err != nil || started.ID == "" {
+	if err := bridge.call(ctx, session, method, params, &started); err != nil || started.ID == "" {
 		bridge.cleanupErr = errors.New("terminal stream allocation could not be confirmed")
 		_ = bridge.write(0x1, []byte(`{"type":"error","message":"terminal unavailable"}`))
 		return
@@ -295,11 +333,11 @@ func (h *handler) bridgeTerminalContainer(ctx context.Context, bridge *workspace
 			if method == "docker.exec.start" {
 				resizeMethod = "docker.exec.resize"
 			}
-			if err := session.call(ctx, resizeMethod, map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil); err != nil {
+			if err := bridge.call(ctx, session, resizeMethod, map[string]any{"id": started.ID, "cols": message.Cols, "rows": message.Rows}, nil); err != nil {
 				return
 			}
 		} else if message.Type == "input" {
-			if err := session.call(ctx, writeMethod, map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil); err != nil {
+			if err := bridge.call(ctx, session, writeMethod, map[string]any{"id": started.ID, "base64": base64.StdEncoding.EncodeToString([]byte(message.Data))}, nil); err != nil {
 				return
 			}
 		}

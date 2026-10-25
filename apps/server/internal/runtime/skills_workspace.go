@@ -26,16 +26,12 @@ func (h *handler) skillWorkspace(ctx context.Context, tenant, space string) (*sk
 	if cached, ok := ctx.Value(skillWorkspaceKey{}).(*skillWorkspace); ok {
 		return cached, nil
 	}
-	s, err := h.store.GetSpace(ctx, tenant, space)
+	remote, selected, err := h.remoteSpaceWorkspace(ctx, tenant, space)
 	if err != nil {
 		return nil, err
 	}
-	if s.RuntimeNodeID != nil && *s.RuntimeNodeID != "" {
-		runner, err := h.hub.get(*s.RuntimeNodeID)
-		if err != nil {
-			return nil, err
-		}
-		return &skillWorkspace{remote: &remoteWorkspace{runner: runner, spaceID: space}}, nil
+	if selected {
+		return &skillWorkspace{remote: remote}, nil
 	}
 	base := os.Getenv("ZAKURA_WORKSPACE_ROOT")
 	if base == "" {
@@ -59,7 +55,7 @@ func (f *skillWorkspace) mkdir(ctx context.Context, p string) error {
 		return f.local.MkdirAll(skillRelative(p), 0750)
 	}
 	params, _ := f.remote.pathParams(p)
-	return f.remote.runner.call(ctx, "host.fs.mkdir", params, nil)
+	return f.remote.call(ctx, "host.fs.mkdir", params, nil)
 }
 func (f *skillWorkspace) write(ctx context.Context, p string, b []byte) error {
 	if err := f.mkdir(ctx, path.Dir(p)); err != nil {
@@ -76,7 +72,7 @@ func (f *skillWorkspace) rename(ctx context.Context, from, to string) error {
 		return f.local.Rename(skillRelative(from), skillRelative(to))
 	}
 	params := map[string]any{"spaceId": f.remote.spaceID, "oldPath": from, "newPath": to}
-	return f.remote.runner.call(ctx, "host.fs.rename", params, nil)
+	return f.remote.call(ctx, "host.fs.rename", params, nil)
 }
 func (f *skillWorkspace) remove(ctx context.Context, p string) error {
 	if f.local != nil {
@@ -84,7 +80,7 @@ func (f *skillWorkspace) remove(ctx context.Context, p string) error {
 	}
 	params, _ := f.remote.pathParams(p)
 	params["recursive"] = true
-	return f.remote.runner.call(ctx, "host.fs.remove", params, nil)
+	return f.remote.call(ctx, "host.fs.remove", params, nil)
 }
 func (f *skillWorkspace) exists(ctx context.Context, p string) (bool, error) {
 	if f.local != nil {

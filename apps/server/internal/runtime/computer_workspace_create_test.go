@@ -54,6 +54,8 @@ func TestWorkspaceCreateLostReplyUsesOriginalReceipt(t *testing.T) {
 						return []any{}, nil
 					}
 					return []computerContainer{instance}, nil
+				case "docker.images":
+					return []computerImageStatus{}, nil
 				case "docker.pull":
 					return map[string]any{}, nil
 				case "docker.create":

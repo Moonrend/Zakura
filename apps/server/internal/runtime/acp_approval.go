@@ -43,7 +43,7 @@ func (rt *acpLiveRuntime) currentApprovalContext(ctx context.Context) (context.C
 	if err != nil || a.SpaceID != rt.spaceID {
 		return ctx, ErrNotFound
 	}
-	space, err := h.store.GetSpace(ctx, rt.tenantID, rt.spaceID)
+	space, err := rt.workspaceSpace(ctx)
 	if err != nil {
 		return ctx, err
 	}

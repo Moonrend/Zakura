@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
 	"github.com/go-chi/chi/v5"
 )
@@ -41,11 +42,12 @@ type acpLoginTicket struct {
 }
 
 type acpLoginTarget struct {
-	ticket acpLoginTicket
-	setup  acpSetup
-	runner *runnerSession
-	exec   *resolvedExecution
-	image  string
+	ticket      acpLoginTicket
+	setup       acpSetup
+	runner      *runnerSession
+	exec        *resolvedExecution
+	image       string
+	streamOwner string
 }
 
 func acpLoginDigest(raw []byte) string {
@@ -78,9 +80,10 @@ func (h *handler) resolveACPLogin(ctx context.Context, tenant, space, profile st
 		return nil, err
 	}
 	raw, err := json.Marshal(struct {
-		Setup acpSetup
-		Image string
-	}{setup, image})
+		Setup     acpSetup
+		Image     string
+		Workspace *protocol.Binding `json:"workspace,omitempty"`
+	}{setup, image, exec.workspace})
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +155,7 @@ func (h *handler) issueACPLoginTicket(ctx context.Context, target *acpLoginTarge
 		return "", err
 	}
 	defer lease.release()
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	current, err := h.resolveACPLogin(ctx, ticket.Tenant, ticket.Space, ticket.Profile)
 	if err != nil || current.ticket != target.ticket {
 		return "", errors.New("ACP login target changed")
@@ -214,6 +218,7 @@ func (h *handler) consumeACPLoginTicket(ctx context.Context, token, space, profi
 		return nil, invalid
 	}
 	defer lease.release()
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	target, err := h.resolveACPLogin(ctx, ticket.Tenant, space, profile)
 	if err != nil || target.ticket.Node != ticket.Node || target.ticket.Computer != ticket.Computer || target.ticket.ConfigHash != ticket.ConfigHash {
 		return nil, invalid

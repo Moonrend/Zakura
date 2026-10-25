@@ -95,7 +95,11 @@ func (h *handler) registerRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := nodeRow.ID
-	runnerTokenCache.Store(nodeID, b.Token)
+	installationIncarnation, err := h.cacheRuntimeNodeToken(r.Context(), nodeID, b.Token)
+	if err != nil || installationIncarnation != "" {
+		httpx.Error(w, http.StatusForbidden, "Compose nodes must connect through the runtime hub")
+		return
+	}
 	now := runtimeTimeString(h.store.now())
 	e = h.deps.Gorm.WithContext(r.Context()).Model(&models.RuntimeNode{}).Where("id = ?", nodeID).Updates(map[string]any{"endpoint": b.Endpoint, "capabilities_json": validJSON(b.Capabilities, "{}"), "host_info_json": validJSON(b.HostInfo, "{}"), "agent_version": nullString(b.AgentVersion), "last_seen_at": now, "updated_at": now}).Error
 	if e != nil {
@@ -300,6 +304,29 @@ func (h *handler) projectRuntimeNode(node map[string]any) {
 	}
 	if err == nil {
 		node["lastSeenAt"] = runtimeTimeString(time.UnixMilli(session.lastSeen.Load()).UTC())
+		if session.local != nil {
+			// Embedded rows can predate the current server image. Socket access and
+			// the Docker CLI must be probed here, not inferred from old metadata.
+			ctx, cancel := context.WithTimeout(h.deps.RunContext(), 5*time.Second)
+			defer cancel()
+			var info struct {
+				Capabilities map[string]any `json:"capabilities"`
+				HostInfo     map[string]any `json:"hostInfo"`
+				Docker       struct {
+					OK    bool   `json:"ok"`
+					Error string `json:"error"`
+				} `json:"docker"`
+			}
+			if err := session.call(ctx, "sys.info", map[string]any{}, &info); err != nil {
+				node["capabilities"] = map[string]any{"docker": false}
+				node["dockerError"] = err.Error()
+			} else {
+				node["capabilities"], node["hostInfo"] = info.Capabilities, info.HostInfo
+				if !info.Docker.OK {
+					node["dockerError"] = info.Docker.Error
+				}
+			}
+		}
 	}
 }
 

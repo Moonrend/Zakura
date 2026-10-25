@@ -1301,10 +1301,9 @@ export function ChatApp() {
           setSessions(list);
         } else if (pending && pending.agentId === agentId) {
           await loadSession(agentId, pending.sessionId);
-        } else if (list.length > 0) {
-          await loadSession(agentId, list[0]!.id);
         } else {
           setSessionId(null);
+          setAcpRuntime(null);
           resetConversationEvents();
           seqRef.current = 0;
         }

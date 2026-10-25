@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
+	"github.com/Moonrend/Zakura/apps/server/internal/workspaces"
 	"gorm.io/gorm"
 )
 
@@ -29,7 +31,7 @@ func (h *handler) recoverSpaceWorkspaces(ctx context.Context, limit int) error {
 	}
 	for _, space := range stranded {
 		raw, _ := json.Marshal(workspaceIntent{PreviousStatus: "stopped", Uncertain: true})
-		if err := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO computer_workspace_leases(space_id,tenant_id,token,operation,expires_at,intent_json,updated_at) SELECT id,tenant_id,?,?,0,?,? FROM spaces WHERE id=? AND tenant_id=? AND workspace_status=? ON CONFLICT(space_id) DO NOTHING`, h.store.id(), space.Status, string(raw), h.store.now().UnixMilli(), space.ID, space.TenantID, space.Status).Error; err != nil {
+		if err := h.deps.Gorm.WithContext(ctx).Exec(`INSERT INTO computer_workspace_leases(space_id,tenant_id,token,operation,expires_at,intent_json,updated_at,workspace_instance_id,workspace_generation) SELECT id,tenant_id,?,?,0,?,?,current_workspace_instance_id,workspace_generation FROM spaces WHERE id=? AND tenant_id=? AND workspace_status=? ON CONFLICT(space_id) DO NOTHING`, h.store.id(), space.Status, string(raw), h.store.now().UnixMilli(), space.ID, space.TenantID, space.Status).Error; err != nil {
 			return err
 		}
 	}
@@ -79,6 +81,28 @@ func (h *handler) recoverSpaceWorkspace(ctx context.Context, l *workspaceLease) 
 	if l.Intent.SharedProfile != "" {
 		return l.uncertain(errors.New("profile authentication outcome requires explicit profile recovery"))
 	}
+	if l.Space.CurrentWorkspaceInstanceID != nil {
+		if l.Operation == "migrating" || l.Operation == "deleting" {
+			return l.uncertain(errors.New("managed workspace operation requires instance recovery"))
+		}
+		if l.Operation == "configuring" && l.Intent.DesiredConfig != nil && l.Intent.DesiredConfig.DiskID != "" {
+			remote, err := l.remoteWorkspace(ctx)
+			if err != nil {
+				return l.uncertain(err)
+			}
+			var ack struct {
+				Target protocol.Target `json:"target"`
+				OK     bool            `json:"ok"`
+			}
+			if err = remote.runner.call(ctx, "workspace.attach", *remote.workspace, &ack); err != nil {
+				return l.uncertain(err)
+			}
+			if !ack.OK || ack.Target != remote.workspace.Target {
+				return l.uncertain(workspaces.ErrUnverified)
+			}
+			return l.finish(ctx, "stopped", map[string]any{"last_error": nil})
+		}
+	}
 	if l.Operation == "migrating" {
 		return h.recoverWorkspaceMigration(ctx, l)
 	}
@@ -126,7 +150,17 @@ func (h *handler) recoverSpaceWorkspace(ctx context.Context, l *workspaceLease) 
 			if err != nil {
 				return l.uncertain(err)
 			}
-			if err = runner.call(ctx, "docker.stop", map[string]any{"id": obs.Container.DockerID, "remove": false}, nil); err != nil {
+			params := map[string]any{"id": obs.Container.DockerID, "remove": false}
+			if l.Space.CurrentWorkspaceInstanceID != nil {
+				remote, e := l.remoteWorkspace(ctx)
+				if e != nil {
+					return l.uncertain(e)
+				}
+				err = remote.call(ctx, "docker.stop", params, nil)
+			} else {
+				err = runner.call(ctx, "docker.stop", params, nil)
+			}
+			if err != nil {
 				return l.uncertain(err)
 			}
 			obs, err = h.observeSpaceWorkspace(ctx, l.Space)

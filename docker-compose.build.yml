@@ -8,6 +8,12 @@ services:
       dockerfile: docker/server/Dockerfile
     image: ${ZAKURA_SERVER_IMAGE:-sunwuyuan/zakura-server:latest}
 
+  node:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    image: ${ZAKURA_NODE_IMAGE:-sunwuyuan/zakura-agent:latest}
+
   web:
     build:
       context: .

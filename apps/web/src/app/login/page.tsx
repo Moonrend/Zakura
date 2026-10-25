@@ -142,7 +142,7 @@ export default function LoginPage() {
       return;
     }
     const current = await api<{ onboardingCompleted?: boolean }>("/api/tenant/current");
-    router.push(current.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
+    router.push(current.onboardingCompleted === false ? "/onboarding" : "/chat");
   }
 
   async function startSso(hint: SsoHint) {
@@ -299,7 +299,7 @@ export default function LoginPage() {
         { method: "POST", json: { email: addr, assertion } },
       );
       setSession(res.session);
-      router.push(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces");
+      router.push(res.tenant?.onboardingCompleted === false ? "/onboarding" : "/chat");
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
       if (name !== "NotAllowedError") {

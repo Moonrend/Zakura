@@ -101,7 +101,7 @@ export default function TenantOnboardingPage() {
       ]);
 
       if (boot.completed) {
-        router.replace("/dashboard/spaces");
+        router.replace("/chat");
         return;
       }
 
@@ -231,7 +231,7 @@ export default function TenantOnboardingPage() {
                     moveTo(hasChatModel ? "name" : "provider");
                   }}
                   onSkip={() => {
-                    void finishOnboarding({}, "/dashboard/spaces");
+                    void finishOnboarding({}, "/chat");
                   }}
                 />
               ) : step === "mcp" ? (

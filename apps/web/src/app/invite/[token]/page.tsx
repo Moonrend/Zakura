@@ -59,7 +59,7 @@ export default function InviteAcceptPage() {
       setSession(res.session);
       toast.success("已加入团队");
       router.push(
-        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/dashboard/spaces",
+        res.tenant?.onboardingCompleted === false ? "/onboarding" : "/chat",
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));

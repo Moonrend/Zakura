@@ -45,6 +45,8 @@ func TestSpaceServerComputerLifecycleWithoutAgent(t *testing.T) {
 				return []computerContainer{}, nil
 			}
 			return []computerContainer{instance}, nil
+		case "docker.images":
+			return []computerImageStatus{}, nil
 		case "docker.pull":
 			pulls++
 			return map[string]any{}, nil

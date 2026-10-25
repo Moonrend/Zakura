@@ -63,6 +63,8 @@ type acpLiveRuntime struct {
 	profileID, acpSessionID  string
 	adapterImage             string
 	runner                   *runnerSession
+	remote                   *remoteWorkspace
+	streamOwner              string
 	processID                string
 	containerID              string
 	computerID               string
@@ -332,6 +334,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		return nil, err
 	}
 	defer lease.release()
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	exec, acpErr := resolveACPHost(ctx, m.h, tenantID, agentID, sid)
 	if acpErr != nil {
 		return nil, acpErr
@@ -357,6 +360,17 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 	runner, err := m.h.hub.get(exec.nodeID)
 	if err != nil {
 		return nil, err
+	}
+	remote := m.h.executionRemote(runner, exec)
+	streamOwner := ""
+	if exec.workspace != nil {
+		streamOwner, err = workspaceStreamOwner(ctx, runner)
+		if err != nil {
+			return nil, err
+		}
+		if err := m.h.pinACPSessionWorkspace(ctx, lease, agentID, sid, exec); err != nil {
+			return nil, err
+		}
 	}
 	authToken := m.h.store.id()
 	if err = m.h.acquireACPAuthLock(ctx, tenantID, exec.spaceID, profileID, "protocol", authToken, workspaceLeaseDuration, exec); err != nil {
@@ -414,10 +428,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		startMethod, writeMethod, closeMethod = "docker.attach", "docker.exec.write", "docker.exec.close"
 		params = map[string]any{"id": containerID}
 	} else {
-		space, spaceErr := m.h.store.GetSpace(ctx, tenantID, exec.spaceID)
-		if spaceErr != nil {
-			return nil, spaceErr
-		}
+		space := lease.Space
 		params = map[string]any{"spaceId": exec.spaceID, "command": argv, "workingDir": workingDir, "env": env, "cols": 120, "rows": 40}
 		if space.WorkspaceKind != "host" {
 			observation, observeErr := m.h.observeSpaceWorkspace(ctx, space)
@@ -440,7 +451,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 			if started.ID == "" {
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 				defer cancel()
-				if err := runner.call(cleanupCtx, "docker.stop", map[string]any{"id": containerID, "remove": true}, nil); err == nil {
+				if err := cleanupWorkspaceContainer(cleanupCtx, runner, remote, containerID); err == nil {
 					remoteEffect = false
 				}
 			}
@@ -450,7 +461,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		return nil, err
 	}
 	remoteEffect = true
-	if err := runner.call(ctx, startMethod, params, &started); err != nil {
+	if err := remote.call(ctx, startMethod, params, &started); err != nil {
 		started.ID = ""
 		return nil, err
 	}
@@ -462,6 +473,7 @@ func (m *acpRuntimeManager) start(ctx context.Context, tenantID, agentID, sid, p
 		userID = *sess.CreatedByUserID
 	}
 	rt := &acpLiveRuntime{manager: m, tenantID: tenantID, agentID: agentID, sid: sid, profileID: profileID, runner: runner, processID: started.ID, containerID: containerID, computerID: resolvedHost, writeMethod: writeMethod, closeMethod: closeMethod, pending: map[string]chan acpRPCReply{}, inbound: map[string]acpInbound{}, done: make(chan struct{}), state: map[string]any{"runtimeId": started.ID, "sessionId": sid, "profileId": profileID, "state": "starting"}, userID: userID, toolStarted: map[string]time.Time{}, toolRecorded: map[string]bool{}}
+	rt.remote, rt.streamOwner = remote, streamOwner
 	rt.spaceID, rt.workingDir, rt.previousSessionID = exec.spaceID, workingDir, previousACPSessionID
 	rt.adapterImage, _ = profile["image"].(string)
 	if actor, exists := httpx.PrincipalFrom(ctx); exists {
@@ -898,7 +910,7 @@ func (rt *acpLiveRuntime) writeContext(ctx context.Context, message any) error {
 	}
 	raw = append(raw, '\n')
 	var ignored map[string]any
-	return rt.runner.call(ctx, rt.writeMethod, map[string]any{"id": rt.processID, "base64": base64.StdEncoding.EncodeToString(raw)}, &ignored)
+	return rt.workspaceRemote().call(ctx, rt.writeMethod, map[string]any{"id": rt.processID, "base64": base64.StdEncoding.EncodeToString(raw)}, &ignored)
 }
 
 func (rt *acpLiveRuntime) applySessionState(response map[string]any) {
@@ -1124,6 +1136,19 @@ func (rt *acpLiveRuntime) resolveDecision(body map[string]any, permission bool) 
 }
 
 func (rt *acpLiveRuntime) prompt(ctx context.Context, runID, content string) error {
+	if rt.remote != nil && rt.remote.workspace != nil {
+		computer, err := rt.manager.h.serverComputerRecord(ctx, rt.tenantID, rt.spaceID)
+		if err != nil {
+			return err
+		}
+		exec, err := rt.manager.h.resolveWorkspaceExecution(ctx, computer, runID)
+		if err != nil {
+			return err
+		}
+		if exec.workspace == nil || *exec.workspace != *rt.remote.workspace {
+			return errors.New("ACP run workspace changed")
+		}
+	}
 	rt.authMu.Lock()
 	defer rt.authMu.Unlock()
 	rt.mu.Lock()
@@ -1248,15 +1273,15 @@ func (rt *acpLiveRuntime) close(reason error) error {
 				terminal.detach()
 			}
 			terminal.once.Do(func() { close(terminal.done) })
-			if rt.runner.call(ctx, terminal.closeMethod, map[string]any{"id": terminal.id}, nil) != nil {
+			if rt.closeWorkspaceStream(ctx, terminal.closeMethod, terminal.id) != nil {
 				rt.closeErr = errACPCleanupUnconfirmed
 			}
 		}
-		if rt.runner.call(ctx, rt.closeMethod, map[string]any{"id": rt.processID}, nil) != nil {
+		if rt.closeWorkspaceStream(ctx, rt.closeMethod, rt.processID) != nil {
 			rt.closeErr = errACPCleanupUnconfirmed
 		}
 		if rt.containerID != "" {
-			if rt.runner.call(ctx, "docker.stop", map[string]any{"id": rt.containerID, "remove": true}, nil) != nil {
+			if cleanupWorkspaceContainer(ctx, rt.runner, rt.remote, rt.containerID) != nil {
 				rt.closeErr = errACPCleanupUnconfirmed
 			}
 		}

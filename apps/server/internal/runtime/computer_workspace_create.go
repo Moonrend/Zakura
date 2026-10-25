@@ -4,20 +4,26 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
+
+	"github.com/Moonrend/Zakura/apps/server/internal/workspaces"
 
 	"gorm.io/gorm"
 )
 
 type workspaceCreateOperation struct {
-	SpaceID      string  `gorm:"column:space_id"`
-	TenantID     string  `gorm:"column:tenant_id"`
-	NodeID       string  `gorm:"column:node_id"`
-	ComputerID   string  `gorm:"column:computer_id"`
-	OperationID  string  `gorm:"column:operation_id"`
-	Name         string  `gorm:"column:name"`
-	ConfigDigest *string `gorm:"column:config_digest"`
-	CreatedAt    string  `gorm:"column:created_at"`
+	SpaceID         string             `gorm:"column:space_id"`
+	TenantID        string             `gorm:"column:tenant_id"`
+	NodeID          string             `gorm:"column:node_id"`
+	ComputerID      string             `gorm:"column:computer_id"`
+	OperationID     string             `gorm:"column:operation_id"`
+	Name            string             `gorm:"column:name"`
+	ConfigDigest    *string            `gorm:"column:config_digest"`
+	CreatedAt       string             `gorm:"column:created_at"`
+	InstanceID      *string            `gorm:"column:workspace_instance_id"`
+	IdentityVersion int                `gorm:"column:identity_version"`
+	target          *workspaces.Target `gorm:"-"`
 }
 
 func (h *handler) workspaceCreateOperation(ctx context.Context, space Space) (*workspaceCreateOperation, error) {
@@ -25,9 +31,25 @@ func (h *handler) workspaceCreateOperation(ctx context.Context, space Space) (*w
 		return nil, errWorkspaceNodeRequired
 	}
 	var row workspaceCreateOperation
-	err := h.deps.Gorm.WithContext(ctx).Table("workspace_create_operations").Where("space_id=? AND tenant_id=? AND node_id=?", space.ID, space.TenantID, *space.RuntimeNodeID).Take(&row).Error
+	query := h.deps.Gorm.WithContext(ctx).Table("workspace_create_operations").Where("space_id=? AND tenant_id=? AND node_id=?", space.ID, space.TenantID, *space.RuntimeNodeID)
+	if space.CurrentWorkspaceInstanceID == nil {
+		query = query.Where("workspace_instance_id IS NULL")
+	} else {
+		query = query.Where("workspace_instance_id=?", *space.CurrentWorkspaceInstanceID)
+	}
+	err := query.Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
+	}
+	if err == nil && row.IdentityVersion == 2 {
+		instance, e := h.workspaceStore().Instance(ctx, space.TenantID, space.ID, *space.CurrentWorkspaceInstanceID)
+		if e != nil {
+			return nil, e
+		}
+		if instance.Generation != space.WorkspaceGeneration {
+			return nil, workspaces.ErrTargetRevoked
+		}
+		row.target = &instance.Target
 	}
 	return &row, err
 }
@@ -54,22 +76,64 @@ func (h *handler) beginWorkspaceCreate(ctx context.Context, lease *workspaceLeas
 		return nil, errors.New("workspace computer binding changed")
 	}
 	op := &workspaceCreateOperation{SpaceID: lease.Space.ID, TenantID: lease.Space.TenantID, NodeID: runner.nodeID, ComputerID: exec.computer.ID, OperationID: h.store.id(), Name: "zakura-ws-" + slugify(lease.Space.Slug) + "-" + lease.Space.ID, CreatedAt: runtimeTimeString(h.store.now())}
+	op.IdentityVersion = 1
+	if exec.workspace != nil {
+		if lease.Space.CurrentWorkspaceInstanceID == nil || *lease.Space.CurrentWorkspaceInstanceID != exec.workspace.Target.InstanceID || lease.Space.WorkspaceGeneration != exec.workspace.Target.Generation {
+			return nil, workspaces.ErrTargetRevoked
+		}
+		op.InstanceID = &exec.workspace.Target.InstanceID
+		op.IdentityVersion = 2
+		op.target = &exec.workspace.Target
+		op.Name = "zakura-ws-" + exec.workspace.Target.InstanceID
+	}
 	if err := lease.fenced(ctx, func(tx *gorm.DB) error {
-		return tx.Table("workspace_create_operations").Create(op).Error
+		if err := tx.Table("workspace_create_operations").Create(op).Error; err != nil {
+			return err
+		}
+		if op.InstanceID != nil {
+			r := tx.Table("workspace_instances").Where("id=? AND tenant_id=? AND space_id=? AND revoked_at IS NULL AND create_operation_id IS NULL", *op.InstanceID, op.TenantID, op.SpaceID).Updates(map[string]any{"create_operation_id": op.OperationID, "state": "creating", "updated_at": op.CreatedAt})
+			if r.Error != nil {
+				return r.Error
+			}
+			if r.RowsAffected != 1 {
+				return workspaces.ErrConflict
+			}
+		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
 	return op, nil
 }
 
-func (op *workspaceCreateOperation) wire() map[string]string {
-	return map[string]string{"id": op.OperationID, "tenantId": op.TenantID, "spaceId": op.SpaceID, "computerId": op.ComputerID}
+func (op *workspaceCreateOperation) wire() map[string]any {
+	params := map[string]any{"id": op.OperationID, "tenantId": op.TenantID, "spaceId": op.SpaceID, "computerId": op.ComputerID}
+	if t := op.target; t != nil {
+		params["instanceId"], params["generation"], params["diskId"] = t.InstanceID, t.Generation, t.DiskID
+		params["locatorVersion"], params["nodeIncarnation"] = t.LocatorVersion, t.NodeIncarnation
+	}
+	return params
+}
+
+func (op *workspaceCreateOperation) labels() map[string]string {
+	labels := map[string]string{"zakura.tenant": op.TenantID, "zakura.space": op.SpaceID, "zakura.computer": op.ComputerID, "zakura.purpose": "workspace"}
+	if t := op.target; t != nil {
+		labels["zakura.workspace-instance"] = t.InstanceID
+		labels["zakura.workspace-generation"] = strconv.FormatInt(t.Generation, 10)
+		labels["zakura.disk"] = t.DiskID
+		labels["zakura.disk-version"] = strconv.FormatInt(t.LocatorVersion, 10)
+		labels["zakura.node-incarnation"] = t.NodeIncarnation
+	}
+	return labels
 }
 
 func (op *workspaceCreateOperation) matches(c computerContainer, digest string) bool {
+	for key, value := range op.labels() {
+		if c.Labels[key] != value {
+			return false
+		}
+	}
 	return c.DockerID != "" && strings.TrimPrefix(c.Name, "/") == op.Name &&
-		c.Labels["zakura.tenant"] == op.TenantID && c.Labels["zakura.space"] == op.SpaceID &&
-		c.Labels["zakura.computer"] == op.ComputerID && c.Labels["zakura.purpose"] == "workspace" &&
 		c.Labels["zakura.create-operation"] == op.OperationID && c.Labels["zakura.create-digest"] == digest
 }
 
@@ -78,7 +142,10 @@ func (h *handler) reconcileWorkspaceCreate(ctx context.Context, lease *workspace
 		State, ConfigDigest, Name string
 		Container                 *computerContainer
 	}
-	if err := runner.call(ctx, "docker.create.status", map[string]string{"operationId": op.OperationID, "tenantId": op.TenantID, "spaceId": op.SpaceID, "computerId": op.ComputerID, "name": op.Name}, &receipt); err != nil {
+	params := op.wire()
+	delete(params, "id")
+	params["operationId"], params["name"] = op.OperationID, op.Name
+	if err := runner.call(ctx, "docker.create.status", params, &receipt); err != nil {
 		return err
 	}
 	digest, err := hex.DecodeString(receipt.ConfigDigest)

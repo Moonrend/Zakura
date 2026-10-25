@@ -13,7 +13,7 @@ import (
 )
 
 func receiptFixture() (RunSpec, CreateOperation) {
-	op := CreateOperation{"operation-1", "tenant-1", "space-1", "computer-1"}
+	op := CreateOperation{ID: "operation-1", TenantID: "tenant-1", SpaceID: "space-1", ComputerID: "computer-1"}
 	return RunSpec{
 		Name: "workspace-space-1", Image: "workspace:1",
 		Env:     map[string]string{"TOKEN": "environment-secret"},
@@ -25,7 +25,8 @@ func receiptFixture() (RunSpec, CreateOperation) {
 }
 
 func receiptStatusRequest(op CreateOperation) CreateStatusRequest {
-	return CreateStatusRequest{OperationID: op.ID, TenantID: op.TenantID, SpaceID: op.SpaceID, ComputerID: op.ComputerID}
+	return CreateStatusRequest{OperationID: op.ID, TenantID: op.TenantID, SpaceID: op.SpaceID, ComputerID: op.ComputerID,
+		InstanceID: op.InstanceID, Generation: op.Generation, DiskID: op.DiskID, LocatorVersion: op.LocatorVersion, NodeIncarnation: op.NodeIncarnation, Purpose: op.Purpose}
 }
 
 func receiptInfo(spec RunSpec) ContainerInfo {

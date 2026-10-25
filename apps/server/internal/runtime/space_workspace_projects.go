@@ -34,19 +34,26 @@ func (h *handler) createProjectWorkspace(r *http.Request, space, slug, gitURL st
 	}
 	if selected {
 		params, _ := remote.pathParams("/projects")
-		if err = remote.runner.call(r.Context(), "host.fs.mkdir", params, nil); err != nil {
+		if err = remote.call(r.Context(), "host.fs.mkdir", params, nil); err != nil {
 			return err
 		}
 		if gitURL == "" {
 			params, _ = remote.pathParams(projectRemotePath(slug))
-			return remote.runner.call(r.Context(), "host.fs.mkdir", params, nil)
+			return remote.call(r.Context(), "host.fs.mkdir", params, nil)
 		}
-		// host.exec executes on the runner host, not inside /workspace. Relative
-		// destination and cwd are jailed to the same Space root used by host.fs.
+		if remote.workspace != nil {
+			exec, err := h.resolveServerComputer(r.Context(), principal(r).TenantID, space)
+			if err != nil {
+				return err
+			}
+			_, err = h.workspaceInstanceExec(r.Context(), exec, "", 120000, "git", "clone", "--depth", "1", "--", gitURL, "projects/"+slug)
+			return err
+		}
+		// Legacy host execution uses the same jailed Space root as host.fs.
 		var result struct {
 			ExitCode int `json:"exitCode"`
 		}
-		if err = remote.runner.call(r.Context(), "host.exec", map[string]any{"spaceId": space, "workingDir": "/", "command": []string{"git", "clone", "--depth", "1", "--", gitURL, "projects/" + slug}, "timeoutMs": 120000}, &result); err != nil {
+		if err = remote.call(r.Context(), "host.exec", map[string]any{"spaceId": space, "workingDir": "/", "command": []string{"git", "clone", "--depth", "1", "--", gitURL, "projects/" + slug}, "timeoutMs": 120000}, &result); err != nil {
 			return fmt.Errorf("git clone failed: %w", err)
 		}
 		if result.ExitCode != 0 {
@@ -70,6 +77,8 @@ func (h *handler) createProjectWorkspace(r *http.Request, space, slug, gitURL st
 
 type projectIntent struct {
 	ID            string         `json:"id"`
+	InstanceID    *string        `json:"workspaceInstanceId,omitempty"`
+	Generation    int64          `json:"workspaceGeneration,omitempty"`
 	Kind          string         `json:"kind"`
 	Slug          string         `json:"slug"`
 	Next          string         `json:"next"`
@@ -90,16 +99,36 @@ func decodeProjectIntent(v any) (projectIntent, error) {
 }
 func (h *handler) reserveProjectIntent(ctx context.Context, tenant, space string, in projectIntent) (projectIntent, error) {
 	var out projectIntent
-	_, err := h.store.mutateSpaceConfig(ctx, tenant, space, func(cfg map[string]any) error {
+	accepted, ok := ctx.Value(workspaceRequestTargetKey{}).(Space)
+	if !ok || accepted.TenantID != tenant || accepted.ID != space {
+		var err error
+		accepted, err = h.store.GetSpace(ctx, tenant, space)
+		if err != nil {
+			return out, err
+		}
+	}
+	in.InstanceID, in.Generation = accepted.CurrentWorkspaceInstanceID, accepted.WorkspaceGeneration
+	err := h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockWorkspaceInstance(tx, tenant, space, in.InstanceID, in.Generation); err != nil {
+			return err
+		}
+		var row models.Space
+		if err := tx.Where("tenant_id=? AND id=?", tenant, space).Take(&row).Error; err != nil {
+			return err
+		}
+		cfg := map[string]any{}
+		if err := json.Unmarshal([]byte(row.ConfigJSON), &cfg); err != nil {
+			return err
+		}
 		ops, _ := cfg[projectIntentsKey].(map[string]any)
 		if ops == nil {
 			ops = map[string]any{}
 		}
-		if value, ok := ops[in.Slug]; ok {
-			old, e := decodeProjectIntent(value)
-			if e != nil {
-				return e
-			}
+		key, old, err := projectIntentAt(ops, in)
+		if err != nil {
+			return err
+		}
+		if key != "" {
 			a, _ := json.Marshal(old.Updates)
 			b, _ := json.Marshal(in.Updates)
 			if old.Kind != in.Kind || old.Next != in.Next || string(a) != string(b) {
@@ -114,12 +143,26 @@ func (h *handler) reserveProjectIntent(ctx context.Context, tenant, space string
 			if e != nil {
 				return e
 			}
+			if !projectIntentMatches(other, in.InstanceID, in.Generation) {
+				continue
+			}
 			if other.Next == in.Next || other.Slug == in.Next || other.Next == in.Slug {
 				return ErrConflict
 			}
 		}
-		ops[in.Slug] = in
+		ops[projectIntentSlot(in)] = in
 		cfg[projectIntentsKey] = ops
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		result := tx.Table("spaces").Where("tenant_id=? AND id=? AND config_json=?", tenant, space, row.ConfigJSON).Updates(map[string]any{"config_json": string(raw), "updated_at": runtimeTimeString(h.store.now())})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrConflict
+		}
 		out = in
 		return nil
 	})
@@ -129,6 +172,7 @@ func (h *handler) applyProjectIntentFS(ctx context.Context, tenant, space string
 	if (!in.HasWorkspace && !in.WantWorkspace) || (in.Kind != "delete" && in.Next == in.Slug && in.WantWorkspace == in.HasWorkspace) {
 		return nil
 	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, Space{ID: space, TenantID: tenant, CurrentWorkspaceInstanceID: in.InstanceID, WorkspaceGeneration: in.Generation})
 	remote, selected, err := h.remoteSpaceWorkspace(ctx, tenant, space)
 	if err != nil {
 		return err
@@ -137,7 +181,7 @@ func (h *handler) applyProjectIntentFS(ctx context.Context, tenant, space string
 		if in.Kind == "delete" {
 			params, _ := remote.pathParams(projectRemotePath(in.Slug))
 			params["recursive"] = true
-			err = remote.runner.call(ctx, "host.fs.remove", params, nil)
+			err = remote.call(ctx, "host.fs.remove", params, nil)
 			if workspaceMissing(err) {
 				return nil
 			}
@@ -147,10 +191,10 @@ func (h *handler) applyProjectIntentFS(ctx context.Context, tenant, space string
 			from, to := projectRemotePath(in.Slug), projectRemotePath(in.Next)
 			params, _ := remote.pathParams(from)
 			var src runnerFSEntry
-			srcErr := remote.runner.call(ctx, "host.fs.stat", params, &src)
+			srcErr := remote.call(ctx, "host.fs.stat", params, &src)
 			target, _ := remote.pathParams(to)
 			var dst runnerFSEntry
-			dstErr := remote.runner.call(ctx, "host.fs.stat", target, &dst)
+			dstErr := remote.call(ctx, "host.fs.stat", target, &dst)
 			if workspaceMissing(srcErr) && dstErr == nil {
 				return nil
 			} // retry after the remote rename completed
@@ -167,11 +211,11 @@ func (h *handler) applyProjectIntentFS(ctx context.Context, tenant, space string
 			if remote.root != "" {
 				params["root"] = remote.root
 			}
-			return remote.runner.call(ctx, "host.fs.rename", params, nil)
+			return remote.call(ctx, "host.fs.rename", params, nil)
 		}
 		if in.WantWorkspace && !in.HasWorkspace {
 			params, _ := remote.pathParams(projectRemotePath(in.Next))
-			return remote.runner.call(ctx, "host.fs.mkdir", params, nil)
+			return remote.call(ctx, "host.fs.mkdir", params, nil)
 		}
 		return nil
 	}
@@ -226,6 +270,9 @@ func workspaceMissing(err error) bool {
 func (h *handler) finishProjectIntent(ctx context.Context, tenant, space string, in projectIntent) error {
 	for attempt := 0; attempt < 8; attempt++ {
 		err := h.deps.Gorm.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockWorkspaceInstance(tx, tenant, space, in.InstanceID, in.Generation); err != nil {
+				return err
+			}
 			var row models.Space
 			if err := tx.Where("tenant_id=? AND id=?", tenant, space).Take(&row).Error; err != nil {
 				return err
@@ -235,9 +282,25 @@ func (h *handler) finishProjectIntent(ctx context.Context, tenant, space string,
 				return err
 			}
 			ops, _ := cfg[projectIntentsKey].(map[string]any)
-			saved, err := decodeProjectIntent(ops[in.Slug])
-			if err != nil || saved.ID != in.ID {
+			key, saved, err := projectIntentAt(ops, in)
+			if err != nil || key == "" || saved.ID != in.ID {
 				return ErrConflict
+			}
+			var project models.SpaceProject
+			if err := tx.Where("tenant_id=? AND space_id=? AND slug=?", tenant, space, in.Slug).Take(&project).Error; err != nil {
+				return err
+			}
+			if in.InstanceID != nil && project.ID != nil {
+				var disk string
+				if err := tx.Table("workspace_instances").Select("disk_id").Where("tenant_id=? AND space_id=? AND id=?", tenant, space, *in.InstanceID).Scan(&disk).Error; err != nil {
+					return err
+				}
+				if disk == "" {
+					return ErrConflict
+				}
+				if err := h.saveProjectDiskPresence(tx, tenant, space, disk, *project.ID, in.Next, in.Kind != "delete" && in.WantWorkspace); err != nil {
+					return err
+				}
 			}
 			projects := tx.Where("tenant_id=? AND space_id=? AND slug=?", tenant, space, in.Slug)
 			if in.Kind == "delete" {
@@ -266,7 +329,7 @@ func (h *handler) finishProjectIntent(ctx context.Context, tenant, space string,
 					}
 				}
 			}
-			delete(ops, in.Slug)
+			delete(ops, key)
 			if len(ops) == 0 {
 				delete(cfg, projectIntentsKey)
 			} else {
@@ -304,6 +367,12 @@ func (h *handler) mutateProject(w http.ResponseWriter, r *http.Request, remove b
 		statusErr(w, err)
 		return
 	}
+	presence, err := h.projectDiskPresence(r.Context(), tenant, space, []models.SpaceProject{existing})
+	if err != nil {
+		statusErr(w, err)
+		return
+	}
+	existing.HasWorkspace = presence[slug]
 	in := projectIntent{ID: h.store.id(), Kind: "update", Slug: slug, Next: slug, HasWorkspace: existing.HasWorkspace, WantWorkspace: existing.HasWorkspace, Updates: map[string]any{}}
 	if remove {
 		in.Kind = "delete"
@@ -378,5 +447,6 @@ func (h *handler) mutateProject(w http.ResponseWriter, r *http.Request, remove b
 		statusErr(w, err)
 		return
 	}
+	existing.HasWorkspace = in.WantWorkspace
 	httpx.JSON(w, 200, map[string]any{"project": projectDTO(existing)})
 }

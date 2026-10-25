@@ -17,6 +17,7 @@ func (h *handler) computerStore() computers.Store {
 func (h *handler) registerComputers(r chi.Router) {
 	r.Post("/spaces/{id}/desktop-ticket", h.spaceDesktopTicket)
 	r.Get("/spaces/{id}/computer", h.getServerComputer)
+	r.Delete("/spaces/{id}/computer", h.deleteServerComputer)
 	r.Put("/spaces/{id}/computer/config", h.configureServerComputer)
 	r.Post("/spaces/{id}/computer/start", h.startServerComputer)
 	r.Post("/spaces/{id}/computer/stop", h.stopServerComputer)

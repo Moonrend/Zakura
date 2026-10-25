@@ -99,7 +99,7 @@ func (rt *acpLiveRuntime) handleCallback(method string, id json.RawMessage, para
 		}
 		// Deliberately do not use remoteWorkspace(ctx,agent) or pinnedExecution:
 		// callbacks always use the server workspace captured at adapter launch.
-		remote := &remoteWorkspace{runner: rt.runner, spaceID: rt.spaceID}
+		remote := rt.workspaceRemote()
 		if method == "fs/read_text_file" {
 			if err = rt.approveCallback(ctx, method, id, params); err != nil {
 				break
@@ -291,7 +291,7 @@ func (rt *acpLiveRuntime) createTerminal(ctx context.Context, params map[string]
 		return nil, errors.New("too many ACP terminals")
 	}
 	rt.mu.Unlock()
-	space, err := rt.manager.h.store.GetSpace(ctx, rt.tenantID, rt.spaceID)
+	space, err := rt.workspaceSpace(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (rt *acpLiveRuntime) createTerminal(ctx context.Context, params map[string]
 	var started struct {
 		ID string `json:"id"`
 	}
-	if err = rt.runner.call(ctx, method, args, &started); err != nil {
+	if err = rt.workspaceRemote().call(ctx, method, args, &started); err != nil {
 		return nil, err
 	}
 	if started.ID == "" {
@@ -352,7 +352,7 @@ func (rt *acpLiveRuntime) createTerminal(ctx context.Context, params map[string]
 		if terminal.detach != nil {
 			terminal.detach()
 		}
-		_ = rt.runner.call(ctx, closeMethod, map[string]any{"id": started.ID}, nil)
+		_ = rt.closeWorkspaceStream(ctx, closeMethod, started.ID)
 		return nil, errors.New("ACP adapter closed")
 	default:
 	}
@@ -361,7 +361,7 @@ func (rt *acpLiveRuntime) createTerminal(ctx context.Context, params map[string]
 		if terminal.detach != nil {
 			terminal.detach()
 		}
-		_ = rt.runner.call(ctx, closeMethod, map[string]any{"id": started.ID}, nil)
+		_ = rt.closeWorkspaceStream(ctx, closeMethod, started.ID)
 		return nil, errors.New("too many ACP terminals")
 	}
 	rt.terminals[started.ID] = terminal
@@ -411,7 +411,7 @@ func (rt *acpLiveRuntime) terminalCallback(ctx context.Context, method string, p
 		return nil, errors.New("unknown ACP terminal id")
 	}
 	if method == "terminal/kill" || method == "terminal/release" {
-		if err := rt.runner.call(ctx, terminal.closeMethod, map[string]any{"id": id}, nil); err != nil {
+		if err := rt.closeWorkspaceStream(ctx, terminal.closeMethod, id); err != nil {
 			return nil, err
 		}
 		if method == "terminal/release" {

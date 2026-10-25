@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -108,6 +109,20 @@ func (h *handler) closeACP(ctx context.Context, p httpx.Principal, agent, sid st
 		return nil, errors.New("ACP authentication or prompt is active")
 	}
 	defer rt.authMu.Unlock()
+	if rt.remote != nil && rt.remote.workspace != nil {
+		err := rt.validateWorkspace(ctx)
+		if errors.Is(err, workspaces.ErrTargetRevoked) {
+			// Retirement already moved every writer obligation to the tombstone.
+			// Close this known process without taking the replacement's profile slot.
+			if err = rt.close(nil); err != nil {
+				return nil, err
+			}
+			return rt.snapshot(), nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 	lease, authToken, quarantined, err := h.claimACPClose(ctx, p, rt)
 	if err != nil {
 		return nil, err
@@ -141,6 +156,7 @@ func (h *handler) closeACP(ctx context.Context, p httpx.Principal, agent, sid st
 
 func (h *handler) claimACPClose(ctx context.Context, p httpx.Principal, rt *acpLiveRuntime) (*workspaceLease, string, bool, error) {
 	tenant := p.TenantID
+	ctx = rt.workspaceContext(ctx)
 	lease, claimErr := h.acquireSpaceInfrastructure(ctx, tenant, rt.spaceID)
 	if claimErr == nil {
 		exec, err := resolveACPHost(ctx, h, tenant, rt.agentID, rt.sid)
@@ -166,6 +182,10 @@ func (h *handler) claimACPClose(ctx context.Context, p httpx.Principal, rt *acpL
 	state, err := h.loadACPAuthRecovery(ctx, tenant, rt.spaceID, rt.profileID)
 	if err != nil || state.ExpiresAt > h.store.now().UnixMilli() || state.NodeID != rt.runner.nodeID || state.ComputerID != rt.computerID {
 		return nil, "", false, claimErr
+	}
+	original, _ := ctx.Value(workspaceRequestTargetKey{}).(Space)
+	if !acpRecoveryMatchesSpace(state, original) {
+		return nil, "", false, errACPAuthLockLost
 	}
 	var intent workspaceIntent
 	if state.WorkspaceToken != "" && (state.WorkspaceOperation != "configuring" || json.Unmarshal([]byte(state.WorkspaceIntent), &intent) != nil || intent.SharedProfile != rt.profileID) {

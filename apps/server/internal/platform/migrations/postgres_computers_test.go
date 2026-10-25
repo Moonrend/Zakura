@@ -37,6 +37,11 @@ func TestPostgresComputersSchema(t *testing.T) {
 		"agent_tool_approvals",
 		"workspace_create_operations",
 		"workspace_connections",
+		"workspace_disks",
+		"workspace_instances",
+		"workspace_cleanup_tombstones",
+		"workspace_disk_projects",
+		"node_installations",
 	} {
 		var n int
 		if err := conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name=?`), table).Scan(&n); err != nil {
@@ -44,6 +49,14 @@ func TestPostgresComputersSchema(t *testing.T) {
 		}
 		if n != 1 {
 			t.Errorf("table %s missing", table)
+		}
+	}
+	for _, table := range []string{"acp_profile_auth_locks", "acp_device_auth_attempts"} {
+		for column, expected := range map[string]string{"workspace_instance_id": "text", "workspace_generation": "bigint"} {
+			var dataType string
+			if err := conn.DB.QueryRowContext(ctx, conn.Rebind(`SELECT data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?`), table, column).Scan(&dataType); err != nil || dataType != expected {
+				t.Fatalf("%s.%s type=%q: %v", table, column, dataType, err)
+			}
 		}
 	}
 	var dataType string

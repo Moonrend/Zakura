@@ -166,7 +166,7 @@ func (h *handler) fsInfo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var result map[string]any
-		if e = remote.runner.call(r.Context(), "host.fs.stat", params, &result); e != nil {
+		if e = remote.call(r.Context(), "host.fs.stat", params, &result); e != nil {
 			writeRemoteError(w, e)
 			return
 		}
@@ -487,7 +487,7 @@ func (h *handler) fsMkdir(w http.ResponseWriter, r *http.Request) {
 		params, e := remotePathParams(remote.spaceID, b.Path)
 		if e == nil {
 			var result map[string]any
-			e = remote.runner.call(r.Context(), "host.fs.mkdir", params, &result)
+			e = remote.call(r.Context(), "host.fs.mkdir", params, &result)
 			if e == nil {
 				httpx.JSON(w, http.StatusOK, result)
 				return
@@ -523,7 +523,7 @@ func (h *handler) fsDelete(w http.ResponseWriter, r *http.Request) {
 		if e == nil {
 			params["recursive"] = b.Recursive
 			var result map[string]any
-			e = remote.runner.call(r.Context(), "host.fs.remove", params, &result)
+			e = remote.call(r.Context(), "host.fs.remove", params, &result)
 			if e == nil {
 				httpx.JSON(w, http.StatusOK, result)
 				return
@@ -573,7 +573,7 @@ func (h *handler) fsRename(w http.ResponseWriter, r *http.Request) {
 			to, e = runnerWorkspacePath(b.To)
 			if e == nil {
 				var result map[string]any
-				e = remote.runner.call(r.Context(), "host.fs.rename", map[string]any{"spaceId": remote.spaceID, "oldPath": from, "newPath": to}, &result)
+				e = remote.call(r.Context(), "host.fs.rename", map[string]any{"spaceId": remote.spaceID, "oldPath": from, "newPath": to}, &result)
 				if e == nil {
 					httpx.JSON(w, http.StatusOK, result)
 					return
@@ -695,17 +695,17 @@ func (h *handler) listProjects(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	presence, e := h.projectDiskPresence(r.Context(), p.TenantID, space, ms)
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
 	out := make([]map[string]any, 0, len(ms))
 	for _, m := range ms {
-		id := ""
-		if m.ID != nil {
-			id = *m.ID
-		}
-		var path any
-		if m.HasWorkspace {
-			path = "/workspace/projects/" + m.Slug
-		}
-		out = append(out, map[string]any{"id": id, "slug": m.Slug, "name": m.Name, "description": m.Description, "instructions": m.Instructions, "hasWorkspace": m.HasWorkspace, "path": path, "createdAt": parseTime(m.CreatedAt), "updatedAt": parseTime(m.UpdatedAt)})
+		m.HasWorkspace = presence[m.Slug]
+		item := projectDTO(m)
+		item["createdAt"], item["updatedAt"] = parseTime(m.CreatedAt), parseTime(m.UpdatedAt)
+		out = append(out, item)
 	}
 	httpx.JSON(w, 200, map[string]any{"projects": out})
 }
@@ -746,13 +746,17 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 		statusErr(w, e)
 		return
 	}
+	accepted, ok := r.Context().Value(workspaceRequestTargetKey{}).(Space)
+	if !ok {
+		accepted = currentSpace
+	}
 	for _, value := range nestedMap(configMap(currentSpace.Config), projectIntentsKey) {
 		op, err := decodeProjectIntent(value)
 		if err != nil {
 			statusErr(w, err)
 			return
 		}
-		if op.Slug == b.Slug || op.Next == b.Slug {
+		if projectIntentMatches(op, accepted.CurrentWorkspaceInstanceID, accepted.WorkspaceGeneration) && (op.Slug == b.Slug || op.Next == b.Slug) {
 			statusErr(w, ErrConflict)
 			return
 		}
@@ -760,7 +764,12 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 	nowStr := runtimeTimeString(h.store.now())
 	id := h.store.id()
 	sp := models.SpaceProject{ID: &id, TenantID: p.TenantID, SpaceID: space, Slug: b.Slug, Name: b.Name, Description: b.Description, Instructions: b.Instructions, HasWorkspace: b.HasWorkspace, CreatedAt: nowStr, UpdatedAt: nowStr}
-	if e = h.deps.Gorm.WithContext(r.Context()).Create(&sp).Error; e != nil {
+	if e = h.deps.Gorm.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := lockWorkspaceInstance(tx, p.TenantID, space, accepted.CurrentWorkspaceInstanceID, accepted.WorkspaceGeneration); err != nil {
+			return err
+		}
+		return tx.Create(&sp).Error
+	}); e != nil {
 		statusErr(w, e)
 		return
 	}
@@ -772,6 +781,12 @@ func (h *handler) createProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	presence, e := h.projectDiskPresence(r.Context(), p.TenantID, space, []models.SpaceProject{sp})
+	if e != nil {
+		statusErr(w, e)
+		return
+	}
+	sp.HasWorkspace = presence[sp.Slug]
 	httpx.JSON(w, http.StatusOK, map[string]any{"project": projectDTO(sp)})
 }
 func (h *handler) patchProject(w http.ResponseWriter, r *http.Request) {
@@ -991,36 +1006,6 @@ func (h *handler) patchRuntimeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.getRuntimeNode(w, r)
-}
-func (h *handler) deleteRuntimeNode(w http.ResponseWriter, r *http.Request) {
-	var kind string
-	if err := h.deps.Gorm.WithContext(r.Context()).Table("runtime_nodes").Select("kind").Where("tenant_id=? AND id=?", principal(r).TenantID, chi.URLParam(r, "id")).Scan(&kind).Error; err != nil {
-		statusErr(w, err)
-		return
-	}
-	if kind == "local" {
-		httpx.Error(w, http.StatusConflict, "the built-in local node cannot be removed")
-		return
-	}
-	var bound int64
-	if err := h.deps.Gorm.WithContext(r.Context()).Table("spaces").Where("tenant_id=? AND runtime_node_id=?", principal(r).TenantID, chi.URLParam(r, "id")).Count(&bound).Error; err != nil {
-		statusErr(w, err)
-		return
-	}
-	if bound > 0 {
-		httpx.Error(w, http.StatusConflict, "move workspaces before removing this node")
-		return
-	}
-	res := h.deps.Gorm.WithContext(r.Context()).Where("tenant_id = ? AND id = ? AND is_shared = false", principal(r).TenantID, chi.URLParam(r, "id")).Delete(&models.RuntimeNode{})
-	if res.Error != nil {
-		statusErr(w, res.Error)
-		return
-	}
-	if res.RowsAffected == 0 {
-		statusErr(w, ErrNotFound)
-		return
-	}
-	httpx.JSON(w, 200, map[string]any{"ok": true})
 }
 func (h *handler) runtimeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeRunnerNode(r, chi.URLParam(r, "id"), false) {

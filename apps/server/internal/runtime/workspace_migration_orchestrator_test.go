@@ -156,6 +156,8 @@ func (r *migrationRig) handle(node, method string, params map[string]any) (any, 
 		return map[string]any{"ok": true}, nil
 	case "host.fs.mkdir":
 		return map[string]any{"abs": "/fixture/workspace", "ok": true}, nil
+	case "docker.images":
+		return []computerImageStatus{}, nil
 	case "docker.pull":
 		return map[string]any{"ok": true}, nil
 	case "docker.create":

@@ -71,8 +71,12 @@ func (h *handler) registerSpaceWorkspace(r chi.Router) {
 	}
 }
 func (h *handler) workspaceForSpace(ctx context.Context, tenant, space string) (workspaceFS, error) {
-	if _, err := h.store.GetSpace(ctx, tenant, space); err != nil {
+	exec, err := h.resolveServerComputer(ctx, tenant, space)
+	if err != nil {
 		return workspaceFS{}, err
+	}
+	if exec.workspace != nil {
+		return workspaceFS{}, errors.New("managed workspace disk requires its runtime node")
 	}
 	base := os.Getenv("ZAKURA_WORKSPACE_ROOT")
 	if base == "" {
@@ -98,6 +102,14 @@ func (h *handler) remoteSpaceWorkspace(ctx context.Context, tenant, space string
 	record, err := h.store.GetSpace(ctx, tenant, space)
 	if err != nil {
 		return nil, false, err
+	}
+	exec, err := h.resolveServerComputer(ctx, tenant, space)
+	if err != nil {
+		return nil, true, err
+	}
+	if exec.workspace != nil {
+		remote, err := h.remotePinnedWorkspace(ctx, exec)
+		return remote, true, err
 	}
 	node := ""
 	if record.RuntimeNodeID != nil {

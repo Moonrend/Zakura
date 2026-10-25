@@ -2,11 +2,14 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
 
+	protocol "github.com/Moonrend/Zakura/apps/agent/workspace"
 	"github.com/Moonrend/Zakura/apps/server/internal/platform/httpx"
+	"github.com/Moonrend/Zakura/apps/server/internal/workspaces"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -15,7 +18,7 @@ func (h *handler) serverComputerState(ctx context.Context, tenant, spaceID strin
 	if err != nil {
 		return nil, err
 	}
-	computer, err := h.resolveServerComputer(ctx, tenant, spaceID)
+	computer, err := h.serverComputerRecord(ctx, tenant, spaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +30,23 @@ func (h *handler) serverComputerState(ctx context.Context, tenant, spaceID strin
 	if err := h.deps.Gorm.WithContext(ctx).Table("computer_workspace_leases").Select("token,operation,expires_at").Where("space_id=? AND tenant_id=?", space.ID, tenant).Find(&lease).Error; err != nil {
 		return nil, err
 	}
-	state := map[string]any{"computer": computer.computer, "space": map[string]any{"id": space.ID, "runtimeNodeId": space.RuntimeNodeID, "workspaceKind": space.WorkspaceKind, "workspaceImage": space.WorkspaceImage, "enableComputer": space.EnableComputer, "workspaceStatus": space.WorkspaceStatus, "lastError": space.LastError}}
+	state := map[string]any{"computer": computer, "space": map[string]any{"id": space.ID, "runtimeNodeId": space.RuntimeNodeID, "workspaceKind": space.WorkspaceKind, "workspaceImage": space.WorkspaceImage, "enableComputer": space.EnableComputer, "workspaceStatus": space.WorkspaceStatus, "lastError": space.LastError, "currentWorkspaceInstanceId": space.CurrentWorkspaceInstanceID, "workspaceGeneration": space.WorkspaceGeneration}, "workspaceInstance": nil, "workspaceDisk": nil}
+	if space.CurrentWorkspaceInstanceID != nil {
+		instance, err := h.workspaceStore().Instance(ctx, tenant, spaceID, *space.CurrentWorkspaceInstanceID)
+		if err != nil {
+			return nil, err
+		}
+		disk, err := h.workspaceStore().Disk(ctx, tenant, spaceID, instance.DiskID)
+		if err != nil {
+			return nil, err
+		}
+		state["workspaceInstance"], state["workspaceDisk"] = instance, disk
+	}
+	cleanups, err := h.workspaceStore().Cleanups(ctx, tenant, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	state["workspaceCleanups"] = cleanups
 	if lease.Token != "" {
 		state["workspaceOperation"] = lease
 	}
@@ -47,6 +66,45 @@ func (h *handler) getServerComputer(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, state)
 }
+
+// Deletion revokes access immediately; remote release runs from the durable job.
+func (h *handler) deleteServerComputer(w http.ResponseWriter, r *http.Request) {
+	if !h.manageComputerScope(w, r) {
+		return
+	}
+	p := principal(r)
+	spaceID := chi.URLParam(r, "id")
+	var in struct {
+		ExpectedInstanceID string `json:"expectedInstanceId"`
+		RequestID          string `json:"requestId"`
+		DeleteDisk         bool   `json:"deleteDisk"`
+	}
+	if httpx.DecodeJSON(r, &in) != nil || !protocol.ValidIdentity(in.ExpectedInstanceID) || !protocol.ValidIdentity(in.RequestID) {
+		httpx.Error(w, http.StatusBadRequest, "expectedInstanceId and requestId are required")
+		return
+	}
+	if _, err := h.store.GetSpace(r.Context(), p.TenantID, spaceID); err != nil {
+		statusErr(w, err)
+		return
+	}
+	instance, err := h.workspaceStore().Instance(r.Context(), p.TenantID, spaceID, in.ExpectedInstanceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpx.Error(w, http.StatusConflict, "the selected workspace instance is no longer current")
+		return
+	}
+	if err != nil {
+		workspaceStatusError(w, err)
+		return
+	}
+	job, err := h.workspaceStore().Retire(r.Context(), instance.Target, in.RequestID, h.store.id(), in.DeleteDisk, h.store.now())
+	if err != nil {
+		workspaceStatusError(w, err)
+		return
+	}
+	h.disconnectInstanceWorkspaceBridges(p.TenantID, spaceID, instance.InstanceID)
+	httpx.JSON(w, http.StatusAccepted, map[string]any{"operationId": job.ID, "operation": job})
+}
+
 func (h *handler) configureServerComputer(w http.ResponseWriter, r *http.Request) {
 	if !h.manageComputerScope(w, r) {
 		return
@@ -61,6 +119,10 @@ func (h *handler) configureServerComputer(w http.ResponseWriter, r *http.Request
 	space, err := h.store.GetSpace(r.Context(), p.TenantID, spaceID)
 	if err != nil {
 		statusErr(w, err)
+		return
+	}
+	if in.DiskID != "" || space.WorkspaceGeneration != 0 {
+		h.configureWorkspaceInstance(w, r, space, in)
 		return
 	}
 	if in.RuntimeNodeID == nil || strings.TrimSpace(*in.RuntimeNodeID) == "" {
@@ -196,7 +258,7 @@ type workspaceRunnerError struct{ error }
 func (h *handler) serverComputerLifecycleError(w http.ResponseWriter, err error) {
 	var runnerErr workspaceRunnerError
 	switch {
-	case errors.Is(err, errWorkspaceNodeRequired), errors.Is(err, errWorkspaceStarting), errors.Is(err, errWorkspaceLeaseLost):
+	case errors.Is(err, errWorkspaceNodeRequired), errors.Is(err, errWorkspaceStarting), errors.Is(err, errWorkspaceLeaseLost), errors.Is(err, workspaces.ErrConflict), errors.Is(err, workspaces.ErrTargetRevoked), errors.Is(err, workspaces.ErrUnverified):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.As(err, &runnerErr):
 		httpx.Error(w, http.StatusBadGateway, err.Error())
@@ -210,7 +272,11 @@ func (h *handler) startSpaceWorkspace(ctx context.Context, space Space) error {
 		return err
 	}
 	defer lease.release()
+	if !sameWorkspaceInstance(space, lease.Space) {
+		return workspaces.ErrTargetRevoked
+	}
 	if err = h.startSpaceWorkspaceWithLease(ctx, lease); err != nil {
+		lease.recordFailure(err)
 		return err
 	}
 	return lease.finish(ctx, "running", map[string]any{"last_error": nil})
@@ -253,22 +319,42 @@ func (h *handler) startSpaceWorkspaceWithLease(ctx context.Context, lease *works
 	if err = lease.recordObservation(ctx, obs); err != nil {
 		return err
 	}
-	var mkdir struct {
-		Abs string `json:"abs"`
+	var remote *remoteWorkspace
+	var mount workspaceMount
+	if space.CurrentWorkspaceInstanceID != nil {
+		remote, err = lease.remoteWorkspace(ctx)
+		if err != nil {
+			return err
+		}
+		mount, err = remote.mount(ctx)
+		if err != nil {
+			return workspaceRunnerError{err}
+		}
+	} else {
+		var mkdir struct {
+			Abs string `json:"abs"`
+		}
+		if err = runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": space.ID, "path": "/"}, &mkdir); err != nil {
+			return workspaceRunnerError{err}
+		}
+		mount = workspaceMount{HostPath: mkdir.Abs, ContainerPath: "/workspace"}
 	}
-	if err = runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": space.ID, "path": "/"}, &mkdir); err != nil {
-		return workspaceRunnerError{err}
+	call := runner.call
+	if remote != nil {
+		call = func(ctx context.Context, method string, params any, out any) error {
+			return remote.call(ctx, method, params.(map[string]any), out)
+		}
 	}
 	if space.WorkspaceKind != "host" {
-		if strings.TrimSpace(mkdir.Abs) == "" {
-			return workspaceRunnerError{errors.New("runtime node returned no workspace path")}
+		if strings.TrimSpace(mount.HostPath) == "" && mount.VolumeName == "" {
+			return workspaceRunnerError{errors.New("runtime node returned no workspace mount")}
 		}
 		if obs.Container.DockerID != "" && obs.Container.Status != "running" {
 			if err = lease.check(ctx); err != nil {
 				return err
 			}
 			lease.retained = true
-			if err = runner.call(ctx, "docker.start", map[string]any{"id": obs.Container.DockerID}, nil); err != nil {
+			if err = call(ctx, "docker.start", map[string]any{"id": obs.Container.DockerID}, nil); err != nil {
 				return lease.uncertain(err)
 			}
 		} else if obs.Container.DockerID == "" {
@@ -276,9 +362,16 @@ func (h *handler) startSpaceWorkspaceWithLease(ctx context.Context, lease *works
 			if space.WorkspaceImage != nil && strings.TrimSpace(*space.WorkspaceImage) != "" {
 				image = strings.TrimSpace(*space.WorkspaceImage)
 			}
-			if err = runner.call(ctx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
-				// A pull is safe to repeat and has not created the workspace.
+			present, err := computerImagePresent(ctx, runner, image)
+			if err != nil {
 				return workspaceRunnerError{err}
+			}
+			if !present {
+				// Startup uses a cached image; explicit image refresh owns updates.
+				// Keep the caller context so cancellation cannot outlive this lease.
+				if err = runner.call(ctx, "docker.pull", map[string]any{"image": image}, nil); err != nil {
+					return workspaceRunnerError{err}
+				}
 			}
 			if err = lease.check(ctx); err != nil {
 				return err
@@ -292,11 +385,11 @@ func (h *handler) startSpaceWorkspaceWithLease(ctx context.Context, lease *works
 				return err
 			}
 			lease.retained = true
-			if err = runner.call(ctx, "docker.create", map[string]any{
+			if err = call(ctx, "docker.create", map[string]any{
 				"name": op.Name, "image": image, "operation": op.wire(),
 				"env":     map[string]string{"ZAKURA_SPACE_ID": space.ID, "ZAKURA_ENABLE_COMPUTER": display, "ZAKURA_ENABLE_BROWSER": display},
-				"labels":  map[string]string{"zakura.tenant": space.TenantID, "zakura.space": space.ID, "zakura.computer": op.ComputerID, "zakura.purpose": "workspace"},
-				"volumes": []map[string]any{{"hostPath": mkdir.Abs, "containerPath": "/workspace"}}, "ports": []any{}, "workingDir": "/workspace", "restart": "unless-stopped",
+				"labels":  op.labels(),
+				"volumes": []workspaceMount{mount}, "ports": []any{}, "workingDir": "/workspace", "restart": "unless-stopped",
 			}, nil); err != nil {
 				return lease.uncertain(err)
 			}
@@ -354,7 +447,11 @@ func (h *handler) stopSpaceWorkspace(ctx context.Context, space Space) error {
 		return err
 	}
 	defer lease.release()
+	if !sameWorkspaceInstance(space, lease.Space) {
+		return workspaces.ErrTargetRevoked
+	}
 	if err = h.stopSpaceWorkspaceWithLease(ctx, lease); err != nil {
+		lease.recordFailure(err)
 		return err
 	}
 	return lease.finish(ctx, "stopped", map[string]any{"last_error": nil})
@@ -365,8 +462,14 @@ func (h *handler) stopSpaceWorkspaceWithLease(ctx context.Context, lease *worksp
 	if err := lease.check(ctx); err != nil {
 		return err
 	}
-	if err := h.closeSpaceWorkspaceBridges(ctx, space.TenantID, space.ID); err != nil {
-		return lease.uncertain(err)
+	var closeErr error
+	if space.CurrentWorkspaceInstanceID == nil {
+		closeErr = h.closeSpaceWorkspaceBridges(ctx, space.TenantID, space.ID)
+	} else {
+		closeErr = h.closeInstanceWorkspaceBridges(ctx, space.TenantID, space.ID, *space.CurrentWorkspaceInstanceID)
+	}
+	if closeErr != nil {
+		return lease.uncertain(closeErr)
 	}
 	if err := h.recoverWorkspaceConnections(ctx, lease); err != nil {
 		return lease.uncertain(err)
@@ -389,7 +492,17 @@ func (h *handler) stopSpaceWorkspaceWithLease(ctx context.Context, lease *worksp
 			return err
 		}
 		lease.retained = true
-		if err = runner.call(ctx, "docker.stop", map[string]any{"id": obs.Container.DockerID, "remove": false}, nil); err != nil {
+		params := map[string]any{"id": obs.Container.DockerID, "remove": false}
+		if space.CurrentWorkspaceInstanceID != nil {
+			remote, e := lease.remoteWorkspace(ctx)
+			if e != nil {
+				return e
+			}
+			err = remote.call(ctx, "docker.stop", params, nil)
+		} else {
+			err = runner.call(ctx, "docker.stop", params, nil)
+		}
+		if err != nil {
 			return lease.uncertain(err)
 		}
 		obs, err = h.observeSpaceWorkspace(ctx, space)

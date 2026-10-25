@@ -35,6 +35,9 @@ func acpMCPHash(raw string) string {
 // The original identity is checked again on every gateway request. Never turn
 // an unknown background caller into a tenant owner or a broad API key.
 func (rt *acpLiveRuntime) currentMCPActor(ctx context.Context, source httpx.Principal, persisted bool) (httpx.Principal, error) {
+	if err := rt.validateWorkspace(ctx); err != nil {
+		return httpx.Principal{}, err
+	}
 	actor, err := rt.currentACPActor(ctx, source, persisted, "mcp")
 	if err != nil {
 		return httpx.Principal{}, err
@@ -113,6 +116,9 @@ func sameACPMCPActor(a, b httpx.Principal) bool {
 // Cache and in-flight reuse must not lend the original actor's tools to another
 // caller. Missing background identity can only revalidate this grant's source.
 func (rt *acpLiveRuntime) validateMCPCaller(ctx context.Context) error {
+	if err := rt.validateWorkspace(ctx); err != nil {
+		return err
+	}
 	m := rt.manager
 	m.mu.Lock()
 	hash := rt.mcpGrantHash
@@ -271,7 +277,12 @@ func (h *handler) acpMCPGateway(w http.ResponseWriter, r *http.Request) {
 	// Only this exact route recognizes acpm_ grants. Forward in-process to the
 	// SAME handler; current policies, bindings, encrypted credentials and audit
 	// remain owned by the existing MCP path. No upstream secret reaches ACP.
-	forward := r.Clone(httpx.WithPrincipal(r.Context(), actor))
+	forwardCtx := httpx.WithPrincipal(r.Context(), actor)
+	if rt.remote != nil && rt.remote.workspace != nil {
+		target := rt.remote.workspace.Target
+		forwardCtx = context.WithValue(forwardCtx, workspaceRequestTargetKey{}, Space{ID: target.SpaceID, TenantID: target.TenantID, CurrentWorkspaceInstanceID: &target.InstanceID, WorkspaceGeneration: target.Generation})
+	}
+	forward := r.Clone(forwardCtx)
 	u := *r.URL
 	u.Path, u.RawPath = "/mcp/spaces/"+space.Slug, ""
 	forward.URL = &u

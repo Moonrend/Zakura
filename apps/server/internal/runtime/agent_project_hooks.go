@@ -220,7 +220,27 @@ func (h *handler) executeProjectHook(ctx context.Context, tenant, space, project
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(action.TimeoutMs)*time.Millisecond)
 	defer cancel()
-	remote, selected, err := h.remoteSpaceWorkspace(ctx, tenant, space)
+	var remote *remoteWorkspace
+	var selected bool
+	var err error
+	if run, _ := ctx.Value(computerRunKey{}).(string); run != "" {
+		c, resolveErr := h.serverComputerRecord(ctx, tenant, space)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		exec, resolveErr := h.resolveWorkspaceExecution(ctx, c, run)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		if exec.workspace != nil {
+			remote, err = h.remotePinnedWorkspace(ctx, exec)
+			selected = true
+		} else {
+			remote, selected, err = h.remoteSpaceWorkspace(ctx, tenant, space)
+		}
+	} else {
+		remote, selected, err = h.remoteSpaceWorkspace(ctx, tenant, space)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -236,10 +256,17 @@ func (h *handler) executeProjectHook(ctx context.Context, tenant, space, project
 	if err := remote.runner.call(ctx, "sys.info", nil, &info); err != nil {
 		return "", err
 	}
-	if info.Capabilities["boundedExecOutput"] != true {
-		return "", errors.New("command hooks require a runner with boundedExecOutput support")
+	capability := "boundedExecOutput"
+	if remote.workspace != nil {
+		capability = "boundedDockerExecInputOutput"
+	}
+	if info.Capabilities[capability] != true {
+		return "", fmt.Errorf("command hooks require a runner with %s support", capability)
 	}
 	platform := firstNonEmpty(info.GOOS, mapStringValue(info.HostInfo["platform"]))
+	if remote.workspace != nil {
+		platform = "linux"
+	}
 	command := []string{"sh", "-lc", action.Command}
 	switch platform {
 	case "linux", "darwin", "freebsd":
@@ -267,10 +294,13 @@ func (h *handler) executeProjectHook(ctx context.Context, tenant, space, project
 	}
 	env := map[string]string{}
 	if pkg.Root != "" {
-		if info.StorageRoot == "" {
+		if info.StorageRoot == "" && remote.workspace == nil {
 			return "", errors.New("hook plugin root requires runner storageRoot")
 		}
 		root := path.Join(strings.ReplaceAll(info.StorageRoot, "\\", "/"), "spaces", space, "workspace", pkg.Root)
+		if remote.workspace != nil {
+			root = path.Join("/workspace", pkg.Root)
+		}
 		env["CLAUDE_PLUGIN_ROOT"], env["ZAKURA_PLUGIN_ROOT"] = root, root
 	}
 	var result struct {
@@ -278,7 +308,22 @@ func (h *handler) executeProjectHook(ctx context.Context, tenant, space, project
 		Stdout   string `json:"stdout"`
 		Stderr   string `json:"stderr"`
 	}
-	err = remote.runner.call(ctx, "host.exec", map[string]any{"spaceId": space, "workingDir": cwd, "command": command, "env": env, "stdin": string(stdin), "timeoutMs": action.TimeoutMs, "maxOutputBytes": hookOutputMaxBytes}, &result)
+	if remote.workspace != nil {
+		target := remote.workspace.Target
+		accepted := Space{ID: space, TenantID: tenant, CurrentWorkspaceInstanceID: &target.InstanceID, WorkspaceGeneration: target.Generation}
+		ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, accepted)
+		exec, resolveErr := h.resolveServerComputer(ctx, tenant, space)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		bound, resolveErr := h.workspaceInstanceContainer(ctx, exec)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		err = remote.call(ctx, "docker.exec", map[string]any{"id": bound.containerID, "workingDir": path.Join("/workspace", cwd), "command": command, "env": env, "stdin": string(stdin), "timeoutMs": action.TimeoutMs, "maxOutputBytes": hookOutputMaxBytes}, &result)
+	} else {
+		err = remote.call(ctx, "host.exec", map[string]any{"spaceId": space, "workingDir": cwd, "command": command, "env": env, "stdin": string(stdin), "timeoutMs": action.TimeoutMs, "maxOutputBytes": hookOutputMaxBytes}, &result)
+	}
 	output := result.Stdout
 	if result.Stderr != "" {
 		output += "\n" + result.Stderr
@@ -366,6 +411,7 @@ func (s *Service) invokeProjectHooks(ctx context.Context, req TurnRequest, runID
 			return mapStringValue(value["context"]), nil
 		}
 	}
+	ctx = context.WithValue(ctx, computerRunKey{}, runID)
 	text, err := project.runHooks(ctx, input)
 	kind := "hook_result"
 	if err != nil {

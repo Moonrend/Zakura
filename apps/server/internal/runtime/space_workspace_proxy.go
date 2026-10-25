@@ -24,6 +24,7 @@ type spaceWorkspaceTarget struct {
 	space     Space
 	runner    *runnerSession
 	container string
+	remote    *remoteWorkspace
 }
 
 // Resolve the canonical workspace, never a selected execution computer or the
@@ -33,6 +34,10 @@ func (h *handler) resolveSpaceWorkspaceTarget(ctx context.Context, tenant, space
 	if err != nil {
 		return nil, err
 	}
+	if accepted, ok := ctx.Value(workspaceRequestTargetKey{}).(Space); ok && accepted.TenantID == tenant && accepted.ID == space && !sameWorkspaceInstance(accepted, s) {
+		return nil, errors.New("workspace connection target changed")
+	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, s)
 	if s.RuntimeNodeID == nil || *s.RuntimeNodeID == "" {
 		return nil, errors.New("workspace is not configured")
 	}
@@ -67,8 +72,12 @@ func (h *handler) resolveSpaceWorkspaceTarget(ctx context.Context, tenant, space
 		}
 		container = obs.Container.DockerID
 	}
-	raw := rawJSON([]any{s.ID, exec.computer.ID, exec.nodeID, s.WorkspaceKind, s.WorkspaceImage, s.EnableComputer, container})
-	return &spaceWorkspaceTarget{space: s, runner: runner, container: container, ticket: acpLoginTicket{Tenant: tenant, Space: space, Profile: "workspace-" + kind, Node: exec.nodeID, Computer: exec.computer.ID, ConfigHash: acpLoginDigest(raw)}}, nil
+	var remote *remoteWorkspace
+	if exec.workspace != nil {
+		remote = &remoteWorkspace{runner: runner, spaceID: space, workspace: exec.workspace, validate: func(ctx context.Context) error { return h.validateWorkspaceExecution(ctx, exec) }}
+	}
+	raw := rawJSON([]any{s.ID, exec.computer.ID, exec.nodeID, s.WorkspaceKind, s.WorkspaceImage, s.EnableComputer, container, exec.workspace})
+	return &spaceWorkspaceTarget{space: s, runner: runner, container: container, remote: remote, ticket: acpLoginTicket{Tenant: tenant, Space: space, Profile: "workspace-" + kind, Node: exec.nodeID, Computer: exec.computer.ID, ConfigHash: acpLoginDigest(raw)}}, nil
 }
 
 func (h *handler) workspaceTicketPrincipal(ctx context.Context, identity, tenant, space string) (httpx.Principal, error) {
@@ -163,6 +172,7 @@ func (h *handler) issueSpaceWorkspaceTicket(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer lease.release()
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	target, err := h.resolveSpaceWorkspaceTarget(ctx, p.TenantID, space, kind)
 	if err != nil {
 		h.serverComputerLifecycleError(w, err)
@@ -227,6 +237,7 @@ func (h *handler) consumeSpaceWorkspaceTicket(ctx context.Context, token, space,
 		lease.release()
 		return nil, nil, ctx, invalid
 	}
+	ctx = context.WithValue(ctx, workspaceRequestTargetKey{}, lease.Space)
 	target, err := h.resolveSpaceWorkspaceTarget(ctx, ticket.Tenant, space, kind)
 	if err != nil || target.ticket.Node != ticket.Node || target.ticket.Computer != ticket.Computer || target.ticket.ConfigHash != ticket.ConfigHash {
 		return fail()
@@ -335,7 +346,7 @@ func (h *handler) spaceWorkspaceProxy(w http.ResponseWriter, r *http.Request, ki
 	if rw.Flush() != nil {
 		return
 	}
-	bridge = &workspaceBridge{conn: conn, rw: rw, done: make(chan struct{}), journalID: row.ID, streamOwner: row.StreamOwner, ready: func(id, method string) error {
+	bridge = &workspaceBridge{conn: conn, rw: rw, done: make(chan struct{}), journalID: row.ID, streamOwner: row.StreamOwner, remote: target.remote, ready: func(id, method string) error {
 		if err := h.activateWorkspaceConnection(actorCtx, lease, row, id, method); err != nil {
 			return err
 		}
@@ -343,6 +354,9 @@ func (h *handler) spaceWorkspaceProxy(w http.ResponseWriter, r *http.Request, ki
 		return nil
 	}}
 	binding := workspaceConnectionTicket{TenantID: target.ticket.Tenant, SpaceID: target.ticket.Space, ComputerID: target.ticket.Computer, NodeID: target.ticket.Node}
+	if target.remote != nil {
+		binding.WorkspaceInstanceID = target.remote.workspace.Target.InstanceID
+	}
 	liveWorkspaceBridges.Lock()
 	liveWorkspaceBridges.items[bridge] = binding
 	liveWorkspaceBridges.Unlock()

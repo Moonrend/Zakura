@@ -7,7 +7,7 @@ import "context"
 // into the cleanup manifest. An existing OAuth credential requires explicit user
 // action rather than being silently replaced by another device authorization.
 func (h *handler) requireEmptyACPDeviceAuth(ctx context.Context, runner *runnerSession, exec *resolvedExecution, profile string) error {
-	fs := acpManagedFS{call: runner.call, space: exec.spaceID, home: "/workspace/.zakura/acp/" + profile + "/home"}
+	fs := acpManagedFS{call: h.executionRemote(runner, exec).callAny, space: exec.spaceID, home: "/workspace/.zakura/acp/" + profile + "/home"}
 	_, exists, err := fs.inspect(ctx, fs.home+"/.codex/auth.json")
 	if err != nil {
 		return err

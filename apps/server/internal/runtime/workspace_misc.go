@@ -189,7 +189,7 @@ func (h *handler) deleteProjectSkill(w http.ResponseWriter, r *http.Request) {
 	} else if selected {
 		params, _ := remotePathParams(remote.spaceID, projectRemotePath(chi.URLParam(r, "slug"), projectSkillDirectory(remote.projectReader(r.Context(), chi.URLParam(r, "slug")), name)))
 		params["recursive"] = true
-		if err = remote.runner.call(r.Context(), "host.fs.remove", params, nil); err != nil {
+		if err = remote.call(r.Context(), "host.fs.remove", params, nil); err != nil {
 			writeRemoteError(w, err)
 			return
 		}

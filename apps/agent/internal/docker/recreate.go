@@ -10,10 +10,10 @@ import (
 )
 
 type RecreateResult struct {
-	Image      string          `json:"image"`
-	Recreated  []ContainerInfo `json:"recreated"`
-	Skipped    int             `json:"skipped"`
-	Failed     []string        `json:"failed,omitempty"`
+	Image     string          `json:"image"`
+	Recreated []ContainerInfo `json:"recreated"`
+	Skipped   int             `json:"skipped"`
+	Failed    []string        `json:"failed,omitempty"`
 }
 
 // RecreateStale 把仍跑旧镜像 ID 的 zakura 容器按 inspect 重建到当前 tag。
@@ -31,7 +31,9 @@ func RecreateStale(ctx context.Context, image string) (RecreateResult, error) {
 		return res, err
 	}
 	for _, c := range list {
-		if !isZakura(c.Labels) || !imageRefMatch(c.Image, image) {
+		// Instance containers must be replaced through their lifecycle protocol,
+		// which binds creation receipts and disk ownership to the exact instance.
+		if !isZakura(c.Labels) || !imageRefMatch(c.Image, image) || c.Labels["zakura.workspace-instance"] != "" {
 			res.Skipped++
 			continue
 		}
@@ -115,6 +117,15 @@ func specFromInspectJSON(raw []byte) (RunSpec, error) {
 		v := Volume{ContainerPath: m.Destination, ReadOnly: !m.RW}
 		if m.Type == "volume" {
 			v.VolumeName = m.Name
+			for _, configured := range c.HostConfig.Mounts {
+				if configured.Target != m.Destination {
+					continue
+				}
+				if configured.Type != "volume" || configured.Source != m.Name {
+					return RunSpec{}, fmt.Errorf("volume mount identity changed")
+				}
+				v.VolumeSubpath, v.NoCopy = configured.VolumeOptions.Subpath, configured.VolumeOptions.NoCopy
+			}
 		} else {
 			v.HostPath = m.Source
 		}
@@ -138,6 +149,15 @@ type inspectBlob struct {
 		RestartPolicy struct {
 			Name string `json:"Name"`
 		} `json:"RestartPolicy"`
+		Mounts []struct {
+			Type          string `json:"Type"`
+			Source        string `json:"Source"`
+			Target        string `json:"Target"`
+			VolumeOptions struct {
+				Subpath string `json:"Subpath"`
+				NoCopy  bool   `json:"NoCopy"`
+			} `json:"VolumeOptions"`
+		} `json:"Mounts"`
 		PortBindings map[string][]struct {
 			HostIP   string `json:"HostIp"`
 			HostPort string `json:"HostPort"`

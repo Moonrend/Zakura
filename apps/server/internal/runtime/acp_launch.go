@@ -12,7 +12,12 @@ import (
 )
 
 func (h *handler) acpSpaceRunner(ctx context.Context, tenant, space string) (*runnerSession, *resolvedExecution, error) {
-	exec, err := h.resolveServerComputer(ctx, tenant, space)
+	computer, err := h.serverComputerRecord(ctx, tenant, space)
+	if err != nil {
+		return nil, nil, err
+	}
+	run, _ := ctx.Value(computerRunKey{}).(string)
+	exec, err := h.resolveWorkspaceExecution(ctx, computer, run)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -27,9 +32,12 @@ func (h *handler) acpSpaceRunner(ctx context.Context, tenant, space string) (*ru
 }
 
 func (h *handler) probeSpaceACPCommand(ctx context.Context, tenant, space, command string) (map[string]any, error) {
-	runner, _, err := h.acpSpaceRunner(ctx, tenant, space)
+	runner, exec, err := h.acpSpaceRunner(ctx, tenant, space)
 	if err != nil {
 		return nil, err
+	}
+	if exec.workspace != nil {
+		return h.workspaceInstanceExec(ctx, exec, "", 30000, command, "--version")
 	}
 	s, err := h.store.GetSpace(ctx, tenant, space)
 	if err != nil {
@@ -133,39 +141,34 @@ func (h *handler) prepareACPFiles(ctx context.Context, runner *runnerSession, ex
 	for key, value := range acpProfileStorageEnv(profileID, home) {
 		env[key] = value
 	}
-	// A new Space may not yet have a workspace root. Create only that root
-	// before inspection; profile descendants are validated before any writes.
-	if err := runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": exec.spaceID, "path": "/"}, nil); err != nil {
+	remote := h.executionRemote(runner, exec)
+	// The managed disk must already exist; its pinned mkdir never allocates it.
+	if err := remote.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": exec.spaceID, "path": "/"}, nil); err != nil {
 		return nil, errors.New("cannot create ACP workspace root")
 	}
 	// Callers already hold the shared profile writer lease. Reconcile only
 	// signed, fingerprint-matching generated files; never overwrite user OAuth.
 	scope, _ := json.Marshal([]string{exec.computer.TenantID, exec.spaceID, profileID})
-	fs := acpManagedFS{call: runner.call, space: exec.spaceID, home: home, scope: string(scope), secret: h.deps.Secret}
+	fs := acpManagedFS{call: remote.callAny, space: exec.spaceID, home: home, scope: string(scope), secret: h.deps.Secret}
 	if err := fs.reconcile(ctx, setup, files); err != nil {
 		return nil, err
 	}
 	var result map[string]any
-	if err := runner.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": exec.spaceID, "path": strings.TrimPrefix(home, "/workspace")}, &result); err != nil {
+	if err := remote.call(ctx, "host.fs.mkdir", map[string]any{"spaceId": exec.spaceID, "path": strings.TrimPrefix(home, "/workspace")}, &result); err != nil {
 		return nil, err
 	}
 	return env, nil
 }
 
 func (h *handler) startACPContainer(ctx context.Context, runner *runnerSession, exec *resolvedExecution, sid, profileID, image, workingDir string, env map[string]string) (string, error) {
-	root, err := h.serverComputerHostRoot(ctx, exec)
-	if err != nil {
-		return "", err
-	}
 	identity, _ := json.Marshal([]string{exec.computer.TenantID, exec.spaceID, sid, profileID, h.store.id()})
 	digest := sha256.Sum256(identity)
 	name := "zakura-acp-" + hex.EncodeToString(digest[:16])
 	var created acpSidecarContainer
-	err = runner.call(ctx, "docker.create", map[string]any{
+	err := h.createWorkspaceSidecar(ctx, runner, exec, map[string]any{
 		"name": name, "image": image, "stdinOpen": true, "restart": "no",
 		"workingDir": workingDir, "env": env,
-		"labels":  map[string]string{"zakura.purpose": "acp-adapter", "zakura.tenant": exec.computer.TenantID, "zakura.space": exec.spaceID, "zakura.computer": exec.computer.ID, "zakura.session": sid},
-		"volumes": []map[string]any{{"hostPath": root, "containerPath": "/workspace"}},
+		"labels": map[string]string{"zakura.purpose": "acp-adapter", "zakura.tenant": exec.computer.TenantID, "zakura.space": exec.spaceID, "zakura.computer": exec.computer.ID, "zakura.session": sid},
 	}, &created)
 	if err != nil {
 		return "", err
