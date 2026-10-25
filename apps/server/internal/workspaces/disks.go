@@ -33,14 +33,30 @@ func (s Store) RegisterDisk(ctx context.Context, tenant, space, id, name, node, 
 	}
 	raw, _ := json.Marshal(l)
 	stamp := now.UTC().Format(time.RFC3339Nano)
-	err := changed(s.DB.ExecContext(ctx, s.query(`INSERT INTO workspace_disks(id,tenant_id,space_id,name,node_id,node_incarnation,locator_json,locator_key,state,created_at,updated_at)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Disk{}, err
+	}
+	defer tx.Rollback()
+	// Lock the Space then node, matching node removal and attachment.
+	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE spaces SET workspace_generation=workspace_generation WHERE tenant_id=? AND id=? AND deletion_pending=FALSE`), tenant, space)); err != nil {
+		return Disk{}, err
+	}
+	if err = changed(tx.ExecContext(ctx, s.query(`UPDATE runtime_nodes SET incarnation=incarnation WHERE id=? AND (tenant_id=? OR is_shared=TRUE) AND incarnation=? AND kind IN ('server','computer')`), node, tenant, incarnation)); err != nil {
+		return Disk{}, err
+	}
+	err = changed(tx.ExecContext(ctx, s.query(`INSERT INTO workspace_disks(id,tenant_id,space_id,name,node_id,node_incarnation,locator_json,locator_key,state,created_at,updated_at)
  SELECT ?,s.tenant_id,s.id,?,n.id,n.incarnation,?,?,'pending',?,?
  FROM spaces s JOIN runtime_nodes n ON n.id=? AND (n.tenant_id=s.tenant_id OR n.is_shared=TRUE)
  WHERE s.tenant_id=? AND s.id=? AND s.deletion_pending=FALSE AND n.incarnation=? AND n.kind IN ('server','computer')`), id, name, string(raw), l.RelativePath, stamp, stamp, node, tenant, space, incarnation))
 	if err != nil {
 		return Disk{}, err
 	}
-	return s.Disk(ctx, tenant, space, id)
+	d, err := s.disk(ctx, tx, tenant, space, id)
+	if err != nil {
+		return Disk{}, err
+	}
+	return d, tx.Commit()
 }
 
 // VerifyDisk commits an exact node observation; a delayed allocation reply must
@@ -51,7 +67,7 @@ func (s Store) VerifyDisk(ctx context.Context, d Disk, usedBytes int64, now time
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
 	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET state='available',verified_at=?,used_bytes=?,sampled_at=?,last_error=NULL,updated_at=?
- WHERE id=? AND tenant_id=? AND space_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND locator_key=? AND state='pending' AND attached_instance_id IS NULL`), stamp, usedBytes, stamp, stamp, d.ID, d.TenantID, d.SpaceID, d.NodeID, d.NodeIncarnation, d.LocatorVersion, d.Locator.RelativePath))
+ WHERE id=? AND tenant_id=? AND space_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND locator_key=? AND state='pending' AND attached_instance_id IS NULL AND node_removed_at IS NULL`), stamp, usedBytes, stamp, stamp, d.ID, d.TenantID, d.SpaceID, d.NodeID, d.NodeIncarnation, d.LocatorVersion, d.Locator.RelativePath))
 }
 
 // Attach reserves a verified disk under the caller's existing lifecycle lease.

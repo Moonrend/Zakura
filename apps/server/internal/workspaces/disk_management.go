@@ -27,7 +27,7 @@ func (s Store) DiskError(ctx context.Context, d Disk, cause error, now time.Time
 	if cause == nil {
 		return errors.New("disk error required")
 	}
-	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET last_error=?,updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND state='pending'`), cause.Error(), now.UTC().Format(time.RFC3339Nano), d.ID, d.TenantID, d.SpaceID, d.NodeID, d.NodeIncarnation, d.LocatorVersion))
+	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET last_error=?,updated_at=? WHERE id=? AND tenant_id=? AND space_id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND state='pending' AND node_removed_at IS NULL`), cause.Error(), now.UTC().Format(time.RFC3339Nano), d.ID, d.TenantID, d.SpaceID, d.NodeID, d.NodeIncarnation, d.LocatorVersion))
 }
 
 func (s Store) SampleUsage(ctx context.Context, d Disk, bytes int64, now time.Time) error {
@@ -35,7 +35,7 @@ func (s Store) SampleUsage(ctx context.Context, d Disk, bytes int64, now time.Ti
 		return errors.New("invalid disk usage")
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
-	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET used_bytes=?,sampled_at=?,updated_at=? WHERE tenant_id=? AND space_id=? AND id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND locator_key=? AND state NOT IN ('deleted','delete_pending') AND (sampled_at IS NULL OR sampled_at<=?)`), bytes, stamp, stamp, d.TenantID, d.SpaceID, d.ID, d.NodeID, d.NodeIncarnation, d.LocatorVersion, d.Locator.RelativePath, stamp))
+	return changed(s.DB.ExecContext(ctx, s.query(`UPDATE workspace_disks SET used_bytes=?,sampled_at=?,updated_at=? WHERE tenant_id=? AND space_id=? AND id=? AND node_id=? AND node_incarnation=? AND locator_version=? AND locator_key=? AND state NOT IN ('deleted','delete_pending') AND node_removed_at IS NULL AND (sampled_at IS NULL OR sampled_at<=?)`), bytes, stamp, stamp, d.TenantID, d.SpaceID, d.ID, d.NodeID, d.NodeIncarnation, d.LocatorVersion, d.Locator.RelativePath, stamp))
 }
 
 // DeleteDisk creates an independent deletion authorization for a released disk.
@@ -66,8 +66,15 @@ func (s Store) DeleteDisk(ctx context.Context, tenant, space, diskID, requestID,
 	if err != nil {
 		return Cleanup{}, err
 	}
-	if d.NodeRemovedAt == nil && (d.AttachedInstanceID != nil || d.State != "available" || d.VerifiedAt == nil) {
-		return Cleanup{}, ErrConflict
+	if d.NodeRemovedAt == nil {
+		// Node removal also changes this disk and cancels its cleanup. Serialize
+		// before recording an authorization which would otherwise miss that pass.
+		if err := changed(tx.ExecContext(ctx, s.query(`UPDATE runtime_nodes SET incarnation=incarnation WHERE id=? AND (tenant_id=? OR is_shared=TRUE) AND incarnation=?`), d.NodeID, tenant, d.NodeIncarnation)); err != nil {
+			return Cleanup{}, err
+		}
+		if d.AttachedInstanceID != nil || d.State != "available" || d.VerifiedAt == nil {
+			return Cleanup{}, ErrConflict
+		}
 	}
 	snapshot := CleanupSnapshot{Version: 1, Disk: d, Locator: d.Locator}
 	raw, err := json.Marshal(snapshot)

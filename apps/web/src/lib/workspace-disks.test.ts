@@ -19,6 +19,7 @@ test("only verified released disks on capable original nodes can be selected", (
   }
   assert.ok(diskUnavailableReason({ ...disk, attachedInstanceId: "old" }, node));
   assert.ok(diskUnavailableReason({ ...disk, verifiedAt: null }, node));
+  assert.equal(diskUnavailableReason({ ...disk, nodeRemovedAt: "2026-10-25T12:00:00Z" }, node), "原节点已删除，已停止同步");
   assert.ok(diskUnavailableReason(disk, undefined));
   assert.ok(diskUnavailableReason(disk, { ...node, status: "offline" }));
   assert.ok(diskUnavailableReason(disk, { ...node, capabilities: { docker: true, dockerCreateReceipts: true } }));

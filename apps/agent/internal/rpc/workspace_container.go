@@ -66,19 +66,19 @@ func (h *Handler) workspaceDocker(ctx context.Context, b protocol.Binding, metho
 		return nil, fmt.Errorf("workspace container execution is unavailable in sandbox mode")
 	}
 	var p struct {
-		Workspace  protocol.Binding  `json:"workspace"`
-		ID         string            `json:"id"`
-		Command    []string          `json:"command"`
-		WorkingDir string            `json:"workingDir"`
-		Env        map[string]string `json:"env"`
-		TTY        bool              `json:"tty"`
-		Cols       int               `json:"cols"`
-		Rows       int               `json:"rows"`
-		Remove     bool              `json:"remove"`
-		Tail       int               `json:"tail"`
-		TimeoutMS  int64             `json:"timeoutMs"`
-		Stdin string `json:"stdin"`
-		MaxOutputBytes int `json:"maxOutputBytes"`
+		Workspace      protocol.Binding  `json:"workspace"`
+		ID             string            `json:"id"`
+		Command        []string          `json:"command"`
+		WorkingDir     string            `json:"workingDir"`
+		Env            map[string]string `json:"env"`
+		TTY            bool              `json:"tty"`
+		Cols           int               `json:"cols"`
+		Rows           int               `json:"rows"`
+		Remove         bool              `json:"remove"`
+		Tail           int               `json:"tail"`
+		TimeoutMS      int64             `json:"timeoutMs"`
+		Stdin          string            `json:"stdin"`
+		MaxOutputBytes int               `json:"maxOutputBytes"`
 	}
 	if err := decodeDockerCreate(raw, &p); err != nil {
 		return nil, err

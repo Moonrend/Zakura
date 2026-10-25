@@ -37,6 +37,10 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			pending, err := h.workspaceStore().RegisterDisk(ctx, "tenant", rig.space.ID, "pending-disk", "Pending", old.NodeID, old.NodeIncarnation, h.store.now())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err := h.deps.DB.Exec(`INSERT INTO node_installations(id,tenant_id,node_id,node_incarnation,bootstrap_hash,credential_nonce,created_at) VALUES('installation','tenant','node','incarnation','fixture-hash','fixture-nonce','before')`); err != nil {
 				t.Fatal(err)
 			}
@@ -93,6 +97,22 @@ func TestRuntimeNodeDeletionStopsWorkspaceSynchronization(t *testing.T) {
 				if err != nil || removed.Pending || removed.Phase != "node_removed" {
 					t.Fatalf("forgotten disk enqueued remote work: %v", err)
 				}
+			}
+			for _, err := range []error{
+				h.workspaceStore().VerifyDisk(ctx, pending, 1, h.store.now()),
+				h.workspaceStore().SampleUsage(ctx, pending, 1, h.store.now()),
+				h.workspaceStore().DiskError(ctx, pending, errors.New("late allocation failure"), h.store.now()),
+			} {
+				if !errors.Is(err, workspaces.ErrConflict) {
+					t.Fatalf("deleted node accepted allocation callback: %v", err)
+				}
+			}
+			if _, err := h.workspaceStore().RegisterDisk(ctx, "tenant", rig.space.ID, "late-disk", "Late", old.NodeID, old.NodeIncarnation, h.store.now()); !errors.Is(err, workspaces.ErrConflict) {
+				t.Fatalf("deleted node accepted a new disk: %v", err)
+			}
+			forgotten, err := h.workspaceStore().DeleteDisk(ctx, "tenant", rig.space.ID, pending.ID, "forget-pending", "forget-pending-cleanup", h.store.now())
+			if err != nil || forgotten.Pending || forgotten.Phase != "node_removed" {
+				t.Fatalf("pending disk cannot be forgotten after node removal: %v", err)
 			}
 			if disks, err := h.workspaceStore().Disks(ctx, "tenant", rig.space.ID); err != nil || len(disks) != 0 {
 				t.Fatalf("removed disk remains in management: %v", err)

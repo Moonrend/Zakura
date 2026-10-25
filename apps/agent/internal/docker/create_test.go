@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Re-execute the test binary as Docker for shell-free Windows coverage.
@@ -34,8 +35,17 @@ func TestMain(m *testing.M) {
 			if len(os.Args) < 4 || os.Args[2] != "-i" {
 				os.Exit(93)
 			}
+			if ready := os.Getenv("ZAKURA_TEST_EXEC_READY"); ready != "" {
+				if err := os.WriteFile(ready, nil, 0600); err != nil {
+					os.Exit(94)
+				}
+				time.Sleep(time.Minute)
+			}
 			_, _ = io.Copy(os.Stdout, os.Stdin)
 			fmt.Fprint(os.Stderr, strings.Repeat("stderr", 10000))
+			if os.Getenv("ZAKURA_TEST_EXEC_EXIT") == "1" {
+				os.Exit(17)
+			}
 		case "run":
 			if os.Getenv("ZAKURA_TEST_CREATE_CONFLICT") == "1" {
 				fmt.Fprintln(os.Stderr, "name already in use")
