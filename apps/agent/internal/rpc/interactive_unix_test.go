@@ -17,6 +17,11 @@ func TestDockerStdioDefaultsNonTTYAndReportsExit(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "docker")
 	script := `#!/bin/sh
 if [ "$1" = version ]; then printf 'test\n'; exit 0; fi
+if [ "$1" = inspect ]; then
+  [ "$#" = 2 ] && [ "$2" = login-container ] || exit 97
+  printf '[{"Id":"login-container","Config":{"Labels":{}}}]\n'
+  exit 0
+fi
 [ "$1" = exec ] && [ "$2" = -i ] && [ "$3" = login-container ] || exit 99
 [ ! -t 0 ] && [ ! -t 1 ] || exit 98
 printf '{"jsonrpc":"2.0"}\n'

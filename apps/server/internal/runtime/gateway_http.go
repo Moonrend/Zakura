@@ -71,25 +71,7 @@ func copyProviderResponse(w http.ResponseWriter, resp *ProviderResponse) error {
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(resp.Status)
 		if gwPassthrough(resp.Protocol, resp.Operation) {
-			buffer := make([]byte, 32<<10)
-			reader := io.LimitReader(resp.Body, maxProviderResponse)
-			for {
-				n, err := reader.Read(buffer)
-				if n > 0 {
-					if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-						return writeErr
-					}
-					if flushErr := http.NewResponseController(w).Flush(); flushErr != nil && !errors.Is(flushErr, http.ErrNotSupported) {
-						return flushErr
-					}
-				}
-				if err == io.EOF {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-			}
+			return copyProviderStream(w, resp.Body)
 		}
 		return translateGatewayStream(w, resp)
 	}

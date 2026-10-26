@@ -1,0 +1,21 @@
+goos: linux
+goarch: amd64
+pkg: github.com/Moonrend/Zakura/apps/server/internal/runtime
+cpu: AMD EPYC 9V74 80-Core Processor
+BenchmarkGatewayFirstEvent-8          	   16893	     68611 ns/op	 477.71 MB/s	  237931 B/op	      16 allocs/op
+BenchmarkGatewayFirstEvent-8          	   17958	     67212 ns/op	 487.65 MB/s	  237930 B/op	      16 allocs/op
+BenchmarkGatewayFirstEvent-8          	   17073	     68967 ns/op	 475.24 MB/s	  237931 B/op	      16 allocs/op
+BenchmarkGatewayCandidatePayload-8    	    1590	    776446 ns/op	  77.40 MB/s	  375553 B/op	     171 allocs/op
+BenchmarkGatewayCandidatePayload-8    	    1467	    797037 ns/op	  75.40 MB/s	  379758 B/op	     172 allocs/op
+BenchmarkGatewayCandidatePayload-8    	    1681	    749322 ns/op	  80.20 MB/s	  377347 B/op	     171 allocs/op
+BenchmarkGatewayResolveCandidates/1-8 	   19623	     61476 ns/op	   22623 B/op	     303 allocs/op
+BenchmarkGatewayResolveCandidates/1-8 	   18730	     65255 ns/op	   22623 B/op	     303 allocs/op
+BenchmarkGatewayResolveCandidates/1-8 	   19035	     64062 ns/op	   22623 B/op	     303 allocs/op
+BenchmarkGatewayResolveCandidates/32-8         	    1041	   1071596 ns/op	  299253 B/op	    5240 allocs/op
+BenchmarkGatewayResolveCandidates/32-8         	    1158	    985573 ns/op	  299257 B/op	    5240 allocs/op
+BenchmarkGatewayResolveCandidates/32-8         	    1233	   1072576 ns/op	  299261 B/op	    5240 allocs/op
+BenchmarkGatewayResolveCandidates/128-8        	     324	   3633164 ns/op	 1181475 B/op	   20516 allocs/op
+BenchmarkGatewayResolveCandidates/128-8        	     328	   3931687 ns/op	 1181415 B/op	   20516 allocs/op
+BenchmarkGatewayResolveCandidates/128-8        	     345	   3328316 ns/op	 1181358 B/op	   20515 allocs/op
+PASS
+ok  	github.com/Moonrend/Zakura/apps/server/internal/runtime	19.007s

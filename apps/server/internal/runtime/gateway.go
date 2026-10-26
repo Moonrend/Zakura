@@ -30,7 +30,8 @@ type Gateway struct {
 
 func NewGateway(store *Store) *Gateway {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = 16
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 64
 	transport.ResponseHeaderTimeout = 90 * time.Second
 	return &Gateway{store: store, client: &http.Client{Transport: transport}, captureSlots: make(chan struct{}, gatewayCaptureSlots)}
 }
@@ -217,7 +218,7 @@ func (g *Gateway) Do(ctx context.Context, tenant, capability, operation, model s
 			return resp, nil
 		}
 		if resp != nil {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			body := readGatewayErrorBody(ctx, resp.Body)
 			resp.Body.Close()
 			failure.Status = resp.Status
 			failure.Body = body
@@ -268,14 +269,7 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 	if err != nil {
 		return nil, err
 	}
-	body, err := decodeGatewayBody(originalPayload)
-	if err != nil {
-		return nil, err
-	}
-	streaming, _ := body["stream"].(bool)
-	body = prepareUpstreamRequest(upstream.Protocol, operation, route, body)
-	applyContextCache(ctx, upstream.Protocol, body)
-	payload, err := json.Marshal(body)
+	payload, streaming, err := prepareGatewayPayload(ctx, upstream.Protocol, operation, route, originalPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +310,6 @@ func (g *Gateway) doCandidate(ctx context.Context, tenant, operation string, ori
 			continue
 		}
 		if retrySameUpstream(resp.StatusCode) && attempt < 2 {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			continue
 		}
@@ -344,6 +337,9 @@ func decodeGatewayBody(payload []byte) (map[string]any, error) {
 	if err := dec.Decode(&body); err != nil || body == nil {
 		return nil, errors.New("invalid JSON body")
 	}
+	if dec.Decode(new(any)) != io.EOF {
+		return nil, errors.New("invalid JSON body")
+	}
 	return body, nil
 }
 
@@ -360,33 +356,15 @@ func isEventStream(contentType string) bool {
 // caller until the upstream has produced one complete event, so a connection
 // that dies (or reports an error) before its first event can still fail over.
 func commitStream(body io.ReadCloser) (io.ReadCloser, error) {
-	br := bufio.NewReaderSize(body, 32<<10)
-	var prefix bytes.Buffer
-	sawField := false
-	for prefix.Len() < 64<<10 {
-		line, err := br.ReadSlice('\n')
-		prefix.Write(line)
-		if err == bufio.ErrBufferFull {
-			sawField = true
-			continue
-		}
-		if len(line) > 0 {
-			if len(bytes.TrimRight(line, "\r\n")) == 0 {
-				if sawField {
-					if msg, failed := firstEventError(prefix.Bytes()); failed {
-						return nil, fmt.Errorf("upstream stream error: %s", msg)
-					}
-					return structReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix.Bytes()), br), Closer: body}, nil
-				}
-			} else {
-				sawField = true
-			}
-		}
-		if err != nil {
-			return nil, fmt.Errorf("stream failed before first complete event: %w", err)
-		}
+	br := bufio.NewReaderSize(body, 4096)
+	prefix, err := readStreamCommit(br)
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("first stream event exceeds 64 KiB")
+	if msg, failed := firstEventError(prefix); failed {
+		return nil, fmt.Errorf("upstream stream error: %s", msg)
+	}
+	return structReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), br), Closer: body}, nil
 }
 
 func firstEventError(raw []byte) (string, bool) {

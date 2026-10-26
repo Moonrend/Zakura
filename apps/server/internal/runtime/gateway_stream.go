@@ -24,6 +24,8 @@ func gwNewSSEReader(r io.Reader) *gwSSEReader {
 }
 
 func (r *gwSSEReader) Next() (gwSSEEvent, error) {
+	// Bound an individual event, not the lifetime of the connection.
+	r.remaining = maxProviderResponse
 	var ev gwSSEEvent
 	var data []string
 	for {

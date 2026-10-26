@@ -1324,6 +1324,8 @@ func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 			w = capture
 			defer func() { capture.finish(err) }()
 		}
+		tracked := &gatewayResponseWriter{ResponseWriter: w}
+		w = tracked
 		ctx, cancel := context.WithCancel(withGatewayClientHeaders(r.Context(), r.Header))
 		defer cancel()
 		if streaming, _ := v["stream"].(bool); streaming && gwChatOperation(operation) {
@@ -1337,6 +1339,9 @@ func (h *handler) gateway(capability, operation string) http.HandlerFunc {
 			return
 		}
 		err = copyProviderResponse(w, resp)
+		if err != nil && tracked.committed.Load() && tracked.streaming.Load() {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 func (h *handler) listGatewayModels(w http.ResponseWriter, r *http.Request) {
